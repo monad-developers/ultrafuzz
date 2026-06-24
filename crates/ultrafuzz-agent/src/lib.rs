@@ -31,6 +31,8 @@ const RUNTIME_CONTEXT_FILE: &str = "runtime-context.json";
 const RUN_METADATA_DIR: &str = "run-metadata";
 const PROPERTY_LENS_INPUTS_FILE: &str = "lens-inputs.json";
 const AGGREGATION_MANIFEST_FILE: &str = "aggregation.json";
+const DEPENDENCY_WORKSPACE_CHANGE_CONFLICTS_FILE: &str =
+    "dependency-workspace-change-conflicts.json";
 const CODEX_LAST_MESSAGE_FILE: &str = "codex-last-message.txt";
 const MAX_PROMPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_AGENT_STREAM_BYTES: u64 = 16 * 1024 * 1024;
@@ -576,7 +578,11 @@ impl CliSubprocessBackend {
         let duration = started.elapsed();
         let join_result = join_subprocess_threads(stdin_handle, stdout_handle, stderr_handle);
         if !wait_result.timed_out {
-            join_result?;
+            if let Err(error) = join_result {
+                if live_tool_policy_error(&live_tool_policy).is_none() {
+                    return Err(error);
+                }
+            }
         }
         if !wait_result.timed_out {
             if let Some(reason) = live_tool_policy_violation_reason(&live_tool_policy) {
@@ -2457,6 +2463,7 @@ fn should_preserve_backend_artifact(file_name: Option<&str>, input: &AgentInput)
                 | RUNTIME_CONTEXT_FILE
                 | RUN_METADATA_DIR
                 | PROPERTY_LENS_INPUTS_FILE
+                | DEPENDENCY_WORKSPACE_CHANGE_CONFLICTS_FILE
         )
     )
 }
@@ -3948,7 +3955,12 @@ args = ["-c", "model_reasoning_effort=\"xhigh\""]
         let extra_context = temp.path().join("extra-artifacts");
         fs::create_dir_all(&extra_context).unwrap();
         input.extra_context_dirs.push(extra_context);
-        let backend = CodexCliBackend::new(backend_config(BackendKind::CodexCli, "codex"));
+        let mut config = backend_config(BackendKind::CodexCli, "codex");
+        config
+            .permissions
+            .write_allow
+            .retain(|entry| entry != "extra-context");
+        let backend = CodexCliBackend::new(config);
 
         let error = backend.command_for(&input).unwrap_err();
 

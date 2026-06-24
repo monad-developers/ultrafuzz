@@ -63,6 +63,7 @@ materialize_outputs_as_unstaged = true
 write_allow = [
   "workspace",
   "artifacts",
+  "extra-context",
   "final-materialization",
 ]
 read_deny = [

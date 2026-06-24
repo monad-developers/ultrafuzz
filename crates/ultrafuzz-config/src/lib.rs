@@ -500,6 +500,7 @@ impl Default for PermissionConfig {
             write_allow: vec![
                 "workspace".to_owned(),
                 "artifacts".to_owned(),
+                "extra-context".to_owned(),
                 "final-materialization".to_owned(),
             ],
             read_deny: DEFAULT_SENSITIVE_READ_DENY
@@ -2550,6 +2551,29 @@ output_dir = ".ultrafuzz/runs"
     }
 
     #[test]
+    fn default_permissions_allow_extra_context_artifact_roots() {
+        let config = CampaignConfig::default();
+        assert!(config
+            .permissions
+            .write_allow
+            .iter()
+            .any(|entry| entry == "extra-context"));
+
+        let resolved = resolve_config_from_toml(
+            Some(default_config_toml()),
+            Vec::new(),
+            EnvOverrides::default(),
+            CliOverrides::default(),
+        )
+        .unwrap();
+        assert!(resolved
+            .permissions
+            .write_allow
+            .iter()
+            .any(|entry| entry == "extra-context"));
+    }
+
+    #[test]
     fn applies_config_env_and_cli_precedence() {
         let mut decode = StrategyDefinition::built_in(BuiltInStrategy::EncodeDecode);
         decode.loops = 3;
@@ -3234,9 +3258,10 @@ NORMAL_VALUE = "visible"
         );
         let dump = config.dump_redacted_toml().unwrap();
         assert!(dump.contains("OPENAI_API_KEY = \"<redacted>\""));
-        assert!(dump.contains("NORMAL_VALUE = \"visible\""));
+        assert!(dump.contains("NORMAL_VALUE = \"<redacted>\""));
         assert!(!dump.contains("sk-secret"));
         assert!(!dump.contains("old-secret"));
+        assert!(!dump.contains("visible"));
     }
 
     #[test]
@@ -3281,9 +3306,10 @@ NORMAL_VALUE = "profile-visible"
         );
         let dump = config.dump_redacted_toml().unwrap();
         assert!(dump.contains("ANTHROPIC_API_KEY = \"<redacted>\""));
-        assert!(dump.contains("NORMAL_VALUE = \"profile-visible\""));
+        assert!(dump.contains("NORMAL_VALUE = \"<redacted>\""));
         assert!(!dump.contains("fresh-secret"));
         assert!(!dump.contains("stale-secret"));
+        assert!(!dump.contains("profile-visible"));
     }
 
     #[test]

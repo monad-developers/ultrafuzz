@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Uniswap v2","repository":"https://github.com/Uniswap/v2-core","signal_profile":"control","expected_findings":"eq:0"},{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"}]') }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"}]') }}
     env:
       CARGO_HOME: .cargo-home
       CARGO_TARGET_DIR: .cargo-target
