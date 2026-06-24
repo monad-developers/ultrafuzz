@@ -579,7 +579,9 @@ impl CliSubprocessBackend {
         let join_result = join_subprocess_threads(stdin_handle, stdout_handle, stderr_handle);
         if !wait_result.timed_out {
             if let Err(error) = join_result {
-                if live_tool_policy_error(&live_tool_policy).is_none() {
+                if live_tool_policy_error(&live_tool_policy).is_none()
+                    && wait_result_permission_policy_error(&wait_result).is_none()
+                {
                     return Err(error);
                 }
             }
@@ -607,6 +609,9 @@ impl CliSubprocessBackend {
         )?;
 
         if let Some(error) = live_tool_policy_error(&live_tool_policy) {
+            return Err(error);
+        }
+        if let Some(error) = wait_result_permission_policy_error(&wait_result) {
             return Err(error);
         }
 
@@ -2613,6 +2618,28 @@ fn wait_with_timeout(
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn wait_result_permission_policy_error(wait_result: &WaitResult) -> Option<AgentError> {
+    (wait_result.error_kind == Some(AgentErrorKind::BackendPermissionPolicyRejected))
+        .then(|| permission_policy_rejected(wait_result_permission_policy_reason(wait_result)))
+}
+
+fn wait_result_permission_policy_reason(wait_result: &WaitResult) -> String {
+    wait_result
+        .error_message
+        .as_deref()
+        .and_then(permission_policy_reason_from_message)
+        .unwrap_or("backend streamed tool use violated permission policy")
+        .to_owned()
+}
+
+fn permission_policy_reason_from_message(message: &str) -> Option<&str> {
+    let reason = message
+        .strip_prefix(AgentErrorKind::BackendPermissionPolicyRejected.code())
+        .and_then(|message| message.strip_prefix(": "))
+        .unwrap_or(message);
+    (!reason.is_empty()).then_some(reason)
 }
 
 #[cfg(unix)]
@@ -4696,6 +4723,24 @@ printf '[]\n' > "$ULTRAFUZZ_OUTPUT_FINDINGS_PATH"
     }
 
     #[test]
+    fn wait_result_permission_policy_error_preserves_formatted_metadata_message() {
+        let message =
+            "backend-permission-policy-rejected: Read path `/tmp/task.out` is outside allowed roots"
+                .to_owned();
+        let wait_result = WaitResult {
+            exit_status: None,
+            timed_out: false,
+            error_kind: Some(AgentErrorKind::BackendPermissionPolicyRejected),
+            error_message: Some(message.clone()),
+        };
+
+        let error = wait_result_permission_policy_error(&wait_result).unwrap();
+
+        assert_eq!(error.code(), "backend-permission-policy-rejected");
+        assert_eq!(error.to_string(), message);
+    }
+
+    #[test]
     fn claude_streamed_file_tool_uses_reject_outside_absolute_paths_live() {
         let temp = tempfile::tempdir().unwrap();
         let event = json!({
@@ -4738,6 +4783,8 @@ printf '[]\n' > "$ULTRAFUZZ_OUTPUT_FINDINGS_PATH"
             metadata["error_class"],
             "backend-permission-policy-rejected"
         );
+        let error_message = error.to_string();
+        assert_eq!(metadata["error"].as_str(), Some(error_message.as_str()));
     }
 
     #[test]
