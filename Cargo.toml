@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ultrafuzz-agent",
+    "crates/ultrafuzz-artifacts",
+    "crates/ultrafuzz-cli",
+    "crates/ultrafuzz-config",
+    "crates/ultrafuzz-core",
+    "crates/ultrafuzz-events",
+    "crates/ultrafuzz-executor",
+    "crates/ultrafuzz-prompts",
+    "crates/ultrafuzz-references",
+    "crates/ultrafuzz-state",
+    "crates/ultrafuzz-topology",
+    "crates/ultrafuzz-dashboard",
+    "crates/ultrafuzz-workspace",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/monad-developers/ultrafuzz"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+lto = "thin"
+
+[workspace.dependencies]
+anyhow = "1.0"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+getrandom = "0.4"
+humantime = "2.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3.10"
+thiserror = "2.0"
+toml = "0.8"
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+libc = "0.2"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "time"] }
+tower = "0.5"

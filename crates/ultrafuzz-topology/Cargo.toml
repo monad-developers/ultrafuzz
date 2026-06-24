@@ -1,0 +1,23 @@
+[package]
+name = "ultrafuzz-topology"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+ultrafuzz-config = { path = "../ultrafuzz-config" }
+ultrafuzz-core = { path = "../ultrafuzz-core" }
+ultrafuzz-prompts = { path = "../ultrafuzz-prompts" }
+ultrafuzz-references = { path = "../ultrafuzz-references" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

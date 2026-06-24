@@ -1,0 +1,528 @@
+version: 1
+defaults:
+  strategy_loops: 3
+groups:
+  properties:
+    label: Properties
+    color: '#a16207'
+  review:
+    label: Review
+    color: '#0f766e'
+  setup:
+    label: Setup
+    color: '#2563eb'
+  strategies:
+    label: Strategies
+    color: '#7c3aed'
+nodes:
+- id: __start__
+  kind: meta
+  role: start
+  depends_on: []
+  loop_mode: parallel
+  required_artifacts: []
+- id: project-discovery
+  group: setup
+  depends_on:
+  - __start__
+  loop_mode: parallel
+  required_artifacts:
+  - setup/project-discovery.md
+  primary_artifact: setup/project-discovery.md
+- id: actors-flows
+  prompt: setup/actors-flows.md
+  group: setup
+  depends_on:
+  - project-discovery
+  loop_mode: parallel
+  required_artifacts:
+  - setup/actors-flows.md
+  primary_artifact: setup/actors-flows.md
+- id: setup-foundry
+  prompt: setup/prepare-foundry-harness.md
+  group: setup
+  depends_on:
+  - actors-flows
+  loop_mode: parallel
+  required_artifacts:
+  - setup/setup-foundry.md
+  primary_artifact: setup/setup-foundry.md
+- id: base-test-setup
+  prompt: setup/discover-base-test.md
+  group: setup
+  depends_on:
+  - setup-foundry
+  loop_mode: parallel
+  required_artifacts:
+  - setup/base-test-setup.md
+  primary_artifact: setup/base-test-setup.md
+- id: property-specification-certora
+  prompt: properties/certora-thinking-lens.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/certora.md
+  primary_artifact: properties/certora.md
+- id: property-specification-crytic
+  prompt: properties/property-specification-crytic.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/crytic.md
+  primary_artifact: properties/crytic.md
+- id: property-specification-runtime-verification
+  prompt: properties/property-specification-runtime-verification.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/runtime-verification.md
+  primary_artifact: properties/runtime-verification.md
+- id: property-specification-a16z
+  prompt: properties/property-specification-a16z.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/a16z.md
+  primary_artifact: properties/a16z.md
+- id: property-specification-recon
+  prompt: properties/recon-lens.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/recon.md
+  primary_artifact: properties/recon.md
+- id: property-specification-aviggiano
+  prompt: properties/aviggiano-lens.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/aviggiano.md
+  primary_artifact: properties/aviggiano.md
+- id: property-specification-0kn0t
+  prompt: properties/0kn0t-lens.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/0kn0t.md
+  primary_artifact: properties/0kn0t.md
+- id: property-specification-josselin-feist
+  prompt: properties/josselin-feist-lens.md
+  group: properties
+  depends_on:
+  - base-test-setup
+  loop_mode: parallel
+  required_artifacts:
+  - properties/josselin-feist.md
+  primary_artifact: properties/josselin-feist.md
+- id: property-specification-fanin
+  prompt: properties/property-specification-fanin.md
+  group: properties
+  depends_on:
+  - property-specification-certora
+  - property-specification-crytic
+  - property-specification-runtime-verification
+  - property-specification-a16z
+  - property-specification-recon
+  - property-specification-aviggiano
+  - property-specification-0kn0t
+  - property-specification-josselin-feist
+  loop_mode: parallel
+  required_artifacts:
+  - properties.md
+  primary_artifact: properties.md
+- id: boundary-tests
+  prompt: strategies/boundary-tests.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts:
+  - boundary-recipes.md
+  - boundary-recipes.json
+  primary_artifact: boundary-recipes.md
+- id: encode-decode
+  prompt: strategies/encode-decode.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: differential-library-tests
+  prompt: strategies/differential-library-tests.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: round-trip
+  prompt: strategies/round-trip.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: workflow-property-based-tests
+  prompt: strategies/workflow-property-based-tests.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: time-warp-sequences
+  prompt: strategies/time-warp-sequences.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: expand-coverage
+  prompt: strategies/expand-coverage.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: admin-config-boundaries
+  prompt: strategies/admin-config-boundaries.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts:
+  - admin-config-boundary-matrix.md
+  - admin-config-boundary-matrix.json
+  primary_artifact: admin-config-boundary-matrix.md
+- id: external-dependency-boundaries
+  prompt: strategies/external-dependency-boundaries.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts:
+  - dependency-scope-matrix.md
+  - dependency-scope-matrix.json
+  primary_artifact: dependency-scope-matrix.md
+- id: amm-boundary-liquidity
+  prompt: strategies/amm-boundary-liquidity.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: payable-fallback-accounting
+  prompt: strategies/payable-fallback-accounting.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: packed-action-parity
+  prompt: strategies/packed-action-parity.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: batch-atomicity-unsupported-actions
+  prompt: strategies/batch-atomicity-unsupported-actions.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: router-exact-accounting
+  prompt: strategies/router-exact-accounting.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: rounding-direction-audit
+  prompt: strategies/rounding-direction-audit.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: market-exhaustion-boundaries
+  prompt: strategies/market-exhaustion-boundaries.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: order-replacement-collateral
+  prompt: strategies/order-replacement-collateral.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: state-machine-boundaries
+  prompt: strategies/state-machine-boundaries.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: lifecycle-view-boundaries
+  prompt: strategies/lifecycle-view-boundaries.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts: []
+- id: stateful-invariant-setup
+  prompt: strategies/invariants/setup.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts:
+  - setup-inventory.md
+  primary_artifact: setup-inventory.md
+- id: stateful-invariant-handlers
+  prompt: strategies/invariants/handlers.md
+  group: strategies
+  depends_on:
+  - stateful-invariant-setup
+  loop_mode: parallel
+  required_artifacts:
+  - handler-coverage-inventory.md
+  primary_artifact: handler-coverage-inventory.md
+- id: stateful-invariant-coverage
+  prompt: strategies/invariants/coverage.md
+  group: strategies
+  depends_on:
+  - stateful-invariant-handlers
+  - property-specification-fanin
+  loops: 3
+  loop_mode: series
+  required_artifacts:
+  - coverage-goal.json
+  - coverage-report.md
+  - findings.json
+  - harness-repairs.json
+  primary_artifact: coverage-goal.json
+- id: stateful-invariant-implement-properties
+  prompt: strategies/invariants/implement-properties.md
+  group: strategies
+  depends_on:
+  - stateful-invariant-coverage
+  loop_mode: parallel
+  required_artifacts:
+  - implemented-properties.md
+  - implemented-properties.json
+  - generated-tests.json
+  - findings.json
+  primary_artifact: implemented-properties.md
+- id: stateful-invariant-recon-campaign
+  prompt: strategies/invariants/invariant-testing-campaign.md
+  group: strategies
+  depends_on:
+  - stateful-invariant-implement-properties
+  loop_mode: parallel
+  required_artifacts:
+  - campaign-plan.json
+  - campaign-report.md
+  - recon-fuzzer-results.json
+  - generated-tests.json
+  - findings.json
+  primary_artifact: campaign-plan.json
+- id: differential-oracle-planner
+  prompt: strategies/differential/differential-oracle-planner.md
+  group: strategies
+  depends_on:
+  - property-specification-fanin
+  loop_mode: parallel
+  required_artifacts:
+  - differential-plan.json
+  primary_artifact: differential-plan.json
+- id: reference-harness-author
+  prompt: strategies/differential/reference-harness-author.md
+  group: strategies
+  depends_on:
+  - differential-oracle-planner
+  loop_mode: parallel
+  required_artifacts:
+  - reference-harness.json
+  primary_artifact: reference-harness.json
+- id: reference-and-lane-auditor
+  prompt: strategies/differential/reference-and-lane-auditor.md
+  group: strategies
+  depends_on:
+  - reference-harness-author
+  loop_mode: parallel
+  required_artifacts:
+  - audited-differential-lanes.json
+  primary_artifact: audited-differential-lanes.json
+- id: differential-lane-author
+  prompt: strategies/differential/differential-lane-author.md
+  group: strategies
+  depends_on:
+  - reference-and-lane-auditor
+  loops: 3
+  loop_mode: parallel
+  required_artifacts:
+  - lane-result.json
+  primary_artifact: lane-result.json
+- id: differential-red-triage
+  prompt: strategies/differential/differential-red-triage.md
+  group: strategies
+  depends_on:
+  - differential-lane-author
+  loops: 2
+  loop_mode: parallel
+  required_artifacts:
+  - semantic-red-registry.json
+  - triage-a.json
+  - triage-b.json
+  primary_artifact: semantic-red-registry.json
+- id: differential-repair-and-report-review
+  prompt: strategies/differential/differential-repair-and-report-review.md
+  group: strategies
+  depends_on:
+  - differential-red-triage
+  loop_mode: parallel
+  required_artifacts:
+  - repair-summary.json
+  - gap-review.json
+  - differential-report-review.json
+  primary_artifact: repair-summary.json
+- id: dynamic-strategy-generator
+  prompt: strategies/dynamic-strategy-generator.md
+  group: strategies
+  depends_on:
+  - encode-decode
+  - differential-library-tests
+  - round-trip
+  - workflow-property-based-tests
+  - time-warp-sequences
+  - amm-boundary-liquidity
+  - payable-fallback-accounting
+  - packed-action-parity
+  - batch-atomicity-unsupported-actions
+  - router-exact-accounting
+  - rounding-direction-audit
+  - admin-config-boundaries
+  - external-dependency-boundaries
+  - market-exhaustion-boundaries
+  - order-replacement-collateral
+  - state-machine-boundaries
+  - lifecycle-view-boundaries
+  - stateful-invariant-coverage
+  - stateful-invariant-implement-properties
+  - stateful-invariant-recon-campaign
+  - expand-coverage
+  - boundary-tests
+  - differential-repair-and-report-review
+  loop_mode: parallel
+  timeout_seconds: 14400
+  required_artifacts:
+  - strategy-plan.json
+  - enumerator-outputs.json
+  - aggregate-recommendations.json
+  - selected-strategies.json
+  - generated-tests.json
+  - findings.json
+  - provenance.json
+  primary_artifact: strategy-plan.json
+- id: dedupe-findings
+  prompt: review/dedupe-findings.md
+  group: review
+  depends_on:
+  - encode-decode
+  - differential-library-tests
+  - round-trip
+  - workflow-property-based-tests
+  - time-warp-sequences
+  - amm-boundary-liquidity
+  - payable-fallback-accounting
+  - packed-action-parity
+  - batch-atomicity-unsupported-actions
+  - router-exact-accounting
+  - rounding-direction-audit
+  - admin-config-boundaries
+  - external-dependency-boundaries
+  - market-exhaustion-boundaries
+  - order-replacement-collateral
+  - state-machine-boundaries
+  - lifecycle-view-boundaries
+  - stateful-invariant-coverage
+  - stateful-invariant-implement-properties
+  - stateful-invariant-recon-campaign
+  - expand-coverage
+  - boundary-tests
+  - differential-repair-and-report-review
+  - dynamic-strategy-generator
+  loop_mode: parallel
+  required_artifacts:
+  - deduped-findings.json
+  - strategy-detections.json
+  - finding-lifecycle-ledger.json
+  primary_artifact: deduped-findings.json
+- id: triage
+  prompt: review/triage.md
+  group: review
+  depends_on:
+  - dedupe-findings
+  loop_mode: parallel
+  timeout_seconds: 3600
+  required_artifacts:
+  - triaged-findings.json
+  - finding-lifecycle-ledger.json
+  primary_artifact: triaged-findings.json
+- id: severity-classification
+  prompt: review/severity-classification.md
+  group: review
+  depends_on:
+  - triage
+  loop_mode: parallel
+  timeout_seconds: 3600
+  required_artifacts:
+  - severity-classified-findings.json
+  - strategy-detections.json
+  - finding-lifecycle-ledger.json
+  primary_artifact: severity-classified-findings.json
+- id: aggregate-test-files
+  prompt: review/aggregate-test-files.md
+  group: review
+  depends_on:
+  - severity-classification
+  loop_mode: parallel
+  timeout_seconds: 3600
+  required_artifacts:
+  - aggregation.json
+  primary_artifact: aggregation.json
+- id: final-report
+  prompt: review/final-report.md
+  group: review
+  depends_on:
+  - aggregate-test-files
+  loop_mode: series
+  timeout_seconds: 3600
+  required_artifacts:
+  - report.md
+  - report.json
+  primary_artifact: report.md
+- id: __finish__
+  kind: meta
+  role: finish
+  depends_on:
+  - final-report
+  loop_mode: parallel
+  required_artifacts: []

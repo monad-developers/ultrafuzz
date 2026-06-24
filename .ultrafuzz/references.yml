@@ -1,0 +1,83 @@
+version: 1
+references:
+  properties.0kn0t:
+    provider: github
+    repo: 0kn0t/properties_framework
+    commit: 527f581ca89259bec0d9b6bbcb816fe522314478
+    paths:
+      - README.md
+      - 01_PROPERTY_CLASSIFICATION_TAXONOMY.md
+      - 02_PROPERTY_SCHEMA.md
+      - 03_COMPREHENSIVE_FRAMEWORK.md
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.a16z-erc4626:
+    provider: github
+    repo: a16z/erc4626-tests
+    commit: ac485460e014f22807c1ff687e0b4dc3af96ee40
+    paths:
+      - README.md
+      - ERC4626.prop.sol
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.aviggiano:
+    provider: github
+    repo: aviggiano/security
+    commit: 04d13d61d3c941923e7228c3b9fe029eaaa8017f
+    paths:
+      - goals/properties.md
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.certora-sanity:
+    provider: github
+    repo: Certora/Examples
+    commit: 279e55370f969607c922e9eb3089c82911b76a20
+    paths:
+      - CLIFlags/README.md
+      - CLIFlags/rule_sanity.conf
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.certora-thinking:
+    provider: github
+    repo: Certora/Tutorials
+    commit: ed1c14028ce75d729ba56b75d224a9991f299ea1
+    paths:
+      - 06.Lesson_ThinkingProperties/README.md
+      - 06.Lesson_ThinkingProperties/AuctionDemonstration/README.md
+      - 06.Lesson_ThinkingProperties/AuctionDemonstration/propertiesList.md
+      - 06.Lesson_ThinkingProperties/ThinkingPropertiesExercise/TicketDepot/sanity.spec
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.crytic:
+    provider: github
+    repo: crytic/properties
+    commit: 5ea14b813ff296e24b4257ab52a0402360f916f6
+    paths:
+      - README.md
+      - PROPERTIES.md
+      - contracts/ERC4626/README.md
+      - contracts/ERC4626/properties/RoundingProps.sol
+      - contracts/ERC4626/properties/SecurityProps.sol
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.montyly-rounding:
+    provider: github
+    repo: montyly/montyly.github.io
+    commit: a3dbfa1fbacd05fb2e5e7c66acb2243dafd1483d
+    paths:
+      - blog/2026/january/rounding.md
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.recon:
+    provider: github
+    repo: Recon-Fuzz/recon-docs
+    commit: 173d80fffd72cffc6087e977941c4b382c5c4660
+    paths:
+      - README.md
+      - src/oss/properties.md
+      - src/writing_invariant_tests/implementing_properties.md
+      - src/writing_invariant_tests/optimizing_broken_properties.md
+    resolved_at: "2026-06-23T00:00:00Z"
+  properties.runtime-verification:
+    provider: github
+    repo: runtimeverification/ercx-tests
+    commit: ca65eb975cfd7e9db1599499f5946e564eb9872d
+    paths:
+      - README.md
+      - src/ERC4626/ERC4626Security.sol
+      - src/ERC4626/Light/ERC4626Standard.sol
+      - src/ERC4626/Heavy/ERC4626Standard.sol
+    resolved_at: "2026-06-23T00:00:00Z"

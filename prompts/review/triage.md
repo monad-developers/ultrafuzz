@@ -1,0 +1,185 @@
+---
+id: triage
+display_name: Triage
+---
+
+# Triage
+
+Your job is to classify each deduplicated finding before severity is assigned.
+
+Use this dedupe handoff:
+
+Deduped findings:
+{{artifact_path:dedupe-findings}}/deduped-findings.json
+
+Finding lifecycle ledger:
+{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json
+
+For each deduplicated finding, run a consensus investigation inside this review
+step:
+
+- Perform {{triage_panel_size}} independent investigation passes, each using the
+  maximum available reasoning level.
+- Each pass must independently inspect the finding, generated test, relevant
+  target code, public specifications, and any upstream evidence.
+- Each pass must choose exactly one classification:
+  - `true-positive`: credible production issue.
+  - `false-positive`: invalid issue with no useful follow-up.
+  - `undetermined`: needs more human review before classification.
+  - `incomplete-spec`: public specification or policy is missing, ambiguous, or
+    contradicted.
+  - `harness-defect`: the generated test or harness violates required
+    preconditions or models the protocol incorrectly.
+  - `repair-candidate`: a local generated test, prompt output, or campaign
+    artifact should be repaired before re-running.
+  - `spec-gated`: behavior may be valid or invalid depending on an explicit
+    product/spec decision.
+  - `defensive-hardening`: not a production bug, but a guard, assertion, or
+    documentation hardening would reduce risk.
+- If at least {{triage_quorum}} of {{triage_panel_size}} passes agree, use that
+  classification.
+- If no classification reaches {{triage_quorum}}-of-{{triage_panel_size}}
+  agreement, classify the finding as `undetermined`.
+
+When rerunning generated tests, focused proofs, temporary public wrappers, or
+any other Foundry command during triage, resolve the Foundry binary first: use
+`forge` from `PATH` when available, or the absolute Foundry binary path recorded
+by setup artifacts such as `setup-foundry`, `base-test-setup`, or upstream
+campaign artifacts. Do not run a bare `forge test ...` command unless
+`command -v forge` succeeds in the current shell. When substituting the executable,
+preserve the original command's environment variables, flags, match selectors,
+and test-root semantics. Do not add `FOUNDRY_TEST=test` to project-native test
+commands, temporary public wrappers, or focused proof reruns outside
+Ultrafuzz's generated `test/foundry` tree unless the original command or setup
+artifacts already require that override. Prefer a guarded command shape such as
+`FOUNDRY_BIN="${FOUNDRY_BIN:-$(command -v forge || true)}"; test -n
+"$FOUNDRY_BIN" || { echo "Set FOUNDRY_BIN to the absolute forge binary path
+recorded by setup artifacts" >&2; exit 1; }; "$FOUNDRY_BIN" test ...`. Do not
+treat `forge: command not found` as a reproducer result or classification
+signal; resolve the binary first and then evaluate the intended proof outcome.
+
+## Helper reachability audit
+
+During each pass, check whether the failing proof depends on directly calling
+an internal helper, library function, generated wrapper, or test-only adapter
+instead of a production public/external entrypoint. For those findings, triage
+must audit public reachability before treating the result as production
+evidence:
+
+- If a public/external entrypoint trace or generated public wrapper PoC reaches
+  the same helper behavior under production-like preconditions, the finding may
+  remain `true-positive`. Add a note with
+  `reachability=public-entrypoint-trace` or
+  `reachability=generated-public-wrapper-poc`.
+- If the proof is helper-only and public entrypoints enforce stricter bounds,
+  classify it as `harness-defect`, `defensive-hardening`, or `false-positive`
+  according to the evidence. Set `status` to `false-positive` for unreachable
+  false positives, and record why production reachability is absent.
+- If direct public reachability is unclear, classify it as `undetermined` and
+  add `reachability=public-wrapper-required` plus the exact public wrapper or
+  entrypoint evidence needed before severity can treat it as production
+  exploitable.
+
+## External dependency scope audit
+
+During each pass, check whether the finding depends on an external dependency,
+callback, oracle, token, hook, adapter, bridge, router, vault, pool, or
+third-party protocol behaving incorrectly. Require a source-backed in-scope rationale
+before treating that dependency behavior as production evidence.
+
+- If the finding depends only on `trusted-boundary-failure`, such as making a trusted oracle lie or a trusted third-party protocol malfunction, classify it
+  as `false-positive` unless public docs, interfaces, tests, specs, or comments
+  explicitly say the protocol promises to tolerate that behavior. Add
+  `dependency_scope=ambiguous-or-out-of-scope`.
+- If the proof relies on `undocumented-external-misbehavior`, an explicitly
+  unsupported token breaking ERC-20 semantics, or an out-of-scope callback
+  acting maliciously, classify it as `false-positive`, `incomplete-spec`, or
+  `spec-gated` according to the available evidence. Do not promote it to
+  `true-positive`.
+- If the finding tests project-owned validation, wrapper, adapter,
+  authorization, bounds, staleness, sanitization, rollback, or error-handling
+  logic and cites explicit public evidence that the protocol promises that
+  guard, it may remain eligible for `true-positive`. Add
+  `dependency_scope=source-backed-in-scope` and cite the source-backed
+  in-scope rationale.
+- If the dependency scope is ambiguous, preserve the useful scope note or
+  harness note, but classify the production claim as `incomplete-spec`,
+  `spec-gated`, `defensive-hardening`, or `false-positive`, not
+  `true-positive`.
+
+## Required batch rollback audit
+
+During each pass, check whether the finding involves a structured batch,
+multicall, packed action list, or opcode/action array with required-success
+semantics. When public docs, interfaces, ABIs, or tests enumerate a finite
+opcode/action set and describe required batch success, rollback, or
+all-or-nothing semantics, unknown required opcodes/actions should fail. If a
+required unknown opcode/action is accepted and earlier required mutations remain
+externally visible, the oracle is production-backed unless public docs
+explicitly define unknown required actions as no-ops or skippable.
+
+- Do not downgrade the finding only because docs omit a sentence saying every
+  unknown required action must revert; the finite opcode/action set plus
+  required rollback semantics is enough source support.
+- Require evidence that the proof checks rollback of the earlier required
+  mutation, including no live order or externally visible state delta through
+  public getters, balances, queues, events, nonces, or equivalent state.
+- If either the finite opcode/action set or required rollback semantics is
+  missing or ambiguous, preserve the repro but classify the production claim as
+  `incomplete-spec`, `spec-gated`, or `undetermined` according to the evidence.
+
+Reachability fixture examples:
+
+```json
+{
+  "title": "Helper-only arithmetic mismatch",
+  "triage_classification": "harness-defect",
+  "status": "false-positive",
+  "notes": [
+    "reachability=helper-only: direct helper fuzzing bypasses public entrypoint bounds",
+    "classification_reason=harness defect: generated proof bypasses production entrypoint preconditions"
+  ]
+}
+```
+
+```json
+{
+  "title": "Public entrypoint reaches helper mismatch",
+  "triage_classification": "true-positive",
+  "notes": [
+    "reachability=public-entrypoint-trace: external flow reaches the helper with production-like bounds",
+    "helper_proof=direct helper mismatch reproduced",
+    "public_exploitability=public entrypoint trace reproduces the same state transition"
+  ]
+}
+```
+
+Do not remove findings during triage. Preserve the upstream finding fields and
+add or update `triage_classification` with the consensus value. Keep concise
+notes that summarize the votes, decisive evidence, and recommended next action.
+Every triaged finding must include a machine-readable `triage_reason=<reason>`
+or `classification_reason=<reason>` note. If triage demotes a previously
+production-looking record to a non-production class, also include
+`demotion_reason=<reason>`.
+When a finding is classified as `false-positive`, set `status` to
+`false-positive`; otherwise leave the status visible for downstream review unless
+the upstream evidence already supports a more specific status.
+
+For stateful invariant records, preserve any upstream
+`stateful_failure_classification=<classification>` note exactly. Coverage-only
+success is not evidence that the record should be removed. Treat
+`production-bug`, `harness-defect`, `incomplete-spec`, `false-positive`, and
+`blocked-unreproduced` as distinct upstream outcomes that must remain visible in
+`triaged-findings.json`; triage may add consensus notes, but it must not erase
+the original classification, reproducer, blocker, or repair evidence.
+
+Save triaged findings to {{artifact_path}}/triaged-findings.json as a JSON
+array. Every object must include `triage_classification` set to exactly one of
+the classification values above.
+
+Also save {{artifact_path}}/finding-lifecycle-ledger.json by copying the input
+ledger and updating the matching `dedupe_key` record for every triaged finding:
+set `triage_classification`, preserve or add `triage_reason`, preserve or add
+`demotion_reason` when present, and append a `triaged` stage that points to
+{{artifact_path}}/triaged-findings.json. Do not match lifecycle records by
+title when `dedupe_key` is available.
