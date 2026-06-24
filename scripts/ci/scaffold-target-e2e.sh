@@ -33,7 +33,7 @@ if [ ! -f "$artifact_helper" ]; then
 fi
 
 case "$signal_profile" in
-  control | smoke | uniswap-v2)
+  control | smoke)
     signal_profile="control"
     topology_file="$script_dir/target-e2e-topology.yml"
     ;;
@@ -99,6 +99,12 @@ args = ["exec"]
 sandbox = "workspace-write"
 sandbox_required = true
 allow_dangerous_bypass = false
+write_allow = [
+  "workspace",
+  "artifacts",
+  "extra-context",
+  "final-materialization",
+]
 
 [invariants]
 property_priority_threshold = "high"

@@ -10142,6 +10142,40 @@ mod tests {
         }
     }
 
+    fn assert_run_succeeded(result: &RunResult, layout: &ultrafuzz_artifacts::RunLayout) {
+        if result.status == RunStatus::Succeeded {
+            return;
+        }
+        let details = RunStateStore::for_run_root(&layout.root)
+            .load()
+            .map(|state| {
+                state
+                    .nodes
+                    .values()
+                    .filter(|node| {
+                        matches!(
+                            node.status,
+                            NodeStatus::Failed | NodeStatus::TimedOut | NodeStatus::Skipped
+                        )
+                    })
+                    .map(|node| {
+                        format!(
+                            "{}={:?}:{}",
+                            node.node_id,
+                            node.status,
+                            node.last_error.as_deref().unwrap_or("no error")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_else(|error| format!("failed to load state: {error}"));
+        panic!(
+            "expected run to succeed, got {:?}; node details: {}",
+            result.status, details
+        );
+    }
+
     #[test]
     fn persist_workspace_changes_skips_symlink_sources() {
         let temp = tempfile::tempdir().unwrap();
@@ -12613,6 +12647,7 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
         resolved_config.project.repo = target_repo.path().to_path_buf();
         resolved_config.run.workspace_mode = ultrafuzz_core::WorkspaceMode::TempdirCopy;
         resolved_config.backend.codex_cli.command = backend.display().to_string();
+        resolved_config.permissions.allow_dangerous_bypass = true;
         let default_profile = resolved_config
             .models
             .profiles
@@ -12639,7 +12674,7 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
             })
             .unwrap();
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_run_succeeded(&result, &layout);
         let state = RunStateStore::for_run_root(&layout.root).load().unwrap();
         let node_state = &state.nodes[&NodeId::from("discover")];
         assert_eq!(node_state.model_id, Some(ModelProfileId::from("default")));
@@ -12700,6 +12735,11 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
         resolved_config.run.workspace_mode = ultrafuzz_core::WorkspaceMode::TempdirCopy;
         resolved_config.run.default_timeout_seconds = 5;
         resolved_config.backend.codex_cli.command = backend.display().to_string();
+        resolved_config.permissions.allow_dangerous_bypass = true;
+        resolved_config
+            .permissions
+            .write_allow
+            .push("extra-context".to_owned());
         let layout = ultrafuzz_artifacts::RunLayout::new(project.path().join("runs"), run_id);
         let executor = DagExecutor::new(
             ExecutorConfig::from_campaign_config(&resolved_config),
@@ -12719,7 +12759,7 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
             })
             .unwrap();
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_run_succeeded(&result, &layout);
         let consumer_args = fs::read_to_string(
             layout
                 .artifact_dir(&NodeId::from("consumer"))
@@ -12787,6 +12827,11 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
         resolved_config.run.workspace_mode = ultrafuzz_core::WorkspaceMode::TempdirCopy;
         resolved_config.run.default_timeout_seconds = 5;
         resolved_config.backend.codex_cli.command = backend.display().to_string();
+        resolved_config.permissions.allow_dangerous_bypass = true;
+        resolved_config
+            .permissions
+            .write_allow
+            .push("extra-context".to_owned());
         let layout = ultrafuzz_artifacts::RunLayout::new(project.path().join("runs"), run_id);
         let executor = DagExecutor::new(
             ExecutorConfig::from_campaign_config(&resolved_config),
@@ -12806,7 +12851,7 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
             })
             .unwrap();
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_run_succeeded(&result, &layout);
         let aggregate_args = fs::read_to_string(
             layout
                 .artifact_dir(&NodeId::from("aggregate-test-files"))
@@ -12860,12 +12905,8 @@ printf '{"ok":true}\n' > "$ULTRAFUZZ_OUTPUT_METADATA_PATH"
             ["aggregation_destination_dir"]
             .as_str()
             .unwrap();
-        assert!(aggregation_destination.starts_with(
-            layout
-                .workspace_dir(&NodeId::from("aggregate-test-files"))
-                .to_str()
-                .unwrap()
-        ));
+        let workspace_path = runtime_context["workspace"]["path"].as_str().unwrap();
+        assert!(aggregation_destination.starts_with(workspace_path));
         assert!(!aggregation_destination.starts_with(target_repo.path().to_str().unwrap()));
         let source_args = fs::read_to_string(
             layout
@@ -13135,6 +13176,10 @@ esac
         resolved_config.run.workspace_mode = ultrafuzz_core::WorkspaceMode::TempdirCopy;
         resolved_config.backend.codex_cli.command = backend.display().to_string();
         resolved_config.permissions.allow_dangerous_bypass = true;
+        resolved_config
+            .permissions
+            .write_allow
+            .push("extra-context".to_owned());
         let layout = ultrafuzz_artifacts::RunLayout::new(project.path().join("runs"), run_id);
         let executor = DagExecutor::new(
             ExecutorConfig::from_campaign_config(&resolved_config),
@@ -13154,7 +13199,7 @@ esac
             })
             .unwrap();
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_run_succeeded(&result, &layout);
         assert!(layout
             .artifact_dir(&NodeId::from("setup"))
             .join("workspace-changes/foundry.toml")
@@ -13307,6 +13352,10 @@ esac
         resolved_config.run.workspace_mode = ultrafuzz_core::WorkspaceMode::TempdirCopy;
         resolved_config.backend.codex_cli.command = backend.display().to_string();
         resolved_config.permissions.allow_dangerous_bypass = true;
+        resolved_config
+            .permissions
+            .write_allow
+            .push("extra-context".to_owned());
         let layout = ultrafuzz_artifacts::RunLayout::new(project.path().join("runs"), run_id);
         let executor = DagExecutor::new(
             ExecutorConfig::from_campaign_config(&resolved_config),
@@ -13326,7 +13375,7 @@ esac
             })
             .unwrap();
 
-        assert_eq!(result.status, RunStatus::Succeeded);
+        assert_run_succeeded(&result, &layout);
         let conflict_report_path = layout
             .artifact_dir(&NodeId::from("verify"))
             .join(DEPENDENCY_WORKSPACE_CHANGE_CONFLICTS_FILE);

@@ -509,7 +509,10 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
             "schema_version": "1.0",
             "source_test_files": 0,
             "copied_test_files": 0,
+            "source_support_files": 0,
+            "copied_support_files": 0,
             "files": [],
+            "support_files": [],
             "skipped_files": [],
         },
     )

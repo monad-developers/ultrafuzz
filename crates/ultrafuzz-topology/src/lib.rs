@@ -4337,7 +4337,7 @@ mod tests {
             graph
                 .node(&NodeId::from("differential-library-tests-0"))
                 .and_then(|node| node.timeout),
-            Some(Duration::from_secs(3_600))
+            Some(Duration::from_secs(1_800))
         );
         assert!(graph.node(&NodeId::from("round-trip-0")).is_some());
         assert!(graph.node(&NodeId::from("round-trip-1")).is_some());
