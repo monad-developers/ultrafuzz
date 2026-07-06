@@ -1,65 +1,74 @@
-# Restart or Continue Campaigns
+# Resume, Replay, Or Fork Runs
 
-Use restart when you want a clean replay from a prior run. Use continue when
-you want to reuse compatible completed work and rerun the rest.
+Use `resume`, `replay`, and `fork` to operate on the linked workflow run after
+Ultrafuzz performs product checks.
 
-## List Runs
+## Find The Run
 
 ```bash
-ultrafuzz list
-ultrafuzz status <run-id>
+ultrafuzz ps --project /path/to/target-protocol
+ultrafuzz inspect <run-id> --project /path/to/target-protocol
 ```
 
-Run directories live under:
+Run evidence lives under:
 
 ```text
 .ultrafuzz/runs/<run-id>/
 ```
 
-## Restart A Run
+`inspect` shows product evidence and the linked workflow identity.
+
+## Resume A Linked Run
+
+Use resume when the linked workflow can continue from its current workflow
+state:
 
 ```bash
-ultrafuzz restart <run-id>
+ultrafuzz resume <run-id> --project /path/to/target-protocol
+ultrafuzz resume <run-id> --project /path/to/target-protocol --max-concurrency 4
 ```
 
-With overrides:
+Resume delegates to the workflow engine and records updated lifecycle evidence
+for the same Ultrafuzz run.
+
+## Replay A Linked Run
+
+Use replay when you want the workflow engine to replay the linked run from the
+stored product evidence:
 
 ```bash
-ultrafuzz restart <run-id> --backend claude-code-cli --max-parallel-agents 8
-ultrafuzz restart <run-id> --triage-quorum 4 --triage-panel-size 7
+ultrafuzz replay <run-id> --project /path/to/target-protocol
 ```
 
-Restart creates a new run from the prior run's resolved config and graph. It
-does not mutate the old run.
+Replay is a linked-workflow operation over existing run evidence. Use a fresh
+`ultrafuzz run` when modified config, topology, prompts, or references should
+define a new campaign.
 
-Run artifact `resolved-config.toml` redacts backend and model-profile
-environment values. When a prior run contains redacted env keys, `restart`
-restores those values from the current project `ultrafuzz.toml` before executing
-the new run. If the current config cannot provide an unredacted value for a
-redacted source key, restart fails with an explicit error instead of running
-with the literal `<redacted>` placeholder.
+## Fork A Linked Run
 
-## Continue A Run
+Use fork when you want a derived linked workflow from a checkpoint or reset
+point:
 
 ```bash
-ultrafuzz continue <run-id>
+ultrafuzz fork <run-id> --project /path/to/target-protocol --label retry-triage
+ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12
+ultrafuzz fork <run-id> --project /path/to/target-protocol --reset-node triage --max-concurrency 4
 ```
 
-Continue creates a new run that first validates graph, config, topology, prompt,
-and artifact compatibility. It reuses valid succeeded node artifacts and reruns
-unfinished, failed, timed-out, skipped, invalidated, or affected downstream
-work.
+Fork delegates to the workflow engine after product checks and persists the
+new linked workflow identity or lifecycle evidence.
 
-Like restart, continue restores redacted backend and model-profile env values
-from the current project config before checking config compatibility.
+## When To Start Fresh
 
-## Keep Workspaces For Debugging
-
-Set:
+If you changed `ultrafuzz.toml`, `.ultrafuzz/topology.yml`,
+`.ultrafuzz/prompts/**`, or `.ultrafuzz/references.yml` and want those changes
+to define a new campaign, run validation and start a new run:
 
 ```bash
-export ULTRAFUZZ_KEEP_WORKSPACES=1
+ultrafuzz validate --project /path/to/target-protocol
+ultrafuzz references sync --project /path/to/target-protocol
+ultrafuzz run --project /path/to/target-protocol
 ```
 
-Then inspect the isolated attempt workspaces after the run. Clear the variable
-when you no longer need local debugging artifacts.
+Sync references only when the run needs pinned references that are not already
+present in the local digest-checked cache.

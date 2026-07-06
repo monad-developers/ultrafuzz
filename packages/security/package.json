@@ -1,0 +1,20 @@
+{
+  "name": "@ultrafuzz/security",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

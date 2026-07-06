@@ -1,0 +1,23 @@
+{
+  "name": "@ultrafuzz/config",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.build.json && cp ../../ultrafuzz.toml dist/ultrafuzz.toml",
+    "test": "pnpm --filter @ultrafuzz/security build && vitest run",
+    "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@ultrafuzz/security": "workspace:*",
+    "smol-toml": "^1.7.0"
+  }
+}

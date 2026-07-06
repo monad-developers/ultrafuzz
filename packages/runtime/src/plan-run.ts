@@ -1,0 +1,527 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  appendEvent,
+  createRunLayout,
+  getNodeArtifactDir,
+  updateNodeState,
+  writeArtifactManifest,
+  writeJsonDurable,
+  type NodeStateInput,
+  type RunLayout
+} from "@ultrafuzz/artifacts";
+import { redactResolvedConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
+import {
+  loadPromptCatalog,
+  renderPrompt,
+  writeRenderedPrompt,
+  type PromptCatalog,
+  type PromptCatalogEntry,
+  type PromptConcreteNode,
+  type PromptGraphNode
+} from "@ultrafuzz/prompts";
+import { loadReferenceCatalog, materializeReferenceArtifacts } from "@ultrafuzz/references";
+import {
+  expandTopology,
+  fingerprintGraph,
+  loadTopology,
+  type ExpandedGraph,
+  type ExpandedNode
+} from "@ultrafuzz/topology";
+
+import {
+  RUNTIME_SCHEMA_VERSION,
+  type PlanRunInput,
+  type PlanRunValue,
+  type PlannedGraph,
+  type PlannedGraphNode,
+  type RenderedPromptPlan
+} from "./types.js";
+import { validateProject } from "./validate.js";
+import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
+import {
+  diagnosticFromError,
+  generateRunId,
+  hasRuntimeErrors,
+  runtimeFailure,
+  runtimeResult,
+  sha256Stable
+} from "./utils.js";
+import { checkDependencyLegality } from "./artifact-gates.js";
+
+export async function planRun(input: PlanRunInput) {
+  const projectRoot = path.resolve(input.projectRoot);
+  const validation = await validateProject(input);
+  if (!validation.ok || !validation.value) {
+    return runtimeFailure<PlanRunValue>(validation.diagnostics);
+  }
+
+  const resolved = await loadResolvedProject(input);
+  if (!resolved.config) {
+    return runtimeFailure<PlanRunValue>(resolved.diagnostics);
+  }
+  applyWorkflowRunOverrides(resolved.config, input);
+
+  const runId = input.runId ?? generateRunId(input.mode ?? "run");
+  const configFingerprint = sha256Stable(resolved.config);
+  const redacted = redactResolvedConfig(resolved.config);
+  const redactedConfigFingerprint = sha256Stable(redacted.config);
+  const outputRoot = outputRootForConfig(projectRoot, resolved.config);
+  const runRoot = path.join(outputRoot, runId);
+  if (fs.existsSync(runRoot)) {
+    return runtimeFailure<PlanRunValue>([
+      {
+        code: "RUN_ALREADY_EXISTS",
+        message: `run ${runId} already exists`,
+        severity: "error",
+        source: "runtime",
+        path: runRoot
+      }
+    ]);
+  }
+
+  let expandedGraph: ExpandedGraph;
+  let catalog: PromptCatalog;
+  try {
+    const topology = loadTopology(projectRoot, { requirePromptFiles: true });
+    expandedGraph = expandTopology(topology, {
+      projectRoot,
+      runId,
+      requirePromptFiles: true,
+      defaultTimeoutSeconds: resolved.config.run.defaultTimeoutSeconds,
+      modelProfiles: modelProfilesForTopology(resolved.config),
+      defaultModelProfileId: resolved.config.models.default,
+      configFingerprint: redactedConfigFingerprint
+    });
+    catalog = loadPromptCatalog({ projectRoot });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
+  }
+
+  const graph = toPlannedGraph(expandedGraph, catalog);
+  const graphDiagnostics = checkDependencyLegality(graph);
+  if (hasRuntimeErrors(graphDiagnostics)) {
+    return runtimeFailure<PlanRunValue>(graphDiagnostics);
+  }
+  const graphFingerprint = fingerprintGraph(expandedGraph);
+  const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
+    id: node.id,
+    logicalNodeId: node.logical_id,
+    artifactDir: node.artifact_dir,
+    requiredArtifacts: node.required_artifacts,
+    attemptIndex: node.loop.attempt_index,
+    loopIndex: node.loop.index,
+    modelId: node.model_fanout[0]?.model_profile_id,
+    model: node.model_fanout[0]?.model_name,
+    modelIndex: node.model_fanout[0]?.model_index
+  }));
+
+  let layout;
+  try {
+    layout = createRunLayout({
+      projectRoot,
+      outputRoot,
+      runId,
+      sourceRunId: input.sourceRunId,
+      resolvedConfigToml: serializeRedactedResolvedConfigToml(redacted),
+      configRedactions: redacted.manifest,
+      graph,
+      graphFingerprint,
+      configFingerprint,
+      stateNodes,
+      runMetadata: {
+        mode: input.mode ?? "run",
+        workflow_ids: [],
+        redacted_config_fingerprint: redactedConfigFingerprint
+      }
+    });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
+  }
+
+  try {
+    materializeReferenceNodesForPlan({ projectRoot, graph, layout });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
+  }
+
+  let renderedPrompts: RenderedPromptPlan[];
+  try {
+    renderedPrompts = renderPromptsForPlan({
+      catalog,
+      graph,
+      layout,
+      projectRoot,
+      resolvedConfig: resolved.config,
+      runId
+    });
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
+  }
+
+  writeJsonDurable(path.join(layout.root, "plan.json"), {
+    schema_version: RUNTIME_SCHEMA_VERSION,
+    run_id: runId,
+    mode: input.mode ?? "run",
+    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+    graph_fingerprint: graphFingerprint,
+    config_fingerprint: configFingerprint,
+    redacted_config_fingerprint: redactedConfigFingerprint,
+    topology: validation.value.topology,
+    rendered_prompts: renderedPrompts,
+    policy_posture: Object.fromEntries(
+      Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
+    )
+  });
+
+  return runtimeResult(true, {
+    run_id: runId,
+    run_root: layout.root,
+    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+    graph,
+    expanded_graph: expandedGraph,
+    graph_fingerprint: graphFingerprint,
+    config_fingerprint: configFingerprint,
+    redacted_config_fingerprint: redactedConfigFingerprint,
+    output_root: outputRoot,
+    state_nodes: stateNodes,
+    resolved_config: resolved.config,
+    validation: validation.value,
+    layout,
+    rendered_prompts: renderedPrompts
+  });
+}
+
+function materializeReferenceNodesForPlan(input: {
+  projectRoot: string;
+  graph: PlannedGraph;
+  layout: RunLayout;
+}): void {
+  const referenceNodes = input.graph.nodes.filter((node) => node.kind === "reference");
+  if (referenceNodes.length === 0) {
+    return;
+  }
+  const catalog = loadReferenceCatalog(input.projectRoot);
+  for (const node of referenceNodes) {
+    if (!node.reference) {
+      throw new Error(`reference graph node ${node.id} is missing reference id`);
+    }
+    const startedAt = new Date().toISOString();
+    const artifactDir = getNodeArtifactDir(input.layout, node.id, { create: true });
+    const materialized = materializeReferenceArtifacts({
+      catalog,
+      id: node.reference,
+      artifactDir,
+      requiredArtifacts: node.required_artifacts,
+      primaryArtifact: node.primary_artifact
+    });
+    const finishedAt = new Date().toISOString();
+    writeArtifactManifest({
+      layout: input.layout,
+      nodeId: node.id,
+      provenance: {
+        logical_node_id: node.logical_id,
+        origin: "pinned-reference",
+        metadata: {
+          reference: node.reference,
+          repo: node.reference_revision?.repo,
+          commit: node.reference_revision?.commit,
+          reference_artifact: materialized.referenceArtifact,
+          manifest_artifact: materialized.manifestArtifact
+        }
+      }
+    });
+    updateNodeState(input.layout, node.id, {
+      status: "succeeded",
+      started_at: startedAt,
+      finished_at: finishedAt,
+      provenance: {
+        origin: "pinned-reference",
+        reference: node.reference,
+        repo: node.reference_revision?.repo,
+        commit: node.reference_revision?.commit
+      }
+    });
+    appendEvent(input.layout, {
+      eventType: "reference-materialized",
+      nodeId: node.id,
+      status: "succeeded",
+      payload: {
+        reference: node.reference,
+        repo: node.reference_revision?.repo,
+        commit: node.reference_revision?.commit,
+        artifact: materialized.referenceArtifact,
+        manifest: materialized.manifestArtifact
+      }
+    });
+  }
+}
+
+export function toPlannedGraph(expanded: ExpandedGraph, catalog?: PromptCatalog): PlannedGraph {
+  const executableNodes = expanded.nodes.filter((node) => node.kind !== "meta");
+  const nodeById = new Map(expanded.nodes.map((node) => [node.id, node]));
+  return {
+    schema_version: "1.0",
+    graph_version: expanded.graphVersion,
+    topology_version: expanded.topologyVersion,
+    groups: expanded.groups,
+    nodes: executableNodes.map((node) => toPlannedGraphNode(node, nodeById, catalog))
+  };
+}
+
+function toPlannedGraphNode(
+  node: ExpandedNode,
+  nodeById: Map<string, ExpandedNode>,
+  catalog: PromptCatalog | undefined
+): PlannedGraphNode {
+  const promptEntry = node.promptPath ? promptEntryForNode(catalog, node) : undefined;
+  return {
+    id: node.id,
+    logical_id: node.logicalId,
+    display_name: node.label,
+    kind: node.kind,
+    depends_on: node.dependsOn.filter((dependency) => nodeById.get(dependency)?.kind !== "meta"),
+    artifact_dir: node.artifactDir,
+    required_artifacts: [...node.requiredArtifacts],
+    prompt_id: promptEntry?.id ?? node.logicalId,
+    prompt_path: node.promptPath ? path.posix.join(".ultrafuzz/prompts", node.promptPath) : "",
+    ...(node.reference ? { reference: node.reference } : {}),
+    ...(node.referenceRevision
+      ? {
+          reference_revision: {
+            provider: node.referenceRevision.provider,
+            repo: node.referenceRevision.repo,
+            commit: node.referenceRevision.commit,
+            paths: [...node.referenceRevision.paths]
+          }
+        }
+      : {}),
+    ...(node.primaryArtifact ? { primary_artifact: node.primaryArtifact } : {}),
+    ...(node.role ? { role: node.role } : {}),
+    loop: {
+      index: node.loop.index,
+      count: node.loop.count,
+      mode: node.loop.mode,
+      attempt_index: node.loop.attemptIndex
+    },
+    model_fanout: node.modelFanout.map((model) => ({
+      model_profile_id: model.modelProfileId,
+      agent_ref: model.agentRef,
+      ...(model.modelName ? { model_name: model.modelName } : {}),
+      model_index: model.modelIndex,
+      loop_index: model.loopIndex,
+      attempt_index: model.attemptIndex
+    }))
+  };
+}
+
+function renderPromptsForPlan(input: {
+  catalog: PromptCatalog;
+  graph: PlannedGraph;
+  layout: PlanRunValue["layout"];
+  projectRoot: string;
+  resolvedConfig: PlanRunValue["resolved_config"];
+  runId: string;
+}): RenderedPromptPlan[] {
+  const logicalNodes = promptLogicalNodes(input.graph, input.layout);
+  const concreteNodes = promptConcreteNodes(input.graph, input.layout);
+  const rendered: RenderedPromptPlan[] = [];
+
+  for (const node of input.graph.nodes) {
+    if (!node.prompt_path) {
+      continue;
+    }
+    const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
+    for (const attempt of promptAttemptsForNode(node, input.layout)) {
+      const result = renderPrompt({
+        prompt: {
+          id: promptEntry.id,
+          displayName: promptEntry.displayName,
+          source: promptEntry.source,
+          body: promptEntry.body
+        },
+        graph: {
+          logicalNodes,
+          concreteNodes
+        },
+        node: {
+          logicalId: node.logical_id,
+          concreteId: attempt.attemptId,
+          artifactDir: attempt.artifactDir,
+          workspacePath: attempt.workspacePath,
+          repoPath: path.resolve(input.projectRoot, input.resolvedConfig.project.repo),
+          attemptIndex: attempt.attemptIndex,
+          loopIndex: node.loop.index,
+          loopCount: node.loop.count,
+          agentRef:
+            attempt.agentRef ?? input.resolvedConfig.models.profiles[input.resolvedConfig.models.default]?.agent,
+          modelProfileId: attempt.modelProfileId ?? input.resolvedConfig.models.default,
+          modelName: attempt.modelName,
+          modelIndex: attempt.modelIndex
+        },
+        run: {
+          id: input.runId,
+          artifactsDir: input.layout.artifactsDir,
+          metadataPath: input.layout.runMetadataPath
+        },
+        outputs: {
+          findingsPath: path.join(attempt.artifactDir, "findings.json"),
+          patchPath: path.join(attempt.artifactDir, "patch.diff")
+        },
+        resolvedConfig: {
+          triage: {
+            quorum: input.resolvedConfig.triage.quorum,
+            panelSize: input.resolvedConfig.triage.panelSize
+          },
+          dynamicStrategiesEnumerator: input.resolvedConfig.dynamicStrategiesEnumerator,
+          invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
+          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
+        }
+      });
+      writeRenderedPrompt(result);
+      rendered.push({
+        node_id: node.id,
+        logical_node_id: node.logical_id,
+        attempt_id: attempt.attemptId,
+        prompt_id: promptEntry.id,
+        prompt_path: promptEntry.relativePath,
+        rendered_prompt_path: result.renderedPromptPath,
+        variables_used: result.variablesUsed,
+        artifact_references: result.artifactReferences
+      });
+    }
+  }
+
+  return rendered;
+}
+
+function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {
+  if (input.agent === undefined && input.model === undefined) {
+    return;
+  }
+  const profile = config.models.profiles[config.models.default];
+  if (profile === undefined) {
+    return;
+  }
+  if (input.agent !== undefined) {
+    profile.agent = input.agent;
+  }
+  if (input.model !== undefined) {
+    profile.model = input.model;
+  }
+}
+
+function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {
+  const nodes = new Map<string, PromptGraphNode>();
+  for (const node of graph.nodes) {
+    const previous = nodes.get(node.logical_id);
+    const dependencies = Array.from(
+      new Set([
+        ...(previous?.dependsOn ?? []),
+        ...node.depends_on
+          .map((dependency) => graph.nodes.find((candidate) => candidate.id === dependency)?.logical_id)
+          .filter((dependency): dependency is string => dependency !== undefined && dependency !== node.logical_id)
+      ])
+    ).sort();
+    const artifactDirs = Array.from(
+      new Set([
+        ...(previous?.artifactDirs ?? []),
+        ...promptAttemptsForNode(node, layout).map((attempt) => attempt.artifactDir)
+      ])
+    ).sort();
+    nodes.set(node.logical_id, {
+      id: node.logical_id,
+      dependsOn: dependencies,
+      requiredArtifacts: node.required_artifacts,
+      primaryArtifact: node.primary_artifact,
+      artifactDirs,
+      artifactDir: artifactDirs[0]
+    });
+  }
+  return Array.from(nodes.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function promptConcreteNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptConcreteNode[] {
+  return graph.nodes.flatMap((node) =>
+    promptAttemptsForNode(node, layout).map((attempt) => ({
+      id: attempt.attemptId,
+      logicalId: node.logical_id,
+      dependsOn: node.depends_on,
+      artifactDir: attempt.artifactDir,
+      loopIndex: node.loop.index,
+      attemptIndex: attempt.attemptIndex,
+      modelProfileId: attempt.modelProfileId,
+      agentRef: attempt.agentRef,
+      modelName: attempt.modelName,
+      modelIndex: attempt.modelIndex
+    }))
+  );
+}
+
+interface PromptAttempt {
+  attemptId: string;
+  artifactDir: string;
+  workspacePath: string;
+  attemptIndex: number;
+  modelIndex: number;
+  modelProfileId?: string;
+  agentRef?: string;
+  modelName?: string;
+}
+
+function promptAttemptsForNode(node: PlannedGraphNode, layout: PlanRunValue["layout"]): PromptAttempt[] {
+  if (node.model_fanout.length === 0) {
+    return [promptAttemptFor(node, undefined, layout)];
+  }
+  return node.model_fanout.map((model) => promptAttemptFor(node, model, layout));
+}
+
+function promptAttemptFor(
+  node: PlannedGraphNode,
+  model: PlannedGraphNode["model_fanout"][number] | undefined,
+  layout: PlanRunValue["layout"]
+): PromptAttempt {
+  const attemptId = model === undefined ? node.id : plannedAttemptId(node, model);
+  return {
+    attemptId,
+    artifactDir: getNodeArtifactDir(layout, attemptId, { create: true }),
+    workspacePath: path.join(layout.workspacesDir, attemptId),
+    attemptIndex: model?.attempt_index ?? node.loop.attempt_index,
+    modelIndex: model?.model_index ?? 0,
+    modelProfileId: model?.model_profile_id,
+    agentRef: model?.agent_ref,
+    modelName: model?.model_name
+  };
+}
+
+function plannedAttemptId(node: PlannedGraphNode, model: PlannedGraphNode["model_fanout"][number]): string {
+  if (node.model_fanout.length <= 1) {
+    return node.id;
+  }
+  return `${node.id}__model_${model.model_index}__attempt_${model.attempt_index}`;
+}
+
+function promptEntryForNode(catalog: PromptCatalog | undefined, node: ExpandedNode): PromptCatalogEntry | undefined {
+  if (!catalog || !node.promptPath) {
+    return undefined;
+  }
+  return promptEntryForPath(catalog, node.promptPath, node.logicalId);
+}
+
+function promptEntryForPath(catalog: PromptCatalog, promptPath: string, fallbackId: string): PromptCatalogEntry {
+  for (const entry of catalog.entries.values()) {
+    if (entry.relativePath === promptPath) {
+      return entry;
+    }
+  }
+  const fallback = catalog.entries.get(fallbackId);
+  if (fallback) {
+    return fallback;
+  }
+  throw new Error(`prompt ${promptPath} for ${fallbackId} was not found`);
+}
+
+function projectPromptCatalogPath(promptPath: string): string {
+  return promptPath.startsWith(".ultrafuzz/prompts/") ? promptPath.slice(".ultrafuzz/prompts/".length) : promptPath;
+}

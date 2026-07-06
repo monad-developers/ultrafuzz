@@ -2,153 +2,182 @@
 
 The CLI binary is `ultrafuzz`.
 
-## Global Commands
+Every command accepts `--project <path>`. Commands that support automation
+accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 
-| Command | Purpose |
-| --- | --- |
-| `ultrafuzz init` | Scaffold config, prompts, topology, and run directory in the target repository. |
-| `ultrafuzz run` | Build and execute the campaign DAG. |
-| `ultrafuzz references` | Sync, status-check, or intentionally update pinned GitHub references. |
-| `ultrafuzz restart <run-id>` | Create a clean replay run from a prior run's resolved config and graph. |
-| `ultrafuzz continue <run-id>` | Create a new run that reuses compatible completed artifacts and reruns the rest. |
-| `ultrafuzz list` | List known runs. |
-| `ultrafuzz status [<run-id-or-latest>]` | Show run health and node status. |
-| `ultrafuzz doctor` | Validate repository, config, topology, prompts, backend, and permissions. |
-| `ultrafuzz config` | Inspect resolved config or print defaults. |
-| `ultrafuzz dashboard [<run-id-or-latest>]` | Serve the local dashboard. |
-| `ultrafuzz report <run-id-or-latest>` | Render final report output. |
-| `ultrafuzz clean <run-id>` | Remove a run directory. |
-| `ultrafuzz triage <run-id>` | Read persisted artifacts and render triage output. |
-| `ultrafuzz merge <run-id>` | Report deterministic generated-test aggregation results. |
-| `ultrafuzz materialize <run-id>` | Copy selected run artifacts or apply selected patches into the target repo as unstaged changes. |
+## Commands
+
+| Command                          | Purpose                                                                                                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `ultrafuzz init`                 | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
+| `ultrafuzz validate`             | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
+| `ultrafuzz run`                  | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
+| `ultrafuzz references status`    | Report whether pinned references are present in the local digest-checked cache.                                |
+| `ultrafuzz references sync`      | Explicitly fetch pinned references into the local cache.                                                       |
+| `ultrafuzz references update`    | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
+| `ultrafuzz ps`                   | List Ultrafuzz runs and linked workflow status.                                                                |
+| `ultrafuzz inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                   |
+| `ultrafuzz resume <run-id>`      | Delegate resume for the linked workflow run after product checks.                                              |
+| `ultrafuzz replay <run-id>`      | Delegate replay for the linked workflow run after product checks.                                              |
+| `ultrafuzz fork <run-id>`        | Delegate fork for the linked workflow run after product checks.                                                |
+| `ultrafuzz report <run-id>`      | Locate the agent-written final report artifacts.                                                               |
+| `ultrafuzz materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
+| `ultrafuzz clean <run-id>`       | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
+
+Generated workflow-engine files are implementation plumbing. The stable product
+surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
+and the CLI commands above.
+
+## Global Flags
+
+| Flag               | Meaning                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| `--project <path>` | Project root. Defaults to the current working directory.     |
+| `--json`           | Emit a schema-versioned JSON envelope instead of human text. |
+
+JSON output has this shape:
+
+```json
+{
+  "schema_version": "ultrafuzz.cli.result.v1",
+  "command": "validate",
+  "ok": true,
+  "diagnostics": [],
+  "data": {}
+}
+```
+
+Machine consumers should read `ok`, `diagnostics`, and `data`.
 
 ## Init
 
 ```bash
-ultrafuzz init [--force] [--minimal | --full] [--strategy-loops <N>]
+ultrafuzz init [--project <path>] [--force] [--json]
 ```
 
-`--force` replaces existing scaffolded files. `--strategy-loops` writes the
-initial topology default for normal strategy attempts.
+`init` creates or preserves:
+
+```text
+ultrafuzz.toml
+.ultrafuzz/topology.yml
+.ultrafuzz/prompts/**
+.ultrafuzz/references.yml
+.ultrafuzz/runs/
+.ultrafuzz/workspaces/
+.ultrafuzz/cache/
+```
+
+Without `--force`, existing config, topology, prompts, and reference catalog
+files are preserved.
+
+## Validate
+
+```bash
+ultrafuzz validate [--project <path>] [--json]
+```
+
+Validation covers typed TOML config, `.ultrafuzz/topology.yml`, project prompt
+copies, safe paths, reference nodes, agent references, and trusted local
+execution posture. It does not launch agents.
 
 ## Run
 
 ```bash
 ultrafuzz run \
-  [--plain] [--no-color] [--quiet] [--verbose] \
-  [--backend <backend>] \
-  [--max-parallel-agents <N>] \
-  [--strategy-loops <N>] \
-  [--dynamic-strategies-enumerator <N>] \
-  [--triage-quorum <N>] \
-  [--triage-panel-size <N>] \
-  [--invariant-property-priority-threshold high|medium|low] \
-  [--invariant-testing-fuzzer-timeout <duration>] \
-  [--sync-references]
+  [--project <path>] \
+  [--run-id <id>] \
+  [--input <json-or-path>] \
+  [--prompt <text>] \
+  [--agent <agent-ref>] \
+  [--model <model>] \
+  [--max-concurrency <n>] \
+  [--json]
 ```
 
-Durations accept `s`, `min`, or `h`, such as `1800s`, `30min`, or `1h`.
+`--input` accepts inline JSON or a project-relative JSON file path. `--agent`
+and `--model` override the configured default model profile for the launched
+workflow. `--max-concurrency` caps workflow task submission concurrency.
 
-`--plain` and `--no-color` keep terminal output unstyled. `--quiet` suppresses
-next-command guidance, while `--verbose` keeps the full lifecycle summary.
-
-Default runs are offline and require referenced GitHub material to already be
-cached. `--sync-references` performs the trusted network sync phase before the
-offline run starts.
+Runs require pinned reference material to already be present in the local cache
+when the topology uses reference nodes. Use `ultrafuzz references sync` as the
+explicit network step before `run`.
 
 ## References
 
 ```bash
-ultrafuzz references sync
-ultrafuzz references status
-ultrafuzz references update --latest
+ultrafuzz references status [--project <path>] [--json]
+ultrafuzz references sync [--project <path>] [--json]
+ultrafuzz references update --latest [--project <path>] [--json]
 ```
 
-`sync` fetches pinned commits from `.ultrafuzz/references.yml` into the user
-cache. `status` validates the catalog, cache presence, source paths, and
-digests. `update --latest` intentionally rewrites `.ultrafuzz/references.yml`
-with the latest full default-branch SHAs for each tracked GitHub repository.
+`status` validates the reference catalog and digest-checked cache presence.
+`sync` fetches pinned catalog entries into the local cache. `update` requires
+`--latest` and rewrites `.ultrafuzz/references.yml` to current default-branch
+SHAs.
 
-See [Pinned References](references.md) for the catalog format and cache path.
-
-## Restart
+## Run Lifecycle
 
 ```bash
-ultrafuzz restart <run-id> \
-  [--plain] [--no-color] [--quiet] [--verbose] \
-  [--backend <backend>] \
-  [--max-parallel-agents <N>] \
-  [--dynamic-strategies-enumerator <N>] \
-  [--triage-quorum <N>] \
-  [--triage-panel-size <N>] \
-  [--invariant-property-priority-threshold high|medium|low] \
-  [--invariant-testing-fuzzer-timeout <duration>]
+ultrafuzz ps [--project <path>] [--json]
+ultrafuzz inspect <run-id> [--project <path>] [--json]
+ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] [--json]
+ultrafuzz replay <run-id> [--project <path>] [--json]
+ultrafuzz fork <run-id> \
+  [--project <path>] \
+  [--frame <n>] \
+  [--reset-node <workflow-node-id>] \
+  [--label <label>] \
+  [--max-concurrency <n>] \
+  [--json]
 ```
 
-## Continue
-
-```bash
-ultrafuzz continue <run-id> [--plain] [--no-color] [--quiet] [--verbose]
-```
-
-`restart` creates a clean replay run. `continue` creates a new run that reuses
-compatible completed work and reruns the rest.
-
-## Status
-
-```bash
-ultrafuzz status [<run-id-or-latest>] [--json] [--plain] [--no-color]
-```
-
-When no run ID is provided, status resolves the latest run. `--json` emits a
-machine-readable summary including run status, node counts, health, and next
-commands.
-
-## Doctor
-
-```bash
-ultrafuzz doctor [--backend <backend>] [--json] [--plain] [--no-color]
-```
-
-`--json` emits repository, backend, output-directory, git, topology, and next
-command status for automation.
-
-## Config
-
-```bash
-ultrafuzz config inspect
-ultrafuzz config defaults
-```
-
-When no subcommand is provided, config defaults to inspection behavior.
-
-## Dashboard
-
-```bash
-ultrafuzz dashboard [<run-id-or-latest>] [--host <host>] [--port <port>]
-```
-
-The default host is `127.0.0.1` and the default port is `3875`.
+`resume`, `replay`, and `fork` operate on the workflow run linked from
+Ultrafuzz run metadata. `fork` may start from a checkpoint frame and may reset
+one workflow node before starting the fork.
 
 ## Report
 
 ```bash
-ultrafuzz report <run-id-or-latest>
-ultrafuzz report <run-id-or-latest> --json
+ultrafuzz report <run-id> [--project <path>] [--json]
 ```
 
-## Clean
+`report` reads agent-written final report artifacts from:
 
-```bash
-ultrafuzz clean <run-id> [--dry-run] [--force]
+```text
+.ultrafuzz/runs/<run-id>/artifacts/final-report/report.md
+.ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
 ## Materialize
 
 ```bash
 ultrafuzz materialize <run-id> \
-  [--patch <run-relative-patch>] \
-  [--copy <run-relative-path=repo-relative-path>] \
+  --copy <run-relative-source:project-relative-destination> \
+  [--project <path>] \
+  [--yes | --confirm] \
   [--dry-run] \
-  [--force]
+  [--force] \
+  [--json]
 ```
+
+Materialization is copy-only. Each `--copy` source is relative to the run root,
+and each destination is relative to the project root. Non-dry-run
+materialization requires `--yes` or `--confirm`. `--force` allows overwriting an
+existing file destination after path checks.
+
+Patch artifacts may exist as evidence, but patch application is rejected until
+a safe patch applier exists.
+
+## Clean
+
+```bash
+ultrafuzz clean <run-id> \
+  [--project <path>] \
+  [--select <path-under-.ultrafuzz>] \
+  [--yes | --confirm] \
+  [--dry-run] \
+  [--json]
+```
+
+Without `--select`, `clean` selects `runs/<run-id>`. Selections are relative to
+`.ultrafuzz/` and must name generated run, artifact, or workspace directories.

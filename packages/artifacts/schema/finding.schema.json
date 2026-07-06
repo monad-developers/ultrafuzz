@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding",
+  "title": "Ultrafuzz normalized finding",
+  "type": "object",
+  "required": ["schema_version", "id", "title", "status", "severity_guess", "confidence", "summary"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["candidate", "needs-review", "duplicate", "false-positive", "confirmed", "fixed", "wont-fix"]
+    },
+    "severity_guess": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confidence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "triage_classification": {
+      "enum": [
+        "true-positive",
+        "false-positive",
+        "undetermined",
+        "incomplete-spec",
+        "harness-defect",
+        "repair-candidate",
+        "spec-gated",
+        "defensive-hardening"
+      ]
+    },
+    "source_node_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "strategy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "loop_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "affected_files": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "affected_functions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "patch_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "additionalProperties": true,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

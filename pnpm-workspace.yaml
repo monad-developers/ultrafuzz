@@ -1,0 +1,11 @@
+packages:
+  - "packages/security"
+  - "packages/references"
+  - "packages/config"
+  - "packages/prompts"
+  - "packages/topology"
+  - "packages/artifacts"
+  - "packages/runtime"
+  - "packages/cli"
+allowBuilds:
+  esbuild: true

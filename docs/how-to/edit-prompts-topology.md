@@ -1,35 +1,42 @@
-# Edit Prompts and Topology
+# Edit Prompts And Topology
 
-Ultrafuzz uses project-owned Markdown prompts and `.ultrafuzz/topology.yml` as
-the editable campaign graph source of truth.
+Ultrafuzz beta uses project-owned Markdown prompts and
+`.ultrafuzz/topology.yml` as the campaign graph source of truth.
 
 ## Edit A Prompt
 
-After `ultrafuzz init`, prompts live under:
+After `ultrafuzz init`, editable prompts live under:
 
 ```text
 .ultrafuzz/prompts/
 ```
 
-Open the prompt you want to adjust. Keep frontmatter IDs stable unless you are
-intentionally renaming the topology node. `display_name` is a label and does
-not automatically change execution identity.
+Prompt frontmatter may include only identity and display metadata:
 
-Supported template variables are listed in
-[Prompt Variables](../reference/prompt-variables.md). Unknown variables fail
-validation instead of being guessed.
+```md
+---
+id: boundary-tests
+display_name: Boundary Tests
+---
+```
+
+Keep `id` stable unless you are intentionally changing execution identity.
+`display_name` is only a label. Execution knobs such as loops, enabled state,
+model profiles, and timeouts belong in topology, not prompt frontmatter.
+
+Supported prompt variables are listed in [SPECS.md](../SPECS.md#prompts).
+Unknown variables fail validation.
 
 ## Add A Prompt File
 
-Place the Markdown file under the appropriate prompt group:
+Place the prompt under `.ultrafuzz/prompts/**`:
 
 ```text
 .ultrafuzz/prompts/strategies/custom-invariant.md
 ```
 
-Prompt folders are for organization and dashboard grouping. Execution semantics
-come from topology node IDs, dependencies, loop settings, groups, and required
-artifacts.
+Folders are for organization. Execution comes from topology node IDs,
+dependencies, loop settings, groups, model profiles, and required artifacts.
 
 ## Wire A Topology Node
 
@@ -38,33 +45,44 @@ Edit `.ultrafuzz/topology.yml`:
 ```yaml
 version: 1
 defaults:
-  strategy_loops: 3
+  strategy_loops: 1
+groups:
+  strategies:
+    label: Strategies
+    color: "#7c3aed"
+    defaults:
+      loops: 3
+      model_profiles:
+        - default
 nodes:
   - id: __start__
     kind: meta
     role: start
     depends_on: []
   - id: custom-invariant
+    kind: agentic
     prompt: strategies/custom-invariant.md
     group: strategies
     depends_on:
       - property-specification-fanin
     required_artifacts:
       - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: __finish__
     kind: meta
     role: finish
     depends_on:
-      - final-report
+      - custom-invariant
 ```
 
-Agentic nodes run through the existing backend execution path. Topology YAML
-does not define arbitrary shell runners.
+Agentic nodes run through the configured workflow adapter. Topology does not
+define arbitrary shell runners.
 
 ## Declare Durable Handoffs
 
 Use `required_artifacts` for files a node must write under its artifact
-directory:
+directory. Set `primary_artifact` when downstream prompts need a concise handoff.
 
 ```yaml
 required_artifacts:
@@ -72,22 +90,31 @@ required_artifacts:
 primary_artifact: properties.md
 ```
 
-Downstream prompts can use:
+Downstream prompts can reference ancestor artifacts:
 
 ```md
 Read {{artifact_handoff:property-specification-fanin}} before writing tests.
 ```
 
-Use `{{ancestor_artifacts}}` when a node should read every required artifact
-from its direct topology dependencies.
+Handoff variables resolve only to ancestor nodes. Producers must declare the
+artifacts they hand off.
+
+## Work With References
+
+Reference nodes bind to IDs in `.ultrafuzz/references.yml`. If you add or
+update reference bindings, sync the cache explicitly before runs that need
+those pinned files:
+
+```bash
+ultrafuzz references sync --project /path/to/target-protocol
+```
 
 ## Validate Before Running
 
-Run:
-
 ```bash
-ultrafuzz doctor
+ultrafuzz validate --project /path/to/target-protocol
 ```
 
-If topology is missing or invalid where a topology is required, Ultrafuzz fails
-clearly. Run paths do not synthesize a fallback topology after deletion.
+Validation rejects missing prompt files, invalid topology versions, duplicate
+node IDs, unknown dependencies, unsafe artifact paths, unknown model profiles,
+and prompt artifact references to non-ancestor producers.

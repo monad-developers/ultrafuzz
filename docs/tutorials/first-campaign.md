@@ -1,159 +1,154 @@
 # First Campaign
 
-This tutorial takes a protocol repository from first Ultrafuzz initialization
-through dashboard and report review.
+This tutorial takes a Solidity repository from first Ultrafuzz beta
+initialization through report review and explicit output materialization.
 
 ## Prerequisites
 
 You need:
 
-- A local checkout of this Ultrafuzz repository.
+- A local checkout of this Ultrafuzz beta repository.
 - A Solidity target repository you can modify locally.
-- Rust and Cargo installed.
-- At least one supported agent backend available on your PATH, such as the
-  Codex CLI or Claude Code CLI, depending on your config.
-- Foundry available or a project layout that Ultrafuzz can prepare for Foundry
-  fuzz tests.
+- `pnpm` installed for the beta TypeScript workspace.
+- Any agent credentials required by the generated project agent registry.
+- Foundry or a target-project layout your prompts can use for fuzz tests.
 
-## Install The CLI
-
-From the Ultrafuzz repository:
+From the Ultrafuzz beta repository, install dependencies and build the CLI:
 
 ```bash
-cargo install --path crates/ultrafuzz-cli --locked
+pnpm install
+pnpm --filter @ultrafuzz/cli build
 ```
 
-During Ultrafuzz development, run the same binary through Cargo:
-
-```bash
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo run -p ultrafuzz-cli -- --help
-```
+The rest of this guide assumes `ultrafuzz` resolves on your PATH. During beta
+development, you can run the same commands through the workspace CLI binary.
 
 ## Initialize The Target Repository
 
-Switch to the Solidity repository:
-
 ```bash
-cd target-protocol
-ultrafuzz init
+ultrafuzz init --project /path/to/target-protocol
 ```
 
-The command writes a repository-local config, topology, editable prompts, and
-reference catalog:
+Initialization creates or preserves the root config file plus project-owned
+Ultrafuzz surfaces:
 
 ```text
 ultrafuzz.toml
 .ultrafuzz/
   topology.yml
-  references.yml
   prompts/
+  references.yml
   runs/
+  workspaces/
+  cache/
 ```
 
-Existing config, topology, and prompt files are preserved unless you pass
-`--force`.
+Generated workflow plumbing may also be created, but it is not the stable
+operator API. Edit `ultrafuzz.toml`, `.ultrafuzz/topology.yml`, and
+`.ultrafuzz/prompts/**` when changing campaign behavior.
 
-If you want more or fewer normal strategy attempts in the default topology,
-choose that before the first run:
+## Review And Validate
+
+Agents run under a trusted local execution model. Repository mutation limits
+such as "do not commit", "do not push", and "do not open a pull request" are
+prompt-level assumptions, so review prompts before launch.
 
 ```bash
-ultrafuzz init --strategy-loops 3
+ultrafuzz validate --project /path/to/target-protocol
 ```
 
-## Run Doctor
+`validate` checks config, topology, prompts, path guards, agent references, and
+trust posture without launching agents.
 
-Validate the project and backend setup:
+## Sync Pinned References
+
+Reference fetching is explicit. Sync before runs that need the pinned reference
+catalog in `.ultrafuzz/references.yml`.
 
 ```bash
-ultrafuzz doctor
+ultrafuzz references status --project /path/to/target-protocol
+ultrafuzz references sync --project /path/to/target-protocol
 ```
 
-To check a specific backend:
-
-```bash
-ultrafuzz doctor --backend claude-code-cli
-```
-
-Doctor checks the repository, prompt registry, topology, output directory, git
-state, selected CLI backend, sandbox and permission policy, and backend-native
-project permission files.
+Normal runs read the digest-checked local cache and fail before dependent nodes
+run when required references are missing or mismatched.
 
 ## Start A Campaign
 
-Fetch pinned GitHub references, then run the campaign DAG offline:
-
 ```bash
-ultrafuzz references sync
-ultrafuzz run
+ultrafuzz run --project /path/to/target-protocol
 ```
 
-Common runtime overrides:
+Useful beta run flags include:
 
 ```bash
-ultrafuzz run --backend codex-cli --max-parallel-agents 4
-ultrafuzz run --strategy-loops 5
-ultrafuzz run --sync-references
+ultrafuzz run --project /path/to/target-protocol --run-id first-campaign
+ultrafuzz run --project /path/to/target-protocol --max-concurrency 4
+ultrafuzz run --project /path/to/target-protocol --agent CodexAgent --model gpt-5.5
 ```
 
-`--strategy-loops` updates `.ultrafuzz/topology.yml` before graph construction.
-Top-level normal strategy nodes inherit that topology default.
-`--sync-references` performs the trusted reference network phase before the
-offline run starts.
+Loops, dependencies, required artifacts, reference bindings, and model-profile
+fan-out belong in `.ultrafuzz/topology.yml`.
 
-## Watch And Inspect
+## Inspect Progress
 
-List runs and check status:
+List runs and inspect product evidence for the run ID printed by `run`:
 
 ```bash
-ultrafuzz list
-ultrafuzz status <run-id>
+ultrafuzz ps --project /path/to/target-protocol
+ultrafuzz inspect <run-id> --project /path/to/target-protocol
 ```
 
-Open the dashboard:
+Run evidence lives under:
 
-```bash
-ultrafuzz dashboard <run-id>
+```text
+.ultrafuzz/runs/<run-id>/
 ```
 
-The dashboard runs on `127.0.0.1:3875` by default. It shows the campaign graph,
-node status, logs, rendered prompts, findings, report data, and command buttons
-for existing CLI actions.
+Important evidence includes `run.json`, `config.resolved.toml`, `graph.json`,
+`state.json`, `events.jsonl`, rendered prompts, per-node artifacts, review
+artifacts, and linked workflow metadata.
 
 ## Review The Report
 
-Render the final report:
-
 ```bash
-ultrafuzz report <run-id>
-ultrafuzz report <run-id> --json
+ultrafuzz report <run-id> --project /path/to/target-protocol
+ultrafuzz report <run-id> --project /path/to/target-protocol --json
 ```
 
-The final report artifacts live at:
+Reports are agent-written final-report artifacts, typically:
 
 ```text
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.md
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
-Treat every finding and generated test as a candidate that needs human review.
-The report is designed to show what was claimed, what evidence was produced,
-what was triaged away, and which generated tests are worth inspecting.
+Treat every finding and generated test as evidence for human review. Normalized
+findings are JSON arrays in per-node `findings.json` files, and review nodes
+may deduplicate, triage, classify severity, aggregate test outputs, and write
+the final report.
 
-## Review Generated Tests
+## Materialize Reviewed Outputs
 
-The aggregation node copies selected generated tests into the target repository
-as unstaged changes under:
-
-```text
-test/foundry/<strategy>/
-```
-
-Inspect them with normal git tooling:
+Materialization is explicit and copy-only. After reviewing a concrete run
+artifact, preview the copy:
 
 ```bash
-git status
-git diff -- test/foundry
+ultrafuzz materialize <run-id> --project /path/to/target-protocol --dry-run \
+  --copy artifacts/<node-id>/generated-tests/Generated.t.sol:test/foundry/Generated.t.sol
 ```
 
-Keep tests that are useful, edit tests that need protocol-specific cleanup, and
-discard generated changes that do not hold up under manual review.
+Then confirm the exact copy:
+
+```bash
+ultrafuzz materialize <run-id> --project /path/to/target-protocol --confirm \
+  --copy artifacts/<node-id>/generated-tests/Generated.t.sol:test/foundry/Generated.t.sol
+```
+
+Materialized files are ordinary unstaged working-tree changes. Review them with
+your normal repository tools before committing anything:
+
+```bash
+git -C /path/to/target-protocol status
+git -C /path/to/target-protocol diff
+```

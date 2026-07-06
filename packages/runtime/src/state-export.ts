@@ -1,0 +1,406 @@
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  assertNoSymlinkComponents,
+  assertPathInside,
+  layoutForRunRoot,
+  queryEvents,
+  readRunState,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
+
+import type {
+  QueryRunEventsValue,
+  RunListEntry,
+  RunListValue,
+  RunStatusValue,
+  WorkflowCommandSummary
+} from "./types.js";
+import { runtimeFailure, runtimeResult } from "./utils.js";
+import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import { runsRootForProject } from "./validate.js";
+
+export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
+  const projectRoot = path.resolve(input.projectRoot);
+  const runsRoot = await runsRootForProject(projectRoot);
+  const workflowSnapshot = await runSmithersInspectionCommand({
+    args: ["ps", "--all", "--format", "json"],
+    projectRoot,
+    env: input.env
+  });
+  if (!fs.existsSync(runsRoot)) {
+    return runtimeResult<RunListValue>(
+      true,
+      {
+        project_root: projectRoot,
+        product_runs: [],
+        runs: workflowRunsWithProductEvidence(workflowSnapshot.json, [])
+      },
+      diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED")
+    );
+  }
+  const entries = fs
+    .readdirSync(runsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => readRunListEntry(path.join(runsRoot, entry.name), entry.name))
+    .sort((left, right) => (right.created_at ?? "").localeCompare(left.created_at ?? ""));
+  return runtimeResult<RunListValue>(
+    true,
+    {
+      project_root: projectRoot,
+      product_runs: entries,
+      runs: workflowRunsWithProductEvidence(workflowSnapshot.json, entries)
+    },
+    diagnosticsForWorkflowSnapshot(workflowSnapshot, "WORKFLOW_PS_FAILED")
+  );
+}
+
+export async function getRunStatus(input: {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}) {
+  const projectRoot = path.resolve(input.projectRoot);
+  const runsRoot = await runsRootForProject(projectRoot);
+  const layout = checkedRunLayout(runsRoot, input.runId);
+  if (!layout.ok) {
+    return runtimeFailure<RunStatusValue>(layout.diagnostics);
+  }
+  if (!fs.existsSync(layout.root)) {
+    return runtimeFailure<RunStatusValue>([
+      {
+        code: "RUN_NOT_FOUND",
+        message: `run ${input.runId} does not exist`,
+        severity: "error",
+        source: "runtime",
+        path: layout.root
+      }
+    ]);
+  }
+  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const syncDiagnostics = sync.ok
+    ? sync.diagnostics
+    : sync.diagnostics.map((diagnostic) => ({
+        ...diagnostic,
+        severity: "warning" as const
+      }));
+  const base = readRunListEntry(layout.root, layout.runId);
+  const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
+  const events = fs.existsSync(layout.eventsPath)
+    ? fs.readFileSync(layout.eventsPath, "utf8").split(/\r?\n/u).filter(Boolean).length
+    : 0;
+  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath);
+  const workflowRunId = linkedWorkflowRunId(base, metadata);
+  const workflowSnapshots = workflowRunId
+    ? {
+        run_id: workflowRunId,
+        inspect: await runSmithersInspectionCommand({
+          args: ["inspect", workflowRunId, "--format", "json", "--full-output"],
+          projectRoot,
+          env: input.env
+        }),
+        events: await runSmithersInspectionCommand({
+          args: ["events", workflowRunId, "--limit", "200", "--format", "json"],
+          projectRoot,
+          env: input.env
+        })
+      }
+    : undefined;
+  return runtimeResult(
+    true,
+    {
+      ...base,
+      ...(state ? { state } : {}),
+      events,
+      graph: readJsonIfExists(layout.graphPath),
+      metadata: publicRunMetadata(metadata),
+      ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})
+    },
+    workflowSnapshots
+      ? [
+          ...syncDiagnostics,
+          ...diagnosticsForWorkflowSnapshot(workflowSnapshots.inspect, "WORKFLOW_INSPECT_FAILED"),
+          ...diagnosticsForWorkflowSnapshot(workflowSnapshots.events, "WORKFLOW_EVENTS_FAILED")
+        ]
+      : syncDiagnostics
+  );
+}
+
+export async function queryRunEvents(input: {
+  projectRoot: string;
+  runId: string;
+  query?: Parameters<typeof queryEvents>[1];
+}) {
+  const runsRoot = await runsRootForProject(input.projectRoot);
+  const layout = checkedRunLayout(runsRoot, input.runId);
+  if (!layout.ok) {
+    return runtimeFailure<QueryRunEventsValue>(layout.diagnostics);
+  }
+  if (!fs.existsSync(layout.root)) {
+    return runtimeFailure<QueryRunEventsValue>([
+      {
+        code: "RUN_NOT_FOUND",
+        message: `run ${input.runId} does not exist`,
+        severity: "error",
+        source: "runtime",
+        path: layout.root
+      }
+    ]);
+  }
+  return runtimeResult(true, {
+    run_id: input.runId,
+    events: queryEvents(layout, input.query)
+  });
+}
+
+function checkedRunLayout(runsRoot: string, runId: string) {
+  try {
+    const safeRunId = validateSafeId(runId, "run ID");
+    const layout = layoutForRunRoot(path.join(runsRoot, safeRunId), safeRunId);
+    assertPathInside(runsRoot, layout.root, "run root");
+    if (fs.existsSync(runsRoot)) {
+      assertNoSymlinkComponents(runsRoot, layout.root, "run root");
+    }
+    return { ok: true as const, ...layout };
+  } catch (error) {
+    return {
+      ok: false as const,
+      diagnostics: [
+        {
+          code: "RUN_ID_INVALID",
+          message: error instanceof Error ? error.message : String(error),
+          severity: "error" as const,
+          source: "runtime"
+        }
+      ]
+    };
+  }
+}
+
+function readRunListEntry(runRoot: string, runId: string): RunListEntry {
+  const layout = layoutForRunRoot(runRoot, runId);
+  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+  const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
+  return {
+    run_id: runId,
+    run_root: runRoot,
+    status: state?.status ?? "pending",
+    ...(typeof metadata.created_at === "string" ? { created_at: metadata.created_at } : {}),
+    ...(state?.started_at ? { started_at: state.started_at } : {}),
+    ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
+    ...(state?.source_run_id ? { source_run_id: state.source_run_id } : {}),
+    workflow_ids: workflowIdsFromMetadata(metadata)
+  };
+}
+
+function linkedWorkflowRunId(entry: RunListEntry, metadata: Record<string, unknown> | undefined): string | undefined {
+  const workflow = metadata?.workflow;
+  if (workflow && typeof workflow === "object") {
+    const runId =
+      stringField(workflow as Record<string, unknown>, "run_id") ??
+      stringField(workflow as Record<string, unknown>, "workflowRunId");
+    if (runId !== undefined) {
+      return runId;
+    }
+  }
+  const smithers = metadata?.smithers;
+  if (
+    smithers &&
+    typeof smithers === "object" &&
+    "workflowRunId" in smithers &&
+    typeof smithers.workflowRunId === "string"
+  ) {
+    return smithers.workflowRunId;
+  }
+  return entry.workflow_ids[0];
+}
+
+function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: RunListEntry[]): RunListValue["runs"] {
+  const productByWorkflowRun = new Map<string, RunListEntry>();
+  for (const run of productRuns) {
+    for (const workflowRunId of run.workflow_ids) {
+      productByWorkflowRun.set(workflowRunId, run);
+    }
+  }
+
+  const workflowRuns = extractWorkflowRuns(workflowJson);
+  const merged: RunListValue["runs"] = workflowRuns.map((workflowRun) => {
+    const workflowRunId =
+      stringField(workflowRun, "id") ??
+      stringField(workflowRun, "runId") ??
+      stringField(workflowRun, "run_id") ??
+      "unknown";
+    const product = productByWorkflowRun.get(workflowRunId);
+    return {
+      workflow_run_id: workflowRunId,
+      ...(product
+        ? { ultrafuzz_run_id: product.run_id, ultrafuzz_status: product.status, run_root: product.run_root }
+        : {}),
+      ...(stringField(workflowRun, "status") ? { workflow_status: stringField(workflowRun, "status") } : {}),
+      ...(stringField(workflowRun, "step") ? { step: stringField(workflowRun, "step") } : {})
+    };
+  });
+
+  const seen = new Set(merged.map((entry) => entry.workflow_run_id));
+  for (const product of productRuns) {
+    for (const workflowRunId of product.workflow_ids) {
+      if (!seen.has(workflowRunId)) {
+        merged.push({
+          workflow_run_id: workflowRunId,
+          ultrafuzz_run_id: product.run_id,
+          ultrafuzz_status: product.status,
+          run_root: product.run_root
+        });
+      }
+    }
+  }
+  return merged;
+}
+
+function extractWorkflowRuns(value: unknown): Record<string, unknown>[] {
+  if (value && typeof value === "object" && Array.isArray((value as { runs?: unknown }).runs)) {
+    return (value as { runs: unknown[] }).runs.filter(
+      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry)
+    );
+  }
+  if (Array.isArray(value)) {
+    return value.filter(
+      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry)
+    );
+  }
+  return [];
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
+function diagnosticsForWorkflowSnapshot(snapshot: { ok: boolean; error?: string; stderr?: string }, code: string) {
+  if (snapshot.ok) {
+    return [];
+  }
+  return [
+    {
+      code,
+      message: workflowDiagnosticMessage(snapshot),
+      severity: "warning" as const,
+      source: "workflow"
+    }
+  ];
+}
+
+function workflowSummary(input: {
+  run_id: string;
+  inspect: SmithersCommandSnapshot;
+  events: SmithersCommandSnapshot;
+}): NonNullable<RunStatusValue["workflow"]> {
+  const inspectJson = commandData(input.inspect.json);
+  const runJson =
+    inspectJson && typeof inspectJson.run === "object" && inspectJson.run !== null && !Array.isArray(inspectJson.run)
+      ? (inspectJson.run as Record<string, unknown>)
+      : undefined;
+  const runStateJson =
+    inspectJson &&
+    typeof inspectJson.runState === "object" &&
+    inspectJson.runState !== null &&
+    !Array.isArray(inspectJson.runState)
+      ? (inspectJson.runState as Record<string, unknown>)
+      : undefined;
+  const workflowStatus =
+    runStateJson === undefined
+      ? stringField(runJson ?? inspectJson ?? {}, "status")
+      : (stringField(runStateJson, "state") ?? stringField(runJson ?? {}, "status"));
+  return {
+    run_id: input.run_id,
+    ...(workflowStatus === undefined ? {} : { status: workflowStatus }),
+    inspect: commandSummary(input.inspect),
+    events: commandSummary(input.events)
+  };
+}
+
+function commandSummary(snapshot: SmithersCommandSnapshot): WorkflowCommandSummary {
+  return {
+    ok: snapshot.ok,
+    has_json: snapshot.json !== undefined
+  };
+}
+
+function workflowIdsFromMetadata(metadata: Record<string, unknown>): string[] {
+  if (Array.isArray(metadata.workflow_ids)) {
+    return metadata.workflow_ids.filter((value): value is string => typeof value === "string");
+  }
+  if (Array.isArray(metadata.smithers_inspection_ids)) {
+    return metadata.smithers_inspection_ids.filter((value): value is string => typeof value === "string");
+  }
+  return [];
+}
+
+function publicRunMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (metadata === undefined) {
+    return undefined;
+  }
+  const publicMetadata = { ...metadata };
+  delete publicMetadata.smithers;
+  delete publicMetadata.smithers_inspection_ids;
+  const workflowIds = workflowIdsFromMetadata(metadata);
+  if (workflowIds.length > 0) {
+    publicMetadata.workflow_ids = workflowIds;
+  }
+  const workflow = metadata.workflow;
+  if (workflow && typeof workflow === "object" && !Array.isArray(workflow)) {
+    publicMetadata.workflow = publicWorkflowMetadata(workflow as Record<string, unknown>);
+  } else {
+    const smithers = metadata.smithers;
+    if (smithers && typeof smithers === "object" && !Array.isArray(smithers)) {
+      const record = smithers as Record<string, unknown>;
+      publicMetadata.workflow = {
+        ...(typeof record.workflowRunId === "string" ? { run_id: record.workflowRunId } : {}),
+        ...(typeof record.workflowName === "string" ? { name: record.workflowName } : {}),
+        ...(Array.isArray(record.taskNodeIds)
+          ? { task_node_ids: record.taskNodeIds.filter((value): value is string => typeof value === "string") }
+          : {})
+      };
+    }
+  }
+  return publicMetadata;
+}
+
+function publicWorkflowMetadata(workflow: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...(typeof workflow.run_id === "string" ? { run_id: workflow.run_id } : {}),
+    ...(typeof workflow.name === "string" ? { name: workflow.name } : {}),
+    ...(Array.isArray(workflow.task_node_ids)
+      ? { task_node_ids: workflow.task_node_ids.filter((value): value is string => typeof value === "string") }
+      : {})
+  };
+}
+
+function workflowDiagnosticMessage(snapshot: { error?: string; stderr?: string }): string {
+  const source = snapshot.stderr && snapshot.stderr.trim().length > 0 ? snapshot.stderr.trim() : snapshot.error;
+  if (source === undefined || source.trim().length === 0) {
+    return "workflow inspection failed";
+  }
+  return source.replace(/smithers/giu, "workflow runner");
+}
+
+function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+}
+
+function commandData(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const data = record.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    return data as Record<string, unknown>;
+  }
+  return record;
+}

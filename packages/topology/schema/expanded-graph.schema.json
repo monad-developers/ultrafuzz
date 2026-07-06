@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph",
+  "title": "Ultrafuzz expanded graph",
+  "type": "object",
+  "required": ["graphVersion", "topologyVersion", "groups", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "graphVersion": {
+      "const": "1"
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "topologyVersion": {
+      "const": 1
+    },
+    "groups": {
+      "type": "object"
+    },
+    "fingerprintInputs": {
+      "type": "object"
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "logicalId",
+          "label",
+          "kind",
+          "dependsOn",
+          "artifactDir",
+          "retryPolicy",
+          "loop",
+          "requiredArtifacts",
+          "modelFanout"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "logicalId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": ["agentic", "meta", "reference"]
+          },
+          "role": {
+            "enum": ["start", "finish"]
+          },
+          "promptPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1
+          },
+          "referenceRevision": {
+            "type": "object",
+            "required": ["provider", "repo", "commit", "paths"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "github"
+              },
+              "repo": {
+                "type": "string",
+                "minLength": 1
+              },
+              "commit": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{40}$"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "group": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dependsOn": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "artifactDir": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timeoutSeconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "retryPolicy": {
+            "type": "object",
+            "required": ["maxAttempts"],
+            "additionalProperties": false,
+            "properties": {
+              "maxAttempts": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "loop": {
+            "type": "object",
+            "required": ["index", "count", "mode", "attemptIndex"],
+            "additionalProperties": false,
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "mode": {
+                "enum": ["parallel", "series"]
+              },
+              "attemptIndex": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "requiredArtifacts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "primaryArtifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "modelFanout": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["modelProfileId", "agentRef", "modelIndex", "loopIndex", "attemptIndex"],
+              "additionalProperties": false,
+              "properties": {
+                "modelProfileId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "agentRef": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "modelName": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "modelIndex": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "loopIndex": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "attemptIndex": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
