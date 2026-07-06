@@ -1,0 +1,34 @@
+schema_version = "1.0"
+dynamic_strategies_enumerator = 3
+
+[project]
+repo = "."
+
+[run]
+output_dir = ".ultrafuzz/runs"
+max_parallel_agents = 4
+max_parallel_nodes = 8
+keep_workspaces = false
+workspace_mode = "git-worktree"
+default_timeout_seconds = 1800
+
+[models]
+synthesized_default = true
+
+[models.default]
+agent = "CodexAgent"
+model = "gpt-5.5"
+
+[permissions]
+trust_model = "skip-permissions"
+prompt_review_required = true
+materialize_outputs_as_unstaged = true
+
+
+[invariants]
+property_priority_threshold = "high"
+invariant_testing_fuzzer_timeout = "1h"
+
+[triage]
+quorum = 3
+panel_size = 4

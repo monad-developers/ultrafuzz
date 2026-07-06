@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state",
+  "title": "Ultrafuzz run state",
+  "type": "object",
+  "required": ["schema_version", "run_id", "status", "graph_fingerprint", "config_fingerprint", "created_at", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": ["pending", "running", "succeeded", "failed", "timed-out", "canceled"]
+    },
+    "graph_fingerprint": {
+      "type": "string"
+    },
+    "config_fingerprint": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "started_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "finished_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["node_id", "status", "retry_count", "timed_out"],
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "ready",
+              "runnable",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "timed-out",
+              "reused-from-prior-run",
+              "invalidated"
+            ]
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timed_out": {
+            "type": "boolean"
+          },
+          "logical_node_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "artifact_dir": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_artifacts": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "attempt_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "loop_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finished_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "last_error": {
+            "type": "string",
+            "minLength": 1
+          },
+          "provenance": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

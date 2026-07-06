@@ -1,64 +1,109 @@
 # Prompt Variables
 
-Ultrafuzz renders topology prompts before handing them to an agent backend. The
-rendered prompt is written to the node's `prompt.rendered.md` artifact.
+Prompts live under:
 
-Unknown variables fail validation.
-
-| Variable | Meaning |
-| --- | --- |
-| `repo_path` | Absolute path to the target repository being fuzzed. |
-| `workspace_path` | Absolute path to this node's isolated attempt workspace. Agents should do code and test work here. |
-| `artifact_path` | Absolute path to this node's durable artifact directory. |
-| `artifact_dir` | Alias for `artifact_path`. |
-| `artifact_path:<logical-node-id>` | Absolute path to an ancestor node's artifact directory. Looped ancestors render as a Markdown bullet list of concrete attempt paths. |
-| `ancestor_artifacts` | Markdown bullet list of required artifact files from direct topology dependencies. |
-| `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown bullet list of required artifact files from selected ancestor producers. |
-| `artifact_handoff:<logical-node-id>` | Absolute path to an ancestor node's `primary_artifact`. Looped producers render as a Markdown bullet list. |
-| `run_artifacts_path` | Absolute path to the current run's artifact root. |
-| `run_artifacts_dir` | Alias for `run_artifacts_path`. |
-| `output_findings_path` | Absolute artifact path where the agent must write the findings JSON array. |
-| `output_patch_path` | Absolute artifact path reserved for a patch file. |
-| `output_metadata_path` | Absolute artifact path where backend metadata should be written. |
-| `run_id` | Current Ultrafuzz run ID. |
-| `node_id` | Current concrete graph node ID. |
-| `strategy` | Current logical strategy or topology node ID. |
-| `strategy_display_name` | Human-readable strategy display name when available. |
-| `strategy_source` | Strategy prompt source, such as `built-in`, `topology`, or `project:<path>`. |
-| `attempt_index` | Zero-based concrete attempt index for the current strategy or topology node. |
-| `strategy_loop_index` | Zero-based loop index used for deterministic split-work assignment. |
-| `strategy_loop_count` | Total resolved loop attempts for the current strategy or topology node. |
-| `triage_quorum` | Resolved number of agreeing triage votes required for consensus. |
-| `triage_panel_size` | Resolved number of independent triage passes in the arbiter panel. |
-| `dynamic_strategies_enumerator` | Resolved max-reasoning enumerator count for the Dynamic strategy generator. |
-| `invariant_property_priority_threshold` | Resolved invariant property implementation threshold. |
-| `invariant_property_priority_filter` | Human-readable description of selected invariant priorities. |
-| `invariant_property_priorities` | Comma-separated selected priority values, such as `high, medium`. |
-| `invariant_testing_fuzzer_timeout` | Resolved invariant testing campaign timeout. |
-| `strategy_attempt_test_dir` | Absolute workspace path where strategy attempts should write generated Foundry tests. |
-| `aggregation_destination_dir` | Absolute target-repository path where generated tests from this attempt are aggregated. |
-| `backend_kind` | Backend kind selected for this attempt. |
-
-## Handoff Guidance
-
-Write durable cross-node handoff files under `{{artifact_path}}/...` and list
-them in topology `required_artifacts`.
-
-Prefer `{{artifact_handoff:<logical-node-id>}}` when a producer has a
-meaningful primary artifact. Use `{{ancestor_artifacts}}` when a node should
-read all required artifacts from its direct topology dependencies.
-
-Pinned reference nodes also expose their normalized markdown through
-`artifact_handoff`. For example, a property prompt can read a cached GitHub
-reference with:
-
-```md
-{{artifact_handoff:reference-properties-montyly-rounding}}
+```text
+.ultrafuzz/prompts/**
 ```
 
-For looped strategies, split work deterministically with a stable zero-based
-item list and assign item `n` to the attempt where:
+Markdown and MDX files are treated as Markdown-compatible prompt text with YAML
+frontmatter and `{{variable}}` placeholders. MDX imports, exports, and JSX are
+not evaluated.
+
+Ultrafuzz renders prompts before workflow launch and writes each rendered prompt
+to the node or attempt artifact directory as:
+
+```text
+prompt.rendered.md
+```
+
+Unknown template variables fail validation.
+
+## Frontmatter
+
+Prompt frontmatter may contain only:
+
+```md
+---
+id: boundary-tests
+display_name: Boundary Tests
+---
+```
+
+| Field          | Meaning                                                                      |
+| -------------- | ---------------------------------------------------------------------------- |
+| `id`           | Optional execution identity for the prompt catalog entry.                    |
+| `display_name` | Optional label. Changing only this field does not change execution identity. |
+
+Unknown frontmatter fields fail validation. Prompt frontmatter must not contain
+execution knobs such as loops, enabled state, model profiles, categories,
+timeouts, backend settings, or artifact requirements.
+
+## Core Variables
+
+| Variable                    | Meaning                                                                |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `repo_path`                 | Absolute path to the target repository being fuzzed.                   |
+| `workspace_path`            | Absolute path to this node attempt workspace.                          |
+| `artifact_path`             | Absolute path to this node attempt artifact directory.                 |
+| `artifact_dir`              | Alias for `artifact_path`.                                             |
+| `run_metadata_path`         | Absolute path to this run's `run.json`.                                |
+| `output_findings_path`      | Absolute path where the agent should write `findings.json`.            |
+| `output_patch_path`         | Absolute path reserved for a patch evidence file.                      |
+| `strategy`                  | Current logical topology node ID.                                      |
+| `attempt_index`             | Zero-based attempt index for this concrete attempt.                    |
+| `strategy_loop_index`       | Zero-based loop index for this logical node.                           |
+| `strategy_loop_count`       | Total loop count for this logical node.                                |
+| `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt. |
+
+## Triage And Invariant Variables
+
+| Variable                                | Meaning                                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------- |
+| `triage_quorum`                         | Resolved triage quorum.                                                   |
+| `triage_panel_size`                     | Resolved triage panel size.                                               |
+| `dynamic_strategies_enumerator`         | Resolved dynamic strategy enumerator count.                               |
+| `invariant_property_priority_threshold` | Resolved invariant property priority threshold.                           |
+| `invariant_property_priority_filter`    | Human-readable invariant priority filter, when provided by the renderer.  |
+| `invariant_property_priorities`         | Comma-separated invariant priority values, when provided by the renderer. |
+| `invariant_testing_fuzzer_timeout`      | Resolved invariant testing fuzzer timeout.                                |
+
+## Artifact Variables
+
+| Variable                                                      | Meaning                                                                     |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `ancestor_artifacts`                                          | Markdown list of required artifact files from direct topology dependencies. |
+| `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                  |
+| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's `primary_artifact`.                 |
+| `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.  |
+
+Artifact variables may reference only ancestor nodes. Handoff producers must
+declare `primary_artifact`, and the primary artifact must also be listed in
+`required_artifacts`.
+
+`artifact_path` variables may include a safe relative suffix:
+
+```md
+Read the setup notes at {{artifact_path:setup-foundry}}/setup/setup-foundry.md.
+```
+
+`artifact_handoff` resolves to a file and does not accept a suffix.
+`ancestor_artifacts` resolves to declared `required_artifacts` and does not
+accept a suffix.
+
+Looped producers render as a Markdown bullet list of concrete attempt paths.
+Use deterministic split-work assignment for looped strategies:
 
 ```text
 n % {{strategy_loop_count}} == {{strategy_loop_index}}
 ```
+
+## Output Contract
+
+When a topology node declares `required_artifacts`, Ultrafuzz appends an output
+contract to the rendered prompt. Nodes that require `findings.json` receive the
+normalized findings contract, and nodes that require generated-test artifacts
+receive generated-test path guidance.
+
+Agents should write durable cross-node handoff files under `{{artifact_path}}`
+and list those files in topology `required_artifacts`.

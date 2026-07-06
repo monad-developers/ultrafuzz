@@ -1,8 +1,9 @@
 # Tutorials
 
-Tutorials are guided paths. Start here when you want to complete a campaign
-flow end to end instead of looking up a single command.
+Tutorials are guided paths through complete Ultrafuzz workflows. Start here
+when you want to run a campaign end to end instead of looking up one command.
 
-- [First Campaign](first-campaign.md): install Ultrafuzz, initialize a target
-  repository, run checks, launch a campaign, inspect results, and review
-  generated tests.
+- [First Campaign](first-campaign.md): initialize a Solidity repository,
+  validate beta product files, sync pinned references, launch a campaign,
+  inspect run evidence, review findings, and explicitly materialize reviewed
+  outputs.

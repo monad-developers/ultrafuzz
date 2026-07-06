@@ -1,58 +1,63 @@
-# Ultrafuzz
+# Ultrafuzz Beta
 
-Ultrafuzz is a Rust-native orchestrator for agentic Solidity fuzzing campaigns.
-It initializes a protocol repository with editable prompts and topology, runs
-isolated agent attempts through CLI backends, collects generated Foundry tests
-and findings, and serves a local dashboard plus final report for review.
+Ultrafuzz Beta turns a Solidity repository into an agent-run fuzzing campaign.
+Ultrafuzz owns the product surfaces users inspect and edit: root
+`ultrafuzz.toml`, `.ultrafuzz/topology.yml`, `.ultrafuzz/prompts/**`, pinned
+references, run evidence under `.ultrafuzz/runs/**`, and explicit
+materialization or cleanup.
 
-![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
+Agents run in a trusted, skip-permissions workflow. Review the checked-in
+`.ultrafuzz/prompts/` directory before launching a campaign, then review
+generated artifacts before copying anything into the target project.
 
-## Install
+## Operator Flow
 
-From this repository:
-
-```bash
-cargo install --path crates/ultrafuzz-cli --locked
-```
-
-During development, run the CLI through Cargo:
-
-```bash
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo run -p ultrafuzz-cli -- --help
-```
-
-## Quick Start
-
-Run Ultrafuzz from the Solidity repository you want to audit or harden:
-
-```bash
-cd target-protocol
-ultrafuzz init
-ultrafuzz doctor
-ultrafuzz references sync
-ultrafuzz run
-ultrafuzz dashboard
-ultrafuzz report <run-id>
-```
-
-`init` writes `ultrafuzz.toml`, `.ultrafuzz/topology.yml`,
-`.ultrafuzz/references.yml`, editable prompt copies under
-`.ultrafuzz/prompts/`, and `.ultrafuzz/runs/`. `references sync` performs the
-trusted pre-run network phase for pinned GitHub references; normal runs are
-offline and fail before agents start if required cached references are missing.
-Ultrafuzz does not auto-commit, auto-push, auto-submit findings, or auto-merge
-target repository changes.
+1. `ultrafuzz init --project <project>`
+   Creates root config plus project-owned topology, editable prompt copies,
+   pinned references, run/cache/workspace directories, and workflow plumbing.
+2. `ultrafuzz validate --project <project>`
+   Validates config, topology, prompts, path guards, agent references, and the
+   trust model. It does not execute agents.
+3. `ultrafuzz references sync --project <project>`
+   Explicitly fetches pinned property references into the local digest-checked
+   cache. Normal runs stay offline and fail before launch when required
+   references are not cached.
+4. `ultrafuzz run --project <project>`
+   Renders prompts, writes the product plan, launches the workflow, and stores
+   run evidence under `.ultrafuzz/runs/**`.
+5. `ultrafuzz ps` and `ultrafuzz inspect <run-id>`
+   Show product run evidence and linked workflow status.
+6. `ultrafuzz resume|replay|fork <run-id>`
+   Resume, replay, or fork a linked run.
+7. `ultrafuzz report <run-id>`
+   Shows the agent-written final report artifact when the run has produced one.
+8. `ultrafuzz materialize <run-id>` and `ultrafuzz clean <run-id>`
+   Perform explicit, selected, path-safe filesystem operations. Agent limits
+   around commits, pushes, pull requests, external submissions, staging, and
+   merges are prompt instructions and trust-model assumptions, not a
+   deterministic repository-mutation enforcement layer.
 
 ## Documentation
 
-The full documentation site lives under [`docs/`](docs/index.md) and is
-published with GitHub Pages for repository members. It includes tutorials,
-how-to guides, reference material, and conceptual explanation for security
-researchers and protocol developers using Ultrafuzz.
+- [Start Here](docs/index.md)
+- [Beta Spec](docs/SPECS.md)
+- [Tutorials](docs/tutorials/index.md)
+- [How-To Guides](docs/how-to/index.md)
+- [Reference](docs/reference/index.md)
+- [Explanation](docs/explanation/index.md)
+- [CLI](docs/cli.md)
+- [Config](docs/config.md)
+- [Schemas](docs/schemas.md)
+- [Security](docs/security.md)
 
-For background on the research direction that shaped this work, read the
-[Monad Bugfinder blog post](https://blog.monad.xyz/blog/monad-bugfinder).
+## Development Checks
 
-## License
+```bash
+pnpm -w typecheck
+pnpm --filter @ultrafuzz/runtime test
+pnpm --filter @ultrafuzz/cli test
+pnpm -w docs:check
+```
 
-Ultrafuzz is licensed under the MIT license.
+Some package-local scripts build their direct workspace dependencies first
+because workspace package exports point at `dist/**` entrypoints.

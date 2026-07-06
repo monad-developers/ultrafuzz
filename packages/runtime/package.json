@@ -1,0 +1,30 @@
+{
+  "name": "@ultrafuzz/runtime",
+  "version": "0.0.2",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pnpm --filter @ultrafuzz/config build && pnpm --filter @ultrafuzz/security build && pnpm --filter @ultrafuzz/topology build && pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/artifacts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml",
+    "test": "pnpm --filter @ultrafuzz/runtime build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+    "typecheck": "pnpm --filter @ultrafuzz/config build && pnpm --filter @ultrafuzz/security build && pnpm --filter @ultrafuzz/topology build && pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/artifacts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/config": "workspace:*",
+    "@ultrafuzz/prompts": "workspace:*",
+    "@ultrafuzz/references": "workspace:*",
+    "@ultrafuzz/security": "workspace:*",
+    "@ultrafuzz/topology": "workspace:*"
+  }
+}

@@ -1,60 +1,68 @@
 # Contributing
 
-This repository is a Rust workspace for Ultrafuzz.
+This repository is a TypeScript workspace for Ultrafuzz Beta.
 
 ## Repository Map
 
-Workspace crates live under `crates/`:
+Workspace packages live under `packages/`:
 
-- `ultrafuzz-core`: shared IDs, statuses, findings, backend/workspace enums.
-- `ultrafuzz-config`: config loading, defaults, overrides, validation, and
-  redaction.
-- `ultrafuzz-prompts`: bundled and project Markdown prompts, frontmatter,
-  template validation/rendering, and prompt scaffolding.
-- `ultrafuzz-topology`: `.ultrafuzz/topology.yml` loading, validation, loop
-  expansion, graph serialization, and fingerprints.
-- `ultrafuzz-artifacts`, `ultrafuzz-events`, `ultrafuzz-state`, and
-  `ultrafuzz-workspace`: run layout, event stores, restartable state, and
-  isolated workspaces.
-- `ultrafuzz-agent`, `ultrafuzz-executor`, `ultrafuzz-dashboard`, and
-  `ultrafuzz-cli`: backend subprocesses, DAG execution, local dashboard, and
-  CLI.
+- `@ultrafuzz/config`: `ultrafuzz.toml` loading, defaults, overrides,
+  validation, and redaction.
+- `@ultrafuzz/security`: shared path, ID, materialization, and cleanup policy
+  helpers.
+- `@ultrafuzz/prompts`: project prompt catalog discovery, frontmatter
+  validation, template validation/rendering, and prompt scaffolding.
+- `@ultrafuzz/topology`: `.ultrafuzz/topology.yml` loading, validation, loop
+  expansion, group defaults, reference nodes, graph serialization, and
+  fingerprints.
+- `@ultrafuzz/references`: pinned reference catalog validation, local cache
+  status, sync/update support, and reference artifact materialization.
+- `@ultrafuzz/artifacts`: run layout, events, findings, manifests, generated
+  test manifests, and run state.
+- `@ultrafuzz/runtime`: project validation, planning, workflow compilation,
+  lifecycle delegation, synchronization, materialization, cleanup, and report
+  lookup.
+- `@ultrafuzz/cli`: the beta command surface.
 
-Bundled prompt defaults live in `prompts/`. Initialized target projects get
-editable copies under `.ultrafuzz/prompts/`.
-
-The dashboard frontend lives in:
-
-```text
-crates/ultrafuzz-dashboard/frontend
-```
+Bundled editable product assets live under `.ultrafuzz/` in this repository.
+Initialized target projects receive project-owned copies of the same product
+surfaces.
 
 ## Development Stance
 
-Prefer typed domain structs and serde forms over stringly typed logic. Parse and
-validate data at boundaries: config, topology YAML, prompt frontmatter,
-dashboard requests, artifact manifests, and backend outputs.
+Prefer typed domain structures and parser-backed validation over ad hoc string
+handling. Parse and validate data at boundaries: config, topology YAML, prompt
+frontmatter, references, artifact manifests, findings, materialization
+selections, cleanup selections, and CLI JSON output.
 
 Do not add runtime fallbacks that synthesize missing product state. `ultrafuzz
-init` may scaffold topology, but run and dashboard paths should fail clearly if
-required topology is missing or invalid.
+init` may scaffold topology and prompts, but validation, run, dashboard, and
+report paths should fail clearly when required product state is missing or
+invalid.
 
 Keep generated artifacts out of git, including:
 
 ```text
-site/
-.cargo-home/
-.cargo-target/
-.codex-runs/
-.ultrafuzz/
-crates/ultrafuzz-dashboard/frontend/dist/
-crates/ultrafuzz-dashboard/frontend/playwright-report/
-crates/ultrafuzz-dashboard/frontend/test-results/
 node_modules/
+dist/
+dist-test/
+.codex-runs/
+.ultrafuzz/runs/
+.ultrafuzz/workspaces/
+.ultrafuzz/cache/
 ```
 
 ## Checks
 
-Use the commands in [Development Commands](reference/development.md). Prefer the
-narrowest useful check while iterating, then run broader gates before PR
-handoff when the change touches shared behavior or release workflows.
+Useful workspace checks:
+
+```bash
+pnpm -w format:check
+pnpm -w lint
+pnpm -w docs:check
+pnpm -w typecheck
+pnpm -r test
+```
+
+Prefer narrow package checks while iterating, then run broader gates before PR
+handoff when a change touches shared behavior or release workflows.

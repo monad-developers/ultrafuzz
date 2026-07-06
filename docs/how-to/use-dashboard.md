@@ -1,71 +1,93 @@
-# Use the Dashboard
+# Use The Dashboard
 
-The dashboard is served by the same Rust binary as the CLI.
+Dashboard/API is a beta product requirement, but this reset may ship a
+CLI-only operator surface first. The current beta CLI does not expose
+`ultrafuzz dashboard`; use this guide as the dashboard workflow target and use
+the listed CLI commands until the dashboard implementation lands.
 
-## Launch
+## Prepare A Run
+
+Start from a validated beta project:
 
 ```bash
-ultrafuzz dashboard
-ultrafuzz dashboard <run-id>
-ultrafuzz dashboard <run-id> --host 127.0.0.1 --port 3875
+ultrafuzz init --project <project>
+ultrafuzz validate --project <project>
+ultrafuzz references sync --project <project>
+ultrafuzz run --project <project> --run-id <run-id>
 ```
 
-By default, the dashboard binds to `127.0.0.1:3875`.
+The dashboard should read the same product surfaces as the CLI:
 
-## Read The Graph
+```text
+ultrafuzz.toml
+.ultrafuzz/topology.yml
+.ultrafuzz/prompts/**
+.ultrafuzz/references.yml
+.ultrafuzz/runs/**
+```
 
-The main graph shows logical campaign nodes by default. Loop-expanded attempts
-are available through details and toggles, but the editable surface stays
-logical so prompt and topology changes map back to project files.
+## Inspect The Graph
 
-Use the dashboard to inspect:
+The dashboard should show logical topology nodes by default. Expanded strategy
+loops and model fan-out may appear in technical details, but graph edits should
+map back to `.ultrafuzz/topology.yml`.
 
-- Run status, DAG nodes, edges, logs, and event timelines.
-- Rendered prompts and strategy metadata.
-- Findings, report data, strategy source/category, and command jobs.
-- Project config, prompt files, and topology editing surfaces.
+Until the dashboard is available, inspect the same run evidence with:
+
+```bash
+ultrafuzz ps --project <project>
+ultrafuzz inspect --project <project> <run-id>
+ultrafuzz report --project <project> <run-id>
+```
 
 ## Edit Project Assets
 
-Prompt edits save under:
+Dashboard editors should save only beta product inputs:
 
-```text
-.ultrafuzz/prompts/
+- Runtime settings in root `ultrafuzz.toml`.
+- Campaign graph changes in `.ultrafuzz/topology.yml`.
+- Prompt text in `.ultrafuzz/prompts/**`.
+- Reference catalog state through the explicit references flow.
+
+Edits must validate before they are accepted and must not leave partial writes
+after failed validation. For the CLI equivalent, edit the files directly and
+run:
+
+```bash
+ultrafuzz validate --project <project>
 ```
 
-Topology edits save to:
+## Run Product Operations
+
+Dashboard command jobs must map to current beta CLI operations:
 
 ```text
-.ultrafuzz/topology.yml
-```
-
-The dashboard validates path safety and topology/prompt shape before accepting
-mutating saves.
-
-## Run Commands From The Dashboard
-
-Dashboard command buttons call existing CLI operations, including:
-
-```text
+validate
 run
-restart
-continue
-status
-doctor
-config inspect
-config defaults
+references status
+references sync
+references update
+ps
+inspect
+resume
+replay
+fork
 report
-triage
-merge
 materialize
 clean
 ```
 
-Destructive or file-mutating operations such as `materialize` and `clean`
-require confirmation.
+Destructive or target-repository-mutating jobs require confirmation. In the
+CLI, materialization requires explicit reviewed copies:
 
-## Understand Preview Mode
+```bash
+ultrafuzz materialize --project <project> <run-id> \
+  --copy artifacts/<node>/stdout.txt:reviewed/stdout.txt \
+  --yes
+```
 
-If launched before a project has `ultrafuzz.toml`, the dashboard scaffolds the
-default config, topology prompts, and runs directory, then serves a preview
-graph until the first run exists.
+Cleanup removes only selected generated `.ultrafuzz/**` paths:
+
+```bash
+ultrafuzz clean --project <project> <run-id> --select runs/<run-id> --yes
+```

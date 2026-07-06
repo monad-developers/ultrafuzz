@@ -1,62 +1,67 @@
-# Agent Backends and Safety
+# Agents, Workflow Boundary, and Safety
 
-Ultrafuzz runs agents through existing CLI backends instead of embedding a
-provider-specific agent runtime.
+Ultrafuzz Beta delegates agent execution to the configured workflow layer, but
+does not make that layer the product API. The stable user-facing surfaces are
+`ultrafuzz.toml`, `.ultrafuzz/topology.yml`, `.ultrafuzz/prompts/**`,
+`.ultrafuzz/references.yml`, run evidence, report artifacts, and explicit
+materialization.
 
-## Backend Boundary
+## Agent Selection
 
-Backend configuration selects the command, model profile, arguments, and
-environment passed to the external CLI. Ultrafuzz records backend provenance in
-run state and artifacts so reviewers can see which models and settings
-contributed to a result.
+`ultrafuzz.toml` defines model profiles with project agent references, model
+names, and timeouts. Topology nodes or group defaults choose model profiles when
+they need something other than the configured default. Model fan-out is explicit
+so reviewers can see which agent/model attempt produced an artifact or finding.
 
-By default, the command must match the backend kind: `codex-cli` launches
-`codex` and `claude-code-cli` launches `claude`. Custom backend command paths
-or names require `permissions.allow_dangerous_bypass = true`.
+Agent references are validated before launch. The generated project agent
+registry and any workflow adapter files are implementation plumbing, not a
+configuration surface for campaign strategy.
 
-Config-supplied backend and model environment keys are treated as part of the
-backend trust boundary. Loader, shell-startup, path, git, and backend
-configuration-directory variables are rejected by default because they can
-change the process before backend sandbox assumptions hold.
+## Workflow Boundary
+
+Runtime validates product state, renders prompts, writes run evidence, compiles
+workflow tasks, and launches a linked workflow. `resume`, `replay`, and `fork`
+operate on that linked workflow after product checks. The linked workflow ID is
+evidence for lifecycle operations, not a separate product API that users should
+script against directly.
+
+Dashboard/API is a beta product target: a local operator surface for topology,
+prompt, config, run evidence, reports, materialization, and cleanup. The current
+implementation remains CLI-first until the dashboard/API work tracked in #16
+lands.
 
 ## Workspace Boundary
 
-Agent attempts run in isolated workspaces. Prompts receive both:
+Agent attempts work in run-associated workspaces, and prompts receive both the
+target `repo_path` and attempt `workspace_path`. Durable handoff files belong in
+the node artifact directory, not only in a temporary workspace.
 
-- `repo_path`: the target repository.
-- `workspace_path`: the isolated attempt workspace where code and test work
-  should happen.
+Ultrafuzz records workspace metadata and run evidence so reviewers can inspect
+what happened after the workflow completes. It does not promise that a workspace
+is a security isolation boundary.
 
-Durable handoff files go under `artifact_path`, not only inside the temporary
-workspace.
+## Trust Model
 
-## Permission Boundary
+Agents run under a trusted local execution model. Ultrafuzz does not maintain a
+command allowlist, network allowlist, sandbox policy, or approval-flow
+configuration as product behavior.
 
-The default permission policy denies common sensitive files and secret
-locations. Before launch, Ultrafuzz checks the backend-visible workspace,
-artifact, and extra context roots and rejects the attempt if a denied path is
-present. If a configured read or write policy cannot be enforced, execution
-fails closed.
+The durable product boundary is:
 
-Read-deny checks follow symlink targets that remain inside a backend-visible
-root and reject symlinks that escape that root, because Ultrafuzz cannot bound
-the target contents before launch. Codex extra context directories are exposed
-through `--add-dir`, which is writable in workspace-write mode, so they require
-an explicit `extra-context` entry in `permissions.write_allow` when used.
+- review prompts before launch;
+- fetch references only through explicit `references sync` or update actions;
+- persist graph, prompt, config, event, workspace, and artifact evidence;
+- review findings and reports before acting on them;
+- materialize selected outputs only after confirmation and path checks;
+- use normal repository review tools before publishing changes.
 
-Dangerous sandbox and backend bypass arguments are rejected unless a config
-explicitly opts into dangerous bypass mode. Codex `-c` / `--config` entries are
-also inspected, and sandbox, network, permission, or approval overrides are
-rejected by default, including web search overrides and bypass aliases such as
-`--search`, `--profile`, and `--yolo`.
+Repository mutation limits such as no commit, push, pull request, external
+submission, staging, or merge are prompt instructions and trust-model
+assumptions. They are not deterministic enforcement by Ultrafuzz.
 
-## Product Boundary
+## Materialization Boundary
 
-Ultrafuzz is conservative about target repository changes:
-
-- It does not auto-commit.
-- It does not auto-push.
-- It does not auto-submit findings.
-- It does not auto-merge target repository code.
-
-Generated tests and materialized patches remain reviewable working-tree changes.
+Materialization is explicit and copy-only in beta. Patch artifacts may exist as
+evidence, but patch application is rejected until a safe patch applier exists.
+Materialized files are left as ordinary unstaged working-tree changes so the
+operator can review them with the usual repository tools.

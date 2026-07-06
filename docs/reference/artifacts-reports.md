@@ -1,10 +1,13 @@
 # Run Artifacts and Reports
 
-Runs are stored under:
+Runs are stored under the resolved `run.output_dir`, which defaults to:
 
 ```text
 .ultrafuzz/runs/<run-id>/
 ```
+
+Run IDs and node IDs are path-safe identifiers. Run evidence is intended to be
+durable and reviewable.
 
 ## Run Root
 
@@ -12,73 +15,193 @@ Each run records:
 
 ```text
 run.json
+source-run.json
 config.resolved.toml
+config.redactions.json
 graph.json
 graph.fingerprint
 state.json
 events.jsonl
-events.sqlite
+plan.json
 artifacts/
+review/
+events.index/
+workspaces/
+workspaces.json
 ```
+
+`source-run.json` is present when the run derives from another run. Event query
+indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
+of the beta artifact contract.
+
+## Run Metadata
+
+`run.json` records the run schema version, run ID, creation timestamp, mode,
+linked workflow IDs, and workflow evidence pointers. Lifecycle commands such as
+`resume`, `replay`, and `fork` use this linked workflow evidence.
+
+`config.resolved.toml` stores the resolved config for the run. Secret-looking
+values are redacted before persistence, and restore metadata is written to
+`config.redactions.json`.
+
+`graph.json` records the planned executable graph, including logical IDs,
+concrete IDs, group, prompt path, dependencies, artifact directory, required
+artifacts, primary artifact, loop metadata, reference revisions, and model
+fan-out provenance.
+
+`plan.json` records the run plan, graph/config fingerprints, topology summary,
+rendered prompt paths, and validation posture.
+
+## State
+
+`state.json` has schema version `1.0`.
+
+Run statuses are:
+
+- `pending`
+- `running`
+- `succeeded`
+- `failed`
+- `timed-out`
+- `canceled`
+
+Node statuses are:
+
+- `pending`
+- `ready`
+- `runnable`
+- `running`
+- `succeeded`
+- `failed`
+- `skipped`
+- `timed-out`
+- `reused-from-prior-run`
+- `invalidated`
+
+Node state can also record logical node ID, artifact directory, required
+artifacts, attempt index, loop index, model profile ID, model name, model
+index, timestamps, last error, and provenance.
 
 ## Node Artifacts
 
-Node artifacts live under:
+Node and attempt artifacts live under:
 
 ```text
-artifacts/<node-id>/
+artifacts/<attempt-id>/
 ```
 
 Common files include:
 
 ```text
 prompt.rendered.md
-stdout.log
-stderr.log
-transcript.json
+artifact-manifest.json
 findings.json
-metadata.json
+patch.diff
 generated-tests/
 generated-tests.json
-workspace-changes.json
-artifact-manifest.json
+references/manifest.json
 ```
 
-Required artifacts are node-specific and declared by topology.
+Required artifacts are node-specific and declared in `.ultrafuzz/topology.yml`.
+Artifact paths are relative to the node artifact directory and must be safe
+project-local relative paths.
 
-## Review Artifacts
+`artifact-manifest.json` records schema version, run ID, node ID, creation
+time, artifact paths, sizes, SHA-256 digests, and provenance such as logical
+node, attempt index, loop index, model profile, model name, workflow task, and
+source run when available.
 
-Important default review artifacts:
+## Findings
+
+`findings.json` must be a JSON array.
+
+Each normalized finding must include:
+
+| Field            | Meaning                                                       |
+| ---------------- | ------------------------------------------------------------- |
+| `schema_version` | Must be `1.0`.                                                |
+| `id`             | Finding ID. Missing IDs are synthesized from node provenance. |
+| `title`          | Non-empty title.                                              |
+| `status`         | Enum value listed below.                                      |
+| `severity_guess` | Non-empty severity guess.                                     |
+| `confidence`     | Non-empty confidence label.                                   |
+| `summary`        | Non-empty summary.                                            |
+
+Finding `status` must be one of:
+
+- `candidate`
+- `needs-review`
+- `duplicate`
+- `false-positive`
+- `confirmed`
+- `fixed`
+- `wont-fix`
+
+When present, `triage_classification` must be one of:
+
+- `true-positive`
+- `false-positive`
+- `undetermined`
+- `incomplete-spec`
+- `harness-defect`
+- `repair-candidate`
+- `spec-gated`
+- `defensive-hardening`
+
+Findings may also preserve source node, strategy, attempt index, model profile,
+model name, model index, loop index, affected files, affected functions,
+evidence, patch references, notes, dedupe metadata, and family metadata.
+
+## Final Report
+
+Final reporting is agentic. The report command reads agent-written final report
+artifacts from:
 
 ```text
-artifacts/dedupe-findings/deduped-findings.json
-artifacts/dedupe-findings/strategy-detections.json
-artifacts/triage/triaged-findings.json
-artifacts/severity-classification/severity-classified-findings.json
-artifacts/severity-classification/strategy-detections.json
-artifacts/aggregate-test-files/aggregation.json
 artifacts/final-report/report.md
 artifacts/final-report/report.json
 ```
 
-## Final Report
+If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
+
+The final report is a review artifact. It is not an automatic vulnerability
+submission, repository mutation, or patch application.
+
+## Materialization
+
+Materialization copies reviewed run outputs into the target project:
 
 ```bash
-ultrafuzz report <run-id>
-ultrafuzz report <run-id> --json
+ultrafuzz materialize <run-id> \
+  --copy artifacts/final-report/report.md:audit/ultrafuzz-report.md \
+  --confirm
 ```
 
-The Markdown report includes:
+Materialization requires explicit selections and confirmation unless
+`--dry-run` is used. Destinations are project-relative, must be path-safe, must
+not target `.git/`, `.ultrafuzz/`, or sensitive paths, and are left as unstaged
+working-tree changes.
 
-- Issue index first.
-- Fixed preamble.
-- `## Run summary`.
-- Run ID and source run ID when present.
-- Continuation mode and reused node list.
-- Elapsed time rounded to whole minutes.
-- Models used, including reasoning effort when available.
-- Token usage and estimated spend.
-- Configured strategy loops.
-- Inline production issue PoCs when available.
+Patch artifacts may be produced as evidence, but patch application is rejected
+until a safe patch applier is implemented.
 
-The report is a review artifact, not an automatic vulnerability submission.
+Materialization writes an audit record to:
+
+```text
+.ultrafuzz/materialize-audit.jsonl
+```
+
+## Cleanup
+
+`ultrafuzz clean <run-id>` removes selected generated paths relative to
+`.ultrafuzz/`. Without `--select`, it selects `runs/<run-id>`.
+
+Cleanup requires confirmation unless `--dry-run` is used. It rejects unsafe
+paths, symlink escapes, missing selections, non-directory selections, git paths,
+and paths outside generated run, artifact, or workspace roots.
+
+Cleanup writes an audit record to:
+
+```text
+.ultrafuzz/clean-audit.jsonl
+```

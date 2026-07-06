@@ -1,61 +1,53 @@
 # Development Commands
 
-Use workspace-local Cargo cache directories for repeatable checks.
+Ultrafuzz Beta is a TypeScript workspace managed with `pnpm`.
 
-## Rust
-
-Focused iteration:
+## Workspace Checks
 
 ```bash
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo check -p <crate>
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo test -p <crate> <test-name>
+pnpm -w format:check
+pnpm -w lint
+pnpm -w typecheck
+pnpm -w build
+pnpm -w test
+pnpm -w validate:release
+pnpm -w docs:check
 ```
 
-PR validation:
+The root CI script runs format check, lint, build, and release validation:
 
 ```bash
-cargo fmt --all -- --check
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo check --workspace
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo clippy --workspace --all-targets -- -D warnings
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo test --workspace
+pnpm -w ci
 ```
 
-`make validate` runs rustfmt, workspace check, and Clippy. `make test` runs the
-workspace test suite.
+## Package Checks
 
-## Dashboard Frontend
+Focused package iteration uses pnpm filters:
 
 ```bash
-npm --prefix crates/ultrafuzz-dashboard/frontend ci
-npm --prefix crates/ultrafuzz-dashboard/frontend run format:check
-npm --prefix crates/ultrafuzz-dashboard/frontend run lint
-npm --prefix crates/ultrafuzz-dashboard/frontend run test
-npm --prefix crates/ultrafuzz-dashboard/frontend run typecheck
-npm --prefix crates/ultrafuzz-dashboard/frontend run build
+pnpm --filter @ultrafuzz/config test
+pnpm --filter @ultrafuzz/topology test
+pnpm --filter @ultrafuzz/prompts test
+pnpm --filter @ultrafuzz/references test
+pnpm --filter @ultrafuzz/artifacts test
+pnpm --filter @ultrafuzz/runtime test
+pnpm --filter @ultrafuzz/cli test
 ```
 
-Browser and embedded-asset smoke:
+Package-local `typecheck` and `test` scripts may build direct workspace
+dependencies first because package exports point at `dist/**`.
+
+## Docs Check
 
 ```bash
-ULTRAFUZZ_DASHBOARD_REQUIRE_ASSETS=1 CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target cargo test -p ultrafuzz-dashboard
-CARGO_HOME=.cargo-home CARGO_TARGET_DIR=.cargo-target npm --prefix crates/ultrafuzz-dashboard/frontend run smoke
-make dashboard-smoke
+pnpm -w docs:check
 ```
 
-Generated frontend assets are ignored:
+The docs check verifies that required documentation entrypoints exist. It does
+not build a static site.
 
-```text
-crates/ultrafuzz-dashboard/frontend/dist/
-crates/ultrafuzz-dashboard/frontend/playwright-report/
-crates/ultrafuzz-dashboard/frontend/test-results/
-node_modules/
-```
+## Generated Output
 
-## Docs
-
-```bash
-python -m pip install -r requirements-docs.txt
-python -m mkdocs build --strict
-```
-
-Generated docs output goes to `site/` and is ignored.
+Build output lives under package `dist/` directories and is not a product
+surface. User-owned Ultrafuzz state remains root `ultrafuzz.toml` and
+`.ultrafuzz/**`.

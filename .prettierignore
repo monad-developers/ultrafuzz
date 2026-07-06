@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-test
+coverage
+.worktrees
+.ultrafuzz
+pnpm-lock.yaml
+
+packages/*/dist
+packages/*/dist-test
+
+prompts/**/*.md

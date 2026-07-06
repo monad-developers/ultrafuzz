@@ -1,35 +1,91 @@
 # Configuration and Environment
 
-`ultrafuzz.toml` resolves built-in defaults, prompt frontmatter, config file
-values, environment variables, and CLI overrides.
+Ultrafuzz Beta has one root project config file:
+
+```text
+ultrafuzz.toml
+```
+
+Topology, prompts, references, runs, workspaces, and cache state live under
+`.ultrafuzz/**`; they are not configured through alternate root files.
 
 ## Common Shape
 
 ```toml
+schema_version = "1.0"
 dynamic_strategies_enumerator = 3
+
+[project]
+repo = "."
 
 [run]
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
+max_parallel_nodes = 8
+keep_workspaces = false
 workspace_mode = "git-worktree"
-enable_dashboard = true
+default_timeout_seconds = 1800
 
-[backend]
-default = "codex-cli"
+[models]
+default = "default"
 
-[triage]
-quorum = 3
-panel_size = 5
+[models.default]
+agent = "CodexAgent"
+model = "gpt-5.5"
+timeout_seconds = 1800
+
+[permissions]
+trust_model = "skip-permissions"
+prompt_review_required = true
+materialize_outputs_as_unstaged = true
 
 [invariants]
 property_priority_threshold = "high"
 invariant_testing_fuzzer_timeout = "1h"
 
-[dashboard]
-host = "127.0.0.1"
-port = 3875
-live_updates = true
+[triage]
+quorum = 3
+panel_size = 4
 ```
+
+Unknown TOML keys fail validation. Strategy execution behavior belongs in
+`.ultrafuzz/topology.yml`, not in TOML.
+
+## Top-Level Keys
+
+| Key                             | Meaning                                                             |
+| ------------------------------- | ------------------------------------------------------------------- |
+| `schema_version`                | Config schema version string.                                       |
+| `dynamic_strategies_enumerator` | Positive integer used by prompts that enumerate dynamic strategies. |
+| `[project]`                     | Project paths.                                                      |
+| `[run]`                         | Run output, parallelism, workspace, and timeout settings.           |
+| `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                |
+| `[permissions]`                 | Trusted local execution posture and materialization defaults.       |
+| `[invariants]`                  | Invariant prompt defaults.                                          |
+| `[triage]`                      | Triage quorum and panel size.                                       |
+
+## Project
+
+| Key    | Type   | Meaning                                                           |
+| ------ | ------ | ----------------------------------------------------------------- |
+| `repo` | string | Project-local target repository path. `.` means the project root. |
+| `name` | string | Optional display name.                                            |
+
+Project paths must be project-local relative paths. Absolute paths, traversal,
+empty path components, and dot components fail validation.
+
+## Run
+
+| Key                       | Type    | Meaning                                                            |
+| ------------------------- | ------- | ------------------------------------------------------------------ |
+| `output_dir`              | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`. |
+| `max_parallel_agents`     | integer | Positive workflow submission concurrency default.                  |
+| `max_parallel_nodes`      | integer | Positive graph planning parallelism limit.                         |
+| `keep_workspaces`         | boolean | Whether generated node workspaces are retained.                    |
+| `workspace_mode`          | string  | Must be `git-worktree`.                                            |
+| `default_timeout_seconds` | integer | Default node timeout in seconds.                                   |
+
+Other workspace modes are outside the beta product contract.
 
 ## Model Profiles
 
@@ -38,66 +94,89 @@ live_updates = true
 default = "default"
 
 [models.default]
-backend = "codex-cli"
+agent = "CodexAgent"
 model = "gpt-5.5"
-```
-
-Profile IDs must use ASCII letters, digits, hyphen, underscore, or dot.
-
-## Strategy Definitions
-
-Strategy definitions can set model selection, enablement, category, loop count,
-and timeout. Normal top-level strategy loop counts are controlled by topology
-`defaults.strategy_loops`.
-
-```toml
-[strategies.encode-decode]
-models = ["default"]
-enabled = true
-category = "encode-decode"
 timeout_seconds = 1800
 ```
 
-Runtime strategy categories are:
+Profile IDs must use safe ASCII identifier characters. Each profile supports:
 
-- `differential`
-- `round-trip`
-- `property-based`
-- `encode-decode`
-- `invariant`
-- `custom`
+| Key               | Type    | Meaning                                                                               |
+| ----------------- | ------- | ------------------------------------------------------------------------------------- |
+| `agent`           | string  | Agent reference exported by the project agent registry generated by `ultrafuzz init`. |
+| `model`           | string  | Optional model metadata passed through to the workflow task.                          |
+| `timeout_seconds` | integer | Optional profile timeout metadata.                                                    |
+
+If topology does not select `model_profiles`, an agentic node uses the
+configured default profile only. Multi-model fan-out must be explicit in a
+topology node or group default.
+
+Generated defaults may include `[models] synthesized_default = true` when the
+default profile was synthesized by the scaffold.
+
+## Permissions
+
+```toml
+[permissions]
+trust_model = "skip-permissions"
+prompt_review_required = true
+materialize_outputs_as_unstaged = true
+```
+
+The beta trust model is trusted local execution. Ultrafuzz does not expose a
+TOML command allowlist, network allowlist, or sandbox policy. The durable
+product boundary is reviewable prompts before launch, explicit reference sync,
+durable artifacts, and explicit copy-only materialization.
+
+`materialize_outputs_as_unstaged = true` records the expected materialization
+posture: copied outputs are left as ordinary unstaged working-tree changes.
+
+## Invariants
+
+| Key                                | Type                       | Meaning                                             |
+| ---------------------------------- | -------------------------- | --------------------------------------------------- |
+| `property_priority_threshold`      | `high`, `medium`, or `low` | Priority threshold rendered into invariant prompts. |
+| `invariant_testing_fuzzer_timeout` | duration string            | Timeout rendered into invariant testing prompts.    |
+
+Durations accept `s`, `min`, or `h`, such as `1800s`, `30min`, or `1h`.
+
+## Triage
+
+```toml
+[triage]
+quorum = 3
+panel_size = 4
+```
+
+`quorum` and `panel_size` must be positive integers, and quorum must not exceed
+panel size.
 
 ## Environment Overrides
 
-| Variable | Effect |
-| --- | --- |
-| `ULTRAFUZZ_BACKEND` | Overrides `[backend].default`. |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Overrides `[run].max_parallel_agents`. |
-| `ULTRAFUZZ_OUTPUT_DIR` | Overrides `[run].output_dir`. |
-| `ULTRAFUZZ_KEEP_WORKSPACES` | Keeps isolated attempt workspaces for inspection. |
+| Variable                        | Effect                                                   |
+| ------------------------------- | -------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`. |
+| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.  |
+| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.             |
+| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.              |
 
-## Sensitive Defaults
+Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 
-The default permission policy denies reads from sensitive paths and patterns,
-including `.env`, `.env.*`, `secrets/**`, `.secrets/**`, `.ssh/**`, `.aws/**`,
-`.gcloud/**`, `.azure/**`, `*.pem`, and `*.key`. Files named `.env.example`
-are treated as non-secret template exceptions for the broad `.env.*` defaults;
-exact `.env.example` entries in project policy still deny them.
+## Resolution Order
 
-Backend attempts fail closed when a denied read pattern exists under a
-backend-visible root such as the attempt workspace, artifact directory, or
-extra context directory. Read-deny scanning follows symlinks that stay under
-the visible root and rejects symlinks that escape it. `permissions.write_allow`
-currently supports the backend roots `workspace`, `artifacts`, `extra-context`,
-and `final-materialization`; unknown or stricter write policies are rejected
-when Ultrafuzz cannot enforce them. Codex extra context directories require the
-`extra-context` write entry because Codex exposes them with `--add-dir`.
+1. Built-in root TOML defaults.
+2. Project `ultrafuzz.toml`.
+3. Supported environment overrides.
+4. Runtime overrides from the CLI.
 
-Backend commands are constrained to the executable for their backend kind
-(`codex` for `codex-cli`, `claude` for `claude-code-cli`). Config-supplied
-backend and model env rejects process loader, shell startup, path, git, and
-backend config-directory keys by default. Dangerous sandbox arguments and Codex
-`-c` / `--config` sandbox, network, permission, or approval overrides are also
-rejected unless `permissions.allow_dangerous_bypass = true` is explicitly set;
-this includes Codex web-search overrides, `--search`, `--yolo`, and config
-layering through `--profile` / `-p`.
+The resolved config is persisted for each run as
+`config.resolved.toml`. Sensitive-looking model values are redacted before
+persistence, with restore metadata written to `config.redactions.json`.
+
+## Rejected Config Surfaces
+
+The beta TOML schema does not accept backend, dashboard, sandbox, network,
+tool-allowlist, strategy-definition, prompt-frontmatter execution, or reference
+catalog keys. Put campaign graph behavior in `.ultrafuzz/topology.yml`, prompt
+text in `.ultrafuzz/prompts/**`, and pinned reference metadata in
+`.ultrafuzz/references.yml`.

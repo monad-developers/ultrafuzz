@@ -1,44 +1,51 @@
 # Materialize Generated Tests
 
-The normal aggregation node copies selected generated tests into the target
-repository as unstaged changes under:
+Generated tests and patches are run evidence until you explicitly copy reviewed
+files into the target repository. Beta materialization is copy-only; patch
+application is rejected.
 
-```text
-test/foundry/<strategy>/
-```
+## Choose A Concrete Output
 
-Use `materialize` for explicit non-default copies or patches from a run.
-
-## Copy A Generated File
+Use the report and review artifacts to identify the exact run output you want:
 
 ```bash
-ultrafuzz materialize <run-id> \
-  --copy artifacts/encode-decode-0/generated-tests/test/foundry/encode-decode/Generated.t.sol=test/foundry/manual/Generated.t.sol
+ultrafuzz report <run-id> --project /path/to/target-protocol
+ultrafuzz inspect <run-id> --project /path/to/target-protocol
 ```
 
-The left side is run-relative. The right side is repository-relative.
+Prefer copying reviewed files from run-relative `artifacts/` paths, such as
+`artifacts/<node-id>/generated-tests/<file>`. Review metadata may also live
+under run-relative `review/` paths.
 
-## Apply A Patch
+## Preview A Copy
 
 ```bash
-ultrafuzz materialize <run-id> \
-  --patch artifacts/some-node/patch.diff
+ultrafuzz materialize <run-id> --project /path/to/target-protocol --dry-run \
+  --copy artifacts/<node-id>/generated-tests/Generated.t.sol:test/foundry/Generated.t.sol
 ```
 
-The command uses `git apply` or file copy without staging changes. It rejects
-unsafe run-relative and repo-relative paths, preserves `HEAD`, and writes a
-materialization record under the run's artifacts.
+The left side is relative to `.ultrafuzz/runs/<run-id>/`. The right side is
+relative to the target repository.
 
-## Preview Before Writing
+## Confirm The Copy
 
 ```bash
-ultrafuzz materialize <run-id> --dry-run \
-  --copy artifacts/final-report/generated.t.sol=test/Generated.t.sol
+ultrafuzz materialize <run-id> --project /path/to/target-protocol --confirm \
+  --copy artifacts/<node-id>/generated-tests/Generated.t.sol:test/foundry/Generated.t.sol
 ```
 
-Review the resulting working tree before committing anything:
+Use `--yes` instead of `--confirm` if you prefer. Use `--force` only when you
+intend to overwrite an existing destination file.
+
+Materialized files are left as unstaged working-tree changes. Ultrafuzz writes
+an audit record under `.ultrafuzz/materialize-audit.jsonl`.
+
+## Review The Working Tree
 
 ```bash
-git status
-git diff
+git -C /path/to/target-protocol status
+git -C /path/to/target-protocol diff -- test
 ```
+
+Edit or discard copied tests with normal repository tools. Ultrafuzz does not
+stage, commit, push, open pull requests, or submit findings for you.

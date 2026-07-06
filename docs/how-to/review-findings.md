@@ -1,28 +1,36 @@
 # Review Findings
 
-Ultrafuzz output is evidence for human review, not an automatic submission.
+Ultrafuzz findings are evidence for human review, not automatic vulnerability
+submissions.
 
-## Open The Report
+## Open The Agentic Report
 
 ```bash
-ultrafuzz report <run-id>
-ultrafuzz report <run-id> --json
+ultrafuzz report <run-id> --project /path/to/target-protocol
+ultrafuzz report <run-id> --project /path/to/target-protocol --json
 ```
 
-Read:
+The command reads agent-written final-report artifacts, typically:
 
 ```text
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.md
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
-The Markdown report starts with an issue index, then a fixed preamble and run
-summary. Production issue PoCs are rendered inline when available so the report
-can be reviewed without chasing local artifact paths.
+## Inspect Findings Arrays
 
-## Inspect Triage Artifacts
+Per-node findings are normalized arrays in `findings.json` files:
 
-Review stage artifacts include:
+```text
+.ultrafuzz/runs/<run-id>/artifacts/<node-id>/findings.json
+```
+
+Each finding should include fields such as `schema_version`, `id`, `title`,
+`status`, `severity_guess`, `confidence`, and `summary`. Status values include
+`candidate`, `needs-review`, `duplicate`, `false-positive`, `confirmed`,
+`fixed`, and `wont-fix`.
+
+Review-stage artifacts may include:
 
 ```text
 artifacts/dedupe-findings/deduped-findings.json
@@ -34,19 +42,20 @@ artifacts/final-report/report.md
 artifacts/final-report/report.json
 ```
 
-Use them when you need to understand how a finding moved from generated lead to
-deduped candidate, triage classification, severity, generated test, and final
-report entry.
+Use them to understand how raw strategy output became deduplicated candidates,
+triage classifications, severity guesses, generated-test selections, and final
+report entries.
 
 ## Confirm Evidence
 
 For each finding you might act on:
 
-1. Read the source strategy report and generated test.
-2. Re-run or adapt the generated Foundry test in the target repository.
-3. Check whether the issue is production-reachable, harness-only, incomplete,
-   intended behavior, or a useful hardening suggestion.
+1. Read the source node artifacts and generated tests.
+2. Re-run or adapt the test in the target repository.
+3. Decide whether the issue is production-reachable, harness-only,
+   underspecified, intended behavior, or a useful hardening suggestion.
 4. Keep protocol-specific edits separate from the raw generated artifact so the
    review trail stays clear.
 
-Ultrafuzz intentionally leaves the final decision to the reviewer.
+Only materialize files after review, and treat copied files as ordinary
+unstaged working-tree changes.
