@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_FILE_NAME } from "./constants.js";
 import { parseProjectConfigToml } from "./loader.js";
 import type {
+  AgentConfig,
   ModelProfile,
   PermissionConfig,
   ProjectConfigInput,
@@ -75,6 +76,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
   const project = requiredRecord(input.project, "project", filePath);
   const run = requiredRecord(input.run, "run", filePath);
   const models = requiredRecord(input.models, "models", filePath);
+  const agents = requiredRecord(input.agents, "agents", filePath);
   const permissions = requiredRecord(input.permissions, "permissions", filePath);
   const invariants = requiredRecord(input.invariants, "invariants", filePath);
   const triage = requiredRecord(input.triage, "triage", filePath);
@@ -97,6 +99,9 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         ])
       )
     },
+    agents: Object.fromEntries(
+      Object.entries(agents).map(([id, agent]) => [id, normalizeAgentConfig(id, agent, filePath)])
+    ),
     permissions: normalizePermissions(permissions, filePath),
     invariants: {
       propertyPriorityThreshold: required(
@@ -114,6 +119,14 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       quorum: required(triage.quorum, "triage.quorum", filePath),
       panelSize: required(triage.panelSize, "triage.panel_size", filePath)
     }
+  };
+}
+
+function normalizeAgentConfig(id: string, agent: Partial<AgentConfig>, filePath: string): AgentConfig {
+  return {
+    auth: required(agent.auth, `agents.${id}.auth`, filePath),
+    ...(agent.apiKeyEnv !== undefined ? { apiKeyEnv: agent.apiKeyEnv } : {}),
+    ...(agent.configDir !== undefined ? { configDir: agent.configDir } : {})
   };
 }
 
@@ -191,6 +204,17 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
     assertRecord(profile, `models.profiles.${id}`, filePath);
     assertString(profile.id, `models.profiles.${id}.id`, filePath);
     assertString(profile.agent, `models.profiles.${id}.agent`, filePath);
+  }
+  assertRecord(value.agents, "agents", filePath);
+  for (const [id, agent] of Object.entries(value.agents)) {
+    assertRecord(agent, `agents.${id}`, filePath);
+    assertString(agent.auth, `agents.${id}.auth`, filePath);
+    if (agent.apiKeyEnv !== undefined) {
+      assertString(agent.apiKeyEnv, `agents.${id}.apiKeyEnv`, filePath);
+    }
+    if (agent.configDir !== undefined) {
+      assertString(agent.configDir, `agents.${id}.configDir`, filePath);
+    }
   }
   assertRecord(value.permissions, "permissions", filePath);
   assertString(value.permissions.trustModel, "permissions.trustModel", filePath);

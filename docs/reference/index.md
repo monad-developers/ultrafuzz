@@ -1,6 +1,6 @@
 # Reference
 
-Reference pages describe Ultrafuzz Beta's factual product surfaces.
+Reference pages describe Ultrafuzz's factual product surfaces.
 
 - [CLI Commands](cli.md)
 - [Configuration and Environment](configuration.md)

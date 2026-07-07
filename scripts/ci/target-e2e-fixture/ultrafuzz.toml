@@ -1,0 +1,31 @@
+schema_version = "1.0"
+dynamic_strategies_enumerator = 1
+
+[project]
+repo = "."
+
+[run]
+output_dir = ".ultrafuzz/runs"
+max_parallel_agents = 1
+max_parallel_nodes = 1
+keep_workspaces = false
+workspace_mode = "git-worktree"
+default_timeout_seconds = __NODE_TIMEOUT__
+
+[models]
+default = "ci"
+synthesized_default = true
+
+[models.ci]
+agent = "__AGENT_REF__"
+model = "__MODEL_NAME__"
+timeout_seconds = __NODE_TIMEOUT__
+
+[permissions]
+trust_model = "skip-permissions"
+prompt_review_required = true
+materialize_outputs_as_unstaged = true
+
+[triage]
+quorum = 1
+panel_size = 1

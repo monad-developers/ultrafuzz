@@ -5,7 +5,15 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/dist-test/**", "**/node_modules/**", ".worktrees/**", ".ultrafuzz/**", "coverage/**"]
+    ignores: [
+      "**/dist/**",
+      "**/dist-test/**",
+      "**/node_modules/**",
+      ".smithers/**",
+      ".worktrees/**",
+      ".ultrafuzz/**",
+      "coverage/**"
+    ]
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

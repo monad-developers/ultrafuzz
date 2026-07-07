@@ -1,0 +1,40 @@
+{
+  "name": "@ultrafuzz/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pnpm --filter @ultrafuzz/runtime build && vite build --config frontend/vite.config.ts && tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "test": "pnpm --filter @ultrafuzz/dashboard build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
+    "typecheck": "pnpm --filter @ultrafuzz/runtime build && tsc -p tsconfig.json --noEmit --pretty false && tsc -p frontend/tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/config": "workspace:*",
+    "@ultrafuzz/prompts": "workspace:*",
+    "@ultrafuzz/runtime": "workspace:*",
+    "@ultrafuzz/security": "workspace:*",
+    "@ultrafuzz/topology": "workspace:*",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^5.0.0",
+    "@xyflow/react": "^12.8.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "vite": "^7.0.0"
+  }
+}

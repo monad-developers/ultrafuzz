@@ -3,15 +3,18 @@ import path from "node:path";
 
 import {
   getNodeArtifactDir,
+  readJsonFile,
   readRunState,
   safeResolveInside,
   updateNodeState,
+  validateGeneratedTestManifestSchema,
   type RunLayout,
   type RunState
 } from "@ultrafuzz/artifacts";
 
 import type { PlannedGraph, PlannedGraphNode, RuntimeDiagnostic } from "./types.js";
 import { diagnosticFromError } from "./utils.js";
+import { validateSeverityMatrixArtifact, type SeverityArtifactKind } from "./severity-matrix.js";
 
 export interface DependencyGateDecision {
   ok: boolean;
@@ -112,17 +115,90 @@ export function verifyRequiredArtifactsForAttempt(
           source: "artifact-gates",
           path: path.posix.join("artifacts", attemptId, required)
         });
+      } else {
+        diagnostics.push(...verifyRequiredArtifactShape(artifactDir, absolutePath, required));
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
     }
   }
+  diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
 
   return {
     ok: diagnostics.length === 0,
     diagnostics,
     missing
   };
+}
+
+function verifyRequiredArtifactShape(artifactDir: string, absolutePath: string, required: string): RuntimeDiagnostic[] {
+  if (required !== "generated-tests.json") {
+    return [];
+  }
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const parsed = validateGeneratedTestManifestSchema(readJsonFile(absolutePath));
+  if (!parsed.ok || parsed.value === undefined) {
+    return parsed.issues.map((issue) => ({
+      code: issue.code,
+      message: issue.message,
+      severity: "error",
+      source: "generated-tests",
+      path: `${absolutePath}#${issue.path}`
+    }));
+  }
+
+  for (const [index, entry] of parsed.value.generated_tests.entries()) {
+    try {
+      const generatedPath = safeResolveInside(artifactDir, entry.path, "generated test manifest entry");
+      if (!fs.existsSync(generatedPath) || !fs.statSync(generatedPath).isFile()) {
+        diagnostics.push({
+          code: "GENERATED_TEST_FILE_MISSING",
+          message: `generated test manifest entry ${entry.path} was not produced`,
+          severity: "error",
+          source: "generated-tests",
+          path: `${absolutePath}#$.generated_tests[${index}].path`
+        });
+      }
+    } catch (error) {
+      diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));
+    }
+  }
+
+  return diagnostics;
+}
+
+function verifySeverityMatrixArtifacts(artifactDir: string, node: PlannedGraphNode): RuntimeDiagnostic[] {
+  const artifact = severityArtifactForNode(node);
+  if (artifact === undefined) {
+    return [];
+  }
+  const artifactPath = path.join(artifactDir, artifact.file);
+  if (!fs.existsSync(artifactPath)) {
+    return [];
+  }
+  try {
+    return validateSeverityMatrixArtifact({
+      artifact: readJsonFile(artifactPath),
+      artifactPath,
+      kind: artifact.kind
+    });
+  } catch (error) {
+    return [diagnosticFromError(error, "severity-matrix", "SEVERITY_ARTIFACT_READ_FAILED")];
+  }
+}
+
+function severityArtifactForNode(
+  node: PlannedGraphNode
+): { kind: SeverityArtifactKind; file: "severity-classified-findings.json" | "report.json" } | undefined {
+  const logicalId = node.logical_id ?? node.id;
+  if (logicalId === "severity-classification") {
+    return { kind: "severity-classification", file: "severity-classified-findings.json" };
+  }
+  if (logicalId === "final-report") {
+    return { kind: "final-report", file: "report.json" };
+  }
+  return undefined;
 }
 
 export function markNodeBlockedByDependencies(

@@ -1,6 +1,6 @@
 # Configuration and Environment
 
-Ultrafuzz Beta has one root project config file:
+Ultrafuzz has one root project config file:
 
 ```text
 ultrafuzz.toml
@@ -85,7 +85,7 @@ empty path components, and dot components fail validation.
 | `workspace_mode`          | string  | Must be `git-worktree`.                                            |
 | `default_timeout_seconds` | integer | Default node timeout in seconds.                                   |
 
-Other workspace modes are outside the beta product contract.
+Other workspace modes are outside the product contract.
 
 ## Model Profiles
 
@@ -123,7 +123,7 @@ prompt_review_required = true
 materialize_outputs_as_unstaged = true
 ```
 
-The beta trust model is trusted local execution. Ultrafuzz does not expose a
+The trust model is trusted local execution. Ultrafuzz does not expose a
 TOML command allowlist, network allowlist, or sandbox policy. The durable
 product boundary is reviewable prompts before launch, explicit reference sync,
 durable artifacts, and explicit copy-only materialization.
@@ -175,7 +175,7 @@ persistence, with restore metadata written to `config.redactions.json`.
 
 ## Rejected Config Surfaces
 
-The beta TOML schema does not accept backend, dashboard, sandbox, network,
+The TOML schema does not accept backend, dashboard, sandbox, network,
 tool-allowlist, strategy-definition, prompt-frontmatter execution, or reference
 catalog keys. Put campaign graph behavior in `.ultrafuzz/topology.yml`, prompt
 text in `.ultrafuzz/prompts/**`, and pinned reference metadata in

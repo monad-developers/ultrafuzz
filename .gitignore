@@ -1,5 +1,6 @@
 .worktrees/
 .codex-runs/
+.smithers/
 .ultrafuzz/*
 !.ultrafuzz/
 !.ultrafuzz/references.yml

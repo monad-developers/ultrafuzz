@@ -28,7 +28,9 @@ Per-node findings are normalized arrays in `findings.json` files:
 Each finding should include fields such as `schema_version`, `id`, `title`,
 `status`, `severity_guess`, `confidence`, and `summary`. Status values include
 `candidate`, `needs-review`, `duplicate`, `false-positive`, `confirmed`,
-`fixed`, and `wont-fix`.
+`fixed`, and `wont-fix`; agent-produced lifecycle statuses may also appear.
+Evidence may be recorded as non-empty string references or as metadata objects
+with optional `kind` and `path` fields.
 
 Review-stage artifacts may include:
 

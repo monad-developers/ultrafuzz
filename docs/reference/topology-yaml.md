@@ -79,7 +79,7 @@ Group defaults may include:
 | `model_profiles`  | Explicit model profile list for nodes in the group. |
 
 Node fields override group defaults. A node or group `model_profiles` list is
-the beta model fan-out surface. When neither a node nor its group selects model
+the model fan-out surface. When neither a node nor its group selects model
 profiles, the node uses the configured default model profile only.
 
 ## Node Fields

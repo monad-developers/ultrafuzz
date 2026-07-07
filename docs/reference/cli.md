@@ -23,6 +23,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz report <run-id>`      | Locate the agent-written final report artifacts.                                                               |
 | `ultrafuzz materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
 | `ultrafuzz clean <run-id>`       | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
+| `ultrafuzz dashboard`            | Serve the local loopback dashboard and API for product state inspection and editing.                           |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -148,6 +149,11 @@ ultrafuzz report <run-id> [--project <path>] [--json]
 .ultrafuzz/runs/<run-id>/artifacts/final-report/report.json
 ```
 
+If run metadata contains populated cumulative accounting, `report --json`
+emits diagnostics when `report.md` or `report.json.run_metadata` leaves
+`Tokens used` or `Estimated spend` unavailable, non-positive, missing the
+partial-pricing `+` marker, or greater than the current cumulative metadata.
+
 ## Materialize
 
 ```bash
@@ -181,3 +187,18 @@ ultrafuzz clean <run-id> \
 
 Without `--select`, `clean` selects `runs/<run-id>`. Selections are relative to
 `.ultrafuzz/` and must name generated run, artifact, or workspace directories.
+
+## Dashboard
+
+```bash
+ultrafuzz dashboard \
+  [--project <path>] \
+  [--host 127.0.0.1] \
+  [--port 3875] \
+  [--run-id <run-id>] \
+  [--no-live]
+```
+
+`dashboard` starts a local loopback server and prints the `/dashboard` URL. The
+API reads and edits only beta product surfaces, validates mutating saves before
+writing, and guards mutating requests with a per-session token.

@@ -1,6 +1,6 @@
-# Ultrafuzz Beta
+# Ultrafuzz
 
-Ultrafuzz Beta turns a Solidity repository into an agent-run fuzzing campaign.
+Ultrafuzz turns a Solidity repository into an agent-run fuzzing campaign.
 Ultrafuzz owns the product surfaces users inspect and edit: root
 `ultrafuzz.toml`, `.ultrafuzz/topology.yml`, `.ultrafuzz/prompts/**`, pinned
 references, run evidence under `.ultrafuzz/runs/**`, and explicit
@@ -40,7 +40,7 @@ generated artifacts before copying anything into the target project.
 ## Documentation
 
 - [Start Here](docs/index.md)
-- [Beta Spec](docs/SPECS.md)
+- [Specification](docs/SPECS.md)
 - [Tutorials](docs/tutorials/index.md)
 - [How-To Guides](docs/how-to/index.md)
 - [Reference](docs/reference/index.md)

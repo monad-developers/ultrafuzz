@@ -1,8 +1,14 @@
 # Dashboard And API
 
-Dashboard/API is part of the beta product contract even when an implementation
-exposes only the CLI first. The current beta CLI deliberately does not expose
-`ultrafuzz dashboard`; dashboard behavior is specified here and in
+Dashboard/API is part of the product contract. The CLI exposes a local operator
+surface with:
+
+```bash
+ultrafuzz dashboard --project <project>
+```
+
+The server binds to loopback by default and serves the dashboard at the printed
+`/dashboard` URL. Dashboard behavior is specified here and in
 [SPECS.md](../SPECS.md).
 
 ## Product Surfaces
@@ -30,7 +36,7 @@ validation as the CLI. Invalid changes must be rejected without partial writes.
 
 ## Command Jobs
 
-Dashboard command jobs must map only to supported beta product operations:
+Dashboard command jobs must map only to supported product operations:
 
 ```text
 validate
@@ -65,8 +71,11 @@ relative paths, symlink escapes, and unsafe run IDs.
 The dashboard is a local operator tool. Do not expose it on an untrusted
 network interface.
 
+`ultrafuzz dashboard` accepts `--host`, `--port`, `--run-id`, and `--no-live`.
+The host must be loopback (`127.0.0.1`, `::1`, or `localhost`).
+
 ## Asset
 
 `docs/assets/ultrafuzz-dashboard.png` is a byte-for-byte copy of the original
 Ultrafuzz dashboard screenshot. Use it as visual context for the intended
-local operator UI; beta behavior is governed by this page and the beta spec.
+local operator UI; product behavior is governed by this page and the spec.

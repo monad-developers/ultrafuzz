@@ -20,9 +20,9 @@ Ultrafuzz keeps several design lessons visible in a Solidity fuzzing workflow:
 - Evaluate repeated campaigns with a fixed rubric instead of trusting a single
   run outcome.
 
-## What Is Different In Beta
+## What Is Different In Ultrafuzz
 
-Ultrafuzz Beta is repository-local and product-surface-first. The editable
+Ultrafuzz is repository-local and product-surface-first. The editable
 campaign state is root `ultrafuzz.toml` plus `.ultrafuzz/**`; generated workflow
 files are implementation plumbing. Topology owns graph semantics, prompts own
 agent instructions, references own pinned external context, and artifacts own

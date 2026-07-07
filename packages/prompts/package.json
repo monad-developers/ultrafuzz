@@ -1,6 +1,6 @@
 {
   "name": "@ultrafuzz/prompts",
-  "version": "0.0.2",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

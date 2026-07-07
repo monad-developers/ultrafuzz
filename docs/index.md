@@ -1,6 +1,6 @@
 # Start Here
 
-Ultrafuzz Beta runs agentic Solidity fuzzing campaigns against a target
+Ultrafuzz runs agentic Solidity fuzzing campaigns against a target
 repository. It scaffolds editable campaign topology and prompts, validates
 product state before launch, compiles a linked workflow, persists durable run
 evidence, and leaves generated changes reviewable until the operator explicitly

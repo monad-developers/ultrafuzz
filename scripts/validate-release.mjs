@@ -24,7 +24,7 @@ const overallStatus = failedCommands.length === 0 ? "pass" : "fail";
 
 const report = {
   schema_version: "ultrafuzz.release-validation.report.v1",
-  package_id: "ultrafuzz-beta",
+  package_id: "ultrafuzz",
   generated_at: new Date().toISOString(),
   project_root: root,
   report_path: path.relative(root, reportPath).split(path.sep).join("/"),

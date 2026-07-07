@@ -1,7 +1,7 @@
 # Materialize Generated Tests
 
 Generated tests and patches are run evidence until you explicitly copy reviewed
-files into the target repository. Beta materialization is copy-only; patch
+files into the target repository. Materialization is copy-only; patch
 application is rejected.
 
 ## Choose A Concrete Output

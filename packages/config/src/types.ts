@@ -60,6 +60,8 @@ export type WorkspaceMode = "git-worktree";
 
 export type TrustModel = "skip-permissions";
 
+export type AgentAuthMode = "api-key" | "subscription";
+
 export interface ProjectConfig {
   repo: string;
   name?: string;
@@ -87,6 +89,12 @@ export interface ModelsConfig {
   profiles: Record<string, ModelProfile>;
 }
 
+export interface AgentConfig {
+  auth: AgentAuthMode;
+  apiKeyEnv?: string;
+  configDir?: string;
+}
+
 export interface PermissionConfig {
   trustModel: TrustModel;
   promptReviewRequired: boolean;
@@ -109,6 +117,7 @@ export interface ResolvedConfig {
   project: ProjectConfig;
   run: RunConfig;
   models: ModelsConfig;
+  agents: Record<string, AgentConfig>;
   permissions: PermissionConfig;
   invariants: InvariantConfig;
   triage: TriageConfig;
@@ -129,6 +138,7 @@ export interface ProjectConfigInput {
     synthesizedDefault?: boolean;
     profiles?: Record<string, Partial<ModelProfile> & { id?: string }>;
   };
+  agents?: Record<string, Partial<AgentConfig>>;
   permissions?: Partial<PermissionConfig>;
   invariants?: Partial<InvariantConfig>;
   triage?: Partial<TriageConfig>;

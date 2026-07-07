@@ -189,6 +189,52 @@ test("findings normalize schema-versioned findings arrays", () => {
   ]);
 });
 
+test("findings normalize agent lifecycle statuses and flexible evidence references", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Generated test reproduces issue",
+        status: "reproduced_by_generated_test",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The generated test fails deterministically.",
+        evidence: [
+          "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
+          { note: "Generated test reproduces issue" }
+        ]
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.equal(report.count, 1);
+  assert.equal(report.findings[0]!.status, "reproduced_by_generated_test");
+  assert.deepEqual(report.findings[0]!.evidence, [
+    "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
+    { note: "Generated test reproduces issue" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Generated test reproduces issue",
+        status: "reproduced_by_generated_test",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The generated test fails deterministically.",
+        evidence: [{ kind: 123 }]
+      }
+    ])
+  );
+
+  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /field kind/);
+});
+
 test("findings metadata paths allow dot-prefixed generated roots but reject traversal", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
@@ -283,7 +329,7 @@ test("generated-test manifests persist explicit generated files with provenance"
   assert.equal(manifest.schema_version, "1.0");
   assert.equal(manifest.generated_tests.length, 1);
   assert.equal(manifest.generated_tests[0]!.path, "generated-tests/Invariant.t.sol");
-  assert.equal(manifest.generated_tests[0]!.provenance.agent_ref, "CodexAgent");
+  assert.equal(manifest.generated_tests[0]!.provenance!.agent_ref, "CodexAgent");
   assert.equal(
     fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
     true

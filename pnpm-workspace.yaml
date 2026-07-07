@@ -6,6 +6,7 @@ packages:
   - "packages/topology"
   - "packages/artifacts"
   - "packages/runtime"
+  - "packages/dashboard"
   - "packages/cli"
 allowBuilds:
   esbuild: true

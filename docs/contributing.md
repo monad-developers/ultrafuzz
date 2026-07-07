@@ -1,6 +1,6 @@
 # Contributing
 
-This repository is a TypeScript workspace for Ultrafuzz Beta.
+This repository is a TypeScript workspace for Ultrafuzz.
 
 ## Repository Map
 
@@ -22,7 +22,7 @@ Workspace packages live under `packages/`:
 - `@ultrafuzz/runtime`: project validation, planning, workflow compilation,
   lifecycle delegation, synchronization, materialization, cleanup, and report
   lookup.
-- `@ultrafuzz/cli`: the beta command surface.
+- `@ultrafuzz/cli`: the command surface.
 
 Bundled editable product assets live under `.ultrafuzz/` in this repository.
 Initialized target projects receive project-owned copies of the same product

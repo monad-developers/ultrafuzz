@@ -7,6 +7,8 @@ import {
   fail,
   hasErrors,
   ok,
+  type AgentAuthMode,
+  type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
   type LoadedProjectConfig,
@@ -21,6 +23,7 @@ const TOP_LEVEL_KEYS = new Set([
   "project",
   "run",
   "models",
+  "agents",
   "permissions",
   "invariants",
   "triage"
@@ -36,6 +39,7 @@ const RUN_KEYS = [
   "default_timeout_seconds"
 ] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "timeout_seconds"] as const;
+const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
 const INVARIANT_KEYS = ["property_priority_threshold", "invariant_testing_fuzzer_timeout"] as const;
 const TRIAGE_KEYS = ["quorum", "panel_size"] as const;
@@ -219,6 +223,40 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         ...config.models.profiles,
         [key]: modelProfile
       };
+    }
+  }
+
+  const agents = readTable(root, "agents", ["agents"], diagnostics);
+  if (agents) {
+    config.agents = {};
+    for (const [id, value] of Object.entries(agents).sort()) {
+      if (!isPlainObject(value)) {
+        pushTypeDiagnostic(["agents", id], "table", diagnostics);
+        continue;
+      }
+      const table = value as Record<string, unknown>;
+      collectUnknownKeys(table, new Set(AGENT_KEYS), ["agents", id], diagnostics);
+      const agentConfig: Partial<AgentConfig> = {};
+      readEnum(table, "auth", ["agents", id, "auth"], diagnostics, normalizeAgentAuthMode, (value) => {
+        agentConfig.auth = value;
+      });
+      readScalarFields(table, ["agents", id], diagnostics, [
+        {
+          key: "api_key_env",
+          type: "string",
+          assign: (value) => {
+            agentConfig.apiKeyEnv = value;
+          }
+        },
+        {
+          key: "config_dir",
+          type: "string",
+          assign: (value) => {
+            agentConfig.configDir = value;
+          }
+        }
+      ]);
+      config.agents[id] = agentConfig;
     }
   }
 
@@ -521,6 +559,16 @@ function normalizeWorkspaceMode(value: string): WorkspaceMode | undefined {
   switch (value.trim().toLowerCase().replaceAll("_", "-")) {
     case "git-worktree":
       return value.trim().toLowerCase().replaceAll("_", "-") as WorkspaceMode;
+    default:
+      return undefined;
+  }
+}
+
+function normalizeAgentAuthMode(value: string): AgentAuthMode | undefined {
+  switch (value.trim().toLowerCase().replaceAll("_", "-")) {
+    case "api-key":
+    case "subscription":
+      return value.trim().toLowerCase().replaceAll("_", "-") as AgentAuthMode;
     default:
       return undefined;
   }

@@ -1,6 +1,6 @@
 # Explanation
 
-Explanation pages describe why Ultrafuzz Beta is shaped the way it is. The
+Explanation pages describe why Ultrafuzz is shaped the way it is. The
 normative behavior is still [SPECS.md](../SPECS.md); these pages explain the
 product model behind that contract.
 

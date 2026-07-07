@@ -1,0 +1,165 @@
+name: Target Repository E2E
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target_repositories:
+        description: Optional JSON array of target objects with `name`, `repository`, `signal_profile`, and `expected_findings`; omit for defaults.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  ultrafuzz-target:
+    name: Ultrafuzz target (${{ matrix.target.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"}]') }}
+    env:
+      ULTRAFUZZ_E2E_DYNAMIC_STRATEGIES_ENUMERATOR: "1"
+      ULTRAFUZZ_E2E_INVARIANT_TIMEOUT: 2min
+      ULTRAFUZZ_E2E_MAX_PARALLEL_AGENTS: "1"
+      ULTRAFUZZ_E2E_NODE_TIMEOUT_SECONDS: "420"
+      ULTRAFUZZ_E2E_STRATEGY_LOOPS: "1"
+      ULTRAFUZZ_E2E_TRIAGE_PANEL_SIZE: "1"
+      ULTRAFUZZ_E2E_TRIAGE_QUORUM: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.3
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Prepare pnpm
+        run: corepack prepare pnpm@11.1.1 --activate
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Ultrafuzz
+        run: pnpm -w build
+
+      - name: Prepare Ultrafuzz CLI
+        run: |
+          mkdir -p .ci-bin
+          cat > .ci-bin/ultrafuzz <<'SH'
+          #!/usr/bin/env bash
+          exec node "$GITHUB_WORKSPACE/packages/cli/dist/index.js" "$@"
+          SH
+          chmod +x .ci-bin/ultrafuzz
+          echo "$GITHUB_WORKSPACE/.ci-bin" >> "$GITHUB_PATH"
+          .ci-bin/ultrafuzz --help
+
+      - name: Verify Codex API key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::Set OPENAI_API_KEY for the target repository E2E workflow."
+            exit 1
+          fi
+          echo "::add-mask::${OPENAI_API_KEY}"
+
+      - name: Install Codex sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap
+          if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict || true
+          fi
+          bwrap --version
+
+      - name: Install Codex CLI
+        run: |
+          if ! command -v codex >/dev/null 2>&1; then
+            curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if command -v codex >/dev/null 2>&1; then
+            codex --version
+          else
+            "$HOME/.local/bin/codex" --version
+          fi
+
+      - name: Authenticate Codex CLI
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: printenv OPENAI_API_KEY | codex login --with-api-key
+
+      - name: Verify Codex workspace-write sandbox
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          git -C "$tmp" init -q
+
+          set +e
+          printf 'Write exactly ok to sandbox-probe.txt in the current directory. Do not edit any other file.\n' \
+            | timeout 180 codex exec \
+                --sandbox workspace-write \
+                -c approval_policy=never \
+                --cd "$tmp" \
+                --json \
+                - > "$tmp/codex-probe.jsonl" 2> "$tmp/codex-probe.stderr.log"
+          status=$?
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Codex sandbox probe stderr"
+            sed -n '1,200p' "$tmp/codex-probe.stderr.log" >&2 || true
+            echo "::endgroup::"
+            echo "::group::Codex sandbox probe jsonl"
+            sed -n '1,200p' "$tmp/codex-probe.jsonl" || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+
+          if [ "$(tr -d '\r\n' < "$tmp/sandbox-probe.txt" 2>/dev/null)" != "ok" ]; then
+            echo "::error::Codex workspace-write sandbox probe did not create the expected file."
+            echo "::group::Codex sandbox probe stderr"
+            sed -n '1,200p' "$tmp/codex-probe.stderr.log" >&2 || true
+            echo "::endgroup::"
+            echo "::group::Codex sandbox probe jsonl"
+            sed -n '1,200p' "$tmp/codex-probe.jsonl" || true
+            echo "::endgroup::"
+            exit 1
+          fi
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run target repository E2E
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TARGET_NAME: ${{ matrix.target.name }}
+          TARGET_REPOSITORY: ${{ matrix.target.repository }}
+          ULTRAFUZZ_E2E_EXPECTED_FINDINGS: ${{ matrix.target.expected_findings || 'any' }}
+          ULTRAFUZZ_E2E_SIGNAL_PROFILE: ${{ matrix.target.signal_profile || 'control' }}
+          ULTRAFUZZ_BIN: ${{ github.workspace }}/.ci-bin/ultrafuzz
+        run: bash scripts/ci/run-target-e2e.sh "$TARGET_REPOSITORY"
+
+      - name: Upload E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ultrafuzz-target-e2e-${{ strategy.job-index }}
+          path: .codex-runs/e2e-targets/*/evidence/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

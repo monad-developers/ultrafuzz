@@ -208,16 +208,7 @@ function renderSmithersAgentsIndex(): string {
 }
 
 function renderSmithersCodexAgent(): string {
-  return [
-    'import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";',
-    "",
-    "export const CodexAgent = new SmithersCodexAgent({",
-    '  model: "gpt-5.5",',
-    "  skipGitRepoCheck: true,",
-    "  apiKey: process.env.OPENAI_API_KEY,",
-    "});",
-    ""
-  ].join("\n");
+  return loadRuntimeTemplate("smithers/agents/codex.tsx");
 }
 
 function uniqueSorted(values: string[]): string[] {
@@ -242,6 +233,25 @@ function defaultTopologyPath(): string {
   const found = candidates.find((candidate) => fs.existsSync(candidate));
   if (found === undefined) {
     throw new Error(`unable to locate topology.yml from ${here}`);
+  }
+  return found;
+}
+
+function loadRuntimeTemplate(relativePath: string): string {
+  return fs.readFileSync(runtimeTemplatePath(relativePath), "utf8");
+}
+
+function runtimeTemplatePath(relativePath: string): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const parts = relativePath.split("/");
+  const candidates = [
+    path.join(here, "templates", ...parts),
+    path.resolve(here, "../src/templates", ...parts),
+    path.resolve(here, "../../src/templates", ...parts)
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (found === undefined) {
+    throw new Error(`unable to locate runtime template ${relativePath} from ${here}`);
   }
   return found;
 }
