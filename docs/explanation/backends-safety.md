@@ -1,6 +1,6 @@
 # Agents, Workflow Boundary, and Safety
 
-Ultrafuzz Beta delegates agent execution to the configured workflow layer, but
+Ultrafuzz delegates agent execution to the configured workflow layer, but
 does not make that layer the product API. The stable user-facing surfaces are
 `ultrafuzz.toml`, `.ultrafuzz/topology.yml`, `.ultrafuzz/prompts/**`,
 `.ultrafuzz/references.yml`, run evidence, report artifacts, and explicit
@@ -25,10 +25,9 @@ operate on that linked workflow after product checks. The linked workflow ID is
 evidence for lifecycle operations, not a separate product API that users should
 script against directly.
 
-Dashboard/API is a beta product target: a local operator surface for topology,
-prompt, config, run evidence, reports, materialization, and cleanup. The current
-implementation remains CLI-first until the dashboard/API work tracked in #16
-lands.
+Dashboard/API is a product surface: a local loopback operator UI for
+topology, prompt, config, run evidence, reports, materialization, and cleanup.
+It remains scoped to product state rather than workflow-engine internals.
 
 ## Workspace Boundary
 
@@ -61,7 +60,7 @@ assumptions. They are not deterministic enforcement by Ultrafuzz.
 
 ## Materialization Boundary
 
-Materialization is explicit and copy-only in beta. Patch artifacts may exist as
+Materialization is explicit and copy-only. Patch artifacts may exist as
 evidence, but patch application is rejected until a safe patch applier exists.
 Materialized files are left as ordinary unstaged working-tree changes so the
 operator can review them with the usual repository tools.

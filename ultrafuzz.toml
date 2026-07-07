@@ -19,6 +19,10 @@ synthesized_default = true
 agent = "CodexAgent"
 model = "gpt-5.5"
 
+[agents.CodexAgent]
+auth = "api-key"
+api_key_env = "OPENAI_API_KEY"
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true

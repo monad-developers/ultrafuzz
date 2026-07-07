@@ -1,6 +1,6 @@
 # How-To Guides
 
-How-to guides solve specific Ultrafuzz beta tasks during or after a campaign.
+How-to guides solve specific Ultrafuzz tasks during or after a campaign.
 
 - [Edit Prompts and Topology](edit-prompts-topology.md)
 - [Resume, Replay, or Fork Runs](restart-continue.md)

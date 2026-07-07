@@ -2,6 +2,7 @@ node_modules
 dist
 dist-test
 coverage
+.smithers
 .worktrees
 .ultrafuzz
 pnpm-lock.yaml
@@ -10,3 +11,4 @@ packages/*/dist
 packages/*/dist-test
 
 prompts/**/*.md
+scripts/ci/target-e2e-fixture/prompts/**/*.md

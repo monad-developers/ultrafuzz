@@ -25,7 +25,7 @@ export const TRIAGE_CLASSIFICATIONS = [
   "defensive-hardening"
 ] as const;
 
-export type FindingStatus = (typeof FINDING_STATUSES)[number];
+export type FindingStatus = string;
 export type TriageClassification = (typeof TRIAGE_CLASSIFICATIONS)[number];
 
 export interface FindingProvenance {
@@ -121,7 +121,7 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   normalized.id =
     optionalString(value, "id") ?? `${nodeId === undefined ? "finding" : validateSafeId(nodeId, "node ID")}-${index}`;
   normalized.title = requiredString(value, "title", index);
-  normalized.status = requiredEnum(value, "status", FINDING_STATUSES, index);
+  normalized.status = requiredString(value, "status", index);
   normalized.severity_guess = requiredString(value, "severity_guess", index);
   normalized.confidence = requiredString(value, "confidence", index);
   normalized.summary = requiredString(value, "summary", index);
@@ -237,15 +237,18 @@ function validateEvidence(value: unknown, index: number): void {
     throw new Error(`finding ${index} evidence must be an array`);
   }
   for (const entry of value) {
+    if (typeof entry === "string") {
+      if (entry.trim().length === 0) {
+        throw new Error(`finding ${index} evidence entries must be non-empty strings or objects`);
+      }
+      continue;
+    }
     if (!isPlainRecord(entry)) {
-      throw new Error(`finding ${index} evidence entries must be objects`);
+      throw new Error(`finding ${index} evidence entries must be non-empty strings or objects`);
     }
-    const kind = optionalString(entry, "kind");
+    optionalString(entry, "kind");
     const evidencePath = optionalString(entry, "path");
-    if (kind === undefined || evidencePath === undefined) {
-      throw new Error(`finding ${index} evidence entries require kind and path`);
-    }
-    if (!path.isAbsolute(evidencePath)) {
+    if (evidencePath !== undefined && !path.isAbsolute(evidencePath)) {
       validateFindingMetadataRelativePath(evidencePath, "evidence path");
     }
   }

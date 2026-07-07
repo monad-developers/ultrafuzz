@@ -1,13 +1,17 @@
 # Use The Dashboard
 
-Dashboard/API is a beta product requirement, but this reset may ship a
-CLI-only operator surface first. The current beta CLI does not expose
-`ultrafuzz dashboard`; use this guide as the dashboard workflow target and use
-the listed CLI commands until the dashboard implementation lands.
+The dashboard is a local loopback operator surface over the same beta product
+state used by the CLI. Start it with:
+
+```bash
+ultrafuzz dashboard --project <project>
+```
+
+Open the printed `/dashboard` URL in a local browser.
 
 ## Prepare A Run
 
-Start from a validated beta project:
+Start from a validated project:
 
 ```bash
 ultrafuzz init --project <project>
@@ -28,11 +32,11 @@ ultrafuzz.toml
 
 ## Inspect The Graph
 
-The dashboard should show logical topology nodes by default. Expanded strategy
-loops and model fan-out may appear in technical details, but graph edits should
-map back to `.ultrafuzz/topology.yml`.
+The dashboard shows logical topology nodes by default. Expanded strategy loops
+and model fan-out appear in technical details, while graph edits map back to
+`.ultrafuzz/topology.yml`.
 
-Until the dashboard is available, inspect the same run evidence with:
+You can inspect the same run evidence from the CLI with:
 
 ```bash
 ultrafuzz ps --project <project>
@@ -42,16 +46,15 @@ ultrafuzz report --project <project> <run-id>
 
 ## Edit Project Assets
 
-Dashboard editors should save only beta product inputs:
+Dashboard editors save only product inputs:
 
 - Runtime settings in root `ultrafuzz.toml`.
 - Campaign graph changes in `.ultrafuzz/topology.yml`.
 - Prompt text in `.ultrafuzz/prompts/**`.
 - Reference catalog state through the explicit references flow.
 
-Edits must validate before they are accepted and must not leave partial writes
-after failed validation. For the CLI equivalent, edit the files directly and
-run:
+Edits validate before they are accepted and must not leave partial writes after
+failed validation. For the CLI equivalent, edit the files directly and run:
 
 ```bash
 ultrafuzz validate --project <project>
@@ -59,7 +62,7 @@ ultrafuzz validate --project <project>
 
 ## Run Product Operations
 
-Dashboard command jobs must map to current beta CLI operations:
+Dashboard command jobs must map to current CLI operations:
 
 ```text
 validate

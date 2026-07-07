@@ -29,6 +29,10 @@ describe("config loading and resolution", () => {
       panelSize: DEFAULT_TRIAGE_PANEL_SIZE
     });
     expect(resolved.value.triage).toEqual({ quorum: 3, panelSize: 4 });
+    expect(resolved.value.agents.CodexAgent).toEqual({
+      auth: "api-key",
+      apiKeyEnv: "OPENAI_API_KEY"
+    });
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
@@ -46,6 +50,10 @@ default = "project-model"
 [models.project-model]
 agent = "CodexAgent"
 model = "gpt-5.5"
+
+[agents.CodexAgent]
+auth = "subscription"
+config_dir = ".codex/team"
 `);
     expect(project.ok).toBe(true);
     if (!project.ok) return;
@@ -78,6 +86,11 @@ model = "gpt-5.5"
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
     expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");
+    expect(resolved.value.agents.CodexAgent).toEqual({
+      auth: "subscription",
+      apiKeyEnv: "OPENAI_API_KEY",
+      configDir: ".codex/team"
+    });
   });
 
   it("returns typed diagnostics for invalid TOML fields and rejects legacy backend tables", () => {
@@ -93,6 +106,40 @@ default = "mock"
     expect(parsed.diagnostics.map((entry) => entry.code)).toEqual(
       expect.arrayContaining(["CONFIG_FIELD_TYPE_INVALID", "CONFIG_UNKNOWN_FIELD"])
     );
+  });
+
+  it("validates Codex agent auth configuration", () => {
+    const parsed = parseProjectConfigToml(`
+[agents.CodexAgent]
+auth = "api-key"
+api_key_env = "OPENAI_API_KEY"
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.agents?.CodexAgent?.auth).toBe("api-key");
+    expect(parsed.value.agents?.CodexAgent?.apiKeyEnv).toBe("OPENAI_API_KEY");
+
+    const invalid = resolveConfig({
+      env: {},
+      projectConfig: {
+        agents: {
+          CodexAgent: {
+            auth: "api-key",
+            apiKeyEnv: "not valid"
+          }
+        }
+      }
+    });
+    expect(invalid.ok).toBe(false);
+    if (invalid.ok) return;
+    expect(invalid.diagnostics.map((entry) => entry.code)).toContain("CONFIG_AGENT_API_KEY_ENV_INVALID");
+
+    const defaultResolved = resolveConfig({ env: {} });
+    expect(defaultResolved.ok).toBe(true);
+    if (!defaultResolved.ok) return;
+    const serialized = serializeRedactedResolvedConfigToml(defaultResolved.value);
+    expect(serialized).toContain("[agents.CodexAgent]");
+    expect(serialized).toContain('auth = "api-key"');
   });
 
   it("loads ultrafuzz.toml from disk", async () => {

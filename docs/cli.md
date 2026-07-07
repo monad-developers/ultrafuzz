@@ -19,10 +19,10 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `report <run-id>`      | Show the agent-written final report artifact.                                                                             |
 | `materialize <run-id>` | Copy selected outputs into the project after confirmation and path checks.                                                |
 | `clean <run-id>`       | Remove selected generated paths after confirmation and path checks.                                                       |
+| `dashboard`            | Serve the local loopback dashboard and API.                                                                               |
 
-The table above is the current CLI command surface. Dashboard/API behavior is
-specified as a product requirement in [SPECS.md](SPECS.md), but it is not
-exposed as a CLI verb.
+The dashboard/API is a local operator surface over product state, not a
+workflow-engine API.
 
 `init` may create implementation plumbing for the workflow adapter. That
 plumbing is not an end-user API. User-owned configuration, prompts, topology,

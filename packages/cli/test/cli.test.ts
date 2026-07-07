@@ -115,6 +115,101 @@ function assertNoSmithersSurface(value: unknown): void {
   }
 }
 
+function writeRunAccounting(
+  runRoot: string,
+  accounting: { totalTokens: number; tokensUsed: string; estimatedSpend: string; partialPricing: boolean }
+): void {
+  const runMetadataPath = path.join(runRoot, "run.json");
+  const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
+  const summary = {
+    input_tokens: accounting.totalTokens,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: accounting.totalTokens,
+    tokens_used: accounting.tokensUsed,
+    estimated_spend: accounting.estimatedSpend,
+    estimated_spend_usd: Number(accounting.estimatedSpend.replace(/[$,+]/gu, "")),
+    partial_pricing: accounting.partialPricing,
+    event_count: accounting.partialPricing ? 2 : 1,
+    priced_event_count: 1,
+    unpriced_event_count: accounting.partialPricing ? 1 : 0,
+    models: ["gpt-test"],
+    agents: ["codex"]
+  };
+  fs.writeFileSync(
+    runMetadataPath,
+    `${JSON.stringify(
+      {
+        ...runMetadata,
+        accounting: {
+          schema_version: "1.0",
+          source: "workflow-events",
+          workflow_run_id: "ultrafuzz-cli-run",
+          current: summary,
+          cumulative: {
+            ...summary,
+            source_run_ids: []
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+}
+
+function writeFinalReportAccounting(
+  runRoot: string,
+  accounting: { tokensUsed: string; estimatedSpend: string; partialPricing: boolean }
+): string {
+  const reportDir = path.join(runRoot, "artifacts", "final-report");
+  fs.mkdirSync(reportDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(reportDir, "report.md"),
+    [
+      "# Agent report",
+      "",
+      "## Run summary",
+      "",
+      `- Tokens used: \`${accounting.tokensUsed}\``,
+      `- Estimated spend: \`${accounting.estimatedSpend}\``,
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(reportDir, "report.json"),
+    `${JSON.stringify(
+      {
+        schema_version: "1.0",
+        run_metadata: {
+          tokens_used: accounting.tokensUsed,
+          estimated_spend: accounting.estimatedSpend,
+          partial_pricing: accounting.partialPricing,
+          source_run_ids: []
+        },
+        issues: [],
+        non_production_outcomes: []
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  return reportDir;
+}
+
+function accountingMismatchCount(value: Record<string, unknown>): number {
+  return (
+    (value.diagnostics as Array<{ code?: string }> | undefined)?.filter(
+      (diagnostic) => diagnostic.code === "REPORT_ACCOUNTING_MISMATCH"
+    ).length ?? 0
+  );
+}
+
 test("init and validate emit schema-versioned launch JSON", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# owned\n", "utf8");
@@ -198,15 +293,78 @@ test("run, ps, inspect, report, materialize, clean, and lifecycle commands expos
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
   fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  const runMetadataPath = path.join(runData.run_root, "run.json");
+  const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(
+    runMetadataPath,
+    `${JSON.stringify(
+      {
+        ...runMetadata,
+        accounting: {
+          schema_version: "1.0",
+          source: "workflow-events",
+          workflow_run_id: "ultrafuzz-cli-run",
+          current: {
+            input_tokens: 100,
+            output_tokens: 23,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 123,
+            tokens_used: "123",
+            estimated_spend: "$0.46+",
+            estimated_spend_usd: 0.46,
+            partial_pricing: true,
+            event_count: 2,
+            priced_event_count: 1,
+            unpriced_event_count: 1,
+            models: ["gpt-test"],
+            agents: ["codex"]
+          },
+          cumulative: {
+            input_tokens: 100,
+            output_tokens: 23,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 123,
+            tokens_used: "123",
+            estimated_spend: "$0.46+",
+            estimated_spend_usd: 0.46,
+            partial_pricing: true,
+            event_count: 2,
+            priced_event_count: 1,
+            unpriced_event_count: 1,
+            models: ["gpt-test"],
+            agents: ["codex"],
+            source_run_ids: []
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
   const reportDir = path.join(runData.run_root, "artifacts", "final-report");
   fs.mkdirSync(reportDir, { recursive: true });
-  fs.writeFileSync(path.join(reportDir, "report.md"), "# Agent report\n", "utf8");
-  fs.writeFileSync(path.join(reportDir, "report.json"), '{"ok":true}\n', "utf8");
+  fs.writeFileSync(
+    path.join(reportDir, "report.md"),
+    "# Agent report\n\n- Tokens used: unavailable\n- Estimated spend: unavailable\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(reportDir, "report.json"),
+    '{"run_metadata":{"tokens_used":"unavailable","estimated_spend":"unavailable"}}\n',
+    "utf8"
+  );
 
   const report = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(report.code, 0, report.stderr);
-  assertNoSmithersSurface(parseJson(report));
-  assert.equal((parseJson(report).data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+  const reportBody = parseJson(report);
+  assertNoSmithersSurface(reportBody);
+  assert.equal((reportBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+  assert.equal(accountingMismatchCount(reportBody), 4);
 
   const escapedReport = await cli(project, ["report", "../../outside", "--json"]);
   const escapedReportBody = parseJson(escapedReport);
@@ -344,4 +502,53 @@ test("runtime command failures emit a failing exit code with JSON", async () => 
   assert.equal(body.ok, false, JSON.stringify(body));
   assertNoSmithersSurface(body);
   assert.match(JSON.stringify(body.diagnostics), /AGENT_REFERENCE_UNKNOWN/);
+});
+
+test("report accepts populated accounting snapshots and preserves partial-pricing marker", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+
+  const env = fakeSmithersEnv(project);
+  const run = await cli(project, ["run", "--run-id", "report-accounting", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runData = parseJson(run).data as { run_id: string; run_root: string };
+
+  writeRunAccounting(runData.run_root, {
+    totalTokens: 56_523,
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.16+",
+    partialPricing: true
+  });
+  const reportDir = writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.16+",
+    partialPricing: true
+  });
+
+  const initialReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(initialReport.code, 0, initialReport.stderr);
+  const initialBody = parseJson(initialReport);
+  assert.equal(accountingMismatchCount(initialBody), 0);
+  assert.equal((initialBody.data as { json_path?: string }).json_path, path.join(reportDir, "report.json"));
+
+  writeRunAccounting(runData.run_root, {
+    totalTokens: 725_905,
+    tokensUsed: "725,905",
+    estimatedSpend: "$1.98+",
+    partialPricing: true
+  });
+
+  const postSyncReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(postSyncReport.code, 0, postSyncReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(postSyncReport)), 0);
+
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.16",
+    partialPricing: true
+  });
+  const missingPlusReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(missingPlusReport.code, 0, missingPlusReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 2);
 });

@@ -1,0 +1,63 @@
+version: 1
+defaults:
+  strategy_loops: 1
+groups:
+  setup:
+    label: Setup
+    color: "#2563eb"
+  strategies:
+    label: Strategies
+    color: "#0f766e"
+  review:
+    label: Review
+    color: "#7c3aed"
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    model_profiles:
+      - ci
+    group: setup
+    depends_on:
+      - __start__
+    required_artifacts:
+      - setup/project-discovery.md
+      - findings.json
+    primary_artifact: setup/project-discovery.md
+    timeout_seconds: __NODE_TIMEOUT__
+  - id: signal-analysis
+    kind: agentic
+    prompt: strategies/signal-analysis.md
+    model_profiles:
+      - ci
+    group: strategies
+    depends_on:
+      - project-discovery
+    required_artifacts:
+      - signal-analysis.md
+      - generated-tests.json
+      - findings.json
+    primary_artifact: findings.json
+    timeout_seconds: __NODE_TIMEOUT__
+  - id: final-report
+    kind: agentic
+    prompt: review/final-report.md
+    model_profiles:
+      - ci
+    group: review
+    depends_on:
+      - signal-analysis
+    required_artifacts:
+      - report.md
+      - report.json
+    primary_artifact: report.md
+    timeout_seconds: __NODE_TIMEOUT__
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - final-report

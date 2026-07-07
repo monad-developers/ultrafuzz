@@ -1,6 +1,6 @@
 # Development Commands
 
-Ultrafuzz Beta is a TypeScript workspace managed with `pnpm`.
+Ultrafuzz is a TypeScript workspace managed with `pnpm`.
 
 ## Workspace Checks
 

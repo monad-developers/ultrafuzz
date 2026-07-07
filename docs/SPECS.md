@@ -1,7 +1,7 @@
-# Ultrafuzz Beta Specification
+# Ultrafuzz Specification
 
-This document is the Ultrafuzz Beta product specification. It describes the
-behavior the TypeScript beta implementation is expected to provide, independent
+This document is the Ultrafuzz product specification. It describes the
+behavior the TypeScript implementation is expected to provide, independent
 of the workflow engine, process supervisor, UI framework, or package layout used
 internally.
 
@@ -9,9 +9,10 @@ The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are normative.
 
 ## Sources And Scope
 
-`ultrafuzz-beta` is the normative source for this spec. When older Ultrafuzz
-documents or implementations disagree with beta behavior, beta behavior wins
-unless this repository intentionally changes the product contract.
+This repository is the normative source for this spec. When older Ultrafuzz
+documents or implementations disagree with this specification, this
+specification wins unless this repository intentionally changes the product
+contract.
 
 Ultrafuzz is an agentic campaign orchestrator for Solidity smart contract
 fuzzing. It initializes a project with editable campaign inputs, validates those
@@ -55,7 +56,7 @@ implementation plumbing and are not a stable user API.
 
 ## CLI Surface
 
-The beta CLI product surface consists of:
+The CLI product surface consists of:
 
 | Command                | Required behavior                                                                                                          |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -84,7 +85,7 @@ define typed project/run settings, model profiles, permission posture, invariant
 defaults, and triage defaults. Strategy execution behavior MUST be selected in
 topology, not in TOML.
 
-A compatible beta config MUST support:
+A compatible config MUST support:
 
 - `schema_version`
 - `dynamic_strategies_enumerator`
@@ -100,7 +101,7 @@ A compatible beta config MUST support:
 - `[triage] quorum` and `panel_size`
 
 `run.workspace_mode` MUST be `git-worktree`. Other workspace modes are outside
-the beta product contract.
+the product contract.
 
 Unknown TOML keys MUST fail validation. Model profile IDs and agent references
 MUST use safe identifiers. Omitted model selection in topology MUST resolve to
@@ -220,7 +221,7 @@ Prompt rendering MUST happen before workflow launch and the rendered prompt
 MUST be stored as a node artifact. Unknown template variables MUST fail
 validation.
 
-The beta prompt variable set includes:
+The prompt variable set includes:
 
 - `repo_path`
 - `workspace_path`
@@ -311,7 +312,8 @@ Findings MUST be arrays in `findings.json`. Each normalized finding MUST
 include `schema_version`, `id`, `title`, `status`, `severity_guess`,
 `confidence`, and `summary`.
 
-Finding `status` MUST be one of:
+Finding `status` MUST be a non-empty lifecycle string. Canonical values
+include:
 
 - `candidate`
 - `needs-review`
@@ -320,6 +322,9 @@ Finding `status` MUST be one of:
 - `confirmed`
 - `fixed`
 - `wont-fix`
+
+Agent-produced lifecycle statuses SHOULD be preserved when they are non-empty
+strings.
 
 When present, `triage_classification` MUST be one of:
 
@@ -335,6 +340,10 @@ When present, `triage_classification` MUST be one of:
 Findings SHOULD preserve source node, strategy, attempt index, model profile,
 model name, model index, loop index, affected files/functions, evidence,
 patch references, notes, and dedupe or family metadata when available.
+`evidence` entries MAY be non-empty string references or objects with optional
+`kind`, `path`, and additional metadata. When present, object `kind` and `path`
+values MUST be non-empty strings, and relative evidence paths MUST remain safe
+artifact-relative paths.
 
 Default review flows SHOULD deduplicate findings, classify severity, aggregate
 generated tests, and write final report artifacts. `ultrafuzz report` MUST read
@@ -347,14 +356,14 @@ artifacts/final-report/report.json
 
 ## Materialization And Cleanup
 
-Materialization MUST be explicit, selected, confirmed, and path-safe. The beta
+Materialization MUST be explicit, selected, confirmed, and path-safe. The
 materialization surface is copy-only. Patch artifacts MAY exist as evidence, but
 patch application MUST be rejected until a safe patch applier is implemented.
 
 Materialized files SHOULD be left as ordinary unstaged working-tree changes.
 Repository mutation constraints such as no commit, push, pull request, external
 submission, staging, or merge are prompt-level trust assumptions and SHOULD be
-expressed in prompts. Beta does not treat those constraints as deterministic
+expressed in prompts. Ultrafuzz does not treat those constraints as deterministic
 repository-mutation enforcement.
 
 Cleanup MUST remove only selected generated `.ultrafuzz/**` paths after
@@ -375,10 +384,10 @@ values before persistence.
 
 ## Dashboard And API Expectations
 
-Dashboard/API is a beta product requirement even when a CLI-only implementation
-ships first. The target UX SHOULD match the original Ultrafuzz direction: a
-local operator UI for graph inspection, run status, evidence, prompt editing,
-topology editing, config review, report review, materialization, and cleanup.
+Dashboard/API is a product requirement. The target UX SHOULD match the
+original Ultrafuzz direction: a local operator UI for graph inspection, run
+status, evidence, prompt editing, topology editing, config review, report
+review, materialization, and cleanup.
 
 Dashboard/API servers MUST bind to loopback by default. Mutating APIs MUST use
 local request protections and a cryptographically random session token. Path

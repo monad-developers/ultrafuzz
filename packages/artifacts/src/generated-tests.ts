@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { z } from "zod/v4";
+
 import { type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
 import {
@@ -12,10 +14,13 @@ import {
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
+import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const GENERATED_TESTS_SCHEMA_VERSION = "1.0";
 export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
+export const GENERATED_TESTS_JSON_SCHEMA_ID =
+  "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/generated-tests" as const;
 
 export interface GeneratedTestInput {
   path: string;
@@ -28,9 +33,9 @@ export interface GeneratedTestInput {
 
 export interface GeneratedTestEntry {
   path: string;
-  size_bytes: number;
-  sha256: string;
-  provenance: ArtifactProvenance;
+  size_bytes?: number;
+  sha256?: string;
+  provenance?: ArtifactProvenance;
   language?: string;
   framework?: string;
   description?: string;
@@ -41,7 +46,140 @@ export interface GeneratedTestManifest {
   run_id: string;
   node_id: string;
   generated_tests: GeneratedTestEntry[];
-  provenance: ArtifactProvenance;
+  provenance?: ArtifactProvenance;
+}
+
+const nonEmptyString = z.string().min(1);
+const nonNegativeInteger = z.number().int().nonnegative();
+
+const artifactProvenanceSchema = z.looseObject({
+  producer_node_id: nonEmptyString.optional(),
+  run_id: nonEmptyString.optional(),
+  logical_node_id: nonEmptyString.optional(),
+  attempt_index: nonNegativeInteger.optional(),
+  loop_index: nonNegativeInteger.optional(),
+  model_id: nonEmptyString.optional(),
+  model: nonEmptyString.optional(),
+  model_index: nonNegativeInteger.optional(),
+  agent_ref: nonEmptyString.optional(),
+  workflow_run_id: nonEmptyString.optional(),
+  workflow_task_id: nonEmptyString.optional(),
+  source_run_id: nonEmptyString.optional(),
+  origin: nonEmptyString.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional()
+});
+
+const generatedTestPathSchema = nonEmptyString.refine((value) => isSafeGeneratedTestManifestPath(value), {
+  message: `path must use the ${GENERATED_TESTS_DIR}/<file> prefix and stay inside that directory`
+});
+
+export const generatedTestEntrySchema = z.looseObject({
+  path: generatedTestPathSchema,
+  size_bytes: nonNegativeInteger.optional(),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional(),
+  provenance: artifactProvenanceSchema.optional(),
+  language: nonEmptyString.optional(),
+  framework: nonEmptyString.optional(),
+  description: nonEmptyString.optional()
+});
+
+export const generatedTestManifestSchema = z.looseObject({
+  schema_version: z.literal(GENERATED_TESTS_SCHEMA_VERSION),
+  run_id: nonEmptyString,
+  node_id: nonEmptyString,
+  generated_tests: z.array(generatedTestEntrySchema),
+  provenance: artifactProvenanceSchema.optional()
+});
+
+export const generatedTestsJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: GENERATED_TESTS_JSON_SCHEMA_ID,
+  title: "Ultrafuzz generated tests manifest",
+  type: "object",
+  required: ["schema_version", "run_id", "node_id", "generated_tests"],
+  additionalProperties: true,
+  properties: {
+    schema_version: { const: GENERATED_TESTS_SCHEMA_VERSION },
+    run_id: { type: "string", minLength: 1 },
+    node_id: { type: "string", minLength: 1 },
+    generated_tests: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["path"],
+        additionalProperties: true,
+        properties: {
+          path: { type: "string", pattern: "^generated-tests\\/.+" },
+          size_bytes: { type: "integer", minimum: 0 },
+          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          provenance: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              producer_node_id: { type: "string", minLength: 1 },
+              run_id: { type: "string", minLength: 1 },
+              logical_node_id: { type: "string", minLength: 1 },
+              attempt_index: { type: "integer", minimum: 0 },
+              loop_index: { type: "integer", minimum: 0 },
+              model_id: { type: "string", minLength: 1 },
+              model: { type: "string", minLength: 1 },
+              model_index: { type: "integer", minimum: 0 },
+              agent_ref: { type: "string", minLength: 1 },
+              workflow_run_id: { type: "string", minLength: 1 },
+              workflow_task_id: { type: "string", minLength: 1 },
+              source_run_id: { type: "string", minLength: 1 },
+              origin: { type: "string", minLength: 1 },
+              metadata: { type: "object", additionalProperties: true }
+            }
+          },
+          language: { type: "string", minLength: 1 },
+          framework: { type: "string", minLength: 1 },
+          description: { type: "string", minLength: 1 }
+        }
+      }
+    },
+    provenance: {
+      type: "object",
+      additionalProperties: true,
+      properties: {
+        producer_node_id: { type: "string", minLength: 1 },
+        run_id: { type: "string", minLength: 1 },
+        logical_node_id: { type: "string", minLength: 1 },
+        attempt_index: { type: "integer", minimum: 0 },
+        loop_index: { type: "integer", minimum: 0 },
+        model_id: { type: "string", minLength: 1 },
+        model: { type: "string", minLength: 1 },
+        model_index: { type: "integer", minimum: 0 },
+        agent_ref: { type: "string", minLength: 1 },
+        workflow_run_id: { type: "string", minLength: 1 },
+        workflow_task_id: { type: "string", minLength: 1 },
+        source_run_id: { type: "string", minLength: 1 },
+        origin: { type: "string", minLength: 1 },
+        metadata: { type: "object", additionalProperties: true }
+      }
+    }
+  }
+} as const;
+
+export function validateGeneratedTestManifestSchema(
+  value: unknown,
+  path = "$"
+): SchemaValidationResult<GeneratedTestManifest> {
+  return validateWithZod(generatedTestManifestSchema as z.ZodType<GeneratedTestManifest>, value, {
+    path,
+    code: "GENERATED_TEST_MANIFEST_SCHEMA_INVALID"
+  });
+}
+
+export function assertGeneratedTestManifestSchema(value: unknown): GeneratedTestManifest {
+  const result = validateGeneratedTestManifestSchema(value);
+  if (!result.ok || !result.value) {
+    throw new Error(schemaErrorMessage("generated tests manifest", result.issues));
+  }
+  return result.value;
 }
 
 export function writeGeneratedTestManifest(input: {
@@ -66,7 +204,21 @@ export function writeGeneratedTestManifest(input: {
 }
 
 export function readGeneratedTestManifest(layout: RunLayout, nodeId: string): GeneratedTestManifest {
-  return readJsonFile<GeneratedTestManifest>(path.join(getNodeArtifactDir(layout, nodeId), GENERATED_TESTS_MANIFEST));
+  return assertGeneratedTestManifestSchema(
+    readJsonFile(path.join(getNodeArtifactDir(layout, nodeId), GENERATED_TESTS_MANIFEST))
+  );
+}
+
+function isSafeGeneratedTestManifestPath(value: string): boolean {
+  if (!value.startsWith(`${GENERATED_TESTS_DIR}/`)) {
+    return false;
+  }
+  try {
+    normalizeSafeRelativePath(stripGeneratedTestsPrefix(value), "generated test manifest path");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function writeGeneratedTestEntry(

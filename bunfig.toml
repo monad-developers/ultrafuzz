@@ -1,0 +1,8 @@
+[test]
+pathIgnorePatterns = [
+  "**/dist/**",
+  "**/dist-test/**",
+  "packages/runtime/test/**",
+  "packages/cli/test/**"
+]
+timeout = 120000

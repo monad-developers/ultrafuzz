@@ -1,3 +1,4 @@
+import { z, type ZodIssue } from "zod/v4";
 import {
   DEFAULT_AGENT,
   DEFAULT_MODEL_PROFILE_ID,
@@ -6,6 +7,7 @@ import {
   createDefaultPromptMetadataLayer,
   createDefaultResolvedConfig
 } from "./defaults.js";
+import { validateAgentConfigs } from "./agents.js";
 import { syncDefaultModelProfile, validateModelProfiles, validProfileId } from "./model-profiles.js";
 import { validateTriageConfig } from "./triage.js";
 import {
@@ -13,6 +15,7 @@ import {
   fail,
   hasErrors,
   ok,
+  type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
   type PermissionConfig,
@@ -20,9 +23,60 @@ import {
   type PromptMetadataLayer,
   type ResolveConfigInput,
   type ResolvedConfig,
-  type RuntimeConfigOverrides,
-  type WorkspaceMode
+  type RuntimeConfigOverrides
 } from "./types.js";
+
+const positiveIntegerSchema = z.number().int().positive();
+const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
+const nonEmptyStringSchema = z.string().refine((value) => value.trim().length > 0);
+const projectLocalPathSchema = z.string().superRefine((value, context) => {
+  if (value.length === 0) {
+    context.addIssue({ code: "custom", message: "CONFIG_PATH_EMPTY" });
+    return;
+  }
+  if (value === ".") {
+    return;
+  }
+  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) {
+    context.addIssue({ code: "custom", message: "CONFIG_PATH_ABSOLUTE" });
+    return;
+  }
+  if (value.split(/[\\/]/).some((part) => part.length === 0 || part === "." || part === "..")) {
+    context.addIssue({ code: "custom", message: "CONFIG_PATH_TRAVERSAL" });
+  }
+});
+
+const resolvedConfigValidationSchema = z
+  .object({
+    schemaVersion: nonEmptyStringSchema,
+    dynamicStrategiesEnumerator: positiveIntegerSchema,
+    project: z
+      .object({
+        repo: projectLocalPathSchema
+      })
+      .passthrough(),
+    run: z
+      .object({
+        outputDir: projectLocalPathSchema,
+        maxParallelAgents: positiveIntegerSchema,
+        maxParallelNodes: positiveIntegerSchema,
+        defaultTimeoutSeconds: timeoutSecondsSchema,
+        workspaceMode: z.literal("git-worktree")
+      })
+      .passthrough(),
+    invariants: z
+      .object({
+        propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
+        invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema
+      })
+      .passthrough(),
+    permissions: z
+      .object({
+        trustModel: z.literal("skip-permissions")
+      })
+      .passthrough()
+  })
+  .passthrough();
 
 export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<ResolvedConfig> {
   const diagnostics: ConfigDiagnostic[] = [];
@@ -51,77 +105,10 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
 }
 
 export function validateResolvedConfig(config: ResolvedConfig): ConfigDiagnostic[] {
-  const diagnostics: ConfigDiagnostic[] = [];
-
-  if (config.schemaVersion.trim().length === 0) {
-    diagnostics.push(
-      diagnostic("CONFIG_SCHEMA_VERSION_EMPTY", "schema_version cannot be empty", ["schema_version"], "validation")
-    );
-  }
-  pushPositiveIntegerDiagnostic(
-    config.dynamicStrategiesEnumerator,
-    ["dynamic_strategies_enumerator"],
-    "dynamic_strategies_enumerator",
-    diagnostics
+  const diagnostics = schemaIssues(resolvedConfigValidationSchema, config).map((issue) =>
+    resolvedConfigDiagnostic(issue, config)
   );
-  pushProjectLocalPathDiagnostic(config.project.repo, ["project", "repo"], "project.repo", diagnostics);
-  pushProjectLocalPathDiagnostic(config.run.outputDir, ["run", "output_dir"], "run.output_dir", diagnostics);
-  pushPositiveIntegerDiagnostic(
-    config.run.maxParallelAgents,
-    ["run", "max_parallel_agents"],
-    "run.max_parallel_agents",
-    diagnostics
-  );
-  pushPositiveIntegerDiagnostic(
-    config.run.maxParallelNodes,
-    ["run", "max_parallel_nodes"],
-    "run.max_parallel_nodes",
-    diagnostics
-  );
-  pushTimeoutDiagnostic(
-    config.run.defaultTimeoutSeconds,
-    ["run", "default_timeout_seconds"],
-    "run.default_timeout_seconds",
-    diagnostics
-  );
-  if (!isWorkspaceMode(config.run.workspaceMode)) {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_WORKSPACE_MODE_INVALID",
-        `run.workspace_mode \`${String(config.run.workspaceMode)}\` is not supported`,
-        ["run", "workspace_mode"],
-        "validation"
-      )
-    );
-  }
-  if (!["high", "medium", "low"].includes(config.invariants.propertyPriorityThreshold)) {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_INVARIANT_PRIORITY_INVALID",
-        "invariants.property_priority_threshold must be high, medium, or low",
-        ["invariants", "property_priority_threshold"],
-        "validation"
-      )
-    );
-  }
-  pushTimeoutDiagnostic(
-    config.invariants.invariantTestingFuzzerTimeoutSeconds,
-    ["invariants", "invariant_testing_fuzzer_timeout"],
-    "invariants.invariant_testing_fuzzer_timeout",
-    diagnostics
-  );
-
-  if (config.permissions.trustModel !== "skip-permissions") {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_TRUST_MODEL_INVALID",
-        "permissions.trust_model must be skip-permissions",
-        ["permissions", "trust_model"],
-        "validation"
-      )
-    );
-  }
-
+  diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
   return diagnostics;
@@ -157,6 +144,13 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
       agent: profile.agent,
       model: profile.model,
       timeout_seconds: profile.timeoutSeconds
+    });
+  }
+  for (const [id, agent] of Object.entries(clone.agents)) {
+    pushTable(lines, tableName(["agents", id]), {
+      auth: agent.auth,
+      api_key_env: agent.apiKeyEnv,
+      config_dir: agent.configDir
     });
   }
   pushTable(lines, "permissions", {
@@ -258,6 +252,11 @@ function applyProjectConfigLayer(
       }
     }
   }
+  if (layer.agents) {
+    for (const [id, agent] of Object.entries(layer.agents).sort()) {
+      config.agents[id] = normalizeAgentConfig(agent, config.agents[id]);
+    }
+  }
   if (layer.permissions) {
     applyPermissionConfig(config.permissions, layer.permissions);
   }
@@ -356,6 +355,14 @@ function applyPermissionConfig(target: PermissionConfig, source: Partial<Permiss
   Object.assign(target, definedOnly(source));
 }
 
+function normalizeAgentConfig(source: Partial<AgentConfig>, base?: AgentConfig): AgentConfig {
+  return {
+    auth: source.auth ?? base?.auth ?? "subscription",
+    apiKeyEnv: source.apiKeyEnv ?? base?.apiKeyEnv,
+    configDir: source.configDir ?? base?.configDir
+  };
+}
+
 function applyIntegerEnv(
   _config: ResolvedConfig,
   env: Record<string, string | undefined>,
@@ -379,61 +386,108 @@ function applyIntegerEnv(
   void path;
 }
 
-function pushPositiveIntegerDiagnostic(
-  value: number,
-  path: string[],
-  label: string,
-  diagnostics: ConfigDiagnostic[]
-): void {
-  if (!Number.isInteger(value) || value <= 0) {
-    diagnostics.push(
-      diagnostic("CONFIG_POSITIVE_INTEGER_INVALID", `${label} must be greater than zero`, path, "validation")
-    );
+function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? [] : parsed.error.issues;
+}
+
+function resolvedConfigDiagnostic(issue: ZodIssue, config: ResolvedConfig): ConfigDiagnostic {
+  const code = resolvedConfigDiagnosticCode(issue);
+  return diagnostic(
+    code,
+    resolvedConfigDiagnosticMessage(code, issue, config),
+    resolvedConfigDiagnosticPath(issue),
+    "validation"
+  );
+}
+
+function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
+  if (issue.code === "custom" && issue.message.startsWith("CONFIG_")) {
+    return issue.message;
+  }
+  const path = resolvedConfigDiagnosticPath(issue);
+  const key = path.join(".");
+  switch (key) {
+    case "schema_version":
+      return "CONFIG_SCHEMA_VERSION_EMPTY";
+    case "run.default_timeout_seconds":
+    case "invariants.invariant_testing_fuzzer_timeout":
+      return "CONFIG_TIMEOUT_INVALID";
+    case "run.workspace_mode":
+      return "CONFIG_WORKSPACE_MODE_INVALID";
+    case "invariants.property_priority_threshold":
+      return "CONFIG_INVARIANT_PRIORITY_INVALID";
+    case "permissions.trust_model":
+      return "CONFIG_TRUST_MODEL_INVALID";
+    default:
+      return "CONFIG_POSITIVE_INTEGER_INVALID";
   }
 }
 
-function pushTimeoutDiagnostic(value: number, path: string[], label: string, diagnostics: ConfigDiagnostic[]): void {
-  if (!Number.isInteger(value) || value < 1 || value > MAX_TIMEOUT_SECONDS) {
-    diagnostics.push(
-      diagnostic("CONFIG_TIMEOUT_INVALID", `${label} must be between 1 and ${MAX_TIMEOUT_SECONDS}`, path, "validation")
-    );
+function resolvedConfigDiagnosticMessage(code: string, issue: ZodIssue, config: ResolvedConfig): string {
+  const label = resolvedConfigDiagnosticPath(issue).join(".");
+  switch (code) {
+    case "CONFIG_SCHEMA_VERSION_EMPTY":
+      return "schema_version cannot be empty";
+    case "CONFIG_PATH_EMPTY":
+      return `${label} cannot be empty`;
+    case "CONFIG_PATH_ABSOLUTE":
+      return `${label} must be a relative project-local path`;
+    case "CONFIG_PATH_TRAVERSAL":
+      return `${label} must not contain empty, dot, or traversal path components`;
+    case "CONFIG_TIMEOUT_INVALID":
+      return `${label} must be between 1 and ${MAX_TIMEOUT_SECONDS}`;
+    case "CONFIG_WORKSPACE_MODE_INVALID":
+      return `run.workspace_mode \`${String(valueAtPath(config, issue.path))}\` is not supported`;
+    case "CONFIG_INVARIANT_PRIORITY_INVALID":
+      return "invariants.property_priority_threshold must be high, medium, or low";
+    case "CONFIG_TRUST_MODEL_INVALID":
+      return "permissions.trust_model must be skip-permissions";
+    default:
+      return `${label} must be greater than zero`;
   }
 }
 
-function pushProjectLocalPathDiagnostic(
-  value: string,
-  path: string[],
-  label: string,
-  diagnostics: ConfigDiagnostic[]
-): void {
-  if (value.length === 0) {
-    diagnostics.push(diagnostic("CONFIG_PATH_EMPTY", `${label} cannot be empty`, path, "validation"));
-    return;
-  }
-  if (value === ".") {
-    return;
-  }
-  if (value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value)) {
-    diagnostics.push(
-      diagnostic("CONFIG_PATH_ABSOLUTE", `${label} must be a relative project-local path`, path, "validation")
-    );
-    return;
-  }
-  const parts = value.split(/[\\/]/);
-  if (parts.some((part) => part.length === 0 || part === "." || part === "..")) {
-    diagnostics.push(
-      diagnostic(
-        "CONFIG_PATH_TRAVERSAL",
-        `${label} must not contain empty, dot, or traversal path components`,
-        path,
-        "validation"
-      )
-    );
+function resolvedConfigDiagnosticPath(issue: ZodIssue): string[] {
+  return issue.path.map((segment) => configPathSegment(String(segment)));
+}
+
+function configPathSegment(segment: string): string {
+  switch (segment) {
+    case "schemaVersion":
+      return "schema_version";
+    case "dynamicStrategiesEnumerator":
+      return "dynamic_strategies_enumerator";
+    case "outputDir":
+      return "output_dir";
+    case "maxParallelAgents":
+      return "max_parallel_agents";
+    case "maxParallelNodes":
+      return "max_parallel_nodes";
+    case "defaultTimeoutSeconds":
+      return "default_timeout_seconds";
+    case "workspaceMode":
+      return "workspace_mode";
+    case "propertyPriorityThreshold":
+      return "property_priority_threshold";
+    case "invariantTestingFuzzerTimeoutSeconds":
+      return "invariant_testing_fuzzer_timeout";
+    case "trustModel":
+      return "trust_model";
+    default:
+      return segment;
   }
 }
 
-function isWorkspaceMode(value: string): value is WorkspaceMode {
-  return value === "git-worktree";
+function valueAtPath(value: unknown, path: PropertyKey[]): unknown {
+  let current = value;
+  for (const segment of path) {
+    if (current === null || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<PropertyKey, unknown>)[segment];
+  }
+  return current;
 }
 
 function parseBoolean(value: string): boolean | undefined {
@@ -454,6 +508,9 @@ function parseBoolean(value: string): boolean | undefined {
 }
 
 function sortConfig(config: ResolvedConfig): void {
+  config.agents = Object.fromEntries(
+    Object.entries(config.agents).sort(([left], [right]) => left.localeCompare(right))
+  );
   config.models.profiles = Object.fromEntries(
     Object.entries(config.models.profiles).sort(([left], [right]) => left.localeCompare(right))
   );

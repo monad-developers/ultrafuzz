@@ -14,6 +14,7 @@ import {
   updateRunStatus,
   validateSafeId,
   writeArtifactManifest,
+  writeJsonDurable,
   type ArtifactProvenance,
   type NodeState,
   type NodeStatus,
@@ -79,6 +80,50 @@ interface WorkflowEvent {
   payload?: Record<string, unknown>;
 }
 
+interface AccountingSummary {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+  tokens_used: string;
+  estimated_spend: string;
+  estimated_spend_usd?: number;
+  partial_pricing: boolean;
+  event_count: number;
+  priced_event_count: number;
+  unpriced_event_count: number;
+  models: string[];
+  agents: string[];
+}
+
+interface CumulativeAccountingSummary extends AccountingSummary {
+  source_run_ids: string[];
+}
+
+interface AccountingTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  estimatedSpendUsd?: number;
+  partialPricing: boolean;
+  eventCount: number;
+  pricedEventCount: number;
+  unpricedEventCount: number;
+  models: Set<string>;
+  agents: Set<string>;
+}
+
+interface ModelPricing {
+  inputUsdPerMillion: number;
+  cachedInputUsdPerMillion: number;
+  outputUsdPerMillion: number;
+}
+
 interface NodeWorkflowEvidence {
   status: NodeStatus;
   workflowState?: string;
@@ -111,6 +156,14 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "reused-from-prior-run",
   "invalidated"
 ]);
+const ACCOUNTING_SCHEMA_VERSION = "1.0";
+const MODEL_PRICING_USD_PER_MILLION: Record<string, ModelPricing> = {
+  "gpt-5.5": {
+    inputUsdPerMillion: 2.5,
+    cachedInputUsdPerMillion: 0.25,
+    outputUsdPerMillion: 15
+  }
+};
 
 export async function syncRun(input: SyncRunInput) {
   const result = await synchronizeLinkedWorkflowRun(input);
@@ -193,6 +246,12 @@ export async function synchronizeLinkedWorkflowRun(
     });
   }
 
+  const accountingResult = synchronizeWorkflowAccounting({
+    layout,
+    workflowRunId: evidence.smithersRunId,
+    events
+  });
+
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
   });
@@ -201,7 +260,7 @@ export async function synchronizeLinkedWorkflowRun(
   if (runStatusChanged) {
     updateRunStatus(layout, finalStatus);
   }
-  if (runStatusChanged || syncResult.changed) {
+  if (runStatusChanged || syncResult.changed || accountingResult.changed) {
     appendEvent(layout, {
       eventType: "workflow-synced",
       status: finalStatus,
@@ -209,7 +268,8 @@ export async function synchronizeLinkedWorkflowRun(
         workflow_run_id: evidence.smithersRunId,
         workflow_status: inspect.runStatus,
         workflow_state: inspect.runState,
-        synced_nodes: syncResult.syncedNodes
+        synced_nodes: syncResult.syncedNodes,
+        accounting_available: accountingResult.available
       }
     });
   }
@@ -225,6 +285,327 @@ export async function synchronizeLinkedWorkflowRun(
       synced_nodes: syncResult.syncedNodes
     }
   };
+}
+
+function synchronizeWorkflowAccounting(input: { layout: RunLayout; workflowRunId: string; events: WorkflowEvent[] }): {
+  changed: boolean;
+  available: boolean;
+} {
+  const current = accountingFromWorkflowEvents(input.events);
+  if (current === undefined) {
+    return { changed: false, available: false };
+  }
+
+  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
+  const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
+  const sourceAccounting =
+    sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
+  const sourceSummaries = sourceAccounting?.summary === undefined ? [] : [sourceAccounting.summary];
+  const cumulative = cumulativeAccountingSummary([...sourceSummaries, current], sourceAccounting?.sourceRunIds ?? []);
+  const nextComparable = {
+    schema_version: ACCOUNTING_SCHEMA_VERSION,
+    source: "workflow-events",
+    workflow_run_id: input.workflowRunId,
+    current,
+    cumulative
+  };
+  if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), nextComparable)) {
+    return { changed: false, available: true };
+  }
+
+  writeJsonDurable(input.layout.runMetadataPath, {
+    ...metadata,
+    accounting: {
+      ...nextComparable,
+      updated_at: new Date().toISOString()
+    }
+  });
+  return { changed: true, available: true };
+}
+
+function accountingFromWorkflowEvents(events: WorkflowEvent[]): AccountingSummary | undefined {
+  const totals = emptyAccountingTotals();
+  for (const event of events) {
+    if (event.type !== "TokenUsageReported") {
+      continue;
+    }
+    const payload = event.payload ?? {};
+    const inputTokens = firstNumericField(payload, ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"]);
+    const outputTokens = firstNumericField(payload, [
+      "outputTokens",
+      "output_tokens",
+      "completionTokens",
+      "completion_tokens"
+    ]);
+    const cacheReadTokens = firstNumericField(payload, ["cacheReadTokens", "cache_read_tokens"]);
+    const cacheWriteTokens = firstNumericField(payload, ["cacheWriteTokens", "cache_write_tokens"]);
+    const reasoningTokens = firstNumericField(payload, ["reasoningTokens", "reasoning_tokens"]);
+    const explicitTotal = firstNumericField(payload, ["totalTokens", "total_tokens"]);
+    const costUsd = firstNumericField(payload, [
+      "costUsd",
+      "costUSD",
+      "cost",
+      "estimatedCostUsd",
+      "estimated_cost_usd"
+    ]);
+    const model = stringField(payload, "model");
+    const estimatedCostUsd =
+      costUsd ??
+      estimatedCostFromModelPricing({
+        model,
+        inputTokens: inputTokens ?? 0,
+        outputTokens: outputTokens ?? 0,
+        cacheReadTokens: cacheReadTokens ?? 0
+      });
+    const tokenCount =
+      explicitTotal ??
+      (inputTokens ?? 0) +
+        (outputTokens ?? 0) +
+        (cacheReadTokens ?? 0) +
+        (cacheWriteTokens ?? 0) +
+        (reasoningTokens ?? 0);
+    if (tokenCount <= 0 && estimatedCostUsd === undefined) {
+      continue;
+    }
+
+    totals.inputTokens += inputTokens ?? 0;
+    totals.outputTokens += outputTokens ?? 0;
+    totals.cacheReadTokens += cacheReadTokens ?? 0;
+    totals.cacheWriteTokens += cacheWriteTokens ?? 0;
+    totals.reasoningTokens += reasoningTokens ?? 0;
+    totals.totalTokens += tokenCount;
+    totals.eventCount += 1;
+    if (estimatedCostUsd === undefined) {
+      if (tokenCount > 0) {
+        totals.unpricedEventCount += 1;
+      }
+    } else {
+      totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + estimatedCostUsd;
+      totals.pricedEventCount += 1;
+    }
+    if (
+      booleanField(payload, "partialPricing") === true ||
+      booleanField(payload, "partial_pricing") === true ||
+      booleanField(payload, "pricingPartial") === true ||
+      booleanField(payload, "pricing_partial") === true
+    ) {
+      totals.partialPricing = true;
+    }
+    if (model !== undefined) {
+      totals.models.add(model);
+    }
+    const agent = stringField(payload, "agent");
+    if (agent !== undefined) {
+      totals.agents.add(agent);
+    }
+  }
+  return accountingSummaryFromTotals(totals);
+}
+
+function cumulativeAccountingForSourceRun(
+  layout: RunLayout,
+  sourceRunId: string
+): { summary?: AccountingSummary; sourceRunIds: string[] } | undefined {
+  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  if (safeSourceRunId === layout.runId) {
+    return undefined;
+  }
+  const runsRoot = path.dirname(layout.root);
+  const sourceRoot = path.join(runsRoot, safeSourceRunId);
+  assertPathInside(runsRoot, sourceRoot, "source run root");
+  const sourceMetadata = readJsonIfExists<Record<string, unknown>>(
+    layoutForRunRoot(sourceRoot, safeSourceRunId).runMetadataPath
+  );
+  if (sourceMetadata === undefined) {
+    return { sourceRunIds: [safeSourceRunId] };
+  }
+  const accounting = recordField(sourceMetadata, "accounting");
+  const cumulativeRecord = recordField(accounting, "cumulative");
+  const cumulative = storedAccountingSummary(cumulativeRecord);
+  if (cumulative !== undefined) {
+    return {
+      summary: cumulative,
+      sourceRunIds: uniqueStrings([safeSourceRunId, ...stringArrayField(cumulativeRecord, "source_run_ids")])
+    };
+  }
+  const current = storedAccountingSummary(recordField(accounting, "current"));
+  return { ...(current === undefined ? {} : { summary: current }), sourceRunIds: [safeSourceRunId] };
+}
+
+function cumulativeAccountingSummary(
+  summaries: AccountingSummary[],
+  sourceRunIds: string[]
+): CumulativeAccountingSummary {
+  const totals = emptyAccountingTotals();
+  for (const summary of summaries) {
+    totals.inputTokens += summary.input_tokens;
+    totals.outputTokens += summary.output_tokens;
+    totals.cacheReadTokens += summary.cache_read_tokens;
+    totals.cacheWriteTokens += summary.cache_write_tokens;
+    totals.reasoningTokens += summary.reasoning_tokens;
+    totals.totalTokens += summary.total_tokens;
+    totals.eventCount += summary.event_count;
+    totals.pricedEventCount += summary.priced_event_count;
+    totals.unpricedEventCount += summary.unpriced_event_count;
+    totals.partialPricing =
+      totals.partialPricing ||
+      summary.partial_pricing ||
+      (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
+    if (summary.estimated_spend_usd !== undefined) {
+      totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + summary.estimated_spend_usd;
+    }
+    for (const model of summary.models) {
+      totals.models.add(model);
+    }
+    for (const agent of summary.agents) {
+      totals.agents.add(agent);
+    }
+  }
+  const summary = accountingSummaryFromTotals(totals) ?? {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 0,
+    tokens_used: "0",
+    estimated_spend: "unavailable",
+    partial_pricing: false,
+    event_count: 0,
+    priced_event_count: 0,
+    unpriced_event_count: 0,
+    models: [],
+    agents: []
+  };
+  return {
+    ...summary,
+    source_run_ids: uniqueStrings(sourceRunIds)
+  };
+}
+
+function storedAccountingSummary(value: Record<string, unknown> | undefined): AccountingSummary | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const totalTokens = firstNumericField(value, ["total_tokens", "totalTokens"]);
+  if (totalTokens === undefined) {
+    return undefined;
+  }
+  return {
+    input_tokens: firstNumericField(value, ["input_tokens", "inputTokens"]) ?? 0,
+    output_tokens: firstNumericField(value, ["output_tokens", "outputTokens"]) ?? 0,
+    cache_read_tokens: firstNumericField(value, ["cache_read_tokens", "cacheReadTokens"]) ?? 0,
+    cache_write_tokens: firstNumericField(value, ["cache_write_tokens", "cacheWriteTokens"]) ?? 0,
+    reasoning_tokens: firstNumericField(value, ["reasoning_tokens", "reasoningTokens"]) ?? 0,
+    total_tokens: totalTokens,
+    tokens_used: stringField(value, "tokens_used") ?? stringField(value, "tokensUsed") ?? formatInteger(totalTokens),
+    estimated_spend: stringField(value, "estimated_spend") ?? stringField(value, "estimatedSpend") ?? "unavailable",
+    ...(firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) === undefined
+      ? {}
+      : { estimated_spend_usd: firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) }),
+    partial_pricing: booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false,
+    event_count: firstNumericField(value, ["event_count", "eventCount"]) ?? 0,
+    priced_event_count: firstNumericField(value, ["priced_event_count", "pricedEventCount"]) ?? 0,
+    unpriced_event_count: firstNumericField(value, ["unpriced_event_count", "unpricedEventCount"]) ?? 0,
+    models: stringArrayField(value, "models"),
+    agents: stringArrayField(value, "agents")
+  };
+}
+
+function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummary | undefined {
+  if (totals.eventCount === 0) {
+    return undefined;
+  }
+  const estimatedSpendUsd = Number((totals.estimatedSpendUsd ?? 0).toFixed(6));
+  const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0;
+  return {
+    input_tokens: totals.inputTokens,
+    output_tokens: totals.outputTokens,
+    cache_read_tokens: totals.cacheReadTokens,
+    cache_write_tokens: totals.cacheWriteTokens,
+    reasoning_tokens: totals.reasoningTokens,
+    total_tokens: totals.totalTokens,
+    tokens_used: formatInteger(totals.totalTokens),
+    estimated_spend: formatUsd(estimatedSpendUsd, partialPricing),
+    estimated_spend_usd: estimatedSpendUsd,
+    partial_pricing: partialPricing,
+    event_count: totals.eventCount,
+    priced_event_count: totals.pricedEventCount,
+    unpriced_event_count: totals.unpricedEventCount,
+    models: [...totals.models].sort(),
+    agents: [...totals.agents].sort()
+  };
+}
+
+function emptyAccountingTotals(): AccountingTotals {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    partialPricing: false,
+    eventCount: 0,
+    pricedEventCount: 0,
+    unpricedEventCount: 0,
+    models: new Set(),
+    agents: new Set()
+  };
+}
+
+function estimatedCostFromModelPricing(input: {
+  model: string | undefined;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+}): number | undefined {
+  const pricing = pricingForModel(input.model);
+  if (pricing === undefined || (input.inputTokens <= 0 && input.outputTokens <= 0 && input.cacheReadTokens <= 0)) {
+    return undefined;
+  }
+  const cachedInputTokens = Math.min(Math.max(input.cacheReadTokens, 0), Math.max(input.inputTokens, 0));
+  const uncachedInputTokens = Math.max(input.inputTokens - cachedInputTokens, 0);
+  return (
+    (uncachedInputTokens * pricing.inputUsdPerMillion +
+      cachedInputTokens * pricing.cachedInputUsdPerMillion +
+      Math.max(input.outputTokens, 0) * pricing.outputUsdPerMillion) /
+    1_000_000
+  );
+}
+
+function pricingForModel(model: string | undefined): ModelPricing | undefined {
+  if (model === undefined) {
+    return undefined;
+  }
+  return MODEL_PRICING_USD_PER_MILLION[model.trim().toLowerCase()];
+}
+
+function comparableAccounting(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return {
+    schema_version: value.schema_version,
+    source: value.source,
+    workflow_run_id: value.workflow_run_id,
+    current: value.current,
+    cumulative: value.cumulative
+  };
+}
+
+function formatInteger(value: number): string {
+  return Math.trunc(value)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
+}
+
+function formatUsd(value: number, partial: boolean): string {
+  const suffix = partial ? "+" : "";
+  if (value > 0 && value < 0.01) {
+    return `$${value.toFixed(4)}${suffix}`;
+  }
+  return `$${value.toFixed(2)}${suffix}`;
 }
 
 function synchronizeTasks(input: {
@@ -973,6 +1354,32 @@ function numberField(value: Record<string, unknown> | undefined, key: string): n
   return typeof field === "number" && Number.isFinite(field) ? field : undefined;
 }
 
+function firstNumericField(value: Record<string, unknown> | undefined, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const field = value?.[key];
+    if (typeof field === "number" && Number.isFinite(field)) {
+      return field;
+    }
+    if (typeof field === "string") {
+      const parsed = Number(field);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return undefined;
+}
+
+function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const field = value?.[key];
+  return typeof field === "boolean" ? field : undefined;
+}
+
+function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] {
+  const field = value?.[key];
+  return Array.isArray(field) ? field.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
 function maxDefinedNumber(left: number | undefined, right: number | undefined): number | undefined {
   if (left === undefined) {
     return right;
@@ -1008,4 +1415,15 @@ function errorLooksLikeTimeout(value: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }

@@ -1,26 +1,26 @@
 # First Campaign
 
-This tutorial takes a Solidity repository from first Ultrafuzz beta
+This tutorial takes a Solidity repository from first Ultrafuzz
 initialization through report review and explicit output materialization.
 
 ## Prerequisites
 
 You need:
 
-- A local checkout of this Ultrafuzz beta repository.
+- A local checkout of this Ultrafuzz repository.
 - A Solidity target repository you can modify locally.
-- `pnpm` installed for the beta TypeScript workspace.
+- `pnpm` installed for the TypeScript workspace.
 - Any agent credentials required by the generated project agent registry.
 - Foundry or a target-project layout your prompts can use for fuzz tests.
 
-From the Ultrafuzz beta repository, install dependencies and build the CLI:
+From the Ultrafuzz repository, install dependencies and build the CLI:
 
 ```bash
 pnpm install
 pnpm --filter @ultrafuzz/cli build
 ```
 
-The rest of this guide assumes `ultrafuzz` resolves on your PATH. During beta
+The rest of this guide assumes `ultrafuzz` resolves on your PATH. During
 development, you can run the same commands through the workspace CLI binary.
 
 ## Initialize The Target Repository
@@ -79,7 +79,7 @@ run when required references are missing or mismatched.
 ultrafuzz run --project /path/to/target-protocol
 ```
 
-Useful beta run flags include:
+Useful run flags include:
 
 ```bash
 ultrafuzz run --project /path/to/target-protocol --run-id first-campaign

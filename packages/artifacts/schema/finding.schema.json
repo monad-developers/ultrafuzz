@@ -18,7 +18,8 @@
       "minLength": 1
     },
     "status": {
-      "enum": ["candidate", "needs-review", "duplicate", "false-positive", "confirmed", "fixed", "wont-fix"]
+      "type": "string",
+      "minLength": 1
     },
     "severity_guess": {
       "type": "string",
@@ -103,19 +104,26 @@
     "evidence": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["kind", "path"],
-        "additionalProperties": true,
-        "properties": {
-          "kind": {
+        "anyOf": [
+          {
             "type": "string",
             "minLength": 1
           },
-          "path": {
-            "type": "string",
-            "minLength": 1
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
-        }
+        ]
       }
     }
   }

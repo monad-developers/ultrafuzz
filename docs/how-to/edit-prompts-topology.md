@@ -1,6 +1,6 @@
 # Edit Prompts And Topology
 
-Ultrafuzz beta uses project-owned Markdown prompts and
+Ultrafuzz uses project-owned Markdown prompts and
 `.ultrafuzz/topology.yml` as the campaign graph source of truth.
 
 ## Edit A Prompt

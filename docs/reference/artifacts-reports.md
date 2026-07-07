@@ -32,7 +32,7 @@ workspaces.json
 
 `source-run.json` is present when the run derives from another run. Event query
 indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
-of the beta artifact contract.
+of the artifact contract.
 
 ## Run Metadata
 
@@ -122,12 +122,12 @@ Each normalized finding must include:
 | `schema_version` | Must be `1.0`.                                                |
 | `id`             | Finding ID. Missing IDs are synthesized from node provenance. |
 | `title`          | Non-empty title.                                              |
-| `status`         | Enum value listed below.                                      |
+| `status`         | Non-empty lifecycle string.                                   |
 | `severity_guess` | Non-empty severity guess.                                     |
 | `confidence`     | Non-empty confidence label.                                   |
 | `summary`        | Non-empty summary.                                            |
 
-Finding `status` must be one of:
+Canonical finding `status` values include:
 
 - `candidate`
 - `needs-review`
@@ -136,6 +136,9 @@ Finding `status` must be one of:
 - `confirmed`
 - `fixed`
 - `wont-fix`
+
+Agent-produced lifecycle statuses are also preserved when they are non-empty
+strings.
 
 When present, `triage_classification` must be one of:
 
@@ -151,6 +154,10 @@ When present, `triage_classification` must be one of:
 Findings may also preserve source node, strategy, attempt index, model profile,
 model name, model index, loop index, affected files, affected functions,
 evidence, patch references, notes, dedupe metadata, and family metadata.
+`evidence` entries may be non-empty string references or objects. Object
+entries may include `kind`, `path`, and additional metadata; `kind` and `path`
+must be non-empty strings when present. Relative `path` values must stay inside
+safe artifact-relative paths.
 
 ## Final Report
 
@@ -163,6 +170,14 @@ artifacts/final-report/report.json
 ```
 
 If final report artifacts are missing, `ultrafuzz report <run-id>` fails.
+
+When workflow usage data is available, run metadata includes
+`accounting.cumulative.tokens_used` and
+`accounting.cumulative.estimated_spend`. Final reports should copy the
+available cumulative values into the markdown run summary and into
+`report.json.run_metadata`. A trailing `+` on `estimated_spend` means the
+persisted estimate is partial because some token usage did not have pricing
+data.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

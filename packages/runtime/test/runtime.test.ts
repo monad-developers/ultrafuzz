@@ -122,7 +122,7 @@ function workflowInspect(input: {
 
 function workflowEvents(
   workflowRunId: string,
-  events: Array<{ type: string; nodeId?: string; attempt?: number; error?: unknown }>
+  events: Array<{ type: string; nodeId?: string; attempt?: number; error?: unknown; extra?: Record<string, unknown> }>
 ): string {
   const base = Date.parse("2026-07-03T00:00:00.000Z");
   return `${events
@@ -141,6 +141,9 @@ function workflowEvents(
       }
       if (event.error !== undefined) {
         payload.error = event.error;
+      }
+      if (event.extra !== undefined) {
+        Object.assign(payload, event.extra);
       }
       return JSON.stringify({
         runId: workflowRunId,
@@ -433,7 +436,11 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, "topology.yml")), false);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/index.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/prompts/setup/project-discovery.md")), true);
-  assert.doesNotMatch(fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8"), /cwd:\s*process\.cwd/);
+  const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
+  assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
+  assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
+  assert.match(codexAgentText, /ultrafuzz\.toml/);
+  assert.match(codexAgentText, /codexAuthOptions/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -449,11 +456,10 @@ test("validate rejects unknown agent references before launch", async () => {
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
   writeSmallTopology(project);
   const configPath = path.join(project, "ultrafuzz.toml");
-  fs.writeFileSync(
-    configPath,
-    fs.readFileSync(configPath, "utf8").replace('agent = "CodexAgent"', 'agent = "MissingAgent"'),
-    "utf8"
-  );
+  const generatedConfig = fs.readFileSync(configPath, "utf8");
+  assert.match(generatedConfig, /\[agents\.CodexAgent\]/);
+  assert.match(generatedConfig, /auth = "api-key"/);
+  fs.writeFileSync(configPath, generatedConfig.replace('agent = "CodexAgent"', 'agent = "MissingAgent"'), "utf8");
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, false);
@@ -958,6 +964,246 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
   const events = fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8");
   assert.match(events, /findings-normalized/);
   assert.match(events, /artifact-manifest-written/);
+});
+
+test("syncRun persists cumulative token accounting and partial pricing from workflow events", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const source = await startRun({
+    projectRoot: project,
+    runId: "source-accounting",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(source.ok, true, JSON.stringify(source.diagnostics));
+  const sourceMetadataPath = path.join(source.value!.run_root, "run.json");
+  const sourceMetadata = JSON.parse(fs.readFileSync(sourceMetadataPath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(
+    sourceMetadataPath,
+    `${JSON.stringify(
+      {
+        ...sourceMetadata,
+        accounting: {
+          schema_version: "1.0",
+          source: "workflow-events",
+          workflow_run_id: "ultrafuzz-source-accounting",
+          current: {
+            input_tokens: 40,
+            output_tokens: 60,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 100,
+            tokens_used: "100",
+            estimated_spend: "$0.01",
+            estimated_spend_usd: 0.01,
+            partial_pricing: false,
+            event_count: 1,
+            priced_event_count: 1,
+            unpriced_event_count: 0,
+            models: ["source-model"],
+            agents: ["codex"]
+          },
+          cumulative: {
+            input_tokens: 40,
+            output_tokens: 60,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 100,
+            tokens_used: "100",
+            estimated_spend: "$0.01",
+            estimated_spend_usd: 0.01,
+            partial_pricing: false,
+            event_count: 1,
+            priced_event_count: 1,
+            unpriced_event_count: 0,
+            models: ["source-model"],
+            agents: ["codex"],
+            source_run_ids: []
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const workflowRunId = "ultrafuzz-lineage-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 20,
+          costUsd: 0.02,
+          model: "gpt-test",
+          agent: "codex"
+        }
+      },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 5,
+          model: "gpt-test",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "lineage-accounting",
+    sourceRunId: "source-accounting",
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "lineage-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
+      cumulative?: {
+        tokens_used?: string;
+        estimated_spend?: string;
+        partial_pricing?: boolean;
+        source_run_ids?: string[];
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.tokens_used, "35");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.02+");
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.cumulative?.tokens_used, "135");
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.03+");
+  assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
+  assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
+});
+
+test("syncRun records lower-bound spend when workflow token events are unpriced", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-unpriced-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 20,
+          model: "gpt-test",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "unpriced-accounting",
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "unpriced-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
+      cumulative?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.tokens_used, "30");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.00+");
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.cumulative?.tokens_used, "30");
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.00+");
+  assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
+});
+
+test("syncRun estimates spend for default priced model usage events without explicit cost", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-estimated-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 100_000,
+          outputTokens: 10_000,
+          model: "gpt-5.5",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "estimated-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "estimated-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        tokens_used?: string;
+        estimated_spend?: string;
+        partial_pricing?: boolean;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.tokens_used, "110,000");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
 });
 
 test("getRunStatus synchronizes without appending duplicate events", async () => {

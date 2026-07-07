@@ -513,6 +513,7 @@ nodes:
       - coverage-goal.json
       - coverage-report.md
       - findings.json
+      - generated-tests.json
       - harness-repairs.json
     primary_artifact: coverage-goal.json
     loops: 1
@@ -561,6 +562,7 @@ nodes:
       - differential-oracle-planner
     required_artifacts:
       - reference-harness.json
+      - generated-tests.json
     primary_artifact: reference-harness.json
     loops: 1
   - id: reference-and-lane-auditor

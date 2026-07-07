@@ -1,11 +1,6 @@
 import { z } from "zod/v4";
 
-import {
-  FINDINGS_SCHEMA_VERSION,
-  FINDING_STATUSES,
-  TRIAGE_CLASSIFICATIONS,
-  type NormalizedFinding
-} from "./findings.js";
+import { FINDINGS_SCHEMA_VERSION, TRIAGE_CLASSIFICATIONS, type NormalizedFinding } from "./findings.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const FINDING_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding" as const;
@@ -14,12 +9,19 @@ export const FINDINGS_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#sc
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const stringArray = z.array(nonEmptyString);
+const evidenceEntrySchema = z.union([
+  nonEmptyString,
+  z.looseObject({
+    kind: nonEmptyString.optional(),
+    path: nonEmptyString.optional()
+  })
+]);
 
 export const findingSchema = z.looseObject({
   schema_version: z.literal(FINDINGS_SCHEMA_VERSION),
   id: nonEmptyString,
   title: nonEmptyString,
-  status: z.enum(FINDING_STATUSES),
+  status: nonEmptyString,
   severity_guess: nonEmptyString,
   confidence: nonEmptyString,
   summary: nonEmptyString,
@@ -35,14 +37,7 @@ export const findingSchema = z.looseObject({
   affected_functions: stringArray.optional(),
   patch_refs: stringArray.optional(),
   notes: stringArray.optional(),
-  evidence: z
-    .array(
-      z.looseObject({
-        kind: nonEmptyString,
-        path: nonEmptyString
-      })
-    )
-    .optional()
+  evidence: z.array(evidenceEntrySchema).optional()
 });
 
 export const findingsSchema = z.array(findingSchema);
@@ -58,7 +53,7 @@ export const findingJsonSchema = {
     schema_version: { const: FINDINGS_SCHEMA_VERSION },
     id: { type: "string", minLength: 1 },
     title: { type: "string", minLength: 1 },
-    status: { enum: FINDING_STATUSES },
+    status: { type: "string", minLength: 1 },
     severity_guess: { type: "string", minLength: 1 },
     confidence: { type: "string", minLength: 1 },
     summary: { type: "string", minLength: 1 },
@@ -77,13 +72,17 @@ export const findingJsonSchema = {
     evidence: {
       type: "array",
       items: {
-        type: "object",
-        required: ["kind", "path"],
-        additionalProperties: true,
-        properties: {
-          kind: { type: "string", minLength: 1 },
-          path: { type: "string", minLength: 1 }
-        }
+        anyOf: [
+          { type: "string", minLength: 1 },
+          {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              kind: { type: "string", minLength: 1 },
+              path: { type: "string", minLength: 1 }
+            }
+          }
+        ]
       }
     }
   }
