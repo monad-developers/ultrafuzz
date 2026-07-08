@@ -11,6 +11,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{js,mjs}\" \"*.{js,mjs}\"",
     "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{js,mjs}\" \"*.{js,mjs}\" --fix",
+    "smoke:stableswap-ng-vyper": "node scripts/ci/stableswap-ng-vyper-smoke.mjs",
     "test": "pnpm -r test",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r typecheck"

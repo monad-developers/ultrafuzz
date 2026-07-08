@@ -47,6 +47,16 @@ jobs:
       - name: Build
         run: pnpm -w build
 
+      - name: Cache StableSwapNG Vyper smoke target
+        uses: actions/cache@v4
+        with:
+          path: .ultrafuzz/cache/benchmarks/stableswap-ng-vyper
+          key: stableswap-ng-vyper-${{ runner.os }}-8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386
+
+      - name: StableSwapNG Vyper setup smoke
+        timeout-minutes: 5
+        run: pnpm -w smoke:stableswap-ng-vyper
+
       - name: Validate release
         run: pnpm -w validate:release
 
