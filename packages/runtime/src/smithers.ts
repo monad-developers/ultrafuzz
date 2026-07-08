@@ -413,6 +413,7 @@ async function execSmithersCli(input: {
   env?: Record<string, string | undefined>;
 }): Promise<{ stdout: string; stderr: string; command: string[] }> {
   const command = [...input.args];
+  await ensureSmithersDependencies(input.projectRoot, input.env);
   const executable = smithersExecutable(input.projectRoot, input.env);
   const { stdout, stderr } = await execFileAsync(executable, command, {
     cwd: input.projectRoot,
@@ -499,16 +500,53 @@ function truncateDiagnosticText(value: string): string {
   return value.length > limit ? `${value.slice(0, limit)}\n[truncated ${value.length - limit} bytes]` : value;
 }
 
+async function ensureSmithersDependencies(
+  projectRoot: string,
+  env: Record<string, string | undefined> | undefined
+): Promise<void> {
+  if (explicitSmithersExecutable(env) !== undefined) {
+    return;
+  }
+  const local = localSmithersExecutable(projectRoot);
+  if (fs.existsSync(local)) {
+    return;
+  }
+  const packageRoot = path.join(projectRoot, ".smithers");
+  const packageJson = path.join(packageRoot, "package.json");
+  if (!fs.existsSync(packageJson)) {
+    return;
+  }
+  assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
+  assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
+  await execFileAsync("npm", ["install", "--prefix", packageRoot, "--no-audit", "--no-fund", "--loglevel=error"], {
+    cwd: projectRoot,
+    env: smithersCommandEnv(projectRoot, env),
+    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+  });
+  if (!fs.existsSync(local)) {
+    throw new Error("Smithers dependency install completed without creating the local workflow runner binary");
+  }
+}
+
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
-  const explicit = env?.SMITHERS_BIN ?? process.env.SMITHERS_BIN;
-  if (explicit && explicit.trim().length > 0) {
+  const explicit = explicitSmithersExecutable(env);
+  if (explicit !== undefined) {
     return explicit;
   }
-  const local = path.join(projectRoot, ".smithers", "node_modules", ".bin", smithersBinaryName());
+  const local = localSmithersExecutable(projectRoot);
   if (fs.existsSync(local)) {
     return local;
   }
   return "smithers";
+}
+
+function explicitSmithersExecutable(env: Record<string, string | undefined> | undefined): string | undefined {
+  const explicit = env?.SMITHERS_BIN ?? process.env.SMITHERS_BIN;
+  return explicit && explicit.trim().length > 0 ? explicit : undefined;
+}
+
+function localSmithersExecutable(projectRoot: string): string {
+  return path.join(projectRoot, ".smithers", "node_modules", ".bin", smithersBinaryName());
 }
 
 function smithersCommandEnv(
