@@ -88,4 +88,35 @@ describe("prompt semantic anchors", () => {
     );
     expect(readFileSync(templatePath, "utf8")).toContain("Use `[]` when there are no findings");
   });
+
+  it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {
+    const projectDiscovery = prompt("setup/project-discovery.md");
+    const setupFoundry = prompt("setup/prepare-foundry-harness.md");
+    const baseSetup = prompt("setup/discover-base-test.md");
+
+    expect(projectDiscovery).toContain("whether production contracts are Solidity, Vyper, or mixed Solidity/Vyper");
+    expect(projectDiscovery).toContain("`.vy` production contracts");
+    expect(projectDiscovery).toContain("`vyper` or `vyper-json` commands");
+    expect(projectDiscovery).toContain("Vyper-only projects as still needing Solidity-based Foundry tests");
+
+    expect(setupFoundry).toContain("`test/foundry/<strategy>`");
+    expect(setupFoundry).toMatch(/do not ask Foundry to\s+compile `\.vy` files as Solidity sources/u);
+    expect(setupFoundry).toContain("Solidity interfaces");
+    expect(setupFoundry).toContain("public/external ABI");
+    expect(setupFoundry).toContain("target project's pinned compiler/tooling");
+    expect(setupFoundry).toContain("`vm.ffi`");
+    expect(setupFoundry).toContain("inline `create`");
+    expect(setupFoundry).toContain("`forge test --ffi`");
+    expect(setupFoundry).toContain("`ffi = true`");
+    expect(setupFoundry).toContain("`vm.etch` writes runtime bytecode");
+    expect(setupFoundry).toContain("does not run constructor");
+    expect(setupFoundry).toMatch(/project-local\s+Vyper dependency is unavailable/u);
+
+    expect(baseSetup).toContain("Vyper-aware while keeping the tests");
+    expect(baseSetup).toContain("ABI-derived interfaces");
+    expect(baseSetup).toContain("`vyper`, or `vyper-json`");
+    expect(baseSetup).toContain("`vm.ffi` plus inline `create`");
+    expect(baseSetup).toContain("`vm.etch` does not run constructors or init code");
+    expect(baseSetup).toContain("project-local Vyper dependencies as explicit validation blockers");
+  });
 });
