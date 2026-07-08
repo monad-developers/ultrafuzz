@@ -32,7 +32,6 @@ jobs:
       ULTRAFUZZ_E2E_STRATEGY_LOOPS: "1"
       ULTRAFUZZ_E2E_TRIAGE_PANEL_SIZE: "1"
       ULTRAFUZZ_E2E_TRIAGE_QUORUM: "1"
-      CODEX_RELEASE: "0.142.5"
     steps:
       - name: Check out repository
         uses: actions/checkout@v6.0.3
