@@ -7,9 +7,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const REPO_ROOT = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const MANIFEST_PATH = path.join(REPO_ROOT, "benchmarks", "stableswap-ng-vyper", "ground-truth.json");
 const RUNTIME_ENTRY = path.join(REPO_ROOT, "packages", "runtime", "dist", "index.js");
-const BENCHMARK_CACHE_ROOT =
+const BENCHMARK_CACHE_ROOT = path.resolve(
+  REPO_ROOT,
   process.env.ULTRAFUZZ_STABLESWAP_NG_CACHE_DIR ??
-  path.join(REPO_ROOT, ".ultrafuzz", "cache", "benchmarks", "stableswap-ng-vyper");
+    path.join(REPO_ROOT, ".ultrafuzz", "cache", "benchmarks", "stableswap-ng-vyper")
+);
 const GIT_TIMEOUT_MS = 120_000;
 
 const REQUIRED_SETUP_GUIDANCE = {
@@ -583,7 +585,12 @@ function runGit(cwd, args) {
       timeout: GIT_TIMEOUT_MS
     });
   } catch (error) {
-    const stderr = Buffer.isBuffer(error.stderr) ? error.stderr.toString("utf8").trim() : "";
+    const stderr =
+      typeof error.stderr === "string"
+        ? error.stderr.trim()
+        : Buffer.isBuffer(error.stderr)
+          ? error.stderr.toString("utf8").trim()
+          : "";
     fail(`git ${args.join(" ")} failed in ${cwd}${stderr ? `: ${stderr}` : ""}`);
   }
 }
