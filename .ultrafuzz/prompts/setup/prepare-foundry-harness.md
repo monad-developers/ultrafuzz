@@ -39,8 +39,14 @@ For Vyper targets, record a concrete bytecode path for downstream tests:
 - compile Vyper bytecode with the target project's pinned compiler/tooling from
   the project root, normally a project script, `vyper`, or `vyper-json`;
 - prefer a reusable Solidity deployment helper that calls `vm.ffi` to run the
-  project-local Vyper compile command and deploys the returned creation bytecode
-  with inline `create`;
+  project-local Vyper compile command, hex-decodes the compiler stdout from
+  ASCII hex into raw creation bytecode, appends any ABI-encoded `__init__`
+  arguments without a function selector using
+  `bytes.concat(decodedBytecode, abi.encode(...))`, and deploys that combined
+  initcode with inline `create`;
+- never pass undecoded `vm.ffi` stdout directly to `create`; even contracts
+  without `__init__` arguments need decoded initcode, and constructor-dependent
+  contracts need the ABI-encoded arguments appended before deployment;
 - document that local validation and downstream strategy runs must use
   `forge test --ffi`, or `ffi = true` in `foundry.toml`, when the helper uses
   `vm.ffi`;

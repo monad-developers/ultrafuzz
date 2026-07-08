@@ -25,10 +25,20 @@ Solidity sources.
 For Vyper deployment helpers, prefer one reusable path that compiles creation
 bytecode with the target project's pinned compiler/tooling from the project
 root, normally a project script, `vyper`, or `vyper-json`, then deploys the
-returned bytes from Solidity with `vm.ffi` plus inline `create`. Keep the helper
-close to the shared `BaseTest`/`Setup` fixture and record the import path and
-required validation command, such as `forge test --ffi`, or the need for
-`ffi = true` in `foundry.toml`.
+returned bytes from Solidity with `vm.ffi` plus inline `create`. The shared
+helper must hex-decode ASCII hex compiler stdout into raw creation bytecode
+before deployment, and it must append ABI-encoded `__init__` constructor
+arguments without a function selector using
+`bytes.concat(decodedBytecode, abi.encode(...))` before inline `create` when
+the Vyper target has initialization parameters. Keep the helper close to the
+shared `BaseTest`/`Setup` fixture and record the import path and required
+validation command, such as `forge test --ffi`, or the need for `ffi = true` in
+`foundry.toml`.
+
+Do not pass undecoded `vm.ffi` stdout directly to `create` or drop
+constructor/init data in the shared base fixture. Strategy tests consume this
+fixture, so constructor-dependent Vyper contracts need decoded initcode plus the
+appended ABI-encoded arguments during `setUp()`.
 
 Use `vm.etch` only for explicit runtime-bytecode injection cases. Document that
 `vm.etch` does not run constructors or init code and does not initialize storage;
