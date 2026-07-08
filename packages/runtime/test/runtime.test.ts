@@ -441,6 +441,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
+  assert.match(codexAgentText, /model_reasoning_effort:\s*"xhigh"/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
