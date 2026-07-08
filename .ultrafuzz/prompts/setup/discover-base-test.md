@@ -15,6 +15,36 @@ If the configuration is not close to the ideal one, restructure Foundry fuzz tes
 
 If an existing Foundry fixture already compiles and provides a reusable deploy/setup base, preserve its current file names and imports. Do not rename working fixtures, change import paths, or rewrite source files only to match reference filenames such as `Setup.t.sol`; those examples describe structure, not a required naming migration.
 
+If the setup handoffs identify Vyper-only or mixed Solidity/Vyper production
+contracts, make the reusable Foundry fixture Vyper-aware while keeping the tests
+Solidity-based. Define Solidity interfaces for the Vyper contracts' ABI-visible
+public/external functions and events, or reuse ABI-derived interfaces generated
+by the target repository. Do not require Foundry to compile `.vy` files as
+Solidity sources.
+
+For Vyper deployment helpers, prefer one reusable path that compiles creation
+bytecode with the target project's pinned compiler/tooling from the project
+root, normally a project script, `vyper`, or `vyper-json`, then deploys the
+returned bytes from Solidity with `vm.ffi` plus inline `create`. The shared
+helper must hex-decode ASCII hex compiler stdout into raw creation bytecode
+before deployment, and it must append ABI-encoded `__init__` constructor
+arguments without a function selector using
+`bytes.concat(decodedBytecode, abi.encode(...))` before inline `create` when
+the Vyper target has initialization parameters. Keep the helper close to the
+shared `BaseTest`/`Setup` fixture and record the import path and required
+validation command, such as `forge test --ffi`, or the need for `ffi = true` in
+`foundry.toml`.
+
+Do not pass undecoded `vm.ffi` stdout directly to `create` or drop
+constructor/init data in the shared base fixture. Strategy tests consume this
+fixture, so constructor-dependent Vyper contracts need decoded initcode plus the
+appended ABI-encoded arguments during `setUp()`.
+
+Use `vm.etch` only for explicit runtime-bytecode injection cases. Document that
+`vm.etch` does not run constructors or init code and does not initialize storage;
+for constructor/init-dependent Vyper contracts, deploy creation bytecode with
+the helper or call the initializer/manual setup after etching runtime bytecode.
+
 Make sure Foundry compilation is passing.
 
 Any test dependency you add for the base fixture must be patch-visible to
@@ -34,6 +64,11 @@ Use separate workspace-relative checks and let missing paths report naturally.
 If you cannot make `forge-std` patch-visible, do not import it from new base
 fixtures; use a minimal local support file under `test/foundry/` and document
 the dependency limitation in the handoff.
+
+For Vyper targets, treat unavailable `forge`, `vyper`, `vyper-json`, or
+project-local Vyper dependencies as explicit validation blockers. Do not use
+host-global compiler paths, nested checkouts, or untracked vendored dependencies
+as the normal path for making the fixture compile in this isolated workspace.
 
 Place reusable `BaseTest`/`Setup` fixtures where the target project's
 `foundry.toml` and existing conventions make them compile, and record the import

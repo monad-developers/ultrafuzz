@@ -17,6 +17,13 @@ If the project is Hardhat-only, set up a Foundry-compatible project without remo
 
 If the project is already Foundry or mixed Foundry/Hardhat, retain the existing architecture and avoid migration changes.
 
+If the project discovery handoff identifies Vyper-only or mixed Solidity/Vyper
+production contracts, keep Foundry as the test harness and do not ask Foundry to
+compile `.vy` files as Solidity sources. Configure the harness so generated
+`.t.sol` tests interact with Vyper contracts through Solidity interfaces that
+match the contracts' public/external ABI, or through ABI-derived Solidity
+interfaces when the target repository already generates them.
+
 Create only the minimal harness layout needed by later fuzzing agents.
 
 Ultrafuzz collects generated strategy tests from the canonical
@@ -27,6 +34,28 @@ target project uses another Foundry test root, you may create reusable shared
 fixtures under that active root, but describe them as shared fixture or import paths
 rather than the generated strategy test directory.
 
+For Vyper targets, record a concrete bytecode path for downstream tests:
+
+- compile Vyper bytecode with the target project's pinned compiler/tooling from
+  the project root, normally a project script, `vyper`, or `vyper-json`;
+- prefer a reusable Solidity deployment helper that calls `vm.ffi` to run the
+  project-local Vyper compile command, hex-decodes the compiler stdout from
+  ASCII hex into raw creation bytecode, appends any ABI-encoded `__init__`
+  arguments without a function selector using
+  `bytes.concat(decodedBytecode, abi.encode(...))`, and deploys that combined
+  initcode with inline `create`;
+- never pass undecoded `vm.ffi` stdout directly to `create`; even contracts
+  without `__init__` arguments need decoded initcode, and constructor-dependent
+  contracts need the ABI-encoded arguments appended before deployment;
+- document that local validation and downstream strategy runs must use
+  `forge test --ffi`, or `ffi = true` in `foundry.toml`, when the helper uses
+  `vm.ffi`;
+- reserve `vm.etch` for runtime-bytecode injection cases only. Explain that
+  `vm.etch` writes runtime bytecode to an address and does not run constructor
+  logic, initialize storage, or execute init code; constructor/init-dependent
+  contracts need the deployment helper or an explicit initializer/manual setup
+  after etching.
+
 Make sure Foundry compilation is passing.
 
 Check Foundry availability only with `forge --version`. If it reports command
@@ -35,6 +64,11 @@ the minimal Foundry scaffold and a clear validation note. Do not inspect host
 install directories or shell environment variables. Wrong: `echo "$PATH"`.
 Wrong: `ls -la ~/.foundry/bin`. Wrong:
 `ls -la /home/ubuntu/.foundry/bin`.
+
+For Vyper targets, also record blocked validation clearly when `vyper`,
+`vyper-json`, a required project script, Python environment, or project-local
+Vyper dependency is unavailable. Do not silently fall back to host-global
+compiler paths, nested git checkouts, or untracked vendoring.
 
 Keep dependencies patch-visible for downstream Ultrafuzz workspaces. Do not use
 `git clone`, `forge install`, or a submodule just to create `lib/forge-std`
