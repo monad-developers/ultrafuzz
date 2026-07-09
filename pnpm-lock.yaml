@@ -59,6 +59,9 @@ importers:
       '@ultrafuzz/dashboard':
         specifier: workspace:*
         version: link:../dashboard
+      '@ultrafuzz/evals':
+        specifier: workspace:*
+        version: link:../evals
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -120,6 +123,24 @@ importers:
       vite:
         specifier: ^7.0.0
         version: 7.3.6(@types/node@24.13.2)(yaml@2.9.0)
+
+  packages/evals:
+    dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@ultrafuzz/config':
+        specifier: workspace:*
+        version: link:../config
+      '@ultrafuzz/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/prompts:
     dependencies:

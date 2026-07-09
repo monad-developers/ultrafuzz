@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { Flags, type Command } from "@oclif/core";
+import { loadProjectConfig, resolveConfig, type EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic, RuntimeResult } from "@ultrafuzz/runtime";
 
 export const CLI_SCHEMA_VERSION = "ultrafuzz.cli.result.v1" as const;
@@ -46,6 +47,36 @@ export function cliIo(): CliIo {
 
 export function projectRoot(flags: { project?: string }): string {
   return path.resolve(flags.project ?? cliIo().cwd);
+}
+
+/**
+ * Resolve the `[eval]` section of ultrafuzz.toml for the eval commands.
+ * Provider binding + credentials env-var names live here; the committable
+ * experiment definition lives in the eval suite YAML.
+ */
+export async function loadEvalConfig(
+  root: string,
+  env: Record<string, string | undefined>
+): Promise<{ evalConfig: EvalConfig; diagnostics: RuntimeDiagnostic[] }> {
+  const loaded = await loadProjectConfig(root);
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const projectConfig = loaded.ok ? loaded.value.config : {};
+  if (!loaded.ok) {
+    for (const diagnostic of loaded.diagnostics) {
+      diagnostics.push({
+        code: diagnostic.code,
+        message: diagnostic.message,
+        severity: diagnostic.severity,
+        source: "config"
+      });
+    }
+  }
+  const resolved = resolveConfig({ projectConfig, env });
+  if (!resolved.ok) {
+    const summary = resolved.diagnostics.map((entry) => `${entry.code}: ${entry.message}`).join("; ");
+    throw new Error(`ultrafuzz.toml failed to resolve: ${summary}`);
+  }
+  return { evalConfig: resolved.value.eval, diagnostics };
 }
 
 export function commandFromRuntime<T>(

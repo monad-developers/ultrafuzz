@@ -26,7 +26,8 @@ const TOP_LEVEL_KEYS = new Set([
   "agents",
   "permissions",
   "invariants",
-  "triage"
+  "triage",
+  "eval"
 ]);
 
 const PROJECT_KEYS = ["repo", "name"] as const;
@@ -43,6 +44,8 @@ const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
 const INVARIANT_KEYS = ["property_priority_threshold", "invariant_testing_fuzzer_timeout"] as const;
 const TRIAGE_KEYS = ["quorum", "panel_size"] as const;
+const EVAL_KEYS = ["eval_config", "ground_truth_root", "provider", "providers"] as const;
+const EVAL_PROVIDER_KEYS = ["api_key_env", "workspace_id_env", "project", "endpoint"] as const;
 
 export interface LoadProjectConfigOptions {
   fileName?: string;
@@ -346,6 +349,79 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         }
       }
     ]);
+  }
+
+  const evalTable = readConfigTable(root, "eval", EVAL_KEYS, diagnostics);
+  if (evalTable) {
+    const evalConfig: NonNullable<ProjectConfigInput["eval"]> = {};
+    config.eval = evalConfig;
+    readScalarFields(evalTable, ["eval"], diagnostics, [
+      {
+        key: "eval_config",
+        type: "string",
+        assign: (value) => {
+          evalConfig.evalConfig = value;
+        }
+      },
+      {
+        key: "ground_truth_root",
+        type: "string",
+        assign: (value) => {
+          evalConfig.groundTruthRoot = value;
+        }
+      },
+      {
+        key: "provider",
+        type: "string",
+        assign: (value) => {
+          evalConfig.provider = value;
+        }
+      }
+    ]);
+    const providers = readTable(evalTable, "providers", ["eval", "providers"], diagnostics);
+    if (providers) {
+      evalConfig.providers = {};
+      for (const [name, value] of Object.entries(providers).sort()) {
+        if (!isPlainObject(value)) {
+          pushTypeDiagnostic(["eval", "providers", name], "table", diagnostics);
+          continue;
+        }
+        const profileTable = value as Record<string, unknown>;
+        collectUnknownKeys(profileTable, new Set(EVAL_PROVIDER_KEYS), ["eval", "providers", name], diagnostics);
+        const profile: NonNullable<NonNullable<ProjectConfigInput["eval"]>["providers"]>[string] = {};
+        readScalarFields(profileTable, ["eval", "providers", name], diagnostics, [
+          {
+            key: "api_key_env",
+            type: "string",
+            assign: (value) => {
+              profile.apiKeyEnv = value;
+            }
+          },
+          {
+            key: "workspace_id_env",
+            type: "string",
+            assign: (value) => {
+              profile.workspaceIdEnv = value;
+            }
+          },
+          {
+            key: "project",
+            type: "string",
+            assign: (value) => {
+              profile.project = value;
+            }
+          },
+          {
+            key: "endpoint",
+            type: "string",
+            assign: (value) => {
+              profile.endpoint = value;
+            }
+          }
+        ]);
+        evalConfig.providers[name] = profile;
+      }
+    }
   }
 
   if (hasErrors(diagnostics)) {

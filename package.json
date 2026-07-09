@@ -34,6 +34,7 @@
     "packages/topology",
     "packages/artifacts",
     "packages/runtime",
+    "packages/evals",
     "packages/dashboard",
     "packages/cli"
   ]

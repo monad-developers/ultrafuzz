@@ -102,3 +102,14 @@ Sensitive model values are redacted before persistence. Launch guards for
 literal redaction placeholders may fail before workflow launch when enabled,
 and manifest entries mark values that must be restored from current config
 before launch.
+
+## Eval suites
+
+The `[eval]` section binds eval suites to a reporting provider per
+environment. It holds the default suite path, the machine-specific
+`ground_truth_root` (which must resolve outside the repository), the active
+`provider` (`braintrust`, `langsmith`, or `none`), and per-provider
+`[eval.providers.<name>]` connection profiles containing env-var _names_ only
+(matching the `[agents.CodexAgent] api_key_env` pattern). The committable
+experiment definition lives in the eval YAML referenced by `eval_config`. See
+[docs/reference/evals.md](reference/evals.md).
