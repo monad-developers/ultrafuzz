@@ -131,6 +131,74 @@ describe("runner", () => {
     // Cursor persisted under the eval run root for crash-safe resume.
     expect(fs.existsSync(path.join(base, "eval-run", "telemetry", `${row.id}.cursor.json`))).toBe(true);
   });
+
+  it("defers onRowStart until the detached subprocess writes graph.json", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-race-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    // Freshly launched run: state.json exists but DAG planning has not written graph.json yet.
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: {
+        schema_version: "1.0",
+        run_id: "run-1",
+        status: "running",
+        created_at: T0,
+        started_at: T0,
+        nodes: {}
+      }
+    });
+    const reporter = new RecordingReporter();
+    let syncCalls = 0;
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: {
+        schema_version: EVAL_RUN_SCHEMA_VERSION,
+        eval_run_id: "eval-1",
+        row_id: row.id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        ultrafuzz_run_id: "run-1",
+        ultrafuzz_run_root: runRoot,
+        status: "launched",
+        workflow_ids: ["wf-1"],
+        started_at: T0,
+        finished_at: T0,
+        diagnostics: []
+      },
+      reporters: [reporter],
+      evalRunRoot: path.join(base, "eval-run"),
+      sync: async () => {
+        syncCalls += 1;
+        if (syncCalls === 2) {
+          // Second tick: planning finishes (graph.json appears) and the run completes.
+          terminalRunFixture(runRoot);
+        }
+      },
+      pollIntervalMs: 1
+    });
+
+    expect(watched.record.final_status).toBe("succeeded");
+    expect(syncCalls).toBe(2);
+    const methods = reporter.calls.map((call) => call.method);
+    expect(methods[0]).toBe("onRowStart");
+    expect(methods[methods.length - 1]).toBe("onRowFinish");
+    // onRowStart waited for graph.json: reporters get the real node list, not an empty graph.
+    const rowStartGraph = reporter.calls[0]?.args[1] as { nodes: Array<{ id: string; group: string }> };
+    expect(rowStartGraph.nodes).toHaveLength(1);
+    expect(rowStartGraph.nodes[0]).toMatchObject({ id: "setup-1", group: "setup" });
+    // No node events were delivered before onRowStart, and all journal events still arrive.
+    expect(reporter.envelopes().map((envelope) => envelope.event.type)).toEqual([
+      "node-started",
+      "node-artifacts",
+      "node-finished"
+    ]);
+  });
 });
 
 describe("eval publish (post-hoc replay)", () => {

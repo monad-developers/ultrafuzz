@@ -269,10 +269,6 @@ export async function watchEvalRow(
   if (runRoot === undefined) {
     return { record: input.record, diagnostics };
   }
-  const graph = readGraph(runRoot);
-  for (const reporter of input.reporters) {
-    await reporter.onRowStart(input.row, graphFromPlannedGraph(graph, input.row.id));
-  }
   const pump = new NodeTelemetryPump({
     runRoot,
     row: input.row,
@@ -284,6 +280,27 @@ export async function watchEvalRow(
   const pollIntervalMs = input.pollIntervalMs ?? 15_000;
   const deadline = Date.now() + (input.timeoutSeconds ?? 6 * 60 * 60) * 1000;
 
+  // The detached subprocess writes graph.json only after DAG planning, which
+  // can be seconds to tens of seconds after launch. Defer onRowStart until the
+  // graph is on disk so reporters see the real node list (an empty graph would
+  // orphan every node run under a never-created "default" group). `force`
+  // falls back to the empty graph so onRowStart always precedes drains/finish.
+  let rowStarted = false;
+  const startRowIfReady = async (force: boolean): Promise<void> => {
+    if (rowStarted) {
+      return;
+    }
+    const graph = readGraph(runRoot);
+    if (graph === undefined && !force) {
+      return;
+    }
+    rowStarted = true;
+    for (const reporter of input.reporters) {
+      await reporter.onRowStart(input.row, graphFromPlannedGraph(graph, input.row.id));
+    }
+  };
+
+  await startRowIfReady(false);
   let state = readStateSafe(runRoot);
   while (state !== undefined && !isTerminalRunStatus(state.status) && Date.now() < deadline) {
     try {
@@ -301,8 +318,11 @@ export async function watchEvalRow(
         source: "evals"
       });
     }
-    const drained = await pump.drain();
-    diagnostics.push(...drained.warnings);
+    await startRowIfReady(false);
+    if (rowStarted) {
+      const drained = await pump.drain();
+      diagnostics.push(...drained.warnings);
+    }
     state = readStateSafe(runRoot);
     if (state !== undefined && isTerminalRunStatus(state.status)) {
       break;
@@ -311,6 +331,7 @@ export async function watchEvalRow(
   }
 
   // Final catch-up after the row reaches terminal state (or times out).
+  await startRowIfReady(true);
   const finalDrain = await pump.drain();
   diagnostics.push(...finalDrain.warnings);
   state = readStateSafe(runRoot);
