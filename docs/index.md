@@ -49,9 +49,10 @@ copy reviewed outputs into the target project with `ultrafuzz materialize`.
 - Follow the [first campaign tutorial](tutorials/first-campaign.md) to get from
   initialization to report review.
 - Use [how-to guides](how-to/index.md) for specific operator tasks such as
-  editing prompts, materializing tests, reviewing findings, or cleaning runs.
+  editing prompts, materializing tests, reviewing findings, cleaning runs, or
+  running eval suites.
 - Use [reference](reference/index.md) for exact CLI, config, topology, prompt,
-  artifact, reference, dashboard, and development details.
+  artifact, reference, eval-suite, dashboard, and development details.
 - Use [explanation](explanation/index.md) to understand campaign ownership,
   artifact handoffs, trust boundaries, and evaluation guidance.
 

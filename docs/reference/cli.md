@@ -24,6 +24,12 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
 | `ultrafuzz clean <run-id>`       | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
 | `ultrafuzz dashboard`            | Serve the local loopback dashboard and API for product state inspection and editing.                           |
+| `ultrafuzz eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                      |
+| `ultrafuzz eval run`             | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
+| `ultrafuzz eval score <id>`      | Score finished eval run reports against external ground truth.                                                 |
+| `ultrafuzz eval report <id>`     | Show the scored eval run variant ranking.                                                                      |
+| `ultrafuzz eval compare <id>`    | Compare scored eval variants against a baseline variant.                                                       |
+| `ultrafuzz eval publish <id>`    | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -202,3 +208,65 @@ ultrafuzz dashboard \
 `dashboard` starts a local loopback server and prints the `/dashboard` URL. The
 API reads and edits only beta product surfaces, validates mutating saves before
 writing, and guards mutating requests with a per-session token.
+
+## Eval
+
+```bash
+ultrafuzz eval plan \
+  [--project <path>] \
+  [--suite <suite-yaml-path>] \
+  [--provider braintrust|langsmith|none] \
+  [--target-root <path>] \
+  [--skip-target-validation] \
+  [--json]
+ultrafuzz eval run \
+  [--project <path>] \
+  [--suite <suite-yaml-path>] \
+  [--provider braintrust|langsmith|none] \
+  [--eval-run-id <id>] \
+  [--row <row-id>]... \
+  [--target-root <path>] \
+  [--no-watch] \
+  [--json]
+ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]
+ultrafuzz eval report <eval-run-id> [--project <path>] [--json]
+ultrafuzz eval compare <eval-run-id> --baseline <variant-id> [--project <path>] [--json]
+ultrafuzz eval publish <eval-run-id> \
+  [--project <path>] \
+  [--provider braintrust|langsmith] \
+  [--resume] \
+  [--json]
+```
+
+Eval suites benchmark the fuzzing pipeline against targets with known
+ground-truth bugs. The experiment definition lives in a committable eval YAML
+(default suite path from `[eval].eval_config`, overridable per command with
+`--suite`); provider binding and credential env-var names live in the
+`ultrafuzz.toml` `[eval]` section. Precedence for both is CLI flag > env
+(`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
+
+`plan` validates config plus suite and prints the trial matrix without
+launching workflows. By default it also validates local target checkouts (one
+directory per target id under `--target-root`) against the pinned git refs;
+`--skip-target-validation` skips that check.
+
+`run` launches Ultrafuzz runs for matrix rows (all rows, or a `--row`
+selection), polls them to a terminal state, and streams node telemetry to the
+configured provider. `--no-watch` launches detached without polling or
+telemetry streaming.
+
+`score` grades finished run reports against external ground truth resolved
+under `[eval].ground_truth_root`, deterministically by default and with the
+suite's judge model profile when `--llm-judge` is passed. `report` shows the
+scored variant ranking, and `compare` diffs variants against a required
+`--baseline` variant.
+
+`publish` replays a recorded eval run's journals from offset 0 and
+reconstructs the full node trace on a provider post hoc; `--resume` continues
+from the persisted publish cursor instead. Provider credentials are only
+required at publish time, so `provider = "none"` keeps the local
+plan → run → score → report → compare loop working offline.
+
+Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
+[Eval Suites](evals.md) for configuration, architecture, and telemetry policy
+details.

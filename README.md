@@ -47,6 +47,7 @@ generated artifacts before copying anything into the target project.
 - [Explanation](docs/explanation/index.md)
 - [CLI](docs/cli.md)
 - [Config](docs/config.md)
+- [Eval Suites](docs/reference/evals.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
 

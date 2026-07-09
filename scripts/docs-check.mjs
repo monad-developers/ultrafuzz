@@ -14,6 +14,7 @@ const requiredDocs = [
   "docs/how-to/materialize-tests.md",
   "docs/how-to/restart-continue.md",
   "docs/how-to/review-findings.md",
+  "docs/how-to/run-evals.md",
   "docs/how-to/use-dashboard.md",
   "docs/reference/index.md",
   "docs/reference/artifacts-reports.md",

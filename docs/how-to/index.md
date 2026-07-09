@@ -8,6 +8,7 @@ How-to guides solve specific Ultrafuzz tasks during or after a campaign.
 - [Materialize Generated Tests](materialize-tests.md)
 - [Clean Runs](clean-runs.md)
 - [Use the Dashboard](use-dashboard.md)
+- [Run Eval Suites](run-evals.md)
 
 For command summaries, see [CLI](../cli.md). For config fields and trust-model
 settings, see [Config](../config.md).

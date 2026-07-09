@@ -220,3 +220,38 @@ Cleanup writes an audit record to:
 ```text
 .ultrafuzz/clean-audit.jsonl
 ```
+
+## Eval Run Artifacts
+
+Eval suite runs write local artifacts under:
+
+```text
+.ultrafuzz/evals/runs/<eval-run-id>/
+```
+
+Each eval run records:
+
+```text
+eval.json
+matrix.json
+runs.jsonl
+scores.jsonl
+summary.json
+summary.md
+telemetry/
+```
+
+`eval.json` records the resolved suite, `matrix.json` records the planned
+target × variant × trial rows, and `runs.jsonl` appends one record per
+launched row. `ultrafuzz eval score` writes per-row scores to `scores.jsonl`
+and the variant ranking to `summary.json` plus a human-readable `summary.md`
+read by `ultrafuzz eval report`.
+
+`telemetry/` holds durable per-row telemetry cursors (byte offset, event dedup
+state, uploaded-artifact hashes) for live streaming, plus per-provider publish
+cursors under `telemetry/publish/<provider>/`, so a crashed driver or
+`ultrafuzz eval publish --resume` can continue delivery without
+double-publishing. The underlying Ultrafuzz runs
+live inside each target checkout, not under the eval project; eval artifacts
+reference them by run ID. Grading and these artifacts never depend on a
+reporting provider. See [Eval Suites](evals.md).
