@@ -201,9 +201,11 @@ test("findings normalize agent lifecycle statuses and flexible evidence referenc
         severity_guess: "high",
         confidence: "high",
         summary: "The generated test fails deterministically.",
+        notes: "narrow rerun confirmed the generated test",
         evidence: [
           "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
-          { note: "Generated test reproduces issue" }
+          { note: "Generated test reproduces issue" },
+          { kind: "validation", path: "forge test --match-path test/foundry/strategy-a/Generated.t.sol -vvvv" }
         ]
       }
     ])
@@ -213,9 +215,11 @@ test("findings normalize agent lifecycle statuses and flexible evidence referenc
 
   assert.equal(report.count, 1);
   assert.equal(report.findings[0]!.status, "reproduced_by_generated_test");
+  assert.deepEqual(report.findings[0]!.notes, ["narrow rerun confirmed the generated test"]);
   assert.deepEqual(report.findings[0]!.evidence, [
     "test/foundry/strategy-a/Generated.t.sol::testReproducesIssue",
-    { note: "Generated test reproduces issue" }
+    { note: "Generated test reproduces issue" },
+    { kind: "validation", command: "forge test --match-path test/foundry/strategy-a/Generated.t.sol -vvvv" }
   ]);
 
   fs.writeFileSync(
@@ -273,6 +277,44 @@ test("findings normalize markdown evidence path fragments", () => {
   );
 
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /fragment conflicts/);
+});
+
+test("findings normalize source evidence line suffixes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source line anchors the issue.",
+        evidence: [{ kind: "source", path: "src/Oracle.sol:42" }]
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(report.findings[0]!.evidence, [{ kind: "source", path: "src/Oracle.sol", line: 42 }]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source line anchors the issue.",
+        evidence: [{ kind: "source", path: "src/Oracle.sol:42", line: 43 }]
+      }
+    ])
+  );
+
+  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line conflicts/);
 });
 
 test("findings metadata paths allow dot-prefixed generated roots but reject traversal", () => {
