@@ -50,7 +50,7 @@ test("final report validation accepts target e2e severity issue shape", () => {
     summary: "Bounded target E2E signal generated from repository structure and selected CI profile.",
     affected_files: ["repository-root"],
     evidence: [{ kind: "repository-sample", path: "repository-root" }],
-    reproductions: [{ type: "ci-helper", command: "python3 .ultrafuzz/ci/target-e2e-artifacts.py signal-analysis" }],
+    reproductions: [{ type: "ci-helper", command: "bun .ultrafuzz/ci/target-e2e-artifacts.ts signal-analysis" }],
     notes: ["impact=Medium", "likelihood=Medium", "context=CI target signal preservation via deterministic profile"]
   };
   const diagnostics = validateSeverityMatrixArtifact({
