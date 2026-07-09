@@ -65,7 +65,10 @@ def signal_analysis(repo: Path, artifact: Path, out: Path) -> None:
     )[:30]
     test_files = sorted(
         str(path.relative_to(repo))
-        for path in list(repo.glob("test/**/*.sol")) + list(repo.glob("tests/**/*.ts")) + list(repo.glob("tests/**/*.py"))
+        for path in list(repo.glob("test/**/*.sol"))
+        + list(repo.glob("tests/**/*.ts"))
+        + list(repo.glob("test/**/*.py"))
+        + list(repo.glob("tests/**/*.py"))
     )[:30]
     write_text(
         artifact / "signal-analysis.md",
