@@ -278,6 +278,46 @@ describe("LangSmithReporter", () => {
     expect(patches[0]?.url).toContain(String(nodeCreate.id));
   });
 
+  it("routes artifact events to the latest attempt run, even beyond 16 retries", async () => {
+    const { requests, fetchImpl } = fakeFetch();
+    const suite = testSuite("/tmp/gt");
+    const row = testRow(suite);
+    const reporter = new LangSmithReporter({
+      apiKey: "secret",
+      project: "ultrafuzz-evals",
+      evalRunId: "eval-1",
+      policy: testReportingPolicy(),
+      fetchImpl
+    });
+    await reporter.onRowStart(row, {
+      rowId: row.id,
+      nodes: [{ id: "setup-1", logicalId: "setup-1", kind: "agentic", group: "setup", dependsOn: [] }]
+    });
+    await reporter.onNodeEvent({
+      eventId: "evt-1",
+      rowId: row.id,
+      nodeId: "setup-1",
+      event: { type: "node-started", at: "2026-07-09T00:00:00.000Z", attempt: 17 }
+    });
+    const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
+    const nodeCreate = creates[creates.length - 1]?.body as Record<string, unknown>;
+    expect(nodeCreate).toMatchObject({ name: "setup-1 (attempt 17)" });
+
+    await reporter.onNodeEvent({
+      eventId: "evt-2",
+      rowId: row.id,
+      nodeId: "setup-1",
+      event: {
+        type: "node-artifacts",
+        at: "2026-07-09T00:05:00.000Z",
+        manifest: [{ path: "report.md", size_bytes: 8, sha256: "abc", provenance: { producer_node_id: "setup-1" } }]
+      }
+    });
+    const patches = requests.filter((request) => request.method === "PATCH");
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toContain(String(nodeCreate.id));
+  });
+
   it("formats dotted-order segments the way LangSmith expects", () => {
     const segment = dottedOrderSegment("2026-07-09T01:02:03.456Z", "abc");
     expect(segment).toBe("20260709T010203456000Zabc");

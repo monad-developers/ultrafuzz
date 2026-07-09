@@ -163,25 +163,39 @@ export class NodeTelemetryPump {
 
   private readNewJournalRecords(warnings: RuntimeDiagnostic[]): { records: EventRecord[]; nextOffset: number } {
     const eventsPath = path.join(this.input.runRoot, "events.jsonl");
-    if (!fs.existsSync(eventsPath)) {
-      return { records: [], nextOffset: this.cursor.byteOffset };
-    }
-    const size = fs.statSync(eventsPath).size;
-    if (size < this.cursor.byteOffset) {
-      // Journal shrank (rewritten run dir) — restart from zero rather than mis-read.
-      this.cursor.byteOffset = 0;
-    }
-    if (size === this.cursor.byteOffset) {
-      return { records: [], nextOffset: this.cursor.byteOffset };
-    }
-    const buffer = Buffer.alloc(size - this.cursor.byteOffset);
-    const fd = fs.openSync(eventsPath, "r");
+    // The existsSync/statSync/openSync sequence is not atomic: the run dir can
+    // vanish between calls (CI cleanup, crash recovery). Treat any filesystem
+    // error as "no new records this tick" instead of aborting the whole suite.
+    let text: string;
     try {
-      fs.readSync(fd, buffer, 0, buffer.length, this.cursor.byteOffset);
-    } finally {
-      fs.closeSync(fd);
+      if (!fs.existsSync(eventsPath)) {
+        return { records: [], nextOffset: this.cursor.byteOffset };
+      }
+      const size = fs.statSync(eventsPath).size;
+      if (size < this.cursor.byteOffset) {
+        // Journal shrank (rewritten run dir) — restart from zero rather than mis-read.
+        this.cursor.byteOffset = 0;
+      }
+      if (size === this.cursor.byteOffset) {
+        return { records: [], nextOffset: this.cursor.byteOffset };
+      }
+      const buffer = Buffer.alloc(size - this.cursor.byteOffset);
+      const fd = fs.openSync(eventsPath, "r");
+      try {
+        fs.readSync(fd, buffer, 0, buffer.length, this.cursor.byteOffset);
+      } finally {
+        fs.closeSync(fd);
+      }
+      text = buffer.toString("utf8");
+    } catch (error) {
+      warnings.push(
+        warningDiagnostic(
+          "EVAL_TELEMETRY_JOURNAL_UNREADABLE",
+          `failed to read run journal ${eventsPath}: ${error instanceof Error ? error.message : String(error)}`
+        )
+      );
+      return { records: [], nextOffset: this.cursor.byteOffset };
     }
-    const text = buffer.toString("utf8");
     const lastNewline = text.lastIndexOf("\n");
     if (lastNewline === -1) {
       // Partial line only — wait for the writer to finish it.

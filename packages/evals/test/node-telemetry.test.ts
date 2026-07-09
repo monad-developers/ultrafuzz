@@ -258,6 +258,38 @@ describe("NodeTelemetryPump", () => {
     expect(reporter.envelopes().filter((envelope) => envelope.event.type === "node-heartbeat")).toHaveLength(2);
   });
 
+  it("degrades journal read errors to warnings instead of aborting the drain", async () => {
+    const { runRoot, reporter, pump } = setup();
+    writeRunFixture({ runRoot, events: [] });
+    const eventsPath = path.join(runRoot, "events.jsonl");
+    // Simulate a racy/unreadable journal (e.g. run dir replaced mid-drain):
+    // a directory passes existsSync/statSync but fails on read.
+    fs.rmSync(eventsPath);
+    fs.mkdirSync(eventsPath);
+    const result = await pump().drain();
+    expect(result.warnings.some((warning) => warning.code === "EVAL_TELEMETRY_JOURNAL_UNREADABLE")).toBe(true);
+    expect(reporter.envelopes()).toHaveLength(0);
+
+    // Once the journal is healthy again the pump resumes from its cursor.
+    fs.rmdirSync(eventsPath);
+    fs.writeFileSync(
+      eventsPath,
+      `${JSON.stringify({
+        schema_version: "1.0",
+        run_id: "run-1",
+        event_id: "evt-1",
+        event_type: "node-synced",
+        timestamp: T0,
+        node_id: "setup-1",
+        status: "running",
+        payload: {}
+      })}\n`,
+      "utf8"
+    );
+    await pump().drain();
+    expect(reporter.envelopes()).toHaveLength(1);
+  });
+
   it("degrades reporter failures to warnings and keeps draining", async () => {
     const { runRoot, reporter, pump } = setup();
     reporter.failOn = new Set(["onNodeEvent"]);

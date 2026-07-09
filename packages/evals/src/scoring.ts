@@ -460,7 +460,10 @@ async function bestMatch(
  * gateway; nothing in the scoring loop depends on it (grading is deterministic
  * unless a judge is explicitly enabled).
  */
-export function gatewayLlmJudge(env: Record<string, string | undefined>): FindingJudge {
+export function gatewayLlmJudge(
+  env: Record<string, string | undefined>,
+  fetchImpl: typeof fetch = fetch
+): FindingJudge {
   const apiKey = env.ULTRAFUZZ_EVAL_JUDGE_API_KEY ?? env.BRAINTRUST_API_KEY ?? env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new EvalError(
@@ -480,7 +483,7 @@ export function gatewayLlmJudge(env: Record<string, string | undefined>): Findin
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetchImpl(endpoint, {
         method: "POST",
         headers: {
           authorization: `Bearer ${apiKey}`,

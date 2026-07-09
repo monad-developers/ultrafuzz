@@ -39,6 +39,7 @@ export class LangSmithReporter implements EvalReporter {
   private readonly fetchImpl: typeof fetch;
   private projectEnsured = false;
   private readonly createdRuns = new Set<string>();
+  private readonly latestAttemptByNode = new Map<string, number>();
   private readonly rowGraphs = new Map<string, EvalRowGraph>();
   private readonly rowStartTimes = new Map<string, string>();
 
@@ -235,18 +236,25 @@ export class LangSmithReporter implements EvalReporter {
   }
 
   private latestNodeRunId(rowId: string, nodeId: string): string | undefined {
-    for (let attempt = 16; attempt >= 1; attempt -= 1) {
-      const candidate = this.nodeRunId(rowId, nodeId, attempt);
-      if (this.createdRuns.has(candidate)) {
-        return candidate;
-      }
+    const latestAttempt = this.latestAttemptByNode.get(`${rowId}:${nodeId}`);
+    if (latestAttempt === undefined) {
+      return undefined;
     }
-    return undefined;
+    return this.nodeRunId(rowId, nodeId, latestAttempt);
+  }
+
+  private recordLatestAttempt(rowId: string, nodeId: string, attempt: number): void {
+    const key = `${rowId}:${nodeId}`;
+    const prior = this.latestAttemptByNode.get(key);
+    if (prior === undefined || attempt > prior) {
+      this.latestAttemptByNode.set(key, attempt);
+    }
   }
 
   private async ensureNodeRun(rowId: string, nodeId: string, attempt: number, startTime: string): Promise<void> {
     const runId = this.nodeRunId(rowId, nodeId, attempt);
     if (this.createdRuns.has(runId)) {
+      this.recordLatestAttempt(rowId, nodeId, attempt);
       return;
     }
     const graph = this.rowGraphs.get(rowId);
@@ -282,6 +290,7 @@ export class LangSmithReporter implements EvalReporter {
         }
       }
     });
+    this.recordLatestAttempt(rowId, nodeId, attempt);
   }
 
   private async createRun(body: Record<string, unknown>): Promise<void> {
