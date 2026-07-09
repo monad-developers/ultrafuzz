@@ -8,7 +8,6 @@ How-to guides solve specific Ultrafuzz tasks during or after a campaign.
 - [Materialize Generated Tests](materialize-tests.md)
 - [Clean Runs](clean-runs.md)
 - [Use the Dashboard](use-dashboard.md)
-- [StableSwapNG Vyper Smoke Benchmark](stableswap-ng-vyper-smoke.md)
 
 For command summaries, see [CLI](../cli.md). For config fields and trust-model
 settings, see [Config](../config.md).
