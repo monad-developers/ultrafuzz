@@ -21,6 +21,7 @@ const requiredDocs = [
   "docs/reference/configuration.md",
   "docs/reference/dashboard.md",
   "docs/reference/development.md",
+  "docs/reference/evals.md",
   "docs/reference/prompt-variables.md",
   "docs/reference/references.md",
   "docs/reference/topology-yaml.md",

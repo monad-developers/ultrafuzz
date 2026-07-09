@@ -166,6 +166,19 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     quorum: clone.triage.quorum,
     panel_size: clone.triage.panelSize
   });
+  pushTable(lines, "eval", {
+    eval_config: clone.eval.evalConfig,
+    ground_truth_root: clone.eval.groundTruthRoot,
+    provider: clone.eval.provider
+  });
+  for (const [name, profile] of Object.entries(clone.eval.providers)) {
+    pushTable(lines, tableName(["eval", "providers", name]), {
+      api_key_env: profile.apiKeyEnv,
+      workspace_id_env: profile.workspaceIdEnv,
+      project: profile.project,
+      endpoint: profile.endpoint
+    });
+  }
   return `${lines.join("\n").replace(/\n{3,}/g, "\n\n")}\n`;
 }
 
@@ -272,6 +285,25 @@ function applyProjectConfigLayer(
       ...definedOnly(layer.triage)
     };
   }
+  if (layer.eval) {
+    if (layer.eval.provider !== undefined) {
+      config.eval.provider = layer.eval.provider;
+    }
+    if (layer.eval.evalConfig !== undefined) {
+      config.eval.evalConfig = layer.eval.evalConfig;
+    }
+    if (layer.eval.groundTruthRoot !== undefined) {
+      config.eval.groundTruthRoot = layer.eval.groundTruthRoot;
+    }
+    if (layer.eval.providers) {
+      for (const [name, profile] of Object.entries(layer.eval.providers).sort()) {
+        config.eval.providers[name] = {
+          ...config.eval.providers[name],
+          ...definedOnly(profile)
+        };
+      }
+    }
+  }
 }
 
 function applyEnvironmentOverrides(
@@ -316,6 +348,12 @@ function applyEnvironmentOverrides(
     } else {
       config.run.keepWorkspaces = parsed;
     }
+  }
+  if (env.ULTRAFUZZ_EVAL_PROVIDER !== undefined && env.ULTRAFUZZ_EVAL_PROVIDER.trim().length > 0) {
+    config.eval.provider = env.ULTRAFUZZ_EVAL_PROVIDER.trim();
+  }
+  if (env.ULTRAFUZZ_EVAL_CONFIG !== undefined && env.ULTRAFUZZ_EVAL_CONFIG.trim().length > 0) {
+    config.eval.evalConfig = env.ULTRAFUZZ_EVAL_CONFIG.trim();
   }
   syncDefaultModelProfile(config);
 }
@@ -513,6 +551,9 @@ function sortConfig(config: ResolvedConfig): void {
   );
   config.models.profiles = Object.fromEntries(
     Object.entries(config.models.profiles).sort(([left], [right]) => left.localeCompare(right))
+  );
+  config.eval.providers = Object.fromEntries(
+    Object.entries(config.eval.providers).sort(([left], [right]) => left.localeCompare(right))
   );
 }
 

@@ -7,6 +7,9 @@
 !.ultrafuzz/topology.yml
 !.ultrafuzz/prompts/
 !.ultrafuzz/prompts/**
+!.ultrafuzz/evals/
+!.ultrafuzz/evals/*.yml
+.ultrafuzz/evals/runs/
 node_modules/
 dist/
 dist-test/

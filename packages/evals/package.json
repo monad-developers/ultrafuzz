@@ -1,0 +1,30 @@
+{
+  "name": "@ultrafuzz/evals",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "pnpm --filter @ultrafuzz/runtime build && tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @ultrafuzz/runtime build && vitest run",
+    "typecheck": "pnpm --filter @ultrafuzz/runtime build && tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/config": "workspace:*",
+    "@ultrafuzz/runtime": "workspace:*",
+    "yaml": "^2.8.0",
+    "zod": "^4.4.3"
+  }
+}

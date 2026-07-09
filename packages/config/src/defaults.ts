@@ -6,6 +6,8 @@ import { CONFIG_FILE_NAME } from "./constants.js";
 import { parseProjectConfigToml } from "./loader.js";
 import type {
   AgentConfig,
+  EvalConfig,
+  EvalConfigInput,
   ModelProfile,
   PermissionConfig,
   ProjectConfigInput,
@@ -24,6 +26,8 @@ export const DEFAULT_TRIAGE_QUORUM = 3;
 export const DEFAULT_TRIAGE_PANEL_SIZE = 4;
 export const DEFAULT_TIMEOUT_SECONDS = 1_800;
 export const MAX_TIMEOUT_SECONDS = 86_400;
+export const DEFAULT_EVAL_PROVIDER = "none";
+export const DEFAULT_EVAL_CONFIG_PATH = ".ultrafuzz/evals/bug-finding.yml";
 
 const DEFAULT_CONFIG = loadDefaultConfig();
 
@@ -118,7 +122,27 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
     triage: {
       quorum: required(triage.quorum, "triage.quorum", filePath),
       panelSize: required(triage.panelSize, "triage.panel_size", filePath)
-    }
+    },
+    eval: normalizeEvalConfig(input.eval)
+  };
+}
+
+export function normalizeEvalConfig(input: EvalConfigInput | undefined): EvalConfig {
+  return {
+    provider: input?.provider ?? DEFAULT_EVAL_PROVIDER,
+    providers: Object.fromEntries(
+      Object.entries(input?.providers ?? {}).map(([name, profile]) => [
+        name,
+        {
+          ...(profile.apiKeyEnv !== undefined ? { apiKeyEnv: profile.apiKeyEnv } : {}),
+          ...(profile.workspaceIdEnv !== undefined ? { workspaceIdEnv: profile.workspaceIdEnv } : {}),
+          ...(profile.project !== undefined ? { project: profile.project } : {}),
+          ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {})
+        }
+      ])
+    ),
+    ...(input?.evalConfig !== undefined ? { evalConfig: input.evalConfig } : {}),
+    ...(input?.groundTruthRoot !== undefined ? { groundTruthRoot: input.groundTruthRoot } : {})
   };
 }
 
@@ -233,6 +257,9 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   assertRecord(value.triage, "triage", filePath);
   assertNumber(value.triage.quorum, "triage.quorum", filePath);
   assertNumber(value.triage.panelSize, "triage.panelSize", filePath);
+  assertRecord(value.eval, "eval", filePath);
+  assertString(value.eval.provider, "eval.provider", filePath);
+  assertRecord(value.eval.providers, "eval.providers", filePath);
 }
 
 function assertRecord(value: unknown, label: string, filePath: string): asserts value is Record<string, unknown> {

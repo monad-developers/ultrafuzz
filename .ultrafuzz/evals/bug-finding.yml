@@ -1,0 +1,47 @@
+# Default eval suite: the committable experiment definition.
+#
+# Nothing in this file names a provider, an endpoint, or an env var — provider
+# binding and credentials env-var names live in ultrafuzz.toml under [eval].
+# Ground-truth files resolve under [eval].ground_truth_root, which MUST live
+# outside the repository.
+schema_version: ultrafuzz.eval.v1
+suite: bug-finding-regression
+
+model_profiles:
+  eval-runner: { agent: CodexAgent, model: gpt-5.4-mini, reasoning: high }
+  eval-judge: { agent: CodexAgent, model: gpt-5.5, reasoning: xhigh }
+
+targets:
+  - id: aave-v4
+    repo: https://github.com/aave/aave-v4
+    ref: v0.5.6
+    sensitivity: private
+    ground_truth: aave-v4.yml # resolved under [eval].ground_truth_root
+  - id: very-liquid-vaults
+    repo: https://github.com/rheo-xyz/very-liquid-vaults
+    ref: e50384709a696c86ab0440bbbc3dd14a5f4ff6ec
+    sensitivity: private
+    ground_truth: very-liquid-vaults.yml
+
+variants:
+  - id: baseline # CI topology, unmodified
+
+run:
+  runner_model_profile: eval-runner
+  judge_model_profile: eval-judge
+  trials_per_variant: 10 # N=10 per target, matching the CI-topology default
+  max_parallel_targets: 2
+  max_parallel_runs: 8
+
+metrics:
+  primary: [precision, recall, f1_score]
+  recall_threshold: 0.7
+
+reporting: # policy only — provider selection/credentials live in ultrafuzz.toml
+  node_telemetry: true
+  heartbeat_interval_seconds: 60
+  experiment_prefix: bug-finding
+  artifacts:
+    mode: manifest-only # forced default when target.sensitivity == private; opt in to "upload"
+    include: ["report.md", "report.json", "findings.normalized.json"]
+    max_file_bytes: 5000000

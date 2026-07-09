@@ -111,6 +111,24 @@ export interface TriageConfig {
   panelSize: number;
 }
 
+export interface EvalProviderProfile {
+  apiKeyEnv?: string;
+  workspaceIdEnv?: string;
+  project?: string;
+  endpoint?: string;
+}
+
+export interface EvalConfig {
+  /** Path to the committable eval suite YAML used when `--suite` is omitted. */
+  evalConfig?: string;
+  /** Machine-specific root for ground-truth files; must resolve outside the repository. */
+  groundTruthRoot?: string;
+  /** Active reporter binding: `braintrust`, `langsmith`, `none`, or any configured profile name. */
+  provider: string;
+  /** Connection profiles keyed by provider name; values are env-var NAMES, never secrets. */
+  providers: Record<string, EvalProviderProfile>;
+}
+
 export interface ResolvedConfig {
   schemaVersion: string;
   dynamicStrategiesEnumerator: number;
@@ -121,6 +139,7 @@ export interface ResolvedConfig {
   permissions: PermissionConfig;
   invariants: InvariantConfig;
   triage: TriageConfig;
+  eval: EvalConfig;
 }
 
 export interface PromptMetadataLayer {
@@ -142,6 +161,14 @@ export interface ProjectConfigInput {
   permissions?: Partial<PermissionConfig>;
   invariants?: Partial<InvariantConfig>;
   triage?: Partial<TriageConfig>;
+  eval?: EvalConfigInput;
+}
+
+export interface EvalConfigInput {
+  evalConfig?: string;
+  groundTruthRoot?: string;
+  provider?: string;
+  providers?: Record<string, Partial<EvalProviderProfile>>;
 }
 
 export interface LoadedProjectConfig {
