@@ -297,6 +297,7 @@ nodes:
     kind: agentic
     prompt: strategies/differential-library-tests.md
     group: strategies
+    timeout_seconds: 7200
     depends_on:
       - property-specification-fanin
     required_artifacts:
