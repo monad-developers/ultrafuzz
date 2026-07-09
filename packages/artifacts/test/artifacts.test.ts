@@ -235,6 +235,46 @@ test("findings normalize agent lifecycle statuses and flexible evidence referenc
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /field kind/);
 });
 
+test("findings normalize markdown evidence path fragments", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Recipe-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A recipe section explains the issue.",
+        evidence: [{ kind: "recipe", path: "artifacts/strategy-a/recipes.md#bt-013" }]
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(report.findings[0]!.evidence, [
+    { kind: "recipe", path: "artifacts/strategy-a/recipes.md", fragment: "bt-013" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Recipe-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A recipe section explains the issue.",
+        evidence: [{ kind: "recipe", path: "artifacts/strategy-a/recipes.md#bt-013", fragment: "other" }]
+      }
+    ])
+  );
+
+  assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /fragment conflicts/);
+});
+
 test("findings metadata paths allow dot-prefixed generated roots but reject traversal", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });

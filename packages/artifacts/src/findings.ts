@@ -249,8 +249,44 @@ function validateEvidence(value: unknown, index: number): void {
     optionalString(entry, "kind");
     const evidencePath = optionalString(entry, "path");
     if (evidencePath !== undefined && !path.isAbsolute(evidencePath)) {
-      validateFindingMetadataRelativePath(evidencePath, "evidence path");
+      const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
+      entry.path = reference.path;
+      const existingFragment = optionalString(entry, "fragment");
+      if (reference.fragment !== undefined) {
+        if (existingFragment !== undefined && existingFragment !== reference.fragment) {
+          throw new Error(`evidence path fragment conflicts with existing fragment field`);
+        }
+        entry.fragment = reference.fragment;
+      } else if (existingFragment !== undefined) {
+        validateFindingMetadataFragment(existingFragment, "evidence fragment");
+      }
     }
+  }
+}
+
+function normalizeFindingMetadataPathReference(value: string, key: string): { path: string; fragment?: string } {
+  const hashIndex = value.indexOf("#");
+  if (hashIndex === -1) {
+    validateFindingMetadataRelativePath(value, key);
+    return { path: value };
+  }
+
+  const relativePath = value.slice(0, hashIndex);
+  const fragment = value.slice(hashIndex + 1);
+  validateFindingMetadataRelativePath(relativePath, key);
+  validateFindingMetadataFragment(fragment, `${key} fragment`);
+  return { path: relativePath, fragment };
+}
+
+function validateFindingMetadataFragment(value: string, key: string): void {
+  if (value.length === 0) {
+    throw new ArtifactPathError("empty-fragment", `${key} cannot be empty`);
+  }
+  if (value.includes("\0") || /[\r\n\t]/.test(value)) {
+    throw new ArtifactPathError("control-character", `${key} cannot contain control characters`);
+  }
+  if (!/^[A-Za-z0-9._@+-]+$/u.test(value)) {
+    throw new ArtifactPathError("unsafe-fragment", `${key} contains unsafe fragment ${JSON.stringify(value)}`);
   }
 }
 
