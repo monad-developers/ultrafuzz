@@ -21,13 +21,17 @@ work_root="${ULTRAFUZZ_E2E_WORK_ROOT:-.codex-runs/e2e-targets}"
 wait_seconds="${ULTRAFUZZ_E2E_WAIT_SECONDS:-1800}"
 poll_interval_seconds="${ULTRAFUZZ_E2E_POLL_INTERVAL_SECONDS:-15}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ci_helper="$script_dir/target-e2e-ci.py"
+ci_helper="$script_dir/target-e2e-ci.ts"
 clone_repository="$target_repository"
 checkout_ref=""
 checkout_kind=""
 
 if ! command -v "$ultrafuzz_bin" >/dev/null 2>&1 && [ ! -x "$ultrafuzz_bin" ]; then
   echo "Ultrafuzz CLI not found or not executable: $ultrafuzz_bin" >&2
+  exit 1
+fi
+if ! command -v bun >/dev/null 2>&1; then
+  echo "bun is required to run the target E2E CI helpers" >&2
   exit 1
 fi
 if [ -z "${OPENAI_API_KEY:-}" ]; then
@@ -52,7 +56,7 @@ run_id="e2e-${slug//./-}"
 
 redact_file() {
   local path="$1"
-  python3 "$ci_helper" redact "$path"
+  bun "$ci_helper" redact "$path"
 }
 
 run_cli_json() {
@@ -76,12 +80,12 @@ run_cli_json() {
 assert_cli_ok() {
   local path="$1"
   local label="$2"
-  python3 "$ci_helper" assert-cli-ok "$path" "$label"
+  bun "$ci_helper" assert-cli-ok "$path" "$label"
 }
 
 assert_inspect_healthy() {
   local path="$1"
-  python3 "$ci_helper" assert-inspect-healthy "$path"
+  bun "$ci_helper" assert-inspect-healthy "$path"
 }
 
 archive_latest_run_diagnostics() {
@@ -163,7 +167,7 @@ clone_target() {
 }
 
 write_target_metadata() {
-  python3 "$ci_helper" write-target-metadata "$evidence_root/target.json" "$target_name" "$target_repository" "$signal_profile" "$expected_findings"
+  bun "$ci_helper" write-target-metadata "$evidence_root/target.json" "$target_name" "$target_repository" "$signal_profile" "$expected_findings"
 }
 
 install_target_workflow_dependencies() {
@@ -214,15 +218,15 @@ wait_for_report() {
 }
 
 copy_report_json() {
-  python3 "$ci_helper" copy-report-json "$evidence_root/final-report.json" "$evidence_root/report.json"
+  bun "$ci_helper" copy-report-json "$evidence_root/final-report.json" "$evidence_root/report.json"
 }
 
 assert_report_accounting() {
-  python3 "$ci_helper" assert-report-accounting "$evidence_root/final-report.json" "$target_name" "$signal_profile"
+  bun "$ci_helper" assert-report-accounting "$evidence_root/final-report.json" "$target_name" "$signal_profile"
 }
 
 assert_report_findings() {
-  python3 "$ci_helper" assert-report-findings "$evidence_root/report.json" "$expected_findings" "$target_name" "$signal_profile"
+  bun "$ci_helper" assert-report-findings "$evidence_root/report.json" "$expected_findings" "$target_name" "$signal_profile"
 }
 
 rm -rf "$run_root"
@@ -236,7 +240,7 @@ run_cli_json "$evidence_root/init.json" "$evidence_root/init.stderr.log" \
   "$ultrafuzz_bin" init --project "$target_root" --force --json
 assert_cli_ok "$evidence_root/init.json" "init"
 
-python3 "$script_dir/scaffold-target-e2e.py" "$target_root"
+bun "$script_dir/scaffold-target-e2e.ts" "$target_root"
 install_target_workflow_dependencies
 
 run_cli_json "$evidence_root/validate.json" "$evidence_root/validate.stderr.log" \

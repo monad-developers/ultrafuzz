@@ -9,8 +9,8 @@
     "docs:check": "node scripts/docs-check.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{js,mjs}\" \"*.{js,mjs}\"",
-    "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{js,mjs}\" \"*.{js,mjs}\" --fix",
+    "lint": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\"",
+    "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\" --fix",
     "test": "pnpm -r test",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r typecheck"
