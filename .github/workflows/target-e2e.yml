@@ -87,7 +87,11 @@ jobs:
       - name: Install Codex CLI
         run: |
           if ! command -v codex >/dev/null 2>&1; then
-            curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+            curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh || true
+            if ! command -v codex >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/codex" ]; then
+              echo "Codex installer script failed; falling back to npm install."
+              npm install -g @openai/codex
+            fi
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           if command -v codex >/dev/null 2>&1; then
