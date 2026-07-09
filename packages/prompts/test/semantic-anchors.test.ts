@@ -86,7 +86,9 @@ describe("prompt semantic anchors", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/findings.mdx", import.meta.url)
     );
-    expect(readFileSync(templatePath, "utf8")).toContain("Use `[]` when there are no findings");
+    const template = readFileSync(templatePath, "utf8");
+    expect(template).toContain("Use `[]` when there are no findings");
+    expect(template).toContain("without anchors or line selectors");
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {
