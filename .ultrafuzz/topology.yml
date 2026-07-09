@@ -13,6 +13,7 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 3
+      timeout_seconds: 7200
       model_profiles:
         - default
   references:
@@ -297,7 +298,6 @@ nodes:
     kind: agentic
     prompt: strategies/differential-library-tests.md
     group: strategies
-    timeout_seconds: 7200
     depends_on:
       - property-specification-fanin
     required_artifacts:
