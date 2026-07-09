@@ -37,6 +37,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
   };
 }

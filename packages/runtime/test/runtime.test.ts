@@ -48,6 +48,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
   };
 }
@@ -88,6 +89,7 @@ function fakeLifecycleSmithersEnv(
   fs.chmodSync(smithers, 0o755);
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath
@@ -441,6 +443,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
+  assert.match(codexAgentText, /model_reasoning_effort:\s*"xhigh"/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -836,6 +839,51 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
+test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const binDir = path.join(project, "fake-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const npm = path.join(binDir, "npm");
+  const localSmithers = path.join(project, ".smithers", "node_modules", ".bin", "smithers");
+  const npmLogPath = path.join(project, "npm-install.log");
+  const smithersLogPath = path.join(project, "local-smithers.log");
+  fs.writeFileSync(
+    npm,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" >> "$NPM_FAKE_LOG"',
+      'mkdir -p "$(dirname "$ULTRAFUZZ_TEST_LOCAL_SMITHERS")"',
+      "cat > \"$ULTRAFUZZ_TEST_LOCAL_SMITHERS\" <<'EOS'",
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      "printf '%s\\n' '{\"ok\":true}'",
+      "EOS",
+      'chmod +x "$ULTRAFUZZ_TEST_LOCAL_SMITHERS"',
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(npm, 0o755);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "bootstrap-smithers-run",
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      NPM_FAKE_LOG: npmLogPath,
+      SMITHERS_FAKE_LOG: smithersLogPath,
+      ULTRAFUZZ_TEST_LOCAL_SMITHERS: localSmithers
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
+  assert.match(fs.readFileSync(smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+});
+
 test("startRun creates the workflow log directory before submission", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -870,7 +918,7 @@ test("startRun creates the workflow log directory before submission", async () =
   const run = await startRun({
     projectRoot: project,
     runId: "log-dir-run",
-    env: { PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` }
+    env: { PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SMITHERS_BIN: smithers }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -901,7 +949,7 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   const run = await startRun({
     projectRoot: project,
     runId: "failed-submit",
-    env: { PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` }
+    env: { PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SMITHERS_BIN: smithers }
   });
 
   assert.equal(run.ok, false);

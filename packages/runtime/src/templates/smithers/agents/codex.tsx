@@ -7,6 +7,7 @@ type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<stri
 
 export const CodexAgent = new SmithersCodexAgent({
   model: "gpt-5.5",
+  config: { model_reasoning_effort: "xhigh" },
   skipGitRepoCheck: true,
   ...codexAuthOptions()
 });
