@@ -184,11 +184,21 @@ export class LangSmithReporter implements EvalReporter {
 
   async onRowFinish(row: EvalMatrixRow, result: EvalRowResult): Promise<void> {
     const endTime = result.finishedAt ?? new Date().toISOString();
+    // In the post-hoc publish path onRowStart runs at publish time, so the
+    // root/group runs were created with a wall-clock start_time that can be
+    // hours or days after the actual run. state.json's started_at arrives here
+    // as result.startedAt — patch start_time back so the waterfall is correct.
+    // In the live path this second PATCH is a harmless near-no-op.
+    const startPatch = result.startedAt !== undefined ? { start_time: result.startedAt } : {};
+    if (result.startedAt !== undefined) {
+      this.rowStartTimes.set(row.id, result.startedAt);
+    }
     const graph = this.rowGraphs.get(row.id);
     for (const group of graph ? groupsInGraph(graph) : []) {
-      await this.patchRun(this.groupRunId(row.id, group), { end_time: endTime });
+      await this.patchRun(this.groupRunId(row.id, group), { ...startPatch, end_time: endTime });
     }
     await this.patchRun(this.rowRunId(row.id), {
+      ...startPatch,
       end_time: endTime,
       outputs: {
         status: result.status,
