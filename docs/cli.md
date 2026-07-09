@@ -20,6 +20,12 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `materialize <run-id>` | Copy selected outputs into the project after confirmation and path checks.                                                |
 | `clean <run-id>`       | Remove selected generated paths after confirmation and path checks.                                                       |
 | `dashboard`            | Serve the local loopback dashboard and API.                                                                               |
+| `eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                                 |
+| `eval run`             | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
+| `eval score <id>`      | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
+| `eval report <id>`     | Show the scored eval run variant ranking.                                                                                 |
+| `eval compare <id>`    | Compare scored eval variants against a `--baseline` variant.                                                              |
+| `eval publish <id>`    | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
 
 The dashboard/API is a local operator surface over product state, not a
 workflow-engine API.
@@ -68,6 +74,28 @@ run artifacts receive normalized Markdown handoffs plus
 
 Patch artifacts are not materialized until Ultrafuzz can apply them safely. Use
 explicit `--copy` selections for files you have reviewed.
+
+## Eval Commands
+
+`eval plan | run | score | report | compare | publish` drive eval suites that
+benchmark the pipeline against targets with known ground-truth bugs. The suite
+YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
+the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
+provider (`braintrust | langsmith | none`) and credential env-var names.
+Common flags:
+
+- `--suite <suite-yaml-path>` (plan, run)
+- `--provider <name>` (plan, run, publish)
+- `--target-root <path>` (plan, run)
+- `--row <row-id>` (run, repeatable)
+- `--no-watch` (run)
+- `--llm-judge` (score)
+- `--baseline <variant-id>` (compare, required)
+- `--resume` (publish)
+
+Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
+[Eval Suites](reference/evals.md) and the
+[CLI reference](reference/cli.md#eval) for full details.
 
 ## JSON Envelope
 

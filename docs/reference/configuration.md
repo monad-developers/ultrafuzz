@@ -63,6 +63,7 @@ Unknown TOML keys fail validation. Strategy execution behavior belongs in
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.       |
 | `[invariants]`                  | Invariant prompt defaults.                                          |
 | `[triage]`                      | Triage quorum and panel size.                                       |
+| `[eval]`                        | Eval suite defaults and reporting provider binding.                 |
 
 ## Project
 
@@ -151,6 +152,41 @@ panel_size = 4
 `quorum` and `panel_size` must be positive integers, and quorum must not exceed
 panel size.
 
+## Eval
+
+```toml
+[eval]
+eval_config = ".ultrafuzz/evals/bug-finding.yml"
+ground_truth_root = "/secure/eval-ground-truth"
+provider = "braintrust"
+
+[eval.providers.braintrust]
+api_key_env = "BRAINTRUST_API_KEY"
+project = "ultrafuzz-evals"
+```
+
+| Key                 | Type   | Meaning                                                                       |
+| ------------------- | ------ | ----------------------------------------------------------------------------- |
+| `eval_config`       | string | Eval suite YAML used when `--suite` is omitted.                               |
+| `ground_truth_root` | string | Machine-specific ground-truth directory; must resolve outside the repository. |
+| `provider`          | string | Active eval reporter: `braintrust`, `langsmith`, or `none`.                   |
+
+Each `[eval.providers.<name>]` connection profile supports:
+
+| Key                | Type   | Meaning                                                        |
+| ------------------ | ------ | -------------------------------------------------------------- |
+| `api_key_env`      | string | Name of the environment variable holding the provider API key. |
+| `workspace_id_env` | string | Name of the environment variable holding the workspace ID.     |
+| `project`          | string | Provider project name for published experiments.               |
+| `endpoint`         | string | Optional provider endpoint override.                           |
+
+Profiles hold environment-variable _names_ only, never secret values. An
+unknown `provider` or a missing `[eval.providers.<name>]` profile is a config
+error at `eval plan` time; a missing credential env var is an error at publish
+time only, so `provider = "none"` keeps local eval runs working offline. The
+experiment definition itself lives in the eval YAML — see
+[Eval Suites](evals.md).
+
 ## Environment Overrides
 
 | Variable                        | Effect                                                   |
@@ -159,6 +195,8 @@ panel size.
 | `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.  |
 | `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.             |
 | `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.              |
+| `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                            |
+| `ULTRAFUZZ_EVAL_CONFIG`         | Override for `eval.eval_config`.                         |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 

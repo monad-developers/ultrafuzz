@@ -109,3 +109,10 @@ Grading never depends on a provider: scores are computed locally
 (deterministic matcher, optional LLM judge behind the generic `FindingJudge`
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
+
+Full per-command flags are in the [CLI reference](cli.md#eval). Local eval
+artifacts (`eval.json`, `matrix.json`, `runs.jsonl`, `scores.jsonl`,
+`summary.json`, `summary.md`, telemetry cursors) are documented in
+[Run Artifacts and Reports](artifacts-reports.md#eval-run-artifacts). For a
+task-oriented walkthrough, see
+[Run Eval Suites](../how-to/run-evals.md).
