@@ -1452,6 +1452,48 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   assert.equal(resumedState.nodes?.["project-discovery"]?.finished_at, undefined);
 });
 
+test("syncRun keeps reset workflow nodes pending while the workflow is running", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-reset-pending";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "CLI timed out after 1800000ms" }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-reset-pending", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-reset-pending", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    finished_at?: string;
+    nodes?: Record<string, { status?: string; last_error?: string; finished_at?: string; timed_out?: boolean }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.finished_at, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.status, "pending");
+  assert.equal(state.nodes?.["project-discovery"]?.timed_out, false);
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.finished_at, undefined);
+});
+
 test("syncRun records model fan-out attempts independently", async () => {
   const project = tempProject();
   writeFanoutProject(project);
