@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"}]') }}
+        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"},{"name":"StableSwapNG (Vyper)","repository":"https://github.com/curvefi/stableswap-ng/commit/8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386","signal_profile":"stableswap-ng-vyper","expected_findings":"gt:0"}]') }}
     env:
       ULTRAFUZZ_E2E_DYNAMIC_STRATEGIES_ENUMERATOR: "1"
       ULTRAFUZZ_E2E_INVARIANT_TIMEOUT: 2min

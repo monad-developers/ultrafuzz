@@ -32,6 +32,11 @@ def project_discovery(repo: Path, artifact: Path, out: Path) -> None:
         for path in repo.glob("*")
         if path.is_dir() and any(path.glob("**/*.sol"))
     ][:12]
+    vyper_dirs = [
+        str(path.relative_to(repo))
+        for path in repo.glob("*")
+        if path.is_dir() and any(path.glob("**/*.vy"))
+    ][:12]
     top_level = sorted(path.name for path in repo.iterdir() if not path.name.startswith("."))[:40]
     write_text(
         artifact / "setup" / "project-discovery.md",
@@ -42,6 +47,7 @@ def project_discovery(repo: Path, artifact: Path, out: Path) -> None:
                 f"- Repository: {repo}",
                 f"- Markers: {', '.join(markers) if markers else 'none'}",
                 f"- Solidity directories: {', '.join(solidity_dirs) if solidity_dirs else 'none'}",
+                f"- Vyper directories: {', '.join(vyper_dirs) if vyper_dirs else 'none'}",
                 f"- Top-level entries: {', '.join(top_level) if top_level else 'none'}",
                 "",
             ]
@@ -53,10 +59,13 @@ def project_discovery(repo: Path, artifact: Path, out: Path) -> None:
 def signal_analysis(repo: Path, artifact: Path, out: Path) -> None:
     profile = os.environ.get("ULTRAFUZZ_E2E_SIGNAL_PROFILE", "control")
     expected = os.environ.get("ULTRAFUZZ_E2E_EXPECTED_FINDINGS", "any")
-    sol_files = sorted(str(path.relative_to(repo)) for path in repo.glob("**/*.sol"))[:30]
+    source_files = sorted(
+        str(path.relative_to(repo))
+        for path in list(repo.glob("**/*.sol")) + list(repo.glob("**/*.vy"))
+    )[:30]
     test_files = sorted(
         str(path.relative_to(repo))
-        for path in list(repo.glob("test/**/*.sol")) + list(repo.glob("tests/**/*.ts"))
+        for path in list(repo.glob("test/**/*.sol")) + list(repo.glob("tests/**/*.ts")) + list(repo.glob("tests/**/*.py"))
     )[:30]
     write_text(
         artifact / "signal-analysis.md",
@@ -65,14 +74,14 @@ def signal_analysis(repo: Path, artifact: Path, out: Path) -> None:
                 "# CI Signal Analysis",
                 "",
                 f"- Signal profile: {profile}",
-                f"- Solidity files sampled: {', '.join(sol_files) if sol_files else 'none'}",
+                f"- Source files sampled: {', '.join(source_files) if source_files else 'none'}",
                 f"- Test files sampled: {', '.join(test_files) if test_files else 'none'}",
                 "- The target E2E profile emits one source-backed CI signal unless the matrix expects eq:0.",
                 "",
             ]
         ),
     )
-    findings = [] if expected == "eq:0" else [finding(profile, sol_files, test_files)]
+    findings = [] if expected == "eq:0" else [finding(profile, source_files, test_files)]
     write_json(out, findings)
     write_json(
         artifact / "generated-tests.json",
@@ -99,11 +108,12 @@ def infer_node_id(artifact: Path) -> str:
     return artifact.name or "signal-analysis"
 
 
-def finding(profile: str, sol_files: list[str], test_files: list[str]) -> dict[str, object]:
-    evidence_path = sol_files[0] if sol_files else (test_files[0] if test_files else "repository-root")
+def finding(profile: str, source_files: list[str], test_files: list[str]) -> dict[str, object]:
+    evidence_path = source_files[0] if source_files else (test_files[0] if test_files else "repository-root")
     title = {
         "aave-v4": "CI signal preserved for Aave v4 stateful invariant surface",
         "very-liquid-vaults": "CI signal preserved for Very Liquid Vaults market boundary surface",
+        "stableswap-ng-vyper": "CI signal preserved for StableSwapNG Vyper AMM invariant surface",
     }.get(profile, "CI signal preserved for target repository surface")
     return {
         "schema_version": "1.0",
