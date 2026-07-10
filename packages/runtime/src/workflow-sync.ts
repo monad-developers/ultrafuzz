@@ -864,6 +864,16 @@ function mergeNodeWorkflowEvidence(
   const stepIsTerminal = terminalStatus(fromStep.status);
   const eventIsTerminal = terminalStatus(fromEvents.status);
   const attempt = maxDefinedNumber(fromEvents.attempt, fromStep.attempt);
+  if (!stepIsTerminal && eventIsTerminal) {
+    const eventAttemptIsNewer =
+      fromEvents.attempt !== undefined && fromStep.attempt !== undefined && fromEvents.attempt > fromStep.attempt;
+    if (!eventAttemptIsNewer) {
+      return {
+        ...fromStep,
+        ...(attempt === undefined ? {} : { attempt })
+      };
+    }
+  }
   return {
     ...fromEvents,
     ...(stepIsTerminal && !eventIsTerminal ? { status: fromStep.status, workflowState: fromStep.workflowState } : {}),
@@ -1013,6 +1023,20 @@ function finalRunStatus(
   if (workflowStatus === "cancelled" || workflowStatus === "canceled") {
     return "canceled";
   }
+  if (
+    [
+      "running",
+      "in-progress",
+      "started",
+      "retrying",
+      "queued",
+      "waiting-approval",
+      "waiting-event",
+      "waiting-timer"
+    ].includes(workflowStatus)
+  ) {
+    return "running";
+  }
   if (workflowStatus.includes("timeout") || statuses.includes("timed-out")) {
     return "timed-out";
   }
@@ -1028,20 +1052,6 @@ function finalRunStatus(
   }
   if (["stale", "orphaned"].includes(workflowStatus)) {
     return "failed";
-  }
-  if (
-    [
-      "running",
-      "in-progress",
-      "started",
-      "retrying",
-      "queued",
-      "waiting-approval",
-      "waiting-event",
-      "waiting-timer"
-    ].includes(workflowStatus)
-  ) {
-    return "running";
   }
   return currentStatus === "pending" ? "running" : currentStatus;
 }

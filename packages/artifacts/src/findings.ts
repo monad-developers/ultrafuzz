@@ -140,7 +140,7 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   validateOptionalStringArray(normalized, "affected_files", true);
   validateOptionalStringArray(normalized, "affected_functions", false);
   validateOptionalStringArray(normalized, "patch_refs", true);
-  validateOptionalStringArray(normalized, "notes", false);
+  normalizeOptionalStringArray(normalized, "notes");
   validateEvidence(normalized.evidence, index);
 
   return normalized as NormalizedFinding;
@@ -201,6 +201,18 @@ function validateOptionalStringArray(record: Record<string, unknown>, key: strin
   }
 }
 
+function normalizeOptionalStringArray(record: Record<string, unknown>, key: string): void {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (typeof value === "string") {
+    record[key] = [optionalString(record, key)!];
+    return;
+  }
+  validateOptionalStringArray(record, key, false);
+}
+
 function validateFindingMetadataRelativePath(relativePath: string, key: string): void {
   if (relativePath.length === 0) {
     throw new ArtifactPathError("empty-path", `${key} cannot contain empty paths`);
@@ -247,11 +259,113 @@ function validateEvidence(value: unknown, index: number): void {
       throw new Error(`finding ${index} evidence entries must be non-empty strings or objects`);
     }
     optionalString(entry, "kind");
+    optionalString(entry, "command");
+    const existingLine = optionalLineNumber(entry, "line");
     const evidencePath = optionalString(entry, "path");
     if (evidencePath !== undefined && !path.isAbsolute(evidencePath)) {
-      validateFindingMetadataRelativePath(evidencePath, "evidence path");
+      if (looksLikeEvidenceCommand(evidencePath)) {
+        const existingCommand = optionalString(entry, "command");
+        if (existingCommand !== undefined && existingCommand !== evidencePath) {
+          throw new Error(`evidence command conflicts with existing command field`);
+        }
+        entry.command = evidencePath;
+        delete entry.path;
+        continue;
+      }
+      const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
+      entry.path = reference.path;
+      const existingFragment = optionalString(entry, "fragment");
+      if (reference.line !== undefined) {
+        if (existingLine !== undefined && existingLine !== reference.line) {
+          throw new Error(`evidence path line conflicts with existing line field`);
+        }
+        entry.line = reference.line;
+      } else if (existingLine !== undefined) {
+        entry.line = existingLine;
+      }
+      if (reference.fragment !== undefined) {
+        if (existingFragment !== undefined && existingFragment !== reference.fragment) {
+          throw new Error(`evidence path fragment conflicts with existing fragment field`);
+        }
+        entry.fragment = reference.fragment;
+      } else if (existingFragment !== undefined) {
+        validateFindingMetadataFragment(existingFragment, "evidence fragment");
+      }
     }
   }
+}
+
+function looksLikeEvidenceCommand(value: string): boolean {
+  const trimmed = value.trim();
+  if (!/\s/u.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes("\0") || /[\r\n]/u.test(trimmed)) {
+    return false;
+  }
+  const [command] = trimmed.split(/\s+/u);
+  return command !== undefined && /^[A-Za-z0-9._@+/-]+$/u.test(command);
+}
+
+function normalizeFindingMetadataPathReference(
+  value: string,
+  key: string
+): { path: string; fragment?: string; line?: number } {
+  const hashIndex = value.indexOf("#");
+  if (hashIndex === -1) {
+    const lineReference = splitLineReference(value);
+    const relativePath = lineReference?.path ?? value;
+    validateFindingMetadataRelativePath(relativePath, key);
+    return { path: relativePath, ...(lineReference === undefined ? {} : { line: lineReference.line }) };
+  }
+
+  const relativePath = value.slice(0, hashIndex);
+  const fragment = value.slice(hashIndex + 1);
+  validateFindingMetadataRelativePath(relativePath, key);
+  validateFindingMetadataFragment(fragment, `${key} fragment`);
+  return { path: relativePath, fragment };
+}
+
+function splitLineReference(value: string): { path: string; line: number } | undefined {
+  const match = /^(?<path>.+):(?<line>[1-9][0-9]*)$/u.exec(value);
+  const linePath = match?.groups?.path;
+  const line = match?.groups?.line;
+  if (linePath === undefined || line === undefined) {
+    return undefined;
+  }
+  return {
+    path: linePath,
+    line: Number(line)
+  };
+}
+
+function validateFindingMetadataFragment(value: string, key: string): void {
+  if (value.length === 0) {
+    throw new ArtifactPathError("empty-fragment", `${key} cannot be empty`);
+  }
+  if (value.includes("\0") || /[\r\n\t]/.test(value)) {
+    throw new ArtifactPathError("control-character", `${key} cannot contain control characters`);
+  }
+  if (!/^[A-Za-z0-9._@+-]+$/u.test(value)) {
+    throw new ArtifactPathError("unsafe-fragment", `${key} contains unsafe fragment ${JSON.stringify(value)}`);
+  }
+}
+
+function optionalLineNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^[1-9][0-9]*$/u.test(value)
+        ? Number(value)
+        : undefined;
+  if (parsed === undefined || !Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`field ${key} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

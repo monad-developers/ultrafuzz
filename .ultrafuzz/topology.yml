@@ -13,6 +13,7 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 3
+      timeout_seconds: 7200
       model_profiles:
         - default
   references:
