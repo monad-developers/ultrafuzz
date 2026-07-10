@@ -3,8 +3,8 @@
 Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
 
 It initializes a protocol repository with editable prompts and topology, runs
-specialized agents, collects generated fuzz tests
-and findings, and serves a local dashboard plus final report for review.
+specialized agents, collects generated fuzz tests and findings, and serves a
+local dashboard plus final report for review.
 
 > **Trust model:** Agents run in a trusted, skip-permissions workflow, and
 > user-editable prompts can influence what is written into a target repository.
