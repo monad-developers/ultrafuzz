@@ -1,14 +1,12 @@
 # Ultrafuzz
 
-Ultrafuzz turns a Solidity repository into an agent-run fuzzing campaign.
-Ultrafuzz owns the product surfaces users inspect and edit: root
-`ultrafuzz.toml`, `.ultrafuzz/topology.yml`, `.ultrafuzz/prompts/**`, pinned
-references, run evidence under `.ultrafuzz/runs/**`, and explicit
-materialization or cleanup.
+Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
 
-Agents run in a trusted, skip-permissions workflow. Review the checked-in
-`.ultrafuzz/prompts/` directory before launching a campaign, then review
-generated artifacts before copying anything into the target project.
+It initializes a protocol repository with editable prompts and topology, runs
+specialized agents, collects generated fuzz tests
+and findings, and serves a local dashboard plus final report for review.
+
+![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
 
 ## Operator Flow
 
