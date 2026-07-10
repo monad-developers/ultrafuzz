@@ -2,7 +2,9 @@
 
 Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
 
-It initializes a protocol repository with editable prompts and topology, runs
+![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
+
+This tool initializes a protocol repository with editable prompts and topology, runs
 specialized agents, collects generated fuzz tests and findings, and serves a
 local dashboard plus final report for review.
 
@@ -11,8 +13,6 @@ local dashboard plus final report for review.
 > Review the checked-in `.ultrafuzz/prompts/` before launching a campaign, and
 > review generated artifacts before copying anything into your project. See
 > [Security](docs/security.md) for details.
-
-![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)
 
 ## Operator Flow
 
