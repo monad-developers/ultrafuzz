@@ -117,6 +117,20 @@ test("mutating APIs require the session token and reject invalid saves without w
   }
 });
 
+test("dashboard page serves the built static asset instead of 404", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(handle.url);
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/u);
+    assert.match(body, /<html/iu);
+  } finally {
+    await handle.close();
+  }
+});
+
 test("API requests reject non-loopback host headers", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });

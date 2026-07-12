@@ -1628,7 +1628,7 @@ function sendError(response: http.ServerResponse, error: unknown): void {
 }
 
 async function sendStaticAsset(response: http.ServerResponse, relativePath: string): Promise<void> {
-  const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
+  const publicRoot = fileURLToPath(new URL("./public/", import.meta.url));
   const normalized = relativePath.replace(/^\/+/u, "");
   if (normalized.includes("..") || normalized.includes("\\")) {
     throw new HttpError(400, "invalid dashboard asset path");
