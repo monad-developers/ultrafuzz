@@ -98,6 +98,7 @@ export interface CompiledSmithersTask {
   smithersNodeId: string;
   agentRef: string;
   modelName?: string;
+  reasoningEffort?: string;
   dependencies: readonly string[];
   dependencySmithersNodeIds: readonly string[];
   timeoutMs: number;
@@ -147,6 +148,7 @@ export interface SmithersTaskMetadata {
     profileId: string;
     agentRef: string;
     modelName?: string;
+    reasoningEffort?: string;
     modelIndex: number;
     attemptIndex: number;
   };
@@ -811,6 +813,7 @@ function compileTask(input: {
       profileId: profile.id,
       agentRef: profile.agent,
       ...(profile.model ? { modelName: profile.model } : {}),
+      ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
       modelIndex: input.attempt.modelIndex,
       attemptIndex: input.attempt.attemptIndex
     },
@@ -843,6 +846,7 @@ function compileTask(input: {
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
     ...(profile.model ? { modelName: profile.model } : {}),
+    ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
     dependencies: input.dependencyAttemptIds,
     dependencySmithersNodeIds,
     timeoutMs,
@@ -966,6 +970,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
+      modelName: task.modelName ?? null,
+      reasoningEffort: task.reasoningEffort ?? null,
       promptPath: task.renderedPromptPath,
       workspacePath: task.workspacePath,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,

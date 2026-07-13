@@ -188,6 +188,7 @@ function modelFanoutFor(
     modelProfileId: profile.profileId,
     agentRef: profile.agentRef,
     ...(profile.modelName ? { modelName: profile.modelName } : {}),
+    ...(profile.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
     modelIndex,
     loopIndex,
     attemptIndex: loopIndex * Math.max(profiles.length, 1) + modelIndex

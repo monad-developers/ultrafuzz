@@ -1,1 +1,4 @@
-export { CodexAgent } from "./codex";
+import { createCodexAgent } from "./codex";
+
+export { CodexAgent, createCodexAgent } from "./codex";
+export const agentFactories = { CodexAgent: createCodexAgent };

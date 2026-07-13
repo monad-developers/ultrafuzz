@@ -80,6 +80,7 @@ export interface ModelProfile {
   id: string;
   agent: string;
   model?: string;
+  reasoning?: string;
   timeoutSeconds?: number;
 }
 

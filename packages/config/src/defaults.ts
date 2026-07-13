@@ -20,6 +20,7 @@ export { CONFIG_FILE_NAME } from "./constants.js";
 export const DEFAULT_MODEL_PROFILE_ID = "default";
 export const DEFAULT_AGENT = "CodexAgent";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
+export const DEFAULT_CODEX_REASONING = "xhigh";
 export const DEFAULT_TRIAGE_QUORUM = 3;
 export const DEFAULT_TRIAGE_PANEL_SIZE = 4;
 export const MAX_TIMEOUT_SECONDS = 86_400;
@@ -39,7 +40,8 @@ export function synthesizeDefaultModelProfile(agent = DEFAULT_AGENT): ModelProfi
   return {
     id: DEFAULT_MODEL_PROFILE_ID,
     agent,
-    model: DEFAULT_CODEX_MODEL
+    model: DEFAULT_CODEX_MODEL,
+    reasoning: DEFAULT_CODEX_REASONING
   };
 }
 
@@ -178,6 +180,7 @@ function normalizeModelProfile(id: string, profile: Partial<ModelProfile>, fileP
     id,
     agent: required(profile.agent, `models.${id}.agent`, filePath),
     ...(profile.model !== undefined ? { model: profile.model } : {}),
+    ...(profile.reasoning !== undefined ? { reasoning: profile.reasoning } : {}),
     ...(profile.timeoutSeconds !== undefined ? { timeoutSeconds: profile.timeoutSeconds } : {})
   };
 }
@@ -224,6 +227,9 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
     assertRecord(profile, `models.profiles.${id}`, filePath);
     assertString(profile.id, `models.profiles.${id}.id`, filePath);
     assertString(profile.agent, `models.profiles.${id}.agent`, filePath);
+    if (profile.reasoning !== undefined) {
+      assertString(profile.reasoning, `models.profiles.${id}.reasoning`, filePath);
+    }
   }
   assertRecord(value.agents, "agents", filePath);
   for (const [id, agent] of Object.entries(value.agents)) {

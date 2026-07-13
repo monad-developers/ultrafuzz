@@ -46,7 +46,8 @@ references, run evidence, and materialized outputs remain under root
 - `--json`
 
 Agent and model flags override the default Ultrafuzz model profile for the
-launched workflow.
+launched workflow. The selected profile's `reasoning` setting remains in
+effect and is recorded with the workflow task metadata.
 
 ## Reference Commands
 
