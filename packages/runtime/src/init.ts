@@ -191,7 +191,7 @@ function renderSmithersPackageJson(): string {
       private: true,
       type: "module",
       dependencies: {
-        "smithers-orchestrator": "^0.26.1",
+        "smithers-orchestrator": "^0.27.0",
         zod: "^4.4.3"
       },
       devDependencies: {
