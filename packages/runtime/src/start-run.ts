@@ -23,7 +23,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun } from "./plan-run.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   runSmithersLifecycleCommand,
@@ -352,11 +352,4 @@ function resolveStoredWorkflowPath(projectRoot: string, runRoot: string, value: 
     return projectRelative;
   }
   return path.resolve(runRoot, value);
-}
-
-function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
-  if (!fs.existsSync(filePath)) {
-    return undefined;
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
 }

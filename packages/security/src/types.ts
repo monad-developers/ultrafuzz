@@ -37,22 +37,6 @@ export function policyError(
   return { code, message, severity: "error", ...fields };
 }
 
-export function policyWarning(
-  code: string,
-  message: string,
-  fields: Omit<PolicyDiagnostic, "code" | "message" | "severity"> = {}
-): PolicyDiagnostic {
-  return { code, message, severity: "warning", ...fields };
-}
-
-export function policyInfo(
-  code: string,
-  message: string,
-  fields: Omit<PolicyDiagnostic, "code" | "message" | "severity"> = {}
-): PolicyDiagnostic {
-  return { code, message, severity: "info", ...fields };
-}
-
 export function policyResult<T = undefined>(
   diagnostics: PolicyDiagnostic[],
   value?: T,
@@ -67,8 +51,4 @@ export function policyResult<T = undefined>(
     result.value = value;
   }
   return result;
-}
-
-export function normalizeHeaderName(name: string): string {
-  return name.trim().toLowerCase();
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { z } from "zod/v4";
 
-import { type ArtifactProvenance } from "./manifests.js";
+import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
 import {
   ensureSafeDirectory,
@@ -190,7 +190,7 @@ export function writeGeneratedTestManifest(input: {
 }): GeneratedTestManifest {
   const nodeDir = getNodeArtifactDir(input.layout, input.nodeId, { create: true });
   ensureSafeDirectory(nodeDir, GENERATED_TESTS_DIR);
-  const provenance = normalizeProvenance(input.layout, input.nodeId, input.provenance);
+  const provenance = normalizeArtifactProvenance(input.layout, input.nodeId, input.provenance);
   const generated_tests = input.tests.map((test) => writeGeneratedTestEntry(nodeDir, test, provenance));
   const manifest: GeneratedTestManifest = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
@@ -238,10 +238,14 @@ function writeGeneratedTestEntry(
     path: `${GENERATED_TESTS_DIR}/${safeRelativeTestPath}`,
     size_bytes: fs.statSync(absolutePath).size,
     sha256: sha256File(absolutePath),
-    provenance: normalizeProvenance({ runId: manifestProvenance.run_id ?? "" }, manifestProvenance.producer_node_id, {
-      ...manifestProvenance,
-      ...input.provenance
-    })
+    provenance: normalizeArtifactProvenance(
+      { runId: manifestProvenance.run_id ?? "" },
+      manifestProvenance.producer_node_id,
+      {
+        ...manifestProvenance,
+        ...input.provenance
+      }
+    )
   };
   if (input.language !== undefined) {
     entry.language = input.language;
@@ -257,34 +261,4 @@ function writeGeneratedTestEntry(
 
 function stripGeneratedTestsPrefix(value: string): string {
   return value.replace(/^generated-tests\//u, "");
-}
-
-function normalizeProvenance(
-  layout: Pick<RunLayout, "runId">,
-  nodeId: string,
-  provenance: Partial<ArtifactProvenance> | undefined
-): ArtifactProvenance {
-  const normalized: ArtifactProvenance = {
-    producer_node_id: provenance?.producer_node_id ?? nodeId,
-    run_id: provenance?.run_id ?? layout.runId
-  };
-  assignOptional(normalized, "logical_node_id", provenance?.logical_node_id);
-  assignOptional(normalized, "attempt_index", provenance?.attempt_index);
-  assignOptional(normalized, "loop_index", provenance?.loop_index);
-  assignOptional(normalized, "model_id", provenance?.model_id);
-  assignOptional(normalized, "model", provenance?.model);
-  assignOptional(normalized, "model_index", provenance?.model_index);
-  assignOptional(normalized, "agent_ref", provenance?.agent_ref);
-  assignOptional(normalized, "workflow_run_id", provenance?.workflow_run_id);
-  assignOptional(normalized, "workflow_task_id", provenance?.workflow_task_id);
-  assignOptional(normalized, "source_run_id", provenance?.source_run_id);
-  assignOptional(normalized, "origin", provenance?.origin);
-  assignOptional(normalized, "metadata", provenance?.metadata);
-  return normalized;
-}
-
-function assignOptional<T extends object, K extends keyof T>(target: T, key: K, value: T[K] | undefined): void {
-  if (value !== undefined) {
-    target[key] = value;
-  }
 }

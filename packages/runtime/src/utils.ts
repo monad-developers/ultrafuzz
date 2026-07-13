@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import type { ConfigDiagnostic } from "@ultrafuzz/config";
@@ -20,6 +21,23 @@ export function runtimeFailure<T>(diagnostics: RuntimeDiagnostic[]): RuntimeResu
     schema_version: RUNTIME_SCHEMA_VERSION,
     ok: false,
     diagnostics
+  };
+}
+
+export function runtimeError(
+  code: string,
+  message: string,
+  source: string,
+  pathValue?: string,
+  details?: Record<string, unknown>
+): RuntimeDiagnostic {
+  return {
+    code,
+    message,
+    severity: "error",
+    source,
+    ...(pathValue !== undefined ? { path: pathValue } : {}),
+    ...(details !== undefined ? { details } : {})
   };
 }
 
@@ -100,17 +118,12 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function assertPathInsideProject(projectRoot: string, candidate: string): void {
-  const root = path.resolve(projectRoot);
-  const relative = path.relative(root, path.resolve(candidate));
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return;
-  }
-  throw new Error(`path ${candidate} escapes project root ${root}`);
-}
-
 export function toProjectRelative(projectRoot: string, candidate: string): string {
   return path.relative(path.resolve(projectRoot), path.resolve(candidate)).split(path.sep).join("/");
+}
+
+export function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
+  return fs.existsSync(filePath) ? (JSON.parse(fs.readFileSync(filePath, "utf8")) as T) : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
