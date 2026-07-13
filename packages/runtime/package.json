@@ -15,9 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "pnpm --filter @ultrafuzz/config build && pnpm --filter @ultrafuzz/security build && pnpm --filter @ultrafuzz/topology build && pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/artifacts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
-    "test": "pnpm --filter @ultrafuzz/runtime build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
-    "typecheck": "pnpm --filter @ultrafuzz/config build && pnpm --filter @ultrafuzz/security build && pnpm --filter @ultrafuzz/topology build && pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/artifacts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
+    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+    "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",

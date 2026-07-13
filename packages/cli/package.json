@@ -23,9 +23,9 @@
     "topicSeparator": " "
   },
   "scripts": {
-    "build": "rm -rf dist && pnpm --filter @ultrafuzz/runtime build && pnpm --filter @ultrafuzz/evals build && pnpm --filter @ultrafuzz/dashboard build && tsc -p tsconfig.json",
-    "test": "pnpm --filter @ultrafuzz/cli build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
-    "typecheck": "pnpm --filter @ultrafuzz/runtime build && pnpm --filter @ultrafuzz/evals build && pnpm --filter @ultrafuzz/dashboard build && tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "test": "pnpm --filter @ultrafuzz/cli... build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test --test-concurrency=1 dist-test/test/*.test.js",
+    "typecheck": "pnpm --filter @ultrafuzz/cli^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@oclif/core": "^4.11.11",

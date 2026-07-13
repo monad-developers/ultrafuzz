@@ -12,9 +12,9 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json",
-    "test": "pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/references build && vitest run",
-    "typecheck": "pnpm --filter @ultrafuzz/prompts build && pnpm --filter @ultrafuzz/references build && tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm --filter @ultrafuzz/topology^... build && vitest run",
+    "typecheck": "pnpm --filter @ultrafuzz/topology^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/prompts": "workspace:*",
