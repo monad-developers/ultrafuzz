@@ -117,16 +117,20 @@ export function modelProfilesForTopology(
         profileId,
         {
           agentRef: profile.agent,
-          ...(profile.model ? { modelName: profile.model } : {})
+          ...(profile.model ? { modelName: profile.model } : {}),
+          ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {})
         }
       ])
   );
 }
 
 export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["resolved_config"] {
+  const defaultProfile = config.models.profiles[config.models.default];
   return {
     schema_version: config.schemaVersion,
-    default_agent: config.models.profiles[config.models.default]?.agent ?? "",
+    default_agent: defaultProfile?.agent ?? "",
+    ...(defaultProfile?.model ? { default_model: defaultProfile.model } : {}),
+    ...(defaultProfile?.reasoning ? { default_reasoning: defaultProfile.reasoning } : {}),
     output_dir: config.run.outputDir,
     triage_quorum: config.triage.quorum,
     triage_panel_size: config.triage.panelSize

@@ -103,7 +103,8 @@ ultrafuzz run \
 
 `--input` accepts inline JSON or a project-relative JSON file path. `--agent`
 and `--model` override the configured default model profile for the launched
-workflow. `--max-concurrency` caps workflow task submission concurrency.
+workflow. The profile's configured `reasoning` setting is retained.
+`--max-concurrency` caps workflow task submission concurrency.
 
 Runs require pinned reference material to already be present in the local cache
 when the topology uses reference nodes. Use `ultrafuzz references sync` as the

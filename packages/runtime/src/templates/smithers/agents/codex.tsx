@@ -4,13 +4,18 @@ import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
+export type CodexTaskOptions = { model?: string; reasoningEffort?: string };
 
-export const CodexAgent = new SmithersCodexAgent({
-  model: "gpt-5.5",
-  config: { model_reasoning_effort: "xhigh" },
-  skipGitRepoCheck: true,
-  ...codexAuthOptions()
-});
+export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
+  return new SmithersCodexAgent({
+    ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
+    skipGitRepoCheck: true,
+    ...codexAuthOptions()
+  });
+}
+
+export const CodexAgent = createCodexAgent();
 
 function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();

@@ -66,6 +66,8 @@ export interface ValidateProjectResult {
   resolved_config?: {
     schema_version: string;
     default_agent: string;
+    default_model?: string;
+    default_reasoning?: string;
     output_dir: string;
     triage_quorum: number;
     triage_panel_size: number;
@@ -119,6 +121,7 @@ export interface PlannedGraphNode {
     model_profile_id: string;
     agent_ref: string;
     model_name?: string;
+    reasoning_effort?: string;
     model_index: number;
     loop_index: number;
     attempt_index: number;

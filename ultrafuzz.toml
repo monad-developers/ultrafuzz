@@ -18,6 +18,7 @@ synthesized_default = true
 [models.default]
 agent = "CodexAgent"
 model = "gpt-5.5"
+reasoning = "xhigh"
 
 [agents.CodexAgent]
 auth = "api-key"

@@ -84,12 +84,14 @@ export interface ModelProfileSelection {
   profileId: string;
   agentRef: string;
   modelName?: string;
+  reasoningEffort?: string;
 }
 
 export interface ModelFanoutProvenance {
   modelProfileId: string;
   agentRef: string;
   modelName?: string;
+  reasoningEffort?: string;
   modelIndex: number;
   loopIndex: number;
   attemptIndex: number;

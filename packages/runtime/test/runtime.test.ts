@@ -542,7 +542,9 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
-  assert.match(codexAgentText, /model_reasoning_effort:\s*"xhigh"/);
+  assert.match(codexAgentText, /createCodexAgent/);
+  assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
+  assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -550,6 +552,8 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.policy_posture.agents.status, "pass");
   assert.equal(validate.value?.policy_posture.paths.status, "pass");
   assert.equal(validate.value?.resolved_config?.default_agent, "CodexAgent");
+  assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
+  assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
 test("validate rejects unknown agent references before launch", async () => {
@@ -837,11 +841,18 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('reasoning = "xhigh"', 'reasoning = "max"'),
+    "utf8"
+  );
 
   const run = await startRun({
     projectRoot: project,
     runId: "smithers-run",
     env: fakeSmithersEnv(project),
+    model: "gpt-runtime-override",
     maxConcurrency: 2,
     prompt: "Operator priority",
     workflowInput: { issue: 2 }
@@ -865,10 +876,15 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   ) as {
     tasks: Array<{
       agentRef?: string;
+      modelName?: string;
+      reasoningEffort?: string;
       timeoutMs?: number;
       retries?: number;
       retryPolicy?: unknown;
-      metadata?: { node?: { concreteNodeId?: string } };
+      metadata?: {
+        node?: { concreteNodeId?: string };
+        model?: { modelName?: string; reasoningEffort?: string };
+      };
     }>;
   };
   const smithersInput = JSON.parse(
@@ -883,17 +899,23 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   assert.equal(typeof smithersInput.tasks?.[0]?.prompt_path, "string");
   assert.equal(smithersTasks.tasks[0]?.agentRef, "CodexAgent");
+  assert.equal(smithersTasks.tasks[0]?.modelName, "gpt-runtime-override");
+  assert.equal(smithersTasks.tasks[0]?.reasoningEffort, "max");
   assert.ok(smithersTasks.tasks.every((task) => typeof task.timeoutMs === "number"));
   assert.ok(smithersTasks.tasks.every((task) => typeof task.retries === "number"));
   assert.ok(smithersTasks.tasks.every((task) => task.retryPolicy !== null));
   assert.equal(smithersTasks.tasks[0]?.metadata?.node?.concreteNodeId, "project-discovery");
+  assert.equal(smithersTasks.tasks[0]?.metadata?.model?.modelName, "gpt-runtime-override");
+  assert.equal(smithersTasks.tasks[0]?.metadata?.model?.reasoningEffort, "max");
 
   const workflowSource = fs.readFileSync(
     path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"),
     "utf8"
   );
   assert.match(workflowSource, /smithers-orchestrator/);
-  assert.match(workflowSource, /agent=\{agentRegistry\[task\.agentRef\]\}/);
+  assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
+  assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
+  assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);

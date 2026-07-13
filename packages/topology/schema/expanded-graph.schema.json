@@ -173,6 +173,10 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "reasoningEffort": {
+                  "type": "string",
+                  "minLength": 1
+                },
                 "modelIndex": {
                   "type": "integer",
                   "minimum": 0

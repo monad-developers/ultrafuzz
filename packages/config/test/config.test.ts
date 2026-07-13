@@ -33,6 +33,7 @@ describe("config loading and resolution", () => {
       auth: "api-key",
       apiKeyEnv: "OPENAI_API_KEY"
     });
+    expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
@@ -50,6 +51,7 @@ default = "project-model"
 [models.project-model]
 agent = "CodexAgent"
 model = "gpt-5.5"
+reasoning = "max"
 
 [agents.CodexAgent]
 auth = "subscription"
@@ -86,6 +88,7 @@ config_dir = ".codex/team"
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
     expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");
+    expect(resolved.value.models.profiles["project-model"]?.reasoning).toBe("max");
     expect(resolved.value.agents.CodexAgent).toEqual({
       auth: "subscription",
       apiKeyEnv: "OPENAI_API_KEY",
@@ -244,6 +247,7 @@ describe("model profile and triage validation", () => {
             "../bad": {
               agent: "../missing",
               model: "",
+              reasoning: "",
               timeoutSeconds: 0
             }
           },
@@ -259,6 +263,7 @@ describe("model profile and triage validation", () => {
         "CONFIG_MODEL_AGENT_INVALID",
         "CONFIG_MODEL_DEFAULT_UNKNOWN",
         "CONFIG_MODEL_NAME_EMPTY",
+        "CONFIG_MODEL_REASONING_EMPTY",
         "CONFIG_MODEL_TIMEOUT_INVALID"
       ])
     );
