@@ -11,7 +11,8 @@ import {
   defaultReferenceCatalogYaml,
   materializeReferenceArtifacts,
   parseReferenceCatalog,
-  statusReferenceCatalog
+  statusReferenceCatalog,
+  syncReferenceCatalog
 } from "../src/index.js";
 import type { ReferenceCatalog, ReferenceEntry, ReferenceManifestFile } from "../src/index.js";
 
@@ -118,6 +119,23 @@ references:
 `),
     /relative and traversal-free/u
   );
+});
+
+test("repository components cannot traverse the reference cache", () => {
+  const project = tempDir("ufz-ref-repo-");
+  const cacheRoot = path.join(project, "cache");
+
+  for (const repo of ["./repo", "../repo", "owner/.", "owner/..", "../.."]) {
+    assert.throws(
+      () =>
+        syncReferenceCatalog(fixtureCatalog({ ...fixtureReference(), repo }), {
+          cacheRoot
+        }),
+      /invalid GitHub repo/u
+    );
+  }
+
+  assert.equal(fs.existsSync(cacheRoot), false);
 });
 
 test("status and materialization use the pinned offline cache with digest manifests", () => {
