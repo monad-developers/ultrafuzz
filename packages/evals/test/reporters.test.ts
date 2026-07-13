@@ -15,6 +15,7 @@ import { testReportingPolicy, testRow, testSuite } from "./helpers.js";
 interface RecordedRequest {
   url: string;
   method: string;
+  redirect?: string;
   body: unknown;
 }
 
@@ -23,11 +24,12 @@ function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
   fetchImpl: typeof fetch;
 } {
   const requests: RecordedRequest[] = [];
-  const fetchImpl = (async (input: unknown, init?: { method?: string; body?: string }) => {
+  const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const request: RecordedRequest = {
       url: String(input),
       method: init?.method ?? "GET",
-      body: init?.body !== undefined ? JSON.parse(init.body) : undefined
+      ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}),
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined
     };
     requests.push(request);
     const payload = respond?.(request) ?? { id: `id-${requests.length}` };
@@ -75,6 +77,46 @@ describe("provider resolution", () => {
     expect(() => resolveEvalProvider({ env: {}, evalConfig: { provider: "braintrust", providers: {} } })).toThrowError(
       expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_MISSING" })
     );
+  });
+
+  it("rejects provider profiles that can redirect configured credentials", () => {
+    expect(() =>
+      resolveEvalProvider({
+        env: {},
+        evalConfig: {
+          provider: "braintrust",
+          providers: { braintrust: { apiKeyEnv: "OTHER_SECRET" } }
+        }
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNTRUSTED" }));
+    expect(() =>
+      resolveEvalProvider({
+        env: {},
+        evalConfig: {
+          provider: "langsmith",
+          providers: {
+            langsmith: {
+              apiKeyEnv: "LANGSMITH_API_KEY",
+              endpoint: "https://telemetry.example"
+            }
+          }
+        }
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNTRUSTED" }));
+    expect(() =>
+      resolveEvalProvider({
+        env: {},
+        evalConfig: {
+          provider: "langsmith",
+          providers: {
+            langsmith: {
+              apiKeyEnv: "LANGSMITH_API_KEY",
+              workspaceIdEnv: "OTHER_SECRET"
+            }
+          }
+        }
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNTRUSTED" }));
   });
 
   it("resolves the suite path with CLI > env > toml > default precedence", () => {
@@ -195,6 +237,7 @@ describe("BraintrustReporter", () => {
     });
 
     expect(requests[0]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/project") });
+    expect(requests[0]?.redirect).toBe("error");
     expect(requests[1]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/experiment") });
     expect((requests[1]?.body as { name?: string }).name).toBe("bug-finding-eval-1");
 
@@ -257,6 +300,7 @@ describe("LangSmithReporter", () => {
     });
 
     const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
+    expect(requests[0]?.redirect).toBe("error");
     // root run + group run + node run
     expect(creates).toHaveLength(3);
     const nodeCreate = creates[2]?.body as Record<string, unknown>;

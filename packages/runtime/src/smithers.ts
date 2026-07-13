@@ -16,6 +16,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import { assertSmithersPackageManifest } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -508,22 +509,40 @@ async function ensureSmithersDependencies(
   if (explicitSmithersExecutable(env) !== undefined) {
     return;
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
-    return;
-  }
   const packageRoot = path.join(projectRoot, ".smithers");
   const packageJson = path.join(packageRoot, "package.json");
+  const local = localSmithersExecutable(projectRoot);
   if (!fs.existsSync(packageJson)) {
+    if (fs.existsSync(local)) {
+      throw new Error("local workflow runner requires a generated dependency manifest");
+    }
     return;
   }
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  await execFileAsync("npm", ["install", "--prefix", packageRoot, "--no-audit", "--no-fund", "--loglevel=error"], {
-    cwd: projectRoot,
-    env: smithersCommandEnv(projectRoot, env),
-    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
-  });
+  assertSmithersPackageManifest(JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown);
+  if (fs.existsSync(local)) {
+    return;
+  }
+  await execFileAsync(
+    "npm",
+    [
+      "install",
+      "--prefix",
+      packageRoot,
+      "--ignore-scripts",
+      "--package-lock=false",
+      "--registry=https://registry.npmjs.org",
+      "--no-audit",
+      "--no-fund",
+      "--loglevel=error"
+    ],
+    {
+      cwd: projectRoot,
+      env: smithersCommandEnv(projectRoot, env),
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+    }
+  );
   if (!fs.existsSync(local)) {
     throw new Error("Smithers dependency install completed without creating the local workflow runner binary");
   }

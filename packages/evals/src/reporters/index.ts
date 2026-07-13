@@ -14,6 +14,18 @@ export { LangSmithReporter, type LangSmithReporterOptions, dottedOrderSegment } 
 export const EVAL_PROVIDER_NONE = "none";
 export const KNOWN_EVAL_PROVIDERS = ["braintrust", "langsmith", EVAL_PROVIDER_NONE] as const;
 
+const TRUSTED_PROVIDER_PROFILES = {
+  braintrust: {
+    apiKeyEnv: "BRAINTRUST_API_KEY",
+    endpoint: "https://api.braintrust.dev"
+  },
+  langsmith: {
+    apiKeyEnv: "LANGSMITH_API_KEY",
+    workspaceIdEnv: "LANGSMITH_WORKSPACE_ID",
+    endpoint: "https://api.smith.langchain.com"
+  }
+} as const;
+
 export interface ResolveEvalProviderInput {
   /** `--provider` CLI flag; highest precedence. */
   cliProvider?: string;
@@ -42,7 +54,7 @@ export function resolveEvalProvider(input: ResolveEvalProviderInput): ResolvedEv
   if (provider === EVAL_PROVIDER_NONE) {
     return { provider };
   }
-  if (!(KNOWN_EVAL_PROVIDERS as readonly string[]).includes(provider)) {
+  if (provider !== "braintrust" && provider !== "langsmith") {
     throw new EvalError("EVAL_PROVIDER_UNKNOWN", `unknown eval provider \`${provider}\``, {
       provider,
       known: [...KNOWN_EVAL_PROVIDERS]
@@ -56,6 +68,7 @@ export function resolveEvalProvider(input: ResolveEvalProviderInput): ResolvedEv
       { provider }
     );
   }
+  assertTrustedProviderProfile(provider, profile);
   return { provider, profile };
 }
 
@@ -147,6 +160,31 @@ function requireEnv(env: Record<string, string | undefined>, envName: string | u
     );
   }
   return value;
+}
+
+function assertTrustedProviderProfile(provider: "braintrust" | "langsmith", profile: EvalProviderProfile): void {
+  const expected = TRUSTED_PROVIDER_PROFILES[provider];
+  if (profile.apiKeyEnv !== undefined && profile.apiKeyEnv !== expected.apiKeyEnv) {
+    throw untrustedProfileError(provider, "api_key_env", expected.apiKeyEnv);
+  }
+  if (
+    provider === "langsmith" &&
+    profile.workspaceIdEnv !== undefined &&
+    profile.workspaceIdEnv !== TRUSTED_PROVIDER_PROFILES.langsmith.workspaceIdEnv
+  ) {
+    throw untrustedProfileError(provider, "workspace_id_env", TRUSTED_PROVIDER_PROFILES.langsmith.workspaceIdEnv);
+  }
+  if (profile.endpoint !== undefined && profile.endpoint !== expected.endpoint) {
+    throw untrustedProfileError(provider, "endpoint", expected.endpoint);
+  }
+}
+
+function untrustedProfileError(provider: string, field: string, expected: string): EvalError {
+  return new EvalError("EVAL_PROVIDER_PROFILE_UNTRUSTED", `[eval.providers.${provider}].${field} must be ${expected}`, {
+    provider,
+    field,
+    expected
+  });
 }
 
 function firstNonEmpty(value: string | undefined): string | undefined {

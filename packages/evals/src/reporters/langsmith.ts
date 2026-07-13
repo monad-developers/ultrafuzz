@@ -351,6 +351,7 @@ export class LangSmithReporter implements EvalReporter {
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
     const response = await this.fetchImpl(`${this.options.endpoint ?? DEFAULT_ENDPOINT}${requestPath}`, {
       method,
+      redirect: "error",
       headers: {
         "x-api-key": this.options.apiKey,
         "content-type": "application/json",

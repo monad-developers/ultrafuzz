@@ -8,6 +8,8 @@ import test from "node:test";
 
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
+import { assertSmithersPackageManifest } from "../src/smithers-package.js";
+
 import {
   forkRun,
   getRunStatus,
@@ -441,7 +443,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "^0.27.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.27.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -925,7 +927,42 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--ignore-scripts/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--package-lock=false/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
   assert.match(fs.readFileSync(smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+});
+
+test("generated workflow dependencies reject modified manifests", () => {
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        name: "ultrafuzz-smithers",
+        private: true,
+        type: "module",
+        dependencies: {
+          "smithers-orchestrator": "^0.27.0",
+          zod: "4.4.3"
+        },
+        devDependencies: { typescript: "6.0.3" }
+      }),
+    /dependency manifest has been modified/u
+  );
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        name: "ultrafuzz-smithers",
+        private: true,
+        type: "module",
+        dependencies: {
+          "smithers-orchestrator": "0.27.0",
+          zod: "4.4.3"
+        },
+        devDependencies: { typescript: "6.0.3" },
+        scripts: { preinstall: "node setup.js" }
+      }),
+    /dependency manifest has been modified/u
+  );
 });
 
 test("startRun creates the workflow log directory before submission", async () => {
