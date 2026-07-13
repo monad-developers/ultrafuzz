@@ -128,6 +128,88 @@ test("API requests reject non-loopback host headers", async () => {
   }
 });
 
+test("dashboard serves external theme bootstrap with restrictive security and cache headers", async () => {
+  const projectRoot = makeProject();
+  const testPublicRoot = path.join(process.cwd(), "dist-test", "src", "public");
+  fs.cpSync(path.join(process.cwd(), "dist", "public"), testPublicRoot, { recursive: true });
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const documentResponse = await fetch(handle.url);
+    assert.equal(documentResponse.status, 200);
+    const documentBody = await documentResponse.text();
+    const csp = documentResponse.headers.get("content-security-policy") ?? "";
+    const scriptPolicy = csp.split(";").find((directive) => directive.trim().startsWith("script-src")) ?? "";
+    assert.match(scriptPolicy, /script-src 'self'/u);
+    assert.doesNotMatch(scriptPolicy, /'unsafe-inline'/u);
+    assert.match(csp, /frame-ancestors 'none'/u);
+    assert.equal(documentResponse.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(documentResponse.headers.get("x-frame-options"), "DENY");
+    assert.equal(documentResponse.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(documentResponse.headers.get("cross-origin-opener-policy"), "same-origin");
+    assert.equal(documentResponse.headers.get("cross-origin-resource-policy"), "same-origin");
+    assert.equal(/<script(?![^>]*\bsrc=)[^>]*>/u.test(documentBody), false);
+
+    const scriptSource = /<script[^>]+src="([^"]+)"/u.exec(documentBody)?.[1];
+    assert.ok(scriptSource);
+    const scriptResponse = await fetch(new URL(scriptSource, handle.url));
+    assert.equal(scriptResponse.status, 200);
+    assert.equal(scriptResponse.headers.get("cache-control"), "no-cache");
+    await scriptResponse.body?.cancel();
+
+    const apiResponse = await fetch(apiUrl(handle.url, "/api/session"));
+    assert.equal(apiResponse.status, 200);
+    assert.equal(apiResponse.headers.get("x-content-type-options"), "nosniff");
+  } finally {
+    await handle.close();
+    fs.rmSync(testPublicRoot, { recursive: true, force: true });
+  }
+});
+
+test("dashboard rejects oversized JSON request bodies", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify({ content: "x".repeat(1024 * 1024) })
+    });
+    assert.equal(response.status, 413);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard audit append refuses a final-component symlink", async () => {
+  const projectRoot = makeProject();
+  const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-audit-"));
+  const outsidePath = path.join(outsideDir, "outside.log");
+  fs.writeFileSync(outsidePath, "sentinel\n", "utf8");
+  fs.symlinkSync(outsidePath, auditPath, "file");
+  const config = fs.readFileSync(path.join(projectRoot, "ultrafuzz.toml"), "utf8");
+
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify({ content: config })
+    });
+    assert.equal(response.status, 500);
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), "sentinel\n");
+    assert.equal(fs.lstatSync(auditPath).isSymbolicLink(), true);
+  } finally {
+    await handle.close();
+  }
+});
+
 function makeProject(): string {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-"));
   const result = initProject({ projectRoot, force: true });

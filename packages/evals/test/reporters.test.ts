@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { graphFromPlannedGraph } from "../src/reporter.js";
 import { BraintrustReporter } from "../src/reporters/braintrust.js";
+import { boundedResponseText } from "../src/reporters/http.js";
 import { LangSmithReporter, dottedOrderSegment } from "../src/reporters/langsmith.js";
 import {
   EVAL_PROVIDER_NONE,
@@ -16,6 +17,8 @@ interface RecordedRequest {
   url: string;
   method: string;
   body: unknown;
+  redirect?: "follow" | "error" | "manual";
+  hasSignal: boolean;
 }
 
 function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
@@ -23,11 +26,13 @@ function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
   fetchImpl: typeof fetch;
 } {
   const requests: RecordedRequest[] = [];
-  const fetchImpl = (async (input: unknown, init?: { method?: string; body?: string }) => {
+  const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const request: RecordedRequest = {
       url: String(input),
       method: init?.method ?? "GET",
-      body: init?.body !== undefined ? JSON.parse(init.body) : undefined
+      body: init?.body !== undefined ? JSON.parse(String(init.body)) : undefined,
+      ...(init?.redirect !== undefined ? { redirect: init.redirect } : {}),
+      hasSignal: init?.signal !== undefined && init.signal !== null
     };
     requests.push(request);
     const payload = respond?.(request) ?? { id: `id-${requests.length}` };
@@ -113,6 +118,74 @@ describe("provider resolution", () => {
     });
     expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
   });
+
+  it("binds provider credentials and endpoints to approved destinations", () => {
+    const policy = testReportingPolicy();
+    expect(() =>
+      createEvalReporters({
+        env: { AWS_SECRET_ACCESS_KEY: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: { braintrust: { apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } }
+        },
+        evalRunId: "eval-1",
+        policy
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_CREDENTIAL_BINDING_INVALID" }));
+
+    expect(() =>
+      createEvalReporters({
+        env: { BRAINTRUST_API_KEY: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: {
+            braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", endpoint: "https://example.com" }
+          }
+        },
+        evalRunId: "eval-1",
+        policy
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_UNTRUSTED" }));
+
+    const custom = createEvalReporters({
+      env: {
+        BRAINTRUST_API_KEY: "custom-service-key",
+        ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT: "https://braintrust.internal.example"
+      },
+      evalConfig: {
+        provider: "braintrust",
+        providers: {
+          braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", endpoint: "https://braintrust.internal.example" }
+        }
+      },
+      evalRunId: "eval-1",
+      policy,
+      fetchImpl: fakeFetch().fetchImpl
+    });
+    expect(custom.map((reporter) => reporter.name)).toEqual(["braintrust"]);
+
+    expect(
+      () =>
+        new LangSmithReporter({
+          apiKey: "secret",
+          project: "ultrafuzz-evals",
+          evalRunId: "eval-1",
+          policy,
+          endpoint: "http://api.smith.langchain.com"
+        })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_INVALID" }));
+  });
+});
+
+describe("provider transport", () => {
+  it("rejects provider responses larger than the transport limit", async () => {
+    const response = new Response("oversized", {
+      headers: { "content-length": String(1024 * 1024 + 1) }
+    });
+    await expect(boundedResponseText(response, "provider", "EVAL_TEST_RESPONSE_TOO_LARGE")).rejects.toMatchObject({
+      code: "EVAL_TEST_RESPONSE_TOO_LARGE"
+    });
+  });
 });
 
 describe("graphFromPlannedGraph", () => {
@@ -195,6 +268,7 @@ describe("BraintrustReporter", () => {
     });
 
     expect(requests[0]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/project") });
+    expect(requests[0]).toMatchObject({ redirect: "error", hasSignal: true });
     expect(requests[1]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/experiment") });
     expect((requests[1]?.body as { name?: string }).name).toBe("bug-finding-eval-1");
 

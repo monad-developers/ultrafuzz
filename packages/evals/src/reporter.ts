@@ -92,6 +92,8 @@ export interface EvalReporter {
 const KNOWN_GROUPS = ["setup", "properties", "strategies", "references", "review"];
 export const DEFAULT_GRAPH_GROUP = "default";
 
+const guardedReporterTargets = new WeakMap<EvalReporter, EvalReporter>();
+
 /**
  * Build the provider-facing row graph from a run's graph.json (PlannedGraph).
  * Tolerant by design: unknown shapes degrade to an empty node list rather than
@@ -174,7 +176,7 @@ export function guardReporter(
       );
     }
   };
-  return {
+  const guarded: EvalReporter = {
     name: reporter.name,
     onPlan: (plan) => guard("onPlan", () => reporter.onPlan(plan)),
     onRowStart: (row, graph) => guard("onRowStart", () => reporter.onRowStart(row, graph)),
@@ -196,4 +198,25 @@ export function guardReporter(
       }
     }
   };
+  guardedReporterTargets.set(guarded, reporter);
+  return guarded;
+}
+
+/**
+ * Return the underlying reporter for delivery loops that own their retry and
+ * warning semantics. Other call sites keep using the guarded facade so a
+ * provider outage cannot abort an eval run.
+ */
+export function reporterForReliableDelivery(reporter: EvalReporter): EvalReporter {
+  let current = reporter;
+  const seen = new Set<EvalReporter>();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const target = guardedReporterTargets.get(current);
+    if (target === undefined) {
+      return current;
+    }
+    current = target;
+  }
+  return current;
 }

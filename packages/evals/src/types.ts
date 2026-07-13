@@ -29,7 +29,7 @@ export interface EvalTarget {
   /** Local checkout of the target; required to launch rows, optional for plan/score/publish. */
   path?: string;
   signal_profile?: string;
-  /** Ground-truth file, resolved under `[eval].ground_truth_root` (or absolute). */
+  /** Relative ground-truth file resolved strictly under the operator-supplied `[eval].ground_truth_root`. */
   ground_truth: string;
   /** `private` forces manifest-only artifact reporting unless the suite explicitly opts into `upload`. */
   sensitivity?: string;
@@ -87,7 +87,7 @@ export interface EvalReportingPolicy {
 export interface EvalSuiteSpec {
   schema_version: typeof EVAL_SPEC_SCHEMA_VERSION;
   suite: string;
-  /** Normally supplied by `[eval].ground_truth_root` in ultrafuzz.toml; may be overridden per machine. */
+  /** Supplied by resolved `[eval].ground_truth_root` or a programmatic machine override, never by suite YAML. */
   ground_truth_root?: string;
   model_profiles: Record<string, EvalModelProfile>;
   targets: EvalTarget[];

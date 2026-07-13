@@ -1,5 +1,7 @@
 import fs from "node:fs";
 
+import { redactSecretsInText } from "@ultrafuzz/security";
+
 import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
 
 export const STATE_SCHEMA_VERSION = "1.0";
@@ -146,7 +148,13 @@ export function createNodeState(input: NodeStateInput): NodeState {
 }
 
 export function writeRunState(target: RunLayoutStateLike | string, state: RunState): void {
-  writeJsonDurable(resolveStatePath(target), state);
+  const nodes = Object.fromEntries(
+    Object.entries(state.nodes).map(([nodeId, node]) => [
+      nodeId,
+      node.last_error === undefined ? node : { ...node, last_error: redactSecretsInText(node.last_error) }
+    ])
+  );
+  writeJsonDurable(resolveStatePath(target), { ...state, nodes });
 }
 
 export function readRunState(target: RunLayoutStateLike | string): RunState {

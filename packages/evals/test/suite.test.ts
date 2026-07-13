@@ -136,6 +136,47 @@ describe("eval suite loading and planning", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_GROUND_TRUTH_INSIDE_REPO" }));
   });
 
+  it("rejects external aliases whose nearest existing ancestor resolves inside the repository", () => {
+    const { projectRoot, suitePath } = setup();
+    const projectAlias = path.join(path.dirname(projectRoot), "project-alias");
+    fs.symlinkSync(projectRoot, projectAlias, process.platform === "win32" ? "junction" : "dir");
+
+    expect(() =>
+      planEvalSuite({
+        projectRoot,
+        suitePath,
+        groundTruthRoot: path.join(projectAlias, "missing-ground-truth"),
+        validateTargets: false
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_GROUND_TRUTH_INSIDE_REPO" }));
+  });
+
+  it("keeps ground-truth entries inside the configured root", () => {
+    const { projectRoot, groundTruthRoot, suitePath } = setup();
+    fs.writeFileSync(suitePath, SUITE_YAML.replace("ground_truth: aave-v4.yml", "ground_truth: ../other.yml"));
+    expect(() => planEvalSuite({ projectRoot, suitePath, groundTruthRoot, validateTargets: false })).toThrowError(
+      expect.objectContaining({ code: "EVAL_GROUND_TRUTH_OUTSIDE_ROOT" })
+    );
+
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace("ground_truth: aave-v4.yml", `ground_truth: ${path.join(groundTruthRoot, "aave-v4.yml")}`)
+    );
+    expect(() => planEvalSuite({ projectRoot, suitePath, groundTruthRoot, validateTargets: false })).toThrowError(
+      expect.objectContaining({ code: "EVAL_GROUND_TRUTH_ABSOLUTE_PATH" })
+    );
+  });
+
+  it("rejects symlinked ground-truth files", () => {
+    const { projectRoot, groundTruthRoot, suitePath } = setup();
+    const outside = path.join(path.dirname(groundTruthRoot), "outside.yml");
+    fs.writeFileSync(outside, "bugs: []\n", "utf8");
+    fs.symlinkSync(outside, path.join(groundTruthRoot, "aave-v4.yml"));
+    expect(() => planEvalSuite({ projectRoot, suitePath, groundTruthRoot, validateTargets: false })).toThrowError(
+      expect.objectContaining({ code: "EVAL_GROUND_TRUTH_UNSAFE" })
+    );
+  });
+
   it("rejects unknown model profiles", () => {
     const { projectRoot, groundTruthRoot, suitePath } = setup();
     fs.writeFileSync(

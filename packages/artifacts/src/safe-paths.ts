@@ -177,15 +177,33 @@ export function writeJsonDurable(filePath: string, value: unknown): void {
   writeFileDurable(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-export function appendLineDurable(filePath: string, line: string): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const fd = fs.openSync(filePath, "a", 0o600);
+export function appendLineDurable(filePath: string, line: string, trustedRoot?: string): void {
+  const directory = path.dirname(filePath);
+  if (trustedRoot !== undefined) {
+    assertNoSymlinkComponents(trustedRoot, directory, "append directory");
+  }
+  fs.mkdirSync(directory, { recursive: true });
+  if (trustedRoot !== undefined) {
+    assertNoSymlinkComponents(trustedRoot, filePath, "append path");
+  }
+  const fd = fs.openSync(
+    filePath,
+    fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+    0o600
+  );
   try {
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new ArtifactPathError("not-file", `append path must be a regular file: ${filePath}`);
+    }
+    if (trustedRoot !== undefined) {
+      assertNoSymlinkComponents(trustedRoot, filePath, "append path");
+    }
     fs.writeSync(fd, line.endsWith("\n") ? line : `${line}\n`);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
   }
+  fsyncDirectory(directory);
 }
 
 export function readJsonFile<T = unknown>(filePath: string): T {

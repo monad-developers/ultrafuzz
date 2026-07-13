@@ -1,0 +1,113 @@
+export const SMITHERS_ORCHESTRATOR_VERSION = "0.27.0";
+export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
+
+const REQUIRED_SMITHERS_DEPENDENCIES = {
+  dependencies: {
+    "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+    zod: "4.4.3"
+  },
+  devDependencies: {
+    typescript: "6.0.3"
+  }
+} as const;
+
+const LEGACY_SMITHERS_DEPENDENCIES = {
+  dependencies: {
+    "smithers-orchestrator": "^0.27.0",
+    zod: "^4.4.3"
+  },
+  devDependencies: {
+    typescript: "^6.0.3"
+  }
+} as const;
+
+export interface SmithersPackageMigration {
+  manifest: unknown;
+  migrated: boolean;
+}
+
+export function renderSmithersPackageJson(): string {
+  return `${JSON.stringify(
+    {
+      name: "ultrafuzz-smithers",
+      private: true,
+      type: "module",
+      ...REQUIRED_SMITHERS_DEPENDENCIES
+    },
+    null,
+    2
+  )}\n`;
+}
+
+export function assertSmithersPackageManifest(value: unknown): void {
+  if (!isRecord(value)) {
+    throw modifiedManifestError();
+  }
+  for (const [section, expected] of Object.entries(REQUIRED_SMITHERS_DEPENDENCIES)) {
+    const actual = value[section];
+    if (!isRecord(actual)) {
+      throw modifiedManifestError();
+    }
+    for (const [name, version] of Object.entries(expected)) {
+      if (actual[name] !== version) {
+        throw modifiedManifestError();
+      }
+    }
+  }
+}
+
+export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPackageMigration {
+  if (
+    !isRecord(value) ||
+    value.name !== "ultrafuzz-smithers" ||
+    value.private !== true ||
+    value.type !== "module" ||
+    !hasRequiredVersions(value, LEGACY_SMITHERS_DEPENDENCIES)
+  ) {
+    return { manifest: value, migrated: false };
+  }
+  const dependencies = value.dependencies as Record<string, unknown>;
+  const devDependencies = value.devDependencies as Record<string, unknown>;
+  return {
+    manifest: {
+      ...value,
+      dependencies: {
+        ...dependencies,
+        ...REQUIRED_SMITHERS_DEPENDENCIES.dependencies
+      },
+      devDependencies: {
+        ...devDependencies,
+        ...REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
+      }
+    },
+    migrated: true
+  };
+}
+
+function hasRequiredVersions(
+  value: Record<string, unknown>,
+  required: typeof REQUIRED_SMITHERS_DEPENDENCIES | typeof LEGACY_SMITHERS_DEPENDENCIES
+): boolean {
+  for (const [section, expected] of Object.entries(required)) {
+    const actual = value[section];
+    if (!isRecord(actual)) {
+      return false;
+    }
+    for (const [name, version] of Object.entries(expected)) {
+      if (actual[name] !== version) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function modifiedManifestError(): Error {
+  return new Error(
+    "generated workflow dependency manifest must retain Ultrafuzz's exact runner versions; recreate it before launch"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

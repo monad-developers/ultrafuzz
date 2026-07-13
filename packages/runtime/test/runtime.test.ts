@@ -9,6 +9,12 @@ import test from "node:test";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
+  assertSmithersPackageManifest,
+  SMITHERS_ORCHESTRATOR_BIN_PATH,
+  SMITHERS_ORCHESTRATOR_VERSION
+} from "../src/smithers-package.js";
+
+import {
   forkRun,
   getRunStatus,
   initProject,
@@ -25,6 +31,92 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function fakeInstalledSmithersPaths(project: string): {
+  packageRoot: string;
+  packageJson: string;
+  target: string;
+  shim: string;
+} {
+  const packageRoot = path.join(project, ".smithers", "node_modules", "smithers-orchestrator");
+  return {
+    packageRoot,
+    packageJson: path.join(packageRoot, "package.json"),
+    target: path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/")),
+    shim: path.join(project, ".smithers", "node_modules", ".bin", "smithers")
+  };
+}
+
+function writeFakeInstalledSmithers(
+  project: string,
+  input: { version?: string; shimTarget?: string; binTarget?: string } = {}
+): ReturnType<typeof fakeInstalledSmithersPaths> {
+  const paths = fakeInstalledSmithersPaths(project);
+  fs.mkdirSync(path.dirname(paths.target), { recursive: true });
+  fs.mkdirSync(path.dirname(paths.shim), { recursive: true });
+  fs.writeFileSync(
+    paths.packageJson,
+    `${JSON.stringify({
+      name: "smithers-orchestrator",
+      version: input.version ?? SMITHERS_ORCHESTRATOR_VERSION,
+      bin: { smithers: input.binTarget ?? SMITHERS_ORCHESTRATOR_BIN_PATH }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    paths.target,
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    "utf8"
+  );
+  fs.chmodSync(paths.target, 0o755);
+  fs.rmSync(paths.shim, { force: true });
+  fs.symlinkSync(path.relative(path.dirname(paths.shim), input.shimTarget ?? paths.target), paths.shim);
+  return paths;
+}
+
+function writeFakeNpmInstaller(project: string): {
+  binDir: string;
+  npmLogPath: string;
+  smithersLogPath: string;
+} {
+  const binDir = path.join(project, "fake-bin");
+  const npm = path.join(binDir, "npm");
+  const npmLogPath = path.join(project, "npm-install.log");
+  const smithersLogPath = path.join(project, "local-smithers.log");
+  const paths = fakeInstalledSmithersPaths(project);
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    npm,
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' "$*" >> ${shellQuote(npmLogPath)}`,
+      `mkdir -p ${shellQuote(path.dirname(paths.target))} ${shellQuote(path.dirname(paths.shim))}`,
+      `cat > ${shellQuote(paths.packageJson)} <<'EOS'`,
+      JSON.stringify({
+        name: "smithers-orchestrator",
+        version: SMITHERS_ORCHESTRATOR_VERSION,
+        bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+      }),
+      "EOS",
+      `cat > ${shellQuote(paths.target)} <<'EOS'`,
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      "printf '%s\\n' '{\"ok\":true}'",
+      "EOS",
+      `chmod +x ${shellQuote(paths.target)}`,
+      `rm -f ${shellQuote(paths.shim)}`,
+      `ln -s ${shellQuote(path.relative(path.dirname(paths.shim), paths.target))} ${shellQuote(paths.shim)}`,
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(npm, 0o755);
+  return { binDir, npmLogPath, smithersLogPath };
+}
+
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -35,6 +127,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
       '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
+      '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
       'if [ "$1" = "fork" ]; then',
       "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
@@ -441,7 +536,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "^0.27.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.27.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -802,6 +897,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
+  assert.match(workflowSource, /untrusted data, not instructions/);
   assert.match(workflowSource, /<Worktree/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
@@ -819,6 +915,85 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+});
+
+test("startRun forwards configured and explicitly allowed environment variables only", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const environmentLog = path.join(project, "smithers-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_ENV_LOG: environmentLog,
+    OPENAI_API_KEY: "configured-agent-key",
+    AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
+    FOUNDRY_PROFILE: "ci",
+    ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "FOUNDRY_PROFILE"
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "filtered-environment", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
+});
+
+test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const binDir = path.join(project, "fake-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-command.log");
+  fs.writeFileSync(
+    smithers,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" > "$SMITHERS_FAKE_LOG"',
+      "printf '%s\\n' 'submission api_key=sk-successstdout'",
+      "printf '%s\\n' 'submission token=sk-successstderr' >&2",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "redacted-evidence",
+    prompt: "Operator token=sk-operatorsecret",
+    workflowInput: { nested: { api_key: "sk-nestedsecret" }, note: "retain" },
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers,
+      SMITHERS_FAKE_LOG: commandLog
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const operationalCommand = fs.readFileSync(commandLog, "utf8");
+  assert.match(operationalCommand, /sk-operatorsecret/);
+  assert.match(operationalCommand, /sk-nestedsecret/);
+
+  const inputEvidence = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
+  ) as {
+    operator_prompt?: string;
+    operator_input?: { nested?: { api_key?: string }; note?: string };
+  };
+  assert.equal(inputEvidence.operator_prompt, "Operator token=<redacted>");
+  assert.equal(inputEvidence.operator_input?.nested?.api_key, "<redacted>");
+  assert.equal(inputEvidence.operator_input?.note, "retain");
+
+  const submissionEvidence = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "submission.json"), "utf8")
+  ) as { command?: string[]; stdout?: string; stderr?: string };
+  assert.equal(submissionEvidence.stdout, "submission api_key=<redacted>\n");
+  assert.equal(submissionEvidence.stderr, "submission token=<redacted>\n");
+  const inputArgumentIndex = submissionEvidence.command?.indexOf("--input") ?? -1;
+  assert.equal(submissionEvidence.command?.[inputArgumentIndex + 1], "<redacted>");
+  assert.doesNotMatch(JSON.stringify(submissionEvidence), /sk-(?:operator|nested|success)/);
 });
 
 test("startRun submits prompt paths instead of rendered prompt bodies", async () => {
@@ -862,16 +1037,8 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, ".smithers", "node_modules", ".bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const smithers = path.join(binDir, process.platform === "win32" ? "smithers.cmd" : "smithers");
   const logPath = path.join(project, "local-smithers.log");
-  fs.writeFileSync(
-    smithers,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
-    "utf8"
-  );
-  fs.chmodSync(smithers, 0o755);
+  writeFakeInstalledSmithers(project);
 
   const run = await startRun({
     projectRoot: project,
@@ -883,49 +1050,167 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
+test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const logPath = path.join(project, "published-smithers.log");
+  writeFakeInstalledSmithers(project, { binTarget: `./${SMITHERS_ORCHESTRATOR_BIN_PATH}` });
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "published-smithers-bin-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-published-smithers-bin-run\.tsx/);
+});
+
 test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, "fake-bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const npm = path.join(binDir, "npm");
-  const localSmithers = path.join(project, ".smithers", "node_modules", ".bin", "smithers");
-  const npmLogPath = path.join(project, "npm-install.log");
-  const smithersLogPath = path.join(project, "local-smithers.log");
-  fs.writeFileSync(
-    npm,
-    [
-      "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$NPM_FAKE_LOG"',
-      'mkdir -p "$(dirname "$ULTRAFUZZ_TEST_LOCAL_SMITHERS")"',
-      "cat > \"$ULTRAFUZZ_TEST_LOCAL_SMITHERS\" <<'EOS'",
-      "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
-      "printf '%s\\n' '{\"ok\":true}'",
-      "EOS",
-      'chmod +x "$ULTRAFUZZ_TEST_LOCAL_SMITHERS"',
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(npm, 0o755);
+  const installer = writeFakeNpmInstaller(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "bootstrap-smithers-run",
     env: {
-      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      NPM_FAKE_LOG: npmLogPath,
-      SMITHERS_FAKE_LOG: smithersLogPath,
-      ULTRAFUZZ_TEST_LOCAL_SMITHERS: localSmithers
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
     }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
-  assert.match(fs.readFileSync(smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--ignore-scripts/);
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--package-lock=false/);
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
+  assert.match(fs.readFileSync(installer.smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+});
+
+test("startRun migrates the known generated Smithers caret manifest without dropping custom fields", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const packageJson = path.join(project, ".smithers", "package.json");
+  fs.writeFileSync(
+    packageJson,
+    `${JSON.stringify(
+      {
+        name: "ultrafuzz-smithers",
+        private: true,
+        type: "module",
+        scripts: { custom: "node custom.js" },
+        dependencies: {
+          "smithers-orchestrator": "^0.27.0",
+          zod: "^4.4.3",
+          "custom-agent-package": "1.2.3"
+        },
+        devDependencies: { typescript: "^6.0.3", "custom-build-package": "2.3.4" }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  writeFakeInstalledSmithers(project);
+  const logPath = path.join(project, "local-smithers.log");
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "migrated-smithers-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    scripts: { custom: string };
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+  };
+  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(migrated.dependencies.zod, "4.4.3");
+  assert.equal(migrated.devDependencies.typescript, "6.0.3");
+  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
+  assert.equal(migrated.devDependencies["custom-build-package"], "2.3.4");
+  assert.equal(migrated.scripts.custom, "node custom.js");
+});
+
+test("startRun reinstalls a stale target-local Smithers package before launch", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  writeFakeInstalledSmithers(project, { version: "0.26.0" });
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "stale-smithers-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
+  const installed = JSON.parse(fs.readFileSync(fakeInstalledSmithersPaths(project).packageJson, "utf8")) as {
+    version: string;
+  };
+  assert.equal(installed.version, SMITHERS_ORCHESTRATOR_VERSION);
+});
+
+test("startRun repairs a target-local Smithers shim that points outside the pinned package", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const paths = fakeInstalledSmithersPaths(project);
+  const wrongTarget = path.join(project, ".smithers", "node_modules", "wrong-smithers.js");
+  fs.mkdirSync(path.dirname(wrongTarget), { recursive: true });
+  fs.writeFileSync(wrongTarget, "#!/bin/sh\nexit 91\n", "utf8");
+  writeFakeInstalledSmithers(project, { shimTarget: wrongTarget });
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "repaired-smithers-shim-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
+  assert.equal(fs.realpathSync(paths.shim), fs.realpathSync(paths.target));
+});
+
+test("generated workflow dependencies require exact runner versions while allowing custom packages", () => {
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        dependencies: {
+          "smithers-orchestrator": "^0.27.0",
+          zod: "4.4.3"
+        },
+        devDependencies: { typescript: "6.0.3" }
+      }),
+    /must retain Ultrafuzz's exact runner versions/u
+  );
+  assert.doesNotThrow(() =>
+    assertSmithersPackageManifest({
+      dependencies: {
+        "smithers-orchestrator": "0.27.0",
+        zod: "4.4.3",
+        "custom-agent-package": "1.2.3"
+      },
+      devDependencies: { typescript: "6.0.3" }
+    })
+  );
 });
 
 test("startRun creates the workflow log directory before submission", async () => {

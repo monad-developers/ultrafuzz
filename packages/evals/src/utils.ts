@@ -76,11 +76,51 @@ export function isPathInside(root: string, candidate: string): boolean {
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {
-  if (isPathInside(projectRoot, candidate)) {
+  let resolvedProjectRoot: string;
+  let resolvedCandidate: string;
+  try {
+    resolvedProjectRoot = resolveFromNearestExistingAncestor(projectRoot);
+    resolvedCandidate = resolveFromNearestExistingAncestor(candidate);
+  } catch (error) {
+    throw new EvalError("EVAL_GROUND_TRUTH_UNSAFE", `${label} could not be resolved safely`, {
+      path: path.resolve(candidate),
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  if (isPathInside(resolvedProjectRoot, resolvedCandidate)) {
     throw new EvalError("EVAL_GROUND_TRUTH_INSIDE_REPO", `${label} must resolve outside this repository`, {
       path: path.resolve(candidate),
-      projectRoot: path.resolve(projectRoot)
+      resolvedPath: resolvedCandidate,
+      projectRoot: path.resolve(projectRoot),
+      resolvedProjectRoot
     });
+  }
+}
+
+/** Resolve symlinks in the nearest existing ancestor, preserving a missing tail. */
+function resolveFromNearestExistingAncestor(candidate: string): string {
+  let current = path.resolve(candidate);
+  const missingSegments: string[] = [];
+  while (true) {
+    let exists = false;
+    try {
+      fs.lstatSync(current);
+      exists = true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw error;
+      }
+    }
+    if (exists) {
+      return path.resolve(fs.realpathSync(current), ...missingSegments);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return current;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
   }
 }
 

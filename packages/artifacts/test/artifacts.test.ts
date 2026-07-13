@@ -7,14 +7,17 @@ import test from "node:test";
 
 import {
   appendEvent,
+  appendLineDurable,
   createRunLayout,
   getNodeArtifactDir,
   normalizeFindings,
   normalizeSafeRelativePath,
   queryEvents,
   readFindings,
+  readRunState,
   replayEvents,
   safeResolveInside,
+  updateNodeState,
   writeArtifact,
   writeArtifactManifest,
   writeGeneratedTestManifest
@@ -142,6 +145,30 @@ test("event redaction covers token families, AWS keys, URL credentials, and priv
   assert.doesNotMatch(serialized, /xoxb-/);
   assert.doesNotMatch(serialized, /user:pass/);
   assert.doesNotMatch(serialized, /PRIVATE KEY/);
+});
+
+test("run state redacts secret-looking node errors before persistence", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-state-redaction" });
+  updateNodeState(layout, "node-a", {
+    status: "failed",
+    last_error: "request failed with Authorization: Bearer sk-state-secret"
+  });
+
+  const serialized = fs.readFileSync(layout.statePath, "utf8");
+  assert.doesNotMatch(serialized, /sk-state-secret/);
+  assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/);
+});
+
+test("durable append rejects a symlinked parent before creating outside directories", () => {
+  const root = tempProject();
+  const outside = tempProject();
+  fs.symlinkSync(outside, path.join(root, "linked"), "dir");
+
+  assert.throws(
+    () => appendLineDurable(path.join(root, "linked", "created", "audit.jsonl"), "entry", root),
+    /crosses symlink/u
+  );
+  assert.equal(fs.existsSync(path.join(outside, "created")), false);
 });
 
 test("findings normalize schema-versioned findings arrays", () => {
