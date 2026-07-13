@@ -688,7 +688,7 @@ groups:
   setup:
     label: Setup
     defaults:
-      timeout_seconds: 45
+      timeout_seconds: 1200
 nodes:
   - id: __start__
     kind: meta
@@ -724,11 +724,18 @@ nodes:
   });
 
   const smithersTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
-    tasks: Array<{ attemptId: string; timeoutMs: number; metadata?: { timeout?: { seconds?: number } } }>;
+    tasks: Array<{
+      attemptId: string;
+      timeoutMs: number;
+      heartbeatTimeoutMs: number;
+      metadata?: { timeout?: { seconds?: number; heartbeatTimeoutMs?: number } };
+    }>;
   };
   const task = smithersTasks.tasks.find((entry) => entry.attemptId === "project-discovery");
-  assert.equal(task?.timeoutMs, 45_000);
-  assert.equal(task?.metadata?.timeout?.seconds, 45);
+  assert.equal(task?.timeoutMs, 1_200_000);
+  assert.equal(task?.heartbeatTimeoutMs, 1_200_000);
+  assert.equal(task?.metadata?.timeout?.seconds, 1200);
+  assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
 });
 
 test("startRun compiles normal Smithers tasks, persists provenance, and submits through Smithers CLI", async () => {
