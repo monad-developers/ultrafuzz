@@ -213,6 +213,13 @@ function fakeLifecycleSmithersEnv(
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
       "    ;;",
+      "  up)",
+      '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
+      "      printf '%s\\n' 'fake up failure' >&2",
+      "      exit 1",
+      "    fi",
+      "    printf '%s\\n' '{\"ok\":true}'",
+      "    ;;",
       "  *)",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
@@ -2065,6 +2072,96 @@ test("resume keeps an already-running linked workflow attached without launching
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json/u);
   assert.doesNotMatch(commands, /^up /mu);
+});
+
+test("resume suppresses duplicate submissions for every active workflow run state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-retrying-lifecycle-run",
+      status: "running",
+      state: "retrying",
+      steps: [{ id: "node:project-discovery", state: "retrying", attempt: 2 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  for (const state of ["in-progress", "started", "queued", "retrying", "waiting-approval"]) {
+    fs.writeFileSync(
+      env.SMITHERS_FAKE_INSPECT!,
+      `${JSON.stringify(
+        workflowInspect({
+          workflowRunId: "ultrafuzz-retrying-lifecycle-run",
+          status: "running",
+          state,
+          steps: [{ id: "node:project-discovery", state, attempt: 2 }]
+        })
+      )}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
+
+    assert.equal(resumed.ok, true, `${state}: ${JSON.stringify(resumed.diagnostics)}`);
+    assert.equal(resumed.value?.submitted, false, `state ${state} must suppress duplicate resume`);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+    assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json/u);
+    assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
+  }
+});
+
+test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-reset-lifecycle-run",
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const detached = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env: { ...env, SMITHERS_FAKE_FAIL_UP: "1" }
+  });
+
+  assert.equal(detached.ok, false);
+  assert.equal(detached.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.match(detached.diagnostics[0]?.message ?? "", /without repeating the reset/u);
+  assert.equal(fs.existsSync(markerPath), true, "reset marker must persist after a failed continuation");
+  const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(failedCommands, /^timetravel /mu);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const retried = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  assert.equal(retried.value?.submitted, true);
+  assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
+  const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
+  assert.match(
+    retriedCommands,
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
+  );
 });
 
 test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {

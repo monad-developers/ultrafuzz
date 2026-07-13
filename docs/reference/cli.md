@@ -141,9 +141,14 @@ ultrafuzz fork <run-id> \
 ```
 
 `resume`, `replay`, and `fork` operate on the workflow run linked from
-Ultrafuzz run metadata. `resume --reset-node` retries one failed workflow node
-and its dependents in the same linked run. `fork` may start from a checkpoint
-frame and may reset one workflow node before starting the fork.
+Ultrafuzz run metadata. `resume` reports `submitted: false` instead of
+launching a duplicate continuation when the linked workflow is still in an
+active state (running, in-progress, started, queued, retrying, or waiting).
+`resume --reset-node` retries one failed workflow node and its dependents in
+the same linked run; the applied reset is recorded so retrying the command
+after a failed continuation resumes the already-reset run instead of repeating
+the reset. `fork` may start from a checkpoint frame and may reset one workflow
+node before starting the fork.
 
 ## Report
 
