@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertNoSymlinkComponents,
+  assertPathInside,
   prepareSafeFilePath,
   readJsonFile,
   safeResolveInside,
@@ -496,7 +497,7 @@ function githubRepoParts(reference: ReferenceEntry, id: string): { owner: string
 }
 
 function isGithubRepoPart(value: string): boolean {
-  return /^[A-Za-z0-9_.-]+$/u.test(value);
+  return value !== "." && value !== ".." && /^[A-Za-z0-9_.-]+$/u.test(value);
 }
 
 function isFullSha(value: string): boolean {
@@ -523,7 +524,10 @@ function validateReferencePath(id: string, referencePath: string): void {
 
 function cacheDirForRoot(reference: ReferenceEntry, root: string): string {
   const { owner, repo } = githubRepoParts(reference, "cache-path");
-  return path.join(root, "github", owner, repo, reference.commit);
+  const githubRoot = path.resolve(root, "github");
+  const cacheDir = path.resolve(githubRoot, owner, repo, reference.commit);
+  assertPathInside(githubRoot, cacheDir, "reference cache path");
+  return cacheDir;
 }
 
 function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: string): void {
