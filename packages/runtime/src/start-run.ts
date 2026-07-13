@@ -189,6 +189,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       payload: {
         action,
         workflow_run_id: workflowRunId,
+        ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });

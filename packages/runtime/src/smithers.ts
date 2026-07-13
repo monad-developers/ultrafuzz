@@ -436,7 +436,7 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    if (smithersSnapshotRunState(inspection) === "running") {
+    if (smithersSnapshotRunState(inspection) === "running" && input.resetNode === undefined) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
@@ -444,6 +444,49 @@ export async function runSmithersLifecycleCommand(input: {
         alreadyRunning: true
       };
     }
+  }
+
+  if (input.action === "resume" && input.resetNode !== undefined) {
+    const resetResult = await execSmithersCli({
+      args: [
+        "timetravel",
+        input.workflowPath,
+        "--run-id",
+        input.smithersRunId,
+        "--node-id",
+        input.resetNode,
+        "--no-vcs",
+        "--deps",
+        "--force",
+        "--format",
+        "json"
+      ],
+      projectRoot: input.projectRoot,
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames
+    });
+    const resumeResult = await execSmithersCli({
+      args: [
+        "up",
+        input.workflowPath,
+        "--resume",
+        input.smithersRunId,
+        "--run-id",
+        input.smithersRunId,
+        "--force",
+        "--detach",
+        ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+        "--format",
+        "json"
+      ],
+      projectRoot: input.projectRoot,
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames
+    });
+    return {
+      ...resumeResult,
+      stderr: [resetResult.stderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n")
+    };
   }
 
   if (input.action === "fork" && input.forkFrame !== undefined) {
