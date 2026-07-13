@@ -646,6 +646,36 @@ test("compileSmithersWorkflow emits native task dependencies without synthetic l
   );
 });
 
+test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
+  const project = tempProject();
+  writeFanoutProject(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const quotedProjectRoot = path.join(project, 'checkout"quoted');
+  fs.mkdirSync(quotedProjectRoot);
+  const compiled = compileSmithersWorkflow({
+    projectRoot: quotedProjectRoot,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-escaped-import",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  let importPath = path
+    .relative(path.dirname(compiled.evidenceWorkflowPath), compiled.workflowPath)
+    .split(path.sep)
+    .join("/");
+  if (!importPath.startsWith(".")) {
+    importPath = `./${importPath}`;
+  }
+  importPath = importPath.replace(/\.tsx$/u, "");
+  const evidenceSource = fs.readFileSync(compiled.evidenceWorkflowPath, "utf8");
+  assert.ok(evidenceSource.includes(`from ${JSON.stringify(importPath)};`), evidenceSource);
+});
+
 test("compileSmithersWorkflow applies group timeout defaults", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

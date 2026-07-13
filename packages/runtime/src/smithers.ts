@@ -725,7 +725,9 @@ function writeExecutableWorkflow(projectRoot: string, workflowPath: string, sour
 
 function renderEvidenceWorkflowSource(workflowPath: string, evidenceWorkflowPath: string): string {
   return renderRuntimeTemplate("smithers/workflows/evidence.tsx", {
-    __ULTRAFUZZ_WORKFLOW_IMPORT__: importPathBetween(path.dirname(evidenceWorkflowPath), workflowPath)
+    __ULTRAFUZZ_WORKFLOW_IMPORT__: JSON.stringify(
+      importPathBetween(path.dirname(evidenceWorkflowPath), workflowPath)
+    ).slice(1, -1)
   });
 }
 
