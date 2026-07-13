@@ -579,7 +579,11 @@ function compileTask(input: {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
     (input.node.timeoutSeconds ?? profile.timeoutSeconds ?? input.config.run.defaultTimeoutSeconds) * 1000;
-  const heartbeatTimeoutMs = Math.min(600_000, timeoutMs);
+  // Agent subprocesses can spend long stretches inside a provider request where
+  // Smithers cannot emit a useful task heartbeat. Keep the watchdog aligned with
+  // the configured node deadline so it does not silently replace a longer node
+  // timeout with the old ten-minute cap.
+  const heartbeatTimeoutMs = timeoutMs;
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
