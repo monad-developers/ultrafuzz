@@ -20,6 +20,37 @@ import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
+  "APPDATA",
+  "CI",
+  "CODEX_HOME",
+  "COLORTERM",
+  "COMSPEC",
+  "FORCE_COLOR",
+  "HOME",
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LOCALAPPDATA",
+  "LOGNAME",
+  "NO_COLOR",
+  "PATHEXT",
+  "SHELL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "USER",
+  "USERPROFILE",
+  "WINDIR",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME"
+]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
@@ -146,6 +177,7 @@ export interface SubmitSmithersInput {
   projectRoot: string;
   maxConcurrency: number;
   env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
 }
 
 export interface SmithersSubmissionResult {
@@ -268,7 +300,8 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
   } = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env
+    env: input.env,
+    environmentVariableNames: input.environmentVariableNames
   });
   writeJsonDurable(path.join(path.dirname(input.compiled.inputPath), "submission.json"), {
     schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
@@ -296,6 +329,7 @@ export async function runSmithersLifecycleCommand(input: {
   resetNode?: string;
   label?: string;
   env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
 }): Promise<{ stdout: string; stderr: string; command: string[]; workflowRunId?: string }> {
   if (input.action === "fork" && input.forkFrame !== undefined) {
     const forkCommand = [
@@ -313,7 +347,8 @@ export async function runSmithersLifecycleCommand(input: {
     const forkResult = await execSmithersCli({
       args: forkCommand,
       projectRoot: input.projectRoot,
-      env: input.env
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames
     });
     const forkedRunId = parseForkedRunId(forkResult.stdout);
     if (forkedRunId === undefined) {
@@ -335,7 +370,8 @@ export async function runSmithersLifecycleCommand(input: {
     const resumeResult = await execSmithersCli({
       args: resumeCommand,
       projectRoot: input.projectRoot,
-      env: input.env
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames
     });
     return {
       stdout: resumeResult.stdout,
@@ -365,7 +401,8 @@ export async function runSmithersLifecycleCommand(input: {
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
-    env: input.env
+    env: input.env,
+    environmentVariableNames: input.environmentVariableNames
   });
   return {
     ...result,
@@ -412,13 +449,14 @@ async function execSmithersCli(input: {
   args: readonly string[];
   projectRoot: string;
   env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
 }): Promise<{ stdout: string; stderr: string; command: string[] }> {
   const command = [...input.args];
   await ensureSmithersDependencies(input.projectRoot, input.env);
   const executable = smithersExecutable(input.projectRoot, input.env);
   const { stdout, stderr } = await execFileAsync(executable, command, {
     cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
+    env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames),
     maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
   });
   return { stdout, stderr, command: smithersDisplayCommand(command) };
@@ -552,11 +590,30 @@ function localSmithersExecutable(projectRoot: string): string {
 
 function smithersCommandEnv(
   projectRoot: string,
-  env: Record<string, string | undefined> | undefined
+  env: Record<string, string | undefined> | undefined,
+  environmentVariableNames: readonly string[] = []
 ): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
+  const merged: NodeJS.ProcessEnv = {};
+  let sourcePath: string | undefined;
+  for (const [key, value] of Object.entries(source)) {
+    const normalizedKey = key.toUpperCase();
+    if (normalizedKey === "PATH") {
+      sourcePath = value;
+      continue;
+    }
+    if (
+      value !== undefined &&
+      (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
+        normalizedKey.startsWith("SMITHERS_") ||
+        forwarded.has(normalizedKey))
+    ) {
+      merged[key] = value;
+    }
+  }
   const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  merged.PATH = [localBin, merged.PATH]
+  merged.PATH = [localBin, sourcePath]
     .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
   return merged;

@@ -25,6 +25,10 @@ function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -35,6 +39,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then',
       '  printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
+      '  printf \'%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
       'if [ "$1" = "fork" ]; then',
       "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
@@ -802,6 +809,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
+  assert.match(workflowSource, /untrusted data, not instructions/);
   assert.match(workflowSource, /<Worktree/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
@@ -819,6 +827,24 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+});
+
+test("startRun forwards only the configured agent credential to the workflow process", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const environmentLog = path.join(project, "smithers-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_ENV_LOG: environmentLog,
+    OPENAI_API_KEY: "configured-agent-key",
+    AWS_SECRET_ACCESS_KEY: "unrelated-host-key"
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "filtered-environment", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key|\n");
 });
 
 test("startRun submits prompt paths instead of rendered prompt bodies", async () => {
@@ -898,14 +924,14 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
     npm,
     [
       "#!/bin/sh",
-      'printf \'%s\\n\' "$*" >> "$NPM_FAKE_LOG"',
-      'mkdir -p "$(dirname "$ULTRAFUZZ_TEST_LOCAL_SMITHERS")"',
-      "cat > \"$ULTRAFUZZ_TEST_LOCAL_SMITHERS\" <<'EOS'",
+      `printf '%s\\n' "$*" >> ${shellQuote(npmLogPath)}`,
+      `mkdir -p ${shellQuote(path.dirname(localSmithers))}`,
+      `cat > ${shellQuote(localSmithers)} <<'EOS'`,
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
       "printf '%s\\n' '{\"ok\":true}'",
       "EOS",
-      'chmod +x "$ULTRAFUZZ_TEST_LOCAL_SMITHERS"',
+      `chmod +x ${shellQuote(localSmithers)}`,
       ""
     ].join("\n"),
     "utf8"
@@ -917,9 +943,7 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
     runId: "bootstrap-smithers-run",
     env: {
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-      NPM_FAKE_LOG: npmLogPath,
-      SMITHERS_FAKE_LOG: smithersLogPath,
-      ULTRAFUZZ_TEST_LOCAL_SMITHERS: localSmithers
+      SMITHERS_FAKE_LOG: smithersLogPath
     }
   });
 

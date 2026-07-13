@@ -13,6 +13,7 @@ import {
   writeRunState,
   type RunLayout
 } from "@ultrafuzz/artifacts";
+import type { ResolvedConfig } from "@ultrafuzz/config";
 
 import {
   type PlannedGraph,
@@ -31,7 +32,7 @@ import {
   submitSmithersWorkflow,
   type CompiledSmithersWorkflow
 } from "./smithers.js";
-import { runsRootForProject } from "./validate.js";
+import { loadResolvedProject, runsRootForProject } from "./validate.js";
 
 export async function startRun(input: StartRunInput) {
   const planned = await planRun(input);
@@ -78,7 +79,11 @@ export async function startRun(input: StartRunInput) {
       compiled,
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
-      env: input.env
+      env: input.env,
+      environmentVariableNames: agentEnvironmentVariableNames(
+        plan.resolved_config,
+        compiled.tasks.map((task) => task.agentRef)
+      )
     });
     appendEvent(plan.layout, {
       eventType: "workflow-submitted",
@@ -138,6 +143,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   if (!evidence.ok) {
     return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
   }
+  const resolved = await loadResolvedProject(input);
+  if (resolved.config === undefined) {
+    return runtimeFailure<WorkflowLifecycleValue>(resolved.diagnostics);
+  }
   try {
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
@@ -148,7 +157,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
       label: input.label,
-      env: input.env
+      env: input.env,
+      environmentVariableNames: agentEnvironmentVariableNames(resolved.config, linkedWorkflowAgentRefs(evidence.layout))
     });
     const workflowRunId =
       action === "fork" && lifecycleResult.workflowRunId !== undefined
@@ -352,4 +362,25 @@ function resolveStoredWorkflowPath(projectRoot: string, runRoot: string, value: 
     return projectRelative;
   }
   return path.resolve(runRoot, value);
+}
+
+function linkedWorkflowAgentRefs(layout: RunLayout): string[] {
+  const tasks = readJsonIfExists<{ tasks?: Array<{ agentRef?: unknown }> }>(
+    path.join(layout.root, "smithers", "tasks.json")
+  );
+  return (tasks?.tasks ?? [])
+    .map((task) => task.agentRef)
+    .filter((agentRef): agentRef is string => typeof agentRef === "string");
+}
+
+function agentEnvironmentVariableNames(config: ResolvedConfig, agentRefs: readonly string[]): string[] {
+  const activeAgentRefs = new Set(agentRefs);
+  return [
+    ...new Set(
+      Object.entries(config.agents)
+        .filter(([agentRef, agent]) => activeAgentRefs.has(agentRef) && agent.auth === "api-key")
+        .map(([, agent]) => agent.apiKeyEnv)
+        .filter((name): name is string => name !== undefined)
+    )
+  ].sort();
 }
