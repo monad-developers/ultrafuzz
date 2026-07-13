@@ -1542,11 +1542,13 @@ export interface CommandJob {
 
 class HttpError extends Error {
   readonly status: number;
+  readonly closeConnection: boolean;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, closeConnection = false) {
     super(message);
     this.name = "HttpError";
     this.status = status;
+    this.closeConnection = closeConnection;
   }
 }
 
@@ -1623,28 +1625,21 @@ async function readBodyObject(request: http.IncomingMessage): Promise<JsonObject
       throw new HttpError(400, "invalid Content-Length header");
     }
     if (declaredBytes > MAX_REQUEST_BODY_BYTES) {
-      request.resume();
-      throw new HttpError(413, "request body exceeds the maximum allowed size");
+      request.pause();
+      throw new HttpError(413, "request body exceeds the maximum allowed size", true);
     }
   }
 
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  let tooLarge = false;
-  for await (const chunk of request) {
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     totalBytes += buffer.length;
     if (totalBytes > MAX_REQUEST_BODY_BYTES) {
-      tooLarge = true;
-      chunks.length = 0;
-      continue;
+      request.pause();
+      throw new HttpError(413, "request body exceeds the maximum allowed size", true);
     }
-    if (!tooLarge) {
-      chunks.push(buffer);
-    }
-  }
-  if (tooLarge) {
-    throw new HttpError(413, "request body exceeds the maximum allowed size");
+    chunks.push(buffer);
   }
   if (chunks.length === 0) {
     return {};
@@ -1673,6 +1668,10 @@ function sendJson(response: http.ServerResponse, value: unknown, status = 200): 
 
 function sendError(response: http.ServerResponse, error: unknown): void {
   const status = error instanceof HttpError ? error.status : 500;
+  if (error instanceof HttpError && error.closeConnection) {
+    response.shouldKeepAlive = false;
+    response.setHeader("connection", "close");
+  }
   sendJson(response, { error: errorMessage(error) }, status);
 }
 
