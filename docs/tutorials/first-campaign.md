@@ -17,7 +17,7 @@ From the Ultrafuzz repository, install dependencies and build the CLI:
 
 ```bash
 pnpm install
-pnpm --filter @ultrafuzz/cli build
+pnpm --filter @ultrafuzz/cli... build
 ```
 
 The rest of this guide assumes `ultrafuzz` resolves on your PATH. During

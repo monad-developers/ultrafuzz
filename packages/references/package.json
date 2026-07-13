@@ -15,9 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "pnpm --filter @ultrafuzz/artifacts build && tsc -p tsconfig.json && cp ../../.ultrafuzz/references.yml dist/default-references.yml",
-    "test": "pnpm --filter @ultrafuzz/references build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "typecheck": "pnpm --filter @ultrafuzz/artifacts build && tsc -p tsconfig.json --noEmit --pretty false"
+    "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/references.yml dist/default-references.yml",
+    "test": "pnpm --filter @ultrafuzz/references... build && rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "typecheck": "pnpm --filter @ultrafuzz/references^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",
