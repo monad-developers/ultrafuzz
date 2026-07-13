@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import {
   assertNoSymlinkComponents,
+  assertPathInside,
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
@@ -614,7 +615,7 @@ async function ensureSmithersDependencies(
   }
   const installedPackageRoot = installedSmithersPackageRoot(projectRoot);
   if (fs.existsSync(installedPackageRoot)) {
-    assertNoSymlinkComponents(projectRoot, installedPackageRoot, "installed Smithers package");
+    resolveInstalledSmithersPackageRoot(projectRoot);
   }
   if (installedSmithersValidationError(projectRoot) === undefined) {
     return;
@@ -645,15 +646,20 @@ async function ensureSmithersDependencies(
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {
-  const packageRoot = installedSmithersPackageRoot(projectRoot);
-  const packageJson = path.join(packageRoot, "package.json");
-  const expectedBin = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const linkedPackageRoot = installedSmithersPackageRoot(projectRoot);
   const local = localSmithersExecutable(projectRoot);
   try {
+    if (!fs.existsSync(linkedPackageRoot)) {
+      return "installed package metadata is missing";
+    }
+    const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+    const packageJson = path.join(packageRoot, "package.json");
+    const expectedBin = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+    const expectedLinkedBin = path.join(linkedPackageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
     if (!fs.existsSync(packageJson)) {
       return "installed package metadata is missing";
     }
-    assertNoSymlinkComponents(projectRoot, packageJson, "installed Smithers package metadata");
+    assertRegularFileInside(packageRoot, packageJson, "installed Smithers package metadata");
     const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
     if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
       return `installed package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`;
@@ -676,13 +682,19 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
       if (!contents.includes(expectedReference)) {
         return "local workflow runner command shim has an unexpected target";
       }
-    } else {
-      if (!shim.isSymbolicLink()) {
-        return "local workflow runner binary is not a package-manager symlink";
-      }
+    } else if (shim.isSymbolicLink()) {
       if (fs.realpathSync(local) !== fs.realpathSync(expectedBin)) {
         return "local workflow runner binary has an unexpected target";
       }
+    } else if (shim.isFile()) {
+      assertRegularFileInside(path.dirname(local), local, "local Smithers workflow runner shim");
+      const expectedReference = path.relative(path.dirname(local), expectedLinkedBin);
+      const contents = fs.readFileSync(local, "utf8").replaceAll("\\", "/");
+      if (!contents.includes(expectedReference.replaceAll("\\", "/"))) {
+        return "local workflow runner command shim has an unexpected target";
+      }
+    } else {
+      return "local workflow runner command shim is not a regular file or package-manager symlink";
     }
     return undefined;
   } catch (error) {
@@ -696,6 +708,16 @@ function isExpectedSmithersBinTarget(value: unknown): boolean {
 
 function installedSmithersPackageRoot(projectRoot: string): string {
   return path.join(projectRoot, ".smithers", "node_modules", "smithers-orchestrator");
+}
+
+function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
+  const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
+  const packageRoot = installedSmithersPackageRoot(projectRoot);
+  assertNoSymlinkComponents(projectRoot, nodeModules, "Smithers dependencies");
+  const realNodeModules = fs.realpathSync(nodeModules);
+  const realPackageRoot = fs.realpathSync(packageRoot);
+  assertPathInside(realNodeModules, realPackageRoot, "installed Smithers package");
+  return realPackageRoot;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

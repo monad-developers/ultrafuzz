@@ -77,6 +77,43 @@ function writeFakeInstalledSmithers(
   return paths;
 }
 
+function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fakeInstalledSmithersPaths> {
+  const paths = fakeInstalledSmithersPaths(project);
+  const storeRoot = path.join(
+    project,
+    ".smithers",
+    "node_modules",
+    ".pnpm",
+    "smithers-orchestrator@unit",
+    "node_modules",
+    "smithers-orchestrator"
+  );
+  const storePackageJson = path.join(storeRoot, "package.json");
+  const storeTarget = path.join(storeRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  fs.mkdirSync(path.dirname(storeTarget), { recursive: true });
+  fs.mkdirSync(path.dirname(paths.shim), { recursive: true });
+  fs.writeFileSync(
+    storePackageJson,
+    `${JSON.stringify({
+      name: "smithers-orchestrator",
+      version: SMITHERS_ORCHESTRATOR_VERSION,
+      bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    storeTarget,
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    "utf8"
+  );
+  fs.chmodSync(storeTarget, 0o755);
+  fs.symlinkSync(path.relative(path.dirname(paths.packageRoot), storeRoot), paths.packageRoot);
+  const linkedTarget = path.relative(path.dirname(paths.shim), paths.target).split(path.sep).join("/");
+  fs.writeFileSync(paths.shim, `#!/bin/sh\nbasedir=\${0%/*}\nexec "$basedir/${linkedTarget}" "$@"\n`, "utf8");
+  fs.chmodSync(paths.shim, 0o755);
+  return paths;
+}
+
 function writeFakeNpmInstaller(project: string): {
   binDir: string;
   npmLogPath: string;
@@ -1088,6 +1125,25 @@ test("startRun accepts the published Smithers bin target with its leading dot se
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-published-smithers-bin-run\.tsx/);
+});
+
+test("startRun accepts a package-manager package link and regular command shim inside node_modules", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const logPath = path.join(project, "pnpm-smithers.log");
+  const paths = writeFakePnpmInstalledSmithers(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "pnpm-smithers-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.realpathSync(paths.packageRoot).includes(`${path.sep}.pnpm${path.sep}`), true);
+  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-pnpm-smithers-run\.tsx/);
 });
 
 test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
