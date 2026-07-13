@@ -23,6 +23,10 @@ const modelProfileSchema = z.object({
     .string()
     .refine((value) => value.trim().length > 0)
     .optional(),
+  reasoning: z
+    .string()
+    .refine((value) => value.trim().length > 0)
+    .optional(),
   timeoutSeconds: z.number().int().min(1).max(MODEL_TIMEOUT_SECONDS).optional()
 });
 
@@ -112,6 +116,8 @@ function modelProfileDiagnosticCode(issue: ZodIssue): string {
       return "CONFIG_MODEL_AGENT_INVALID";
     case "model":
       return "CONFIG_MODEL_NAME_EMPTY";
+    case "reasoning":
+      return "CONFIG_MODEL_REASONING_EMPTY";
     case "timeoutSeconds":
       return "CONFIG_MODEL_TIMEOUT_INVALID";
     default:
@@ -131,6 +137,8 @@ function modelProfileDiagnosticMessage(code: string, issue: ZodIssue, config: Re
       return `model profile \`${id ?? ""}\` references invalid agent \`${String(profile?.agent)}\``;
     case "CONFIG_MODEL_NAME_EMPTY":
       return `model profile \`${id ?? ""}\` model cannot be empty`;
+    case "CONFIG_MODEL_REASONING_EMPTY":
+      return `model profile \`${id ?? ""}\` reasoning cannot be empty`;
     case "CONFIG_MODEL_TIMEOUT_INVALID":
       return "model profile timeout_seconds must be between 1 and 86400";
     default:
@@ -187,9 +195,11 @@ function modelProfileFieldRank(issue: ZodIssue): number {
       return 2;
     case "CONFIG_MODEL_NAME_EMPTY":
       return 3;
-    case "CONFIG_MODEL_TIMEOUT_INVALID":
+    case "CONFIG_MODEL_REASONING_EMPTY":
       return 4;
-    default:
+    case "CONFIG_MODEL_TIMEOUT_INVALID":
       return 5;
+    default:
+      return 6;
   }
 }

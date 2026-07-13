@@ -143,6 +143,7 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     pushTable(lines, tableName(["models", id]), {
       agent: profile.agent,
       model: profile.model,
+      reasoning: profile.reasoning,
       timeout_seconds: profile.timeoutSeconds
     });
   }
@@ -207,6 +208,7 @@ function applyPromptMetadataLayer(
         id,
         agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
         model: profile.model ?? existing?.model,
+        reasoning: profile.reasoning ?? existing?.reasoning,
         timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
       };
       if (id === DEFAULT_MODEL_PROFILE_ID) {
@@ -260,6 +262,7 @@ function applyProjectConfigLayer(
           id,
           agent: profile.agent ?? existing?.agent ?? DEFAULT_AGENT,
           model: profile.model ?? existing?.model,
+          reasoning: profile.reasoning ?? existing?.reasoning,
           timeoutSeconds: profile.timeoutSeconds ?? existing?.timeoutSeconds
         };
       }

@@ -108,6 +108,7 @@ export const expandedGraphJsonSchema = {
                 modelProfileId: { type: "string", minLength: 1 },
                 agentRef: { type: "string", minLength: 1 },
                 modelName: { type: "string", minLength: 1 },
+                reasoningEffort: { type: "string", minLength: 1 },
                 modelIndex: { type: "integer", minimum: 0 },
                 loopIndex: { type: "integer", minimum: 0 },
                 attemptIndex: { type: "integer", minimum: 0 }
@@ -250,6 +251,7 @@ function validateModelFanout(value: unknown, path: string, issues: TopologySchem
     expectRequiredString(value, key, path, issues);
   }
   expectOptionalString(value, "modelName", path, issues);
+  expectOptionalString(value, "reasoningEffort", path, issues);
   validateModelFanoutIntegers(value as Partial<ModelFanoutProvenance>, path, issues);
 }
 

@@ -39,7 +39,7 @@ const RUN_KEYS = [
   "workspace_mode",
   "default_timeout_seconds"
 ] as const;
-const MODEL_PROFILE_KEYS = ["agent", "model", "timeout_seconds"] as const;
+const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
 const INVARIANT_KEYS = ["property_priority_threshold", "invariant_testing_fuzzer_timeout"] as const;
@@ -212,6 +212,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
           type: "string",
           assign: (value) => {
             modelProfile.model = value;
+          }
+        },
+        {
+          key: "reasoning",
+          type: "string",
+          assign: (value) => {
+            modelProfile.reasoning = value;
           }
         },
         {

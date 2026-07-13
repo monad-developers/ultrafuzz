@@ -77,6 +77,43 @@ function writeFakeInstalledSmithers(
   return paths;
 }
 
+function writeFakePnpmInstalledSmithers(project: string): ReturnType<typeof fakeInstalledSmithersPaths> {
+  const paths = fakeInstalledSmithersPaths(project);
+  const storeRoot = path.join(
+    project,
+    ".smithers",
+    "node_modules",
+    ".pnpm",
+    "smithers-orchestrator@unit",
+    "node_modules",
+    "smithers-orchestrator"
+  );
+  const storePackageJson = path.join(storeRoot, "package.json");
+  const storeTarget = path.join(storeRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  fs.mkdirSync(path.dirname(storeTarget), { recursive: true });
+  fs.mkdirSync(path.dirname(paths.shim), { recursive: true });
+  fs.writeFileSync(
+    storePackageJson,
+    `${JSON.stringify({
+      name: "smithers-orchestrator",
+      version: SMITHERS_ORCHESTRATOR_VERSION,
+      bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    storeTarget,
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    "utf8"
+  );
+  fs.chmodSync(storeTarget, 0o755);
+  fs.symlinkSync(path.relative(path.dirname(paths.packageRoot), storeRoot), paths.packageRoot);
+  const linkedTarget = path.relative(path.dirname(paths.shim), paths.target).split(path.sep).join("/");
+  fs.writeFileSync(paths.shim, `#!/bin/sh\nbasedir=\${0%/*}\nexec "$basedir/${linkedTarget}" "$@"\n`, "utf8");
+  fs.chmodSync(paths.shim, 0o755);
+  return paths;
+}
+
 function writeFakeNpmInstaller(project: string): {
   binDir: string;
   npmLogPath: string;
@@ -542,7 +579,9 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
-  assert.match(codexAgentText, /model_reasoning_effort:\s*"xhigh"/);
+  assert.match(codexAgentText, /createCodexAgent/);
+  assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
+  assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -550,6 +589,8 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.policy_posture.agents.status, "pass");
   assert.equal(validate.value?.policy_posture.paths.status, "pass");
   assert.equal(validate.value?.resolved_config?.default_agent, "CodexAgent");
+  assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
+  assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
 test("validate rejects unknown agent references before launch", async () => {
@@ -837,11 +878,18 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs.readFileSync(configPath, "utf8").replace('reasoning = "xhigh"', 'reasoning = "max"'),
+    "utf8"
+  );
 
   const run = await startRun({
     projectRoot: project,
     runId: "smithers-run",
     env: fakeSmithersEnv(project),
+    model: "gpt-runtime-override",
     maxConcurrency: 2,
     prompt: "Operator priority",
     workflowInput: { issue: 2 }
@@ -865,10 +913,15 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   ) as {
     tasks: Array<{
       agentRef?: string;
+      modelName?: string;
+      reasoningEffort?: string;
       timeoutMs?: number;
       retries?: number;
       retryPolicy?: unknown;
-      metadata?: { node?: { concreteNodeId?: string } };
+      metadata?: {
+        node?: { concreteNodeId?: string };
+        model?: { modelName?: string; reasoningEffort?: string };
+      };
     }>;
   };
   const smithersInput = JSON.parse(
@@ -883,17 +936,23 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   assert.equal(typeof smithersInput.tasks?.[0]?.prompt_path, "string");
   assert.equal(smithersTasks.tasks[0]?.agentRef, "CodexAgent");
+  assert.equal(smithersTasks.tasks[0]?.modelName, "gpt-runtime-override");
+  assert.equal(smithersTasks.tasks[0]?.reasoningEffort, "max");
   assert.ok(smithersTasks.tasks.every((task) => typeof task.timeoutMs === "number"));
   assert.ok(smithersTasks.tasks.every((task) => typeof task.retries === "number"));
   assert.ok(smithersTasks.tasks.every((task) => task.retryPolicy !== null));
   assert.equal(smithersTasks.tasks[0]?.metadata?.node?.concreteNodeId, "project-discovery");
+  assert.equal(smithersTasks.tasks[0]?.metadata?.model?.modelName, "gpt-runtime-override");
+  assert.equal(smithersTasks.tasks[0]?.metadata?.model?.reasoningEffort, "max");
 
   const workflowSource = fs.readFileSync(
     path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"),
     "utf8"
   );
   assert.match(workflowSource, /smithers-orchestrator/);
-  assert.match(workflowSource, /agent=\{agentRegistry\[task\.agentRef\]\}/);
+  assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
+  assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
+  assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
@@ -1066,6 +1125,25 @@ test("startRun accepts the published Smithers bin target with its leading dot se
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-published-smithers-bin-run\.tsx/);
+});
+
+test("startRun accepts a package-manager package link and regular command shim inside node_modules", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const logPath = path.join(project, "pnpm-smithers.log");
+  const paths = writeFakePnpmInstalledSmithers(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "pnpm-smithers-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.realpathSync(paths.packageRoot).includes(`${path.sep}.pnpm${path.sep}`), true);
+  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-pnpm-smithers-run\.tsx/);
 });
 
 test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
@@ -1932,6 +2010,73 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
   );
+});
+
+test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const binDir = path.join(project, "fake-bin");
+  const smithers = path.join(binDir, "smithers");
+  const logPath = path.join(project, "recovery-smithers.log");
+  const markerPath = path.join(project, "initial-submission-attempted");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    smithers,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      'if [ "$1" = "inspect" ]; then',
+      '  printf \'%s\\n\' \'{"code":"RUN_NOT_FOUND","message":"Run not found"}\'',
+      "  exit 1",
+      "fi",
+      'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
+      '  : > "$SMITHERS_FAKE_MARKER"',
+      "  exit 42",
+      "fi",
+      "printf '%s\\n' '{\"ok\":true}'",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+  const env = {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
+    SMITHERS_FAKE_LOG: logPath,
+    SMITHERS_FAKE_MARKER: markerPath
+  };
+
+  const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
+  assert.equal(initial.ok, false);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "missing-workflow-run",
+    maxConcurrency: 8,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-missing-workflow-run");
+
+  const commands = fs.readFileSync(logPath, "utf8").split("\n");
+  const upCommands = commands.filter((line) => line.startsWith("up "));
+  assert.equal(upCommands.length, 2);
+  assert.match(commands.find((line) => line.startsWith("inspect ")) ?? "", /--format json/u);
+  assert.doesNotMatch(upCommands[1] ?? "", /--resume/u);
+  assert.match(upCommands[1] ?? "", /--max-concurrency 8 --root /u);
+  assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
+
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
+  const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {
+    recovery?: string;
+    command?: string[];
+  };
+  assert.equal(recovery.recovery, "missing-workflow-run");
+  assert.equal(recovery.command?.includes("<redacted>"), true);
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as { status?: string };
+  assert.equal(state.status, "running");
 });
 
 test(

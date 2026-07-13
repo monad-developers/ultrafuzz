@@ -156,10 +156,18 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       smithersRunId: evidence.smithersRunId,
       workflowPath: evidence.workflowPath,
       projectRoot: path.resolve(input.projectRoot),
-      maxConcurrency: input.maxConcurrency,
+      maxConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
       label: input.label,
+      resumeRecovery:
+        action === "resume"
+          ? {
+              runRoot: evidence.layout.root,
+              inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
+              logsDir: path.join(evidence.layout.root, "smithers", "logs")
+            }
+          : undefined,
       env: input.env,
       environmentVariableNames: agentEnvironmentVariableNames(
         resolved.config,
@@ -180,7 +188,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       status: "running",
       payload: {
         action,
-        workflow_run_id: workflowRunId
+        workflow_run_id: workflowRunId,
+        ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
     return runtimeResult(true, {

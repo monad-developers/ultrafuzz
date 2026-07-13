@@ -309,6 +309,7 @@ function toPlannedGraphNode(
       model_profile_id: model.modelProfileId,
       agent_ref: model.agentRef,
       ...(model.modelName ? { model_name: model.modelName } : {}),
+      ...(model.reasoningEffort ? { reasoning_effort: model.reasoningEffort } : {}),
       model_index: model.modelIndex,
       loop_index: model.loopIndex,
       attempt_index: model.attemptIndex

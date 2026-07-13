@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import {
   assertNoSymlinkComponents,
+  assertPathInside,
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
@@ -98,6 +99,7 @@ export interface CompiledSmithersTask {
   smithersNodeId: string;
   agentRef: string;
   modelName?: string;
+  reasoningEffort?: string;
   dependencies: readonly string[];
   dependencySmithersNodeIds: readonly string[];
   timeoutMs: number;
@@ -147,6 +149,7 @@ export interface SmithersTaskMetadata {
     profileId: string;
     agentRef: string;
     modelName?: string;
+    reasoningEffort?: string;
     modelIndex: number;
     attemptIndex: number;
   };
@@ -360,9 +363,72 @@ export async function runSmithersLifecycleCommand(input: {
   forkFrame?: number;
   resetNode?: string;
   label?: string;
+  resumeRecovery?: {
+    runRoot: string;
+    inputPath: string;
+    logsDir: string;
+  };
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
-}): Promise<{ stdout: string; stderr: string; command: string[]; workflowRunId?: string }> {
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  command: string[];
+  workflowRunId?: string;
+  recoveredMissingRun?: boolean;
+}> {
+  if (input.action === "resume" && input.resumeRecovery !== undefined) {
+    const inspection = await runSmithersInspectionCommand({
+      args: ["inspect", input.smithersRunId, "--format", "json"],
+      projectRoot: input.projectRoot,
+      env: input.env
+    });
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
+      assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
+      assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+      fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
+      assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+      const inputJson = fs.readFileSync(input.resumeRecovery.inputPath, "utf8");
+      const recoveryCommand = [
+        "up",
+        input.workflowPath,
+        "--detach",
+        "--run-id",
+        input.smithersRunId,
+        ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+        "--root",
+        input.projectRoot,
+        "--log-dir",
+        input.resumeRecovery.logsDir,
+        "--input",
+        inputJson,
+        "--format",
+        "json"
+      ];
+      const recoveryResult = await execSmithersCli({
+        args: recoveryCommand,
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames
+      });
+      writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+        schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+        smithers_run_id: input.smithersRunId,
+        recovery: "missing-workflow-run",
+        command: recoveryResult.command,
+        stdout: redactedEvidenceText(recoveryResult.stdout),
+        stderr: redactedEvidenceText(recoveryResult.stderr),
+        submitted_at: new Date().toISOString()
+      });
+      return { ...recoveryResult, recoveredMissingRun: true };
+    }
+    if (!inspection.ok) {
+      throw new Error(
+        `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
+      );
+    }
+  }
+
   if (input.action === "fork" && input.forkFrame !== undefined) {
     const forkCommand = [
       "fork",
@@ -475,6 +541,26 @@ export async function runSmithersInspectionCommand(input: {
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
+  return (
+    jsonHasErrorCode(snapshot.json, code) ||
+    [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
+  );
+}
+
+function jsonHasErrorCode(value: unknown, code: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => jsonHasErrorCode(entry, code));
+  }
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+  if (value.code === code) {
+    return true;
+  }
+  return Object.values(value).some((entry) => jsonHasErrorCode(entry, code));
 }
 
 async function execSmithersCli(input: {
@@ -612,7 +698,7 @@ async function ensureSmithersDependencies(
   }
   const installedPackageRoot = installedSmithersPackageRoot(projectRoot);
   if (fs.existsSync(installedPackageRoot)) {
-    assertNoSymlinkComponents(projectRoot, installedPackageRoot, "installed Smithers package");
+    resolveInstalledSmithersPackageRoot(projectRoot);
   }
   if (installedSmithersValidationError(projectRoot) === undefined) {
     return;
@@ -643,15 +729,20 @@ async function ensureSmithersDependencies(
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {
-  const packageRoot = installedSmithersPackageRoot(projectRoot);
-  const packageJson = path.join(packageRoot, "package.json");
-  const expectedBin = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const linkedPackageRoot = installedSmithersPackageRoot(projectRoot);
   const local = localSmithersExecutable(projectRoot);
   try {
+    if (!fs.existsSync(linkedPackageRoot)) {
+      return "installed package metadata is missing";
+    }
+    const packageRoot = resolveInstalledSmithersPackageRoot(projectRoot);
+    const packageJson = path.join(packageRoot, "package.json");
+    const expectedBin = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+    const expectedLinkedBin = path.join(linkedPackageRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
     if (!fs.existsSync(packageJson)) {
       return "installed package metadata is missing";
     }
-    assertNoSymlinkComponents(projectRoot, packageJson, "installed Smithers package metadata");
+    assertRegularFileInside(packageRoot, packageJson, "installed Smithers package metadata");
     const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
     if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
       return `installed package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`;
@@ -674,13 +765,19 @@ function installedSmithersValidationError(projectRoot: string): string | undefin
       if (!contents.includes(expectedReference)) {
         return "local workflow runner command shim has an unexpected target";
       }
-    } else {
-      if (!shim.isSymbolicLink()) {
-        return "local workflow runner binary is not a package-manager symlink";
-      }
+    } else if (shim.isSymbolicLink()) {
       if (fs.realpathSync(local) !== fs.realpathSync(expectedBin)) {
         return "local workflow runner binary has an unexpected target";
       }
+    } else if (shim.isFile()) {
+      assertRegularFileInside(path.dirname(local), local, "local Smithers workflow runner shim");
+      const expectedReference = path.relative(path.dirname(local), expectedLinkedBin);
+      const contents = fs.readFileSync(local, "utf8").replaceAll("\\", "/");
+      if (!contents.includes(expectedReference.replaceAll("\\", "/"))) {
+        return "local workflow runner command shim has an unexpected target";
+      }
+    } else {
+      return "local workflow runner command shim is not a regular file or package-manager symlink";
     }
     return undefined;
   } catch (error) {
@@ -694,6 +791,16 @@ function isExpectedSmithersBinTarget(value: unknown): boolean {
 
 function installedSmithersPackageRoot(projectRoot: string): string {
   return path.join(projectRoot, ".smithers", "node_modules", "smithers-orchestrator");
+}
+
+function resolveInstalledSmithersPackageRoot(projectRoot: string): string {
+  const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
+  const packageRoot = installedSmithersPackageRoot(projectRoot);
+  assertNoSymlinkComponents(projectRoot, nodeModules, "Smithers dependencies");
+  const realNodeModules = fs.realpathSync(nodeModules);
+  const realPackageRoot = fs.realpathSync(packageRoot);
+  assertPathInside(realNodeModules, realPackageRoot, "installed Smithers package");
+  return realPackageRoot;
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -811,6 +918,7 @@ function compileTask(input: {
       profileId: profile.id,
       agentRef: profile.agent,
       ...(profile.model ? { modelName: profile.model } : {}),
+      ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
       modelIndex: input.attempt.modelIndex,
       attemptIndex: input.attempt.attemptIndex
     },
@@ -843,6 +951,7 @@ function compileTask(input: {
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
     ...(profile.model ? { modelName: profile.model } : {}),
+    ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
     dependencies: input.dependencyAttemptIds,
     dependencySmithersNodeIds,
     timeoutMs,
@@ -966,6 +1075,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
+      modelName: task.modelName ?? null,
+      reasoningEffort: task.reasoningEffort ?? null,
       promptPath: task.renderedPromptPath,
       workspacePath: task.workspacePath,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
