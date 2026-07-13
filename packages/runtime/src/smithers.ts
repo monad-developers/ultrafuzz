@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +17,15 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import {
+  SMITHERS_ORCHESTRATOR_BIN,
+  SMITHERS_ORCHESTRATOR_BYTES,
+  SMITHERS_ORCHESTRATOR_FILE_COUNT,
+  SMITHERS_ORCHESTRATOR_SHA256,
+  SMITHERS_PACKAGE_DEPENDENCIES,
+  SMITHERS_PACKAGE_DEV_DEPENDENCIES,
+  SMITHERS_PACKAGE_REGISTRY
+} from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -415,10 +425,10 @@ async function execSmithersCli(input: {
 }): Promise<{ stdout: string; stderr: string; command: string[] }> {
   const command = [...input.args];
   await ensureSmithersDependencies(input.projectRoot, input.env);
-  const executable = smithersExecutable(input.projectRoot, input.env);
-  const { stdout, stderr } = await execFileAsync(executable, command, {
+  const invocation = smithersInvocation(input.projectRoot, input.env);
+  const { stdout, stderr } = await execFileAsync(invocation.executable, [...invocation.prefixArgs, ...command], {
     cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
+    env: smithersCommandEnv(input.env),
     maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
   });
   return { stdout, stderr, command: smithersDisplayCommand(command) };
@@ -508,8 +518,7 @@ async function ensureSmithersDependencies(
   if (explicitSmithersExecutable(env) !== undefined) {
     return;
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
+  if (verifiedLocalSmithersEntrypoint(projectRoot) !== undefined) {
     return;
   }
   const packageRoot = path.join(projectRoot, ".smithers");
@@ -519,26 +528,43 @@ async function ensureSmithersDependencies(
   }
   assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
   assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  await execFileAsync("npm", ["install", "--prefix", packageRoot, "--no-audit", "--no-fund", "--loglevel=error"], {
-    cwd: projectRoot,
-    env: smithersCommandEnv(projectRoot, env),
-    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
-  });
-  if (!fs.existsSync(local)) {
-    throw new Error("Smithers dependency install completed without creating the local workflow runner binary");
+  assertSmithersProjectManifest(packageJson);
+  await execFileAsync(
+    "npm",
+    [
+      "install",
+      "--prefix",
+      packageRoot,
+      "--ignore-scripts",
+      "--audit=true",
+      `--registry=${SMITHERS_PACKAGE_REGISTRY}`,
+      "--no-fund",
+      "--loglevel=error"
+    ],
+    {
+      cwd: projectRoot,
+      env: smithersCommandEnv(env),
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+    }
+  );
+  if (verifiedLocalSmithersEntrypoint(projectRoot) === undefined) {
+    throw new Error("Smithers dependency install completed without a verified local workflow runner");
   }
 }
 
-function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+function smithersInvocation(
+  projectRoot: string,
+  env: Record<string, string | undefined> | undefined
+): { executable: string; prefixArgs: string[] } {
   const explicit = explicitSmithersExecutable(env);
   if (explicit !== undefined) {
-    return explicit;
+    return { executable: explicit, prefixArgs: [] };
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
-    return local;
+  const localEntrypoint = verifiedLocalSmithersEntrypoint(projectRoot);
+  if (localEntrypoint !== undefined) {
+    return { executable: process.execPath, prefixArgs: [localEntrypoint] };
   }
-  return "smithers";
+  return { executable: "smithers", prefixArgs: [] };
 }
 
 function explicitSmithersExecutable(env: Record<string, string | undefined> | undefined): string | undefined {
@@ -546,24 +572,126 @@ function explicitSmithersExecutable(env: Record<string, string | undefined> | un
   return explicit && explicit.trim().length > 0 ? explicit : undefined;
 }
 
-function localSmithersExecutable(projectRoot: string): string {
-  return path.join(projectRoot, ".smithers", "node_modules", ".bin", smithersBinaryName());
+function smithersCommandEnv(env: Record<string, string | undefined> | undefined): NodeJS.ProcessEnv {
+  return { ...process.env, ...(env ?? {}) };
 }
 
-function smithersCommandEnv(
-  projectRoot: string,
-  env: Record<string, string | undefined> | undefined
-): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
-  const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  merged.PATH = [localBin, merged.PATH]
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-    .join(path.delimiter);
-  return merged;
+function verifiedLocalSmithersEntrypoint(projectRoot: string): string | undefined {
+  const packageRoot = path.join(projectRoot, ".smithers", "node_modules", "smithers-orchestrator");
+  const packageJson = path.join(packageRoot, "package.json");
+  if (!fs.existsSync(packageJson)) {
+    return undefined;
+  }
+  assertNoSymlinkComponents(projectRoot, packageJson, "Smithers installed package");
+  const manifest = readJsonRecord(packageJson, "Smithers installed package manifest");
+  const bin = jsonRecord(manifest.bin)?.smithers;
+  if (
+    manifest.name !== "smithers-orchestrator" ||
+    manifest.version !== SMITHERS_PACKAGE_DEPENDENCIES["smithers-orchestrator"] ||
+    bin !== SMITHERS_ORCHESTRATOR_BIN
+  ) {
+    throw new Error("the local workflow runner package does not match the required version");
+  }
+  verifySmithersPackageContents(packageRoot);
+  const entrypoint = path.join(packageRoot, ...SMITHERS_ORCHESTRATOR_BIN.split("/"));
+  assertNoSymlinkComponents(packageRoot, entrypoint, "Smithers executable");
+  if (!fs.lstatSync(entrypoint).isFile()) {
+    throw new Error("the local workflow runner executable is not a regular file");
+  }
+  return entrypoint;
 }
 
-function smithersBinaryName(): string {
-  return process.platform === "win32" ? "smithers.cmd" : "smithers";
+function assertSmithersProjectManifest(packageJson: string): void {
+  const manifest = readJsonRecord(packageJson, "Smithers package manifest");
+  if (
+    manifest.name !== "ultrafuzz-smithers" ||
+    manifest.private !== true ||
+    manifest.type !== "module" ||
+    !hasExactStringEntries(manifest.dependencies, SMITHERS_PACKAGE_DEPENDENCIES) ||
+    !hasExactStringEntries(manifest.devDependencies, SMITHERS_PACKAGE_DEV_DEPENDENCIES) ||
+    manifest.scripts !== undefined
+  ) {
+    throw new Error("the generated workflow runner manifest has unexpected dependency or script settings");
+  }
+}
+
+function verifySmithersPackageContents(packageRoot: string): void {
+  const files: Array<{ absolute: string; relative: string; size: number }> = [];
+  let entriesVisited = 0;
+  let totalBytes = 0;
+  const visit = (directory: string, depth: number): void => {
+    if (depth > 16) {
+      throw new Error("the local workflow runner package has an unexpected directory layout");
+    }
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      entriesVisited += 1;
+      if (entriesVisited > 256) {
+        throw new Error("the local workflow runner package contains unexpected entries");
+      }
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolute, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error("the local workflow runner package contains a non-regular entry");
+      }
+      const size = fs.statSync(absolute).size;
+      totalBytes += size;
+      if (files.length >= SMITHERS_ORCHESTRATOR_FILE_COUNT || totalBytes > SMITHERS_ORCHESTRATOR_BYTES) {
+        throw new Error("the local workflow runner package failed integrity verification");
+      }
+      files.push({
+        absolute,
+        relative: path.relative(packageRoot, absolute).split(path.sep).join("/"),
+        size
+      });
+    }
+  };
+  visit(packageRoot, 0);
+  if (files.length !== SMITHERS_ORCHESTRATOR_FILE_COUNT || totalBytes !== SMITHERS_ORCHESTRATOR_BYTES) {
+    throw new Error("the local workflow runner package failed integrity verification");
+  }
+  files.sort((left, right) => (left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0));
+  const hash = crypto.createHash("sha256");
+  for (const file of files) {
+    hash.update(file.relative);
+    hash.update("\0");
+    hash.update(String(file.size));
+    hash.update("\0");
+    hash.update(fs.readFileSync(file.absolute));
+    hash.update("\0");
+  }
+  if (hash.digest("hex") !== SMITHERS_ORCHESTRATOR_SHA256) {
+    throw new Error("the local workflow runner package failed integrity verification");
+  }
+}
+
+function hasExactStringEntries(value: unknown, expected: Readonly<Record<string, string>>): boolean {
+  const record = jsonRecord(value);
+  if (record === undefined || Object.keys(record).length !== Object.keys(expected).length) {
+    return false;
+  }
+  return Object.entries(expected).every(([key, expectedValue]) => record[key] === expectedValue);
+}
+
+function readJsonRecord(filePath: string, label: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const record = jsonRecord(value);
+    if (record !== undefined) {
+      return record;
+    }
+  } catch {
+    // The common error below intentionally avoids reflecting parser or path details.
+  }
+  throw new Error(`${label} must contain a JSON object`);
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function compileTask(input: {

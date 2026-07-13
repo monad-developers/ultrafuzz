@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import type { EvalConfig } from "@ultrafuzz/config";
+
 import { graphFromPlannedGraph } from "../src/reporter.js";
 import { BraintrustReporter } from "../src/reporters/braintrust.js";
 import { LangSmithReporter, dottedOrderSegment } from "../src/reporters/langsmith.js";
@@ -16,6 +18,7 @@ interface RecordedRequest {
   url: string;
   method: string;
   body: unknown;
+  redirect?: string;
 }
 
 function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
@@ -27,7 +30,8 @@ function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
     const request: RecordedRequest = {
       url: String(input),
       method: init?.method ?? "GET",
-      body: init?.body !== undefined ? JSON.parse(init.body) : undefined
+      body: init?.body !== undefined ? JSON.parse(init.body) : undefined,
+      redirect: (init as RequestInit | undefined)?.redirect
     };
     requests.push(request);
     const payload = respond?.(request) ?? { id: `id-${requests.length}` };
@@ -109,6 +113,85 @@ describe("provider resolution", () => {
       evalConfig: EVAL_CONFIG,
       evalRunId: "eval-1",
       policy,
+      fetchImpl: fakeFetch().fetchImpl
+    });
+    expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
+  });
+
+  it("rejects non-provider credential selectors and API destinations", () => {
+    const policy = testReportingPolicy();
+    const unsafeProfiles: EvalConfig[] = [
+      {
+        provider: "braintrust",
+        providers: {
+          braintrust: { apiKeyEnv: "UNRELATED_CREDENTIAL", project: "ultrafuzz-evals" }
+        }
+      },
+      {
+        provider: "braintrust",
+        providers: {
+          braintrust: {
+            apiKeyEnv: "BRAINTRUST_API_KEY",
+            project: "ultrafuzz-evals",
+            endpoint: "https://api.braintrust.dev.example.invalid"
+          }
+        }
+      },
+      {
+        provider: "braintrust",
+        providers: {
+          braintrust: {
+            apiKeyEnv: "BRAINTRUST_API_KEY",
+            project: "ultrafuzz-evals",
+            endpoint: "http://api.braintrust.dev"
+          }
+        }
+      },
+      {
+        provider: "langsmith",
+        providers: {
+          langsmith: {
+            apiKeyEnv: "LANGSMITH_API_KEY",
+            workspaceIdEnv: "UNRELATED_WORKSPACE_VALUE",
+            project: "ultrafuzz-evals"
+          }
+        }
+      }
+    ];
+
+    for (const evalConfig of unsafeProfiles) {
+      expect(() =>
+        createEvalReporters({
+          env: {
+            BRAINTRUST_API_KEY: "provider-key",
+            LANGSMITH_API_KEY: "provider-key",
+            UNRELATED_CREDENTIAL: "unrelated-value",
+            UNRELATED_WORKSPACE_VALUE: "unrelated-value"
+          },
+          evalConfig,
+          evalRunId: "eval-1",
+          policy,
+          fetchImpl: fakeFetch().fetchImpl
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNSAFE" }));
+    }
+  });
+
+  it("accepts canonical provider API origins", () => {
+    const reporters = createEvalReporters({
+      env: { BRAINTRUST_API_KEY: "provider-key" },
+      evalConfig: {
+        provider: "braintrust",
+        providers: {
+          braintrust: {
+            apiKeyEnv: "BRAINTRUST_API_KEY",
+            project: "ultrafuzz-evals",
+            endpoint: "https://api.braintrust.dev/"
+          }
+        }
+      },
+      evalRunId: "eval-1",
+      policy: testReportingPolicy(),
       fetchImpl: fakeFetch().fetchImpl
     });
     expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
@@ -195,6 +278,7 @@ describe("BraintrustReporter", () => {
     });
 
     expect(requests[0]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/project") });
+    expect(requests.every((request) => request.redirect === "error")).toBe(true);
     expect(requests[1]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/experiment") });
     expect((requests[1]?.body as { name?: string }).name).toBe("bug-finding-eval-1");
 
@@ -257,6 +341,7 @@ describe("LangSmithReporter", () => {
     });
 
     const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
+    expect(requests.every((request) => request.redirect === "error")).toBe(true);
     // root run + group run + node run
     expect(creates).toHaveLength(3);
     const nodeCreate = creates[2]?.body as Record<string, unknown>;

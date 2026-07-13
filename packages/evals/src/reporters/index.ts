@@ -13,6 +13,11 @@ export { LangSmithReporter, type LangSmithReporterOptions, dottedOrderSegment } 
 
 export const EVAL_PROVIDER_NONE = "none";
 export const KNOWN_EVAL_PROVIDERS = ["braintrust", "langsmith", EVAL_PROVIDER_NONE] as const;
+const BRAINTRUST_API_KEY_ENV = "BRAINTRUST_API_KEY";
+const BRAINTRUST_ENDPOINT = "https://api.braintrust.dev";
+const LANGSMITH_API_KEY_ENV = "LANGSMITH_API_KEY";
+const LANGSMITH_ENDPOINT = "https://api.smith.langchain.com";
+const LANGSMITH_WORKSPACE_ID_ENV = "LANGSMITH_WORKSPACE_ID";
 
 export interface ResolveEvalProviderInput {
   /** `--provider` CLI flag; highest precedence. */
@@ -97,28 +102,37 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
   const env = input.env ?? process.env;
   const profile = resolved.profile ?? {};
   const onWarning = input.onWarning ?? (() => undefined);
-  const apiKey = requireEnv(env, profile.apiKeyEnv, resolved.provider);
   switch (resolved.provider) {
     case "braintrust": {
+      assertTrustedEnvName(profile.apiKeyEnv, BRAINTRUST_API_KEY_ENV, resolved.provider, "api_key_env");
+      const apiUrl = trustedProviderEndpoint(profile.endpoint, BRAINTRUST_ENDPOINT, resolved.provider);
+      const apiKey = requireEnv(env, BRAINTRUST_API_KEY_ENV, resolved.provider);
       const reporter = new BraintrustReporter({
         apiKey,
         project: profile.project ?? "ultrafuzz-evals",
         evalRunId: input.evalRunId,
         policy: input.policy,
-        ...(profile.endpoint !== undefined ? { apiUrl: profile.endpoint } : {}),
+        ...(apiUrl !== undefined ? { apiUrl } : {}),
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {})
       });
       return [guardReporter(reporter, onWarning)];
     }
     case "langsmith": {
-      const workspaceId = profile.workspaceIdEnv !== undefined ? firstNonEmpty(env[profile.workspaceIdEnv]) : undefined;
+      assertTrustedEnvName(profile.apiKeyEnv, LANGSMITH_API_KEY_ENV, resolved.provider, "api_key_env");
+      if (profile.workspaceIdEnv !== undefined) {
+        assertTrustedEnvName(profile.workspaceIdEnv, LANGSMITH_WORKSPACE_ID_ENV, resolved.provider, "workspace_id_env");
+      }
+      const endpoint = trustedProviderEndpoint(profile.endpoint, LANGSMITH_ENDPOINT, resolved.provider);
+      const apiKey = requireEnv(env, LANGSMITH_API_KEY_ENV, resolved.provider);
+      const workspaceId =
+        profile.workspaceIdEnv === undefined ? undefined : firstNonEmpty(env[LANGSMITH_WORKSPACE_ID_ENV]);
       const reporter = new LangSmithReporter({
         apiKey,
         project: profile.project ?? "ultrafuzz-evals",
         evalRunId: input.evalRunId,
         policy: input.policy,
         ...(workspaceId !== undefined ? { workspaceId } : {}),
-        ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {}),
+        ...(endpoint !== undefined ? { endpoint } : {}),
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {})
       });
       return [guardReporter(reporter, onWarning)];
@@ -130,19 +144,52 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
   }
 }
 
-function requireEnv(env: Record<string, string | undefined>, envName: string | undefined, provider: string): string {
-  if (envName === undefined) {
+function assertTrustedEnvName(configured: string | undefined, expected: string, provider: string, field: string): void {
+  if (configured !== undefined && configured !== expected) {
     throw new EvalError(
-      "EVAL_PROVIDER_CREDENTIALS_MISSING",
-      `[eval.providers.${provider}] must set api_key_env to publish to ${provider}`,
-      { provider }
+      "EVAL_PROVIDER_PROFILE_UNSAFE",
+      `[eval.providers.${provider}].${field} must use the provider-specific environment variable`,
+      { provider, field, expected }
     );
   }
+}
+
+function trustedProviderEndpoint(
+  configured: string | undefined,
+  expected: string,
+  provider: string
+): string | undefined {
+  if (configured === undefined) {
+    return undefined;
+  }
+  try {
+    const url = new URL(configured);
+    if (
+      url.origin === expected &&
+      (url.pathname === "" || url.pathname === "/") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    ) {
+      return expected;
+    }
+  } catch {
+    // The provider-safe error below intentionally avoids reflecting the configured URL.
+  }
+  throw new EvalError(
+    "EVAL_PROVIDER_PROFILE_UNSAFE",
+    `[eval.providers.${provider}].endpoint must use the provider's official HTTPS API origin`,
+    { provider }
+  );
+}
+
+function requireEnv(env: Record<string, string | undefined>, envName: string, provider: string): string {
   const value = env[envName];
   if (value === undefined || value.trim().length === 0) {
     throw new EvalError(
       "EVAL_PROVIDER_CREDENTIALS_MISSING",
-      `environment variable ${envName} (from [eval.providers.${provider}].api_key_env) is not set`,
+      `environment variable ${envName} is not set for ${provider}`,
       { provider, envName }
     );
   }

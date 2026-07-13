@@ -7,6 +7,7 @@ import { redactResolvedConfig, resolveConfig, serializeRedactedResolvedConfigTom
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
 import { loadRuntimeTemplate } from "./runtime-template.js";
+import { SMITHERS_PACKAGE_DEPENDENCIES, SMITHERS_PACKAGE_DEV_DEPENDENCIES } from "./smithers-package.js";
 import type { InitProjectInput, InitProjectResult } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
@@ -191,13 +192,8 @@ function renderSmithersPackageJson(): string {
       name: "ultrafuzz-smithers",
       private: true,
       type: "module",
-      dependencies: {
-        "smithers-orchestrator": "^0.27.0",
-        zod: "^4.4.3"
-      },
-      devDependencies: {
-        typescript: "^6.0.3"
-      }
+      dependencies: SMITHERS_PACKAGE_DEPENDENCIES,
+      devDependencies: SMITHERS_PACKAGE_DEV_DEPENDENCIES
     },
     null,
     2

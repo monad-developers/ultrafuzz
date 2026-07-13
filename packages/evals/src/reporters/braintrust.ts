@@ -359,6 +359,7 @@ export class BraintrustReporter implements EvalReporter {
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
     const response = await this.fetchImpl(`${this.options.apiUrl ?? DEFAULT_API_URL}${requestPath}`, {
       method,
+      redirect: "error",
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
         "content-type": "application/json"

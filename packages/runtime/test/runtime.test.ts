@@ -440,8 +440,11 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/prompts/setup/project-discovery.md")), true);
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "^0.27.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.27.0");
+  assert.equal(smithersPackage.dependencies?.zod, "4.4.3");
+  assert.equal(smithersPackage.devDependencies?.typescript, "6.0.3");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -857,14 +860,23 @@ ${`${marker} `.repeat(2000)}
   assert.match(smithersInput.tasks?.[0]?.prompt_path ?? "", /prompt\.rendered\.md$/);
 });
 
-test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
+test("startRun rejects an unverified target-local workflow runner", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
 
-  const binDir = path.join(project, ".smithers", "node_modules", ".bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const smithers = path.join(binDir, process.platform === "win32" ? "smithers.cmd" : "smithers");
+  const packageRoot = path.join(project, ".smithers", "node_modules", "smithers-orchestrator");
+  const smithers = path.join(packageRoot, "src", "bin", "smithers.js");
+  fs.mkdirSync(path.dirname(smithers), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({
+      name: "smithers-orchestrator",
+      version: "0.27.0",
+      bin: { smithers: "src/bin/smithers.js" }
+    }),
+    "utf8"
+  );
   const logPath = path.join(project, "local-smithers.log");
   fs.writeFileSync(
     smithers,
@@ -879,11 +891,12 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
     env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
+  assert.equal(run.ok, false);
+  assert.match(JSON.stringify(run.diagnostics), /integrity verification/);
+  assert.equal(fs.existsSync(logPath), false);
 });
 
-test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
+test("startRun installs with lifecycle scripts disabled and verifies the resulting package", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -923,9 +936,13 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
     }
   });
 
-  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(run.ok, false);
   assert.match(fs.readFileSync(npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
-  assert.match(fs.readFileSync(smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--ignore-scripts/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--audit=true/);
+  assert.match(fs.readFileSync(npmLogPath, "utf8"), /--registry=https:\/\/registry\.npmjs\.org/);
+  assert.doesNotMatch(fs.readFileSync(npmLogPath, "utf8"), /--no-audit/);
+  assert.equal(fs.existsSync(smithersLogPath), false);
 });
 
 test("startRun creates the workflow log directory before submission", async () => {
