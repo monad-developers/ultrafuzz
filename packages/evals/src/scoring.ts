@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { validateFindingsSchema, writeJsonDurable } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, validateFindingsSchema, writeJsonDurable } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
@@ -32,6 +32,7 @@ import {
 } from "./utils.js";
 
 const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v1";
+const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
 
 const groundTruthBugSchema = z.looseObject({
   id: z.string().min(1),
@@ -260,7 +261,7 @@ async function scoreRow(input: {
   findingScores: EvalFindingScore[];
   reviewQueue: HumanReviewQueueItem[];
 }> {
-  const bugs = loadGroundTruth(input.row.target.ground_truth_path);
+  const bugs = loadGroundTruth(input.row.target.ground_truth_path, input.suite.ground_truth_root);
   const report = readReport(input.reportPath);
   const findings = report.findings;
   const schemaValidation = validateFindingsSchema(findings);
@@ -658,9 +659,30 @@ function candidateMatchScore(signals: FindingMatchSignalScores): number {
   return weighted;
 }
 
-export function loadGroundTruth(filePath: string): GroundTruthBug[] {
+export function loadGroundTruth(filePath: string, groundTruthRoot: string | undefined): GroundTruthBug[] {
+  if (groundTruthRoot === undefined) {
+    throw new EvalError("EVAL_GROUND_TRUTH_ROOT_REQUIRED", "ground truth root is required when scoring", {
+      path: filePath
+    });
+  }
   if (!fs.existsSync(filePath)) {
     throw new EvalError("EVAL_GROUND_TRUTH_MISSING", `ground truth file is missing: ${filePath}`, { path: filePath });
+  }
+  try {
+    assertRegularFileInside(path.resolve(groundTruthRoot), filePath, "ground truth path");
+  } catch (error) {
+    throw new EvalError("EVAL_GROUND_TRUTH_UNSAFE", "ground truth must be a regular file inside its root", {
+      path: filePath,
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  const sizeBytes = fs.statSync(filePath).size;
+  if (sizeBytes > MAX_GROUND_TRUTH_BYTES) {
+    throw new EvalError("EVAL_GROUND_TRUTH_TOO_LARGE", `ground truth file exceeds ${MAX_GROUND_TRUTH_BYTES} bytes`, {
+      path: filePath,
+      sizeBytes,
+      maxBytes: MAX_GROUND_TRUTH_BYTES
+    });
   }
   const parsed = parse(fs.readFileSync(filePath, "utf8"));
   const result = groundTruthSchema.safeParse(parsed);

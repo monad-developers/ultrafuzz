@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -176,7 +177,7 @@ export function writeRunFixture(input: {
       manifestFiles.push({
         path: relativePath,
         size_bytes: Buffer.byteLength(contents, "utf8"),
-        sha256: `sha-${relativePath}-${Buffer.byteLength(contents, "utf8")}`,
+        sha256: crypto.createHash("sha256").update(contents).digest("hex"),
         provenance: { producer_node_id: nodeId }
       });
     }

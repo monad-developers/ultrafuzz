@@ -48,7 +48,8 @@ export async function startRun(input: StartRunInput) {
     workflowName: `ultrafuzz-${plan.run_id}`,
     renderedPrompts: plan.rendered_prompts,
     operatorPrompt: input.prompt,
-    operatorInput: input.workflowInput
+    operatorInput: input.workflowInput,
+    env: input.env
   });
   persistSmithersEvidence(plan.layout, plan.graph, compiled);
   appendEvent(plan.layout, {

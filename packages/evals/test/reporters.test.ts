@@ -113,6 +113,46 @@ describe("provider resolution", () => {
     });
     expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
   });
+
+  it("binds provider credentials and endpoints to approved destinations", () => {
+    const policy = testReportingPolicy();
+    expect(() =>
+      createEvalReporters({
+        env: { AWS_SECRET_ACCESS_KEY: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: { braintrust: { apiKeyEnv: "AWS_SECRET_ACCESS_KEY" } }
+        },
+        evalRunId: "eval-1",
+        policy
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_CREDENTIAL_BINDING_INVALID" }));
+
+    expect(() =>
+      createEvalReporters({
+        env: { BRAINTRUST_API_KEY: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: {
+            braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", endpoint: "https://example.com" }
+          }
+        },
+        evalRunId: "eval-1",
+        policy
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_INVALID" }));
+
+    expect(
+      () =>
+        new LangSmithReporter({
+          apiKey: "secret",
+          project: "ultrafuzz-evals",
+          evalRunId: "eval-1",
+          policy,
+          endpoint: "http://api.smith.langchain.com"
+        })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_INVALID" }));
+  });
 });
 
 describe("graphFromPlannedGraph", () => {

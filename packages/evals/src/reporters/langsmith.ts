@@ -10,6 +10,7 @@ import type {
 import { groupsInGraph } from "../reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore } from "../types.js";
 import { EvalError, deterministicUuid, isRecord } from "../utils.js";
+import { boundedProviderResponseText, exactProviderOrigin, PROVIDER_REQUEST_TIMEOUT_MS } from "./http.js";
 
 export interface LangSmithReporterOptions {
   apiKey: string;
@@ -37,6 +38,7 @@ export class LangSmithReporter implements EvalReporter {
   readonly name = "langsmith";
   private readonly options: LangSmithReporterOptions;
   private readonly fetchImpl: typeof fetch;
+  private readonly endpoint: string;
   private projectEnsured = false;
   private readonly createdRuns = new Set<string>();
   private readonly latestAttemptByNode = new Map<string, number>();
@@ -49,6 +51,7 @@ export class LangSmithReporter implements EvalReporter {
     }
     this.options = options;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.endpoint = exactProviderOrigin(options.endpoint, DEFAULT_ENDPOINT, "LangSmith");
   }
 
   async onPlan(plan: EvalPlan): Promise<void> {
@@ -349,8 +352,10 @@ export class LangSmithReporter implements EvalReporter {
   }
 
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.options.endpoint ?? DEFAULT_ENDPOINT}${requestPath}`, {
+    const response = await this.fetchImpl(new URL(requestPath, `${this.endpoint}/`), {
       method,
+      redirect: "error",
+      signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
       headers: {
         "x-api-key": this.options.apiKey,
         "content-type": "application/json",
@@ -358,7 +363,7 @@ export class LangSmithReporter implements EvalReporter {
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {})
     });
-    const text = await response.text();
+    const text = await boundedProviderResponseText(response, "LangSmith");
     if (!response.ok) {
       throw new EvalError("EVAL_LANGSMITH_REQUEST_FAILED", `LangSmith ${method} ${requestPath} failed`, {
         status: response.status,

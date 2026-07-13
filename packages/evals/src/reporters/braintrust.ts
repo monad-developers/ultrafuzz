@@ -10,6 +10,7 @@ import type {
 import { groupsInGraph } from "../reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore } from "../types.js";
 import { EvalError, isRecord } from "../utils.js";
+import { boundedProviderResponseText, exactProviderOrigin, PROVIDER_REQUEST_TIMEOUT_MS } from "./http.js";
 
 export interface BraintrustReporterOptions {
   apiKey: string;
@@ -44,6 +45,7 @@ export class BraintrustReporter implements EvalReporter {
   readonly name = "braintrust";
   private readonly options: BraintrustReporterOptions;
   private readonly fetchImpl: typeof fetch;
+  private readonly apiUrl: string;
   private projectId?: string;
   private experimentId?: string;
   private experimentName?: string;
@@ -56,6 +58,7 @@ export class BraintrustReporter implements EvalReporter {
     }
     this.options = options;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.apiUrl = exactProviderOrigin(options.apiUrl, DEFAULT_API_URL, "Braintrust");
   }
 
   async onPlan(plan: EvalPlan): Promise<void> {
@@ -357,15 +360,17 @@ export class BraintrustReporter implements EvalReporter {
   }
 
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
-    const response = await this.fetchImpl(`${this.options.apiUrl ?? DEFAULT_API_URL}${requestPath}`, {
+    const response = await this.fetchImpl(new URL(requestPath, `${this.apiUrl}/`), {
       method,
+      redirect: "error",
+      signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
         "content-type": "application/json"
       },
       body: JSON.stringify(body)
     });
-    const text = await response.text();
+    const text = await boundedProviderResponseText(response, "Braintrust");
     if (!response.ok) {
       throw new EvalError("EVAL_BRAINTRUST_REQUEST_FAILED", `Braintrust ${method} ${requestPath} failed`, {
         status: response.status,

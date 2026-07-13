@@ -48,6 +48,7 @@ import {
   modelProfilesForTopology,
   type RuntimeResult
 } from "@ultrafuzz/runtime";
+import { redactSecretsInText } from "@ultrafuzz/security";
 import {
   expandTopology,
   FINISH_NODE_ID,
@@ -89,6 +90,27 @@ const PREVIEW_RUN_ID = "preview";
 const SESSION_HEADER = "x-ultrafuzz-session";
 const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+const SECURITY_HEADERS = {
+  "content-security-policy": [
+    "default-src 'none'",
+    "base-uri 'none'",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "style-src-attr 'unsafe-inline'"
+  ].join("; "),
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY"
+} as const;
 
 const SUPPORTED_COMMANDS = new Set([
   "validate",
@@ -118,7 +140,8 @@ const CONTENT_TYPES: Record<string, string> = {
 export async function serveDashboard(config: DashboardServerConfig = {}): Promise<DashboardHandle> {
   const app = await DashboardApp.create(config);
   const server = http.createServer((request, response) => {
-    app.handle(request, response).catch((error) => sendError(response, error));
+    applySecurityHeaders(response);
+    app.handle(request, response).catch((error) => sendError(response, error, app.projectRoot));
   });
   const bindAddr = await listen(server, app.host, app.port);
   const url = `http://${bindAddr}/dashboard`;
@@ -1593,9 +1616,34 @@ function constantTimeEqual(left: string, right: string): boolean {
 }
 
 async function readBodyObject(request: http.IncomingMessage): Promise<JsonObject> {
+  const contentLength = request.headers["content-length"];
+  if (contentLength !== undefined) {
+    const declaredBytes = Number(contentLength);
+    if (!Number.isSafeInteger(declaredBytes) || declaredBytes < 0) {
+      throw new HttpError(400, "invalid Content-Length header");
+    }
+    if (declaredBytes > MAX_REQUEST_BODY_BYTES) {
+      request.resume();
+      throw new HttpError(413, "request body exceeds the maximum allowed size");
+    }
+  }
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let tooLarge = false;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_REQUEST_BODY_BYTES) {
+      tooLarge = true;
+      chunks.length = 0;
+      continue;
+    }
+    if (!tooLarge) {
+      chunks.push(buffer);
+    }
+  }
+  if (tooLarge) {
+    throw new HttpError(413, "request body exceeds the maximum allowed size");
   }
   if (chunks.length === 0) {
     return {};
@@ -1622,9 +1670,30 @@ function sendJson(response: http.ServerResponse, value: unknown, status = 200): 
   response.end(body);
 }
 
-function sendError(response: http.ServerResponse, error: unknown): void {
+function sendError(response: http.ServerResponse, error: unknown, projectRoot: string): void {
   const status = error instanceof HttpError ? error.status : 500;
-  sendJson(response, { error: errorMessage(error) }, status);
+  if (error instanceof HttpError) {
+    sendJson(response, { error: error.message }, status);
+    return;
+  }
+  const errorId = crypto.randomUUID();
+  try {
+    appendAudit(projectRoot, {
+      timestamp: new Date().toISOString(),
+      event: "request-error",
+      error_id: errorId,
+      error: redactSecretsInText(errorMessage(error)).slice(0, 12_000)
+    });
+  } catch {
+    // Error reporting must not replace the original response failure.
+  }
+  sendJson(response, { error: "internal dashboard error", error_id: errorId }, status);
+}
+
+function applySecurityHeaders(response: http.ServerResponse): void {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    response.setHeader(name, value);
+  }
 }
 
 async function sendStaticAsset(response: http.ServerResponse, relativePath: string): Promise<void> {

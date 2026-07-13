@@ -6,7 +6,7 @@ import { assertNoSymlinkComponents } from "@ultrafuzz/artifacts";
 import { redactResolvedConfig, resolveConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
 import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts";
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
-import { loadRuntimeTemplate } from "./runtime-template.js";
+import { loadRuntimeTemplate, renderSmithersPackageJson } from "./runtime-template.js";
 import type { InitProjectInput, InitProjectResult } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
@@ -183,25 +183,6 @@ function writeProjectFile(
   } else {
     created.push(relativePath);
   }
-}
-
-function renderSmithersPackageJson(): string {
-  return `${JSON.stringify(
-    {
-      name: "ultrafuzz-smithers",
-      private: true,
-      type: "module",
-      dependencies: {
-        "smithers-orchestrator": "^0.27.0",
-        zod: "^4.4.3"
-      },
-      devDependencies: {
-        typescript: "^6.0.3"
-      }
-    },
-    null,
-    2
-  )}\n`;
 }
 
 function uniqueSorted(values: string[]): string[] {

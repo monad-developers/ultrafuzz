@@ -1,7 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ArtifactManifest, EventRecord, RunState } from "@ultrafuzz/artifacts";
+import {
+  assertRegularFileInside,
+  normalizeSafeRelativePath,
+  safeResolveInside,
+  sha256Bytes,
+  validateSafeId,
+  type ArtifactManifest,
+  type ArtifactManifestEntry,
+  type EventRecord,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import type { EvalArtifactUpload, EvalNodeEvent, EvalNodeEventEnvelope, EvalReporter } from "./reporter.js";
@@ -10,6 +20,8 @@ import { contentTypeForArtifact, isRecord, warningDiagnostic } from "./utils.js"
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 export interface TelemetryCursorState {
   schemaVersion: typeof TELEMETRY_CURSOR_SCHEMA_VERSION;
@@ -209,9 +221,9 @@ export class NodeTelemetryPump {
         continue;
       }
       try {
-        records.push(JSON.parse(line) as EventRecord);
+        records.push(parseEventRecord(JSON.parse(line) as unknown));
       } catch {
-        warnings.push(warningDiagnostic("EVAL_TELEMETRY_JOURNAL_MALFORMED", "skipped malformed journal line"));
+        warnings.push(warningDiagnostic("EVAL_TELEMETRY_JOURNAL_MALFORMED", "skipped invalid journal record"));
       }
     }
     return { records, nextOffset };
@@ -274,7 +286,7 @@ export class NodeTelemetryPump {
             manifest: manifest.files
           })
         );
-        uploads.push(...this.uploadsForManifest(nodeId, manifest));
+        uploads.push(...this.uploadsForManifest(nodeId, manifest, warnings));
         return;
       }
       default:
@@ -283,12 +295,25 @@ export class NodeTelemetryPump {
   }
 
   private readManifest(nodeId: string, warnings: RuntimeDiagnostic[]): ArtifactManifest | undefined {
-    const manifestPath = path.join(this.input.runRoot, "artifacts", nodeId, "artifact-manifest.json");
+    const artifactsRoot = path.join(this.input.runRoot, "artifacts");
+    let nodeDir: string;
+    let manifestPath: string;
+    try {
+      nodeDir = safeResolveInside(artifactsRoot, validateSafeId(nodeId, "node ID"), "artifact node path");
+      manifestPath = safeResolveInside(nodeDir, "artifact-manifest.json", "artifact manifest path");
+    } catch {
+      warnings.push(warningDiagnostic("EVAL_TELEMETRY_MANIFEST_UNSAFE", "skipped unsafe artifact manifest path"));
+      return undefined;
+    }
     if (!fs.existsSync(manifestPath)) {
       return undefined;
     }
     try {
-      return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ArtifactManifest;
+      assertRegularFileInside(nodeDir, manifestPath, "artifact manifest path");
+      if (fs.statSync(manifestPath).size > MAX_MANIFEST_BYTES) {
+        throw new Error("artifact manifest exceeds the size limit");
+      }
+      return parseArtifactManifest(JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown, nodeId);
     } catch (error) {
       warnings.push(
         warningDiagnostic(
@@ -300,7 +325,11 @@ export class NodeTelemetryPump {
     }
   }
 
-  private uploadsForManifest(nodeId: string, manifest: ArtifactManifest): EvalArtifactUpload[] {
+  private uploadsForManifest(
+    nodeId: string,
+    manifest: ArtifactManifest,
+    warnings: RuntimeDiagnostic[]
+  ): EvalArtifactUpload[] {
     const policy = this.input.policy.artifacts;
     const includeSet = new Set(policy.include);
     // Sensitivity gate: private targets stay manifest-only unless the suite
@@ -309,14 +338,26 @@ export class NodeTelemetryPump {
       policy.mode === "upload" && (this.input.row.target.sensitivity !== "private" || policy.mode_explicit);
     const uploads: EvalArtifactUpload[] = [];
     for (const file of manifest.files) {
-      const baseName = path.posix.basename(file.path);
-      if (!includeSet.has(file.path) && !includeSet.has(baseName)) {
+      if (!includeSet.has(file.path)) {
         continue;
       }
       if (file.size_bytes > policy.max_file_bytes) {
         continue;
       }
-      const absolutePath = path.join(this.input.runRoot, "artifacts", nodeId, file.path);
+      const nodeDir = path.join(this.input.runRoot, "artifacts", nodeId);
+      if (payloadAllowed) {
+        try {
+          readValidatedArtifact(nodeDir, file, policy.max_file_bytes);
+        } catch (error) {
+          warnings.push(
+            warningDiagnostic(
+              "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
+              `skipped invalid artifact ${file.path}: ${error instanceof Error ? error.message : String(error)}`
+            )
+          );
+          continue;
+        }
+      }
       uploads.push({
         rowId: this.input.row.id,
         nodeId,
@@ -324,7 +365,7 @@ export class NodeTelemetryPump {
         contentType: contentTypeForArtifact(file.path),
         sizeBytes: file.size_bytes,
         sha256: file.sha256,
-        ...(payloadAllowed ? { read: () => fs.promises.readFile(absolutePath) } : {})
+        ...(payloadAllowed ? { read: async () => readValidatedArtifact(nodeDir, file, policy.max_file_bytes) } : {})
       });
     }
     return uploads;
@@ -419,6 +460,108 @@ export class NodeTelemetryPump {
         )
       );
     }
+  }
+}
+
+function parseEventRecord(value: unknown): EventRecord {
+  if (!isRecord(value)) {
+    throw new Error("journal record must be an object");
+  }
+  const schemaVersion = requiredString(value, "schema_version");
+  const eventId = validateSafeId(requiredString(value, "event_id"), "event ID");
+  const eventType = validateSafeId(requiredString(value, "event_type"), "event type");
+  const runId = validateSafeId(requiredString(value, "run_id"), "run ID");
+  const timestamp = requiredString(value, "timestamp");
+  if (!Number.isFinite(Date.parse(timestamp))) {
+    throw new Error("journal timestamp must be an ISO timestamp");
+  }
+  const nodeId = value.node_id === undefined ? undefined : validateSafeId(requiredString(value, "node_id"), "node ID");
+  const status =
+    value.status === undefined ? undefined : validateSafeId(requiredString(value, "status"), "event status");
+  return {
+    schema_version: schemaVersion,
+    event_id: eventId,
+    event_type: eventType,
+    run_id: runId,
+    timestamp,
+    payload: value.payload,
+    ...(nodeId !== undefined ? { node_id: nodeId } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(isRecord(value.provenance) ? { provenance: value.provenance } : {})
+  };
+}
+
+function parseArtifactManifest(value: unknown, expectedNodeId: string): ArtifactManifest {
+  if (!isRecord(value) || !Array.isArray(value.files) || !isRecord(value.provenance)) {
+    throw new Error("artifact manifest has an invalid shape");
+  }
+  const nodeId = validateSafeId(requiredString(value, "node_id"), "manifest node ID");
+  if (nodeId !== expectedNodeId) {
+    throw new Error("artifact manifest node ID does not match its directory");
+  }
+  const files = value.files.map((entry): ArtifactManifestEntry => parseManifestEntry(entry));
+  return {
+    schema_version: requiredString(value, "schema_version"),
+    run_id: validateSafeId(requiredString(value, "run_id"), "manifest run ID"),
+    node_id: nodeId,
+    producer_node_id: validateSafeId(requiredString(value, "producer_node_id"), "producer node ID"),
+    created_at: requiredString(value, "created_at"),
+    files,
+    provenance: parseProvenance(value.provenance)
+  };
+}
+
+function parseManifestEntry(value: unknown): ArtifactManifestEntry {
+  if (!isRecord(value) || !isRecord(value.provenance)) {
+    throw new Error("artifact manifest file entry has an invalid shape");
+  }
+  const sizeBytes = value.size_bytes;
+  if (!Number.isSafeInteger(sizeBytes) || (sizeBytes as number) < 0) {
+    throw new Error("artifact manifest file size must be a non-negative integer");
+  }
+  const sha256 = requiredString(value, "sha256");
+  if (!SHA256_PATTERN.test(sha256)) {
+    throw new Error("artifact manifest digest must be SHA-256");
+  }
+  return {
+    path: normalizeSafeRelativePath(requiredString(value, "path"), "artifact manifest file path"),
+    size_bytes: sizeBytes as number,
+    sha256,
+    provenance: parseProvenance(value.provenance)
+  };
+}
+
+function parseProvenance(value: Record<string, unknown>): ArtifactManifestEntry["provenance"] {
+  return {
+    producer_node_id: validateSafeId(requiredString(value, "producer_node_id"), "producer node ID")
+  };
+}
+
+function requiredString(value: Record<string, unknown>, key: string): string {
+  const field = value[key];
+  if (typeof field !== "string" || field.length === 0) {
+    throw new Error(`${key} must be a non-empty string`);
+  }
+  return field;
+}
+
+function readValidatedArtifact(nodeDir: string, file: ArtifactManifestEntry, maxFileBytes: number): Buffer {
+  const absolutePath = safeResolveInside(nodeDir, file.path, "artifact upload path");
+  assertRegularFileInside(nodeDir, absolutePath, "artifact upload path");
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const descriptor = fs.openSync(absolutePath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > maxFileBytes || stat.size !== file.size_bytes) {
+      throw new Error("artifact size does not match its manifest");
+    }
+    const contents = fs.readFileSync(descriptor);
+    if (sha256Bytes(contents) !== file.sha256) {
+      throw new Error("artifact digest does not match its manifest");
+    }
+    return contents;
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 

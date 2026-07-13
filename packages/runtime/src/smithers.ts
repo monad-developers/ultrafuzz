@@ -1,12 +1,16 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import {
   assertNoSymlinkComponents,
+  assertPathInside,
+  assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  sha256Bytes,
   writeFileDurable,
   writeJsonDurable,
   type RunLayout
@@ -15,11 +19,12 @@ import type { ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import { renderRuntimeTemplate } from "./runtime-template.js";
+import { loadRuntimeTemplate, renderRuntimeTemplate, renderSmithersPackageJson } from "./runtime-template.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const SMITHERS_RUNTIME_VERSION = sha256Bytes(renderSmithersPackageJson()).slice(0, 16);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
@@ -34,6 +39,7 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  env?: Record<string, string | undefined>;
 }
 
 export interface NodeAttemptProvenance {
@@ -196,13 +202,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   );
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
+  const runtimeRoot = prepareSmithersRuntime(projectRoot, input.env);
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
-  const workflowPath = path.join(
-    projectRoot,
-    ".smithers",
-    "workflows",
-    `${workflowFileStem(input.runLayout.runId)}.tsx`
-  );
+  const workflowPath = path.join(runtimeRoot, "workflows", `${workflowFileStem(input.runLayout.runId)}.tsx`);
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
@@ -236,7 +238,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
     }))
   });
-  writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
+  writeExecutableWorkflow(runtimeRoot, workflowPath, renderWorkflowSource(compiled));
   writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
   return compiled;
 }
@@ -297,6 +299,7 @@ export async function runSmithersLifecycleCommand(input: {
   label?: string;
   env?: Record<string, string | undefined>;
 }): Promise<{ stdout: string; stderr: string; command: string[]; workflowRunId?: string }> {
+  assertTrustedWorkflowPath(input.projectRoot, input.workflowPath, input.env);
   if (input.action === "fork" && input.forkFrame !== undefined) {
     const forkCommand = [
       "fork",
@@ -508,25 +511,34 @@ async function ensureSmithersDependencies(
   if (explicitSmithersExecutable(env) !== undefined) {
     return;
   }
-  const local = localSmithersExecutable(projectRoot);
+  const runtimeRoot = prepareSmithersRuntime(projectRoot, env);
+  const local = localSmithersExecutable(runtimeRoot);
   if (fs.existsSync(local)) {
+    trustedSmithersExecutable(runtimeRoot, local);
     return;
   }
-  const packageRoot = path.join(projectRoot, ".smithers");
-  const packageJson = path.join(packageRoot, "package.json");
-  if (!fs.existsSync(packageJson)) {
-    return;
-  }
-  assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
-  assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  await execFileAsync("npm", ["install", "--prefix", packageRoot, "--no-audit", "--no-fund", "--loglevel=error"], {
-    cwd: projectRoot,
-    env: smithersCommandEnv(projectRoot, env),
-    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
-  });
+  await execFileAsync(
+    trustedNpmExecutable(projectRoot, env),
+    [
+      "install",
+      "--prefix",
+      runtimeRoot,
+      "--ignore-scripts",
+      "--package-lock=false",
+      "--no-audit",
+      "--no-fund",
+      "--loglevel=error"
+    ],
+    {
+      cwd: runtimeRoot,
+      env: smithersInstallEnv(env),
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+    }
+  );
   if (!fs.existsSync(local)) {
-    throw new Error("Smithers dependency install completed without creating the local workflow runner binary");
+    throw new Error("workflow runner dependency install completed without creating its executable");
   }
+  trustedSmithersExecutable(runtimeRoot, local);
 }
 
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
@@ -534,20 +546,27 @@ function smithersExecutable(projectRoot: string, env: Record<string, string | un
   if (explicit !== undefined) {
     return explicit;
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
-    return local;
-  }
-  return "smithers";
+  const runtimeRoot = smithersRuntimeRoot(projectRoot, env);
+  return trustedSmithersExecutable(runtimeRoot, localSmithersExecutable(runtimeRoot));
 }
 
 function explicitSmithersExecutable(env: Record<string, string | undefined> | undefined): string | undefined {
   const explicit = env?.SMITHERS_BIN ?? process.env.SMITHERS_BIN;
-  return explicit && explicit.trim().length > 0 ? explicit : undefined;
+  if (explicit === undefined || explicit.trim().length === 0) {
+    return undefined;
+  }
+  if (!path.isAbsolute(explicit)) {
+    throw new Error("SMITHERS_BIN must be an absolute operator-controlled path");
+  }
+  const resolved = fs.realpathSync.native(explicit);
+  if (!fs.statSync(resolved).isFile()) {
+    throw new Error("SMITHERS_BIN must resolve to a regular file");
+  }
+  return resolved;
 }
 
-function localSmithersExecutable(projectRoot: string): string {
-  return path.join(projectRoot, ".smithers", "node_modules", ".bin", smithersBinaryName());
+function localSmithersExecutable(runtimeRoot: string): string {
+  return path.join(runtimeRoot, "node_modules", ".bin", smithersBinaryName());
 }
 
 function smithersCommandEnv(
@@ -555,11 +574,112 @@ function smithersCommandEnv(
   env: Record<string, string | undefined> | undefined
 ): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
-  const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
+  const localBin = path.join(smithersRuntimeRoot(projectRoot, env), "node_modules", ".bin");
   merged.PATH = [localBin, merged.PATH]
     .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
   return merged;
+}
+
+function prepareSmithersRuntime(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const runtimeRoot = smithersRuntimeRoot(projectRoot, env);
+  if (fs.existsSync(runtimeRoot) && fs.lstatSync(runtimeRoot).isSymbolicLink()) {
+    throw new Error("workflow runner cache root cannot be a symlink");
+  }
+  fs.mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
+  fs.chmodSync(runtimeRoot, 0o700);
+  assertPathOutsideProject(projectRoot, fs.realpathSync.native(runtimeRoot), "workflow runner cache");
+  const generatedFiles = [
+    ["package.json", renderSmithersPackageJson()],
+    ["agents/index.ts", loadRuntimeTemplate("smithers/agents/index.tsx")],
+    ["agents/codex.ts", loadRuntimeTemplate("smithers/agents/codex.tsx")]
+  ] as const;
+  for (const [relativePath, contents] of generatedFiles) {
+    const filePath = path.join(runtimeRoot, ...relativePath.split("/"));
+    assertNoSymlinkComponents(runtimeRoot, filePath, "workflow runner runtime file");
+    writeFileDurable(filePath, contents);
+  }
+  return runtimeRoot;
+}
+
+function smithersRuntimeRoot(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const cacheHome =
+    env?.XDG_CACHE_HOME ??
+    process.env.XDG_CACHE_HOME ??
+    path.join(env?.HOME ?? process.env.HOME ?? os.homedir(), ".cache");
+  const projectKey = sha256Bytes(path.resolve(projectRoot)).slice(0, 24);
+  const runtimeRoot = path.resolve(cacheHome, "ultrafuzz", "workflow-runner", SMITHERS_RUNTIME_VERSION, projectKey);
+  assertPathOutsideProject(projectRoot, runtimeRoot, "workflow runner cache");
+  return runtimeRoot;
+}
+
+function trustedSmithersExecutable(runtimeRoot: string, executable: string): string {
+  assertNoSymlinkComponents(runtimeRoot, path.dirname(executable), "workflow runner executable");
+  const resolved = fs.realpathSync.native(executable);
+  assertPathInside(runtimeRoot, resolved, "workflow runner executable");
+  assertRegularFileInside(runtimeRoot, resolved, "workflow runner executable");
+  return process.platform === "win32" ? executable : resolved;
+}
+
+function assertTrustedWorkflowPath(
+  projectRoot: string,
+  workflowPath: string,
+  env: Record<string, string | undefined> | undefined
+): void {
+  const runtimeRoot = smithersRuntimeRoot(projectRoot, env);
+  assertRegularFileInside(runtimeRoot, path.resolve(workflowPath), "workflow entrypoint");
+}
+
+function assertPathOutsideProject(projectRoot: string, candidate: string, label: string): void {
+  const project = fs.existsSync(projectRoot) ? fs.realpathSync.native(projectRoot) : path.resolve(projectRoot);
+  const relative = path.relative(project, path.resolve(candidate));
+  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
+    throw new Error(`${label} must be outside the target project`);
+  }
+}
+
+function smithersInstallEnv(env: Record<string, string | undefined> | undefined): NodeJS.ProcessEnv {
+  const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  const allowed = [
+    "HOME",
+    "PATH",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+    "XDG_CACHE_HOME",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY"
+  ];
+  return Object.fromEntries(
+    allowed.flatMap((name) => (source[name] === undefined ? [] : [[name, source[name]]]))
+  ) as NodeJS.ProcessEnv;
+}
+
+function trustedNpmExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const searchPath = env?.PATH ?? process.env.PATH ?? "";
+  const names = process.platform === "win32" ? ["npm.cmd", "npm.exe", "npm"] : ["npm"];
+  for (const directory of searchPath.split(path.delimiter)) {
+    if (directory.length === 0) {
+      continue;
+    }
+    for (const name of names) {
+      const candidate = path.resolve(directory, name);
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) {
+        continue;
+      }
+      const resolved = fs.realpathSync.native(candidate);
+      assertPathOutsideProject(projectRoot, resolved, "npm executable");
+      return process.platform === "win32" ? candidate : resolved;
+    }
+  }
+  throw new Error("unable to locate npm on the operator PATH");
 }
 
 function smithersBinaryName(): string {

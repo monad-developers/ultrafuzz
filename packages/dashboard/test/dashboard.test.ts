@@ -128,6 +128,58 @@ test("API requests reject non-loopback host headers", async () => {
   }
 });
 
+test("dashboard responses set browser security headers", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/session"));
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/u);
+    assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/u);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(response.headers.get("cross-origin-opener-policy"), "same-origin");
+    assert.equal(response.headers.get("cross-origin-resource-policy"), "same-origin");
+  } finally {
+    await handle.close();
+  }
+});
+
+test("dashboard rejects oversized JSON bodies", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify({ content: "x".repeat(1024 * 1024) })
+    });
+    assert.equal(response.status, 413);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("unexpected dashboard errors use a correlation ID and a redacted audit record", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/prompts/strategies/%E0%A4%A"));
+    assert.equal(response.status, 500);
+    const body = (await response.json()) as { error?: string; error_id?: string };
+    assert.equal(body.error, "internal dashboard error");
+    assert.match(body.error_id ?? "", /^[0-9a-f-]{36}$/u);
+    const audit = fs.readFileSync(path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl"), "utf8");
+    assert.match(audit, new RegExp(body.error_id ?? "missing"));
+  } finally {
+    await handle.close();
+  }
+});
+
 function makeProject(): string {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-"));
   const result = initProject({ projectRoot, force: true });

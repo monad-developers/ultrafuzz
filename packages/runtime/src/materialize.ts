@@ -7,7 +7,7 @@ import {
   assertNoSymlinkComponents,
   layoutForRunRoot,
   safeResolveInside,
-  sha256File,
+  sha256Bytes,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, resolveConfig } from "@ultrafuzz/config";
@@ -24,6 +24,8 @@ interface PlannedMaterialization {
   destinationPath: string;
   sizeBytes: number;
   sha256: string;
+  device: number;
+  inode: number;
 }
 
 export async function materializeSelection(input: MaterializeInput): Promise<RuntimeResult<MaterializeValue>> {
@@ -106,11 +108,21 @@ export async function materializeSelection(input: MaterializeInput): Promise<Run
         );
         break;
       }
-      fs.copyFileSync(
-        copy.sourcePath,
-        copy.destinationPath,
-        input.allowOverwrite === true ? 0 : fs.constants.COPYFILE_EXCL
-      );
+      try {
+        const contents = readPlannedSource(copy);
+        writeMaterializedFile(destinationCheck, contents, input.allowOverwrite === true);
+      } catch (error) {
+        diagnostics.push(
+          runtimeError(
+            "MATERIALIZE_SOURCE_CHANGED",
+            `source ${copy.selection.source} changed after it was validated`,
+            "materialize",
+            copy.selection.source,
+            { error: error instanceof Error ? error.message : String(error) }
+          )
+        );
+        break;
+      }
     }
   }
   if (hasRuntimeErrors(diagnostics)) {
@@ -179,13 +191,80 @@ function planCopy(
   if (sourcePath === undefined || destinationPath === undefined) {
     return undefined;
   }
+  const source = readSourceSnapshot(sourcePath);
   return {
     selection: copy,
     sourcePath,
     destinationPath,
-    sizeBytes: fs.statSync(sourcePath).size,
-    sha256: sha256File(sourcePath)
+    sizeBytes: source.contents.length,
+    sha256: source.sha256,
+    device: source.device,
+    inode: source.inode
   };
+}
+
+function readSourceSnapshot(sourcePath: string): {
+  contents: Buffer;
+  sha256: string;
+  device: number;
+  inode: number;
+} {
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const descriptor = fs.openSync(sourcePath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile()) {
+      throw new Error("materialize source is not a regular file");
+    }
+    const contents = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      contents.length !== after.size
+    ) {
+      throw new Error("materialize source changed while it was read");
+    }
+    return {
+      contents,
+      sha256: sha256Bytes(contents),
+      device: after.dev,
+      inode: after.ino
+    };
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function readPlannedSource(copy: PlannedMaterialization): Buffer {
+  const source = readSourceSnapshot(copy.sourcePath);
+  if (
+    source.device !== copy.device ||
+    source.inode !== copy.inode ||
+    source.contents.length !== copy.sizeBytes ||
+    source.sha256 !== copy.sha256
+  ) {
+    throw new Error("materialize source identity or contents changed");
+  }
+  return source.contents;
+}
+
+function writeMaterializedFile(destinationPath: string, contents: Buffer, allowOverwrite: boolean): void {
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const flags =
+    fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    noFollow |
+    (allowOverwrite ? fs.constants.O_TRUNC : fs.constants.O_EXCL);
+  const descriptor = fs.openSync(destinationPath, flags, 0o600);
+  try {
+    fs.writeFileSync(descriptor, contents);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 function resolveSource(selection: string, layout: RunLayout, diagnostics: RuntimeDiagnostic[]): string | undefined {

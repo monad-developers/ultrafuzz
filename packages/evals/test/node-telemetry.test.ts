@@ -147,6 +147,38 @@ describe("NodeTelemetryPump", () => {
     expect(payload.toString("utf8")).toBe("# hello");
   });
 
+  it("rejects unsafe artifact manifest paths before upload", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const { runRoot, reporter, pump } = setup({ policy });
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-a",
+          event_type: "artifact-manifest-written",
+          timestamp: T1,
+          node_id: "setup-1",
+          status: "succeeded"
+        }
+      ],
+      artifacts: { "setup-1": { "report.md": "# hello" } }
+    });
+    const manifestPath = path.join(runRoot, "artifacts", "setup-1", "artifact-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      files: Array<{ path: string }>;
+    };
+    manifest.files[0]!.path = "../../report.md";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    const result = await pump().drain();
+    expect(reporter.artifacts()).toHaveLength(0);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_MANIFEST_UNREADABLE" })])
+    );
+  });
+
   it("keeps private targets manifest-only when upload mode was not explicit", async () => {
     const policy = testReportingPolicy({
       artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: false }

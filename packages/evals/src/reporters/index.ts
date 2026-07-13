@@ -13,6 +13,9 @@ export { LangSmithReporter, type LangSmithReporterOptions, dottedOrderSegment } 
 
 export const EVAL_PROVIDER_NONE = "none";
 export const KNOWN_EVAL_PROVIDERS = ["braintrust", "langsmith", EVAL_PROVIDER_NONE] as const;
+const BRAINTRUST_CREDENTIAL_ENV = "BRAINTRUST_API_KEY";
+const LANGSMITH_CREDENTIAL_ENV = "LANGSMITH_API_KEY";
+const LANGSMITH_WORKSPACE_ENV = "LANGSMITH_WORKSPACE_ID";
 
 export interface ResolveEvalProviderInput {
   /** `--provider` CLI flag; highest precedence. */
@@ -97,9 +100,10 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
   const env = input.env ?? process.env;
   const profile = resolved.profile ?? {};
   const onWarning = input.onWarning ?? (() => undefined);
-  const apiKey = requireEnv(env, profile.apiKeyEnv, resolved.provider);
   switch (resolved.provider) {
     case "braintrust": {
+      requireFixedEnvName(profile.apiKeyEnv, BRAINTRUST_CREDENTIAL_ENV, resolved.provider, "api_key_env");
+      const apiKey = requireEnv(env, BRAINTRUST_CREDENTIAL_ENV, resolved.provider);
       const reporter = new BraintrustReporter({
         apiKey,
         project: profile.project ?? "ultrafuzz-evals",
@@ -111,7 +115,13 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
       return [guardReporter(reporter, onWarning)];
     }
     case "langsmith": {
-      const workspaceId = profile.workspaceIdEnv !== undefined ? firstNonEmpty(env[profile.workspaceIdEnv]) : undefined;
+      requireFixedEnvName(profile.apiKeyEnv, LANGSMITH_CREDENTIAL_ENV, resolved.provider, "api_key_env");
+      const apiKey = requireEnv(env, LANGSMITH_CREDENTIAL_ENV, resolved.provider);
+      if (profile.workspaceIdEnv !== undefined) {
+        requireFixedEnvName(profile.workspaceIdEnv, LANGSMITH_WORKSPACE_ENV, resolved.provider, "workspace_id_env");
+      }
+      const workspaceId =
+        profile.workspaceIdEnv !== undefined ? firstNonEmpty(env[LANGSMITH_WORKSPACE_ENV]) : undefined;
       const reporter = new LangSmithReporter({
         apiKey,
         project: profile.project ?? "ultrafuzz-evals",
@@ -127,6 +137,23 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
       throw new EvalError("EVAL_PROVIDER_UNKNOWN", `unknown eval provider \`${resolved.provider}\``, {
         provider: resolved.provider
       });
+  }
+}
+
+function requireFixedEnvName(configured: string | undefined, expected: string, provider: string, field: string): void {
+  if (configured === undefined) {
+    throw new EvalError(
+      "EVAL_PROVIDER_CREDENTIALS_MISSING",
+      `[eval.providers.${provider}] must set ${field} to ${expected}`,
+      { provider, field, expected }
+    );
+  }
+  if (configured !== expected) {
+    throw new EvalError(
+      "EVAL_PROVIDER_CREDENTIAL_BINDING_INVALID",
+      `[eval.providers.${provider}].${field} must be ${expected}`,
+      { provider, field, expected }
+    );
   }
 }
 

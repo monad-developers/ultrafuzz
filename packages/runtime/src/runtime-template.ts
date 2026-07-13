@@ -24,6 +24,25 @@ export function renderRuntimeTemplate(relativePath: string, replacements: Record
   return rendered;
 }
 
+export function renderSmithersPackageJson(): string {
+  return `${JSON.stringify(
+    {
+      name: "ultrafuzz-smithers",
+      private: true,
+      type: "module",
+      dependencies: {
+        "smithers-orchestrator": "0.27.0",
+        zod: "4.4.3"
+      },
+      devDependencies: {
+        typescript: "6.0.3"
+      }
+    },
+    null,
+    2
+  )}\n`;
+}
+
 function runtimeTemplatePath(relativePath: string): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const parts = relativePath.split("/");
