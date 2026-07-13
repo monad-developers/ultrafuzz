@@ -8,7 +8,8 @@ export default class Resume extends Command {
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
   static override flags = {
     ...globalFlags,
-    "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" })
+    "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" }),
+    "reset-node": Flags.string({ summary: "Retry one failed workflow node and its dependents before resuming" })
   };
 
   async run(): Promise<void> {
@@ -17,6 +18,7 @@ export default class Resume extends Command {
       projectRoot: projectRoot(flags),
       runId: args.runId,
       maxConcurrency: flags["max-concurrency"],
+      resetNode: flags["reset-node"],
       env: cliIo().env
     });
     emitCommandResult(

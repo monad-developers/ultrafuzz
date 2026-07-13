@@ -1981,6 +1981,16 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
 
+  const resetResumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    maxConcurrency: 8,
+    resetNode: "node:project-discovery",
+    env
+  });
+  assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
+  assert.equal(resetResumed.value?.submitted, true);
+
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
@@ -2012,6 +2022,14 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.match(
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --format json/
+  );
+  assert.match(
+    commands,
+    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --deps --force --format json/
+  );
+  assert.match(
+    commands,
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --format json/
   );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(

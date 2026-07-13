@@ -128,7 +128,8 @@ SHAs.
 ```bash
 ultrafuzz ps [--project <path>] [--json]
 ultrafuzz inspect <run-id> [--project <path>] [--json]
-ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] [--json]
+ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
+  [--reset-node <workflow-node-id>] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -140,8 +141,9 @@ ultrafuzz fork <run-id> \
 ```
 
 `resume`, `replay`, and `fork` operate on the workflow run linked from
-Ultrafuzz run metadata. `fork` may start from a checkpoint frame and may reset
-one workflow node before starting the fork.
+Ultrafuzz run metadata. `resume --reset-node` retries one failed workflow node
+and its dependents in the same linked run. `fork` may start from a checkpoint
+frame and may reset one workflow node before starting the fork.
 
 ## Report
 
