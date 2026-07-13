@@ -183,6 +183,56 @@ test("dashboard rejects oversized JSON request bodies", async () => {
   }
 });
 
+test("dashboard stops reading an oversized unfinished chunked body", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  let request: http.ClientRequest | undefined;
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    const parsed = new URL(apiUrl(handle.url, "/api/config"));
+    const responsePromise = new Promise<{ connection?: string; status: number }>((resolve, reject) => {
+      request = http.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: parsed.pathname,
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            "x-ultrafuzz-session": handle.sessionToken
+          }
+        },
+        (response) => {
+          response.resume();
+          response.on("error", reject);
+          response.on("end", () => {
+            resolve({
+              connection: response.headers.connection,
+              status: response.statusCode ?? 0
+            });
+          });
+        }
+      );
+      request.on("error", reject);
+      request.write(Buffer.alloc(1024 * 1024, "x"));
+      request.write("x");
+    });
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error("server kept draining the unfinished request body")), 5000);
+    });
+
+    const response = await Promise.race([responsePromise, timeoutPromise]);
+    assert.equal(response.status, 413);
+    assert.equal(response.connection, "close");
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+    request?.destroy();
+    await handle.close();
+  }
+});
+
 test("dashboard audit append refuses a final-component symlink", async () => {
   const projectRoot = makeProject();
   const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
