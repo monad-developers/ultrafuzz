@@ -17,7 +17,7 @@ import type {
   RunStatusValue,
   WorkflowCommandSummary
 } from "./types.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
@@ -384,13 +384,6 @@ function workflowDiagnosticMessage(snapshot: { error?: string; stderr?: string }
     return "workflow inspection failed";
   }
   return source.replace(/smithers/giu, "workflow runner");
-}
-
-function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
-  if (!fs.existsSync(filePath)) {
-    return undefined;
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
 }
 
 function commandData(value: unknown): Record<string, unknown> | undefined {

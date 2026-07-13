@@ -2,50 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { appendLineDurable, assertNoSymlinkComponents, safeResolveInside } from "@ultrafuzz/artifacts";
-import {
-  validateCleanPolicy,
-  type CleanPolicyInput,
-  type PolicyDiagnostic,
-  type PolicyResult
-} from "@ultrafuzz/security";
+import { isPathInside, validateCleanPolicy } from "@ultrafuzz/security";
 
-const RUNTIME_SCHEMA_VERSION = "ultrafuzz.runtime.v1" as const;
 const CLEAN_AUDIT_SCHEMA_VERSION = "ultrafuzz.clean.audit.v1" as const;
 
-type RuntimeDiagnosticSeverity = "error" | "warning" | "info";
-
-interface RuntimeDiagnostic {
-  code: string;
-  message: string;
-  severity: RuntimeDiagnosticSeverity;
-  source: string;
-  path?: string;
-  details?: Record<string, unknown>;
-}
-
-export interface CleanOperationResult<T> {
-  schema_version: typeof RUNTIME_SCHEMA_VERSION;
-  ok: boolean;
-  diagnostics: RuntimeDiagnostic[];
-  value?: T;
-}
-
-export interface CleanGeneratedInput {
-  projectRoot: string;
-  selections: string[];
-  confirmed?: boolean;
-  dryRun?: boolean;
-}
-
-export interface CleanGeneratedValue {
-  dry_run: boolean;
-  removed: string[];
-  audit: {
-    schema_version: typeof CLEAN_AUDIT_SCHEMA_VERSION;
-    audit_path: string;
-    selections: string[];
-  };
-}
+import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
+import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
 interface PlannedRemoval {
   selection: string;
@@ -53,13 +15,12 @@ interface PlannedRemoval {
   existed: boolean;
 }
 
-export async function cleanRun(input: CleanGeneratedInput): Promise<CleanOperationResult<CleanGeneratedValue>> {
-  const policyInput: CleanPolicyInput = {
+export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResult<CleanGeneratedValue>> {
+  const policy = validateCleanPolicy({
     selections: input.selections,
     confirmed: input.confirmed,
     dryRun: input.dryRun
-  };
-  const policy = validateCleanPolicy(policyInput);
+  });
   const diagnostics = policyDiagnostics(policy, "clean");
   if (!policy.ok) {
     return runtimeFailure(diagnostics);
@@ -166,7 +127,7 @@ function planRemoval(
     );
     return undefined;
   }
-  if (!realPathInside(generatedRoot, absolutePath)) {
+  if (!isPathInside(fs.realpathSync.native(generatedRoot), fs.realpathSync.native(absolutePath))) {
     diagnostics.push(
       runtimeError(
         "CLEAN_SELECTION_ESCAPE",
@@ -182,60 +143,4 @@ function planRemoval(
     absolutePath,
     existed: true
   };
-}
-
-function realPathInside(root: string, candidate: string): boolean {
-  const rootReal = fs.realpathSync.native(root);
-  const candidateReal = fs.realpathSync.native(candidate);
-  const relative = path.relative(rootReal, candidateReal);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function policyDiagnostics<T>(policy: PolicyResult<T>, source: string): RuntimeDiagnostic[] {
-  return policy.diagnostics.map((diagnostic: PolicyDiagnostic) => ({
-    code: diagnostic.code,
-    message: diagnostic.message,
-    severity: diagnostic.severity,
-    source,
-    ...(diagnostic.path ? { path: diagnostic.path } : {}),
-    ...(diagnostic.details ? { details: diagnostic.details } : {})
-  }));
-}
-
-function runtimeResult<T>(ok: boolean, value?: T, diagnostics: RuntimeDiagnostic[] = []): CleanOperationResult<T> {
-  return {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    ok,
-    diagnostics,
-    ...(value !== undefined ? { value } : {})
-  };
-}
-
-function runtimeFailure<T>(diagnostics: RuntimeDiagnostic[]): CleanOperationResult<T> {
-  return {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    ok: false,
-    diagnostics
-  };
-}
-
-function runtimeError(
-  code: string,
-  message: string,
-  source: string,
-  pathValue?: string,
-  details?: Record<string, unknown>
-): RuntimeDiagnostic {
-  return {
-    code,
-    message,
-    severity: "error",
-    source,
-    ...(pathValue !== undefined ? { path: pathValue } : {}),
-    ...(details !== undefined ? { details } : {})
-  };
-}
-
-function hasRuntimeErrors(diagnostics: RuntimeDiagnostic[]): boolean {
-  return diagnostics.some((diagnostic) => diagnostic.severity === "error");
 }

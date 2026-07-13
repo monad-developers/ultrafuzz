@@ -247,6 +247,24 @@ export interface MaterializeValue {
   dry_run: boolean;
   copied: MaterializeCopySelection[];
   patches: string[];
+  audit: {
+    schema_version: "ultrafuzz.materialize.audit.v1";
+    mode: "dry-run" | "unstaged-working-tree";
+    unstaged: true;
+    audit_path: string;
+    event_id?: string;
+    copies: Array<
+      MaterializeCopySelection & {
+        size_bytes: number;
+        sha256: string;
+      }
+    >;
+    patches: Array<{
+      source: string;
+      size_bytes: number;
+      sha256: string;
+    }>;
+  };
 }
 
 export interface ReferencesStatusInput {
@@ -308,6 +326,11 @@ export interface CleanGeneratedInput {
 export interface CleanGeneratedValue {
   dry_run: boolean;
   removed: string[];
+  audit: {
+    schema_version: "ultrafuzz.clean.audit.v1";
+    audit_path: string;
+    selections: string[];
+  };
 }
 
 export interface WorkflowLifecycleInput {

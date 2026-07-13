@@ -11,70 +11,12 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, resolveConfig } from "@ultrafuzz/config";
-import {
-  validateMaterializePolicy,
-  type MaterializeCopySelection,
-  type PolicyDiagnostic,
-  type PolicyResult
-} from "@ultrafuzz/security";
+import { isPathInside, validateMaterializePolicy, type MaterializeCopySelection } from "@ultrafuzz/security";
 
-const RUNTIME_SCHEMA_VERSION = "ultrafuzz.runtime.v1" as const;
 const MATERIALIZE_AUDIT_SCHEMA_VERSION = "ultrafuzz.materialize.audit.v1" as const;
 
-type RuntimeDiagnosticSeverity = "error" | "warning" | "info";
-
-interface RuntimeDiagnostic {
-  code: string;
-  message: string;
-  severity: RuntimeDiagnosticSeverity;
-  source: string;
-  path?: string;
-  details?: Record<string, unknown>;
-}
-
-export interface MaterializeOperationResult<T> {
-  schema_version: typeof RUNTIME_SCHEMA_VERSION;
-  ok: boolean;
-  diagnostics: RuntimeDiagnostic[];
-  value?: T;
-}
-
-export interface MaterializeInput {
-  projectRoot: string;
-  runId: string;
-  copies?: MaterializeCopySelection[];
-  patches?: string[];
-  confirmed?: boolean;
-  dryRun?: boolean;
-  allowOverwrite?: boolean;
-}
-
-export interface MaterializedCopy extends MaterializeCopySelection {
-  size_bytes: number;
-  sha256: string;
-}
-
-export interface MaterializedPatch {
-  source: string;
-  size_bytes: number;
-  sha256: string;
-}
-
-export interface MaterializeValue {
-  run_id: string;
-  dry_run: boolean;
-  copied: MaterializeCopySelection[];
-  patches: string[];
-  audit: {
-    schema_version: typeof MATERIALIZE_AUDIT_SCHEMA_VERSION;
-    mode: "dry-run" | "unstaged-working-tree";
-    unstaged: true;
-    audit_path: string;
-    event_id?: string;
-    copies: MaterializedCopy[];
-    patches: MaterializedPatch[];
-  };
-}
+import type { MaterializeInput, MaterializeValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
+import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
 interface PlannedMaterialization {
   selection: MaterializeCopySelection;
@@ -84,9 +26,7 @@ interface PlannedMaterialization {
   sha256: string;
 }
 
-export async function materializeSelection(
-  input: MaterializeInput
-): Promise<MaterializeOperationResult<MaterializeValue>> {
+export async function materializeSelection(input: MaterializeInput): Promise<RuntimeResult<MaterializeValue>> {
   const projectRoot = path.resolve(input.projectRoot);
   try {
     assertNoSymlinkComponents(projectRoot, path.join(projectRoot, ".ultrafuzz"), "materialize generated root");
@@ -279,7 +219,7 @@ function resolveSource(selection: string, layout: RunLayout, diagnostics: Runtim
     );
     return undefined;
   }
-  if (!realPathInside(layout.root, sourcePath)) {
+  if (!isPathInside(fs.realpathSync.native(layout.root), fs.realpathSync.native(sourcePath))) {
     diagnostics.push(
       runtimeError(
         "MATERIALIZE_SOURCE_ESCAPE",
@@ -364,7 +304,7 @@ async function runsRootForProject(projectRoot: string): Promise<string> {
   return path.resolve(projectRoot, ".ultrafuzz", "runs");
 }
 
-function resolveRunLayout(runsRoot: string, runId: string): MaterializeOperationResult<RunLayout> {
+function resolveRunLayout(runsRoot: string, runId: string): RuntimeResult<RunLayout> {
   try {
     const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
     return runtimeResult(true, layout);
@@ -373,64 +313,4 @@ function resolveRunLayout(runsRoot: string, runId: string): MaterializeOperation
       runtimeError("RUN_ID_INVALID", `run ID ${runId} is not safe`, "materialize", runId, { error: String(error) })
     ]);
   }
-}
-
-function realPathInside(root: string, candidate: string): boolean {
-  const rootReal = fs.realpathSync.native(root);
-  const candidateReal = fs.realpathSync.native(candidate);
-  const relative = path.relative(rootReal, candidateReal);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function policyDiagnostics<T>(policy: PolicyResult<T>, source: string): RuntimeDiagnostic[] {
-  return policy.diagnostics.map((diagnostic: PolicyDiagnostic) => ({
-    code: diagnostic.code,
-    message: diagnostic.message,
-    severity: diagnostic.severity,
-    source,
-    ...(diagnostic.path ? { path: diagnostic.path } : {}),
-    ...(diagnostic.details ? { details: diagnostic.details } : {})
-  }));
-}
-
-function runtimeResult<T>(
-  ok: boolean,
-  value?: T,
-  diagnostics: RuntimeDiagnostic[] = []
-): MaterializeOperationResult<T> {
-  return {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    ok,
-    diagnostics,
-    ...(value !== undefined ? { value } : {})
-  };
-}
-
-function runtimeFailure<T>(diagnostics: RuntimeDiagnostic[]): MaterializeOperationResult<T> {
-  return {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    ok: false,
-    diagnostics
-  };
-}
-
-function runtimeError(
-  code: string,
-  message: string,
-  source: string,
-  pathValue?: string,
-  details?: Record<string, unknown>
-): RuntimeDiagnostic {
-  return {
-    code,
-    message,
-    severity: "error",
-    source,
-    ...(pathValue !== undefined ? { path: pathValue } : {}),
-    ...(details !== undefined ? { details } : {})
-  };
-}
-
-function hasRuntimeErrors(diagnostics: RuntimeDiagnostic[]): boolean {
-  return diagnostics.some((diagnostic) => diagnostic.severity === "error");
 }

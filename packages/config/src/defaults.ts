@@ -17,17 +17,13 @@ import type {
 } from "./types.js";
 
 export { CONFIG_FILE_NAME } from "./constants.js";
-export const CONFIG_SCHEMA_VERSION = "1.0";
 export const DEFAULT_MODEL_PROFILE_ID = "default";
 export const DEFAULT_AGENT = "CodexAgent";
 export const DEFAULT_CODEX_MODEL = "gpt-5.5";
-export const DEFAULT_DYNAMIC_STRATEGIES_ENUMERATOR = 3;
 export const DEFAULT_TRIAGE_QUORUM = 3;
 export const DEFAULT_TRIAGE_PANEL_SIZE = 4;
-export const DEFAULT_TIMEOUT_SECONDS = 1_800;
 export const MAX_TIMEOUT_SECONDS = 86_400;
 export const DEFAULT_EVAL_PROVIDER = "none";
-export const DEFAULT_EVAL_CONFIG_PATH = ".ultrafuzz/evals/bug-finding.yml";
 
 const DEFAULT_CONFIG = loadDefaultConfig();
 

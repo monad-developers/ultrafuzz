@@ -82,7 +82,7 @@ export function writeArtifactJson(layout: RunLayout, nodeId: string, relativePat
 export function writeArtifactManifest(input: WriteArtifactManifestInput): ArtifactManifest {
   const nodeId = validateSafeId(input.nodeId, "node ID");
   const nodeDir = getNodeArtifactDir(input.layout, nodeId, { create: true });
-  const provenance = normalizeProvenance(input.layout, nodeId, input.provenance);
+  const provenance = normalizeArtifactProvenance(input.layout, nodeId, input.provenance);
   const include = input.include?.map((entry) => normalizeSafeRelativePath(entry));
   const includeSet = include === undefined ? undefined : new Set(include);
   const files = listSafeFiles(nodeDir, {
@@ -158,8 +158,8 @@ export function buildRunArtifactIndex(layout: RunLayout): RunArtifactIndex {
   return { schema_version: ARTIFACT_MANIFEST_SCHEMA_VERSION, run_id: layout.runId, artifacts };
 }
 
-function normalizeProvenance(
-  layout: RunLayout,
+export function normalizeArtifactProvenance(
+  layout: Pick<RunLayout, "runId">,
   nodeId: string,
   provenance: Partial<ArtifactProvenance> | undefined
 ): ArtifactProvenance {

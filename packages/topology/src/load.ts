@@ -13,16 +13,8 @@ export interface LoadTopologyOptions extends TopologyValidationOptions {
   validate?: boolean;
 }
 
-export function topologyPath(projectRoot: string): string {
-  return path.join(projectRoot, PROJECT_TOPOLOGY_FILE);
-}
-
-export function legacyTopologyPath(projectRoot: string): string {
-  return topologyPath(projectRoot);
-}
-
 export function resolveTopologyPath(projectRoot: string): string {
-  return topologyPath(projectRoot);
+  return path.join(projectRoot, PROJECT_TOPOLOGY_FILE);
 }
 
 export function loadTopology(projectRoot: string, options: LoadTopologyOptions = {}): ProjectTopology {
