@@ -31,7 +31,7 @@ import {
   type SyncRunInput,
   type SyncRunValue
 } from "./types.js";
-import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
 
@@ -1425,13 +1425,6 @@ function errorLooksLikeTimeout(value: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readJsonIfExists<T = unknown>(filePath: string): T | undefined {
-  if (!fs.existsSync(filePath)) {
-    return undefined;
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
 }
 
 function uniqueStrings(values: string[]): string[] {

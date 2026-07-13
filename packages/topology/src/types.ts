@@ -4,7 +4,6 @@ export const PROJECT_TOPOLOGY_FILE = ".ultrafuzz/topology.yml";
 export const PROJECT_PROMPT_DIR = ".ultrafuzz/prompts";
 export const START_NODE_ID = "__start__";
 export const FINISH_NODE_ID = "__finish__";
-export const DEFAULT_STRATEGY_LOOPS = 3;
 export const MAX_LOOPS = 256;
 export const MAX_TOPOLOGY_NODES = 4096;
 export const MAX_EXPANDED_TOPOLOGY_NODES = 4096;

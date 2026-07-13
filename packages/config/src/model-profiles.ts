@@ -85,10 +85,6 @@ export function validProfileId(id: string): boolean {
   return profileIdSchema.safeParse(id).success;
 }
 
-export function isSafeAgentRef(value: string): boolean {
-  return safeAgentRefSchema.safeParse(value).success;
-}
-
 function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {
   const parsed = schema.safeParse(value);
   return parsed.success ? [] : parsed.error.issues;

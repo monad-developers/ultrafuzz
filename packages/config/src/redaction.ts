@@ -3,7 +3,6 @@ import { serializeResolvedConfigToml } from "./resolve.js";
 import {
   SENSITIVE_REDACTION_PLACEHOLDER,
   hasRedactionPlaceholder,
-  isSensitiveKeyName as sharedSensitiveKeyName,
   isSensitiveSecretValue,
   redactSecretsInText
 } from "@ultrafuzz/security";
@@ -71,7 +70,7 @@ export function restoreRedactedConfig(
 
   for (const entry of manifest.entries) {
     const currentValue = getPath(currentConfig, entry.path);
-    if (typeof currentValue !== "string" || currentValue.length === 0 || isRedactionPlaceholder(currentValue)) {
+    if (typeof currentValue !== "string" || currentValue.length === 0 || hasRedactionPlaceholder(currentValue)) {
       diagnostics.push(
         diagnostic(
           "CONFIG_REDACTION_RESTORE_MISSING",
@@ -95,7 +94,7 @@ export function restoreRedactedConfig(
 export function assertNoRedactionPlaceholders(config: ResolvedConfig): ConfigResult<void> {
   const diagnostics: ConfigDiagnostic[] = [];
   visitStrings(config, [], (path, value) => {
-    if (isRedactionPlaceholder(value)) {
+    if (hasRedactionPlaceholder(value)) {
       diagnostics.push(
         diagnostic(
           "CONFIG_REDACTION_PLACEHOLDER_PRESENT",
@@ -112,20 +111,8 @@ export function assertNoRedactionPlaceholders(config: ResolvedConfig): ConfigRes
 export function redactDiagnostics(diagnostics: ConfigDiagnostic[]): ConfigDiagnostic[] {
   return diagnostics.map((entry) => ({
     ...entry,
-    message: redactSensitiveText(entry.message)
+    message: redactSecretsInText(entry.message)
   }));
-}
-
-export function isSensitiveKeyName(key: string): boolean {
-  return sharedSensitiveKeyName(key);
-}
-
-export function isSensitiveValue(value: string): boolean {
-  return isSensitiveSecretValue(value);
-}
-
-export function isRedactionPlaceholder(value: string): boolean {
-  return hasRedactionPlaceholder(value);
 }
 
 function redactSensitiveScalar<T extends object, K extends keyof T>(
@@ -135,7 +122,7 @@ function redactSensitiveScalar<T extends object, K extends keyof T>(
   entries: RedactionEntry[]
 ): void {
   const value = object[key];
-  if (typeof value === "string" && isSensitiveValue(value)) {
+  if (typeof value === "string" && isSensitiveSecretValue(value)) {
     (object as Record<string, unknown>)[String(key)] = REDACTION_PLACEHOLDER;
     entries.push({
       path,
@@ -199,10 +186,6 @@ function setPath(value: unknown, path: string[], nextValue: string): void {
   } else {
     current[last] = nextValue;
   }
-}
-
-function redactSensitiveText(value: string): string {
-  return redactSecretsInText(value);
 }
 
 function formatPath(path: string[]): string {

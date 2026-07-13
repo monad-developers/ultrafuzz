@@ -24,13 +24,6 @@ export function validateTriageConfig(triage: TriageConfig, path: string[] = ["tr
   return parsed.error.issues.map((issue) => triageConfigDiagnostic(issue, triage, path));
 }
 
-export function hasTriageQuorum(agreeingVotes: number, triage: TriageConfig): boolean {
-  if (validateTriageConfig(triage).length > 0) {
-    return false;
-  }
-  return agreeingVotes >= triage.quorum;
-}
-
 function triageConfigDiagnostic(issue: ZodIssue, triage: TriageConfig, path: string[]): ConfigDiagnostic {
   const code = triageConfigDiagnosticCode(issue);
   return diagnostic(
