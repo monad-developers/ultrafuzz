@@ -89,6 +89,18 @@ const PREVIEW_RUN_ID = "preview";
 const SESSION_HEADER = "x-ultrafuzz-session";
 const MAX_COMMAND_JOBS = 20;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
+const DASHBOARD_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'sha256-sxjPbOwKV2KzjQNlmuC9Xyek+yJwbm86RQmLljrGyXI='",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "object-src 'none'"
+].join("; ");
+const API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
 
 const SUPPORTED_COMMANDS = new Set([
   "validate",
@@ -350,12 +362,12 @@ class DashboardApp {
 
   async handleStatic(_request: http.IncomingMessage, response: http.ServerResponse, url: URL): Promise<void> {
     if (url.pathname === "/") {
-      response.writeHead(302, { location: "/dashboard" });
+      response.writeHead(302, { location: "/dashboard", ...securityHeaders("document") });
       response.end();
       return;
     }
     if (url.pathname === "/run" || url.pathname === "/graph" || url.pathname === "/nodes") {
-      response.writeHead(302, { location: "/dashboard" });
+      response.writeHead(302, { location: "/dashboard", ...securityHeaders("document") });
       response.end();
       return;
     }
@@ -1617,7 +1629,8 @@ function sendJson(response: http.ServerResponse, value: unknown, status = 200): 
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
-    "content-length": Buffer.byteLength(body)
+    "content-length": Buffer.byteLength(body),
+    ...securityHeaders("api")
   });
   response.end(body);
 }
@@ -1628,7 +1641,7 @@ function sendError(response: http.ServerResponse, error: unknown): void {
 }
 
 async function sendStaticAsset(response: http.ServerResponse, relativePath: string): Promise<void> {
-  const publicRoot = fileURLToPath(new URL("../public/", import.meta.url));
+  const publicRoot = fileURLToPath(new URL("./public/", import.meta.url));
   const normalized = relativePath.replace(/^\/+/u, "");
   if (normalized.includes("..") || normalized.includes("\\")) {
     throw new HttpError(400, "invalid dashboard asset path");
@@ -1639,9 +1652,16 @@ async function sendStaticAsset(response: http.ServerResponse, relativePath: stri
     throw new HttpError(404, "dashboard asset not found");
   }
   const extension = path.extname(filePath);
+  const cacheControl =
+    extension === ".html"
+      ? "no-store"
+      : /\.[a-f0-9]{8,}\./u.test(path.basename(filePath))
+        ? "public, max-age=31536000, immutable"
+        : "no-cache";
   response.writeHead(200, {
     "content-type": CONTENT_TYPES[extension] ?? "application/octet-stream",
-    "cache-control": extension === ".html" ? "no-store" : "public, max-age=31536000, immutable"
+    "cache-control": cacheControl,
+    ...securityHeaders("document")
   });
   fs.createReadStream(filePath).pipe(response);
 }
@@ -1651,9 +1671,19 @@ function startSse(response: http.ServerResponse): void {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-store",
     connection: "keep-alive",
-    "x-accel-buffering": "no"
+    "x-accel-buffering": "no",
+    ...securityHeaders("api")
   });
   response.write(": connected\n\n");
+}
+
+function securityHeaders(kind: "document" | "api"): Record<string, string> {
+  return {
+    "content-security-policy": kind === "document" ? DASHBOARD_CSP : API_CSP,
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY"
+  };
 }
 
 function writeSse(response: http.ServerResponse, event: string, data: unknown): void {

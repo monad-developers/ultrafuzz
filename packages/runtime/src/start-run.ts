@@ -5,8 +5,12 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  assertRegularFileInside,
   layoutForRunRoot,
+  normalizeSafeRelativePath,
   readRunState,
+  safeResolveInside,
+  sha256File,
   updateRunStatus,
   validateSafeId,
   writeJsonDurable,
@@ -27,6 +31,7 @@ import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   runSmithersLifecycleCommand,
+  smithersWorkflowRoot,
   smithersDiagnostic,
   submitSmithersWorkflow,
   type CompiledSmithersWorkflow
@@ -45,6 +50,7 @@ export async function startRun(input: StartRunInput) {
     graph: plan.expanded_graph,
     runLayout: plan.layout,
     projectRoot: plan.validation.project_root,
+    env: input.env,
     workflowName: `ultrafuzz-${plan.run_id}`,
     renderedPrompts: plan.rendered_prompts,
     operatorPrompt: input.prompt,
@@ -134,7 +140,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     ]);
   }
 
-  const evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
+  const evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId, input.env);
   if (!evidence.ok) {
     return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);
   }
@@ -204,7 +210,8 @@ function persistSmithersEvidence(layout: RunLayout, graph: PlannedGraph, compile
     workflow: {
       run_id: compiled.smithersRunId,
       name: compiled.workflowName,
-      path: path.relative(compiled.projectRoot, compiled.workflowPath).split(path.sep).join("/"),
+      path: path.basename(compiled.workflowPath),
+      sha256: sha256File(compiled.workflowPath),
       evidence_path: path.relative(layout.root, compiled.evidenceWorkflowPath).split(path.sep).join("/"),
       input_path: path.relative(layout.root, compiled.inputPath),
       task_node_ids: compiled.tasks.map((task) => task.smithersNodeId)
@@ -225,7 +232,8 @@ function persistSmithersEvidence(layout: RunLayout, graph: PlannedGraph, compile
 
 export async function readLinkedWorkflowEvidence(
   projectRoot: string,
-  runId: string
+  runId: string,
+  env?: Record<string, string | undefined>
 ): Promise<
   | { ok: true; smithersRunId: string; workflowPath: string; layout: RunLayout }
   | { ok: false; diagnostics: RuntimeDiagnostic[] }
@@ -269,7 +277,13 @@ export async function readLinkedWorkflowEvidence(
     };
   }
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
-    workflow?: { run_id?: unknown; workflowRunId?: unknown; path?: unknown; workflowPath?: unknown };
+    workflow?: {
+      run_id?: unknown;
+      workflowRunId?: unknown;
+      path?: unknown;
+      workflowPath?: unknown;
+      sha256?: unknown;
+    };
     smithers?: { workflowRunId?: unknown; workflowPath?: unknown };
   };
   const smithersRunId =
@@ -288,18 +302,21 @@ export async function readLinkedWorkflowEvidence(
       ]
     };
   }
-  const workflowPath = resolveStoredWorkflowPath(
-    projectRoot,
-    path.dirname(metadataPath),
-    metadata.workflow?.path ?? metadata.workflow?.workflowPath ?? metadata.smithers?.workflowPath
-  );
-  if (workflowPath === undefined) {
+  let workflowPath: string;
+  try {
+    workflowPath = resolveStoredWorkflowPath(
+      projectRoot,
+      metadata.workflow?.path ?? metadata.workflow?.workflowPath ?? metadata.smithers?.workflowPath,
+      metadata.workflow?.sha256,
+      env
+    );
+  } catch (error) {
     return {
       ok: false,
       diagnostics: [
         {
-          code: "WORKFLOW_PATH_MISSING",
-          message: `run ${runId} is not linked to a workflow path`,
+          code: "WORKFLOW_PATH_INVALID",
+          message: error instanceof Error ? error.message : String(error),
           severity: "error",
           source: "workflow",
           path: metadataPath
@@ -340,16 +357,27 @@ function objectRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function resolveStoredWorkflowPath(projectRoot: string, runRoot: string, value: unknown): string | undefined {
+function resolveStoredWorkflowPath(
+  projectRoot: string,
+  value: unknown,
+  expectedSha256: unknown,
+  env: Record<string, string | undefined> | undefined
+): string {
   if (typeof value !== "string" || value.length === 0) {
-    return undefined;
+    throw new Error("stored workflow path is missing");
   }
-  if (path.isAbsolute(value)) {
-    return value;
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    throw new Error("stored workflow path must be relative");
   }
-  const projectRelative = path.resolve(projectRoot, value);
-  if (fs.existsSync(projectRelative)) {
-    return projectRelative;
+  if (typeof expectedSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(expectedSha256)) {
+    throw new Error("stored workflow digest is missing or invalid");
   }
-  return path.resolve(runRoot, value);
+  const workflowRoot = smithersWorkflowRoot(projectRoot, env);
+  const relativePath = normalizeSafeRelativePath(value, "stored workflow path");
+  const workflowPath = safeResolveInside(workflowRoot, relativePath, "stored workflow path");
+  assertRegularFileInside(workflowRoot, workflowPath, "stored workflow");
+  if (sha256File(workflowPath) !== expectedSha256) {
+    throw new Error("stored workflow digest does not match the compiled workflow");
+  }
+  return workflowPath;
 }

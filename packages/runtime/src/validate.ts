@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import { loadProjectConfig, redactDiagnostics, resolveConfig, type ResolvedConfig } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
@@ -12,6 +13,7 @@ import type {
   ValidateProjectInput,
   ValidateProjectResult
 } from "./types.js";
+import { loadRuntimeTemplate } from "./runtime-template.js";
 import {
   configDiagnostics,
   diagnosticFromError,
@@ -212,7 +214,7 @@ function evaluatePolicies(
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config);
+  const agentRegistry = validateAgentReferences(projectRoot, config, _env);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -226,31 +228,49 @@ function evaluatePolicies(
   };
 }
 
-function validateAgentReferences(projectRoot: string, config: ResolvedConfig): RuntimeDiagnostic[] {
+function validateAgentReferences(
+  projectRoot: string,
+  config: ResolvedConfig,
+  env: Record<string, string | undefined>
+): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   const agentRefs = new Set(Object.values(config.models.profiles).map((profile) => profile.agent));
-  const candidates = [
-    path.join(projectRoot, ".smithers", "agents.ts"),
-    path.join(projectRoot, ".smithers", "agents", "index.ts")
-  ];
-  const existing = candidates.filter((candidate) => fs.existsSync(candidate));
-  if (existing.length === 0) {
+  let registryText: string;
+  try {
+    if (env.ULTRAFUZZ_ALLOW_PROJECT_AGENT_CODE === "1") {
+      const candidates = [
+        path.join(projectRoot, ".smithers", "agents.ts"),
+        path.join(projectRoot, ".smithers", "agents", "index.ts")
+      ];
+      const existing = candidates.filter((candidate) => fs.existsSync(candidate));
+      if (existing.length === 0) {
+        throw new Error("project agent registry is missing");
+      }
+      registryText = existing
+        .map((candidate) => {
+          assertRegularFileInside(projectRoot, candidate, "project agent registry");
+          return fs.readFileSync(candidate, "utf8");
+        })
+        .join("\n");
+    } else {
+      registryText = loadRuntimeTemplate("smithers/agents/index.tsx");
+    }
+  } catch (error) {
     return [
       {
         code: "AGENT_REGISTRY_MISSING",
-        message: "project agent registry is missing; rerun ultrafuzz init to restore it",
+        message: error instanceof Error ? error.message : String(error),
         severity: "error",
         source: "agents",
         path: "agent registry"
       }
     ];
   }
-  const registryText = existing.map((candidate) => fs.readFileSync(candidate, "utf8")).join("\n");
   for (const agentRef of [...agentRefs].sort()) {
     if (!agentRefExported(registryText, agentRef)) {
       diagnostics.push({
         code: "AGENT_REFERENCE_UNKNOWN",
-        message: `agent reference ${agentRef} is not exported by the project agent registry`,
+        message: `agent reference ${agentRef} is not exported by the available agent registry`,
         severity: "error",
         source: "agents",
         path: "agent registry"

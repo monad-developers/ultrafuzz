@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -125,6 +126,48 @@ test("API requests reject non-loopback host headers", async () => {
     assert.equal(status, 403);
   } finally {
     await handle.close();
+  }
+});
+
+test("dashboard responses include restrictive browser security headers", async () => {
+  const projectRoot = makeProject();
+  const testPublicRoot = path.join(process.cwd(), "dist-test", "src", "public");
+  fs.cpSync(path.join(process.cwd(), "dist", "public"), testPublicRoot, { recursive: true });
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const documentResponse = await fetch(handle.url);
+    assert.equal(documentResponse.status, 200);
+    const documentBody = await documentResponse.text();
+    const csp = documentResponse.headers.get("content-security-policy") ?? "";
+    const inlineScript = /<script>([\s\S]*?)<\/script>/u.exec(documentBody)?.[1];
+    assert.ok(inlineScript);
+    const inlineHash = crypto.createHash("sha256").update(inlineScript).digest("base64");
+    const scriptPolicy = csp.split(";").find((directive) => directive.trim().startsWith("script-src")) ?? "";
+    assert.match(scriptPolicy, /script-src 'self'/u);
+    assert.ok(scriptPolicy.includes(`'sha256-${inlineHash}'`));
+    assert.doesNotMatch(scriptPolicy, /'unsafe-inline'/u);
+    assert.match(csp, /frame-ancestors 'none'/u);
+    assert.equal(documentResponse.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(documentResponse.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(documentResponse.headers.get("x-frame-options"), "DENY");
+
+    const scriptSource = /<script[^>]+src="([^"]+)"/u.exec(documentBody)?.[1];
+    assert.ok(scriptSource);
+    const scriptResponse = await fetch(new URL(scriptSource, handle.url));
+    assert.equal(scriptResponse.status, 200);
+    assert.equal(scriptResponse.headers.get("cache-control"), "no-cache");
+    await scriptResponse.body?.cancel();
+
+    const apiResponse = await fetch(apiUrl(handle.url, "/api/session"));
+    assert.equal(apiResponse.status, 200);
+    assert.equal(
+      apiResponse.headers.get("content-security-policy"),
+      "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+    );
+    assert.equal(apiResponse.headers.get("x-content-type-options"), "nosniff");
+  } finally {
+    await handle.close();
+    fs.rmSync(testPublicRoot, { recursive: true, force: true });
   }
 });
 

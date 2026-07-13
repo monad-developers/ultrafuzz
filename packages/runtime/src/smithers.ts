@@ -1,10 +1,14 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import {
   assertNoSymlinkComponents,
+  assertRegularFileInside,
+  ensureSafeDirectory,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
   writeFileDurable,
@@ -15,11 +19,15 @@ import type { ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
-import { renderRuntimeTemplate } from "./runtime-template.js";
+import { loadRuntimeTemplate, renderRuntimeTemplate } from "./runtime-template.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const SMITHERS_ORCHESTRATOR_VERSION = "0.27.0";
+const SMITHERS_ZOD_VERSION = "4.4.3";
+const SMITHERS_TYPESCRIPT_VERSION = "6.0.3";
+const SMITHERS_CACHE_LAYOUT_VERSION = "v1";
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
@@ -30,6 +38,7 @@ export interface SmithersCompileInput {
   graph: ExpandedGraph;
   runLayout: RunLayout;
   projectRoot?: string;
+  env?: Record<string, string | undefined>;
   workflowName?: string;
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
@@ -197,12 +206,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
-  const workflowPath = path.join(
-    projectRoot,
-    ".smithers",
-    "workflows",
-    `${workflowFileStem(input.runLayout.runId)}.tsx`
-  );
+  const workflowRoot = smithersWorkflowRoot(projectRoot, input.env);
+  const workflowPath = path.join(workflowRoot, `${workflowFileStem(input.runLayout.runId)}.tsx`);
   const inputPath = path.join(smithersDir, "input.json");
   const tasksPath = path.join(smithersDir, "tasks.json");
   const logsDir = path.join(smithersDir, "logs");
@@ -236,7 +241,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
     }))
   });
-  writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
+  writeTrustedAgentRegistry(projectRoot, input.runLayout.runId, input.env);
+  writeExecutableWorkflow(workflowRoot, workflowPath, renderWorkflowSource(compiled));
   writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
   return compiled;
 }
@@ -505,40 +511,60 @@ async function ensureSmithersDependencies(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined
 ): Promise<void> {
-  if (explicitSmithersExecutable(env) !== undefined) {
+  const explicit = explicitSmithersExecutable(env);
+  if (explicit !== undefined) {
+    verifyExplicitSmithersExecutable(explicit);
     return;
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
-    return;
-  }
-  const packageRoot = path.join(projectRoot, ".smithers");
+  const packageRoot = smithersPackageRoot(projectRoot, env);
+  ensureSafeDirectory(packageRoot);
   const packageJson = path.join(packageRoot, "package.json");
-  if (!fs.existsSync(packageJson)) {
+  const expectedManifest = renderSmithersPackageJson();
+  if (trustedSmithersInstallation(packageRoot, expectedManifest) !== undefined) {
     return;
   }
-  assertNoSymlinkComponents(projectRoot, packageRoot, "Smithers package");
-  assertNoSymlinkComponents(projectRoot, packageJson, "Smithers package manifest");
-  await execFileAsync("npm", ["install", "--prefix", packageRoot, "--no-audit", "--no-fund", "--loglevel=error"], {
-    cwd: projectRoot,
-    env: smithersCommandEnv(projectRoot, env),
-    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
-  });
-  if (!fs.existsSync(local)) {
-    throw new Error("Smithers dependency install completed without creating the local workflow runner binary");
+
+  const nodeModules = path.join(packageRoot, "node_modules");
+  if (fs.existsSync(nodeModules)) {
+    assertNoSymlinkComponents(packageRoot, nodeModules, "workflow runtime dependencies");
+    fs.rmSync(nodeModules, { recursive: true, force: true });
+  }
+  assertNoSymlinkComponents(packageRoot, packageJson, "workflow runtime package manifest");
+  writeFileDurable(packageJson, expectedManifest);
+  await execFileAsync(
+    "npm",
+    [
+      "install",
+      "--prefix",
+      packageRoot,
+      "--ignore-scripts",
+      "--package-lock=false",
+      "--no-audit",
+      "--no-fund",
+      "--loglevel=error"
+    ],
+    {
+      cwd: packageRoot,
+      env: smithersCommandEnv(projectRoot, env),
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+    }
+  );
+  if (trustedSmithersInstallation(packageRoot, expectedManifest) === undefined) {
+    throw new Error("workflow runtime dependency install did not produce the expected runner");
   }
 }
 
 function smithersExecutable(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
   const explicit = explicitSmithersExecutable(env);
   if (explicit !== undefined) {
-    return explicit;
+    return verifyExplicitSmithersExecutable(explicit);
   }
-  const local = localSmithersExecutable(projectRoot);
-  if (fs.existsSync(local)) {
-    return local;
+  const packageRoot = smithersPackageRoot(projectRoot, env);
+  const executable = trustedSmithersInstallation(packageRoot, renderSmithersPackageJson());
+  if (executable === undefined) {
+    throw new Error("trusted workflow runner is not installed");
   }
-  return "smithers";
+  return executable;
 }
 
 function explicitSmithersExecutable(env: Record<string, string | undefined> | undefined): string | undefined {
@@ -546,8 +572,19 @@ function explicitSmithersExecutable(env: Record<string, string | undefined> | un
   return explicit && explicit.trim().length > 0 ? explicit : undefined;
 }
 
-function localSmithersExecutable(projectRoot: string): string {
-  return path.join(projectRoot, ".smithers", "node_modules", ".bin", smithersBinaryName());
+function verifyExplicitSmithersExecutable(value: string): string {
+  if (!path.isAbsolute(value)) {
+    throw new Error("SMITHERS_BIN must be an absolute path to a regular executable file");
+  }
+  const executable = path.resolve(value);
+  const stat = fs.lstatSync(executable);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("SMITHERS_BIN must reference a regular file and cannot be a symlink");
+  }
+  if (process.platform !== "win32") {
+    fs.accessSync(executable, fs.constants.X_OK);
+  }
+  return executable;
 }
 
 function smithersCommandEnv(
@@ -555,15 +592,172 @@ function smithersCommandEnv(
   env: Record<string, string | undefined> | undefined
 ): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
-  const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  merged.PATH = [localBin, merged.PATH]
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-    .join(path.delimiter);
+  if (explicitSmithersExecutable(env) === undefined) {
+    const trustedBin = path.join(smithersPackageRoot(projectRoot, env), "node_modules", ".bin");
+    merged.PATH = [trustedBin, merged.PATH]
+      .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+      .join(path.delimiter);
+  }
   return merged;
 }
 
-function smithersBinaryName(): string {
-  return process.platform === "win32" ? "smithers.cmd" : "smithers";
+function trustedSmithersInstallation(packageRoot: string, expectedManifest: string): string | undefined {
+  const packageJson = path.join(packageRoot, "package.json");
+  try {
+    assertRegularFileInside(packageRoot, packageJson, "workflow runtime package manifest");
+    if (fs.readFileSync(packageJson, "utf8") !== expectedManifest) {
+      return undefined;
+    }
+    const dependencyRoot = path.join(packageRoot, "node_modules", "smithers-orchestrator");
+    const dependencyManifestPath = path.join(dependencyRoot, "package.json");
+    assertRegularFileInside(packageRoot, dependencyManifestPath, "workflow runner package manifest");
+    const dependencyManifest = JSON.parse(fs.readFileSync(dependencyManifestPath, "utf8")) as {
+      version?: unknown;
+      bin?: unknown;
+    };
+    if (dependencyManifest.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+      return undefined;
+    }
+    const bin =
+      typeof dependencyManifest.bin === "string"
+        ? dependencyManifest.bin
+        : dependencyManifest.bin !== null && typeof dependencyManifest.bin === "object"
+          ? (dependencyManifest.bin as Record<string, unknown>).smithers
+          : undefined;
+    if (typeof bin !== "string" || bin.length === 0 || path.isAbsolute(bin)) {
+      return undefined;
+    }
+    const executable = path.resolve(dependencyRoot, bin);
+    assertRegularFileInside(dependencyRoot, executable, "workflow runner executable");
+    if (process.platform !== "win32") {
+      fs.accessSync(executable, fs.constants.X_OK);
+    }
+    return executable;
+  } catch {
+    return undefined;
+  }
+}
+
+function renderSmithersPackageJson(): string {
+  return `${JSON.stringify(
+    {
+      name: "ultrafuzz-workflow-runtime",
+      private: true,
+      type: "module",
+      dependencies: {
+        "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+        zod: SMITHERS_ZOD_VERSION
+      },
+      devDependencies: {
+        typescript: SMITHERS_TYPESCRIPT_VERSION
+      }
+    },
+    null,
+    2
+  )}\n`;
+}
+
+function smithersPackageRoot(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const configuredCacheHome = env?.XDG_CACHE_HOME ?? process.env.XDG_CACHE_HOME;
+  const cacheHome =
+    configuredCacheHome === undefined || configuredCacheHome.trim().length === 0
+      ? path.join(os.homedir(), ".cache")
+      : configuredCacheHome;
+  if (!path.isAbsolute(cacheHome)) {
+    throw new Error("XDG_CACHE_HOME must be an absolute path");
+  }
+  const packageRoot = path.join(
+    path.resolve(cacheHome),
+    "ultrafuzz",
+    "workflow-runtime",
+    `${SMITHERS_CACHE_LAYOUT_VERSION}-${SMITHERS_ORCHESTRATOR_VERSION}`
+  );
+  assertSeparateRoots(path.resolve(projectRoot), packageRoot);
+  return packageRoot;
+}
+
+function trustedSmithersProjectRoot(projectRoot: string, env: Record<string, string | undefined> | undefined): string {
+  const resolvedProjectRoot = fs.realpathSync.native(path.resolve(projectRoot));
+  const projectKey = crypto.createHash("sha256").update(resolvedProjectRoot).digest("hex");
+  return path.join(smithersPackageRoot(resolvedProjectRoot, env), "projects", projectKey);
+}
+
+export function smithersWorkflowRoot(projectRoot: string, env?: Record<string, string | undefined>): string {
+  return path.join(trustedSmithersProjectRoot(projectRoot, env), "workflows");
+}
+
+function writeTrustedAgentRegistry(
+  projectRoot: string,
+  runId: string,
+  env: Record<string, string | undefined> | undefined
+): void {
+  const packageRoot = smithersPackageRoot(projectRoot, env);
+  const projectRuntimeRoot = trustedSmithersProjectRoot(projectRoot, env);
+  const relativeProjectRoot = path.relative(packageRoot, projectRuntimeRoot).split(path.sep).join("/");
+  const agentSnapshot = workflowFileStem(runId);
+  const agentRoot = path.join(projectRuntimeRoot, "agents", agentSnapshot);
+  if (fs.existsSync(agentRoot)) {
+    assertNoSymlinkComponents(packageRoot, agentRoot, "workflow agent adapters");
+    fs.rmSync(agentRoot, { recursive: true, force: true });
+  }
+  ensureSafeDirectory(packageRoot, `${relativeProjectRoot}/agents/${agentSnapshot}`);
+  ensureSafeDirectory(packageRoot, `${relativeProjectRoot}/workflows`);
+  if (env?.ULTRAFUZZ_ALLOW_PROJECT_AGENT_CODE === "1") {
+    copyProjectAgentRegistry(projectRoot, packageRoot, agentRoot);
+    return;
+  }
+  for (const [name, template] of [
+    ["index.ts", "smithers/agents/index.tsx"],
+    ["codex.ts", "smithers/agents/codex.tsx"]
+  ] as const) {
+    const filePath = path.join(agentRoot, name);
+    assertNoSymlinkComponents(packageRoot, filePath, `workflow agent adapter ${name}`);
+    writeFileDurable(filePath, loadRuntimeTemplate(template));
+  }
+}
+
+function copyProjectAgentRegistry(projectRoot: string, packageRoot: string, destinationRoot: string): void {
+  const sourceRoot = path.join(projectRoot, ".smithers", "agents");
+  assertNoSymlinkComponents(projectRoot, sourceRoot, "project agent registry");
+  if (!fs.existsSync(sourceRoot) || !fs.lstatSync(sourceRoot).isDirectory()) {
+    throw new Error("project agent registry must be a regular directory");
+  }
+
+  const copyDirectory = (sourceDirectory: string, destinationDirectory: string): void => {
+    for (const entry of fs.readdirSync(sourceDirectory, { withFileTypes: true })) {
+      const sourcePath = path.join(sourceDirectory, entry.name);
+      const destinationPath = path.join(destinationDirectory, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`project agent registry cannot contain symlinks: ${sourcePath}`);
+      }
+      if (entry.isDirectory()) {
+        assertNoSymlinkComponents(packageRoot, destinationPath, "workflow agent adapter directory");
+        fs.mkdirSync(destinationPath);
+        copyDirectory(sourcePath, destinationPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        throw new Error(`project agent registry contains a non-regular file: ${sourcePath}`);
+      }
+      assertRegularFileInside(sourceRoot, sourcePath, "project agent module");
+      assertNoSymlinkComponents(packageRoot, destinationPath, "workflow agent adapter");
+      writeFileDurable(destinationPath, fs.readFileSync(sourcePath));
+    }
+  };
+
+  copyDirectory(sourceRoot, destinationRoot);
+  assertRegularFileInside(destinationRoot, path.join(destinationRoot, "index.ts"), "project agent registry");
+}
+
+function assertSeparateRoots(left: string, right: string): void {
+  if (pathIsInside(left, right) || pathIsInside(right, left)) {
+    throw new Error("workflow runtime cache must be outside the target project");
+  }
+}
+
+function pathIsInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function compileTask(input: {
@@ -720,10 +914,10 @@ function workflowFileStem(runId: string): string {
   return `ultrafuzz-${runId.replace(/[^A-Za-z0-9._-]/gu, "-")}`;
 }
 
-function writeExecutableWorkflow(projectRoot: string, workflowPath: string, source: string): void {
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
+function writeExecutableWorkflow(workflowRoot: string, workflowPath: string, source: string): void {
+  assertNoSymlinkComponents(workflowRoot, workflowPath, "Smithers workflow");
   fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
+  assertNoSymlinkComponents(workflowRoot, workflowPath, "Smithers workflow");
   writeFileDurable(workflowPath, source);
 }
 
@@ -789,6 +983,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     2
   );
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
+    __ULTRAFUZZ_AGENT_IMPORT__: `../agents/${workflowFileStem(compiled.runId)}`,
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)

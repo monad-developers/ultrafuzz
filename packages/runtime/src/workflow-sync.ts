@@ -199,7 +199,7 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
 
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, input.env);
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }

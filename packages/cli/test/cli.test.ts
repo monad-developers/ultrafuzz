@@ -38,7 +38,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    XDG_CACHE_HOME: `${project}-operator-cache`
   };
 }
 

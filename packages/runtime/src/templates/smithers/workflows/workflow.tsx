@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
-import * as projectAgents from "../agents";
+import * as projectAgents from "__ULTRAFUZZ_AGENT_IMPORT__";
 
 const inputTaskSchema = z.object({
   id: z.string(),

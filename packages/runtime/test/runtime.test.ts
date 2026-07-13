@@ -26,7 +26,7 @@ function tempProject(): string {
 }
 
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = `${project}-operator-bin`;
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -49,7 +49,8 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    XDG_CACHE_HOME: testCacheHome(project)
   };
 }
 
@@ -57,7 +58,7 @@ function fakeLifecycleSmithersEnv(
   project: string,
   input: { inspect: unknown; events?: string }
 ): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
+  const binDir = `${project}-operator-bin`;
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
@@ -92,8 +93,17 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
-    SMITHERS_FAKE_EVENTS: eventsPath
+    SMITHERS_FAKE_EVENTS: eventsPath,
+    XDG_CACHE_HOME: testCacheHome(project)
   };
+}
+
+function testCacheHome(project: string): string {
+  return `${project}-operator-cache`;
+}
+
+function allowProjectAgentCode(env: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  return { ...env, ULTRAFUZZ_ALLOW_PROJECT_AGENT_CODE: "1" };
 }
 
 function workflowInspect(input: {
@@ -441,7 +451,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "^0.27.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.27.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -480,6 +490,32 @@ test("validate rejects unknown agent references before launch", async () => {
   });
   assert.equal(run.ok, false);
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+});
+
+test("startRun uses packaged agent adapters instead of project-owned executable modules", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const marker = "TARGET_AGENT_MODULE_MARKER";
+  fs.writeFileSync(
+    path.join(project, ".smithers", "agents", "index.ts"),
+    `throw new Error(${JSON.stringify(marker)});\n// CodexAgent\n`,
+    "utf8"
+  );
+  const env = fakeSmithersEnv(project);
+
+  const validation = await validateProject({ projectRoot: project, env });
+  assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
+  const run = await startRun({ projectRoot: project, runId: "packaged-agent", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const { smithersWorkflowRoot } = await import("../src/smithers.js");
+  const cachedRegistry = fs.readFileSync(
+    path.resolve(smithersWorkflowRoot(project, env), "../agents/ultrafuzz-packaged-agent/index.ts"),
+    "utf8"
+  );
+  assert.doesNotMatch(cachedRegistry, new RegExp(marker));
+  assert.match(cachedRegistry, /export \{ CodexAgent \}/);
 });
 
 test("init and run layout reject symlinked project-owned roots before writes", async () => {
@@ -578,7 +614,11 @@ test("plan renders prompt variables against attempt artifact directories for mod
   const project = tempProject();
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "fanout-prompts", env: {} });
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "fanout-prompts",
+    env: allowProjectAgentCode()
+  });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const setupFast = plan.value!.rendered_prompts.find(
@@ -607,11 +647,12 @@ test("compileSmithersWorkflow emits native task dependencies without synthetic l
   const project = tempProject();
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "native-deps", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "native-deps", env: allowProjectAgentCode() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
+    env: allowProjectAgentCode({ XDG_CACHE_HOME: testCacheHome(project) }),
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
@@ -650,13 +691,14 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
   const project = tempProject();
   writeFanoutProject(project);
 
-  const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
+  const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: allowProjectAgentCode() });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const quotedProjectRoot = path.join(project, 'checkout"quoted');
   fs.mkdirSync(quotedProjectRoot);
   const compiled = compileSmithersWorkflow({
     projectRoot: quotedProjectRoot,
+    env: { XDG_CACHE_HOME: testCacheHome(project) },
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
@@ -716,6 +758,7 @@ nodes:
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
   const compiled = compileSmithersWorkflow({
     projectRoot: project,
+    env: { XDG_CACHE_HOME: testCacheHome(project) },
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,
@@ -742,11 +785,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
 
   const run = await startRun({
     projectRoot: project,
     runId: "smithers-run",
-    env: fakeSmithersEnv(project),
+    env,
     maxConcurrency: 2,
     prompt: "Operator priority",
     workflowInput: { issue: 2 }
@@ -755,10 +799,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(run.value?.status, "running");
   assert.deepEqual(run.value!.workflow_ids, ["ultrafuzz-smithers-run"]);
 
-  const list = await listRuns({ projectRoot: project, env: fakeSmithersEnv(project) });
+  const list = await listRuns({ projectRoot: project, env });
   assert.equal(list.value?.product_runs.length, 1);
   assert.equal(list.value?.runs[0]?.workflow_run_id, "ultrafuzz-smithers-run");
-  const status = await getRunStatus({ projectRoot: project, runId: run.value!.run_id, env: fakeSmithersEnv(project) });
+  const status = await getRunStatus({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(status.value?.status, "running");
   assert.equal(status.value?.metadata?.workflow_ids instanceof Array, true);
   assert.equal(status.value?.workflow?.run_id, "ultrafuzz-smithers-run");
@@ -793,10 +837,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.ok(smithersTasks.tasks.every((task) => task.retryPolicy !== null));
   assert.equal(smithersTasks.tasks[0]?.metadata?.node?.concreteNodeId, "project-discovery");
 
-  const workflowSource = fs.readFileSync(
-    path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"),
-    "utf8"
-  );
+  const { smithersWorkflowRoot } = await import("../src/smithers.js");
+  const workflowPath = path.join(smithersWorkflowRoot(project, env), "ultrafuzz-smithers-run.tsx");
+  const workflowSource = fs.readFileSync(workflowPath, "utf8");
   assert.match(workflowSource, /smithers-orchestrator/);
   assert.match(workflowSource, /agent=\{agentRegistry\[task\.agentRef\]\}/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
@@ -818,7 +861,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     command?: string[];
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
-  assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+  assert.ok(submission.command?.includes(workflowPath));
 });
 
 test("startRun submits prompt paths instead of rendered prompt bodies", async () => {
@@ -857,7 +900,7 @@ ${`${marker} `.repeat(2000)}
   assert.match(smithersInput.tasks?.[0]?.prompt_path ?? "", /prompt\.rendered\.md$/);
 });
 
-test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
+test("startRun does not select a target-local workflow runner", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -865,25 +908,28 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   const binDir = path.join(project, ".smithers", "node_modules", ".bin");
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, process.platform === "win32" ? "smithers.cmd" : "smithers");
-  const logPath = path.join(project, "local-smithers.log");
+  const targetLogPath = path.join(project, "target-smithers.log");
   fs.writeFileSync(
     smithers,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SMITHERS_FAKE_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
+    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TARGET_SMITHERS_LOG\"\nprintf '%s\\n' '{\"ok\":true}'\n",
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
+  const env = fakeSmithersEnv(project);
+  env.TARGET_SMITHERS_LOG = targetLogPath;
 
   const run = await startRun({
     projectRoot: project,
     runId: "local-smithers-run",
-    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+    env
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
+  assert.equal(fs.existsSync(targetLogPath), false);
 });
 
-test("startRun bootstraps target-local Smithers dependencies when missing", async () => {
+test("startRun bootstraps exact workflow dependencies outside the target with scripts disabled", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -891,21 +937,36 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const npm = path.join(binDir, "npm");
-  const localSmithers = path.join(project, ".smithers", "node_modules", ".bin", "smithers");
   const npmLogPath = path.join(project, "npm-install.log");
-  const smithersLogPath = path.join(project, "local-smithers.log");
+  const smithersLogPath = path.join(project, "cached-smithers.log");
+  const installScriptMarker = path.join(project, "install-script-ran");
+  fs.writeFileSync(
+    path.join(project, ".smithers", "package.json"),
+    `${JSON.stringify({ scripts: { preinstall: `touch ${installScriptMarker}` } }, null, 2)}\n`,
+    "utf8"
+  );
   fs.writeFileSync(
     npm,
     [
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" >> "$NPM_FAKE_LOG"',
-      'mkdir -p "$(dirname "$ULTRAFUZZ_TEST_LOCAL_SMITHERS")"',
-      "cat > \"$ULTRAFUZZ_TEST_LOCAL_SMITHERS\" <<'EOS'",
+      "prefix=''",
+      "previous=''",
+      'for argument in "$@"; do',
+      '  if [ "$previous" = "--prefix" ]; then prefix="$argument"; fi',
+      '  previous="$argument"',
+      "done",
+      'package_dir="$prefix/node_modules/smithers-orchestrator"',
+      'mkdir -p "$package_dir/src/bin"',
+      "cat > \"$package_dir/package.json\" <<'EOS'",
+      '{"name":"smithers-orchestrator","version":"0.27.0","bin":{"smithers":"src/bin/smithers.js"}}',
+      "EOS",
+      "cat > \"$package_dir/src/bin/smithers.js\" <<'EOS'",
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
       "printf '%s\\n' '{\"ok\":true}'",
       "EOS",
-      'chmod +x "$ULTRAFUZZ_TEST_LOCAL_SMITHERS"',
+      'chmod +x "$package_dir/src/bin/smithers.js"',
       ""
     ].join("\n"),
     "utf8"
@@ -919,12 +980,26 @@ test("startRun bootstraps target-local Smithers dependencies when missing", asyn
       PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
       NPM_FAKE_LOG: npmLogPath,
       SMITHERS_FAKE_LOG: smithersLogPath,
-      ULTRAFUZZ_TEST_LOCAL_SMITHERS: localSmithers
+      XDG_CACHE_HOME: testCacheHome(project)
     }
   });
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
-  assert.match(fs.readFileSync(npmLogPath, "utf8"), /install .*--prefix .*\.smithers/);
+  const npmCommand = fs.readFileSync(npmLogPath, "utf8");
+  assert.match(npmCommand, /install .*--prefix/);
+  assert.match(npmCommand, /--ignore-scripts/);
+  assert.match(npmCommand, /--package-lock=false/);
+  assert.equal(npmCommand.includes(path.join(project, ".smithers")), false);
+  const cacheManifest = JSON.parse(
+    fs.readFileSync(
+      path.join(testCacheHome(project), "ultrafuzz", "workflow-runtime", "v1-0.27.0", "package.json"),
+      "utf8"
+    )
+  ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  assert.equal(cacheManifest.dependencies?.["smithers-orchestrator"], "0.27.0");
+  assert.equal(cacheManifest.dependencies?.zod, "4.4.3");
+  assert.equal(cacheManifest.devDependencies?.typescript, "6.0.3");
+  assert.equal(fs.existsSync(installScriptMarker), false);
   assert.match(fs.readFileSync(smithersLogPath, "utf8"), /up .*ultrafuzz-bootstrap-smithers-run\.tsx/);
 });
 
@@ -1566,6 +1641,7 @@ test("syncRun records model fan-out attempts independently", async () => {
       { type: "NodeSkipped", nodeId: "node:signal-analysis__model_1__attempt_1", attempt: 1 }
     ])
   });
+  env.ULTRAFUZZ_ALLOW_PROJECT_AGENT_CODE = "1";
   const run = await startRun({ projectRoot: project, runId: "sync-fanout", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery__model_0__attempt_0", [
@@ -1649,6 +1725,40 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
 });
 
+test("lifecycle commands reject workflow path changes and content drift", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-integrity", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  const original = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow: { path: string; sha256: string };
+  } & Record<string, unknown>;
+  for (const invalidPath of [path.join(project, "arbitrary-workflow.tsx"), "../arbitrary-workflow.tsx"]) {
+    fs.writeFileSync(
+      metadataPath,
+      `${JSON.stringify({ ...original, workflow: { ...original.workflow, path: invalidPath } }, null, 2)}\n`,
+      "utf8"
+    );
+    const result = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+    assert.equal(result.ok, false);
+    assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_PATH_INVALID"));
+  }
+
+  fs.writeFileSync(metadataPath, `${JSON.stringify(original, null, 2)}\n`, "utf8");
+  const { smithersWorkflowRoot } = await import("../src/smithers.js");
+  const workflowPath = path.join(smithersWorkflowRoot(project, env), original.workflow.path);
+  fs.appendFileSync(workflowPath, "\n// changed after compilation\n", "utf8");
+  const drifted = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+  assert.equal(drifted.ok, false);
+  assert.ok(drifted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_PATH_INVALID"));
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
+});
+
 test(
   "compiled Smithers workflow passes a real non-executing graph smoke",
   { skip: realSmithersGraphUnavailable() },
@@ -1656,17 +1766,14 @@ test(
     const project = tempProject();
     initProject({ projectRoot: project, force: true });
     writeSmallTopology(project);
-    fs.symlinkSync(
-      path.join(workspaceRoot(), ".smithers", "node_modules"),
-      path.join(project, ".smithers", "node_modules"),
-      "dir"
-    );
+    const env = { XDG_CACHE_HOME: testCacheHome(project) };
 
     const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: {} });
     assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-    const { compileSmithersWorkflow } = await import("../src/smithers.js");
+    const { compileSmithersWorkflow, smithersWorkflowRoot } = await import("../src/smithers.js");
     const compiled = compileSmithersWorkflow({
       projectRoot: project,
+      env,
       config: plan.value!.resolved_config,
       graph: plan.value!.expanded_graph,
       runLayout: plan.value!.layout,
@@ -1674,12 +1781,18 @@ test(
       renderedPrompts: plan.value!.rendered_prompts,
       operatorPrompt: "graph smoke"
     });
+    const packageRoot = path.resolve(smithersWorkflowRoot(project, env), "../../..");
+    fs.symlinkSync(
+      path.join(workspaceRoot(), ".smithers", "node_modules"),
+      path.join(packageRoot, "node_modules"),
+      "dir"
+    );
 
     const graphJson = execFileSync(
       "smithers",
       [
         "graph",
-        compiled.evidenceWorkflowPath,
+        compiled.workflowPath,
         "--run-id",
         compiled.smithersRunId,
         "--root",
