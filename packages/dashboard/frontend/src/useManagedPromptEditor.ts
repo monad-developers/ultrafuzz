@@ -53,8 +53,8 @@ type UseManagedPromptEditorOptions = {
   refreshTopology: () => Promise<unknown>;
 };
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(url: string, sessionToken: string): Promise<T> {
+  const response = await fetch(url, { headers: { "x-ultrafuzz-session": sessionToken } });
   if (!response.ok) {
     throw new Error(await response.text());
   }
@@ -112,7 +112,7 @@ export function useManagedPromptEditor({
   }, [onPendingEditChange, prompt, promptDraft]);
 
   useEffect(() => {
-    if (!promptEndpoint) {
+    if (!promptEndpoint || !sessionToken) {
       setPrompt(null);
       setPromptDraft("");
       setPromptError("");
@@ -124,7 +124,7 @@ export function useManagedPromptEditor({
     setPromptDraft("");
     setPromptError("");
 
-    getJson<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint)
+    getJson<Omit<ManagedPromptDetail, "endpoint">>(promptEndpoint, sessionToken)
       .then((promptDetail) => {
         if (cancelled) {
           return;
@@ -145,7 +145,7 @@ export function useManagedPromptEditor({
     return () => {
       cancelled = true;
     };
-  }, [isStrategyAggregate, promptEndpoint]);
+  }, [isStrategyAggregate, promptEndpoint, sessionToken]);
 
   const savePromptNow = useCallback(
     async (endpoint: string, content: string) => {
@@ -176,7 +176,7 @@ export function useManagedPromptEditor({
           await refreshFlow();
           onRenamed(renamedNodeId);
         }
-        const refreshed = await getJson<Omit<ManagedPromptDetail, "endpoint">>(nextEndpoint);
+        const refreshed = await getJson<Omit<ManagedPromptDetail, "endpoint">>(nextEndpoint, sessionToken);
         if (!renamedNodeId && promptEndpointRef.current !== nextEndpoint) {
           return;
         }

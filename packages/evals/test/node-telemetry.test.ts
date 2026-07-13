@@ -71,7 +71,8 @@ describe("NodeTelemetryPump", () => {
             retry_count: 0,
             timed_out: false,
             started_at: T0,
-            finished_at: T2
+            finished_at: T2,
+            last_error: "provider rejected Bearer sk-telemetry-secret"
           }
         }
       },
@@ -117,7 +118,15 @@ describe("NodeTelemetryPump", () => {
     // node-finished folds findingsCount and backdates startedAt from state.json.
     expect(envelopes[2]).toMatchObject({
       eventId: "evt-4",
-      event: { type: "node-finished", status: "succeeded", at: T2, startedAt: T0, attempt: 1, findingsCount: 3 }
+      event: {
+        type: "node-finished",
+        status: "succeeded",
+        at: T2,
+        startedAt: T0,
+        attempt: 1,
+        findingsCount: 3,
+        error: "provider rejected Bearer <redacted>"
+      }
     });
   });
 
@@ -137,14 +146,14 @@ describe("NodeTelemetryPump", () => {
           status: "succeeded"
         }
       ],
-      artifacts: { "setup-1": { "report.md": "# hello" } }
+      artifacts: { "setup-1": { "report.md": "# hello\nBearer sk-artifact-secret" } }
     });
     await pump().drain();
     const uploads = reporter.artifacts();
     expect(uploads).toHaveLength(1);
     expect(uploads[0]?.read).toBeDefined();
     const payload = await uploads[0]!.read!();
-    expect(payload.toString("utf8")).toBe("# hello");
+    expect(payload.toString("utf8")).toBe("# hello\nBearer <redacted>");
   });
 
   it("keeps private targets manifest-only when upload mode was not explicit", async () => {

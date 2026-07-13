@@ -16,6 +16,7 @@ interface RecordedRequest {
   url: string;
   method: string;
   body: unknown;
+  redirect?: string;
 }
 
 function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
@@ -23,11 +24,12 @@ function fakeFetch(respond?: (request: RecordedRequest) => unknown): {
   fetchImpl: typeof fetch;
 } {
   const requests: RecordedRequest[] = [];
-  const fetchImpl = (async (input: unknown, init?: { method?: string; body?: string }) => {
+  const fetchImpl = (async (input: unknown, init?: { method?: string; body?: string; redirect?: string }) => {
     const request: RecordedRequest = {
       url: String(input),
       method: init?.method ?? "GET",
-      body: init?.body !== undefined ? JSON.parse(init.body) : undefined
+      body: init?.body !== undefined ? JSON.parse(init.body) : undefined,
+      redirect: init?.redirect
     };
     requests.push(request);
     const payload = respond?.(request) ?? { id: `id-${requests.length}` };
@@ -113,6 +115,30 @@ describe("provider resolution", () => {
     });
     expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
   });
+
+  it("rejects provider endpoints outside the provider's trusted HTTPS origin", () => {
+    const policy = testReportingPolicy();
+    for (const endpoint of [
+      "http://api.braintrust.dev",
+      "https://example.com",
+      "https://user:password@api.braintrust.dev",
+      "https://api.braintrust.dev/proxy",
+      "not a url"
+    ]) {
+      expect(() =>
+        createEvalReporters({
+          env: { BRAINTRUST_API_KEY: "secret" },
+          evalConfig: {
+            ...EVAL_CONFIG,
+            providers: { ...EVAL_CONFIG.providers, braintrust: { ...EVAL_CONFIG.providers.braintrust, endpoint } }
+          },
+          evalRunId: "eval-1",
+          policy,
+          fetchImpl: fakeFetch().fetchImpl
+        })
+      ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_INVALID" }));
+    }
+  });
 });
 
 describe("graphFromPlannedGraph", () => {
@@ -195,6 +221,7 @@ describe("BraintrustReporter", () => {
     });
 
     expect(requests[0]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/project") });
+    expect(requests[0]?.redirect).toBe("error");
     expect(requests[1]).toMatchObject({ method: "POST", url: expect.stringContaining("/v1/experiment") });
     expect((requests[1]?.body as { name?: string }).name).toBe("bug-finding-eval-1");
 
@@ -257,6 +284,7 @@ describe("LangSmithReporter", () => {
     });
 
     const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
+    expect(requests[0]?.redirect).toBe("error");
     // root run + group run + node run
     expect(creates).toHaveLength(3);
     const nodeCreate = creates[2]?.body as Record<string, unknown>;

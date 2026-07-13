@@ -289,6 +289,8 @@ type DashboardSession = {
   templateVariables: string[];
 };
 
+const dashboardSessionToken = consumeDashboardSessionToken();
+
 type NodeSummary = {
   id: string;
   label: string;
@@ -965,9 +967,9 @@ function App() {
   }, [sidePanelOpen]);
 
   useEffect(() => {
-    getJson<DashboardSession>("/api/session")
+    getJson<Omit<DashboardSession, "sessionToken">>("/api/session")
       .then((sessionData) => {
-        setSession(sessionData);
+        setSession({ ...sessionData, sessionToken: dashboardSessionToken });
         setSessionError("");
       })
       .catch((error) => setSessionError(`Dashboard session failed to load: ${errorMessage(error)}`));
@@ -987,7 +989,6 @@ function App() {
     }
 
     setLiveState("connecting");
-    const stream = new EventSource("/api/events/stream");
     let refreshTimer: number | undefined;
     let refreshInFlight = false;
     let refreshQueued = false;
@@ -1033,29 +1034,32 @@ function App() {
       }, 300);
     };
 
-    stream.onopen = () => {
-      setLiveState("live");
-      setLiveError("");
-    };
-    stream.onerror = () => {
-      if (!closed) {
-        setLiveState("disconnected");
-        setLiveError("Live event stream disconnected. The browser will retry automatically.");
+    const closeStream = subscribeToEventStream("/api/events/stream", session.sessionToken, {
+      onOpen: () => {
+        setLiveState("live");
+        setLiveError("");
+      },
+      onError: () => {
+        if (!closed) {
+          setLiveState("disconnected");
+          setLiveError("Live event stream disconnected. The browser will retry automatically.");
+        }
+      },
+      onEvent: (event, data) => {
+        if (event === "ultrafuzz-event") {
+          setLiveState("live");
+          setLiveError("");
+          scheduleRefresh();
+        } else if (event === "ultrafuzz-error") {
+          setLiveState("degraded");
+          setLiveError(data);
+          setMessage(data);
+        }
       }
-    };
-    stream.addEventListener("ultrafuzz-event", () => {
-      setLiveState("live");
-      setLiveError("");
-      scheduleRefresh();
-    });
-    stream.addEventListener("ultrafuzz-error", (event) => {
-      setLiveState("degraded");
-      setLiveError(event.data);
-      setMessage(event.data);
     });
     return () => {
       closed = true;
-      stream.close();
+      closeStream();
       if (refreshTimer !== undefined) {
         window.clearTimeout(refreshTimer);
       }
@@ -1063,21 +1067,27 @@ function App() {
   }, [loadEvents, loadFlow, session]);
 
   useEffect(() => {
-    const stream = new EventSource("/api/commands/stream");
-    stream.onopen = () => setCommandStreamError("");
-    stream.onerror = () => {
-      setCommandStreamError("Command job stream disconnected. The browser will retry automatically.");
-    };
-    stream.addEventListener("ultrafuzz-command-jobs", (event) => {
-      try {
-        setJobs(JSON.parse(event.data));
-        setCommandStreamError("");
-      } catch (error) {
-        setCommandStreamError(`Command job update failed to parse: ${errorMessage(error)}`);
+    if (!session) {
+      return undefined;
+    }
+    return subscribeToEventStream("/api/commands/stream", session.sessionToken, {
+      onOpen: () => setCommandStreamError(""),
+      onError: () => {
+        setCommandStreamError("Command job stream disconnected. The browser will retry automatically.");
+      },
+      onEvent: (event, data) => {
+        if (event !== "ultrafuzz-command-jobs") {
+          return;
+        }
+        try {
+          setJobs(JSON.parse(data));
+          setCommandStreamError("");
+        } catch (error) {
+          setCommandStreamError(`Command job update failed to parse: ${errorMessage(error)}`);
+        }
       }
     });
-    return () => stream.close();
-  }, []);
+  }, [session]);
 
   const selectedFlowNode = useMemo<DashboardFlowNode | undefined>(() => {
     const selected = nodes.find((node) => node.id === selectedNodeId);
@@ -3079,11 +3089,99 @@ function diffLines(beforeLines: string[], afterLines: string[]): DiffRow[] {
 }
 
 async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    headers: dashboardSessionToken ? { "x-ultrafuzz-session": dashboardSessionToken } : {}
+  });
   if (!response.ok) {
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
+}
+
+type EventStreamHandlers = {
+  onOpen: () => void;
+  onError: () => void;
+  onEvent: (event: string, data: string) => void;
+};
+
+function subscribeToEventStream(url: string, token: string, handlers: EventStreamHandlers): () => void {
+  const controller = new AbortController();
+  let reconnectTimer: number | undefined;
+
+  const connect = async () => {
+    try {
+      const response = await fetch(url, {
+        headers: { "x-ultrafuzz-session": token },
+        cache: "no-store",
+        signal: controller.signal
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`event stream failed with status ${response.status}`);
+      }
+      handlers.onOpen();
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffered += decoder.decode(value, { stream: true });
+        const blocks = buffered.split(/\r?\n\r?\n/u);
+        buffered = blocks.pop() ?? "";
+        for (const block of blocks) {
+          dispatchEventStreamBlock(block, handlers.onEvent);
+        }
+      }
+      if (!controller.signal.aborted) {
+        throw new Error("event stream closed");
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        handlers.onError();
+        reconnectTimer = window.setTimeout(() => {
+          void connect();
+        }, 1000);
+      }
+    }
+  };
+
+  void connect();
+  return () => {
+    controller.abort();
+    if (reconnectTimer !== undefined) {
+      window.clearTimeout(reconnectTimer);
+    }
+  };
+}
+
+function dispatchEventStreamBlock(block: string, onEvent: EventStreamHandlers["onEvent"]): void {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of block.split(/\r?\n/u)) {
+    if (line.startsWith(":")) {
+      continue;
+    }
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    const value = separator === -1 ? "" : line.slice(separator + 1).replace(/^ /u, "");
+    if (field === "event") {
+      event = value;
+    } else if (field === "data") {
+      data.push(value);
+    }
+  }
+  if (data.length > 0) {
+    onEvent(event, data.join("\n"));
+  }
+}
+
+function consumeDashboardSessionToken(): string {
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  const token = fragment.get("session") ?? "";
+  window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+  return /^[a-f0-9]{64}$/u.test(token) ? token : "";
 }
 
 async function postJson<T>(url: string, body: Record<string, unknown>, token: string): Promise<T> {

@@ -121,7 +121,7 @@ export async function serveDashboard(config: DashboardServerConfig = {}): Promis
     app.handle(request, response).catch((error) => sendError(response, error));
   });
   const bindAddr = await listen(server, app.host, app.port);
-  const url = `http://${bindAddr}/dashboard`;
+  const url = `http://${bindAddr}/dashboard#session=${app.sessionToken}`;
   return {
     bindAddr,
     url,
@@ -187,7 +187,7 @@ class DashboardApp {
   async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
-      requireLocalRequest(request);
+      requireAuthenticatedRequest(request, this.sessionToken);
       await this.handleApi(request, response, url);
       return;
     }
@@ -375,7 +375,6 @@ class DashboardApp {
     return {
       runId: await this.selectedRunId(),
       liveUpdates: this.liveUpdates,
-      sessionToken: this.sessionToken,
       templateVariables: [...SUPPORTED_TEMPLATE_VARIABLES]
     };
   }
@@ -1566,6 +1565,10 @@ function requireLocalRequest(request: http.IncomingMessage): void {
 }
 
 function requireMutation(request: http.IncomingMessage, sessionToken: string): void {
+  requireAuthenticatedRequest(request, sessionToken);
+}
+
+function requireAuthenticatedRequest(request: http.IncomingMessage, sessionToken: string): void {
   requireLocalRequest(request);
   const token = request.headers[SESSION_HEADER];
   if (typeof token !== "string" || !constantTimeEqual(token, sessionToken)) {

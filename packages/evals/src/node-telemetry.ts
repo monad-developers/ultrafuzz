@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ArtifactManifest, EventRecord, RunState } from "@ultrafuzz/artifacts";
+import { redactSecretsInText, type ArtifactManifest, type EventRecord, type RunState } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import type { EvalArtifactUpload, EvalNodeEvent, EvalNodeEventEnvelope, EvalReporter } from "./reporter.js";
@@ -247,7 +247,7 @@ export class NodeTelemetryPump {
             status,
             attempt,
             ...(nodeState?.started_at !== undefined ? { startedAt: nodeState.started_at } : {}),
-            ...(nodeState?.last_error !== undefined ? { error: nodeState.last_error } : {}),
+            ...(nodeState?.last_error !== undefined ? { error: redactSecretsInText(nodeState.last_error) } : {}),
             ...(this.cursor.findingsCountByNode[nodeId] !== undefined
               ? { findingsCount: this.cursor.findingsCountByNode[nodeId] }
               : {})
@@ -317,14 +317,15 @@ export class NodeTelemetryPump {
         continue;
       }
       const absolutePath = path.join(this.input.runRoot, "artifacts", nodeId, file.path);
+      const contentType = contentTypeForArtifact(file.path);
       uploads.push({
         rowId: this.input.row.id,
         nodeId,
         relativePath: file.path,
-        contentType: contentTypeForArtifact(file.path),
+        contentType,
         sizeBytes: file.size_bytes,
         sha256: file.sha256,
-        ...(payloadAllowed ? { read: () => fs.promises.readFile(absolutePath) } : {})
+        ...(payloadAllowed ? { read: () => readArtifactPayload(absolutePath, contentType) } : {})
       });
     }
     return uploads;
@@ -420,6 +421,18 @@ export class NodeTelemetryPump {
       );
     }
   }
+}
+
+async function readArtifactPayload(absolutePath: string, contentType: string): Promise<Buffer> {
+  const payload = await fs.promises.readFile(absolutePath);
+  if (!isTextualContentType(contentType)) {
+    return payload;
+  }
+  return Buffer.from(redactSecretsInText(payload.toString("utf8")), "utf8");
+}
+
+function isTextualContentType(contentType: string): boolean {
+  return contentType.startsWith("text/") || contentType === "application/json" || contentType === "application/yaml";
 }
 
 function attemptFromPayload(payload: Record<string, unknown>, state: RunState | undefined, nodeId: string): number {

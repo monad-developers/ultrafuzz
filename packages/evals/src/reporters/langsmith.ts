@@ -9,7 +9,7 @@ import type {
 } from "../reporter.js";
 import { groupsInGraph } from "../reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore } from "../types.js";
-import { EvalError, deterministicUuid, isRecord } from "../utils.js";
+import { EvalError, deterministicUuid, isRecord, validateProviderEndpoint } from "../utils.js";
 
 export interface LangSmithReporterOptions {
   apiKey: string;
@@ -47,7 +47,10 @@ export class LangSmithReporter implements EvalReporter {
     if (!options.apiKey) {
       throw new EvalError("EVAL_PROVIDER_CREDENTIALS_MISSING", "LangSmith reporter requires an API key");
     }
-    this.options = options;
+    this.options =
+      options.endpoint === undefined
+        ? options
+        : { ...options, endpoint: validateProviderEndpoint(options.endpoint, DEFAULT_ENDPOINT, "LangSmith") };
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -351,6 +354,7 @@ export class LangSmithReporter implements EvalReporter {
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
     const response = await this.fetchImpl(`${this.options.endpoint ?? DEFAULT_ENDPOINT}${requestPath}`, {
       method,
+      redirect: "error",
       headers: {
         "x-api-key": this.options.apiKey,
         "content-type": "application/json",

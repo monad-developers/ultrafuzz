@@ -20,6 +20,31 @@ export class EvalError extends Error {
   }
 }
 
+export function validateProviderEndpoint(endpoint: string, expectedOrigin: string, provider: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new EvalError("EVAL_PROVIDER_ENDPOINT_INVALID", `${provider} endpoint must use ${expectedOrigin}`, {
+      provider
+    });
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.origin !== expectedOrigin ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.pathname !== "/" ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw new EvalError("EVAL_PROVIDER_ENDPOINT_INVALID", `${provider} endpoint must use ${expectedOrigin}`, {
+      provider
+    });
+  }
+  return expectedOrigin;
+}
+
 export function evalResult<T>(ok: boolean, value?: T, diagnostics: RuntimeDiagnostic[] = []): EvalResult<T> {
   return {
     schema_version: EVAL_RESULT_SCHEMA_VERSION,

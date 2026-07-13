@@ -37,7 +37,7 @@ test("serves logical topology flow with expanded attempt details", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
   try {
-    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"));
+    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"), handle.sessionToken);
     assert.equal(flow.run.run_id, "preview");
     assert.ok(flow.nodes.length > 0);
     assert.ok(flow.run.expanded_nodes > flow.nodes.length);
@@ -78,7 +78,7 @@ test("creates a topology node prompt as terminal work before finish", async () =
       "---\nid: added-check\ndisplay_name: Added check\n---\n\n# Added check\n"
     );
 
-    const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"));
+    const topology = await getJson<TopologyResponse>(apiUrl(handle.url, "/api/topology"), handle.sessionToken);
     const added = topology.topology.nodes.find((node) => node.id === "added-check");
     const finish = topology.topology.nodes.find((node) => node.id === "__finish__");
     assert.deepEqual(added?.depends_on, ["__start__"]);
@@ -117,6 +117,22 @@ test("mutating APIs require the session token and reject invalid saves without w
   }
 });
 
+test("all APIs require the out-of-band session token and do not disclose it", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    assert.equal(new URL(handle.url).hash, `#session=${handle.sessionToken}`);
+    assert.equal((await fetch(apiUrl(handle.url, "/api/session"))).status, 401);
+    assert.equal((await fetch(apiUrl(handle.url, "/api/flow"))).status, 401);
+
+    const session = await getJson<Record<string, unknown>>(apiUrl(handle.url, "/api/session"), handle.sessionToken);
+    assert.equal("sessionToken" in session, false);
+    assert.equal(session.runId, "preview");
+  } finally {
+    await handle.close();
+  }
+});
+
 test("API requests reject non-loopback host headers", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
@@ -135,8 +151,8 @@ function makeProject(): string {
   return projectRoot;
 }
 
-async function getJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function getJson<T>(url: string, sessionToken: string): Promise<T> {
+  const response = await fetch(url, { headers: { "x-ultrafuzz-session": sessionToken } });
   if (!response.ok) {
     assert.fail(await response.text());
   }
@@ -144,7 +160,10 @@ async function getJson<T>(url: string): Promise<T> {
 }
 
 function apiUrl(dashboardUrl: string, apiPath: string): string {
-  return dashboardUrl.replace(/\/dashboard$/u, apiPath);
+  const url = new URL(dashboardUrl);
+  url.pathname = apiPath;
+  url.hash = "";
+  return url.toString();
 }
 
 function requestStatusWithHost(url: string, host: string): Promise<number> {

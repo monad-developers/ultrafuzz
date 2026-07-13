@@ -9,7 +9,7 @@ import type {
 } from "../reporter.js";
 import { groupsInGraph } from "../reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore } from "../types.js";
-import { EvalError, isRecord } from "../utils.js";
+import { EvalError, isRecord, validateProviderEndpoint } from "../utils.js";
 
 export interface BraintrustReporterOptions {
   apiKey: string;
@@ -54,7 +54,10 @@ export class BraintrustReporter implements EvalReporter {
     if (!options.apiKey) {
       throw new EvalError("EVAL_PROVIDER_CREDENTIALS_MISSING", "Braintrust reporter requires an API key");
     }
-    this.options = options;
+    this.options =
+      options.apiUrl === undefined
+        ? options
+        : { ...options, apiUrl: validateProviderEndpoint(options.apiUrl, DEFAULT_API_URL, "Braintrust") };
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -359,6 +362,7 @@ export class BraintrustReporter implements EvalReporter {
   private async request(method: string, requestPath: string, body: unknown): Promise<unknown> {
     const response = await this.fetchImpl(`${this.options.apiUrl ?? DEFAULT_API_URL}${requestPath}`, {
       method,
+      redirect: "error",
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
         "content-type": "application/json"
