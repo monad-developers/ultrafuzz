@@ -15,6 +15,7 @@ import type { ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
+import { renderRuntimeTemplate } from "./runtime-template.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -723,12 +724,9 @@ function writeExecutableWorkflow(projectRoot: string, workflowPath: string, sour
 }
 
 function renderEvidenceWorkflowSource(workflowPath: string, evidenceWorkflowPath: string): string {
-  return [
-    "// smithers-source: generated",
-    "// This evidence entrypoint re-exports the executable workflow under .smithers/workflows.",
-    `export { default } from ${JSON.stringify(importPathBetween(path.dirname(evidenceWorkflowPath), workflowPath))};`,
-    ""
-  ].join("\n");
+  return renderRuntimeTemplate("smithers/workflows/evidence.tsx", {
+    __ULTRAFUZZ_WORKFLOW_IMPORT__: importPathBetween(path.dirname(evidenceWorkflowPath), workflowPath)
+  });
 }
 
 function importPathBetween(fromDir: string, toFile: string): string {
@@ -766,7 +764,7 @@ function defaultModelProfile(config: ResolvedConfig): ResolvedConfig["models"]["
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
-  return `// smithers-source: generated\n// smithers-display-name: Ultrafuzz ${compiled.runId}\n// smithers-description: Generated Ultrafuzz product workflow. Smithers owns execution; Ultrafuzz owns config, topology, prompts, artifacts, reports, and materialization evidence.\n// project-agents: .smithers/agents\n/** @jsxImportSource smithers-orchestrator */\nimport { readFileSync } from "node:fs";\nimport { createSmithers, type AgentLike } from "smithers-orchestrator";\nimport { z } from "zod/v4";\nimport * as projectAgents from "../agents";\n\nconst inputTaskSchema = z.object({\n  id: z.string(),\n  prompt: z.string().optional(),\n  prompt_path: z.string().optional(),\n});\n\nconst inputSchema = z.looseObject({\n  tasks: z.array(inputTaskSchema).default([]),\n  operator_prompt: z.string().optional(),\n  operator_input: z.unknown().optional(),\n});\n\nconst taskOutput = z.object({\n  summary: z.string().min(1),\n});\n\nconst { Workflow, Task, Worktree, Parallel, smithers, outputs } = createSmithers({\n  input: inputSchema,\n  task: taskOutput,\n});\n\nconst agentRegistry = projectAgents as Record<string, AgentLike | AgentLike[]>;\nconst taskSpecs = ${JSON.stringify(
+  const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
       attemptId: task.attemptId,
@@ -783,5 +781,10 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     })),
     null,
     2
-  )} as const;\n\nfunction promptForTask(task: (typeof taskSpecs)[number], inputTask?: { prompt?: string; prompt_path?: string }): string {\n  if (typeof inputTask?.prompt === "string") {\n    return inputTask.prompt;\n  }\n  const promptPath = inputTask?.prompt_path ?? task.promptPath;\n  return promptPath ? readFileSync(promptPath, "utf8") : "";\n}\n\nexport default smithers((ctx) => {\n  const inputTasks = new Map(((ctx.input as { tasks?: Array<{ id: string; prompt?: string; prompt_path?: string }> }).tasks ?? []).map((task) => [task.id, task]));\n  const operatorPrompt = typeof ctx.input.operator_prompt === "string" && ctx.input.operator_prompt.length > 0 ? \`\${ctx.input.operator_prompt}\\n\\n\` : "";\n  return (\n    <Workflow name=${JSON.stringify(compiled.workflowName)}>\n      <Parallel id="ultrafuzz-agent-tasks">\n        {taskSpecs.map((task) => {\n        const inputTask = inputTasks.get(task.id);\n        return (\n          <Worktree key={task.id} path={task.workspacePath} branch={task.branch}>\n            <Task\n              id={task.id}\n              output={outputs.task}\n              agent={agentRegistry[task.agentRef]}\n              dependsOn={task.dependsOn}\n              timeoutMs={task.timeoutMs}\n              heartbeatTimeoutMs={task.heartbeatTimeoutMs}\n              retries={task.retries}\n              retryPolicy={task.retryPolicy}\n              metadata={task.metadata}\n            >\n              {\`\${operatorPrompt}\${promptForTask(task, inputTask)}\`}\n            </Task>\n          </Worktree>\n        );\n        })}\n      </Parallel>\n    </Workflow>\n  );\n});\n`;
+  );
+  return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
+    __ULTRAFUZZ_RUN_ID__: compiled.runId,
+    __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
+    __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
+  });
 }

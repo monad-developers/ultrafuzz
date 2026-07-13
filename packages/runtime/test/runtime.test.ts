@@ -622,7 +622,9 @@ test("compileSmithersWorkflow emits native task dependencies without synthetic l
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /const taskOutput = z\.object\(\{/);
-  assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\),/);
+  assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\)/);
+  assert.match(workflowSource, /smithers-display-name: Ultrafuzz native-deps/);
+  assert.doesNotMatch(workflowSource, /__ULTRAFUZZ_/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
@@ -768,10 +770,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
   assert.doesNotMatch(workflowSource, /@ultrafuzz\/backends/);
-  assert.match(
-    fs.readFileSync(path.join(run.value!.run_root, "smithers", "workflow.tsx"), "utf8"),
-    /export \{ default \}/
-  );
+  const evidenceWorkflowSource = fs.readFileSync(path.join(run.value!.run_root, "smithers", "workflow.tsx"), "utf8");
+  assert.match(evidenceWorkflowSource, /export \{ default \}/);
+  assert.doesNotMatch(evidenceWorkflowSource, /__ULTRAFUZZ_/);
 
   const submission = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "submission.json"), "utf8")
