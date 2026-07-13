@@ -1,5 +1,11 @@
 ## Ultrafuzz Output Contract
 
-Before finishing, ensure these required artifacts exist exactly at these paths:
+Before finishing, you MUST ensure these required artifacts exist exactly at these paths:
 {{required_artifact_paths}}
 {{findings_contract}}{{generated_tests_contract}}{{boundary_recipes_contract}}
+
+After completing the work and writing every required artifact, your final response MUST contain ONLY one raw, valid JSON object in exactly this form:
+
+{"summary":"A concise description of the completed work and written artifacts."}
+
+The `summary` field is REQUIRED and MUST be a JSON string. Do NOT include Markdown fences, introductory text, explanations, or any other content before or after the JSON object. Do NOT omit the JSON object even when the work succeeds.

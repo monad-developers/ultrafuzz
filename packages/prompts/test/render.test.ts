@@ -90,6 +90,9 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
     expect(result.renderedMarkdown).toContain("severity_guess");
     expect(result.renderedMarkdown).toContain("generated_tests");
+    expect(result.renderedMarkdown).toContain("final response MUST contain ONLY one raw, valid JSON object");
+    expect(result.renderedMarkdown).toContain('{"summary":"A concise description');
+    expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
   });
 
   it("returns model provenance for task metadata", () => {
