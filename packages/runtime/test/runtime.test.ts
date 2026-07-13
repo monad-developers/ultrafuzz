@@ -168,6 +168,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
+      'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
+      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
+      "fi",
       'if [ "$1" = "fork" ]; then',
       "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
       "else",
@@ -981,9 +984,17 @@ test("startRun forwards configured and explicitly allowed environment variables 
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const environmentLog = path.join(project, "smithers-environment.log");
+  const contextLog = path.join(project, "smithers-context.log");
   const env = {
     ...fakeSmithersEnv(project),
     SMITHERS_FAKE_ENV_LOG: environmentLog,
+    SMITHERS_FAKE_CONTEXT_LOG: contextLog,
+    SMITHERS_RUN_ID: "outer-run",
+    SMITHERS_NODE_ID: "outer-node",
+    SMITHERS_ATTEMPT: "3",
+    SMITHERS_ITERATION: "2",
+    SMITHERS_CLI_SRC_DIR: "/outer/cli/src",
+    SMITHERS_SNAPSHOT_SOCK: "/outer/snapshot.sock",
     OPENAI_API_KEY: "configured-agent-key",
     AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
     FOUNDRY_PROFILE: "ci",
@@ -994,6 +1005,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
+  assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
 test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
@@ -2010,6 +2022,31 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
   );
+});
+
+test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-active-lifecycle-run",
+      status: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: "active-lifecycle-run", maxConcurrency: 8, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
+  assert.equal(resumed.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json/u);
+  assert.doesNotMatch(commands, /^up /mu);
 });
 
 test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {
