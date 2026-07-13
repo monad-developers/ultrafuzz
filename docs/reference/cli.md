@@ -128,7 +128,8 @@ SHAs.
 ```bash
 ultrafuzz ps [--project <path>] [--json]
 ultrafuzz inspect <run-id> [--project <path>] [--json]
-ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] [--json]
+ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
+  [--reset-node <workflow-node-id>] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
@@ -140,8 +141,14 @@ ultrafuzz fork <run-id> \
 ```
 
 `resume`, `replay`, and `fork` operate on the workflow run linked from
-Ultrafuzz run metadata. `fork` may start from a checkpoint frame and may reset
-one workflow node before starting the fork.
+Ultrafuzz run metadata. `resume` reports `submitted: false` instead of
+launching a duplicate continuation when the linked workflow is still in an
+active state (running, in-progress, started, queued, retrying, or waiting).
+`resume --reset-node` retries one failed workflow node and its dependents in
+the same linked run; the applied reset is recorded so retrying the command
+after a failed continuation resumes the already-reset run instead of repeating
+the reset. `fork` may start from a checkpoint frame and may reset one workflow
+node before starting the fork.
 
 ## Report
 

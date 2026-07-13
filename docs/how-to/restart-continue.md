@@ -26,10 +26,20 @@ state:
 ```bash
 ultrafuzz resume <run-id> --project /path/to/target-protocol
 ultrafuzz resume <run-id> --project /path/to/target-protocol --max-concurrency 4
+ultrafuzz resume <run-id> --project /path/to/target-protocol \
+  --reset-node node:failed-task --max-concurrency 4
 ```
 
 Resume delegates to the workflow engine and records updated lifecycle evidence
-for the same Ultrafuzz run.
+for the same Ultrafuzz run. When the linked workflow is still active (running,
+queued, retrying, or waiting), resume keeps the existing run attached instead
+of submitting a duplicate continuation.
+
+Use `--reset-node` to retry one failed workflow node and reset its dependents
+before the linked run continues. The reset is recorded in run evidence before
+the continuation launches; if the continuation fails to start, rerun the same
+resume command and Ultrafuzz continues the already-reset run without repeating
+the reset.
 
 ## Replay A Linked Run
 

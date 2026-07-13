@@ -67,10 +67,29 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "XDG_DATA_HOME",
   "XDG_STATE_HOME"
 ]);
+const SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES = new Set([
+  "SMITHERS_ATTEMPT",
+  "SMITHERS_CLI_SRC_DIR",
+  "SMITHERS_ITERATION",
+  "SMITHERS_NODE_ID",
+  "SMITHERS_RUN_ID",
+  "SMITHERS_SNAPSHOT_SOCK"
+]);
+const SMITHERS_ACTIVE_RUN_STATES = new Set([
+  "running",
+  "in-progress",
+  "started",
+  "retrying",
+  "queued",
+  "waiting-approval",
+  "waiting-event",
+  "waiting-timer"
+]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
+export const SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
 
 export interface SmithersCompileInput {
   config: ResolvedConfig;
@@ -376,6 +395,7 @@ export async function runSmithersLifecycleCommand(input: {
   command: string[];
   workflowRunId?: string;
   recoveredMissingRun?: boolean;
+  alreadyRunning?: boolean;
 }> {
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
     const inspection = await runSmithersInspectionCommand({
@@ -427,6 +447,87 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
+    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined) {
+      return {
+        stdout: inspection.stdout,
+        stderr: inspection.stderr,
+        command: inspection.command,
+        alreadyRunning: true
+      };
+    }
+  }
+
+  if (input.action === "resume" && input.resetNode !== undefined) {
+    const resetMarkerPath =
+      input.resumeRecovery === undefined
+        ? undefined
+        : path.join(path.dirname(input.resumeRecovery.inputPath), "reset-node-applied.json");
+    let resetStderr = "";
+    if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+      const resetResult = await execSmithersCli({
+        args: [
+          "timetravel",
+          input.workflowPath,
+          "--run-id",
+          input.smithersRunId,
+          "--node-id",
+          input.resetNode,
+          "--no-vcs",
+          "--deps",
+          "--force",
+          "--format",
+          "json"
+        ],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames
+      });
+      resetStderr = resetResult.stderr;
+      if (resetMarkerPath !== undefined) {
+        writeJsonDurable(resetMarkerPath, {
+          schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
+          smithers_run_id: input.smithersRunId,
+          node_id: input.resetNode,
+          applied_at: new Date().toISOString()
+        });
+      }
+    }
+    let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
+    try {
+      resumeResult = await execSmithersCli({
+        args: [
+          "up",
+          input.workflowPath,
+          "--resume",
+          input.smithersRunId,
+          "--run-id",
+          input.smithersRunId,
+          "--force",
+          "--detach",
+          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+          "--format",
+          "json"
+        ],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames
+      });
+    } catch (error) {
+      if (error instanceof Error && resetMarkerPath !== undefined) {
+        error.message =
+          `${error.message} ` +
+          `(node reset for ${input.resetNode} already completed; ` +
+          `rerun the same resume command to continue the reset run without repeating the reset)`;
+      }
+      throw error;
+    }
+    if (resetMarkerPath !== undefined) {
+      fs.rmSync(resetMarkerPath, { force: true });
+    }
+    return {
+      ...resumeResult,
+      stderr: [resetStderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n")
+    };
   }
 
   if (input.action === "fork" && input.forkFrame !== undefined) {
@@ -548,6 +649,34 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
     jsonHasErrorCode(snapshot.json, code) ||
     [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
   );
+}
+
+function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const runState = isObjectRecord(data.runState) ? data.runState.state : undefined;
+  if (typeof runState === "string") {
+    return runState;
+  }
+  const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
+  return typeof runStatus === "string" ? runStatus : undefined;
+}
+
+function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
+  const state = smithersSnapshotRunState(snapshot);
+  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+}
+
+function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
+  if (markerPath === undefined || !fs.existsSync(markerPath)) {
+    return false;
+  }
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    return isObjectRecord(parsed) && parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
+  } catch {
+    return false;
+  }
 }
 
 function jsonHasErrorCode(value: unknown, code: string): boolean {
@@ -846,7 +975,8 @@ function smithersCommandEnv(
     if (
       value !== undefined &&
       (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
-        normalizedKey.startsWith("SMITHERS_") ||
+        (normalizedKey.startsWith("SMITHERS_") &&
+          !SMITHERS_EXECUTION_CONTEXT_ENVIRONMENT_VARIABLES.has(normalizedKey)) ||
         forwarded.has(normalizedKey))
     ) {
       merged[key] = value;

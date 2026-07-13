@@ -184,11 +184,12 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     }
     updateRunStatus(evidence.layout, "running");
     appendEvent(evidence.layout, {
-      eventType: "workflow-lifecycle-submitted",
+      eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",
       status: "running",
       payload: {
         action,
         workflow_run_id: workflowRunId,
+        ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }
     });
@@ -196,7 +197,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       run_id: input.runId,
       workflow_run_id: workflowRunId,
       action,
-      submitted: true
+      submitted: !lifecycleResult.alreadyRunning
     });
   } catch (error) {
     return runtimeFailure<WorkflowLifecycleValue>([smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED")]);

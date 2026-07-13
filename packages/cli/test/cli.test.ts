@@ -411,6 +411,18 @@ test("run, ps, inspect, report, materialize, clean, and lifecycle commands expos
     assert.equal(lifecycleData.workflow_run_id, "ultrafuzz-cli-run");
   }
 
+  const retried = await cli(
+    project,
+    ["resume", runData.run_id, "--reset-node", "node:project-discovery", "--max-concurrency", "8", "--json"],
+    env
+  );
+  assert.equal(retried.code, 0, `resume reset: ${retried.stderr}${retried.stdout}`);
+  const retriedBody = parseJson(retried);
+  assertNoSmithersSurface(retriedBody);
+  const retriedData = retriedBody.data as { submitted: boolean; workflow_run_id: string };
+  assert.equal(retriedData.submitted, true);
+  assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run");
+
   const fork = await cli(
     project,
     [

@@ -168,6 +168,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
+      'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
+      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
+      "fi",
       'if [ "$1" = "fork" ]; then',
       "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
       "else",
@@ -209,6 +212,13 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
+      "    ;;",
+      "  up)",
+      '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
+      "      printf '%s\\n' 'fake up failure' >&2",
+      "      exit 1",
+      "    fi",
+      "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  *)",
       "    printf '%s\\n' '{\"ok\":true}'",
@@ -981,9 +991,17 @@ test("startRun forwards configured and explicitly allowed environment variables 
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const environmentLog = path.join(project, "smithers-environment.log");
+  const contextLog = path.join(project, "smithers-context.log");
   const env = {
     ...fakeSmithersEnv(project),
     SMITHERS_FAKE_ENV_LOG: environmentLog,
+    SMITHERS_FAKE_CONTEXT_LOG: contextLog,
+    SMITHERS_RUN_ID: "outer-run",
+    SMITHERS_NODE_ID: "outer-node",
+    SMITHERS_ATTEMPT: "3",
+    SMITHERS_ITERATION: "2",
+    SMITHERS_CLI_SRC_DIR: "/outer/cli/src",
+    SMITHERS_SNAPSHOT_SOCK: "/outer/snapshot.sock",
     OPENAI_API_KEY: "configured-agent-key",
     AWS_SECRET_ACCESS_KEY: "unrelated-host-key",
     FOUNDRY_PROFILE: "ci",
@@ -994,6 +1012,7 @@ test("startRun forwards configured and explicitly allowed environment variables 
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
+  assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
 });
 
 test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
@@ -1969,6 +1988,16 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
 
+  const resetResumed = await resumeRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    maxConcurrency: 8,
+    resetNode: "node:project-discovery",
+    env
+  });
+  assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
+  assert.equal(resetResumed.value?.submitted, true);
+
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
@@ -2001,6 +2030,14 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --detach --max-concurrency 8 --format json/
   );
+  assert.match(
+    commands,
+    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --deps --force --format json/
+  );
+  assert.match(
+    commands,
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run --run-id ultrafuzz-lifecycle-run --force --detach --max-concurrency 8 --format json/
+  );
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
     commands,
@@ -2009,6 +2046,121 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.match(
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
+  );
+});
+
+test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-active-lifecycle-run",
+      status: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "active-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: "active-lifecycle-run", maxConcurrency: 8, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-active-lifecycle-run");
+  assert.equal(resumed.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json/u);
+  assert.doesNotMatch(commands, /^up /mu);
+});
+
+test("resume suppresses duplicate submissions for every active workflow run state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-retrying-lifecycle-run",
+      status: "running",
+      state: "retrying",
+      steps: [{ id: "node:project-discovery", state: "retrying", attempt: 2 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  for (const state of ["in-progress", "started", "queued", "retrying", "waiting-approval"]) {
+    fs.writeFileSync(
+      env.SMITHERS_FAKE_INSPECT!,
+      `${JSON.stringify(
+        workflowInspect({
+          workflowRunId: "ultrafuzz-retrying-lifecycle-run",
+          status: "running",
+          state,
+          steps: [{ id: "node:project-discovery", state, attempt: 2 }]
+        })
+      )}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const resumed = await resumeRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
+
+    assert.equal(resumed.ok, true, `${state}: ${JSON.stringify(resumed.diagnostics)}`);
+    assert.equal(resumed.value?.submitted, false, `state ${state} must suppress duplicate resume`);
+    const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+    assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json/u);
+    assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
+  }
+});
+
+test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-reset-lifecycle-run",
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const detached = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env: { ...env, SMITHERS_FAKE_FAIL_UP: "1" }
+  });
+
+  assert.equal(detached.ok, false);
+  assert.equal(detached.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.match(detached.diagnostics[0]?.message ?? "", /without repeating the reset/u);
+  assert.equal(fs.existsSync(markerPath), true, "reset marker must persist after a failed continuation");
+  const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(failedCommands, /^timetravel /mu);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const retried = await resumeRun({
+    projectRoot: project,
+    runId: "reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  assert.equal(retried.value?.submitted, true);
+  assert.equal(fs.existsSync(markerPath), false, "reset marker must clear after a successful continuation");
+  const retriedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(retriedCommands, /^timetravel /mu, "retry must not repeat the destructive reset");
+  assert.match(
+    retriedCommands,
+    /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
   );
 });
 
