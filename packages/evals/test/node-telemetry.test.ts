@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { NodeTelemetryPump, loadTelemetryCursor } from "../src/node-telemetry.js";
+import { guardReporter, type EvalNodeEventEnvelope } from "../src/reporter.js";
 import { RecordingReporter, testReportingPolicy, testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 function setup(overrides: { policy?: ReturnType<typeof testReportingPolicy> } = {}) {
@@ -147,6 +148,88 @@ describe("NodeTelemetryPump", () => {
     expect(payload.toString("utf8")).toBe("# hello");
   });
 
+  it("rejects unsafe artifact manifest paths before upload", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const { runRoot, reporter, pump } = setup({ policy });
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-a",
+          event_type: "artifact-manifest-written",
+          timestamp: T1,
+          node_id: "setup-1",
+          status: "succeeded"
+        }
+      ],
+      artifacts: { "setup-1": { "report.md": "# hello" } }
+    });
+    const manifestPath = path.join(runRoot, "artifacts", "setup-1", "artifact-manifest.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      files: Array<{ path: string }>;
+    };
+    manifest.files[0]!.path = "../../report.md";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    const result = await pump().drain();
+    expect(reporter.artifacts()).toHaveLength(0);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_MANIFEST_UNREADABLE" })])
+    );
+  });
+
+  it("rejects allowlisted artifacts whose bytes do not match the manifest", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const { runRoot, reporter, pump } = setup({ policy });
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-a",
+          event_type: "artifact-manifest-written",
+          timestamp: T1,
+          node_id: "setup-1",
+          status: "succeeded"
+        }
+      ],
+      artifacts: { "setup-1": { "report.md": "# hello" } }
+    });
+    fs.writeFileSync(path.join(runRoot, "artifacts", "setup-1", "report.md"), "# changed", "utf8");
+
+    const result = await pump().drain();
+    expect(reporter.artifacts()).toHaveLength(0);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_ARTIFACT_UNSAFE" })])
+    );
+  });
+
+  it("matches the artifact upload allowlist by exact relative path", async () => {
+    const policy = testReportingPolicy({
+      artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: true }
+    });
+    const { runRoot, reporter, pump } = setup({ policy });
+    writeRunFixture({
+      runRoot,
+      events: [
+        {
+          event_id: "evt-a",
+          event_type: "artifact-manifest-written",
+          timestamp: T1,
+          node_id: "setup-1",
+          status: "succeeded"
+        }
+      ],
+      artifacts: { "setup-1": { "nested/report.md": "# nested" } }
+    });
+
+    await pump().drain();
+    expect(reporter.artifacts()).toHaveLength(0);
+  });
+
   it("keeps private targets manifest-only when upload mode was not explicit", async () => {
     const policy = testReportingPolicy({
       artifacts: { mode: "upload", include: ["report.md"], max_file_bytes: 5_000_000, mode_explicit: false }
@@ -194,6 +277,58 @@ describe("NodeTelemetryPump", () => {
     fs.writeFileSync(cursorPath, JSON.stringify(cursor), "utf8");
     await pump().drain();
     expect(reporter.envelopes()).toHaveLength(2);
+  });
+
+  it("retries guarded reporter failures and leaves undelivered events for resume", async () => {
+    class FlakyReporter extends RecordingReporter {
+      attempts = 0;
+      remainingFailures = 2;
+
+      override onNodeEvent(envelope: EvalNodeEventEnvelope): Promise<void> {
+        this.attempts += 1;
+        if (this.remainingFailures > 0) {
+          this.remainingFailures -= 1;
+          return Promise.reject(new Error("temporary provider failure"));
+        }
+        return super.onNodeEvent(envelope);
+      }
+    }
+
+    const { runRoot, cursorPath, row, policy } = setup();
+    writeRunFixture({
+      runRoot,
+      events: [
+        { event_id: "evt-retry", event_type: "node-synced", timestamp: T0, node_id: "setup-1", status: "running" }
+      ]
+    });
+    const reporter = new FlakyReporter();
+    const guardWarnings: Array<{ code: string }> = [];
+    const guarded = guardReporter(reporter, (warning) => guardWarnings.push(warning));
+    const pump = () =>
+      new NodeTelemetryPump({
+        runRoot,
+        row,
+        reporters: [guarded],
+        policy,
+        cursorPath,
+        maxDeliveryAttempts: 2,
+        retryDelayMs: 0
+      });
+
+    const failed = await pump().drain();
+    expect(reporter.attempts).toBe(2);
+    expect(failed.deliveredEvents).toBe(0);
+    expect(failed.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "EVAL_TELEMETRY_DELIVERY_FAILED" })])
+    );
+    expect(guardWarnings).toEqual([]);
+    expect(loadTelemetryCursor(cursorPath)).toMatchObject({ byteOffset: 0, deliveredEventIds: [] });
+
+    const resumed = await pump().drain();
+    expect(reporter.attempts).toBe(3);
+    expect(resumed).toMatchObject({ deliveredEvents: 1, warnings: [] });
+    expect(reporter.envelopes()).toHaveLength(1);
+    expect(loadTelemetryCursor(cursorPath).byteOffset).toBeGreaterThan(0);
   });
 
   it("waits for complete journal lines before advancing the cursor", async () => {

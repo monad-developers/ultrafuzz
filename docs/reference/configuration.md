@@ -173,30 +173,39 @@ project = "ultrafuzz-evals"
 
 Each `[eval.providers.<name>]` connection profile supports:
 
-| Key                | Type   | Meaning                                                        |
-| ------------------ | ------ | -------------------------------------------------------------- |
-| `api_key_env`      | string | Name of the environment variable holding the provider API key. |
-| `workspace_id_env` | string | Name of the environment variable holding the workspace ID.     |
-| `project`          | string | Provider project name for published experiments.               |
-| `endpoint`         | string | Optional provider endpoint override.                           |
+| Key                | Type   | Meaning                                                                                             |
+| ------------------ | ------ | --------------------------------------------------------------------------------------------------- |
+| `api_key_env`      | string | Canonical key variable: `BRAINTRUST_API_KEY` or `LANGSMITH_API_KEY`.                                |
+| `workspace_id_env` | string | For LangSmith, `LANGSMITH_WORKSPACE_ID`.                                                            |
+| `project`          | string | Provider project name for published experiments.                                                    |
+| `endpoint`         | string | Optional HTTPS origin; non-canonical origins require an exact operator environment acknowledgement. |
 
-Profiles hold environment-variable _names_ only, never secret values. An
+Profiles name credential environment variables and never contain secret
+values. An
 unknown `provider` or a missing `[eval.providers.<name>]` profile is a config
 error at `eval plan` time; a missing credential env var is an error at publish
 time only, so `provider = "none"` keeps local eval runs working offline. The
 experiment definition itself lives in the eval YAML — see
 [Eval Suites](evals.md).
 
+Reporter credentials are sent only to canonical provider origins by default.
+For a self-hosted service, set the configured `endpoint` and independently set
+`ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` or
+`ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT` to that exact origin. Redirects
+are rejected; reporter requests have a 30-second timeout and a 1 MiB response
+limit.
+
 ## Environment Overrides
 
-| Variable                        | Effect                                                   |
-| ------------------------------- | -------------------------------------------------------- |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`. |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.  |
-| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.             |
-| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.              |
-| `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                            |
-| `ULTRAFUZZ_EVAL_CONFIG`         | Override for `eval.eval_config`.                         |
+| Variable                        | Effect                                                                            |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer override for `run.max_parallel_agents`.                          |
+| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer override for `run.max_parallel_nodes`.                           |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra environment-variable names forwarded to workflow processes. |
+| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local override for `run.output_dir`.                                      |
+| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean override for `run.keep_workspaces`.                                       |
+| `ULTRAFUZZ_EVAL_PROVIDER`       | Override for `eval.provider`.                                                     |
+| `ULTRAFUZZ_EVAL_CONFIG`         | Override for `eval.eval_config`.                                                  |
 
 Boolean values accept `1`, `true`, `yes`, `on`, `0`, `false`, `no`, and `off`.
 

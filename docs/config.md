@@ -88,12 +88,19 @@ for prompt analysis today.
 
 ## Supported Environment Overrides
 
-| Variable                        | Effect                                       |
-| ------------------------------- | -------------------------------------------- |
-| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.            |
-| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism. |
-| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.              |
-| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                 |
+| Variable                        | Effect                                                           |
+| ------------------------------- | ---------------------------------------------------------------- |
+| `ULTRAFUZZ_MAX_PARALLEL_AGENTS` | Positive integer run parallelism.                                |
+| `ULTRAFUZZ_MAX_PARALLEL_NODES`  | Positive integer graph planning parallelism.                     |
+| `ULTRAFUZZ_OUTPUT_DIR`          | Project-local output directory.                                  |
+| `ULTRAFUZZ_KEEP_WORKSPACES`     | Boolean workspace retention.                                     |
+| `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` | Comma-separated extra variables forwarded to workflow processes. |
+
+Ultrafuzz automatically forwards only the credentials configured for active
+agents plus normal runtime essentials. Use `ULTRAFUZZ_AGENT_ENV_ALLOWLIST` for
+deliberate workflow inputs such as RPC URLs or Foundry profiles. This is secret
+hygiene, not an agent sandbox; the trusted local execution model remains
+unchanged.
 
 ## Redaction
 

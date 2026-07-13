@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -172,11 +173,13 @@ export function writeRunFixture(input: {
     fs.mkdirSync(nodeDir, { recursive: true });
     const manifestFiles = [];
     for (const [relativePath, contents] of Object.entries(files)) {
-      fs.writeFileSync(path.join(nodeDir, relativePath), contents, "utf8");
+      const artifactPath = path.join(nodeDir, relativePath);
+      fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+      fs.writeFileSync(artifactPath, contents, "utf8");
       manifestFiles.push({
         path: relativePath,
         size_bytes: Buffer.byteLength(contents, "utf8"),
-        sha256: `sha-${relativePath}-${Buffer.byteLength(contents, "utf8")}`,
+        sha256: crypto.createHash("sha256").update(contents).digest("hex"),
         provenance: { producer_node_id: nodeId }
       });
     }

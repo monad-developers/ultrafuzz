@@ -257,7 +257,11 @@ telemetry streaming.
 
 `score` grades finished run reports against external ground truth resolved
 under `[eval].ground_truth_root`, deterministically by default and with the
-suite's judge model profile when `--llm-judge` is passed. `report` shows the
+suite's judge model profile when `--llm-judge` is passed. The gateway judge
+requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
+`ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`. An optional
+`ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without credentials, and redirects
+are rejected. `report` shows the
 scored variant ranking, and `compare` diffs variants against a required
 `--baseline` variant.
 

@@ -34,7 +34,7 @@ jobs:
       ULTRAFUZZ_E2E_TRIAGE_QUORUM: "1"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Enable Corepack
         run: corepack enable
@@ -43,7 +43,7 @@ jobs:
         run: corepack prepare pnpm@11.1.1 --activate
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -87,11 +87,7 @@ jobs:
       - name: Install Codex CLI
         run: |
           if ! command -v codex >/dev/null 2>&1; then
-            curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh || true
-            if ! command -v codex >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/codex" ]; then
-              echo "Codex installer script failed; falling back to npm install."
-              npm install -g @openai/codex
-            fi
+            npm install -g @openai/codex@0.144.3
           fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           if command -v codex >/dev/null 2>&1; then
@@ -99,6 +95,9 @@ jobs:
           else
             "$HOME/.local/bin/codex" --version
           fi
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
 
       - name: Authenticate Codex CLI
         env:
@@ -145,9 +144,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-
       - name: Run target repository E2E
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -160,7 +156,7 @@ jobs:
 
       - name: Upload E2E evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ultrafuzz-target-e2e-${{ strategy.job-index }}
           path: .codex-runs/e2e-targets/*/evidence/

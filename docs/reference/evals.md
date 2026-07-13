@@ -13,8 +13,8 @@ replayable after it.
 Rule of thumb: **`ultrafuzz.toml` answers "where does this run and how does it
 authenticate in this environment"; the eval YAML answers "what experiment are
 we running and how is it graded."** The YAML is committable and portable
-across providers; the TOML is per-environment and holds only env-var _names_,
-never secret values.
+across providers; the TOML is per-environment and names credential environment
+variables, never inline secret values.
 
 ### `ultrafuzz.toml` — the `[eval]` section
 
@@ -32,7 +32,7 @@ project = "ultrafuzz-evals"
 api_key_env = "LANGSMITH_API_KEY"
 workspace_id_env = "LANGSMITH_WORKSPACE_ID"
 project = "ultrafuzz-evals"
-# endpoint = "https://api.smith.langchain.com"     # optional override
+# endpoint = "https://langsmith.internal.example" # requires the exact operator acknowledgement below
 ```
 
 - `provider` selects the active reporter; `[eval.providers.*]` entries are
@@ -42,7 +42,19 @@ project = "ultrafuzz-evals"
   (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
 - `ground_truth_root` is machine-specific and security-sensitive: ground truth
   must live **outside** the repository; suite targets reference files relative
-  to this root.
+  to this root. Absolute entries, traversal, symlinks, non-regular files, and
+  files larger than 1 MiB are rejected.
+- Built-in reporters bind credentials to their canonical names
+  (`BRAINTRUST_API_KEY`, `LANGSMITH_API_KEY`, and, when configured,
+  `LANGSMITH_WORKSPACE_ID`) and canonical HTTPS origins. Requests reject
+  redirects, time out after 30 seconds, and accept at most 1 MiB of response
+  data.
+- A self-hosted endpoint must be an HTTPS origin and requires an exact,
+  operator-owned environment acknowledgement. Set
+  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` or
+  `ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT` to the same origin as the
+  corresponding `endpoint`. Repository configuration alone cannot redirect a
+  provider credential.
 - Validation: an unknown `provider` or a missing `[eval.providers.<name>]`
   profile is a config error at `eval plan` time; a missing env var named by
   `api_key_env` is an error at publish time only, so local-only runs with
@@ -55,11 +67,12 @@ profiles, targets (repo/ref/ground truth/sensitivity), variants, trial counts,
 grading metrics, and the `reporting:` telemetry policy. Nothing in the YAML
 names a provider, an endpoint, or an env var.
 
-The `reporting.artifacts` policy is allowlist-by-default with a size cap and a
-sensitivity gate: `sensitivity: private` targets default to `manifest-only` —
-the provider sees the DAG, timings, findings counts, and file names/hashes,
-while payloads stay on disk unless the suite explicitly opts into
-`mode: upload`.
+The `reporting.artifacts` policy is exact-path allowlist-by-default with a size
+cap and a sensitivity gate: `sensitivity: private` targets default to
+`manifest-only` — the provider sees the DAG, timings, findings counts, and file
+names/hashes, while payloads stay on disk unless the suite explicitly opts
+into `mode: upload`. Before an allowlisted payload is sent, its manifest and
+path containment, regular-file status, size, and SHA-256 digest are checked.
 
 ## Architecture
 
@@ -109,6 +122,14 @@ Grading never depends on a provider: scores are computed locally
 (deterministic matcher, optional LLM judge behind the generic `FindingJudge`
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
+
+The gateway judge requires its own `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; reporter or
+general OpenAI credentials are never reused. `ULTRAFUZZ_EVAL_JUDGE_URL`, when
+set, must be HTTPS without embedded credentials, and redirects are rejected.
+For a target marked `sensitivity: private`, the judge is disabled unless the
+operator explicitly sets `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`.
+Ground-truth IDs are replaced with candidate aliases in the request, and an
+LLM result cannot downgrade a deterministic true positive.
 
 Full per-command flags are in the [CLI reference](cli.md#eval). Local eval
 artifacts (`eval.json`, `matrix.json`, `runs.jsonl`, `scores.jsonl`,

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
@@ -161,7 +162,7 @@ function normalizeReporting(
 export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   const projectRoot = path.resolve(input.projectRoot);
   const loaded = loadEvalSuite({ projectRoot, suitePath: input.suitePath });
-  const suite = applyPathOverrides(projectRoot, loaded.suite, input);
+  const suite = applyPathOverrides(loaded.suite, input);
   validateSuiteIds(suite);
   validateModelProfiles(suite);
   const targets = suite.targets.map((target) => resolveTarget(projectRoot, suite, target));
@@ -230,17 +231,21 @@ export function planEvalSuite(input: PlanEvalSuiteInput): EvalPlanValue {
   };
 }
 
-function applyPathOverrides(projectRoot: string, suite: EvalSuiteSpec, input: PlanEvalSuiteInput): EvalSuiteSpec {
-  const groundTruthRoot = input.groundTruthRoot ? path.resolve(input.groundTruthRoot) : suite.ground_truth_root;
+function applyPathOverrides(suite: EvalSuiteSpec, input: PlanEvalSuiteInput): EvalSuiteSpec {
+  const groundTruthRoot = input.groundTruthRoot ? path.resolve(input.groundTruthRoot) : undefined;
   const targetRoot = input.targetRoot ? path.resolve(input.targetRoot) : undefined;
-  return {
+  const normalized: EvalSuiteSpec = {
     ...suite,
-    ...(groundTruthRoot ? { ground_truth_root: groundTruthRoot } : {}),
     targets: suite.targets.map((target) => ({
       ...target,
       ...(targetRoot ? { path: path.join(targetRoot, target.id) } : {})
     }))
   };
+  delete normalized.ground_truth_root;
+  if (groundTruthRoot !== undefined) {
+    normalized.ground_truth_root = groundTruthRoot;
+  }
+  return normalized;
 }
 
 function validateSuiteIds(suite: EvalSuiteSpec): void {
@@ -312,16 +317,41 @@ function resolveVariant(projectRoot: string, variant: EvalSuiteSpec["variants"][
 }
 
 function resolveGroundTruth(projectRoot: string, suite: EvalSuiteSpec, groundTruth: string): string {
-  if (!path.isAbsolute(groundTruth) && suite.ground_truth_root === undefined) {
+  if (path.isAbsolute(groundTruth) || path.win32.isAbsolute(groundTruth)) {
     throw new EvalError(
-      "EVAL_GROUND_TRUTH_ROOT_REQUIRED",
-      "relative ground_truth requires [eval].ground_truth_root in ultrafuzz.toml (or an absolute path)",
+      "EVAL_GROUND_TRUTH_ABSOLUTE_PATH",
+      "ground_truth entries must be relative to the configured ground-truth root",
       { groundTruth }
     );
   }
-  const resolved = path.isAbsolute(groundTruth)
-    ? path.resolve(groundTruth)
-    : path.resolve(suite.ground_truth_root as string, groundTruth);
+  if (suite.ground_truth_root === undefined) {
+    throw new EvalError(
+      "EVAL_GROUND_TRUTH_ROOT_REQUIRED",
+      "ground_truth requires a machine-specific [eval].ground_truth_root",
+      { groundTruth }
+    );
+  }
+  const root = path.resolve(suite.ground_truth_root);
+  assertExternalPath(projectRoot, root, "ground truth root");
+  const resolved = path.resolve(root, groundTruth);
+  const relative = path.relative(root, resolved);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new EvalError(
+      "EVAL_GROUND_TRUTH_OUTSIDE_ROOT",
+      "ground_truth must resolve to a file inside the configured ground-truth root",
+      { groundTruth }
+    );
+  }
   assertExternalPath(projectRoot, resolved, "ground truth path");
+  if (fs.existsSync(resolved)) {
+    try {
+      assertRegularFileInside(root, resolved, "ground truth path");
+    } catch (error) {
+      throw new EvalError("EVAL_GROUND_TRUTH_UNSAFE", "ground_truth must be a regular non-symlinked file", {
+        groundTruth,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
   return resolved;
 }

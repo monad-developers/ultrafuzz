@@ -112,6 +112,7 @@ export interface TriageConfig {
 }
 
 export interface EvalProviderProfile {
+  /** Built-in providers require their canonical API-key environment variable name. */
   apiKeyEnv?: string;
   workspaceIdEnv?: string;
   project?: string;

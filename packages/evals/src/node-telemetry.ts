@@ -1,15 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ArtifactManifest, EventRecord, RunState } from "@ultrafuzz/artifacts";
+import {
+  ARTIFACT_MANIFEST_FILE,
+  assertRegularFileInside,
+  getNodeArtifactDir,
+  layoutForRunRoot,
+  normalizeSafeRelativePath,
+  readArtifactManifest,
+  safeResolveInside,
+  sha256Bytes,
+  validateSafeId,
+  type ArtifactManifest,
+  type ArtifactManifestEntry,
+  type EventRecord,
+  type RunState
+} from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import type { EvalArtifactUpload, EvalNodeEvent, EvalNodeEventEnvelope, EvalReporter } from "./reporter.js";
+import {
+  reporterForReliableDelivery,
+  type EvalArtifactUpload,
+  type EvalNodeEvent,
+  type EvalNodeEventEnvelope,
+  type EvalReporter
+} from "./reporter.js";
 import type { EvalMatrixRow, EvalReportingPolicy } from "./types.js";
 import { contentTypeForArtifact, isRecord, warningDiagnostic } from "./utils.js";
 
 export const TELEMETRY_CURSOR_SCHEMA_VERSION = "ultrafuzz.eval.telemetry-cursor.v1" as const;
 const DELIVERED_EVENT_RING_SIZE = 4096;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 export interface TelemetryCursorState {
   schemaVersion: typeof TELEMETRY_CURSOR_SCHEMA_VERSION;
@@ -108,6 +130,7 @@ export class NodeTelemetryPump {
     const warnings: RuntimeDiagnostic[] = [];
     const state = this.readState();
     const { records, nextOffset } = this.readNewJournalRecords(warnings);
+    const replayOffset = this.cursor.byteOffset;
 
     const envelopes: EvalNodeEventEnvelope[] = [];
     const uploads: EvalArtifactUpload[] = [];
@@ -117,15 +140,20 @@ export class NodeTelemetryPump {
     envelopes.push(...this.synthesizeHeartbeats(state));
 
     let deliveredEvents = 0;
+    let deliveryFailed = false;
     for (const envelope of envelopes) {
       if (this.cursor.deliveredEventIds.includes(envelope.eventId)) {
         continue;
       }
-      await this.deliver(
+      const delivered = await this.deliver(
         `event ${envelope.event.type} (${envelope.nodeId})`,
         (reporter) => reporter.onNodeEvent(envelope),
         warnings
       );
+      if (!delivered) {
+        deliveryFailed = true;
+        continue;
+      }
       this.markDelivered(envelope.eventId);
       if (envelope.event.type === "node-heartbeat") {
         this.cursor.lastHeartbeatAt[envelope.nodeId] = envelope.event.at;
@@ -139,12 +167,18 @@ export class NodeTelemetryPump {
       if (this.cursor.uploadedArtifacts[key] === upload.sha256) {
         continue;
       }
-      await this.deliver(`artifact ${key}`, (reporter) => reporter.onArtifact(upload), warnings);
+      const delivered = await this.deliver(`artifact ${key}`, (reporter) => reporter.onArtifact(upload), warnings);
+      if (!delivered) {
+        deliveryFailed = true;
+        continue;
+      }
       this.cursor.uploadedArtifacts[key] = upload.sha256;
       deliveredArtifacts += 1;
     }
 
-    this.cursor.byteOffset = nextOffset;
+    // Re-read the journal after any failed callback. Successfully delivered
+    // IDs/hashes remain in the cursor, so resume retries only missing work.
+    this.cursor.byteOffset = deliveryFailed ? replayOffset : nextOffset;
     this.persistCursor(warnings);
     return { deliveredEvents, deliveredArtifacts, warnings };
   }
@@ -274,7 +308,7 @@ export class NodeTelemetryPump {
             manifest: manifest.files
           })
         );
-        uploads.push(...this.uploadsForManifest(nodeId, manifest));
+        uploads.push(...this.uploadsForManifest(nodeId, manifest, warnings));
         return;
       }
       default:
@@ -283,12 +317,35 @@ export class NodeTelemetryPump {
   }
 
   private readManifest(nodeId: string, warnings: RuntimeDiagnostic[]): ArtifactManifest | undefined {
-    const manifestPath = path.join(this.input.runRoot, "artifacts", nodeId, "artifact-manifest.json");
+    let manifestPath: string;
+    let nodeDir: string;
+    let layout: ReturnType<typeof layoutForRunRoot>;
+    try {
+      layout = layoutForRunRoot(this.input.runRoot);
+      nodeDir = getNodeArtifactDir(layout, validateSafeId(nodeId, "node ID"));
+      manifestPath = safeResolveInside(nodeDir, ARTIFACT_MANIFEST_FILE, "artifact manifest path");
+    } catch {
+      warnings.push(warningDiagnostic("EVAL_TELEMETRY_MANIFEST_UNSAFE", "skipped unsafe artifact manifest path"));
+      return undefined;
+    }
     if (!fs.existsSync(manifestPath)) {
       return undefined;
     }
     try {
-      return JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ArtifactManifest;
+      assertRegularFileInside(nodeDir, manifestPath, "artifact manifest path");
+      if (fs.statSync(manifestPath).size > MAX_MANIFEST_BYTES) {
+        throw new Error("artifact manifest exceeds the size limit");
+      }
+      const manifest = readArtifactManifest(layout, nodeId);
+      if (manifest.node_id !== nodeId || !Array.isArray(manifest.files)) {
+        throw new Error("artifact manifest does not match its node directory");
+      }
+      for (const file of manifest.files as unknown[]) {
+        if (!isSafeManifestEntry(file)) {
+          throw new Error("artifact manifest contains an invalid file entry");
+        }
+      }
+      return manifest;
     } catch (error) {
       warnings.push(
         warningDiagnostic(
@@ -300,7 +357,11 @@ export class NodeTelemetryPump {
     }
   }
 
-  private uploadsForManifest(nodeId: string, manifest: ArtifactManifest): EvalArtifactUpload[] {
+  private uploadsForManifest(
+    nodeId: string,
+    manifest: ArtifactManifest,
+    warnings: RuntimeDiagnostic[]
+  ): EvalArtifactUpload[] {
     const policy = this.input.policy.artifacts;
     const includeSet = new Set(policy.include);
     // Sensitivity gate: private targets stay manifest-only unless the suite
@@ -308,15 +369,26 @@ export class NodeTelemetryPump {
     const payloadAllowed =
       policy.mode === "upload" && (this.input.row.target.sensitivity !== "private" || policy.mode_explicit);
     const uploads: EvalArtifactUpload[] = [];
+    const layout = layoutForRunRoot(this.input.runRoot);
+    const nodeDir = getNodeArtifactDir(layout, nodeId);
     for (const file of manifest.files) {
-      const baseName = path.posix.basename(file.path);
-      if (!includeSet.has(file.path) && !includeSet.has(baseName)) {
+      if (!includeSet.has(file.path)) {
         continue;
       }
       if (file.size_bytes > policy.max_file_bytes) {
         continue;
       }
-      const absolutePath = path.join(this.input.runRoot, "artifacts", nodeId, file.path);
+      try {
+        validateArtifact(nodeDir, file, policy.max_file_bytes);
+      } catch (error) {
+        warnings.push(
+          warningDiagnostic(
+            "EVAL_TELEMETRY_ARTIFACT_UNSAFE",
+            `skipped unsafe artifact ${nodeId}/${file.path}: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+        continue;
+      }
       uploads.push({
         rowId: this.input.row.id,
         nodeId,
@@ -324,7 +396,7 @@ export class NodeTelemetryPump {
         contentType: contentTypeForArtifact(file.path),
         sizeBytes: file.size_bytes,
         sha256: file.sha256,
-        ...(payloadAllowed ? { read: () => fs.promises.readFile(absolutePath) } : {})
+        ...(payloadAllowed ? { read: async () => readValidatedArtifact(nodeDir, file, policy.max_file_bytes) } : {})
       });
     }
     return uploads;
@@ -370,8 +442,10 @@ export class NodeTelemetryPump {
     label: string,
     action: (reporter: EvalReporter) => Promise<void>,
     warnings: RuntimeDiagnostic[]
-  ): Promise<void> {
-    for (const reporter of this.input.reporters) {
+  ): Promise<boolean> {
+    let allDelivered = true;
+    for (const configuredReporter of this.input.reporters) {
+      const reporter = reporterForReliableDelivery(configuredReporter);
       let lastError: unknown;
       let delivered = false;
       for (let attempt = 1; attempt <= this.maxAttempts && !delivered; attempt += 1) {
@@ -386,6 +460,7 @@ export class NodeTelemetryPump {
         }
       }
       if (!delivered) {
+        allDelivered = false;
         warnings.push(
           warningDiagnostic(
             "EVAL_TELEMETRY_DELIVERY_FAILED",
@@ -396,6 +471,7 @@ export class NodeTelemetryPump {
         );
       }
     }
+    return allDelivered;
   }
 
   private markDelivered(eventId: string): void {
@@ -419,6 +495,49 @@ export class NodeTelemetryPump {
         )
       );
     }
+  }
+}
+
+function isSafeManifestEntry(value: unknown): value is ArtifactManifestEntry {
+  if (
+    !isRecord(value) ||
+    typeof value.path !== "string" ||
+    !Number.isSafeInteger(value.size_bytes) ||
+    (value.size_bytes as number) < 0 ||
+    typeof value.sha256 !== "string" ||
+    !SHA256_PATTERN.test(value.sha256) ||
+    !isRecord(value.provenance)
+  ) {
+    return false;
+  }
+  try {
+    return normalizeSafeRelativePath(value.path, "artifact manifest file path") === value.path;
+  } catch {
+    return false;
+  }
+}
+
+function validateArtifact(nodeDir: string, file: ArtifactManifestEntry, maxFileBytes: number): void {
+  void readValidatedArtifact(nodeDir, file, maxFileBytes);
+}
+
+function readValidatedArtifact(nodeDir: string, file: ArtifactManifestEntry, maxFileBytes: number): Buffer {
+  const absolutePath = safeResolveInside(nodeDir, file.path, "artifact upload path");
+  assertRegularFileInside(nodeDir, absolutePath, "artifact upload path");
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const descriptor = fs.openSync(absolutePath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > maxFileBytes || stat.size !== file.size_bytes) {
+      throw new Error("artifact size does not match its manifest or exceeds the upload limit");
+    }
+    const contents = fs.readFileSync(descriptor);
+    if (sha256Bytes(contents) !== file.sha256) {
+      throw new Error("artifact digest does not match its manifest");
+    }
+    return contents;
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 

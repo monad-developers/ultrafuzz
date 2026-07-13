@@ -65,8 +65,20 @@ ultrafuzz eval compare <eval-run-id> --baseline baseline
 `score` grades run reports against ground truth with a deterministic matcher;
 `--llm-judge` additionally uses the suite's judge model profile. `report`
 shows the scored variant ranking from `summary.json`/`summary.md`, and
-`compare` diffs variants against the named baseline variant. None of this
-requires a provider or credentials.
+`compare` diffs variants against the named baseline variant. Deterministic
+scoring requires neither a provider nor provider credentials.
+
+The optional gateway judge has a separate credential and consent boundary:
+
+```bash
+export ULTRAFUZZ_EVAL_JUDGE_API_KEY=...
+# Required only when scoring a target marked sensitivity: private:
+export ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true
+ultrafuzz eval score <eval-run-id> --llm-judge
+```
+
+An optional `ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without embedded
+credentials. Judge and reporter requests do not follow redirects.
 
 ## Publish Telemetry (Optional)
 
