@@ -438,6 +438,10 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, "topology.yml")), false);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/index.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/prompts/setup/project-discovery.md")), true);
+  const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "^0.27.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -617,6 +621,8 @@ test("compileSmithersWorkflow emits native task dependencies without synthetic l
 
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
+  assert.match(workflowSource, /const taskOutput = z\.object\(\{/);
+  assert.match(workflowSource, /summary: z\.string\(\)\.min\(1\),/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
