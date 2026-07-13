@@ -2012,6 +2012,73 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
 });
 
+test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const binDir = path.join(project, "fake-bin");
+  const smithers = path.join(binDir, "smithers");
+  const logPath = path.join(project, "recovery-smithers.log");
+  const markerPath = path.join(project, "initial-submission-attempted");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    smithers,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      'if [ "$1" = "inspect" ]; then',
+      '  printf \'%s\\n\' \'{"code":"RUN_NOT_FOUND","message":"Run not found"}\'',
+      "  exit 1",
+      "fi",
+      'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
+      '  : > "$SMITHERS_FAKE_MARKER"',
+      "  exit 42",
+      "fi",
+      "printf '%s\\n' '{\"ok\":true}'",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+  const env = {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    SMITHERS_BIN: smithers,
+    SMITHERS_FAKE_LOG: logPath,
+    SMITHERS_FAKE_MARKER: markerPath
+  };
+
+  const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
+  assert.equal(initial.ok, false);
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "missing-workflow-run",
+    maxConcurrency: 8,
+    env
+  });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-missing-workflow-run");
+
+  const commands = fs.readFileSync(logPath, "utf8").split("\n");
+  const upCommands = commands.filter((line) => line.startsWith("up "));
+  assert.equal(upCommands.length, 2);
+  assert.match(commands.find((line) => line.startsWith("inspect ")) ?? "", /--format json/u);
+  assert.doesNotMatch(upCommands[1] ?? "", /--resume/u);
+  assert.match(upCommands[1] ?? "", /--max-concurrency 8 --root /u);
+  assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
+
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
+  const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {
+    recovery?: string;
+    command?: string[];
+  };
+  assert.equal(recovery.recovery, "missing-workflow-run");
+  assert.equal(recovery.command?.includes("<redacted>"), true);
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as { status?: string };
+  assert.equal(state.status, "running");
+});
+
 test(
   "compiled Smithers workflow passes a real non-executing graph smoke",
   { skip: realSmithersGraphUnavailable() },

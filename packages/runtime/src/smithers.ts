@@ -363,9 +363,72 @@ export async function runSmithersLifecycleCommand(input: {
   forkFrame?: number;
   resetNode?: string;
   label?: string;
+  resumeRecovery?: {
+    runRoot: string;
+    inputPath: string;
+    logsDir: string;
+  };
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
-}): Promise<{ stdout: string; stderr: string; command: string[]; workflowRunId?: string }> {
+}): Promise<{
+  stdout: string;
+  stderr: string;
+  command: string[];
+  workflowRunId?: string;
+  recoveredMissingRun?: boolean;
+}> {
+  if (input.action === "resume" && input.resumeRecovery !== undefined) {
+    const inspection = await runSmithersInspectionCommand({
+      args: ["inspect", input.smithersRunId, "--format", "json"],
+      projectRoot: input.projectRoot,
+      env: input.env
+    });
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
+      assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
+      assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+      fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
+      assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+      const inputJson = fs.readFileSync(input.resumeRecovery.inputPath, "utf8");
+      const recoveryCommand = [
+        "up",
+        input.workflowPath,
+        "--detach",
+        "--run-id",
+        input.smithersRunId,
+        ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+        "--root",
+        input.projectRoot,
+        "--log-dir",
+        input.resumeRecovery.logsDir,
+        "--input",
+        inputJson,
+        "--format",
+        "json"
+      ];
+      const recoveryResult = await execSmithersCli({
+        args: recoveryCommand,
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames
+      });
+      writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+        schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+        smithers_run_id: input.smithersRunId,
+        recovery: "missing-workflow-run",
+        command: recoveryResult.command,
+        stdout: redactedEvidenceText(recoveryResult.stdout),
+        stderr: redactedEvidenceText(recoveryResult.stderr),
+        submitted_at: new Date().toISOString()
+      });
+      return { ...recoveryResult, recoveredMissingRun: true };
+    }
+    if (!inspection.ok) {
+      throw new Error(
+        `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
+      );
+    }
+  }
+
   if (input.action === "fork" && input.forkFrame !== undefined) {
     const forkCommand = [
       "fork",
@@ -478,6 +541,26 @@ export async function runSmithersInspectionCommand(input: {
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: string): boolean {
+  return (
+    jsonHasErrorCode(snapshot.json, code) ||
+    [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
+  );
+}
+
+function jsonHasErrorCode(value: unknown, code: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((entry) => jsonHasErrorCode(entry, code));
+  }
+  if (!isObjectRecord(value)) {
+    return false;
+  }
+  if (value.code === code) {
+    return true;
+  }
+  return Object.values(value).some((entry) => jsonHasErrorCode(entry, code));
 }
 
 async function execSmithersCli(input: {
