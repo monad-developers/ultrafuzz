@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { initProject } from "@ultrafuzz/runtime";
+import { initProject, planRun } from "@ultrafuzz/runtime";
 
 import { serveDashboard } from "../src/index.js";
 
@@ -128,6 +129,79 @@ test("API requests reject non-loopback host headers", async () => {
   }
 });
 
+test("API requests require a Host header", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const status = await requestStatusWithoutHost(apiUrl(handle.url, "/api/session"));
+    assert.equal(status, 403);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("redacts node evidence before serving it", async () => {
+  const projectRoot = makeProject();
+  const planned = await planRun({ projectRoot, runId: "redacted-node-evidence", env: {} });
+  assert.equal(planned.ok, true, JSON.stringify(planned.diagnostics));
+  const attempt = planned.value!.expanded_graph.nodes.find((node) => node.kind === "agentic");
+  assert.ok(attempt);
+  const artifactDir = path.join(planned.value!.run_root, attempt.artifactDir);
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "stdout.log"), "stdout api_key=sk-dashboardstdout\n", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "stderr.log"), "Bearer sk-dashboardstderr\n", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "prompt.rendered.md"), "prompt token=sk-dashboardprompt\n", "utf8");
+  fs.writeFileSync(
+    path.join(artifactDir, "transcript.json"),
+    JSON.stringify({ api_key: "sk-dashboardtranscript", message: "token=sk-dashboardmessage" }),
+    "utf8"
+  );
+
+  const handle = await serveDashboard({ projectRoot, port: 0, runId: "redacted-node-evidence" });
+  try {
+    const detail = await getJson<{
+      stdout?: string;
+      stderr?: string;
+      rendered_prompt?: string;
+      transcript?: { api_key?: string; message?: string };
+    }>(apiUrl(handle.url, `/api/nodes/${attempt.logicalId}`));
+    assert.equal(detail.stdout, "stdout api_key=<redacted>\n");
+    assert.equal(detail.stderr, "Bearer <redacted>\n");
+    assert.equal(detail.rendered_prompt, "prompt token=<redacted>\n");
+    assert.deepEqual(detail.transcript, { api_key: "<redacted>", message: "token=<redacted>" });
+    assert.doesNotMatch(JSON.stringify(detail), /sk-dashboard/);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("audit logging refuses a final-component symlink", async () => {
+  const projectRoot = makeProject();
+  const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-audit-"));
+  const outsidePath = path.join(outsideDir, "outside.log");
+  fs.writeFileSync(outsidePath, "sentinel\n", "utf8");
+  fs.symlinkSync(outsidePath, auditPath, "file");
+  const config = fs.readFileSync(path.join(projectRoot, "ultrafuzz.toml"), "utf8");
+
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  try {
+    const response = await fetch(apiUrl(handle.url, "/api/config"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify({ content: config })
+    });
+    assert.equal(response.status, 500);
+    assert.equal(fs.readFileSync(outsidePath, "utf8"), "sentinel\n");
+    assert.equal(fs.lstatSync(auditPath).isSymbolicLink(), true);
+  } finally {
+    await handle.close();
+  }
+});
+
 function makeProject(): string {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-dashboard-"));
   const result = initProject({ projectRoot, force: true });
@@ -165,5 +239,24 @@ function requestStatusWithHost(url: string, host: string): Promise<number> {
     );
     request.on("error", reject);
     request.end();
+  });
+}
+
+function requestStatusWithoutHost(url: string): Promise<number> {
+  const parsed = new URL(url);
+  return new Promise((resolve, reject) => {
+    let response = "";
+    const socket = net.createConnection({ host: parsed.hostname, port: Number(parsed.port) }, () => {
+      socket.write(`GET ${parsed.pathname}${parsed.search} HTTP/1.0\r\n\r\n`);
+    });
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      response += chunk;
+    });
+    socket.on("error", reject);
+    socket.on("end", () => {
+      const status = /^HTTP\/\d\.\d (\d{3})/u.exec(response)?.[1];
+      resolve(status === undefined ? 0 : Number(status));
+    });
   });
 }

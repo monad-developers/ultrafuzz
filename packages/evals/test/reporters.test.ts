@@ -113,6 +113,56 @@ describe("provider resolution", () => {
     });
     expect(reporters.map((reporter) => reporter.name)).toEqual(["braintrust"]);
   });
+
+  it("rejects untrusted provider credential bindings and endpoints", () => {
+    const policy = testReportingPolicy();
+    const { requests, fetchImpl } = fakeFetch();
+
+    expect(() =>
+      createEvalReporters({
+        env: { UNRELATED_SECRET: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: { braintrust: { apiKeyEnv: "UNRELATED_SECRET" } }
+        },
+        evalRunId: "eval-1",
+        policy,
+        fetchImpl
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNSAFE" }));
+
+    expect(() =>
+      createEvalReporters({
+        env: { BRAINTRUST_API_KEY: "secret" },
+        evalConfig: {
+          provider: "braintrust",
+          providers: {
+            braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", endpoint: "http://127.0.0.1:9" }
+          }
+        },
+        evalRunId: "eval-1",
+        policy,
+        fetchImpl
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNSAFE" }));
+
+    expect(() =>
+      createEvalReporters({
+        env: { LANGSMITH_API_KEY: "secret", UNRELATED_SECRET: "workspace-secret" },
+        evalConfig: {
+          provider: "langsmith",
+          providers: {
+            langsmith: { apiKeyEnv: "LANGSMITH_API_KEY", workspaceIdEnv: "UNRELATED_SECRET" }
+          }
+        },
+        evalRunId: "eval-1",
+        policy,
+        fetchImpl
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_PROFILE_UNSAFE" }));
+
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("graphFromPlannedGraph", () => {

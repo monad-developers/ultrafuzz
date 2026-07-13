@@ -30,6 +30,7 @@ import {
   validatePromptVariables,
   SUPPORTED_TEMPLATE_VARIABLES
 } from "@ultrafuzz/prompts";
+import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import {
   cleanGenerated,
   forkRun,
@@ -677,13 +678,16 @@ class DashboardApp {
         size_bytes: entry.sizeBytes,
         sha256: sha256Bytes(fs.readFileSync(entry.absolutePath))
       }));
+      const stdout = readTextIfExists(path.join(dir, "stdout.log"));
+      const stderr = readTextIfExists(path.join(dir, "stderr.log"));
+      const renderedPrompt = readTextIfExists(path.join(dir, "prompt.rendered.md"));
       return {
         attemptId: attempt.id,
         artifacts: files,
-        stdout: readTextIfExists(path.join(dir, "stdout.log")),
-        stderr: readTextIfExists(path.join(dir, "stderr.log")),
-        renderedPrompt: readTextIfExists(path.join(dir, "prompt.rendered.md")),
-        transcript: readJsonIfExists(path.join(dir, "transcript.json"))
+        stdout: stdout === undefined ? undefined : redactSecretsInText(stdout),
+        stderr: stderr === undefined ? undefined : redactSecretsInText(stderr),
+        renderedPrompt: renderedPrompt === undefined ? undefined : redactSecretsInText(renderedPrompt),
+        transcript: redactSecretsInValue(readJsonIfExists(path.join(dir, "transcript.json")))
       };
     });
   }
@@ -1552,7 +1556,7 @@ function validateLoopbackHost(host: string): void {
 
 function requireLocalRequest(request: http.IncomingMessage): void {
   const host = request.headers.host;
-  if (host && !isLoopbackAuthority(host)) {
+  if (!host || !isLoopbackAuthority(host)) {
     throw new HttpError(403, "dashboard API requires a loopback Host header");
   }
   const origin = request.headers.origin;
@@ -1870,7 +1874,22 @@ function pruneJobs(jobs: Map<string, CommandJob>): void {
 function appendAudit(projectRoot: string, value: JsonObject): void {
   const auditPath = path.join(projectRoot, ".ultrafuzz", "dashboard-audit.jsonl");
   fs.mkdirSync(path.dirname(auditPath), { recursive: true });
-  fs.appendFileSync(auditPath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  assertNoSymlinkComponents(projectRoot, auditPath, "dashboard audit path");
+  const fd = fs.openSync(
+    auditPath,
+    fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new Error("dashboard audit path must be a regular file");
+    }
+    assertNoSymlinkComponents(projectRoot, auditPath, "dashboard audit path");
+    fs.writeSync(fd, `${JSON.stringify(value)}\n`);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function readTextIfExists(filePath: string): string | undefined {

@@ -14,6 +14,18 @@ export { LangSmithReporter, type LangSmithReporterOptions, dottedOrderSegment } 
 export const EVAL_PROVIDER_NONE = "none";
 export const KNOWN_EVAL_PROVIDERS = ["braintrust", "langsmith", EVAL_PROVIDER_NONE] as const;
 
+const TRUSTED_PROVIDER_BINDINGS = {
+  braintrust: {
+    apiKeyEnv: "BRAINTRUST_API_KEY",
+    endpoint: "https://api.braintrust.dev"
+  },
+  langsmith: {
+    apiKeyEnv: "LANGSMITH_API_KEY",
+    workspaceIdEnv: "LANGSMITH_WORKSPACE_ID",
+    endpoint: "https://api.smith.langchain.com"
+  }
+} as const;
+
 export interface ResolveEvalProviderInput {
   /** `--provider` CLI flag; highest precedence. */
   cliProvider?: string;
@@ -97,6 +109,7 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
   const env = input.env ?? process.env;
   const profile = resolved.profile ?? {};
   const onWarning = input.onWarning ?? (() => undefined);
+  assertTrustedProviderBinding(resolved.provider, profile);
   const apiKey = requireEnv(env, profile.apiKeyEnv, resolved.provider);
   switch (resolved.provider) {
     case "braintrust": {
@@ -127,6 +140,38 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
       throw new EvalError("EVAL_PROVIDER_UNKNOWN", `unknown eval provider \`${resolved.provider}\``, {
         provider: resolved.provider
       });
+  }
+}
+
+function assertTrustedProviderBinding(provider: string, profile: EvalProviderProfile): void {
+  if (provider !== "braintrust" && provider !== "langsmith") {
+    return;
+  }
+  const binding = TRUSTED_PROVIDER_BINDINGS[provider];
+  if (profile.apiKeyEnv !== undefined && profile.apiKeyEnv !== binding.apiKeyEnv) {
+    throw new EvalError(
+      "EVAL_PROVIDER_PROFILE_UNSAFE",
+      `[eval.providers.${provider}].api_key_env must be ${binding.apiKeyEnv}`,
+      { provider }
+    );
+  }
+  if (profile.endpoint !== undefined && profile.endpoint !== binding.endpoint) {
+    throw new EvalError(
+      "EVAL_PROVIDER_PROFILE_UNSAFE",
+      `[eval.providers.${provider}].endpoint must be ${binding.endpoint}`,
+      { provider }
+    );
+  }
+  if (
+    provider === "langsmith" &&
+    profile.workspaceIdEnv !== undefined &&
+    profile.workspaceIdEnv !== TRUSTED_PROVIDER_BINDINGS.langsmith.workspaceIdEnv
+  ) {
+    throw new EvalError(
+      "EVAL_PROVIDER_PROFILE_UNSAFE",
+      `[eval.providers.${provider}].workspace_id_env must be ${TRUSTED_PROVIDER_BINDINGS.langsmith.workspaceIdEnv}`,
+      { provider }
+    );
   }
 }
 

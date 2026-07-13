@@ -12,7 +12,7 @@ import {
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import type { ResolvedConfig } from "@ultrafuzz/config";
-import { redactSecretsInText } from "@ultrafuzz/security";
+import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
@@ -141,6 +141,8 @@ export interface CompiledSmithersWorkflow {
   logsDir: string;
 }
 
+const submissionInputs = new WeakMap<CompiledSmithersWorkflow, string>();
+
 export interface SubmitSmithersInput {
   compiled: CompiledSmithersWorkflow;
   projectRoot: string;
@@ -226,7 +228,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     workflow_name: workflowName,
     tasks
   });
-  writeJsonDurable(inputPath, {
+  const smithersInput = {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
     ...(input.operatorPrompt ? { operator_prompt: input.operatorPrompt } : {}),
@@ -235,14 +237,17 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       id: task.smithersNodeId,
       ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
     }))
-  });
+  };
+  submissionInputs.set(compiled, `${JSON.stringify(smithersInput, null, 2)}\n`);
+  writeJsonDurable(inputPath, redactSecretsInValue(smithersInput));
   writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
   writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
   return compiled;
 }
 
 export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promise<SmithersSubmissionResult> {
-  const inputJson = fs.readFileSync(input.compiled.inputPath, "utf8");
+  const inputJson = submissionInputs.get(input.compiled) ?? fs.readFileSync(input.compiled.inputPath, "utf8");
+  submissionInputs.delete(input.compiled);
   const command = [
     "up",
     input.compiled.workflowPath,
@@ -274,8 +279,8 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
     smithers_run_id: input.compiled.smithersRunId,
     command: displayCommand,
-    stdout,
-    stderr,
+    stdout: redactSecretsInText(stdout),
+    stderr: redactSecretsInText(stderr),
     submitted_at: new Date().toISOString()
   });
   return {
@@ -425,7 +430,10 @@ async function execSmithersCli(input: {
 }
 
 function smithersDisplayCommand(command: readonly string[]): string[] {
-  return ["smithers", ...command];
+  return [
+    "smithers",
+    ...command.map((argument, index) => (command[index - 1] === "--input" ? "<redacted>" : argument))
+  ];
 }
 
 function parseForkedRunId(stdout: string): string | undefined {

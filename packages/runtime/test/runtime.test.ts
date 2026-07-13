@@ -821,6 +821,65 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
 });
 
+test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const binDir = path.join(project, "fake-bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const smithers = path.join(binDir, "smithers");
+  const commandLog = path.join(project, "smithers-command.log");
+  fs.writeFileSync(
+    smithers,
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" > "$SMITHERS_FAKE_LOG"',
+      "printf '%s\\n' 'submission api_key=sk-successstdout'",
+      "printf '%s\\n' 'submission token=sk-successstderr' >&2",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(smithers, 0o755);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "redacted-evidence",
+    prompt: "Operator token=sk-operatorsecret",
+    workflowInput: { nested: { api_key: "sk-nestedsecret" }, note: "retain" },
+    env: {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_BIN: smithers,
+      SMITHERS_FAKE_LOG: commandLog
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const operationalCommand = fs.readFileSync(commandLog, "utf8");
+  assert.match(operationalCommand, /sk-operatorsecret/);
+  assert.match(operationalCommand, /sk-nestedsecret/);
+
+  const inputEvidence = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
+  ) as {
+    operator_prompt?: string;
+    operator_input?: { nested?: { api_key?: string }; note?: string };
+  };
+  assert.equal(inputEvidence.operator_prompt, "Operator token=<redacted>");
+  assert.equal(inputEvidence.operator_input?.nested?.api_key, "<redacted>");
+  assert.equal(inputEvidence.operator_input?.note, "retain");
+
+  const submissionEvidence = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "submission.json"), "utf8")
+  ) as { command?: string[]; stdout?: string; stderr?: string };
+  assert.equal(submissionEvidence.stdout, "submission api_key=<redacted>\n");
+  assert.equal(submissionEvidence.stderr, "submission token=<redacted>\n");
+  const inputArgumentIndex = submissionEvidence.command?.indexOf("--input") ?? -1;
+  assert.equal(submissionEvidence.command?.[inputArgumentIndex + 1], "<redacted>");
+  assert.doesNotMatch(JSON.stringify(submissionEvidence), /sk-(?:operator|nested|success)/);
+});
+
 test("startRun submits prompt paths instead of rendered prompt bodies", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
