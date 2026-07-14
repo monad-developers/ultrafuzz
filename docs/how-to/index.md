@@ -9,6 +9,7 @@ How-to guides solve specific Ultrafuzz tasks during or after a campaign.
 - [Clean Runs](clean-runs.md)
 - [Use the Dashboard](use-dashboard.md)
 - [Run Eval Suites](run-evals.md)
+- [Run Evals on Modal](run-evals-on-modal.md)
 
 For command summaries, see [CLI](../cli.md). For config fields and trust-model
 settings, see [Config](../config.md).

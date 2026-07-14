@@ -235,6 +235,7 @@ ultrafuzz eval run \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
+  [--watch-timeout-seconds <seconds>] \
   [--no-watch] \
   [--json]
 ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]

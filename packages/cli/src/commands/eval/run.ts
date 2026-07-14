@@ -19,6 +19,10 @@ export default class EvalRun extends Command {
     "eval-run-id": Flags.string({ summary: "Eval run ID" }),
     row: Flags.string({ summary: "Matrix row ID to launch; repeatable", multiple: true }),
     "target-root": Flags.string({ summary: "Directory containing local target checkouts, one per target id" }),
+    "watch-timeout-seconds": Flags.integer({
+      summary: "Maximum time to watch each launched row before returning",
+      min: 1
+    }),
     "no-watch": Flags.boolean({ summary: "Launch detached without polling runs or streaming node telemetry" })
   };
 
@@ -38,6 +42,9 @@ export default class EvalRun extends Command {
         ...(flags["eval-run-id"] !== undefined ? { evalRunId: flags["eval-run-id"] } : {}),
         ...(flags.row !== undefined ? { rowIds: flags.row } : {}),
         ...(flags["target-root"] !== undefined ? { targetRoot: flags["target-root"] } : {}),
+        ...(flags["watch-timeout-seconds"] !== undefined
+          ? { watchTimeoutSeconds: flags["watch-timeout-seconds"] }
+          : {}),
         ...(evalConfig.groundTruthRoot !== undefined ? { groundTruthRoot: evalConfig.groundTruthRoot } : {}),
         ...(flags.provider !== undefined ? { provider: flags.provider } : {}),
         ...(flags["no-watch"] === true ? { watch: false } : {}),

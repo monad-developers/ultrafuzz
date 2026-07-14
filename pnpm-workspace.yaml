@@ -8,6 +8,9 @@ packages:
   - "packages/runtime"
   - "packages/evals"
   - "packages/dashboard"
+  - "packages/modal"
   - "packages/cli"
 allowBuilds:
+  cbor-extract: true
   esbuild: true
+  protobufjs: true
