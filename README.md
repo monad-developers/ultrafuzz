@@ -1,5 +1,7 @@
 # Ultrafuzz
 
+<img src="docs/assets/ultrafuzz-logo.svg" alt="Ultrafuzz logo" width="96" height="96" />
+
 Ultrafuzz is an agentic orchestrator for smart contract fuzzing.
 
 ![Ultrafuzz dashboard](docs/assets/ultrafuzz-dashboard.png)

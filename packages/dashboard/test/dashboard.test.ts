@@ -149,6 +149,13 @@ test("dashboard serves external theme bootstrap with restrictive security and ca
     assert.equal(documentResponse.headers.get("cross-origin-resource-policy"), "same-origin");
     assert.equal(/<script(?![^>]*\bsrc=)[^>]*>/u.test(documentBody), false);
 
+    const iconSource = /<link[^>]+rel="icon"[^>]+href="([^"]+)"/u.exec(documentBody)?.[1];
+    assert.equal(iconSource, "/dashboard/favicon.svg");
+    const iconResponse = await fetch(new URL(iconSource, handle.url));
+    assert.equal(iconResponse.status, 200);
+    assert.equal(iconResponse.headers.get("content-type"), "image/svg+xml");
+    assert.match(await iconResponse.text(), /fill="#6E55FF"/u);
+
     const scriptSource = /<script[^>]+src="([^"]+)"/u.exec(documentBody)?.[1];
     assert.ok(scriptSource);
     const scriptResponse = await fetch(new URL(scriptSource, handle.url));

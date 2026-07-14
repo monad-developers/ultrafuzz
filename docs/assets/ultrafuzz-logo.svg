@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="title">
+  <title id="title">Ultrafuzz logo</title>
+  <path fill="#6E55FF" d="M0 0h240v240H0z" />
+  <g fill="#FFF">
+    <path d="M32 32h28v28H32zM180 32h28v28h-28zM32 180h28v28H32zM180 180h28v28h-28z" />
+    <path d="M56 72h32v32H56zM152 72h32v32h-32zM56 112h32v32H56zM152 112h32v32h-32zM88 144h64v32H88z" />
+  </g>
+</svg>

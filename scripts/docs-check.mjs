@@ -5,6 +5,7 @@ const requiredDocs = [
   "docs/index.md",
   "docs/contributing.md",
   "docs/SPECS.md",
+  "docs/assets/ultrafuzz-logo.svg",
   "docs/assets/ultrafuzz-dashboard.png",
   "docs/tutorials/index.md",
   "docs/tutorials/first-campaign.md",
