@@ -398,6 +398,94 @@ describe("deterministic scorer math", () => {
     expect(corroborated.rowScore.true_positives).toBe(1);
   });
 
+  it("retries schema-invalid judge output with the configured reasoning effort", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const content =
+        requests.length === 1
+          ? JSON.stringify({ score: 1 })
+          : JSON.stringify({
+              matched_ground_truth_bug_id: "candidate-1",
+              score: 1,
+              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+              classification: "true-positive",
+              rationale: "The finding matches the first candidate.",
+              confidence: 1
+            });
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const judge = gatewayLlmJudge(
+      {
+        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
+      },
+      fetchImpl
+    );
+    const suite = testSuite("/tmp/gt");
+
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite, { judge_reasoning: "xhigh" }),
+      findings: [matchedFinding()],
+      bugs: BUGS,
+      llmJudge: judge
+    });
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
+    expect(requests[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") })
+      ])
+    );
+    expect(scored.rowScore.true_positives).toBe(1);
+  });
+
+  it("sends adaptive thinking parameters to Claude judges", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const content = JSON.stringify({
+        matched_ground_truth_bug_id: "candidate-1",
+        score: 1,
+        signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+        classification: "true-positive",
+        rationale: "The finding matches the first candidate.",
+        confidence: 1
+      });
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const judge = gatewayLlmJudge(
+      {
+        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
+      },
+      fetchImpl
+    );
+    const suite = testSuite("/tmp/gt", {
+      model_profiles: {
+        "eval-runner": { agent: "CodexAgent", model: "gpt-5.5", reasoning: "xhigh" },
+        "eval-judge": { agent: "ClaudeCodeAgent", model: "claude-fable-5", reasoning: "max" }
+      }
+    });
+
+    await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite, { judge_model: "claude-fable-5", judge_reasoning: "max" }),
+      findings: [matchedFinding()],
+      bugs: BUGS,
+      llmJudge: judge
+    });
+
+    expect(requestBody).toMatchObject({
+      model: "claude-fable-5",
+      thinking: { type: "adaptive" },
+      output_config: { effort: "max" }
+    });
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
+  });
+
   it("scores empty reports as all-missed", async () => {
     const suite = testSuite(mkdtempSync(path.join(tmpdir(), "ufz-gt-")));
     const row = testRow(suite);

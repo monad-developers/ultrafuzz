@@ -27,6 +27,7 @@ const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
+const LLM_JUDGE_MAX_ATTEMPTS = 3;
 
 const groundTruthBugSchema = z.looseObject({
   id: z.string().min(1),
@@ -569,40 +570,75 @@ export function gatewayLlmJudge(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
     try {
-      const response = await fetchImpl(endpoint.href, {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages: judgeMessages(input),
-          response_format: { type: "json_object" }
-        }),
-        signal: controller.signal
-      });
-      const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
-      if (!response.ok) {
-        throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
-          status: response.status,
-          body: bodyText.slice(0, 1000)
+      let invalidContent: string | undefined;
+      let lastInvalid: EvalError | undefined;
+      for (let attempt = 1; attempt <= LLM_JUDGE_MAX_ATTEMPTS; attempt += 1) {
+        const response = await fetchImpl(endpoint.href, {
+          method: "POST",
+          redirect: "error",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              ...judgeMessages(input),
+              ...(invalidContent === undefined
+                ? []
+                : [
+                    {
+                      role: "user" as const,
+                      content:
+                        "The previous response did not match the required JSON schema. Return one corrected JSON object only. " +
+                        `Previous response: ${invalidContent.slice(0, 4000)}`
+                    }
+                  ])
+            ],
+            ...judgeReasoningParameters(model, input.row.judge_reasoning),
+            response_format: { type: "json_object" }
+          }),
+          signal: controller.signal
         });
+        const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+        if (!response.ok) {
+          throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+            status: response.status,
+            body: bodyText.slice(0, 1000)
+          });
+        }
+        let content = "";
+        try {
+          content = chatCompletionContent(bodyText);
+          const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
+          if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
+          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            attempt,
+            issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+            content: content.slice(0, 1000)
+          });
+        } catch (error) {
+          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            attempt,
+            cause: error instanceof Error ? error.message : String(error),
+            content: content.slice(0, 1000)
+          });
+        }
+        invalidContent = content || bodyText;
       }
-      const content = chatCompletionContent(bodyText);
-      const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
-      if (!parsed.success) {
-        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-          issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
-          content: content.slice(0, 1000)
-        });
-      }
-      return normalizeLlmJudgeResult(parsed.data, input);
+      throw lastInvalid ?? new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON");
     } finally {
       clearTimeout(timeout);
     }
   };
+}
+
+function judgeReasoningParameters(model: string, reasoning: string | undefined): Record<string, unknown> {
+  if (reasoning === undefined) return {};
+  if (model.toLowerCase().startsWith("claude-")) {
+    return { thinking: { type: "adaptive" }, output_config: { effort: reasoning } };
+  }
+  return { reasoning_effort: reasoning };
 }
 
 function judgeMessages(input: Parameters<FindingJudge>[0]): Array<{ role: "system" | "user"; content: string }> {
