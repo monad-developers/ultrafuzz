@@ -36,6 +36,19 @@ Set `auth = "api-key"` to bill through an OpenAI API key read from
 from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
 at a specific Codex config directory.
 
+Claude Code uses the same configuration shape:
+
+```toml
+[agents.ClaudeCodeAgent]
+auth = "subscription"
+# config_dir = "/secure/claude-config"
+```
+
+For `api-key` auth, `api_key_env` normally names `ANTHROPIC_API_KEY`. For
+`subscription` auth, Claude Code reads `.credentials.json` from its configured
+directory (or the normal Claude config directory). Generated agent adapters do
+not embed or persist credential values.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml

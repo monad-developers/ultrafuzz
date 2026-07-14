@@ -111,6 +111,15 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/claude.ts",
+      loadRuntimeTemplate("smithers/agents/claude.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
   } catch {
     return runtimeFailure<InitProjectResult>([
       {

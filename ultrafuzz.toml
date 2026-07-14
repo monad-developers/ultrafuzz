@@ -24,6 +24,10 @@ reasoning = "xhigh"
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
 
+[agents.ClaudeCodeAgent]
+auth = "api-key"
+api_key_env = "ANTHROPIC_API_KEY"
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true
