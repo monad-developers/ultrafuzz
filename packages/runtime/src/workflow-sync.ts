@@ -23,7 +23,14 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
-import { resolveLiveModelPricing, type ModelPricing } from "./model-pricing.js";
+import {
+  modelPricingFromSnapshot,
+  modelPricingSnapshot,
+  pricingForContext,
+  resolveLiveModelPricing,
+  type ModelPricing,
+  type PricingCatalogMetadata
+} from "./model-pricing.js";
 import { readLinkedWorkflowEvidence } from "./start-run.js";
 import {
   type PlannedGraph,
@@ -298,17 +305,36 @@ async function synchronizeWorkflowAccounting(input: {
   changed: boolean;
   available: boolean;
 }> {
-  const pricing = await resolveLiveModelPricing({ models: modelsRequiringPricing(input.events), env: input.env });
+  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
+  const storedAccounting = recordField(metadata, "accounting");
+  const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
+  const storedPricing = modelPricingFromSnapshot(storedPricingCatalog?.model_prices);
+  const previouslyUnresolvedModels = new Set(stringArrayField(storedPricingCatalog, "unresolved_models"));
+  const requiredModels = modelsRequiringPricing(input.events);
+  const missingModels = requiredModels.filter(
+    (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
+  );
+  const livePricing =
+    missingModels.length === 0 ? undefined : await resolveLiveModelPricing({ models: missingModels, env: input.env });
+  const resolvedPricing = new Map(storedPricing);
+  for (const [model, modelPricing] of livePricing?.prices ?? []) {
+    resolvedPricing.set(model, modelPricing);
+  }
+  const pricingCatalog = mergedPricingCatalogMetadata({
+    requiredModels,
+    resolvedPricing,
+    stored: storedPricingCatalog,
+    live: livePricing?.metadata
+  });
   const current = accountingFromWorkflowEvents(
     input.events,
-    pricing.prices,
+    resolvedPricing,
     configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO)
   );
   if (current === undefined) {
     return { changed: false, available: false };
   }
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
   const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
@@ -320,7 +346,7 @@ async function synchronizeWorkflowAccounting(input: {
     workflow_run_id: input.workflowRunId,
     current,
     cumulative,
-    pricing_catalog: pricing.metadata
+    pricing_catalog: pricingCatalog
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
     return { changed: false, available: true };
@@ -381,11 +407,7 @@ function accountingFromWorkflowEvents(
     const estimatedCostUsd = costUsd ?? modelCostEstimate?.costUsd;
     const tokenCount =
       explicitTotal ??
-      (inputTokens ?? 0) +
-        (outputTokens ?? 0) +
-        (cacheReadTokens ?? 0) +
-        (cacheWriteTokens ?? 0) +
-        (reasoningTokens ?? 0);
+      (inputTokens ?? (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0)) + (outputTokens ?? reasoningTokens ?? 0);
     if (tokenCount <= 0 && estimatedCostUsd === undefined) {
       continue;
     }
@@ -408,7 +430,6 @@ function accountingFromWorkflowEvents(
     if (modelCostEstimate?.cacheReadPricingEstimated === true) {
       totals.cacheReadPricingEstimated = true;
       totals.cacheReadRatioUsed = modelCostEstimate.cacheReadRatioUsed;
-      totals.partialPricing = true;
     }
     if (
       booleanField(payload, "partialPricing") === true ||
@@ -567,8 +588,7 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     reasoning_tokens: totals.reasoningTokens,
     total_tokens: totals.totalTokens,
     tokens_used: formatInteger(totals.totalTokens),
-    estimated_spend:
-      estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, totals.unpricedEventCount > 0),
+    estimated_spend: estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, partialPricing),
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     partial_pricing: partialPricing,
     cache_read_pricing_estimated: totals.cacheReadPricingEstimated,
@@ -614,13 +634,14 @@ function estimatedCostFromModelPricing(input: {
       cacheReadRatioUsed?: number;
     }
   | undefined {
-  const pricing = pricingForModel(input.model, input.modelPricing);
+  const basePricing = pricingForModel(input.model, input.modelPricing);
   if (
-    pricing === undefined ||
+    basePricing === undefined ||
     (input.inputTokens <= 0 && input.outputTokens <= 0 && (input.cacheReadTokens ?? 0) <= 0)
   ) {
     return undefined;
   }
+  const pricing = pricingForContext(basePricing, Math.max(input.inputTokens, 0));
   const cacheRateChangesCost = pricing.cachedInputUsdPerMillion !== pricing.inputUsdPerMillion;
   const cacheReadPricingEstimated =
     input.cacheReadTokens === undefined && input.inputTokens > 0 && cacheRateChangesCost;
@@ -697,7 +718,41 @@ function comparableAccounting(value: Record<string, unknown> | undefined): Recor
     source: value.source,
     workflow_run_id: value.workflow_run_id,
     current: value.current,
-    cumulative: value.cumulative
+    cumulative: value.cumulative,
+    pricing_catalog: value.pricing_catalog
+  };
+}
+
+function mergedPricingCatalogMetadata(input: {
+  requiredModels: string[];
+  resolvedPricing: ReadonlyMap<string, ModelPricing>;
+  stored: Record<string, unknown> | undefined;
+  live: PricingCatalogMetadata | undefined;
+}): PricingCatalogMetadata & { model_prices: Record<string, ModelPricing> } {
+  const resolvedModels = input.requiredModels.filter((model) => input.resolvedPricing.has(model));
+  const unresolvedModels = input.requiredModels.filter((model) => !input.resolvedPricing.has(model));
+  const storedSource = stringField(input.stored, "source");
+  const source =
+    input.live?.source ??
+    (storedSource === "models.dev" || storedSource === "configured-catalog" || storedSource === "disabled"
+      ? storedSource
+      : "models.dev");
+  const storedFetchedAt = stringField(input.stored, "fetched_at");
+  const fetchedAt = input.live?.fetched_at ?? storedFetchedAt;
+  const storedStatus =
+    input.stored?.status === "available" ||
+    input.stored?.status === "disabled" ||
+    input.stored?.status === "unavailable"
+      ? input.stored.status
+      : undefined;
+  const status = unresolvedModels.length === 0 ? "available" : (input.live?.status ?? storedStatus ?? "unavailable");
+  return {
+    source,
+    status,
+    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
+    resolved_models: resolvedModels,
+    unresolved_models: unresolvedModels,
+    model_prices: modelPricingSnapshot(input.resolvedPricing)
   };
 }
 

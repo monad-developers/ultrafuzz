@@ -1632,7 +1632,7 @@ test("syncRun records unavailable spend when workflow token events are unpriced"
   assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
 });
 
-test("syncRun estimates spend from a live pricing catalog without explicit event cost", async () => {
+test("syncRun snapshots live pricing and does not double-count token detail fields", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -1691,10 +1691,12 @@ test("syncRun estimates spend from a live pricing catalog without explicit event
         source?: string;
         status?: string;
         resolved_models?: string[];
+        model_prices?: Record<string, unknown>;
       };
+      updated_at?: string;
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "140,000");
+  assert.equal(metadata.accounting?.current?.tokens_used, "110,000");
   assert.equal(metadata.accounting?.current?.estimated_spend, "$0.72");
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 1);
@@ -1702,6 +1704,90 @@ test("syncRun estimates spend from a live pricing catalog without explicit event
   assert.equal(metadata.accounting?.pricing_catalog?.source, "configured-catalog");
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
   assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["gpt-5.6-sol"]);
+  assert.ok(metadata.accounting?.pricing_catalog?.model_prices?.["gpt-5.6-sol"]);
+
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-5.6-sol": {
+          cost: { input: 50, output: 300, cache_read: 5, cache_write: 62.5 }
+        }
+      }
+    }
+  });
+  const resync = await syncRun({ projectRoot: project, runId: "estimated-accounting", env });
+  assert.equal(resync.ok, true, JSON.stringify(resync.diagnostics));
+  const resyncedMetadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: { current?: { estimated_spend?: string }; updated_at?: string };
+  };
+  assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$0.72");
+  assert.equal(resyncedMetadata.accounting?.updated_at, metadata.accounting?.updated_at);
+});
+
+test("syncRun applies context-tier pricing from the live catalog", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-tiered-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 300_000,
+          outputTokens: 10_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          model: "gpt-tiered",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-tiered": {
+          cost: {
+            input: 5,
+            output: 30,
+            cache_read: 0.5,
+            tiers: [
+              {
+                input: 10,
+                output: 45,
+                cache_read: 1,
+                tier: { type: "context", size: 272_000 }
+              }
+            ]
+          }
+        }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "tiered-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "tiered-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: { current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean } };
+  };
+  assert.equal(metadata.accounting?.current?.tokens_used, "310,000");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$3.45");
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
 });
 
 test("syncRun does not assume zero cache reads when cache telemetry is missing", async () => {
@@ -1820,7 +1906,7 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
     };
   };
   assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
-  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 1);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
   assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, true);

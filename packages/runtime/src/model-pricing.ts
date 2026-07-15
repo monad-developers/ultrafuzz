@@ -7,6 +7,15 @@ export interface ModelPricing {
   cachedInputUsdPerMillion: number;
   cacheWriteUsdPerMillion: number;
   outputUsdPerMillion: number;
+  contextTiers?: ModelPricingContextTier[];
+}
+
+export interface ModelPricingContextTier {
+  contextTokens: number;
+  inputUsdPerMillion: number;
+  cachedInputUsdPerMillion: number;
+  cacheWriteUsdPerMillion: number;
+  outputUsdPerMillion: number;
 }
 
 export interface PricingCatalogMetadata {
@@ -27,6 +36,16 @@ interface CatalogCost {
   output?: unknown;
   cache_read?: unknown;
   cache_write?: unknown;
+  tiers?: unknown;
+  context_over_200k?: unknown;
+}
+
+interface CatalogCostTier {
+  input?: unknown;
+  output?: unknown;
+  cache_read?: unknown;
+  cache_write?: unknown;
+  tier?: unknown;
 }
 
 interface CatalogModel {
@@ -148,11 +167,132 @@ function pricingFromCatalogModel(model: CatalogModel | undefined): ModelPricing 
   if (input === undefined || output === undefined) {
     return undefined;
   }
-  return {
+  const basePricing = {
     inputUsdPerMillion: input,
     cachedInputUsdPerMillion: nonNegativeNumber(model.cost.cache_read) ?? input,
     cacheWriteUsdPerMillion: nonNegativeNumber(model.cost.cache_write) ?? input,
     outputUsdPerMillion: output
+  };
+  const catalogTiers = Array.isArray(model.cost.tiers)
+    ? model.cost.tiers
+        .flatMap((tier): ModelPricingContextTier[] => {
+          const parsed = pricingContextTier(tier, basePricing);
+          return parsed === undefined ? [] : [parsed];
+        })
+        .sort((left, right) => left.contextTokens - right.contextTokens)
+    : [];
+  const fallbackContextTier = pricingContextTier(model.cost.context_over_200k, basePricing, 200_000);
+  const contextTiers =
+    catalogTiers.length > 0 ? catalogTiers : fallbackContextTier === undefined ? [] : [fallbackContextTier];
+  return {
+    ...basePricing,
+    ...(contextTiers.length === 0 ? {} : { contextTiers })
+  };
+}
+
+export function pricingForContext(pricing: ModelPricing, inputTokens: number): ModelPricing {
+  let selected: ModelPricing = pricing;
+  for (const tier of pricing.contextTiers ?? []) {
+    if (inputTokens <= tier.contextTokens) {
+      break;
+    }
+    selected = {
+      inputUsdPerMillion: tier.inputUsdPerMillion,
+      cachedInputUsdPerMillion: tier.cachedInputUsdPerMillion,
+      cacheWriteUsdPerMillion: tier.cacheWriteUsdPerMillion,
+      outputUsdPerMillion: tier.outputUsdPerMillion
+    };
+  }
+  return selected;
+}
+
+export function modelPricingSnapshot(prices: ReadonlyMap<string, ModelPricing>): Record<string, ModelPricing> {
+  return Object.fromEntries([...prices.entries()].sort(([left], [right]) => left.localeCompare(right)));
+}
+
+export function modelPricingFromSnapshot(value: unknown): Map<string, ModelPricing> {
+  const result = new Map<string, ModelPricing>();
+  if (!isRecord(value)) {
+    return result;
+  }
+  for (const [model, rawPricing] of Object.entries(value)) {
+    const pricing = storedModelPricing(rawPricing);
+    if (pricing !== undefined) {
+      result.set(normalizeModel(model), pricing);
+    }
+  }
+  return result;
+}
+
+function pricingContextTier(
+  value: unknown,
+  base: ModelPricing,
+  fallbackContextTokens?: number
+): ModelPricingContextTier | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const tier = isRecord(value.tier) ? value.tier : undefined;
+  const contextTokens = tier?.type === "context" ? positiveNumber(tier.size) : fallbackContextTokens;
+  if (contextTokens === undefined) {
+    return undefined;
+  }
+  const input = nonNegativeNumber((value as CatalogCostTier).input) ?? base.inputUsdPerMillion;
+  return {
+    contextTokens,
+    inputUsdPerMillion: input,
+    cachedInputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).cache_read) ?? base.cachedInputUsdPerMillion,
+    cacheWriteUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).cache_write) ?? input,
+    outputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).output) ?? base.outputUsdPerMillion
+  };
+}
+
+function storedModelPricing(value: unknown): ModelPricing | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const input = nonNegativeNumber(value.inputUsdPerMillion);
+  const cachedInput = nonNegativeNumber(value.cachedInputUsdPerMillion);
+  const cacheWrite = nonNegativeNumber(value.cacheWriteUsdPerMillion);
+  const output = nonNegativeNumber(value.outputUsdPerMillion);
+  if (input === undefined || cachedInput === undefined || cacheWrite === undefined || output === undefined) {
+    return undefined;
+  }
+  const contextTiers = Array.isArray(value.contextTiers)
+    ? value.contextTiers
+        .flatMap((tier): ModelPricingContextTier[] => {
+          if (!isRecord(tier)) {
+            return [];
+          }
+          const contextTokens = positiveNumber(tier.contextTokens);
+          const tierInput = nonNegativeNumber(tier.inputUsdPerMillion);
+          const tierCachedInput = nonNegativeNumber(tier.cachedInputUsdPerMillion);
+          const tierCacheWrite = nonNegativeNumber(tier.cacheWriteUsdPerMillion);
+          const tierOutput = nonNegativeNumber(tier.outputUsdPerMillion);
+          return contextTokens === undefined ||
+            tierInput === undefined ||
+            tierCachedInput === undefined ||
+            tierCacheWrite === undefined ||
+            tierOutput === undefined
+            ? []
+            : [
+                {
+                  contextTokens,
+                  inputUsdPerMillion: tierInput,
+                  cachedInputUsdPerMillion: tierCachedInput,
+                  cacheWriteUsdPerMillion: tierCacheWrite,
+                  outputUsdPerMillion: tierOutput
+                }
+              ];
+        })
+        .sort((left, right) => left.contextTokens - right.contextTokens)
+    : [];
+  return {
+    inputUsdPerMillion: input,
+    cachedInputUsdPerMillion: cachedInput,
+    cacheWriteUsdPerMillion: cacheWrite,
+    outputUsdPerMillion: output,
+    ...(contextTiers.length === 0 ? {} : { contextTiers })
   };
 }
 
@@ -181,6 +321,10 @@ function pricingTimeoutMs(value: string | undefined): number {
 
 function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

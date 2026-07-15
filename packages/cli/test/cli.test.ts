@@ -578,6 +578,22 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
     partialPricing: true,
     unpricedEventCount: 0
   });
+  const inconsistentPartialReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(inconsistentPartialReport.code, 0, inconsistentPartialReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(inconsistentPartialReport)), 2);
+
+  writeRunAccounting(runData.run_root, {
+    totalTokens: 725_905,
+    tokensUsed: "725,905",
+    estimatedSpend: "$1.98",
+    partialPricing: false,
+    unpricedEventCount: 0
+  });
+  writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "56,523",
+    estimatedSpend: "$0.16",
+    partialPricing: false
+  });
   const estimatedReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);

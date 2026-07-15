@@ -294,7 +294,10 @@ function waitForReportRunMetadata(repo: string, path: string | null): RunMetadat
 }
 
 function reportRunMetadataAvailable(runMetadata: RunMetadata): boolean {
-  return isAvailableLabel(runMetadata.tokens_used) && isAvailableLabel(runMetadata.estimated_spend);
+  return (
+    isAvailableLabel(runMetadata.tokens_used) &&
+    (isAvailableLabel(runMetadata.estimated_spend) || runMetadata.partial_pricing)
+  );
 }
 
 function refreshRunMetadata(repo: string, path: string | null): void {
@@ -319,7 +322,7 @@ function refreshRunMetadata(repo: string, path: string | null): void {
   if (
     isJsonObject(cumulative) &&
     isAvailableLabel(cumulative.tokens_used) &&
-    isAvailableLabel(cumulative.estimated_spend)
+    (isAvailableLabel(cumulative.estimated_spend) || cumulative.partial_pricing === true)
   ) {
     return;
   }
