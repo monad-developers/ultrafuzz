@@ -607,6 +607,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
+  assert.match(codexAgentText, /addDir:\s*options\.addDir/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
@@ -626,6 +627,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(claudeAgentText, /extraArgs:\s*\["--effort",\s*options\.reasoningEffort\]/);
   assert.match(claudeAgentText, /claudeAuthOptions/);
   assert.match(claudeAgentText, /ANTHROPIC_API_KEY/);
+  assert.match(claudeAgentText, /addDir:\s*options\.addDir/);
   assert.doesNotMatch(claudeAgentText, /apiKey:\s*process\.env\.ANTHROPIC_API_KEY/);
   // The model comes from the resolved model profile, never hard-coded in the template.
   assert.doesNotMatch(claudeAgentText, /model:\s*"claude-[\w.-]+"/);
@@ -1056,6 +1058,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       timeoutMs?: number;
       retries?: number;
       retryPolicy?: unknown;
+      workspacePath?: string;
+      artifactDir?: string;
       metadata?: {
         node?: { concreteNodeId?: string };
         model?: { modelName?: string; reasoningEffort?: string };
@@ -1076,6 +1080,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersTasks.tasks[0]?.agentRef, "CodexAgent");
   assert.equal(smithersTasks.tasks[0]?.modelName, "gpt-runtime-override");
   assert.equal(smithersTasks.tasks[0]?.reasoningEffort, "max");
+  assert.equal(smithersTasks.tasks[0]?.artifactDir, path.join(run.value!.run_root, "artifacts", "project-discovery"));
+  assert.notEqual(smithersTasks.tasks[0]?.artifactDir, smithersTasks.tasks[0]?.workspacePath);
   assert.ok(smithersTasks.tasks.every((task) => typeof task.timeoutMs === "number"));
   assert.ok(smithersTasks.tasks.every((task) => typeof task.retries === "number"));
   assert.ok(smithersTasks.tasks.every((task) => task.retryPolicy !== null));
@@ -1093,6 +1099,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
+  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir\]/);
+  assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
