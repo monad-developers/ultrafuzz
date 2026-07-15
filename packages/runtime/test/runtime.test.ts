@@ -611,7 +611,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   };
   assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.28.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
-  const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
@@ -624,16 +623,12 @@ test("init preserves existing project-owned files and validate exposes launch po
   // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
   assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
   assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
+  assert.match(codexAgentText, /const apiKey = requiredEnv/);
+  assert.match(codexAgentText, /return { apiKey, env: { CODEX_API_KEY: apiKey } }/);
+  assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
-  assert.match(claudeAgentText, /claudeAuthOptions/);
-  assert.match(claudeAgentText, /createClaudeCodeAgent/);
-  assert.match(claudeAgentText, /dangerouslySkipPermissions:\s*true/);
-  assert.match(claudeAgentText, /extraArgs:\s*\["--effort", options\.reasoningEffort\]/);
-  assert.doesNotMatch(claudeAgentText, /apiKey:\s*process\.env\.ANTHROPIC_API_KEY/);
-  const agentRegistryText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
-  assert.match(agentRegistryText, /ClaudeCodeAgent/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");

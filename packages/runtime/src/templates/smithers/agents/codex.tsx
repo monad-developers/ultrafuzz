@@ -20,12 +20,13 @@ function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
   if (auth === "api-key") {
-    return { apiKey: requiredEnv(config.api_key_env ?? "OPENAI_API_KEY") };
+    const apiKey = requiredEnv(config.api_key_env ?? "OPENAI_API_KEY");
+    return { apiKey, env: { CODEX_API_KEY: apiKey } };
   }
   if (auth === "subscription") {
     return {
       ...(config.config_dir === undefined ? {} : { configDir: resolveConfigDir(config.config_dir) }),
-      env: { OPENAI_API_KEY: "" }
+      env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }
     };
   }
   throw new Error(`unsupported CodexAgent auth mode in ultrafuzz.toml: ${auth}`);
