@@ -282,7 +282,6 @@ nodes:
       - boundary-recipes.md
       - boundary-recipes.json
       - findings.json
-      - generated-tests.json
     primary_artifact: boundary-recipes.md
   - id: encode-decode
     kind: agentic
@@ -292,7 +291,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: differential-library-tests
     kind: agentic
@@ -302,7 +300,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
     loops: 1
   - id: round-trip
@@ -313,7 +310,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: workflow-property-based-tests
     kind: agentic
@@ -323,7 +319,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: time-warp-sequences
     kind: agentic
@@ -333,7 +328,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: admin-config-boundaries
     kind: agentic
@@ -345,7 +339,6 @@ nodes:
       - admin-config-boundary-matrix.md
       - admin-config-boundary-matrix.json
       - findings.json
-      - generated-tests.json
     primary_artifact: admin-config-boundary-matrix.md
   - id: external-dependency-boundaries
     kind: agentic
@@ -357,7 +350,6 @@ nodes:
       - dependency-scope-matrix.md
       - dependency-scope-matrix.json
       - findings.json
-      - generated-tests.json
     primary_artifact: dependency-scope-matrix.md
   - id: externalized-state-accounting
     kind: agentic
@@ -369,7 +361,6 @@ nodes:
       - externalized-state-accounting.md
       - externalized-state-accounting.json
       - findings.json
-      - generated-tests.json
     primary_artifact: externalized-state-accounting.md
   - id: amm-boundary-liquidity
     kind: agentic
@@ -379,7 +370,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: payable-fallback-accounting
     kind: agentic
@@ -389,7 +379,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: packed-action-parity
     kind: agentic
@@ -399,7 +388,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: batch-atomicity-unsupported-actions
     kind: agentic
@@ -409,7 +397,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: router-exact-accounting
     kind: agentic
@@ -419,7 +406,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: rounding-direction-audit
     kind: agentic
@@ -429,7 +415,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: market-exhaustion-boundaries
     kind: agentic
@@ -439,7 +424,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: order-replacement-collateral
     kind: agentic
@@ -449,7 +433,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: state-machine-boundaries
     kind: agentic
@@ -459,7 +442,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: lifecycle-view-boundaries
     kind: agentic
@@ -469,7 +451,6 @@ nodes:
       - property-specification-fanin
     required_artifacts:
       - findings.json
-      - generated-tests.json
     primary_artifact: findings.json
   - id: stateful-invariant-setup
     kind: agentic
@@ -488,8 +469,8 @@ nodes:
     depends_on:
       - stateful-invariant-setup
     required_artifacts:
-      - handler-coverage-inventory.md
-    primary_artifact: handler-coverage-inventory.md
+      - handler-inventory.md
+    primary_artifact: handler-inventory.md
     loops: 1
   - id: differential-oracle-planner
     kind: agentic
@@ -509,7 +490,6 @@ nodes:
       - differential-oracle-planner
     required_artifacts:
       - reference-harness.json
-      - generated-tests.json
     primary_artifact: reference-harness.json
     loops: 1
   - id: reference-and-lane-auditor
@@ -531,7 +511,6 @@ nodes:
     required_artifacts:
       - lane-result.json
       - findings.json
-      - generated-tests.json
     primary_artifact: lane-result.json
     loops: 1
   - id: differential-red-triage
@@ -557,7 +536,6 @@ nodes:
       - gap-review.json
       - differential-report-review.json
       - findings.json
-      - generated-tests.json
     primary_artifact: repair-summary.json
     loops: 1
   - id: dynamic-strategy-generator
@@ -597,7 +575,6 @@ nodes:
       - enumerator-outputs.json
       - aggregate-recommendations.json
       - selected-strategies.json
-      - generated-tests.json
       - findings.json
       - provenance.json
     primary_artifact: strategy-plan.json
@@ -661,21 +638,12 @@ nodes:
       - strategy-detections.json
       - finding-lifecycle-ledger.json
     primary_artifact: severity-classified-findings.json
-  - id: aggregate-test-files
-    kind: agentic
-    prompt: review/aggregate-test-files.md
-    group: review
-    depends_on:
-      - severity-classification
-    required_artifacts:
-      - aggregation.json
-    primary_artifact: aggregation.json
   - id: final-report
     kind: agentic
     prompt: review/final-report.md
     group: review
     depends_on:
-      - aggregate-test-files
+      - severity-classification
     required_artifacts:
       - report.md
       - report.json

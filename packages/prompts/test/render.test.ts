@@ -36,7 +36,7 @@ function baseRenderInput(tmp: string) {
         {
           id: "boundary-tests",
           dependsOn: ["base-test-setup"],
-          requiredArtifacts: ["findings.json", "generated-tests.json"],
+          requiredArtifacts: ["findings.json"],
           artifactDir: path.join(runArtifacts, "boundary-tests")
         }
       ]
@@ -87,9 +87,8 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "findings.json"));
     expect(result.renderedMarkdown).toContain("## Ultrafuzz Output Contract");
-    expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
     expect(result.renderedMarkdown).toContain("severity_guess");
-    expect(result.renderedMarkdown).toContain("generated_tests");
+    expect(result.renderedMarkdown).not.toContain("generated_tests");
     expect(result.renderedMarkdown).toContain("final response MUST contain ONLY one raw, valid JSON object");
     expect(result.renderedMarkdown).toContain('{"summary":"A concise description');
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");

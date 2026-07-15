@@ -10,14 +10,12 @@ Your job is to collapse duplicate findings that describe the same root behavior 
 Restart handling: if {{artifact_path}}/deduped-findings.json,
 {{artifact_path}}/findings.json, {{artifact_path}}/strategy-detections.json,
 and {{artifact_path}}/duplicates.json already exist, first validate their
-required JSON shapes (`deduped-findings.json`, `findings.json`, and
-`strategy-detections.json` are arrays; `duplicates.json` is an object or array).
+    required JSON shapes (`deduped-findings.json`, `findings.json`, and
+    `strategy-detections.json` are arrays; `duplicates.json` is an object or array).
 If those shapes are valid and the files do not clearly contradict the required
 schema, treat them as the materialized dedupe result for this node, refresh only
-missing required files, and finish. Do not rebuild the dedupe from scratch,
-rerun Forge, edit generated tests, or perform optional post-write validation
-unless one of those files is missing, invalid, or clearly contradicts the
-required schema.
+    missing required files, and finish unless one of those files is missing,
+    invalid, or clearly contradicts the required schema.
 
 Dedupe from written findings, property artifacts, source evidence, and
 current-run strategy summaries.
@@ -32,9 +30,6 @@ Dynamic selected strategies:
 
 Dynamic findings:
 {{artifact_path:dynamic-strategy-generator}}/findings.json
-
-Dynamic empty generated-test manifest:
-{{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 

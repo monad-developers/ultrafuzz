@@ -9,8 +9,8 @@ You are an authorized local QA strategy coordinator for smart contracts.
 
 This is a high-timeout, high-cost strategy. Use the Timeout and Finalization
 reserve values in the Topology Runtime Context. Stop optional exploration early
-enough to write every required artifact, `{{output_findings_path}}`, and any
-empty generated-test manifest before timeout.
+enough to write every required artifact and `{{output_findings_path}}` before
+timeout.
 
 ## Objective
 
@@ -45,69 +45,7 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Current strategy generated-test manifests:
-
-Boundary tests:
-{{artifact_path:boundary-tests}}/generated-tests.json
-
-Encode/decode:
-{{artifact_path:encode-decode}}/generated-tests.json
-
-Differential library tests:
-{{artifact_path:differential-library-tests}}/generated-tests.json
-
-Differential lane authors:
-{{artifact_path:differential-lane-author}}/generated-tests.json
-
-Round trip:
-{{artifact_path:round-trip}}/generated-tests.json
-
-Workflow property tests:
-{{artifact_path:workflow-property-based-tests}}/generated-tests.json
-
-Time-warp sequences:
-{{artifact_path:time-warp-sequences}}/generated-tests.json
-
-Admin/config boundaries:
-{{artifact_path:admin-config-boundaries}}/generated-tests.json
-
-External dependency boundaries:
-{{artifact_path:external-dependency-boundaries}}/generated-tests.json
-
-AMM boundary liquidity:
-{{artifact_path:amm-boundary-liquidity}}/generated-tests.json
-
-Payable/fallback accounting:
-{{artifact_path:payable-fallback-accounting}}/generated-tests.json
-
-Externalized-state accounting:
-{{artifact_path:externalized-state-accounting}}/generated-tests.json
-
-Packed action parity:
-{{artifact_path:packed-action-parity}}/generated-tests.json
-
-Batch atomicity unsupported actions:
-{{artifact_path:batch-atomicity-unsupported-actions}}/generated-tests.json
-
-Router exact accounting:
-{{artifact_path:router-exact-accounting}}/generated-tests.json
-
-Rounding direction audit:
-{{artifact_path:rounding-direction-audit}}/generated-tests.json
-
-Market exhaustion boundaries:
-{{artifact_path:market-exhaustion-boundaries}}/generated-tests.json
-
-Order replacement collateral:
-{{artifact_path:order-replacement-collateral}}/generated-tests.json
-
-State machine boundaries:
-{{artifact_path:state-machine-boundaries}}/generated-tests.json
-
-Lifecycle view boundaries:
-{{artifact_path:lifecycle-view-boundaries}}/generated-tests.json
-
-Also inspect current findings artifacts from the same strategies when deciding
+Inspect current findings artifacts from the same strategies when deciding
 what is already covered. Use `findings.json` from each relevant strategy
 artifact directory. Treat missing useful evidence as a reason to record lower
 confidence, not as permission to invent behavior.
@@ -136,10 +74,6 @@ graph. Prefer strategies grounded in:
 Reject recommendations that require changing production contracts, depending
 on live network access, downloading packages, or making guesses not supported
 by repository files or artifacts.
-
-## Generated-test manifest
-
-The required `generated-tests.json` uses an empty `generated_tests` array.
 
 ## Required outputs
 
@@ -173,12 +107,6 @@ Write selected strategy details to:
 
 {{artifact_dir}}/selected-strategies.json
 
-Write the empty generated-test manifest to:
-
-{{artifact_dir}}/generated-tests.json
-
-Use the standard generated-test manifest shape with `generated_tests: []`.
-
 Write findings to {{output_findings_path}}. Use an empty JSON array when no
 finding is confirmed or no selected strategy is actionable. Each finding must
 preserve dynamic provenance with `strategy`, `dynamic_strategy_id`,
@@ -189,7 +117,7 @@ Write provenance to:
 {{artifact_dir}}/provenance.json
 
 Provenance must include current-run artifacts, sub-agent ids or labels,
-model/backend information when visible, commands run, generated-test abstention,
-validation outcomes, and a statement that previous reports, sibling run
+model/backend information when visible, commands run, validation outcomes, and
+a statement that previous reports, sibling run
 directories, host-global paths, network resources, and extra target context were
 not used.

@@ -81,7 +81,7 @@ before treating that dependency behavior as production evidence.
   acting maliciously, classify it as `false-positive`, `incomplete-spec`, or
   `spec-gated` according to the available evidence. Do not promote it to
   `true-positive`.
-- If the finding tests project-owned validation, wrapper, adapter,
+- If the finding exercises project-owned validation, wrapper, adapter,
   authorization, bounds, staleness, sanitization, rollback, or error-handling
   logic and cites explicit public evidence that the protocol promises that
   guard, it may remain eligible for `true-positive`. Add
@@ -150,13 +150,9 @@ When a finding is classified as `false-positive`, set `status` to
 `false-positive`; otherwise leave the status visible for downstream review unless
 the upstream evidence already supports a more specific status.
 
-For stateful invariant records, preserve any upstream
-`stateful_failure_classification=<classification>` note exactly. Coverage-only
-success is not evidence that the record should be removed. Treat
-`production-bug`, `harness-defect`, `incomplete-spec`, `false-positive`, and
-`blocked-unreproduced` as distinct upstream outcomes that must remain visible in
-`triaged-findings.json`; triage may add consensus notes, but it must not erase
-the original classification, reproducer, blocker, or repair evidence.
+For upstream records, preserve existing classification and evidence fields
+exactly. Triage may add consensus notes, but it must keep the original
+classification and supporting evidence visible in `triaged-findings.json`.
 
 Save triaged findings to {{artifact_path}}/triaged-findings.json as a JSON
 array. Every object must include `triage_classification` set to exactly one of
