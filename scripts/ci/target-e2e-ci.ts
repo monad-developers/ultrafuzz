@@ -187,14 +187,17 @@ function assertReportAccounting(envelopePath: string, targetName: string, signal
     "estimated_cost",
     "estimatedCost"
   ]);
+  const partialPricing = runMetadata.partial_pricing === true || runMetadata.partialPricing === true;
   if (!positiveIntegerLabel(tokensUsed)) {
     fail(
       `${targetName} (${signalProfile}) final report is missing positive token usage: ${JSON.stringify(tokensUsed)}`
     );
   }
-  if (!positiveUsdLabel(estimatedSpend)) {
+  const hasPositiveSpend = positiveUsdLabel(estimatedSpend);
+  const hasHonestUnpricedSpend = estimatedSpend === "unavailable" && partialPricing;
+  if (!hasPositiveSpend && !hasHonestUnpricedSpend) {
     fail(
-      `${targetName} (${signalProfile}) final report is missing positive estimated spend: ` +
+      `${targetName} (${signalProfile}) final report has invalid estimated spend accounting: ` +
         JSON.stringify(estimatedSpend)
     );
   }
@@ -203,7 +206,11 @@ function assertReportAccounting(envelopePath: string, targetName: string, signal
   if (markdown.includes("Tokens used: unavailable") || !markdown.includes(tokensUsed as string)) {
     fail(`${targetName} (${signalProfile}) report.md does not render token usage ${JSON.stringify(tokensUsed)}`);
   }
-  if (markdown.includes("Estimated spend: unavailable") || !markdown.includes(estimatedSpend as string)) {
+  if (
+    (hasPositiveSpend &&
+      (markdown.includes("Estimated spend: unavailable") || !markdown.includes(estimatedSpend as string))) ||
+    (hasHonestUnpricedSpend && !markdown.includes("Estimated spend: unavailable"))
+  ) {
     fail(
       `${targetName} (${signalProfile}) report.md does not render estimated spend ${JSON.stringify(estimatedSpend)}`
     );
@@ -211,7 +218,7 @@ function assertReportAccounting(envelopePath: string, targetName: string, signal
 
   console.log(
     `Accounting assertion passed for ${targetName} (${signalProfile}): ` +
-      `tokens=${tokensUsed}, estimated_spend=${estimatedSpend}`
+      `tokens=${tokensUsed}, estimated_spend=${estimatedSpend}, partial_pricing=${partialPricing}`
   );
 }
 
