@@ -138,7 +138,7 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
   const providers = Object.entries(catalog).filter((entry): entry is [string, CatalogProvider] => isRecord(entry[1]));
   for (const model of models) {
     const preferredProvider = providerForModel(model);
-    const orderedProviders = providers.sort(([left], [right]) => {
+    const orderedProviders = [...providers].sort(([left], [right]) => {
       if (left === preferredProvider) return -1;
       if (right === preferredProvider) return 1;
       return left.localeCompare(right);

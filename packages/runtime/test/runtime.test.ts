@@ -1632,6 +1632,76 @@ test("syncRun records unavailable spend when workflow token events are unpriced"
   assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
 });
 
+test("syncRun retries transient pricing catalog failures", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-transient-pricing-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 100_000,
+          outputTokens: 10_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          model: "gpt-test",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = "data:application/json,%7B";
+  const run = await startRun({ projectRoot: project, runId: "transient-pricing-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const failedSync = await syncRun({ projectRoot: project, runId: "transient-pricing-accounting", env });
+  assert.equal(failedSync.ok, true, JSON.stringify(failedSync.diagnostics));
+  const failedMetadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { estimated_spend?: string };
+      pricing_catalog?: { status?: string; unresolved_models?: string[] };
+    };
+  };
+  assert.equal(failedMetadata.accounting?.current?.estimated_spend, "unavailable");
+  assert.equal(failedMetadata.accounting?.pricing_catalog?.status, "unavailable");
+  assert.deepEqual(failedMetadata.accounting?.pricing_catalog?.unresolved_models, ["gpt-test"]);
+
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-test": { cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 } }
+      }
+    }
+  });
+  const recoveredSync = await syncRun({ projectRoot: project, runId: "transient-pricing-accounting", env });
+  assert.equal(recoveredSync.ok, true, JSON.stringify(recoveredSync.diagnostics));
+  const recoveredMetadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { estimated_spend?: string; partial_pricing?: boolean };
+      pricing_catalog?: { status?: string; resolved_models?: string[]; unresolved_models?: string[] };
+    };
+  };
+  assert.equal(recoveredMetadata.accounting?.current?.estimated_spend, "$0.80");
+  assert.equal(recoveredMetadata.accounting?.current?.partial_pricing, false);
+  assert.equal(recoveredMetadata.accounting?.pricing_catalog?.status, "available");
+  assert.deepEqual(recoveredMetadata.accounting?.pricing_catalog?.resolved_models, ["gpt-test"]);
+  assert.deepEqual(recoveredMetadata.accounting?.pricing_catalog?.unresolved_models, []);
+});
+
 test("syncRun snapshots live pricing and does not double-count token detail fields", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

@@ -309,7 +309,10 @@ async function synchronizeWorkflowAccounting(input: {
   const storedAccounting = recordField(metadata, "accounting");
   const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
   const storedPricing = modelPricingFromSnapshot(storedPricingCatalog?.model_prices);
-  const previouslyUnresolvedModels = new Set(stringArrayField(storedPricingCatalog, "unresolved_models"));
+  const previouslyUnresolvedModels =
+    storedPricingCatalog?.status === "disabled"
+      ? new Set(stringArrayField(storedPricingCatalog, "unresolved_models"))
+      : new Set<string>();
   const requiredModels = modelsRequiringPricing(input.events);
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
