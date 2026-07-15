@@ -44,9 +44,7 @@ step:
 - If no classification reaches {{triage_quorum}}-of-{{triage_panel_size}}
   agreement, classify the finding as `undetermined`.
 
-Do not rerun generated tests, focused proofs, temporary public wrappers, or any
-other Foundry command during triage in this no-fuzz branch. Use source,
-specification, property, and artifact evidence only.
+Use source, specification, property, and artifact evidence for triage.
 
 ## Helper reachability audit
 

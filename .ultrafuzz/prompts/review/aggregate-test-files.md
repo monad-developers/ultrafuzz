@@ -5,7 +5,7 @@ display_name: Aggregate test files
 
 # Aggregate test files
 
-This branch is the no-fuzz ablation. There are no generated tests to collect.
+This workflow records an empty generated-test aggregation.
 
 Read these review handoffs only to preserve the default review sequence:
 
@@ -15,9 +15,8 @@ Dedupe report:
 Severity-classified findings:
 {{artifact_path:severity-classification}}/severity-classified-findings.json
 
-Do not inspect strategy generated-test manifests. Do not copy files, run Forge,
-run fuzzer tooling, or modify the target workspace. Write an empty aggregation
-manifest to {{artifact_path}}/aggregation.json with this JSON shape:
+Write an empty aggregation manifest to {{artifact_path}}/aggregation.json with
+this JSON shape:
 
 - `schema_version`: `"1.0"`
 - `source_generated_tests`: `0`

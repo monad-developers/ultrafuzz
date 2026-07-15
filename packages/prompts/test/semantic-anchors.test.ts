@@ -31,7 +31,7 @@ describe("prompt semantic anchors", () => {
     expect(promptCorpus).not.toContain("medusa version");
   });
 
-  it("keeps no-fuzz generated-test manifests on the canonical empty generated_tests contract", () => {
+  it("keeps generated-test manifests on the canonical empty generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
@@ -52,7 +52,7 @@ describe("prompt semantic anchors", () => {
 
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
     expect(readFileSync(templatePath, "utf8")).toContain('"generated_tests": []');
-    expect(aggregate).toContain("There are no generated tests to collect");
+    expect(aggregate).toContain("empty generated-test aggregation");
     expect(dynamic).toContain("`generated_tests: []`");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
     expect(readFileSync(topologyPath, "utf8")).toMatch(

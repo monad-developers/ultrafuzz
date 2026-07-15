@@ -16,7 +16,7 @@ empty generated-test manifest before timeout.
 
 Learn from this campaign's setup, property, and strategy artifacts, then create
 additional target-specific bug-search plans and finding candidates for remaining
-current-run property opportunities. Do not create or execute tests.
+current-run property opportunities.
 
 Start up to {{dynamic_strategies_enumerator}} independent max-reasoning
 enumerator sub-agents. Each enumerator should inspect only current-run
@@ -137,11 +137,9 @@ Reject recommendations that require changing production contracts, depending
 on live network access, downloading packages, or making guesses not supported
 by repository files or artifacts.
 
-## No generated tests
+## Generated-test manifest
 
-Do not write generated Foundry tests, compile test files, run focused
-generated-test commands, or start broad fuzzing or repository-wide checks. The
-required `generated-tests.json` must use an empty `generated_tests` array.
+The required `generated-tests.json` uses an empty `generated_tests` array.
 
 ## Required outputs
 

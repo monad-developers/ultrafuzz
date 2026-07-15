@@ -19,9 +19,8 @@ rerun Forge, edit generated tests, or perform optional post-write validation
 unless one of those files is missing, invalid, or clearly contradicts the
 required schema.
 
-Do not run Forge, generated tests, fuzzer tooling, or dependency hydration in
-this no-fuzz branch. Dedupe only from written findings, property artifacts,
-source evidence, and current-run strategy summaries.
+Dedupe from written findings, property artifacts, source evidence, and
+current-run strategy summaries.
 
 Also inspect the Dynamic strategy generator outputs before deduping:
 
@@ -64,14 +63,12 @@ findings handoff is useful. Save duplicate and family audit details to a
 separate {{artifact_path}}/duplicates.json object or array; do not replace
 `deduped-findings.json` with an audit object.
 
-Do not discard unique symptoms merely because they come from the same strategy.
-Dedupe is only for equivalent findings or proven same-root family variants, not
-for minimizing uncomfortable evidence.
+Preserve unique symptoms that come from the same strategy. Dedupe is only for
+equivalent findings or proven same-root family variants.
 
 Stateful-analysis records are first-class findings. Preserve raw evidence,
-status, notes, and property context on the kept finding. Do not drop or merge
-away distinct stateful records merely because they came from the same strategy
-family.
+status, notes, and property context on the kept finding. Keep distinct stateful
+records visible when they describe different behavior.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
@@ -106,5 +103,3 @@ object with `schema_version: "1.0"` and a `records` array keyed by
 After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.
-
-Do not compile, fix tests, hydrate dependencies, or change the target workspace.

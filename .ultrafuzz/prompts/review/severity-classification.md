@@ -296,9 +296,6 @@ Invalid or out of scope:
 Do not include invalid or out-of-scope records like the example above in the
 production report entries.
 
-Do not compile, run tests, hydrate dependencies, or change the target workspace
-in this no-fuzz branch.
-
 Save severity-classified findings to
 {{artifact_path}}/severity-classified-findings.json as JSON.
 Also copy the strategy detection provenance to

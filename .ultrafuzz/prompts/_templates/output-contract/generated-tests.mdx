@@ -1,6 +1,4 @@
-Do not write generated test source files under `{{strategy_attempt_test_dir}}`
-or `{{generated_tests_dir}}` in this no-fuzz ablation branch.
 `generated-tests.json` must be a JSON object with `schema_version: "1.0"`,
 `run_id`, `node_id`, and `generated_tests`. Use `generated_tests` as the only
-file list, and always set it to an empty array for this branch:
+file list for this workflow. Set it to an empty array:
 `"generated_tests": []`.

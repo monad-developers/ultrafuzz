@@ -16,9 +16,8 @@ Read these review handoffs before writing the report:
 Aggregation manifest:
 `{{artifact_path:aggregate-test-files}}/aggregation.json`
 
-`aggregation.json` is a JSON object, not a top-level array. In this no-fuzz
-branch it should be an empty aggregation manifest. Do not iterate over the whole
-object as an array because that will walk scalar summary fields.
+`aggregation.json` is a JSON object, not a top-level array. It should be an
+empty aggregation manifest.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
@@ -59,8 +58,7 @@ exact source filename where useful, for example
 filenames such as `dedupe-findings/findings.json` when the exact rendered
 filename differs.
 
-The base test setup handoff is context only in this no-fuzz branch. Do not write
-or minimize generated test PoCs.
+The base test setup handoff is context for source and artifact interpretation.
 
 Use these run metadata files for the Run summary section. `{{run_metadata_path}}`
 is the rendered path to `run.json`; `state.json`, `graph.json`, and
@@ -331,10 +329,8 @@ scenario grounded in source and artifact evidence. Prefer meaningful actor names
 they improve understanding; otherwise use generic names such as `Alice` and
 `Bob`.
 
-Do not include Solidity reproducer code blocks, generated test paths, copied
-test snippets, or instructions to compile or run tests. If source/artifact
-evidence is insufficient to write a concrete human-readable scenario, stop and
-report an invalid upstream artifact instead of inventing a PoC.
+Use source/artifact evidence to write concrete human-readable scenarios. If the
+evidence is insufficient, stop and report an invalid upstream artifact.
 
 Do not write local file paths, artifact-relative paths, generated test paths,
 Markdown links, or permalink labels in the human-readable issue body. The
@@ -424,7 +420,7 @@ Before finishing, verify that:
   actor-role language and do not contain placeholder tokens, anonymous variable
   labels, generated-test paths, or copied generated-test boilerplate.
 - Production issues include `### Proof of Concept`.
-- Production issues do not include generated Solidity PoC code blocks.
+- Production issue PoCs are source/artifact scenarios.
 - Production issues include a `### Strategy` detection-rate table.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,
