@@ -83,6 +83,12 @@ Run graph:
 Resolved config:
 `config.resolved.toml` next to `{{run_metadata_path}}`
 
+Repository URL:
+Run `git remote get-url origin` from the repository workspace. For GitHub
+remotes, normalize HTTPS and SSH forms to
+`https://github.com/<owner>/<repository>` and remove a trailing `.git`. If the
+origin is missing or is not a GitHub repository, write `unavailable`.
+
 Use any embedded runtime contexts for Run Summary, Run Accounting, Run Health,
 and Finding Lifecycle Ledger when present in this prompt as the source of truth
 for computed summary/accounting/lineage fields. If those contexts are absent,
@@ -102,13 +108,15 @@ Accounting contract:
   `run_metadata.estimated_spend`, `run_metadata.partial_pricing`, and
   `run_metadata.source_run_ids` with the same values used in `report.md` when
   those values are present in run metadata.
+- In `report.json`, include `run_metadata.repository` with the same normalized
+  URL rendered as `Repository` in `report.md`.
 
 Use `run.json#source_run_id` for `Source run ID`. If there is no source run,
 write `none` for `Source run ID`.
 
 The Run summary contains exactly these public fields: `Run ID`, `Source run ID`,
-`Elapsed time`, `Models used`, `Tokens used`, `Estimated spend`, and `Strategy
-loops`. Render each concrete value as Markdown inline code.
+`Repository`, `Elapsed time`, `Models used`, `Tokens used`, `Estimated spend`,
+and `Strategy loops`. Render each concrete value as Markdown inline code.
 
 ## Finding Selection
 
@@ -253,6 +261,7 @@ Ultrafuzz is an automated Solidity fuzzing campaign assistant. Issues below are 
 
 - Run ID: `<run id>`
 - Source run ID: `<source run id, or none>`
+- Repository: `<normalized GitHub repository URL, or unavailable>`
 - Elapsed time: `<duration rounded to whole hours/minutes, for example 6h 4m, or unavailable>`
 - Models used: `<models from config/state/backend metadata, including reasoning effort when configured, or unavailable>`
 - Tokens used: `<token usage, or unavailable>`
@@ -453,6 +462,8 @@ Before finishing, verify that:
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from
   `run.json` when those metadata values are available.
+- `report.json.run_metadata.repository` matches the normalized `Repository`
+  value rendered in `report.md`.
 - `report.json` production issue `severity`, `impact`, and `likelihood` fields
   use only High, Medium, or Low.
 - `report.json` does not contain alternate severity fields that preserve
