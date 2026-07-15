@@ -24,8 +24,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priority_threshold",
   "invariant_property_priority_filter",
   "invariant_property_priorities",
-  "invariant_testing_fuzzer_timeout",
-  "strategy_attempt_test_dir"
+  "invariant_testing_fuzzer_timeout"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -34,17 +33,12 @@ export interface PromptGraphNode {
   id: string;
   dependsOn?: string[];
   depends_on?: string[];
+  requiredArtifacts?: string[];
+  required_artifacts?: string[];
+  primaryArtifact?: string;
+  primary_artifact?: string;
   artifactDir?: string;
   artifactDirs?: string[];
-  outputs?: PromptArtifactOutput[];
-}
-
-export interface PromptArtifactOutput {
-  path: string;
-  contract: string;
-  primary: boolean;
-  description: string;
-  validEmptyExample?: string;
 }
 
 export interface PromptConcreteNode {
@@ -157,7 +151,6 @@ export interface PromptVariableReference {
   raw: string;
   name: string;
   argument?: string;
-  path?: string;
 }
 
 export function isSupportedTemplateVariable(name: string): name is SupportedTemplateVariable {
@@ -213,8 +206,8 @@ function validatePromptVariableOccurrence(occurrence: TemplateOccurrence, templa
   const reference = parsePromptVariableReference(occurrence.name);
   const producer = parseArtifactProducer(occurrence.name);
   if (producer) {
-    const suffix = parseArtifactSuffix(producer, template.slice(occurrence.end));
-    return suffix.path === undefined ? reference : { ...reference, path: suffix.path };
+    parseArtifactSuffix(producer, template.slice(occurrence.end));
+    return reference;
   }
   const ancestorArtifacts = parseAncestorArtifactsSelector(occurrence.name);
   if (ancestorArtifacts) {
@@ -294,25 +287,22 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
 }
 
 function appendOutputContract(rendered: string, input: PromptRenderInput, current: PromptGraphNode): string {
-  const outputs = artifactOutputsFor(current);
-  if (outputs.length === 0) {
+  const requiredArtifacts = requiredArtifactsFor(current);
+  if (requiredArtifacts.length === 0) {
     return rendered;
   }
 
   const contract = renderOutputContractTemplate("output-contract.mdx", {
-    artifact_contracts: outputs
-      .map((output) => {
-        const validEmptyExample = output.validEmptyExample === "" ? "<empty file>" : output.validEmptyExample;
-        const empty =
-          validEmptyExample === undefined ? "Empty output is not valid." : `Valid empty form: \`${validEmptyExample}\``;
-        return [
-          `- Path: \`${path.join(input.node.artifactDir, output.path)}\`${output.primary ? " (primary)" : ""}`,
-          `  Contract: \`${output.contract}\``,
-          `  Schema: ${output.description}`,
-          `  ${empty}`
-        ].join("\n");
-      })
-      .join("\n")
+    required_artifact_paths: requiredArtifacts
+      .map((artifact) => `- \`${path.join(input.node.artifactDir, artifact)}\``)
+      .join("\n"),
+    findings_contract: requiredArtifacts.includes("findings.json")
+      ? renderOutputContractTemplate("findings.mdx", {})
+      : "",
+    boundary_recipes_contract:
+      requiredArtifacts.includes("boundary-recipes.md") || requiredArtifacts.includes("boundary-recipes.json")
+        ? renderOutputContractTemplate("boundary-recipes.mdx", {})
+        : ""
   });
 
   return `${rendered.trimEnd()}\n\n${contract.trimEnd()}\n`;
@@ -597,22 +587,15 @@ function dependenciesFor(node: PromptGraphNode | undefined): string[] {
 }
 
 function requiredArtifactsFor(node: PromptGraphNode): string[] {
-  const required = (node.outputs ?? []).map((output) => output.path);
+  const required = node.requiredArtifacts ?? node.required_artifacts ?? [];
   for (const artifact of required) {
     validateArtifactRelativePath(artifact);
   }
   return required;
 }
 
-function artifactOutputsFor(node: PromptGraphNode): PromptArtifactOutput[] {
-  for (const output of node.outputs ?? []) {
-    validateArtifactRelativePath(output.path);
-  }
-  return node.outputs ?? [];
-}
-
 function primaryArtifactFor(node: PromptGraphNode): string | undefined {
-  const primary = node.outputs?.find((output) => output.primary)?.path;
+  const primary = node.primaryArtifact ?? node.primary_artifact;
   if (primary) {
     validateArtifactRelativePath(primary);
   }
@@ -648,14 +631,14 @@ function renderArtifactProducer(producer: ArtifactProducer, suffix: string | und
     if (!primary) {
       throw new PromptError(
         "invalid-artifact-reference",
-        `artifact_handoff producer \`${producer.logicalId}\` does not declare a primary output`
+        `artifact_handoff producer \`${producer.logicalId}\` does not declare primary_artifact`
       );
     }
     const required = requiredArtifactsFor(producerNode);
     if (!required.includes(primary)) {
       throw new PromptError(
         "invalid-artifact-reference",
-        `primary output for \`${producer.logicalId}\` is not listed in outputs`
+        `primary_artifact for \`${producer.logicalId}\` is not listed in required_artifacts`
       );
     }
     return renderPathList(dirs.map((dir) => path.join(dir, primary)));
@@ -685,7 +668,7 @@ function renderAncestorArtifacts(selector: "direct" | string[], graph: GraphInde
     if (required.length === 0) {
       throw new PromptError(
         "invalid-artifact-reference",
-        `ancestor_artifacts producer \`${logicalId}\` has no outputs`
+        `ancestor_artifacts producer \`${logicalId}\` has no required_artifacts`
       );
     }
     const dirs = graph.artifactDirsByLogicalId.get(logicalId) ?? [];
@@ -745,7 +728,6 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priority_filter: input.resolvedConfig?.invariantPropertyPriorityFilter ?? "",
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
-    strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }

@@ -4,13 +4,11 @@
 
 Use the property catalog and each strategy's bug-search lens to inspect existing
 source, docs, configuration, tests, and current-run artifacts. Write concrete
-production findings to `findings.json`. When `generated-tests.json` is required,
-write a valid manifest with an empty `generated_tests` array. Review nodes that
-normally aggregate generated tests write empty aggregation manifests.
+production findings to `findings.json`.
 
 Before finishing, you MUST ensure these required artifacts exist exactly at these paths:
 {{required_artifact_paths}}
-{{findings_contract}}{{generated_tests_contract}}{{boundary_recipes_contract}}
+{{findings_contract}}{{boundary_recipes_contract}}
 
 After completing the work and writing every required artifact, your final response MUST contain ONLY one raw, valid JSON object in exactly this form:
 

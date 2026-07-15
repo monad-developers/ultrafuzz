@@ -87,13 +87,10 @@ non-production appendix, keep its upstream `triage_classification`, use a
 canonical `status` such as `needs-review` or `false-positive`, and do not
 describe it as a production bug.
 
-Preserve stateful invariant context notes exactly, including
-`stateful_failure_classification=<classification>`. Use them as root-cause
-context, not as permission to promote invalid or blocked records. Do not
-promote `blocked-unreproduced` records without replayable evidence. Do not
-promote source-comment-only assumptions to production bugs without support from
-public docs, README, interfaces, tests, emitted behavior, or other allowed
-public sources.
+Preserve upstream context notes exactly. Use them as root-cause context. Promote
+blocked records only with replayable evidence. Promote source-comment-only
+assumptions to production bugs only with support from public docs, README,
+interfaces, tests, emitted behavior, or other allowed public sources.
 
 ## Public reachability gate for helper-level findings
 

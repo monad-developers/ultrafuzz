@@ -22,48 +22,21 @@ function baseRenderInput(tmp: string) {
       logicalNodes: [
         {
           id: "project-discovery",
-          outputs: [
-            {
-              path: "setup/project-discovery.md",
-              contract: "ultrafuzz/nonempty-markdown@1",
-              primary: true,
-              description: "A non-empty Markdown document."
-            }
-          ],
+          requiredArtifacts: ["setup/project-discovery.md"],
+          primaryArtifact: "setup/project-discovery.md",
           artifactDir: path.join(runArtifacts, "project-discovery")
         },
         {
           id: "base-test-setup",
           dependsOn: ["project-discovery"],
-          outputs: [
-            {
-              path: "setup/base-test-setup.md",
-              contract: "ultrafuzz/nonempty-markdown@1",
-              primary: true,
-              description: "A non-empty Markdown document."
-            }
-          ],
+          requiredArtifacts: ["setup/base-test-setup.md"],
+          primaryArtifact: "setup/base-test-setup.md",
           artifactDir: path.join(runArtifacts, "base-test-setup")
         },
         {
           id: "boundary-tests",
           dependsOn: ["base-test-setup"],
-          outputs: [
-            {
-              path: "findings.json",
-              contract: "ultrafuzz/findings@1",
-              primary: true,
-              description: "A findings array with severity_guess.",
-              validEmptyExample: "[]"
-            },
-            {
-              path: "generated-tests.json",
-              contract: "ultrafuzz/generated-tests@1",
-              primary: false,
-              description: "A manifest containing generated_tests.",
-              validEmptyExample: '{"generated_tests":[]}'
-            }
-          ],
+          requiredArtifacts: ["findings.json"],
           artifactDir: path.join(runArtifacts, "boundary-tests")
         }
       ]
@@ -114,10 +87,8 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "findings.json"));
     expect(result.renderedMarkdown).toContain("## Ultrafuzz Output Contract");
-    expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
     expect(result.renderedMarkdown).toContain("severity_guess");
-    expect(result.renderedMarkdown).toContain("generated_tests");
-    expect(result.renderedMarkdown).toContain("write each artifact to the exact absolute path");
+    expect(result.renderedMarkdown).not.toContain("generated_tests");
     expect(result.renderedMarkdown).toContain("final response MUST contain ONLY one raw, valid JSON object");
     expect(result.renderedMarkdown).toContain('{"summary":"A concise description');
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
@@ -150,14 +121,8 @@ describe("prompt rendering", () => {
     input.graph.logicalNodes.push({
       id: "unrelated",
       dependsOn: ["project-discovery"],
-      outputs: [
-        {
-          path: "unrelated.txt",
-          contract: "ultrafuzz/text@1",
-          primary: true,
-          description: "Text."
-        }
-      ],
+      requiredArtifacts: ["unrelated.txt"],
+      primaryArtifact: "unrelated.txt",
       artifactDir: path.join(tmp, "runs", "run-1", "artifacts", "unrelated")
     });
     input.prompt = "{{artifact_handoff:unrelated}}";
@@ -169,12 +134,9 @@ describe("prompt rendering", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    input.graph.logicalNodes[1]!.outputs = input.graph.logicalNodes[1]!.outputs?.map((output) => ({
-      ...output,
-      primary: false
-    }));
+    delete input.graph.logicalNodes[1]!.primaryArtifact;
 
-    expect(() => renderPrompt(input)).toThrow(/primary output/);
+    expect(() => renderPrompt(input)).toThrow(/primary_artifact/);
   });
 
   it("writes prompt.rendered.md before workflow launch", () => {

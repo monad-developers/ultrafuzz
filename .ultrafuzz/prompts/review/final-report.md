@@ -7,17 +7,11 @@ display_name: Generate report
 
 Your job is to produce a concise final audit issue list from the upstream
 finding, triage, severity classification, lifecycle, strategy detection, and
-aggregation outputs.
+strategy detection outputs.
 
 ## Required Inputs
 
 Read these review handoffs before writing the report:
-
-Aggregation manifest:
-`{{artifact_path:aggregate-test-files}}/aggregation.json`
-
-`aggregation.json` is a JSON object, not a top-level array. It should be an
-empty aggregation manifest.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
@@ -50,7 +44,6 @@ Base test setup:
 Use exactly the rendered filenames above when reading prior-node outputs. When
 you mention an input internally or in `report.json` provenance, preserve the
 exact source filename where useful, for example
-`{{artifact_path:aggregate-test-files}}/aggregation.json`,
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`,
 `{{artifact_path:severity-classification}}/strategy-detections.json`,
 `{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`, and
@@ -124,11 +117,8 @@ Preserve actionable non-production classifications such as `incomplete-spec`,
 `defensive-hardening` in a concise appendix table instead of mixing them into
 the production issue list.
 
-For stateful invariant records, preserve every upstream finding whose `notes`
-contain `stateful_failure_classification=<classification>`. Production-bug
-records with source/artifact evidence belong in the normal issue list. Preserve
-stateful `harness-defect` and `incomplete-spec` records through the
-non-production actionable outcomes appendix and `report.json`
+For upstream records, preserve actionable non-production classifications through
+the non-production actionable outcomes appendix and `report.json`
 `non_production_outcomes` when their triage classification is actionable.
 
 Use `finding-lifecycle-ledger.json` as the source of truth for source artifacts,
@@ -217,9 +207,7 @@ only when another party can gain an advantage, grief, steal, or otherwise harm
 someone else. Use `User` when the behavior is self-impacting or the protocol
 does not work as intended for the same user who triggers it. Prefer precise
 roles such as `Depositor`, `Borrower`, `Liquidator`, `Relayer`, or `Operator`
-when clearer. Do not combine multiple roles with slash notation. Do not leave
-placeholder tokens, anonymous variable labels, or copied generated-test
-boilerplate in the final report.
+when clearer.
 
 ## Required Markdown Shape
 
@@ -332,9 +320,9 @@ they improve understanding; otherwise use generic names such as `Alice` and
 Use source/artifact evidence to write concrete human-readable scenarios. If the
 evidence is insufficient, stop and report an invalid upstream artifact.
 
-Do not write local file paths, artifact-relative paths, generated test paths,
-Markdown links, or permalink labels in the human-readable issue body. The
-report must be self-sufficient when `report.md` is sent by itself.
+Write the human-readable issue body as standalone prose rather than a set of
+paths or links. The report must be self-sufficient when `report.md` is sent by
+itself.
 
 If the upstream finding has `family_variants`, keep one issue entry for the
 shared production root cause and add a `#### Family variants` subheading inside
@@ -417,8 +405,7 @@ Before finishing, verify that:
   stating the total production issue count and High/Medium/Low severity
   distribution.
 - Production issue descriptions and Proof of Concept steps use concrete
-  actor-role language and do not contain placeholder tokens, anonymous variable
-  labels, generated-test paths, or copied generated-test boilerplate.
+  actor-role language.
 - Production issues include `### Proof of Concept`.
 - Production issue PoCs are source/artifact scenarios.
 - Production issues include a `### Strategy` detection-rate table.
