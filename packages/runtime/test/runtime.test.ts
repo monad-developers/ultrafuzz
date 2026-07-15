@@ -1093,6 +1093,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx"),
     "utf8"
   );
+  const expectedArtifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
   assert.match(workflowSource, /smithers-orchestrator/);
   // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
   // would otherwise shadow the .smithers/agents/ directory under bun.
@@ -1101,6 +1102,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir\]/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
+  assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
+  assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
+  assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(project)}`), false);
   assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);

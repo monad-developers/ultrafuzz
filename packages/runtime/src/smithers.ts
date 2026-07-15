@@ -1209,6 +1209,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       reasoningEffort: task.reasoningEffort ?? null,
       promptPath: task.renderedPromptPath,
       workspacePath: task.workspacePath,
+      artifactDir: task.artifactDir,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
