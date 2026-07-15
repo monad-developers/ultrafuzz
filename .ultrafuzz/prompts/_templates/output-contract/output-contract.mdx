@@ -1,10 +1,26 @@
 ## Ultrafuzz Output Contract
 
-Before finishing, you MUST ensure every artifact below exists and satisfies its named contract. A file merely existing is not sufficient:
+## No-Fuzz Ablation Mode
 
-{{artifact_contracts}}
+This branch is the no-fuzz ablation for the benchmark. If any earlier prompt
+instruction conflicts with this section, this section wins.
 
-Artifact writing is part of the task, not optional final-response metadata. Create parent directories before writing, write each artifact to the exact absolute path shown above, and then verify each path exists, is non-empty unless its contract explicitly allows an empty form, and matches its JSON or Markdown contract. Do not write required artifacts only under the repository root, a relative working directory, or a different similarly named path.
+- Do not create, edit, copy, materialize, compile, or execute fuzz tests,
+  property-based tests, invariant tests, generated Foundry `.t.sol` tests,
+  Recon/Echidna/Medusa campaigns, or coverage-guided fuzzer runs.
+- Do not run `forge test`, Recon, Echidna, Medusa, coverage tooling, or
+  generated-test validation. Inspect existing source, docs, configuration,
+  tests, and current-run artifacts only when they help reason about bugs.
+- Keep the property-specification phase and each strategy's bug-search lens.
+  Search directly for bugs associated with the identified properties and write
+  concrete production findings to `findings.json`.
+- When `generated-tests.json` is required, write a valid empty manifest. Review
+  nodes that normally aggregate generated tests must write empty aggregation
+  manifests instead of copying files.
+
+Before finishing, you MUST ensure these required artifacts exist exactly at these paths:
+{{required_artifact_paths}}
+{{findings_contract}}{{generated_tests_contract}}{{boundary_recipes_contract}}
 
 After completing the work and writing every required artifact, your final response MUST contain ONLY one raw, valid JSON object in exactly this form:
 

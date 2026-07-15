@@ -1,4 +1,4 @@
-version: 2
+version: 1
 defaults:
   strategy_loops: 1
 groups:
@@ -38,40 +38,36 @@ nodes:
     group: setup
     depends_on:
       - __start__
-    outputs:
-      - path: setup/project-discovery.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
+    required_artifacts:
+      - setup/project-discovery.md
+    primary_artifact: setup/project-discovery.md
   - id: actors-flows
     kind: agentic
     prompt: setup/actors-flows.md
     group: setup
     depends_on:
       - project-discovery
-    outputs:
-      - path: setup/actors-flows.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
+    required_artifacts:
+      - setup/actors-flows.md
+    primary_artifact: setup/actors-flows.md
   - id: setup-foundry
     kind: agentic
     prompt: setup/prepare-foundry-harness.md
     group: setup
     depends_on:
       - actors-flows
-    outputs:
-      - path: setup/setup-foundry.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
+    required_artifacts:
+      - setup/setup-foundry.md
+    primary_artifact: setup/setup-foundry.md
   - id: base-test-setup
     kind: agentic
     prompt: setup/discover-base-test.md
     group: setup
     depends_on:
       - setup-foundry
-    outputs:
-      - path: setup/base-test-setup.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
+    required_artifacts:
+      - setup/base-test-setup.md
+    primary_artifact: setup/base-test-setup.md
   - id: reference-properties-0kn0t
     kind: reference
     reference: properties.0kn0t
@@ -79,12 +75,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/0kn0t.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/0kn0t.md
+      - references/manifest.json
+    primary_artifact: references/0kn0t.md
   - id: reference-properties-certora-thinking
     kind: reference
     reference: properties.certora-thinking
@@ -92,12 +86,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/certora-thinking.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/certora-thinking.md
+      - references/manifest.json
+    primary_artifact: references/certora-thinking.md
   - id: reference-properties-certora-sanity
     kind: reference
     reference: properties.certora-sanity
@@ -105,12 +97,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/certora-sanity.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/certora-sanity.md
+      - references/manifest.json
+    primary_artifact: references/certora-sanity.md
   - id: reference-properties-aviggiano
     kind: reference
     reference: properties.aviggiano
@@ -118,12 +108,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/aviggiano.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/aviggiano.md
+      - references/manifest.json
+    primary_artifact: references/aviggiano.md
   - id: reference-properties-montyly-rounding
     kind: reference
     reference: properties.montyly-rounding
@@ -131,12 +119,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/rounding.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/rounding.md
+      - references/manifest.json
+    primary_artifact: references/rounding.md
   - id: reference-properties-crytic
     kind: reference
     reference: properties.crytic
@@ -144,12 +130,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/crytic.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/crytic.md
+      - references/manifest.json
+    primary_artifact: references/crytic.md
   - id: reference-properties-runtime-verification
     kind: reference
     reference: properties.runtime-verification
@@ -157,12 +141,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/runtime-verification.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/runtime-verification.md
+      - references/manifest.json
+    primary_artifact: references/runtime-verification.md
   - id: reference-properties-a16z-erc4626
     kind: reference
     reference: properties.a16z-erc4626
@@ -170,12 +152,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/a16z-erc4626.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/a16z-erc4626.md
+      - references/manifest.json
+    primary_artifact: references/a16z-erc4626.md
   - id: reference-properties-recon
     kind: reference
     reference: properties.recon
@@ -183,12 +163,10 @@ nodes:
     depends_on:
       - __start__
     timeout_seconds: 300
-    outputs:
-      - path: references/recon.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: references/manifest.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - references/recon.md
+      - references/manifest.json
+    primary_artifact: references/recon.md
   - id: property-specification-certora
     kind: agentic
     prompt: properties/certora-thinking-lens.md
@@ -197,12 +175,10 @@ nodes:
       - base-test-setup
       - reference-properties-certora-thinking
       - reference-properties-certora-sanity
-    outputs:
-      - path: properties/certora.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/certora.md
+      - findings.json
+    primary_artifact: properties/certora.md
   - id: property-specification-crytic
     kind: agentic
     prompt: properties/property-specification-crytic.md
@@ -210,12 +186,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-crytic
-    outputs:
-      - path: properties/crytic.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/crytic.md
+      - findings.json
+    primary_artifact: properties/crytic.md
   - id: property-specification-runtime-verification
     kind: agentic
     prompt: properties/property-specification-runtime-verification.md
@@ -223,12 +197,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-runtime-verification
-    outputs:
-      - path: properties/runtime-verification.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/runtime-verification.md
+      - findings.json
+    primary_artifact: properties/runtime-verification.md
   - id: property-specification-a16z
     kind: agentic
     prompt: properties/property-specification-a16z.md
@@ -236,12 +208,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-a16z-erc4626
-    outputs:
-      - path: properties/a16z.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/a16z.md
+      - findings.json
+    primary_artifact: properties/a16z.md
   - id: property-specification-recon
     kind: agentic
     prompt: properties/recon-lens.md
@@ -249,12 +219,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-recon
-    outputs:
-      - path: properties/recon.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/recon.md
+      - findings.json
+    primary_artifact: properties/recon.md
   - id: property-specification-aviggiano
     kind: agentic
     prompt: properties/aviggiano-lens.md
@@ -262,12 +230,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-aviggiano
-    outputs:
-      - path: properties/aviggiano.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/aviggiano.md
+      - findings.json
+    primary_artifact: properties/aviggiano.md
   - id: property-specification-0kn0t
     kind: agentic
     prompt: properties/0kn0t-lens.md
@@ -275,12 +241,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-0kn0t
-    outputs:
-      - path: properties/0kn0t.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/0kn0t.md
+      - findings.json
+    primary_artifact: properties/0kn0t.md
   - id: property-specification-josselin-feist
     kind: agentic
     prompt: properties/josselin-feist-lens.md
@@ -288,12 +252,10 @@ nodes:
     depends_on:
       - base-test-setup
       - reference-properties-montyly-rounding
-    outputs:
-      - path: properties/josselin-feist.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - properties/josselin-feist.md
+      - findings.json
+    primary_artifact: properties/josselin-feist.md
   - id: property-specification-fanin
     kind: agentic
     prompt: properties/property-specification-fanin.md
@@ -307,52 +269,41 @@ nodes:
       - property-specification-aviggiano
       - property-specification-0kn0t
       - property-specification-josselin-feist
-    outputs:
-      - path: properties.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: properties.json
-        contract: ultrafuzz/properties@1
+    required_artifacts:
+      - properties.md
+    primary_artifact: properties.md
   - id: boundary-tests
     kind: agentic
     prompt: strategies/boundary-tests.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: boundary-recipes.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: boundary-recipes.json
-        contract: ultrafuzz/json-object@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - boundary-recipes.md
+      - boundary-recipes.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: boundary-recipes.md
   - id: encode-decode
     kind: agentic
     prompt: strategies/encode-decode.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: differential-library-tests
     kind: agentic
     prompt: strategies/differential-library-tests.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
     loops: 1
   - id: round-trip
     kind: agentic
@@ -360,229 +311,175 @@ nodes:
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: workflow-property-based-tests
     kind: agentic
     prompt: strategies/workflow-property-based-tests.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: time-warp-sequences
     kind: agentic
     prompt: strategies/time-warp-sequences.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-  - id: expand-coverage
-    kind: agentic
-    prompt: strategies/expand-coverage.md
-    group: strategies
-    depends_on:
-      - property-specification-fanin
-    outputs:
-      - path: coverage-expansion.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: admin-config-boundaries
     kind: agentic
     prompt: strategies/admin-config-boundaries.md
     group: strategies
     depends_on:
       - property-specification-fanin
-      - actors-flows
-    outputs:
-      - path: admin-config-boundary-matrix.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: admin-config-boundary-matrix.json
-        contract: ultrafuzz/json-object@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - admin-config-boundary-matrix.md
+      - admin-config-boundary-matrix.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: admin-config-boundary-matrix.md
   - id: external-dependency-boundaries
     kind: agentic
     prompt: strategies/external-dependency-boundaries.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: dependency-scope-matrix.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: dependency-scope-matrix.json
-        contract: ultrafuzz/json-object@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - dependency-scope-matrix.md
+      - dependency-scope-matrix.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: dependency-scope-matrix.md
   - id: externalized-state-accounting
     kind: agentic
     prompt: strategies/externalized-state-accounting.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: externalized-state-accounting.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: externalized-state-accounting.json
-        contract: ultrafuzz/json-object@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - externalized-state-accounting.md
+      - externalized-state-accounting.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: externalized-state-accounting.md
   - id: amm-boundary-liquidity
     kind: agentic
     prompt: strategies/amm-boundary-liquidity.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: payable-fallback-accounting
     kind: agentic
     prompt: strategies/payable-fallback-accounting.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: packed-action-parity
     kind: agentic
     prompt: strategies/packed-action-parity.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: batch-atomicity-unsupported-actions
     kind: agentic
     prompt: strategies/batch-atomicity-unsupported-actions.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: router-exact-accounting
     kind: agentic
     prompt: strategies/router-exact-accounting.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: rounding-direction-audit
     kind: agentic
     prompt: strategies/rounding-direction-audit.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: market-exhaustion-boundaries
     kind: agentic
     prompt: strategies/market-exhaustion-boundaries.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: order-replacement-collateral
     kind: agentic
     prompt: strategies/order-replacement-collateral.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: state-machine-boundaries
     kind: agentic
     prompt: strategies/state-machine-boundaries.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: strategies/lifecycle-view-boundaries.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - findings.json
+      - generated-tests.json
+    primary_artifact: findings.json
   - id: stateful-invariant-setup
     kind: agentic
     prompt: strategies/invariants/setup.md
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: setup-inventory.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
+    required_artifacts:
+      - setup-inventory.md
+    primary_artifact: setup-inventory.md
     loops: 1
   - id: stateful-invariant-handlers
     kind: agentic
@@ -590,71 +487,9 @@ nodes:
     group: strategies
     depends_on:
       - stateful-invariant-setup
-    outputs:
-      - path: handler-coverage-inventory.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-    loops: 1
-  - id: stateful-invariant-coverage
-    kind: agentic
-    prompt: strategies/invariants/coverage.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-handlers
-      - property-specification-fanin
-    loop_mode: series
-    outputs:
-      - path: coverage-goal.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: coverage-report.md
-        contract: ultrafuzz/nonempty-markdown@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-      - path: harness-repairs.json
-        contract: ultrafuzz/json-array@1
-    loops: 1
-  - id: stateful-invariant-implement-properties
-    kind: agentic
-    prompt: strategies/invariants/implement-properties.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-coverage
-    outputs:
-      - path: implemented-properties.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: implemented-properties.json
-        contract: ultrafuzz/implemented-properties@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-    loops: 1
-  - id: stateful-invariant-campaign
-    kind: agentic
-    prompt: strategies/invariants/invariant-testing-campaign.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-implement-properties
-    outputs:
-      - path: campaign-plan.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: campaign-report.md
-        contract: ultrafuzz/nonempty-markdown@1
-      - path: campaign-summary.json
-        contract: ultrafuzz/json-object@1
-      - path: echidna-results.json
-        contract: ultrafuzz/property-campaign@1
-      - path: medusa-results.json
-        contract: ultrafuzz/property-campaign@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
+    required_artifacts:
+      - handler-coverage-inventory.md
+    primary_artifact: handler-coverage-inventory.md
     loops: 1
   - id: differential-oracle-planner
     kind: agentic
@@ -662,10 +497,9 @@ nodes:
     group: strategies
     depends_on:
       - property-specification-fanin
-    outputs:
-      - path: differential-plan.json
-        contract: ultrafuzz/json-object@1
-        primary: true
+    required_artifacts:
+      - differential-plan.json
+    primary_artifact: differential-plan.json
     loops: 1
   - id: reference-harness-author
     kind: agentic
@@ -673,12 +507,10 @@ nodes:
     group: strategies
     depends_on:
       - differential-oracle-planner
-    outputs:
-      - path: reference-harness.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - reference-harness.json
+      - generated-tests.json
+    primary_artifact: reference-harness.json
     loops: 1
   - id: reference-and-lane-auditor
     kind: agentic
@@ -686,10 +518,9 @@ nodes:
     group: strategies
     depends_on:
       - reference-harness-author
-    outputs:
-      - path: audited-differential-lanes.json
-        contract: ultrafuzz/json-object@1
-        primary: true
+    required_artifacts:
+      - audited-differential-lanes.json
+    primary_artifact: audited-differential-lanes.json
     loops: 1
   - id: differential-lane-author
     kind: agentic
@@ -697,14 +528,11 @@ nodes:
     group: strategies
     depends_on:
       - reference-and-lane-auditor
-    outputs:
-      - path: lane-result.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - lane-result.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: lane-result.json
     loops: 1
   - id: differential-red-triage
     kind: agentic
@@ -712,14 +540,11 @@ nodes:
     group: strategies
     depends_on:
       - differential-lane-author
-    outputs:
-      - path: semantic-red-registry.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: triage-a.json
-        contract: ultrafuzz/json-object@1
-      - path: triage-b.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - semantic-red-registry.json
+      - triage-a.json
+      - triage-b.json
+    primary_artifact: semantic-red-registry.json
     loops: 1
   - id: differential-repair-and-report-review
     kind: agentic
@@ -727,18 +552,13 @@ nodes:
     group: strategies
     depends_on:
       - differential-red-triage
-    outputs:
-      - path: repair-summary.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: gap-review.json
-        contract: ultrafuzz/json-object@1
-      - path: differential-report-review.json
-        contract: ultrafuzz/json-object@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
+    required_artifacts:
+      - repair-summary.json
+      - gap-review.json
+      - differential-report-review.json
+      - findings.json
+      - generated-tests.json
+    primary_artifact: repair-summary.json
     loops: 1
   - id: dynamic-strategy-generator
     kind: agentic
@@ -751,7 +571,6 @@ nodes:
       - round-trip
       - workflow-property-based-tests
       - time-warp-sequences
-      - expand-coverage
       - admin-config-boundaries
       - external-dependency-boundaries
       - externalized-state-accounting
@@ -767,31 +586,21 @@ nodes:
       - lifecycle-view-boundaries
       - stateful-invariant-setup
       - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
-      - stateful-invariant-campaign
       - differential-oracle-planner
       - reference-harness-author
       - reference-and-lane-auditor
       - differential-lane-author
       - differential-red-triage
       - differential-repair-and-report-review
-    outputs:
-      - path: strategy-plan.json
-        contract: ultrafuzz/json-object@1
-        primary: true
-      - path: enumerator-outputs.json
-        contract: ultrafuzz/json-object@1
-      - path: aggregate-recommendations.json
-        contract: ultrafuzz/json-object@1
-      - path: selected-strategies.json
-        contract: ultrafuzz/json-object@1
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-      - path: provenance.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - strategy-plan.json
+      - enumerator-outputs.json
+      - aggregate-recommendations.json
+      - selected-strategies.json
+      - generated-tests.json
+      - findings.json
+      - provenance.json
+    primary_artifact: strategy-plan.json
     loops: 1
   - id: dedupe-findings
     kind: agentic
@@ -804,7 +613,6 @@ nodes:
       - round-trip
       - workflow-property-based-tests
       - time-warp-sequences
-      - expand-coverage
       - admin-config-boundaries
       - external-dependency-boundaries
       - externalized-state-accounting
@@ -820,9 +628,6 @@ nodes:
       - lifecycle-view-boundaries
       - stateful-invariant-setup
       - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
-      - stateful-invariant-campaign
       - differential-oracle-planner
       - reference-harness-author
       - reference-and-lane-auditor
@@ -830,60 +635,48 @@ nodes:
       - differential-red-triage
       - differential-repair-and-report-review
       - dynamic-strategy-generator
-    outputs:
-      - path: deduped-findings.json
-        contract: ultrafuzz/json-array@1
-        primary: true
-      - path: strategy-detections.json
-        contract: ultrafuzz/json-array@1
-      - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - deduped-findings.json
+      - strategy-detections.json
+      - finding-lifecycle-ledger.json
+    primary_artifact: deduped-findings.json
   - id: triage
     kind: agentic
     prompt: review/triage.md
     group: review
     depends_on:
       - dedupe-findings
-    outputs:
-      - path: triaged-findings.json
-        contract: ultrafuzz/json-array@1
-        primary: true
-      - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - triaged-findings.json
+      - finding-lifecycle-ledger.json
+    primary_artifact: triaged-findings.json
   - id: severity-classification
     kind: agentic
     prompt: review/severity-classification.md
     group: review
     depends_on:
       - triage
-    outputs:
-      - path: severity-classified-findings.json
-        contract: ultrafuzz/json-array@1
-        primary: true
-      - path: strategy-detections.json
-        contract: ultrafuzz/json-array@1
-      - path: finding-lifecycle-ledger.json
-        contract: ultrafuzz/json-object@1
+    required_artifacts:
+      - severity-classified-findings.json
+      - strategy-detections.json
+      - finding-lifecycle-ledger.json
+    primary_artifact: severity-classified-findings.json
   - id: aggregate-test-files
     kind: agentic
     prompt: review/aggregate-test-files.md
     group: review
     depends_on:
       - severity-classification
-    outputs:
-      - path: aggregation.json
-        contract: ultrafuzz/json-object@1
-        primary: true
+    required_artifacts:
+      - aggregation.json
+    primary_artifact: aggregation.json
   - id: final-report
     kind: agentic
     prompt: review/final-report.md
     group: review
     depends_on:
       - aggregate-test-files
-      - dedupe-findings
-    outputs:
-      - path: report.md
-        contract: ultrafuzz/nonempty-markdown@1
-        primary: true
-      - path: report.json
-        contract: ultrafuzz/report@1
+    required_artifacts:
+      - report.md
+      - report.json
+    primary_artifact: report.md
