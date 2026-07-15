@@ -234,8 +234,13 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
-    SMITHERS_FAKE_EVENTS: eventsPath
+    SMITHERS_FAKE_EVENTS: eventsPath,
+    ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
+}
+
+function pricingCatalogDataUrl(catalog: unknown): string {
+  return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
 }
 
 function workflowInspect(input: {
@@ -1573,7 +1578,7 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });
 
-test("syncRun records lower-bound spend when workflow token events are unpriced", async () => {
+test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -1620,14 +1625,14 @@ test("syncRun records lower-bound spend when workflow token events are unpriced"
     };
   };
   assert.equal(metadata.accounting?.current?.tokens_used, "30");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.00+");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
   assert.equal(metadata.accounting?.current?.partial_pricing, true);
   assert.equal(metadata.accounting?.cumulative?.tokens_used, "30");
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.00+");
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "unavailable");
   assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
 });
 
-test("syncRun estimates spend for default priced model usage events without explicit cost", async () => {
+test("syncRun estimates spend from a live pricing catalog without explicit event cost", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -1647,13 +1652,24 @@ test("syncRun estimates spend for default priced model usage events without expl
           iteration: 0,
           inputTokens: 100_000,
           outputTokens: 10_000,
-          model: "gpt-5.5",
+          cacheReadTokens: 20_000,
+          cacheWriteTokens: 10_000,
+          model: "gpt-5.6-sol",
           agent: "codex"
         }
       },
       { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
       { type: "RunFinished" }
     ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-5.6-sol": {
+          cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 }
+        }
+      }
+    }
   });
   const run = await startRun({ projectRoot: project, runId: "estimated-accounting", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
@@ -1671,13 +1687,144 @@ test("syncRun estimates spend for default priced model usage events without expl
         priced_event_count?: number;
         unpriced_event_count?: number;
       };
+      pricing_catalog?: {
+        source?: string;
+        status?: string;
+        resolved_models?: string[];
+      };
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "110,000");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
+  assert.equal(metadata.accounting?.current?.tokens_used, "140,000");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.72");
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 1);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.pricing_catalog?.source, "configured-catalog");
+  assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["gpt-5.6-sol"]);
+});
+
+test("syncRun does not assume zero cache reads when cache telemetry is missing", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-unknown-cache-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 100_000,
+          outputTokens: 10_000,
+          model: "gpt-5.6-sol",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-5.6-sol": { cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 } }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "unknown-cache-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "unknown-cache-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        estimated_spend?: string;
+        partial_pricing?: boolean;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+        cache_read_pricing_estimated?: boolean;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 0);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, false);
+});
+
+test("syncRun can price missing cache telemetry with an evidence-based cache ratio", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-estimated-cache-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 100_000,
+          outputTokens: 10_000,
+          model: "gpt-5.6-sol",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-5.6-sol": { cost: { input: 5, output: 30, cache_read: 0.5, cache_write: 6.25 } }
+      }
+    }
+  });
+  env.ULTRAFUZZ_CACHE_READ_RATIO = "0.9";
+  const run = await startRun({ projectRoot: project, runId: "estimated-cache-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "estimated-cache-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        estimated_spend?: string;
+        partial_pricing?: boolean;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+        cache_read_pricing_estimated?: boolean;
+        cache_read_ratio_used?: number;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
+  assert.equal(metadata.accounting?.current?.partial_pricing, true);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, true);
+  assert.equal(metadata.accounting?.current?.cache_read_ratio_used, 0.9);
 });
 
 test("getRunStatus synchronizes without appending duplicate events", async () => {

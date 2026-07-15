@@ -23,6 +23,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { resolveLiveModelPricing, type ModelPricing } from "./model-pricing.js";
 import { readLinkedWorkflowEvidence } from "./start-run.js";
 import {
   type PlannedGraph,
@@ -91,6 +92,8 @@ interface AccountingSummary {
   estimated_spend: string;
   estimated_spend_usd?: number;
   partial_pricing: boolean;
+  cache_read_pricing_estimated: boolean;
+  cache_read_ratio_used?: number;
   event_count: number;
   priced_event_count: number;
   unpriced_event_count: number;
@@ -111,17 +114,13 @@ interface AccountingTotals {
   totalTokens: number;
   estimatedSpendUsd?: number;
   partialPricing: boolean;
+  cacheReadPricingEstimated: boolean;
+  cacheReadRatioUsed?: number;
   eventCount: number;
   pricedEventCount: number;
   unpricedEventCount: number;
   models: Set<string>;
   agents: Set<string>;
-}
-
-interface ModelPricing {
-  inputUsdPerMillion: number;
-  cachedInputUsdPerMillion: number;
-  outputUsdPerMillion: number;
 }
 
 interface NodeWorkflowEvidence {
@@ -157,13 +156,6 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "invalidated"
 ]);
 const ACCOUNTING_SCHEMA_VERSION = "1.0";
-const MODEL_PRICING_USD_PER_MILLION: Record<string, ModelPricing> = {
-  "gpt-5.5": {
-    inputUsdPerMillion: 2.5,
-    cachedInputUsdPerMillion: 0.25,
-    outputUsdPerMillion: 15
-  }
-};
 
 export async function syncRun(input: SyncRunInput) {
   const result = await synchronizeLinkedWorkflowRun(input);
@@ -220,14 +212,23 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
   const eventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--type", "node", "--limit", "100000", "--json"],
     projectRoot,
     env: input.env
   });
-  const diagnostics = eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")];
+  const tokenEventsSnapshot = await runSmithersInspectionCommand({
+    args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
+    projectRoot,
+    env: input.env
+  });
+  const diagnostics = [
+    ...(eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")]),
+    ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
+  ];
 
   const inspect = parseInspectSnapshot(inspectSnapshot.json);
   const events = parseWorkflowEvents(eventsSnapshot.stdout);
+  const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout);
   const syncResult = synchronizeTasks({
     layout,
     graph: loaded.graph,
@@ -246,10 +247,11 @@ export async function synchronizeLinkedWorkflowRun(
     });
   }
 
-  const accountingResult = synchronizeWorkflowAccounting({
+  const accountingResult = await synchronizeWorkflowAccounting({
     layout,
     workflowRunId: evidence.smithersRunId,
-    events
+    events: tokenEvents,
+    env: input.env ?? process.env
   });
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
@@ -287,11 +289,21 @@ export async function synchronizeLinkedWorkflowRun(
   };
 }
 
-function synchronizeWorkflowAccounting(input: { layout: RunLayout; workflowRunId: string; events: WorkflowEvent[] }): {
+async function synchronizeWorkflowAccounting(input: {
+  layout: RunLayout;
+  workflowRunId: string;
+  events: WorkflowEvent[];
+  env?: Record<string, string | undefined>;
+}): Promise<{
   changed: boolean;
   available: boolean;
-} {
-  const current = accountingFromWorkflowEvents(input.events);
+}> {
+  const pricing = await resolveLiveModelPricing({ models: modelsRequiringPricing(input.events), env: input.env });
+  const current = accountingFromWorkflowEvents(
+    input.events,
+    pricing.prices,
+    configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO)
+  );
   if (current === undefined) {
     return { changed: false, available: false };
   }
@@ -307,9 +319,10 @@ function synchronizeWorkflowAccounting(input: { layout: RunLayout; workflowRunId
     source: "workflow-events",
     workflow_run_id: input.workflowRunId,
     current,
-    cumulative
+    cumulative,
+    pricing_catalog: pricing.metadata
   };
-  if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), nextComparable)) {
+  if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
     return { changed: false, available: true };
   }
 
@@ -323,7 +336,11 @@ function synchronizeWorkflowAccounting(input: { layout: RunLayout; workflowRunId
   return { changed: true, available: true };
 }
 
-function accountingFromWorkflowEvents(events: WorkflowEvent[]): AccountingSummary | undefined {
+function accountingFromWorkflowEvents(
+  events: WorkflowEvent[],
+  modelPricing: ReadonlyMap<string, ModelPricing>,
+  cacheReadRatio: number | undefined
+): AccountingSummary | undefined {
   const totals = emptyAccountingTotals();
   for (const event of events) {
     if (event.type !== "TokenUsageReported") {
@@ -349,14 +366,19 @@ function accountingFromWorkflowEvents(events: WorkflowEvent[]): AccountingSummar
       "estimated_cost_usd"
     ]);
     const model = stringField(payload, "model");
-    const estimatedCostUsd =
-      costUsd ??
-      estimatedCostFromModelPricing({
-        model,
-        inputTokens: inputTokens ?? 0,
-        outputTokens: outputTokens ?? 0,
-        cacheReadTokens: cacheReadTokens ?? 0
-      });
+    const modelCostEstimate =
+      costUsd === undefined
+        ? estimatedCostFromModelPricing({
+            model,
+            inputTokens: inputTokens ?? 0,
+            outputTokens: outputTokens ?? 0,
+            cacheReadTokens,
+            cacheWriteTokens: cacheWriteTokens ?? 0,
+            cacheReadRatio,
+            modelPricing
+          })
+        : undefined;
+    const estimatedCostUsd = costUsd ?? modelCostEstimate?.costUsd;
     const tokenCount =
       explicitTotal ??
       (inputTokens ?? 0) +
@@ -382,6 +404,11 @@ function accountingFromWorkflowEvents(events: WorkflowEvent[]): AccountingSummar
     } else {
       totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + estimatedCostUsd;
       totals.pricedEventCount += 1;
+    }
+    if (modelCostEstimate?.cacheReadPricingEstimated === true) {
+      totals.cacheReadPricingEstimated = true;
+      totals.cacheReadRatioUsed = modelCostEstimate.cacheReadRatioUsed;
+      totals.partialPricing = true;
     }
     if (
       booleanField(payload, "partialPricing") === true ||
@@ -451,6 +478,13 @@ function cumulativeAccountingSummary(
       totals.partialPricing ||
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
+    totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
+    if (summary.cache_read_ratio_used !== undefined) {
+      totals.cacheReadRatioUsed =
+        totals.cacheReadRatioUsed === undefined || totals.cacheReadRatioUsed === summary.cache_read_ratio_used
+          ? summary.cache_read_ratio_used
+          : undefined;
+    }
     if (summary.estimated_spend_usd !== undefined) {
       totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + summary.estimated_spend_usd;
     }
@@ -471,6 +505,7 @@ function cumulativeAccountingSummary(
     tokens_used: "0",
     estimated_spend: "unavailable",
     partial_pricing: false,
+    cache_read_pricing_estimated: false,
     event_count: 0,
     priced_event_count: 0,
     unpriced_event_count: 0,
@@ -504,6 +539,11 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
       ? {}
       : { estimated_spend_usd: firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) }),
     partial_pricing: booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false,
+    cache_read_pricing_estimated:
+      booleanField(value, "cache_read_pricing_estimated") ?? booleanField(value, "cacheReadPricingEstimated") ?? false,
+    ...(firstNumericField(value, ["cache_read_ratio_used", "cacheReadRatioUsed"]) === undefined
+      ? {}
+      : { cache_read_ratio_used: firstNumericField(value, ["cache_read_ratio_used", "cacheReadRatioUsed"]) }),
     event_count: firstNumericField(value, ["event_count", "eventCount"]) ?? 0,
     priced_event_count: firstNumericField(value, ["priced_event_count", "pricedEventCount"]) ?? 0,
     unpriced_event_count: firstNumericField(value, ["unpriced_event_count", "unpricedEventCount"]) ?? 0,
@@ -516,7 +556,8 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
   if (totals.eventCount === 0) {
     return undefined;
   }
-  const estimatedSpendUsd = Number((totals.estimatedSpendUsd ?? 0).toFixed(6));
+  const estimatedSpendUsd =
+    totals.pricedEventCount === 0 ? undefined : Number((totals.estimatedSpendUsd ?? 0).toFixed(6));
   const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0;
   return {
     input_tokens: totals.inputTokens,
@@ -526,9 +567,12 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     reasoning_tokens: totals.reasoningTokens,
     total_tokens: totals.totalTokens,
     tokens_used: formatInteger(totals.totalTokens),
-    estimated_spend: formatUsd(estimatedSpendUsd, partialPricing),
-    estimated_spend_usd: estimatedSpendUsd,
+    estimated_spend:
+      estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, totals.unpricedEventCount > 0),
+    ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
     partial_pricing: partialPricing,
+    cache_read_pricing_estimated: totals.cacheReadPricingEstimated,
+    ...(totals.cacheReadRatioUsed === undefined ? {} : { cache_read_ratio_used: totals.cacheReadRatioUsed }),
     event_count: totals.eventCount,
     priced_event_count: totals.pricedEventCount,
     unpriced_event_count: totals.unpricedEventCount,
@@ -546,6 +590,7 @@ function emptyAccountingTotals(): AccountingTotals {
     reasoningTokens: 0,
     totalTokens: 0,
     partialPricing: false,
+    cacheReadPricingEstimated: false,
     eventCount: 0,
     pricedEventCount: 0,
     unpricedEventCount: 0,
@@ -558,27 +603,89 @@ function estimatedCostFromModelPricing(input: {
   model: string | undefined;
   inputTokens: number;
   outputTokens: number;
-  cacheReadTokens: number;
-}): number | undefined {
-  const pricing = pricingForModel(input.model);
-  if (pricing === undefined || (input.inputTokens <= 0 && input.outputTokens <= 0 && input.cacheReadTokens <= 0)) {
+  cacheReadTokens: number | undefined;
+  cacheWriteTokens: number;
+  cacheReadRatio: number | undefined;
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+}):
+  | {
+      costUsd: number;
+      cacheReadPricingEstimated: boolean;
+      cacheReadRatioUsed?: number;
+    }
+  | undefined {
+  const pricing = pricingForModel(input.model, input.modelPricing);
+  if (
+    pricing === undefined ||
+    (input.inputTokens <= 0 && input.outputTokens <= 0 && (input.cacheReadTokens ?? 0) <= 0)
+  ) {
     return undefined;
   }
-  const cachedInputTokens = Math.min(Math.max(input.cacheReadTokens, 0), Math.max(input.inputTokens, 0));
-  const uncachedInputTokens = Math.max(input.inputTokens - cachedInputTokens, 0);
-  return (
-    (uncachedInputTokens * pricing.inputUsdPerMillion +
-      cachedInputTokens * pricing.cachedInputUsdPerMillion +
-      Math.max(input.outputTokens, 0) * pricing.outputUsdPerMillion) /
-    1_000_000
+  const cacheRateChangesCost = pricing.cachedInputUsdPerMillion !== pricing.inputUsdPerMillion;
+  const cacheReadPricingEstimated =
+    input.cacheReadTokens === undefined && input.inputTokens > 0 && cacheRateChangesCost;
+  if (cacheReadPricingEstimated && input.cacheReadRatio === undefined) {
+    return undefined;
+  }
+  const cachedInputTokens = Math.min(
+    Math.max(input.cacheReadTokens ?? Math.max(input.inputTokens, 0) * (input.cacheReadRatio ?? 0), 0),
+    Math.max(input.inputTokens, 0)
   );
+  const cacheWriteTokens = Math.min(
+    Math.max(input.cacheWriteTokens, 0),
+    Math.max(input.inputTokens - cachedInputTokens, 0)
+  );
+  const uncachedInputTokens = Math.max(input.inputTokens - cachedInputTokens - cacheWriteTokens, 0);
+  return {
+    costUsd:
+      (uncachedInputTokens * pricing.inputUsdPerMillion +
+        cachedInputTokens * pricing.cachedInputUsdPerMillion +
+        cacheWriteTokens * pricing.cacheWriteUsdPerMillion +
+        Math.max(input.outputTokens, 0) * pricing.outputUsdPerMillion) /
+      1_000_000,
+    cacheReadPricingEstimated,
+    ...(cacheReadPricingEstimated ? { cacheReadRatioUsed: input.cacheReadRatio } : {})
+  };
 }
 
-function pricingForModel(model: string | undefined): ModelPricing | undefined {
+function configuredCacheReadRatio(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim().length === 0) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : undefined;
+}
+
+function pricingForModel(
+  model: string | undefined,
+  modelPricing: ReadonlyMap<string, ModelPricing>
+): ModelPricing | undefined {
   if (model === undefined) {
     return undefined;
   }
-  return MODEL_PRICING_USD_PER_MILLION[model.trim().toLowerCase()];
+  return modelPricing.get(model.trim().toLowerCase());
+}
+
+function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
+  const models = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "TokenUsageReported") {
+      continue;
+    }
+    const payload = event.payload ?? {};
+    const explicitCost = firstNumericField(payload, [
+      "costUsd",
+      "costUSD",
+      "cost",
+      "estimatedCostUsd",
+      "estimated_cost_usd"
+    ]);
+    const model = stringField(payload, "model")?.trim().toLowerCase();
+    if (explicitCost === undefined && model !== undefined && model.length > 0) {
+      models.add(model);
+    }
+  }
+  return [...models].sort();
 }
 
 function comparableAccounting(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {

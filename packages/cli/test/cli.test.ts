@@ -118,7 +118,13 @@ function assertNoSmithersSurface(value: unknown): void {
 
 function writeRunAccounting(
   runRoot: string,
-  accounting: { totalTokens: number; tokensUsed: string; estimatedSpend: string; partialPricing: boolean }
+  accounting: {
+    totalTokens: number;
+    tokensUsed: string;
+    estimatedSpend: string;
+    partialPricing: boolean;
+    unpricedEventCount?: number;
+  }
 ): void {
   const runMetadataPath = path.join(runRoot, "run.json");
   const runMetadata = JSON.parse(fs.readFileSync(runMetadataPath, "utf8")) as Record<string, unknown>;
@@ -133,9 +139,9 @@ function writeRunAccounting(
     estimated_spend: accounting.estimatedSpend,
     estimated_spend_usd: Number(accounting.estimatedSpend.replace(/[$,+]/gu, "")),
     partial_pricing: accounting.partialPricing,
-    event_count: accounting.partialPricing ? 2 : 1,
+    event_count: 1 + (accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0)),
     priced_event_count: 1,
-    unpriced_event_count: accounting.partialPricing ? 1 : 0,
+    unpriced_event_count: accounting.unpricedEventCount ?? (accounting.partialPricing ? 1 : 0),
     models: ["gpt-test"],
     agents: ["codex"]
   };
@@ -564,4 +570,15 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   const missingPlusReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(missingPlusReport.code, 0, missingPlusReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(missingPlusReport)), 2);
+
+  writeRunAccounting(runData.run_root, {
+    totalTokens: 725_905,
+    tokensUsed: "725,905",
+    estimatedSpend: "$1.98",
+    partialPricing: true,
+    unpricedEventCount: 0
+  });
+  const estimatedReport = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
+  assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
 });

@@ -151,6 +151,38 @@ upstream classification rationale before rendering. If the upstream artifact
 lacks enough rationale to choose one of High, Medium, or Low, stop and report
 the invalid upstream classification artifact instead of guessing.
 
+Independently reassess every production issue's impact and likelihood from its
+evidence before finalizing the report. Treat upstream severity fields and
+rationales as inputs, not immutable results. When reassessment changes them,
+render the revised impact, likelihood, matrix severity, and concise rationale
+consistently in both report formats.
+
+Use these risk boundaries before applying the matrix:
+
+- High impact requires direct asset loss or compromise through a concrete valid
+  path. High likelihood means any participant can trigger it reliably, or it
+  can occur naturally under realistic conditions.
+- Medium impact means assets are not directly at risk, but protocol function,
+  availability, accounting, or value is materially affected under realistic
+  stated assumptions or external requirements.
+- Low covers no direct asset risk, minor state or specification defects,
+  view-only, display-only, or event-only effects without broader consequences,
+  and issues the protocol can safely continue operating without fixing.
+- The evidentiary burden increases with severity; unsupported or hand-wavy
+  assumptions cannot establish High or Medium.
+
+Apply this trusted-role boundary explicitly:
+
+- Reckless mistakes by a trusted administrator are non-production outcomes.
+- Direct misuse of a trusted role, and code defects reachable only after an
+  administrator makes a mistake, are Low.
+- A privileged function used under reasonable, intended assumptions can be
+  Medium only when it exposes a genuine protocol bug. Because a trusted role is
+  required, assign Low likelihood, so even High impact maps to Medium.
+- Privilege escalation is assessed normally from its impact and likelihood.
+- High severity requires a path that does not depend solely on an already
+  trusted role choosing, supplying, or executing the harmful action.
+
 Apply this Impact x Likelihood matrix before publishing any production issue:
 
 | Impact \ Likelihood | High | Medium | Low |
@@ -159,11 +191,11 @@ Apply this Impact x Likelihood matrix before publishing any production issue:
 | Medium | Medium | Medium | Low |
 | Low | Low | Low | Low |
 
-If a production issue has `severity` or `final_severity`, `impact`, and
-`likelihood`, recompute the matrix severity. If the recomputed severity
-disagrees with the supplied classified severity, stop and report the invalid
-upstream classification artifact instead of silently publishing the mismatch.
-In particular:
+For every production issue, recompute severity from the reassessed impact and
+likelihood. Publish that matrix result even when it corrects an upstream
+severity, and explain the corrected assessment from evidence. If the evidence
+cannot support impact or likelihood, stop and report the invalid upstream
+classification artifact instead of guessing. In particular:
 
 - High impact + Low likelihood must render as Medium.
 - Medium impact + Low likelihood must render as Low.
@@ -278,13 +310,10 @@ It must not duplicate prose awkwardly, for example avoid constructions like
 fallback callers could...`. Tighten copied upstream text into a clean actor,
 action, and outcome.
 
-Severity must be copied from the severity classification node's top-level
-`final_severity` field when present, then from `severity` when present, then
-from legacy `severity_guess` only when neither classified field exists. Normalize
-to the report vocabulary High, Medium, or Low. If `final_severity`, `severity`,
-or `severity_guess` are present and disagree in a way the artifact does not
-explain, stop and report the invalid upstream classification artifact instead of
-choosing one.
+Severity must be recomputed from the final report's reassessed impact and
+likelihood. Upstream `final_severity`, `severity`, and legacy `severity_guess`
+are review inputs only. Normalize the recomputed result to High, Medium, or Low
+and use it consistently for issue IDs, ordering, counts, Markdown, and JSON.
 
 Impact and Likelihood must each render as exactly High, Medium, or Low followed
 by a colon and concise explanation, for example

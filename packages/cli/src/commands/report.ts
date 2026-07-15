@@ -19,6 +19,7 @@ interface ExpectedAccounting {
   tokens_used?: string;
   estimated_spend?: string;
   partial_pricing?: boolean;
+  partial_pricing_suffix_required?: boolean;
 }
 
 export default class Report extends Command {
@@ -137,10 +138,12 @@ function expectedAccountingFromRunMetadata(metadataPath: string): ExpectedAccoun
   const tokensUsed = labelField(cumulative, ["tokens_used", "tokensUsed"], "integer");
   const estimatedSpend = labelField(cumulative, ["estimated_spend", "estimatedSpend"], "usd");
   const partialPricing = booleanField(cumulative, ["partial_pricing", "partialPricing"]);
+  const unpricedEventCount = numberField(cumulative, ["unpriced_event_count", "unpricedEventCount"]);
   const expected = {
     ...(isAvailableLabel(tokensUsed) ? { tokens_used: tokensUsed } : {}),
     ...(isAvailableLabel(estimatedSpend) ? { estimated_spend: estimatedSpend } : {}),
-    ...(partialPricing === undefined ? {} : { partial_pricing: partialPricing })
+    ...(partialPricing === undefined ? {} : { partial_pricing: partialPricing }),
+    ...((unpricedEventCount ?? (partialPricing === true ? 1 : 0)) > 0 ? { partial_pricing_suffix_required: true } : {})
   };
   return expected.tokens_used === undefined && expected.estimated_spend === undefined ? undefined : expected;
 }
@@ -166,7 +169,7 @@ function markdownAccountingDiagnostics(
       field: "estimated_spend",
       actual: markdownLabel(markdown, "Estimated spend"),
       expected: expected.estimated_spend,
-      expectedPartialPricing: expected.partial_pricing === true,
+      expectedPartialPricing: expected.partial_pricing_suffix_required === true,
       filePath: markdownPath,
       artifact: "markdown"
     })
@@ -206,7 +209,7 @@ function reportJsonAccountingDiagnostics(
       field: "estimated_spend",
       actual: labelField(runMetadata, ["estimated_spend", "estimatedSpend", "estimated_cost", "estimatedCost"], "usd"),
       expected: expected.estimated_spend,
-      expectedPartialPricing: expected.partial_pricing === true,
+      expectedPartialPricing: expected.partial_pricing_suffix_required === true,
       filePath: jsonPath,
       artifact: "json"
     })
@@ -363,6 +366,16 @@ function booleanField(value: Record<string, unknown> | undefined, keys: string[]
   for (const key of keys) {
     const field = value?.[key];
     if (typeof field === "boolean") {
+      return field;
+    }
+  }
+  return undefined;
+}
+
+function numberField(value: Record<string, unknown> | undefined, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const field = value?.[key];
+    if (typeof field === "number" && Number.isFinite(field)) {
       return field;
     }
   }
