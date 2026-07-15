@@ -28,6 +28,10 @@ evidence. Prefer high-signal public/external equality.
 
 Write {{artifact_path}}/differential-plan.json with this JSON shape:
 
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby summary fields.
+
 ```json
 {
   "schema_version": "1.0",

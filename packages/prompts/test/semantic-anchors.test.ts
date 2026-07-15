@@ -63,7 +63,8 @@ describe("prompt semantic anchors", () => {
     );
     const template = readFileSync(templatePath, "utf8");
     expect(template).toContain("Use `[]` when there are no findings");
-    expect(template).toContain("without anchors or line selectors");
+    expect(template).toContain("Object `path` fields use safe relative file paths");
+    expect(template).toContain("line ranges in `detail`");
   });
 
   it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {

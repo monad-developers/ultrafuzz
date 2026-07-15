@@ -54,6 +54,10 @@ Write {{artifact_path}}/semantic-red-registry.json with this JSON shape:
 
 Write {{artifact_path}}/triage-a.json and {{artifact_path}}/triage-b.json with this JSON shape:
 
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby rationale field.
+
 ```json
 {
   "schema_version": "1.0",
