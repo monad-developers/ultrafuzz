@@ -33,7 +33,7 @@ const { Workflow, Task, Worktree, Parallel, smithers, outputs } = createSmithers
 });
 
 const agentRegistry = projectAgents as Record<string, AgentLike | AgentLike[]>;
-type AgentFactory = (options: { model?: string; reasoningEffort?: string }) => AgentLike;
+type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir?: string[] }) => AgentLike;
 const agentFactories =
   (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
 const taskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
@@ -58,7 +58,8 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
   }
   return factory({
     ...(task.modelName === null ? {} : { model: task.modelName }),
-    ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort })
+    ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort }),
+    addDir: [task.artifactDir]
   });
 }
 

@@ -5,12 +5,13 @@ import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type ClaudeAuthOptions = { apiKey?: string; configDir?: string };
-export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string };
+export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 
 export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClaudeCodeAgent {
   return new SmithersClaudeCodeAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { extraArgs: ["--effort", options.reasoningEffort] }),
+    ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     // Every task runs with Claude Code's permission checks off: agents work
     // unattended in a throwaway worktree, so there is nobody to answer a
     // prompt. This mirrors permissions.trust_model = "skip-permissions" in
