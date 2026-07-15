@@ -31,7 +31,7 @@ describe("prompt semantic anchors", () => {
     expect(promptCorpus).not.toContain("medusa version");
   });
 
-  it("keeps generated-test manifests on the canonical generated_tests contract", () => {
+  it("keeps no-fuzz generated-test manifests on the canonical empty generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
     const templatePath = fileURLToPath(
@@ -51,8 +51,9 @@ describe("prompt semantic anchors", () => {
     ]);
 
     expect(readFileSync(templatePath, "utf8")).toContain("generated_tests");
-    expect(aggregate).toContain("manifest `generated_tests` entries");
-    expect(dynamic).toContain("`generated_tests` carrying");
+    expect(readFileSync(templatePath, "utf8")).toContain('"generated_tests": []');
+    expect(aggregate).toContain("There are no generated tests to collect");
+    expect(dynamic).toContain("`generated_tests: []`");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
     expect(readFileSync(topologyPath, "utf8")).toMatch(
       /id: reference-harness-author[\s\S]*required_artifacts:[\s\S]*- generated-tests\.json/u

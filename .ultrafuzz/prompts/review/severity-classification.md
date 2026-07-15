@@ -295,13 +295,8 @@ Invalid or out of scope:
 Do not include invalid or out-of-scope records like the example above in the
 production report entries.
 
-Make sure compilation is passing but do not fix any failing tests. If Foundry
-dependencies are missing, restore project-pinned dependencies first, such as
-`git submodule update --init --recursive lib/forge-std` when `.gitmodules`
-contains that path. Do not run `forge install` or rewrite `foundry.lock` when a
-pinned dependency path already exists. Dependency hydration used only to run
-verification is not a target workspace change; do not include lockfile or
-dependency-vendor drift in the reported artifacts.
+Do not compile, run tests, hydrate dependencies, or change the target workspace
+in this no-fuzz branch.
 
 Save severity-classified findings to
 {{artifact_path}}/severity-classified-findings.json as JSON.

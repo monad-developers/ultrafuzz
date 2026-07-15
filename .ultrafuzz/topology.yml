@@ -335,17 +335,6 @@ nodes:
       - findings.json
       - generated-tests.json
     primary_artifact: findings.json
-  - id: expand-coverage
-    kind: agentic
-    prompt: strategies/expand-coverage.md
-    group: strategies
-    depends_on:
-      - property-specification-fanin
-    required_artifacts:
-      - coverage-expansion.md
-      - findings.json
-      - generated-tests.json
-    primary_artifact: coverage-expansion.md
   - id: admin-config-boundaries
     kind: agentic
     prompt: strategies/admin-config-boundaries.md
@@ -502,49 +491,6 @@ nodes:
       - handler-coverage-inventory.md
     primary_artifact: handler-coverage-inventory.md
     loops: 1
-  - id: stateful-invariant-coverage
-    kind: agentic
-    prompt: strategies/invariants/coverage.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-handlers
-      - property-specification-fanin
-    loop_mode: series
-    required_artifacts:
-      - coverage-goal.json
-      - coverage-report.md
-      - findings.json
-      - generated-tests.json
-      - harness-repairs.json
-    primary_artifact: coverage-goal.json
-    loops: 1
-  - id: stateful-invariant-implement-properties
-    kind: agentic
-    prompt: strategies/invariants/implement-properties.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-coverage
-    required_artifacts:
-      - implemented-properties.md
-      - implemented-properties.json
-      - generated-tests.json
-      - findings.json
-    primary_artifact: implemented-properties.md
-    loops: 1
-  - id: stateful-invariant-recon-campaign
-    kind: agentic
-    prompt: strategies/invariants/invariant-testing-campaign.md
-    group: strategies
-    depends_on:
-      - stateful-invariant-implement-properties
-    required_artifacts:
-      - campaign-plan.json
-      - campaign-report.md
-      - recon-fuzzer-results.json
-      - generated-tests.json
-      - findings.json
-    primary_artifact: campaign-plan.json
-    loops: 1
   - id: differential-oracle-planner
     kind: agentic
     prompt: strategies/differential/differential-oracle-planner.md
@@ -625,7 +571,6 @@ nodes:
       - round-trip
       - workflow-property-based-tests
       - time-warp-sequences
-      - expand-coverage
       - admin-config-boundaries
       - external-dependency-boundaries
       - externalized-state-accounting
@@ -641,9 +586,6 @@ nodes:
       - lifecycle-view-boundaries
       - stateful-invariant-setup
       - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
-      - stateful-invariant-recon-campaign
       - differential-oracle-planner
       - reference-harness-author
       - reference-and-lane-auditor
@@ -671,7 +613,6 @@ nodes:
       - round-trip
       - workflow-property-based-tests
       - time-warp-sequences
-      - expand-coverage
       - admin-config-boundaries
       - external-dependency-boundaries
       - externalized-state-accounting
@@ -687,9 +628,6 @@ nodes:
       - lifecycle-view-boundaries
       - stateful-invariant-setup
       - stateful-invariant-handlers
-      - stateful-invariant-coverage
-      - stateful-invariant-implement-properties
-      - stateful-invariant-recon-campaign
       - differential-oracle-planner
       - reference-harness-author
       - reference-and-lane-auditor

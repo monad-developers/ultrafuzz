@@ -19,22 +19,9 @@ rerun Forge, edit generated tests, or perform optional post-write validation
 unless one of those files is missing, invalid, or clearly contradicts the
 required schema.
 
-Run Forge tests and count failing tests. If Foundry dependencies are missing,
-restore project-pinned dependencies first, such as
-`git submodule update --init --recursive lib/forge-std` when `.gitmodules`
-contains that path. Do not run `forge install` or rewrite `foundry.lock` when a
-pinned dependency path already exists.
-
-Run `forge --version` as a separate Bash call before any Forge invocation. If
-`forge` is available in `PATH`, run focused tests with direct `forge` commands
-while preserving the original command's environment variables, flags, match
-selectors, and test-root semantics. Do not add inline environment assignment
-prefixes to focused test commands; commands should start with `forge` so backend
-allowlists match them. Do not use command substitution, shell conditionals,
-absolute binary paths, or host-global searches to resolve Foundry. If `forge`
-is unavailable in `PATH`, record validation as blocked by tool availability and
-do not classify
-`forge: command not found` as a failing test count.
+Do not run Forge, generated tests, fuzzer tooling, or dependency hydration in
+this no-fuzz branch. Dedupe only from written findings, property artifacts,
+source evidence, and current-run strategy summaries.
 
 Also inspect the Dynamic strategy generator outputs before deduping:
 
@@ -47,7 +34,7 @@ Dynamic selected strategies:
 Dynamic findings:
 {{artifact_path:dynamic-strategy-generator}}/findings.json
 
-Dynamic generated-test manifest:
+Dynamic empty generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
@@ -78,17 +65,13 @@ separate {{artifact_path}}/duplicates.json object or array; do not replace
 `deduped-findings.json` with an audit object.
 
 Do not discard unique symptoms merely because they come from the same strategy.
-Do not hide failing tests. Dedupe is only for equivalent findings or proven
-same-root family variants, not for minimizing uncomfortable evidence.
+Dedupe is only for equivalent findings or proven same-root family variants, not
+for minimizing uncomfortable evidence.
 
-Stateful invariant failure records are first-class findings. If a finding's
-`notes` contain `stateful_failure_classification=<classification>`, preserve
-that token, its reproducer command/path, raw evidence, status, and notes on the
-kept finding. Do not drop or merge away distinct stateful records merely because
-the same coverage campaign later reached its coverage target. Include the
-classification and reproducer shape in the dedupe key whenever two stateful
-records differ by classification, replayability, or repairability, including
-`blocked-unreproduced` records that still need manual replay.
+Stateful-analysis records are first-class findings. Preserve raw evidence,
+status, notes, and property context on the kept finding. Do not drop or merge
+away distinct stateful records merely because they came from the same strategy
+family.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
@@ -124,6 +107,4 @@ After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.
 
-Make sure compilation is passing but do not fix any failing tests. Dependency
-hydration used only to run verification is not a target workspace change; do
-not include lockfile or dependency-vendor drift in the reported artifacts.
+Do not compile, fix tests, hydrate dependencies, or change the target workspace.
