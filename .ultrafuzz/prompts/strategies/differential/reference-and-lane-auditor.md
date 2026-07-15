@@ -48,6 +48,10 @@ For each surface and lane, classify it as exactly one of:
 
 Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
 
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby rationale or notes fields.
+
 ```json
 {
   "schema_version": "1.0",

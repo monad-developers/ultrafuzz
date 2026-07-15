@@ -41,6 +41,10 @@ locating evidence.
 
 Write {{artifact_path}}/lane-result.json with this JSON shape:
 
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby rationale or notes fields.
+
 ```json
 {
   "schema_version": "1.0",
