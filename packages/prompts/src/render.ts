@@ -24,7 +24,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priority_threshold",
   "invariant_property_priority_filter",
   "invariant_property_priorities",
-  "invariant_testing_fuzzer_timeout"
+  "invariant_testing_fuzzer_timeout",
+  "strategy_attempt_test_dir"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -298,6 +299,12 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
       .join("\n"),
     findings_contract: requiredArtifacts.includes("findings.json")
       ? renderOutputContractTemplate("findings.mdx", {})
+      : "",
+    generated_tests_contract: requiredArtifacts.includes("generated-tests.json")
+      ? renderOutputContractTemplate("generated-tests.mdx", {
+          generated_tests_dir: path.join(input.node.artifactDir, "generated-tests"),
+          strategy_attempt_test_dir: strategyAttemptTestDir(input)
+        })
       : "",
     boundary_recipes_contract:
       requiredArtifacts.includes("boundary-recipes.md") || requiredArtifacts.includes("boundary-recipes.json")
@@ -728,8 +735,13 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priority_filter: input.resolvedConfig?.invariantPropertyPriorityFilter ?? "",
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
+    strategy_attempt_test_dir: strategyAttemptTestDir(input),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
+}
+
+function strategyAttemptTestDir(input: PromptRenderInput): string {
+  return path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId);
 }
 
 function validateRenderInputPaths(input: PromptRenderInput): void {
