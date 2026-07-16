@@ -1,7 +1,9 @@
 export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v1" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v1" as const;
-export const MODAL_SANDBOX_TIMEOUT_MS = 16 * 60 * 60 * 1000;
-export const EVAL_WATCH_TIMEOUT_SECONDS = 15 * 60 * 60;
+export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const EVAL_POST_WATCH_MARGIN_MS = 2 * 60 * 60 * 1000;
+export const MODAL_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
+export const EVAL_WATCH_TIMEOUT_SECONDS = (MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS) / 1000;
 export const DEFAULT_NODE_TIMEOUT_SECONDS = 2 * 60 * 60;
 export const DEFAULT_MODAL_APP = "ultrafuzz-evals";
 export const DEFAULT_MODAL_IMAGE = "ultrafuzz-security-runner:latest";
