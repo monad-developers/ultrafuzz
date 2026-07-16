@@ -380,6 +380,11 @@ function optionalLineNumber(record: Record<string, unknown>, key: string): numbe
         ? Number(value)
         : undefined;
   if (parsed === undefined || !Number.isSafeInteger(parsed) || parsed < 1) {
+    if (typeof value === "string" || typeof value === "number") {
+      assignIfMissing(record, `${key}_reference`, String(value).trim());
+      delete record[key];
+      return undefined;
+    }
     throw new FindingsValidationError(`field ${key} must be a positive integer`);
   }
   return parsed;

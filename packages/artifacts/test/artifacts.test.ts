@@ -331,6 +331,26 @@ test("findings normalize source evidence line suffixes", () => {
     path.join(nodeDir, "findings.json"),
     JSON.stringify([
       {
+        title: "Source-backed range",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source range anchors the issue.",
+        evidence: [{ kind: "source", path: "src/Oracle.sol", line: "42-45" }]
+      }
+    ])
+  );
+
+  const rangeReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(rangeReport.findings[0]!.evidence, [
+    { kind: "source", path: "src/Oracle.sol", line_reference: "42-45" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
         title: "Source-backed issue",
         status: "candidate",
         severity_guess: "medium",
