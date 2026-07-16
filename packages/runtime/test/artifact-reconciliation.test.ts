@@ -46,12 +46,12 @@ function writeFile(root: string, relative: string, contents: string): string {
   return filePath;
 }
 
-test("reconciles only the exact task-owned mirrored artifact path", () => {
+test("reconciles only the exact task-owned mirrored artifact path", async () => {
   const fixture = setup(["reports/output.json"]);
   writeFile(fixture.workspaceDir, "other/reports/output.json", "decoy\n");
   writeFile(fixture.mirrorDir, "reports/output.json", "canonical bytes\n");
 
-  const result = reconcileRequiredArtifactsFromWorkspace({
+  const result = await reconcileRequiredArtifactsFromWorkspace({
     layout: fixture.layout,
     node: fixture.node,
     attemptId: "strategy-a"
@@ -61,11 +61,11 @@ test("reconciles only the exact task-owned mirrored artifact path", () => {
   assert.equal(fs.readFileSync(path.join(fixture.artifactDir, "reports", "output.json"), "utf8"), "canonical bytes\n");
 });
 
-test("ignores same-suffix files outside the exact mirrored artifact path", () => {
+test("ignores same-suffix files outside the exact mirrored artifact path", async () => {
   const fixture = setup(["output.json"]);
   writeFile(fixture.workspaceDir, "elsewhere/output.json", "decoy\n");
 
-  const result = reconcileRequiredArtifactsFromWorkspace({
+  const result = await reconcileRequiredArtifactsFromWorkspace({
     layout: fixture.layout,
     node: fixture.node,
     attemptId: "strategy-a"
@@ -75,12 +75,12 @@ test("ignores same-suffix files outside the exact mirrored artifact path", () =>
   assert.equal(fs.existsSync(path.join(fixture.artifactDir, "output.json")), false);
 });
 
-test("never overwrites an existing canonical artifact", () => {
+test("never overwrites an existing canonical artifact", async () => {
   const fixture = setup(["output.json"]);
   writeFile(fixture.artifactDir, "output.json", "existing\n");
   writeFile(fixture.mirrorDir, "output.json", "replacement\n");
 
-  const result = reconcileRequiredArtifactsFromWorkspace({
+  const result = await reconcileRequiredArtifactsFromWorkspace({
     layout: fixture.layout,
     node: fixture.node,
     attemptId: "strategy-a"
@@ -90,18 +90,23 @@ test("never overwrites an existing canonical artifact", () => {
   assert.equal(fs.readFileSync(path.join(fixture.artifactDir, "output.json"), "utf8"), "existing\n");
 });
 
-test("rejects empty, directory, symlink, hard-link, and traversal sources", () => {
+test("rejects empty, directory, symlink, hard-link, and traversal sources", async () => {
   const empty = setup(["empty.json"]);
   writeFile(empty.mirrorDir, "empty.json", "");
   assert.deepEqual(
-    reconcileRequiredArtifactsFromWorkspace({ layout: empty.layout, node: empty.node, attemptId: "strategy-a" })
-      .materialized,
+    (
+      await reconcileRequiredArtifactsFromWorkspace({
+        layout: empty.layout,
+        node: empty.node,
+        attemptId: "strategy-a"
+      })
+    ).materialized,
     []
   );
 
   const directory = setup(["directory.json"]);
   fs.mkdirSync(path.join(directory.mirrorDir, "directory.json"));
-  assert.throws(() =>
+  await assert.rejects(() =>
     reconcileRequiredArtifactsFromWorkspace({
       layout: directory.layout,
       node: directory.node,
@@ -112,7 +117,7 @@ test("rejects empty, directory, symlink, hard-link, and traversal sources", () =
   const symlink = setup(["linked.json"]);
   const outside = writeFile(tempProject(), "outside.json", "outside\n");
   fs.symlinkSync(outside, path.join(symlink.mirrorDir, "linked.json"));
-  assert.throws(() =>
+  await assert.rejects(() =>
     reconcileRequiredArtifactsFromWorkspace({ layout: symlink.layout, node: symlink.node, attemptId: "strategy-a" })
   );
   assert.equal(fs.existsSync(path.join(symlink.artifactDir, "linked.json")), false);
@@ -120,7 +125,7 @@ test("rejects empty, directory, symlink, hard-link, and traversal sources", () =
   const hardLink = setup(["linked.json"]);
   const hardLinkOutside = writeFile(path.dirname(hardLink.workspaceDir), "outside.json", "outside\n");
   fs.linkSync(hardLinkOutside, path.join(hardLink.mirrorDir, "linked.json"));
-  assert.throws(() =>
+  await assert.rejects(() =>
     reconcileRequiredArtifactsFromWorkspace({
       layout: hardLink.layout,
       node: hardLink.node,
@@ -130,7 +135,7 @@ test("rejects empty, directory, symlink, hard-link, and traversal sources", () =
   assert.equal(fs.existsSync(path.join(hardLink.artifactDir, "linked.json")), false);
 
   const traversal = setup(["../escape.json"]);
-  assert.throws(() =>
+  await assert.rejects(() =>
     reconcileRequiredArtifactsFromWorkspace({
       layout: traversal.layout,
       node: traversal.node,
@@ -140,7 +145,7 @@ test("rejects empty, directory, symlink, hard-link, and traversal sources", () =
   assert.equal(fs.existsSync(path.join(traversal.layout.artifactsDir, "escape.json")), false);
 });
 
-test("rejects an intermediate source-directory swap between validation and open", () => {
+test("rejects an intermediate source-directory swap between validation and open", async () => {
   const fixture = setup(["nested/output.json"]);
   const source = writeFile(fixture.mirrorDir, "nested/output.json", "inside\n");
   const sourceDirectory = path.dirname(source);
@@ -159,7 +164,7 @@ test("rejects an intermediate source-directory swap between validation and open"
     return originalOpenSync(filePath, flags, mode);
   }) as typeof fs.openSync;
   try {
-    assert.throws(() =>
+    await assert.rejects(() =>
       reconcileRequiredArtifactsFromWorkspace({
         layout: fixture.layout,
         node: fixture.node,
@@ -176,7 +181,7 @@ test("rejects an intermediate source-directory swap between validation and open"
   assert.equal(fs.existsSync(path.join(fixture.artifactDir, "nested", "output.json")), false);
 });
 
-test("rejects a destination-directory move after opening its descriptor", () => {
+test("rejects a destination-directory move after opening its descriptor", async () => {
   const fixture = setup(["nested/output.json"]);
   writeFile(fixture.mirrorDir, "nested/output.json", "inside\n");
   const destinationDirectory = path.join(fixture.artifactDir, "nested");
@@ -194,7 +199,7 @@ test("rejects a destination-directory move after opening its descriptor", () => 
     return originalOpenSync(filePath, flags, mode);
   }) as typeof fs.openSync;
   try {
-    assert.throws(() =>
+    await assert.rejects(() =>
       reconcileRequiredArtifactsFromWorkspace({
         layout: fixture.layout,
         node: fixture.node,
@@ -212,7 +217,7 @@ test("rejects a destination-directory move after opening its descriptor", () => 
   assert.deepEqual(fs.readdirSync(outsideDirectory), []);
 });
 
-test("reconciles manifest-enumerated generated companions before the strict gate", () => {
+test("reconciles manifest-enumerated generated companions before the strict gate", async () => {
   const fixture = setup(["generated-tests.json"]);
   writeFile(
     fixture.mirrorDir,
@@ -226,7 +231,7 @@ test("reconciles manifest-enumerated generated companions before the strict gate
   );
   writeFile(fixture.mirrorDir, "generated-tests/Example.t.sol", "contract ExampleTest {}\n");
 
-  const result = reconcileRequiredArtifactsFromWorkspace({
+  const result = await reconcileRequiredArtifactsFromWorkspace({
     layout: fixture.layout,
     node: fixture.node,
     attemptId: "strategy-a"
@@ -236,7 +241,7 @@ test("reconciles manifest-enumerated generated companions before the strict gate
   assert.equal(verifyRequiredArtifactsForAttempt(fixture.layout, fixture.node, "strategy-a").ok, true);
 });
 
-test("reconciles a missing generated companion when the canonical manifest already exists", () => {
+test("reconciles a missing generated companion when the canonical manifest already exists", async () => {
   const fixture = setup(["generated-tests.json"]);
   const manifest = JSON.stringify({
     schema_version: "1.0",
@@ -247,7 +252,7 @@ test("reconciles a missing generated companion when the canonical manifest alrea
   writeFile(fixture.artifactDir, "generated-tests.json", manifest);
   writeFile(fixture.mirrorDir, "generated-tests/Example.t.sol", "contract ExampleTest {}\n");
 
-  const result = reconcileRequiredArtifactsFromWorkspace({
+  const result = await reconcileRequiredArtifactsFromWorkspace({
     layout: fixture.layout,
     node: fixture.node,
     attemptId: "strategy-a"
