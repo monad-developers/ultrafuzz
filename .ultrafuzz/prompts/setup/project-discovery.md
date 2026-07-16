@@ -50,3 +50,8 @@ exercise.
 ## 3. Artifacts
 
 Write the discovery artifact with the framework decisions and project-specific context needed by later workflow nodes in {{artifact_path}}/setup/project-discovery.md
+
+Write `[]` to {{output_findings_path}} when this discovery step does not
+independently reproduce a concrete public-impact target defect with actionable
+evidence. Record discovery context in
+{{artifact_path}}/setup/project-discovery.md.

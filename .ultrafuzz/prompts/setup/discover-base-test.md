@@ -43,3 +43,8 @@ Report reusable `BaseTest`/`Setup` fixture paths and import paths that
 downstream prompts may reference.
 
 Write your analysis to {{artifact_path}}/setup/base-test-setup.md
+
+Write `[]` to {{output_findings_path}} when this setup review does not
+independently reproduce a concrete public-impact target defect with actionable
+evidence. Record reusable fixture context in
+{{artifact_path}}/setup/base-test-setup.md.
