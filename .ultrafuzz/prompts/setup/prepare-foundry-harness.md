@@ -46,3 +46,8 @@ dependencies as the evidence basis.
 Record the chosen production source directory and any shared fixture/import
 directory. Save the report to
 {{artifact_path}}/setup/setup-foundry.md
+
+Write `[]` to {{output_findings_path}} when this harness-context review does
+not independently reproduce a concrete public-impact target defect with
+actionable evidence. Record harness context in
+{{artifact_path}}/setup/setup-foundry.md.
