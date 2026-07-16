@@ -63,7 +63,7 @@ const llmJudgeSchema = z.looseObject({
   confidence: z.number().min(0).max(1)
 });
 const JUDGE_OUTPUT_CONTRACT =
-  "Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.";
+  'Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0. classification must be exactly one of "true-positive", "false-positive", or "needs-human-review".';
 
 export interface ScoreEvalRunInput {
   projectRoot: string;

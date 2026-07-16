@@ -436,13 +436,15 @@ describe("deterministic scorer math", () => {
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
     expect(requests[0]?.messages).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") })
+        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
+        expect.objectContaining({ role: "user", content: expect.stringContaining("needs-human-review") })
       ])
     );
     expect(requests[1]?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") }),
-        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") })
+        expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
+        expect.objectContaining({ role: "user", content: expect.stringContaining("needs-human-review") })
       ])
     );
     expect(scored.rowScore.true_positives).toBe(1);
