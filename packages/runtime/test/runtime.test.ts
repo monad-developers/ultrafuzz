@@ -2197,6 +2197,47 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(repairedState.nodes?.["project-discovery"]?.last_error, undefined);
 });
 
+test("syncRun reconciles exact task-workspace artifact mirrors before strict validation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-reconciled";
+  const runnerOverrides = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-reconciled", env: runnerOverrides });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const mirrorRoot = path.join(
+    run.value!.run_root,
+    "workspaces",
+    "project-discovery",
+    "artifacts",
+    "project-discovery"
+  );
+  writeRequiredArtifactSet(path.dirname(path.dirname(mirrorRoot)), "project-discovery", [
+    "setup/project-discovery.md",
+    "findings.json"
+  ]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-reconciled", env: runnerOverrides });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "setup", "project-discovery.md")),
+    true
+  );
+  assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /node-artifacts-reconciled/);
+});
+
 test("syncRun does not mark a completed workflow succeeded without task evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
