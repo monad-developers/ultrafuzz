@@ -298,6 +298,34 @@ test("findings normalize markdown evidence path fragments", () => {
         severity_guess: "medium",
         confidence: "medium",
         summary: "A recipe section explains the issue.",
+        evidence: [
+          { kind: "recipe", path: "artifacts/strategy-a/recipes.md#Boundary cases and fallback" },
+          { kind: "recipe", path: "artifacts/strategy-a/notes.md", fragment: "Action Word" }
+        ]
+      }
+    ])
+  );
+
+  const freeFormReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(freeFormReport.findings[0]!.evidence, [
+    {
+      kind: "recipe",
+      path: "artifacts/strategy-a/recipes.md",
+      fragment_reference: "Boundary cases and fallback"
+    },
+    { kind: "recipe", path: "artifacts/strategy-a/notes.md", fragment_reference: "Action Word" }
+  ]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Recipe-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A recipe section explains the issue.",
         evidence: [{ kind: "recipe", path: "artifacts/strategy-a/recipes.md#bt-013", fragment: "other" }]
       }
     ])

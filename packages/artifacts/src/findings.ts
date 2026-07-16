@@ -291,7 +291,7 @@ function validateEvidence(value: unknown, index: number): void {
       }
       const reference = normalizeFindingMetadataPathReference(evidencePath, "evidence path");
       entry.path = reference.path;
-      const existingFragment = optionalString(entry, "fragment");
+      const existingFragment = optionalFragment(entry, "fragment");
       if (reference.line !== undefined) {
         if (existingLine !== undefined && existingLine !== reference.line) {
           throw new FindingsValidationError(`evidence path line conflicts with existing line field`);
@@ -306,7 +306,10 @@ function validateEvidence(value: unknown, index: number): void {
         }
         entry.fragment = reference.fragment;
       } else if (existingFragment !== undefined) {
-        validateFindingMetadataFragment(existingFragment, "evidence fragment");
+        entry.fragment = existingFragment;
+      }
+      if (reference.fragmentReference !== undefined) {
+        assignIfMissing(entry, "fragment_reference", reference.fragmentReference);
       }
     }
   }
@@ -327,7 +330,7 @@ function looksLikeEvidenceCommand(value: string): boolean {
 function normalizeFindingMetadataPathReference(
   value: string,
   key: string
-): { path: string; fragment?: string; line?: number } {
+): { path: string; fragment?: string; fragmentReference?: string; line?: number } {
   const hashIndex = value.indexOf("#");
   if (hashIndex === -1) {
     const lineReference = splitLineReference(value);
@@ -339,8 +342,9 @@ function normalizeFindingMetadataPathReference(
   const relativePath = value.slice(0, hashIndex);
   const fragment = value.slice(hashIndex + 1);
   validateFindingMetadataRelativePath(relativePath, key);
-  validateFindingMetadataFragment(fragment, `${key} fragment`);
-  return { path: relativePath, fragment };
+  return isValidFindingMetadataFragment(fragment)
+    ? { path: relativePath, fragment }
+    : { path: relativePath, fragmentReference: fragment };
 }
 
 function splitLineReference(value: string): { path: string; line: number } | undefined {
@@ -354,6 +358,15 @@ function splitLineReference(value: string): { path: string; line: number } | und
     path: linePath,
     line: Number(line)
   };
+}
+
+function isValidFindingMetadataFragment(value: string): boolean {
+  try {
+    validateFindingMetadataFragment(value, "fragment");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validateFindingMetadataFragment(value: string, key: string): void {
@@ -388,6 +401,19 @@ function optionalLineNumber(record: Record<string, unknown>, key: string): numbe
     throw new FindingsValidationError(`field ${key} must be a positive integer`);
   }
   return parsed;
+}
+
+function optionalFragment(record: Record<string, unknown>, key: string): string | undefined {
+  const value = optionalString(record, key);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (isValidFindingMetadataFragment(value)) {
+    return value;
+  }
+  assignIfMissing(record, `${key}_reference`, value);
+  delete record[key];
+  return undefined;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
