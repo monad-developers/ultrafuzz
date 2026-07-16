@@ -1759,6 +1759,64 @@ test("syncRun marks successful workflow completion, normalizes findings, and wri
   assert.match(events, /artifact-manifest-written/);
 });
 
+test("syncRun marks task-output validation failures for terminal disposition", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-invalid-output";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-invalid-output", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  fs.writeFileSync(
+    path.join(run.value!.run_root, "artifacts", "project-discovery", "findings.json"),
+    `${JSON.stringify([{ title: "incomplete output" }])}\n`,
+    "utf8"
+  );
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: Record<string, unknown> }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.terminal_disposition, {
+    schema_version: "ultrafuzz.terminal-disposition.v1",
+    kind: "task-output-validation-failure"
+  });
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
+    true
+  );
+
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const manifestPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json");
+  fs.rmSync(manifestPath);
+  fs.mkdirSync(manifestPath);
+
+  const operational = await syncRun({ projectRoot: project, runId: "sync-invalid-output", env });
+
+  assert.equal(operational.ok, true, JSON.stringify(operational.diagnostics));
+  assert.equal(operational.value?.status, "failed");
+  assert.ok(operational.diagnostics.some((diagnostic) => diagnostic.source === "artifacts"));
+  const operationalState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { provenance?: Record<string, unknown> }>;
+  };
+  assert.equal(operationalState.nodes?.["project-discovery"]?.provenance?.terminal_disposition, undefined);
+});
+
 test("syncRun persists cumulative token accounting and partial pricing from workflow events", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -2366,10 +2424,11 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(sync.value?.status, "failed");
   assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    nodes?: Record<string, { status?: string; last_error?: string }>;
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: Record<string, unknown> }>;
   };
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", /setup\/project-discovery\.md/);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.terminal_disposition, undefined);
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     true
