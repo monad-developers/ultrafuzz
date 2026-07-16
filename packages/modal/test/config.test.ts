@@ -22,6 +22,7 @@ describe("Modal benchmark config", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 
     expect(config.loops).toBe(1);
+    expect(config.target_run).toEqual({ max_parallel_agents: 4, max_parallel_nodes: 8 });
     expect(config.models).toEqual(DEFAULT_BENCHMARK_MODELS);
     expect(config.models.map((model) => model.model)).toEqual([
       "gpt-5.5",
@@ -31,6 +32,15 @@ describe("Modal benchmark config", () => {
       "claude-fable-5",
       "claude-opus-4-8"
     ]);
+  });
+
+  it("accepts target run concurrency overrides", () => {
+    const config = parseModalBenchmarkConfig({
+      ...minimalConfig(),
+      target_run: { max_parallel_agents: 1, max_parallel_nodes: 2 }
+    });
+
+    expect(config.target_run).toEqual({ max_parallel_agents: 1, max_parallel_nodes: 2 });
   });
 
   it("rejects inline secret fields and duplicate model slugs", () => {

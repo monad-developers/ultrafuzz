@@ -1,7 +1,16 @@
 import type { ModalModelSpec, ModelProvider } from "./defaults.js";
 import { remoteAuthDir } from "./layout.js";
 
-export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number): string {
+export interface ModalTargetRunConfig {
+  max_parallel_agents: number;
+  max_parallel_nodes: number;
+}
+
+export function modalTargetToml(
+  model: ModalModelSpec,
+  nodeTimeoutSeconds: number,
+  targetRun: ModalTargetRunConfig = { max_parallel_agents: 4, max_parallel_nodes: 8 }
+): string {
   const selectedProfile = modelProfileToml(model);
   const codex = agentToml(model, "CodexAgent", "openai");
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
@@ -13,8 +22,8 @@ repo = "."
 
 [run]
 output_dir = ".ultrafuzz/runs"
-max_parallel_agents = 4
-max_parallel_nodes = 8
+max_parallel_agents = ${targetRun.max_parallel_agents}
+max_parallel_nodes = ${targetRun.max_parallel_nodes}
 keep_workspaces = true
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}

@@ -20,6 +20,7 @@ const relativeFile = z
   .min(1)
   .refine((value) => !path.isAbsolute(value) && !value.split(/[\\/]/u).includes(".."), "must be a safe relative path");
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
+const positiveConcurrency = z.number().int().positive().max(64);
 const httpsUrl = z
   .string()
   .url()
@@ -71,6 +72,13 @@ const benchmarkConfigSchema = z
         judge_credential_ttl_seconds: z.number().int().min(60).max(86_400).default(57_600)
       })
       .strict(),
+    target_run: z
+      .object({
+        max_parallel_agents: positiveConcurrency.default(4),
+        max_parallel_nodes: positiveConcurrency.default(8)
+      })
+      .strict()
+      .default({ max_parallel_agents: 4, max_parallel_nodes: 8 }),
     node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
     loops: z.literal(1).default(1),
     models: z

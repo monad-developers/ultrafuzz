@@ -222,7 +222,10 @@ async function configureTarget(target: string): Promise<void> {
     agentsPath,
     `# Authorized defensive benchmark\n\nThis checkout is being analyzed in an isolated, sanctioned defensive security benchmark. Work only on this checkout and local test or fuzz tooling.\n\n${existingAgents}`
   );
-  await writeFile(path.join(target, "ultrafuzz.toml"), modalTargetToml(MODEL, CONFIG.node_timeout_seconds));
+  await writeFile(
+    path.join(target, "ultrafuzz.toml"),
+    modalTargetToml(MODEL, CONFIG.node_timeout_seconds, CONFIG.target_run)
+  );
   const topologyPath = path.join(target, ".ultrafuzz/topology.yml");
   const topology = (await readFile(topologyPath, "utf8")).replace(/^(\s+loops:)\s*\d+\s*$/gmu, "$1 1");
   const loops = [...topology.matchAll(/^\s+loops:\s*(\d+)\s*$/gmu)].map((match) => Number(match[1]));
