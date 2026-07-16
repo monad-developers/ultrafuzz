@@ -117,7 +117,7 @@ export async function launchModalBenchmark(input: {
       const volume = await modal.volumes.fromName(volumeName, { createIfMissing: true });
       const remoteRoot = persistentDataRoot(config.run_id, model.slug);
       const sandbox = await modal.sandboxes.create(app, image, {
-        name: `eval-${model.slug}`,
+        name: `eval-${config.run_id}-${model.slug}`,
         command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider)],
         cpu: 4,
         cpuLimit: 4,
