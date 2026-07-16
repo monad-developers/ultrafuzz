@@ -965,6 +965,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     "utf8"
   );
   assert.match(workflowSource, /smithers-orchestrator/);
+  // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
+  // would otherwise shadow the .smithers/agents/ directory under bun.
+  assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
+  assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
   assert.match(workflowSource, /"reasoningEffort": "max"/);
