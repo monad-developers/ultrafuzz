@@ -23,6 +23,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { reconcileRequiredArtifactsFromWorkspace } from "./artifact-reconciliation.js";
 import {
   modelPricingFromSnapshot,
   modelPricingSnapshot,
@@ -927,6 +928,23 @@ function finalizeSucceededTask(input: {
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId, { create: true });
+  let reconciledArtifacts: string[] = [];
+  try {
+    reconciledArtifacts = reconcileRequiredArtifactsFromWorkspace({
+      layout: input.layout,
+      node: input.node,
+      attemptId: input.task.attemptId
+    }).materialized;
+    if (reconciledArtifacts.length > 0) {
+      events.push({
+        eventType: "node-artifacts-reconciled",
+        status: "succeeded",
+        payload: { materialized: reconciledArtifacts }
+      });
+    }
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "artifact-reconciliation", "WORKSPACE_ARTIFACT_RECONCILE_FAILED"));
+  }
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
   diagnostics.push(...gate.diagnostics);
   events.push({
@@ -986,6 +1004,7 @@ function finalizeSucceededTask(input: {
       lastError: diagnostics.map((diagnostic) => diagnostic.message).join("; "),
       provenance: {
         required_artifacts: { ok: gate.ok, missing: gate.missing },
+        ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
         ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
       },
       events
@@ -996,6 +1015,7 @@ function finalizeSucceededTask(input: {
     diagnostics,
     provenance: {
       required_artifacts: { ok: true, missing: [] },
+      ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
       ...(input.force ? { repaired_missing_manifest: true } : {})
     },

@@ -70,9 +70,36 @@ test("required artifact gate validates generated-test manifest shape and listed 
   assert.ok(missingFile.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_FILE_MISSING"));
 
   fs.mkdirSync(path.join(artifactDir, "generated-tests"), { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "", "utf8");
+
+  const emptyFile = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(emptyFile.ok, false);
+  assert.ok(emptyFile.diagnostics.some((diagnostic) => diagnostic.code === "GENERATED_TEST_FILE_EMPTY"));
+
   fs.writeFileSync(path.join(artifactDir, "generated-tests", "Invariant.t.sol"), "contract InvariantTest {}\n", "utf8");
 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.deepEqual(valid.diagnostics, []);
   assert.equal(valid.ok, true);
+});
+
+test("required artifact gate rejects empty files and final-component symlinks", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const artifactPath = path.join(artifactDir, "output.json");
+  const node = plannedNode(["output.json"]);
+
+  fs.writeFileSync(artifactPath, "", "utf8");
+  const empty = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(empty.ok, false);
+  assert.deepEqual(empty.missing, ["output.json"]);
+  assert.ok(empty.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_EMPTY"));
+
+  fs.rmSync(artifactPath);
+  const outside = path.join(tempProject(), "outside.json");
+  fs.writeFileSync(outside, "outside\n", "utf8");
+  fs.symlinkSync(outside, artifactPath);
+  const symlink = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(symlink.ok, false);
+  assert.ok(symlink.diagnostics.some((diagnostic) => diagnostic.code === "symlink-escape"));
 });
