@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { MODAL_SANDBOX_TIMEOUT_MS } from "../src/defaults.js";
+import {
+  EVAL_POST_WATCH_MARGIN_MS,
+  EVAL_WATCH_TIMEOUT_SECONDS,
+  MODAL_MAX_SANDBOX_TIMEOUT_MS,
+  MODAL_SANDBOX_TIMEOUT_MS
+} from "../src/defaults.js";
 import {
   REMOTE_CONFIG_PATH,
   persistentWorkspaceRoot,
@@ -16,8 +21,12 @@ describe("Modal storage layout", () => {
     expect(remoteAuthPath("anthropic")).toBe("/run/ultrafuzz-auth/claude/.credentials.json");
   });
 
-  it("uses a sixteen-hour sandbox timeout", () => {
-    expect(MODAL_SANDBOX_TIMEOUT_MS).toBe(16 * 60 * 60 * 1000);
+  it("keeps the bounded eval watch below the sandbox maximum with a fixed completion margin", () => {
+    expect(MODAL_SANDBOX_TIMEOUT_MS).toBe(MODAL_MAX_SANDBOX_TIMEOUT_MS);
+    expect(MODAL_MAX_SANDBOX_TIMEOUT_MS).toBe(24 * 60 * 60 * 1000);
+    expect(EVAL_POST_WATCH_MARGIN_MS).toBe(2 * 60 * 60 * 1000);
+    expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBe(MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS);
+    expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBeLessThan(MODAL_SANDBOX_TIMEOUT_MS);
   });
 
   it("maps only trusted /data children through the resolved Modal mount", () => {

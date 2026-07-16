@@ -15,6 +15,9 @@ import {
 } from "../src/smithers-package.js";
 
 import {
+  ARTIFACT_RECONCILIATION_GRACE_MS,
+  ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
+  ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
   forkRun,
   getRunHealth,
   getRunStatus,
@@ -2341,7 +2344,21 @@ test("syncRun fails a successful workflow node that is missing required artifact
   const run = await startRun({ projectRoot: project, runId: "sync-missing", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  const sync = await syncRun({ projectRoot: project, runId: "sync-missing", env });
+  const graceStartedAt = Date.parse("2026-07-03T00:01:00.000Z");
+  const pending = await syncRun({ projectRoot: project, runId: "sync-missing", env }, { now: () => graceStartedAt });
+
+  assert.equal(pending.ok, true);
+  assert.equal(pending.value?.status, "running");
+  assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  assert.equal(
+    fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8").match(/node-artifacts-missing/gu),
+    null
+  );
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-missing", env },
+    { now: () => graceStartedAt + ARTIFACT_RECONCILIATION_GRACE_MS }
+  );
 
   assert.equal(sync.ok, true);
   assert.equal(sync.value?.status, "failed");
@@ -2357,7 +2374,10 @@ test("syncRun fails a successful workflow node that is missing required artifact
   );
 
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
-  const repaired = await syncRun({ projectRoot: project, runId: "sync-missing", env });
+  const repaired = await syncRun(
+    { projectRoot: project, runId: "sync-missing", env },
+    { now: () => graceStartedAt + ARTIFACT_RECONCILIATION_GRACE_MS + 1 }
+  );
   assert.equal(repaired.ok, true, JSON.stringify(repaired.diagnostics));
   assert.equal(repaired.value?.status, "succeeded");
   const repairedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
@@ -2406,6 +2426,304 @@ test("syncRun reconciles exact task-workspace artifact mirrors before strict val
     true
   );
   assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /node-artifacts-reconciled/);
+});
+
+test("syncRun stops artifact reconciliation at the retry bound before the grace deadline", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-retry-bound";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-retry-bound", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const startedAt = Date.parse("2026-07-03T00:01:30.000Z");
+
+  for (let attempt = 1; attempt < ARTIFACT_RECONCILIATION_MAX_ATTEMPTS; attempt += 1) {
+    const pending = await syncRun(
+      { projectRoot: project, runId: "sync-retry-bound", env },
+      { now: () => startedAt + (attempt - 1) * ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+    );
+    assert.equal(pending.value?.status, "running", `attempt ${attempt}`);
+    assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  }
+
+  const bounded = await syncRun(
+    { projectRoot: project, runId: "sync-retry-bound", env },
+    {
+      now: () => startedAt + (ARTIFACT_RECONCILIATION_MAX_ATTEMPTS - 1) * ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS
+    }
+  );
+  assert.ok(
+    (ARTIFACT_RECONCILIATION_MAX_ATTEMPTS - 1) * ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS <
+      ARTIFACT_RECONCILIATION_GRACE_MS
+  );
+  assert.equal(bounded.value?.status, "failed");
+  assert.ok(bounded.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
+  assert.equal(
+    bounded.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"),
+    false
+  );
+});
+
+test("syncRun keeps a strict node pending until a late safe mirror is reconciled once", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-late-mirror";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-late-mirror", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const now = Date.parse("2026-07-03T00:02:00.000Z");
+
+  const pending = await syncRun({ projectRoot: project, runId: "sync-late-mirror", env }, { now: () => now });
+  assert.equal(pending.ok, true, JSON.stringify(pending.diagnostics));
+  assert.equal(pending.value?.status, "running");
+  assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+
+  const mirrorRoot = path.join(
+    run.value!.run_root,
+    "workspaces",
+    "project-discovery",
+    "artifacts",
+    "project-discovery"
+  );
+  writeRequiredArtifactSet(path.dirname(path.dirname(mirrorRoot)), "project-discovery", [
+    "setup/project-discovery.md",
+    "findings.json"
+  ]);
+
+  const completed = await syncRun(
+    { projectRoot: project, runId: "sync-late-mirror", env },
+    { now: () => now + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+  );
+  assert.equal(completed.ok, true, JSON.stringify(completed.diagnostics));
+  assert.equal(completed.value?.status, "succeeded");
+  const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+  const beforeRepeat = fs.readFileSync(eventsPath, "utf8");
+  assert.equal((beforeRepeat.match(/node-artifacts-reconciled/gu) ?? []).length, 1);
+  assert.equal((beforeRepeat.match(/node-artifact-reconciliation-grace-completed/gu) ?? []).length, 1);
+  assert.equal((beforeRepeat.match(/node-artifacts-verified/gu) ?? []).length, 1);
+  assert.equal((beforeRepeat.match(/node-artifacts-missing/gu) ?? []).length, 0);
+
+  const repeated = await syncRun(
+    { projectRoot: project, runId: "sync-late-mirror", env },
+    { now: () => now + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS * 2 }
+  );
+  assert.equal(repeated.ok, true, JSON.stringify(repeated.diagnostics));
+  assert.equal(fs.readFileSync(eventsPath, "utf8"), beforeRepeat);
+});
+
+test("syncRun rejects unsafe late mirrors instead of extending artifact grace", async () => {
+  for (const sourceKind of ["symlink", "hardlink"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const workflowRunId = `ultrafuzz-sync-unsafe-${sourceKind}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId: `sync-unsafe-${sourceKind}`, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const now = Date.parse("2026-07-03T00:03:00.000Z");
+    const pending = await syncRun(
+      { projectRoot: project, runId: `sync-unsafe-${sourceKind}`, env },
+      { now: () => now }
+    );
+    assert.equal(pending.value?.status, "running");
+
+    const mirrorRoot = path.join(
+      run.value!.run_root,
+      "workspaces",
+      "project-discovery",
+      "artifacts",
+      "project-discovery"
+    );
+    fs.mkdirSync(path.join(mirrorRoot, "setup"), { recursive: true });
+    const outside = path.join(project, `${sourceKind}-outside.md`);
+    fs.writeFileSync(outside, "unsafe source\n", "utf8");
+    const source = path.join(mirrorRoot, "setup", "project-discovery.md");
+    if (sourceKind === "symlink") {
+      fs.symlinkSync(outside, source);
+    } else {
+      fs.linkSync(outside, source);
+    }
+
+    const rejected = await syncRun(
+      { projectRoot: project, runId: `sync-unsafe-${sourceKind}`, env },
+      { now: () => now + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+    );
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.value?.status, "failed");
+    assert.ok(
+      rejected.diagnostics.some(
+        (diagnostic) => diagnostic.source === "artifact-reconciliation" && diagnostic.severity === "error"
+      )
+    );
+    assert.equal(
+      rejected.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"),
+      false
+    );
+    assert.equal(
+      fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "setup", "project-discovery.md")),
+      false
+    );
+  }
+});
+
+test("syncRun rejects a late mirror source swap during artifact grace", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-raced-mirror";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-raced-mirror", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const now = Date.parse("2026-07-03T00:03:30.000Z");
+  const pending = await syncRun({ projectRoot: project, runId: "sync-raced-mirror", env }, { now: () => now });
+  assert.equal(pending.value?.status, "running");
+
+  const mirrorRoot = path.join(
+    run.value!.run_root,
+    "workspaces",
+    "project-discovery",
+    "artifacts",
+    "project-discovery"
+  );
+  writeRequiredArtifactSet(path.dirname(path.dirname(mirrorRoot)), "project-discovery", [
+    "setup/project-discovery.md",
+    "findings.json"
+  ]);
+  const source = path.join(mirrorRoot, "setup", "project-discovery.md");
+  const sourceDirectory = path.dirname(source);
+  const preservedDirectory = path.join(mirrorRoot, "setup-preserved");
+  const outsideDirectory = tempProject();
+  fs.writeFileSync(path.join(outsideDirectory, "project-discovery.md"), "outside\n", "utf8");
+  const originalOpenSync = fs.openSync;
+  let swapped = false;
+  fs.openSync = ((filePath, flags, mode) => {
+    if (!swapped && String(filePath) === source) {
+      swapped = true;
+      fs.renameSync(sourceDirectory, preservedDirectory);
+      fs.symlinkSync(outsideDirectory, sourceDirectory);
+    }
+    return originalOpenSync(filePath, flags, mode);
+  }) as typeof fs.openSync;
+  let rejected;
+  try {
+    rejected = await syncRun(
+      { projectRoot: project, runId: "sync-raced-mirror", env },
+      { now: () => now + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+    );
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.rmSync(sourceDirectory, { force: true });
+    fs.renameSync(preservedDirectory, sourceDirectory);
+  }
+  assert.equal(swapped, true);
+  assert.equal(rejected.ok, true);
+  assert.equal(rejected.value?.status, "failed");
+  assert.ok(
+    rejected.diagnostics.some(
+      (diagnostic) => diagnostic.source === "artifact-reconciliation" && diagnostic.severity === "error"
+    )
+  );
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "setup", "project-discovery.md")),
+    false
+  );
+});
+
+test("syncRun honors cancellation and an overall deadline before starting artifact grace", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-budget";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-budget", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const before = fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8");
+  const now = Date.parse("2026-07-03T00:04:00.000Z");
+  const controller = new AbortController();
+  controller.abort();
+
+  const cancelled = await syncRun(
+    { projectRoot: project, runId: "sync-budget", env },
+    { now: () => now, signal: controller.signal }
+  );
+  assert.equal(cancelled.ok, false);
+  assert.ok(cancelled.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
+
+  const expired = await syncRun(
+    { projectRoot: project, runId: "sync-budget", env },
+    { now: () => now, deadlineMs: now }
+  );
+  assert.equal(expired.ok, false);
+  assert.ok(expired.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED"));
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
+
+  let clockReads = 0;
+  const expiredAfterInspection = await syncRun(
+    { projectRoot: project, runId: "sync-budget", env },
+    {
+      now: () => now + clockReads++,
+      deadlineMs: now + 1
+    }
+  );
+  assert.equal(expiredAfterInspection.ok, false);
+  assert.ok(
+    expiredAfterInspection.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_DEADLINE_EXCEEDED")
+  );
+  assert.equal(clockReads, 2);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
 });
 
 test("syncRun does not mark a completed workflow succeeded without task evidence", async () => {
