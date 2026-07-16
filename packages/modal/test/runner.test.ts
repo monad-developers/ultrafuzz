@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createTrackedSourceArchive,
+  launchIdFor,
   modalImageBuildCommand,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand
@@ -51,5 +52,11 @@ describe("Modal worker identity", () => {
   it("maps only /data children into the volume-relative root", () => {
     expect(modalVolumeRelativeRoot("/data/run-one/model-one")).toBe("run-one/model-one");
     expect(() => modalVolumeRelativeRoot("/outside/run-one")).toThrow("must be a child of /data");
+  });
+});
+
+describe("Modal benchmark dimensions", () => {
+  it("uses a unique launch id for each model-condition pair", () => {
+    expect(launchIdFor("gpt-5-6-sol", "no-fuzzing")).toBe("gpt-5-6-sol-no-fuzzing");
   });
 });

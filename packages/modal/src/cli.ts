@@ -20,6 +20,7 @@ async function main(): Promise<void> {
     const state = await launchModalBenchmark({
       configPath,
       modelSlugs: options(argv, "--model"),
+      conditionIds: options(argv, "--condition"),
       statePath: option(argv, "--state")
     });
     console.log(JSON.stringify(state, null, 2));
@@ -37,7 +38,9 @@ async function main(): Promise<void> {
     });
     return;
   }
-  throw new Error("usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]");
+  throw new Error(
+    "usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--condition id] [--state path]"
+  );
 }
 
 function option(argv: string[], name: string): string | undefined {

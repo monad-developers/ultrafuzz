@@ -12,6 +12,7 @@ import {
   DEFAULT_MODAL_IMAGE,
   MODAL_LAUNCH_STATE_SCHEMA_VERSION,
   MODAL_SANDBOX_TIMEOUT_MS,
+  type ModalConditionSpec,
   type ModalModelSpec,
   type ModelProvider
 } from "./defaults.js";
@@ -29,6 +30,9 @@ const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 
 export interface ModalLaunchRecord extends ModalModelSpec {
+  launch_id: string;
+  condition: ModalConditionSpec;
+  judge: ModalModelSpec;
   sandbox_id: string;
   volume_name: string;
   remote_root: string;
@@ -91,33 +95,38 @@ export async function buildModalImage(
 export async function launchModalBenchmark(input: {
   configPath: string;
   modelSlugs?: string[];
+  conditionIds?: string[];
   statePath?: string;
   env?: Record<string, string | undefined>;
 }): Promise<ModalLaunchState> {
   const configPath = path.resolve(input.configPath);
   const config = loadModalBenchmarkConfig(configPath);
-  const selected = selectModels(config, input.modelSlugs);
+  const selectedModels = selectModels(config, input.modelSlugs);
+  const selectedConditions = selectConditions(config, input.conditionIds);
   const statePath = path.resolve(input.statePath ?? defaultStatePath(config.run_id));
   const env = input.env ?? process.env;
   const prepared = [];
-  for (const model of selected) {
-    const auth = subscriptionAuthCopy(model, env);
-    if (auth !== undefined) await access(auth.source);
-    prepared.push({ model, auth, secrets: secretValues(config, model, env) });
+  for (const model of selectedModels) {
+    for (const condition of selectedConditions) {
+      const auth = subscriptionAuthCopy(model, env);
+      if (auth !== undefined) await access(auth.source);
+      prepared.push({ model, condition, auth, secrets: secretValues(config, model, env) });
+    }
   }
   const modal = modalClient(env);
   try {
     const app = await modal.apps.fromName(config.app_name, { createIfMissing: true });
     const image = await modal.images.fromName(config.image_name);
     const state = await readOrCreateState(statePath, config);
-    for (const { model, auth, secrets } of prepared) {
-      if (state.launches.some((launch) => launch.slug === model.slug)) continue;
+    for (const { model, condition, auth, secrets } of prepared) {
+      const launchId = launchIdFor(model.slug, condition.id);
+      if (state.launches.some((launch) => launch.launch_id === launchId)) continue;
       const secret = await modal.secrets.fromObject(secrets);
-      const volumeName = volumeNameFor(config.run_id, model.slug);
+      const volumeName = volumeNameFor(config.run_id, launchId);
       const volume = await modal.volumes.fromName(volumeName, { createIfMissing: true });
-      const remoteRoot = persistentDataRoot(config.run_id, model.slug);
+      const remoteRoot = persistentDataRoot(config.run_id, launchId);
       const sandbox = await modal.sandboxes.create(app, image, {
-        name: `eval-${model.slug}`,
+        name: `eval-${launchId}`,
         command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider)],
         cpu: 4,
         cpuLimit: 4,
@@ -128,12 +137,13 @@ export async function launchModalBenchmark(input: {
         env: {
           ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
           ULTRAFUZZ_MODAL_MODEL: JSON.stringify(model),
+          ULTRAFUZZ_MODAL_CONDITION: JSON.stringify(condition),
           ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
           ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
         },
         secrets: [secret],
         volumes: { "/data": volume },
-        tags: { purpose: "ultrafuzz-eval", run: config.run_id, model: model.slug }
+        tags: { purpose: "ultrafuzz-eval", run: config.run_id, model: model.slug, condition: condition.id }
       });
       try {
         await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
@@ -150,6 +160,9 @@ export async function launchModalBenchmark(input: {
       }
       state.launches.push({
         ...model,
+        launch_id: launchId,
+        condition,
+        judge: config.judge,
         sandbox_id: sandbox.sandboxId,
         volume_name: volumeName,
         remote_root: remoteRoot,
@@ -217,8 +230,10 @@ export async function modalBenchmarkStatus(input: {
       const volume = await modal.volumes.fromName(launch.volume_name);
       const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, ["status.json"]);
       rows.push({
-        model: launch.model,
-        slug: launch.slug,
+        launch_id: launch.launch_id,
+        implementer: launch.model,
+        judge: launch.judge.model,
+        condition: launch.condition.id,
         runner,
         exit_code: exitCode,
         status: parseJson(persisted["status.json"] ?? "{}")
@@ -248,7 +263,7 @@ export async function collectModalBenchmark(input: {
         "result.json",
         "failure-details.json"
       ]);
-      const output = path.resolve(input.outputDir, launch.slug);
+      const output = path.resolve(input.outputDir, launch.launch_id);
       await mkdir(output, { recursive: true });
       for (const [name, contents] of Object.entries(files)) await writeFile(path.join(output, name), contents);
     }
@@ -319,6 +334,19 @@ function selectModels(config: ModalBenchmarkConfig, slugs: string[] | undefined)
   const missing = [...requested].filter((slug) => !selected.some((model) => model.slug === slug));
   if (missing.length > 0) throw new Error(`unknown model slug(s): ${missing.join(", ")}`);
   return selected;
+}
+
+function selectConditions(config: ModalBenchmarkConfig, ids: string[] | undefined): ModalConditionSpec[] {
+  if (ids === undefined || ids.length === 0) return config.conditions;
+  const requested = new Set(ids);
+  const selected = config.conditions.filter((condition) => requested.has(condition.id));
+  const missing = [...requested].filter((id) => !selected.some((condition) => condition.id === id));
+  if (missing.length > 0) throw new Error(`unknown condition id(s): ${missing.join(", ")}`);
+  return selected;
+}
+
+export function launchIdFor(modelSlug: string, conditionId: string): string {
+  return `${modelSlug}-${conditionId}`;
 }
 
 function defaultStatePath(runId: string): string {

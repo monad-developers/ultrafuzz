@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { parseModalBenchmarkConfig } from "../src/config.js";
-import { DEFAULT_BENCHMARK_MODELS, MODAL_BENCHMARK_SCHEMA_VERSION } from "../src/defaults.js";
+import {
+  DEFAULT_BENCHMARK_CONDITIONS,
+  DEFAULT_BENCHMARK_MODELS,
+  DEFAULT_JUDGE_MODEL,
+  MODAL_BENCHMARK_SCHEMA_VERSION
+} from "../src/defaults.js";
 
 function minimalConfig(): Record<string, unknown> {
   return {
@@ -18,10 +23,10 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
-  it("defaults to the six benchmark models and one loop", () => {
+  it("defaults to the six benchmark models, three loops, two conditions, and a judge", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 
-    expect(config.loops).toBe(1);
+    expect(config.loops).toBe(3);
     expect(config.models).toEqual(DEFAULT_BENCHMARK_MODELS);
     expect(config.models.map((model) => model.model)).toEqual([
       "gpt-5.5",
@@ -31,6 +36,8 @@ describe("Modal benchmark config", () => {
       "claude-fable-5",
       "claude-opus-4-8"
     ]);
+    expect(config.conditions).toEqual(DEFAULT_BENCHMARK_CONDITIONS);
+    expect(config.judge).toEqual(DEFAULT_JUDGE_MODEL);
   });
 
   it("rejects inline secret fields and duplicate model slugs", () => {
@@ -56,6 +63,28 @@ describe("Modal benchmark config", () => {
         models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeCodeAgent" }]
       })
     ).toThrow(/provider and agent/u);
+  });
+
+  it("requires one condition for each prompt variant", () => {
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        conditions: [
+          { id: "first", prompt_variant: "default" },
+          { id: "second", prompt_variant: "default" }
+        ]
+      })
+    ).toThrow(/exactly one default and one no-fuzzing/u);
+
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        conditions: [
+          { id: "same", prompt_variant: "default" },
+          { id: "same", prompt_variant: "no-fuzzing" }
+        ]
+      })
+    ).toThrow(/duplicate condition id/u);
   });
 
   it("accepts audit Markdown conversion and temporary judge credentials", () => {

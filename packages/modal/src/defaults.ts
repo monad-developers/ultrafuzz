@@ -8,6 +8,7 @@ export const DEFAULT_MODAL_IMAGE = "ultrafuzz-security-runner:latest";
 
 export type ModelProvider = "openai" | "anthropic";
 export type ModelAuthMode = "api-key" | "subscription";
+export type ModalPromptVariant = "default" | "no-fuzzing";
 
 export interface ModalModelSpec {
   slug: string;
@@ -17,6 +18,25 @@ export interface ModalModelSpec {
   reasoning: string;
   auth_mode: ModelAuthMode;
 }
+
+export interface ModalConditionSpec {
+  id: string;
+  prompt_variant: ModalPromptVariant;
+}
+
+export const DEFAULT_JUDGE_MODEL: ModalModelSpec = {
+  slug: "gpt-5-6-sol-judge",
+  model: "gpt-5.6-sol",
+  provider: "openai",
+  agent: "CodexAgent",
+  reasoning: "xhigh",
+  auth_mode: "subscription"
+};
+
+export const DEFAULT_BENCHMARK_CONDITIONS: readonly ModalConditionSpec[] = [
+  { id: "default", prompt_variant: "default" },
+  { id: "no-fuzzing", prompt_variant: "no-fuzzing" }
+];
 
 export const DEFAULT_BENCHMARK_MODELS: readonly ModalModelSpec[] = [
   {

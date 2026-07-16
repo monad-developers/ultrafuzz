@@ -4,11 +4,14 @@ import path from "node:path";
 import { z } from "zod/v4";
 
 import {
+  DEFAULT_BENCHMARK_CONDITIONS,
   DEFAULT_BENCHMARK_MODELS,
+  DEFAULT_JUDGE_MODEL,
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
   DEFAULT_NODE_TIMEOUT_SECONDS,
   MODAL_BENCHMARK_SCHEMA_VERSION,
+  type ModalConditionSpec,
   type ModalModelSpec
 } from "./defaults.js";
 
@@ -45,6 +48,13 @@ const modelSchema = z
     "model provider and agent do not match"
   );
 
+const conditionSchema = z
+  .object({
+    id: safeId,
+    prompt_variant: z.enum(["default", "no-fuzzing"])
+  })
+  .strict();
+
 const benchmarkConfigSchema = z
   .object({
     schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
@@ -72,7 +82,12 @@ const benchmarkConfigSchema = z
       })
       .strict(),
     node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
-    loops: z.literal(1).default(1),
+    loops: z.literal(3).default(3),
+    judge: modelSchema.default(() => ({ ...DEFAULT_JUDGE_MODEL })),
+    conditions: z
+      .array(conditionSchema)
+      .length(2)
+      .default(() => DEFAULT_BENCHMARK_CONDITIONS.map((condition) => ({ ...condition }))),
     models: z
       .array(modelSchema)
       .min(1)
@@ -82,6 +97,8 @@ const benchmarkConfigSchema = z
 
 export type ModalBenchmarkConfig = Omit<z.infer<typeof benchmarkConfigSchema>, "models"> & {
   models: ModalModelSpec[];
+  judge: ModalModelSpec;
+  conditions: ModalConditionSpec[];
 };
 
 export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig {
@@ -90,6 +107,16 @@ export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig 
   for (const model of parsed.models) {
     if (slugs.has(model.slug)) throw new Error(`duplicate model slug: ${model.slug}`);
     slugs.add(model.slug);
+  }
+  const conditionIds = new Set<string>();
+  const promptVariants = new Set<string>();
+  for (const condition of parsed.conditions) {
+    if (conditionIds.has(condition.id)) throw new Error(`duplicate condition id: ${condition.id}`);
+    conditionIds.add(condition.id);
+    promptVariants.add(condition.prompt_variant);
+  }
+  if (promptVariants.size !== 2 || !promptVariants.has("default") || !promptVariants.has("no-fuzzing")) {
+    throw new Error("conditions must include exactly one default and one no-fuzzing prompt variant");
   }
   return parsed as ModalBenchmarkConfig;
 }

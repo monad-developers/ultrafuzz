@@ -4,18 +4,21 @@ import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "n
 import path from "node:path";
 
 import { loadModalBenchmarkConfig } from "./config.js";
-import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
+import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalConditionSpec, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { REMOTE_CONFIG_PATH, persistentDataRoot, resolvePersistentRemoteRoot } from "./layout.js";
+import { applyPromptVariant, type AppliedPromptVariant } from "./prompt-variant.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const RUN_ID = requiredEnv("ULTRAFUZZ_MODAL_RUN_ID");
 const MODEL = JSON.parse(requiredEnv("ULTRAFUZZ_MODAL_MODEL")) as ModalModelSpec;
+const CONDITION = JSON.parse(requiredEnv("ULTRAFUZZ_MODAL_CONDITION")) as ModalConditionSpec;
 const CONFIG = loadModalBenchmarkConfig(REMOTE_CONFIG_PATH);
 const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");
-const REMOTE_DATA_ROOT = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT ?? persistentDataRoot(RUN_ID, MODEL.slug);
+const REMOTE_DATA_ROOT =
+  process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT ?? persistentDataRoot(RUN_ID, `${MODEL.slug}-${CONDITION.id}`);
 const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_ROOT);
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
@@ -27,7 +30,7 @@ async function main(): Promise<void> {
     await mkdir(DATA_ROOT, { recursive: true });
     await writeFile(LOG_PATH, "");
     await setStatus("preparing");
-    const { target, control, suitePath, evalRunId } = await prepareWorkspace();
+    const { target, control, suitePath, evalRunId, appliedPromptVariant } = await prepareWorkspace();
     await setStatus("running", { eval_run_id: evalRunId });
     await runEval(
       [
@@ -98,7 +101,10 @@ async function main(): Promise<void> {
           schema_version: "ultrafuzz.modal.result.v1",
           completed_at: new Date().toISOString(),
           run_id: RUN_ID,
-          model: MODEL,
+          implementer: MODEL,
+          judge: CONFIG.judge,
+          condition: CONDITION,
+          applied_prompt_variant: appliedPromptVariant,
           eval_run_id: evalRunId,
           run_summary: runSummary,
           score_summary: scoreSummary
@@ -125,9 +131,19 @@ function assertWorkerInput(): void {
   if (configured === undefined || JSON.stringify(configured) !== JSON.stringify(MODEL)) {
     throw new Error("model does not match runtime config");
   }
+  const configuredCondition = CONFIG.conditions.find((candidate) => candidate.id === CONDITION.id);
+  if (configuredCondition === undefined || JSON.stringify(configuredCondition) !== JSON.stringify(CONDITION)) {
+    throw new Error("condition does not match runtime config");
+  }
 }
 
-async function prepareWorkspace(): Promise<{ target: string; control: string; suitePath: string; evalRunId: string }> {
+async function prepareWorkspace(): Promise<{
+  target: string;
+  control: string;
+  suitePath: string;
+  evalRunId: string;
+  appliedPromptVariant: AppliedPromptVariant;
+}> {
   await rm(WORK_ROOT, { recursive: true, force: true });
   await mkdir(WORK_ROOT, { recursive: true });
   const target = path.join(WORK_ROOT, "target");
@@ -142,6 +158,7 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
   await runChecked(["node", CLI, "init", "--project", target, "--force", "--json"], { label: "target init" });
   await runChecked(["node", CLI, "init", "--project", control, "--force", "--json"], { label: "control init" });
   await configureTarget(target);
+  const appliedPromptVariant = await applyPromptVariant(target, CONDITION.prompt_variant);
   await materializeGroundTruth(
     path.join(groundTruthRepo, CONFIG.ground_truth.file),
     path.join(groundTruth, "findings.yml")
@@ -154,7 +171,13 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
   await runChecked(["node", CLI, "eval", "plan", "--project", control, "--suite", suitePath, "--json"], {
     label: "eval plan"
   });
-  return { target, control, suitePath, evalRunId: `${RUN_ID}-${MODEL.slug}` };
+  return {
+    target,
+    control,
+    suitePath,
+    evalRunId: `${RUN_ID}-${MODEL.slug}-${CONDITION.id}`,
+    appliedPromptVariant
+  };
 }
 
 async function materializeGroundTruth(source: string, destination: string): Promise<void> {
@@ -178,7 +201,7 @@ async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
     cache: "no-store",
     headers: { authorization: `Bearer ${sourceKey}`, "content-type": "application/json" },
     body: JSON.stringify({
-      model: MODEL.model,
+      model: CONFIG.judge.model,
       ttl_seconds: CONFIG.braintrust.judge_credential_ttl_seconds
     })
   });
@@ -213,10 +236,14 @@ async function configureTarget(target: string): Promise<void> {
   );
   await writeFile(path.join(target, "ultrafuzz.toml"), modalTargetToml(MODEL, CONFIG.node_timeout_seconds));
   const topologyPath = path.join(target, ".ultrafuzz/topology.yml");
-  const topology = (await readFile(topologyPath, "utf8")).replace(/^(\s+loops:)\s*\d+\s*$/gmu, "$1 1");
-  const loops = [...topology.matchAll(/^\s+loops:\s*(\d+)\s*$/gmu)].map((match) => Number(match[1]));
-  if (loops.length === 0 || loops.some((value) => value !== 1)) throw new Error("failed to enforce loops=1");
-  await writeFile(topologyPath, topology);
+  assertStrategyLoops(await readFile(topologyPath, "utf8"), CONFIG.loops);
+}
+
+export function assertStrategyLoops(topology: string, expected: number): void {
+  const groupDefaults = [...topology.matchAll(/^ {6}loops:\s*(\d+)\s*$/gmu)].map((match) => Number(match[1]));
+  if (groupDefaults.length !== 1 || groupDefaults[0] !== expected) {
+    throw new Error(`expected one strategy-group loop default set to ${expected}`);
+  }
 }
 
 async function configureControl(control: string, target: string, groundTruth: string): Promise<string> {
@@ -241,13 +268,17 @@ async function configureControl(control: string, target: string, groundTruth: st
   await writeFile(
     suitePath,
     `schema_version: ultrafuzz.eval.v1
-suite: ${yamlString(`modal-${MODEL.slug}`)}
+suite: ${yamlString(`modal-${MODEL.slug}-${CONDITION.id}`)}
 
 model_profiles:
-  benchmark:
+  implementer:
     agent: ${yamlString(MODEL.agent)}
     model: ${yamlString(MODEL.model)}
     reasoning: ${yamlString(MODEL.reasoning)}
+  judge:
+    agent: ${yamlString(CONFIG.judge.agent)}
+    model: ${yamlString(CONFIG.judge.model)}
+    reasoning: ${yamlString(CONFIG.judge.reasoning)}
 
 targets:
   - id: target
@@ -258,13 +289,13 @@ targets:
     ground_truth: findings.yml
 
 variants:
-  - id: ${yamlString(MODEL.slug)}
-    runner_model_profile: benchmark
-    judge_model_profile: benchmark
+  - id: ${yamlString(CONDITION.id)}
+    runner_model_profile: implementer
+    judge_model_profile: judge
 
 run:
-  runner_model_profile: benchmark
-  judge_model_profile: benchmark
+  runner_model_profile: implementer
+  judge_model_profile: judge
   trials_per_variant: 1
   max_parallel_targets: 1
   max_parallel_runs: 1
@@ -362,7 +393,9 @@ async function setStatus(stage: string, extra: Record<string, unknown> = {}): Pr
         schema_version: "ultrafuzz.modal.worker-status.v1",
         updated_at: new Date().toISOString(),
         stage,
-        model: MODEL,
+        implementer: MODEL,
+        judge: CONFIG.judge,
+        condition: CONDITION,
         ...extra
       },
       null,
