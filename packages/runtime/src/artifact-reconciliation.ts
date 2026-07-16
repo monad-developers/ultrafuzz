@@ -20,6 +20,19 @@ export interface ArtifactReconciliationResult {
   materialized: string[];
 }
 
+export class RetryableArtifactReconciliationError extends Error {
+  readonly code = "WORKSPACE_ARTIFACT_RECONCILE_RETRYABLE";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableArtifactReconciliationError";
+  }
+}
+
+export function isRetryableArtifactReconciliationError(error: unknown): error is RetryableArtifactReconciliationError {
+  return error instanceof RetryableArtifactReconciliationError;
+}
+
 export function reconcileRequiredArtifactsFromWorkspace(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
@@ -93,6 +106,7 @@ function copyRegularFileExclusive(
   relativeDestination: string
 ): boolean {
   assertRegularFileInside(workspaceDir, source, "workspace artifact source");
+  const sourceBeforeOpen = fs.statSync(source, { bigint: true });
   const destination = prepareSafeFilePath(artifactDir, relativeDestination);
   if (fs.existsSync(destination)) {
     return false;
@@ -109,6 +123,9 @@ function copyRegularFileExclusive(
   try {
     sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const sourceStat = fs.fstatSync(sourceFd, { bigint: true });
+    if (!sameIdentity(sourceBeforeOpen, sourceStat)) {
+      throw new Error("workspace artifact source identity changed while it was opened");
+    }
     validateOpenedDescriptorInside(workspaceDir, sourceFd, "workspace artifact source");
     assertRegularFileInside(workspaceDir, source, "workspace artifact source");
     const sourcePathStat = fs.statSync(source, { bigint: true });
@@ -165,8 +182,22 @@ function copyRegularFileExclusive(
         written += bytesWritten;
       }
     }
-    if (copiedBytes !== sourceStat.size || !sameStableFile(sourceStat, fs.fstatSync(sourceFd, { bigint: true }))) {
-      throw new Error("workspace artifact source changed while it was copied");
+    const sourceAfterCopy = fs.fstatSync(sourceFd, { bigint: true });
+    validateOpenedDescriptorInside(workspaceDir, sourceFd, "workspace artifact source");
+    assertRegularFileInside(workspaceDir, source, "workspace artifact source");
+    const sourcePathAfterCopy = fs.statSync(source, { bigint: true });
+    if (
+      !sameIdentity(sourceStat, sourceAfterCopy) ||
+      !sameIdentity(sourceAfterCopy, sourcePathAfterCopy) ||
+      !sourceAfterCopy.isFile() ||
+      sourceAfterCopy.nlink !== 1n
+    ) {
+      throw new Error("workspace artifact source identity changed while it was copied");
+    }
+    if (copiedBytes !== sourceStat.size || !sameStableFile(sourceStat, sourceAfterCopy)) {
+      throw new RetryableArtifactReconciliationError(
+        "workspace artifact regular-file contents changed while they were copied"
+      );
     }
     fs.fsyncSync(temporaryFd);
 

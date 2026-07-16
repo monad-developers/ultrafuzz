@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -27,6 +29,11 @@ describe("Modal storage layout", () => {
     expect(EVAL_POST_WATCH_MARGIN_MS).toBe(2 * 60 * 60 * 1000);
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBe(MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS);
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBeLessThan(MODAL_SANDBOX_TIMEOUT_MS);
+
+    const runnerSource = fs.readFileSync(new URL("../src/runner.ts", import.meta.url), "utf8");
+    const workerSource = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
+    expect(runnerSource).toContain("timeoutMs: MODAL_SANDBOX_TIMEOUT_MS");
+    expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
   });
 
   it("maps only trusted /data children through the resolved Modal mount", () => {

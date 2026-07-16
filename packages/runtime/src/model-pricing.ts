@@ -61,6 +61,8 @@ const DISABLED_VALUES = new Set(["disabled", "none", "off"]);
 export async function resolveLiveModelPricing(input: {
   models: Iterable<string>;
   env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<PricingCatalogResult> {
   const models = uniqueNormalizedModels(input.models);
   if (models.length === 0) {
@@ -91,11 +93,15 @@ export async function resolveLiveModelPricing(input: {
   const sourceUrl =
     configuredUrl === undefined || configuredUrl.length === 0 ? DEFAULT_PRICING_CATALOG_URL : configuredUrl;
   const source = sourceUrl === DEFAULT_PRICING_CATALOG_URL ? "models.dev" : "configured-catalog";
-  const timeoutMs = pricingTimeoutMs(input.env?.ULTRAFUZZ_PRICING_TIMEOUT_MS);
+  const timeoutMs = Math.min(
+    pricingTimeoutMs(input.env?.ULTRAFUZZ_PRICING_TIMEOUT_MS),
+    input.timeoutMs ?? Number.POSITIVE_INFINITY
+  );
   try {
+    const timeoutSignal = AbortSignal.timeout(Math.max(1, timeoutMs));
     const response = await fetch(sourceUrl, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs)
+      signal: input.signal === undefined ? timeoutSignal : AbortSignal.any([input.signal, timeoutSignal])
     });
     if (!response.ok) {
       throw new Error(`pricing catalog returned HTTP ${response.status}`);

@@ -23,7 +23,10 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
-import { reconcileRequiredArtifactsFromWorkspace } from "./artifact-reconciliation.js";
+import {
+  isRetryableArtifactReconciliationError,
+  reconcileRequiredArtifactsFromWorkspace
+} from "./artifact-reconciliation.js";
 import {
   modelPricingFromSnapshot,
   modelPricingSnapshot,
@@ -197,8 +200,8 @@ export async function synchronizeLinkedWorkflowRun(
 ): Promise<
   { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }
 > {
-  const nowMs = control.now?.() ?? Date.now();
-  const budgetDiagnostic = synchronizationBudgetDiagnostic(control, nowMs);
+  let synchronizationNowMs = synchronizationClock(control);
+  const budgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [budgetDiagnostic] };
   }
@@ -235,8 +238,14 @@ export async function synchronizeLinkedWorkflowRun(
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
+  synchronizationNowMs = synchronizationClock(control);
+  const postInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (postInspectBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
+  }
   if (!inspectSnapshot.ok) {
     return {
       ok: false,
@@ -246,14 +255,22 @@ export async function synchronizeLinkedWorkflowRun(
   const eventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--type", "node", "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
+  synchronizationNowMs = synchronizationClock(control);
+  const postEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (postEventsBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postEventsBudgetDiagnostic] };
+  }
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
-  const postInspectionBudgetDiagnostic = synchronizationBudgetDiagnostic(control, control.now?.() ?? Date.now());
+  synchronizationNowMs = synchronizationClock(control);
+  const postInspectionBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (postInspectionBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postInspectionBudgetDiagnostic] };
   }
@@ -272,7 +289,7 @@ export async function synchronizeLinkedWorkflowRun(
     workflowRunId: evidence.smithersRunId,
     inspect,
     events,
-    nowMs
+    nowMs: synchronizationNowMs
   });
   diagnostics.push(...syncResult.diagnostics);
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
@@ -284,12 +301,25 @@ export async function synchronizeLinkedWorkflowRun(
     });
   }
 
+  const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (preAccountingBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
+  }
   const accountingResult = await synchronizeWorkflowAccounting({
     layout,
     workflowRunId: evidence.smithersRunId,
     events: tokenEvents,
+    control,
     env: input.env ?? process.env
   });
+  if (accountingResult.budgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
+  }
+
+  const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (preFinalMutationBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
+  }
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
@@ -349,14 +379,31 @@ function synchronizationBudgetDiagnostic(
   return undefined;
 }
 
+function synchronizationClock(control: WorkflowSynchronizationControl): number {
+  return control.now?.() ?? Date.now();
+}
+
+function inspectionExecutionControl(
+  control: WorkflowSynchronizationControl,
+  nowMs: number
+): { signal?: AbortSignal; timeoutMs?: number } {
+  const timeoutMs = control.deadlineMs === undefined ? undefined : Math.max(1, Math.ceil(control.deadlineMs - nowMs));
+  return {
+    ...(control.signal === undefined ? {} : { signal: control.signal }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs })
+  };
+}
+
 async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
   events: WorkflowEvent[];
   env?: Record<string, string | undefined>;
+  control: WorkflowSynchronizationControl;
 }): Promise<{
   changed: boolean;
   available: boolean;
+  budgetDiagnostic?: RuntimeDiagnostic;
 }> {
   const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
   const storedAccounting = recordField(metadata, "accounting");
@@ -371,7 +418,24 @@ async function synchronizeWorkflowAccounting(input: {
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
   const livePricing =
-    missingModels.length === 0 ? undefined : await resolveLiveModelPricing({ models: missingModels, env: input.env });
+    missingModels.length === 0
+      ? undefined
+      : await resolveLiveModelPricing({
+          models: missingModels,
+          env: input.env,
+          signal: input.control.signal,
+          timeoutMs:
+            input.control.deadlineMs === undefined
+              ? undefined
+              : Math.max(1, input.control.deadlineMs - synchronizationClock(input.control))
+        });
+  const postPricingBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    input.control,
+    synchronizationClock(input.control)
+  );
+  if (postPricingBudgetDiagnostic !== undefined) {
+    return { changed: false, available: false, budgetDiagnostic: postPricingBudgetDiagnostic };
+  }
   const resolvedPricing = new Map(storedPricing);
   for (const [model, modelPricing] of livePricing?.prices ?? []) {
     resolvedPricing.set(model, modelPricing);
@@ -406,6 +470,14 @@ async function synchronizeWorkflowAccounting(input: {
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
     return { changed: false, available: true };
+  }
+
+  const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    input.control,
+    synchronizationClock(input.control)
+  );
+  if (preAccountingMutationBudgetDiagnostic !== undefined) {
+    return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
   }
 
   writeJsonDurable(input.layout.runMetadataPath, {
@@ -973,6 +1045,9 @@ function artifactReconciliationGrace(previous: NodeState | undefined): ArtifactR
   const lastAttemptAt = stringField(stored, "last_attempt_at");
   const attempts = numberField(stored, "attempts");
   const missingCount = numberField(stored, "missing_count");
+  const startedAtMs = startedAt === undefined ? Number.NaN : Date.parse(startedAt);
+  const deadlineAtMs = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
+  const lastAttemptAtMs = lastAttemptAt === undefined ? Number.NaN : Date.parse(lastAttemptAt);
   if (
     stored.schema_version !== "ultrafuzz.artifact-reconciliation-grace.v1" ||
     startedAt === undefined ||
@@ -980,10 +1055,17 @@ function artifactReconciliationGrace(previous: NodeState | undefined): ArtifactR
     lastAttemptAt === undefined ||
     attempts === undefined ||
     missingCount === undefined ||
-    !Number.isFinite(Date.parse(startedAt)) ||
-    !Number.isFinite(Date.parse(deadlineAt)) ||
-    !Number.isFinite(Date.parse(lastAttemptAt)) ||
+    !Number.isFinite(startedAtMs) ||
+    !Number.isFinite(deadlineAtMs) ||
+    !Number.isFinite(lastAttemptAtMs) ||
+    deadlineAtMs < startedAtMs ||
+    deadlineAtMs > startedAtMs + ARTIFACT_RECONCILIATION_GRACE_MS ||
+    lastAttemptAtMs < startedAtMs ||
+    lastAttemptAtMs > deadlineAtMs ||
+    !Number.isInteger(attempts) ||
     attempts < 1 ||
+    attempts > ARTIFACT_RECONCILIATION_MAX_ATTEMPTS ||
+    !Number.isInteger(missingCount) ||
     missingCount < 0
   ) {
     return {
@@ -1098,12 +1180,21 @@ function finalizeSucceededTask(input: {
         });
       }
     } catch (error) {
-      reconciliationError = diagnosticFromError(
-        error,
-        "artifact-reconciliation",
-        "WORKSPACE_ARTIFACT_RECONCILE_FAILED"
-      );
-      diagnostics.push(reconciliationError);
+      if (isRetryableArtifactReconciliationError(error)) {
+        diagnostics.push({
+          code: error.code,
+          message: error.message,
+          severity: "warning",
+          source: "artifact-reconciliation"
+        });
+      } else {
+        reconciliationError = diagnosticFromError(
+          error,
+          "artifact-reconciliation",
+          "WORKSPACE_ARTIFACT_RECONCILE_FAILED"
+        );
+        diagnostics.push(reconciliationError);
+      }
     }
   }
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
