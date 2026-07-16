@@ -62,6 +62,8 @@ const llmJudgeSchema = z.looseObject({
   rationale: z.string().min(1),
   confidence: z.number().min(0).max(1)
 });
+const JUDGE_OUTPUT_CONTRACT =
+  "Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.";
 
 export interface ScoreEvalRunInput {
   projectRoot: string;
@@ -590,7 +592,7 @@ export function gatewayLlmJudge(
                     {
                       role: "user" as const,
                       content:
-                        "The previous response did not match the required JSON schema. Return one corrected JSON object only. " +
+                        `The previous response did not match the required JSON schema. ${JUDGE_OUTPUT_CONTRACT} Return one corrected JSON object only. ` +
                         `Previous response: ${invalidContent.slice(0, 4000)}`
                     }
                   ])
@@ -654,6 +656,8 @@ function judgeMessages(input: Parameters<FindingJudge>[0]): Array<{ role: "syste
       role: "user",
       content: [
         "Score the finding with this rubric:",
+        JUDGE_OUTPUT_CONTRACT,
+        "",
         "- 0.0: no meaningful match",
         "- 0.4: weak signal in the same area",
         "- 0.7: same root cause and impact, but incomplete localization or evidence",

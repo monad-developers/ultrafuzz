@@ -7,6 +7,7 @@ import { loadModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { REMOTE_CONFIG_PATH, persistentDataRoot, resolvePersistentRemoteRoot } from "./layout.js";
+import { canScoreBenchmarkRow, inspectTerminalDisposition, runBenchmarkExecutionOnce } from "./terminal-disposition.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -29,32 +30,42 @@ async function main(): Promise<void> {
     await setStatus("preparing");
     const { target, control, suitePath, evalRunId } = await prepareWorkspace();
     await setStatus("running", { eval_run_id: evalRunId });
-    await runEval(
-      [
-        "node",
-        CLI,
-        "eval",
-        "run",
-        "--project",
-        control,
-        "--suite",
-        suitePath,
-        "--provider",
-        "braintrust",
-        "--eval-run-id",
-        evalRunId,
-        "--watch-timeout-seconds",
-        String(EVAL_WATCH_TIMEOUT_SECONDS),
-        "--json"
-      ],
-      target
+    let terminalDisposition = await runBenchmarkExecutionOnce(
+      () =>
+        runEval(
+          [
+            "node",
+            CLI,
+            "eval",
+            "run",
+            "--project",
+            control,
+            "--suite",
+            suitePath,
+            "--provider",
+            "braintrust",
+            "--eval-run-id",
+            evalRunId,
+            "--watch-timeout-seconds",
+            String(EVAL_WATCH_TIMEOUT_SECONDS),
+            "--json"
+          ],
+          target
+        ),
+      () => inspectTerminalDisposition(target)
     );
 
     const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
     const runSummary = JSON.parse(await readFile(path.join(evalDir, "run-summary.json"), "utf8")) as {
       records?: Array<{ final_status?: string }>;
     };
-    if (runSummary.records?.length !== 1 || runSummary.records[0]?.final_status !== "succeeded") {
+    if (runSummary.records?.length !== 1) {
+      throw new Error("benchmark row did not finish successfully");
+    }
+    if (runSummary.records[0]?.final_status !== "succeeded" && terminalDisposition === undefined) {
+      terminalDisposition = await inspectTerminalDisposition(target);
+    }
+    if (!canScoreBenchmarkRow(runSummary.records[0]?.final_status, terminalDisposition)) {
       throw new Error("benchmark row did not finish successfully");
     }
 
