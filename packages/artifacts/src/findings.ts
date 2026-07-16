@@ -52,6 +52,13 @@ export interface FindingsNormalizeReport {
   findings: NormalizedFinding[];
 }
 
+export class FindingsValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FindingsValidationError";
+  }
+}
+
 export type NormalizedFinding = Record<string, unknown> & {
   schema_version: string;
   id: string;
@@ -65,7 +72,15 @@ export type NormalizedFinding = Record<string, unknown> & {
 export function normalizeFindings(input: NormalizeFindingsInput): FindingsNormalizeReport {
   const artifactDir = path.resolve(input.artifactDir);
   const sourcePath = resolveFindingsSource(artifactDir);
-  const raw = readJsonFile(sourcePath);
+  let raw: unknown;
+  try {
+    raw = readJsonFile(sourcePath);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new FindingsValidationError(`${FINDINGS_FILE} must contain valid JSON`);
+    }
+    throw error;
+  }
   const values = findingsArrayFromRaw(raw);
   const findings = values.map((value, index) => normalizeFinding(value, index, input));
   const normalizedPath = path.join(artifactDir, FINDINGS_FILE);
@@ -102,18 +117,20 @@ function findingsArrayFromRaw(value: unknown): unknown[] {
   if (Array.isArray(value)) {
     return value;
   }
-  throw new Error(`${FINDINGS_FILE} must contain a findings array`);
+  throw new FindingsValidationError(`${FINDINGS_FILE} must contain a findings array`);
 }
 
 function normalizeFinding(value: unknown, index: number, input: NormalizeFindingsInput): NormalizedFinding {
   if (!isPlainRecord(value)) {
-    throw new Error(`finding ${index} must be an object`);
+    throw new FindingsValidationError(`finding ${index} must be an object`);
   }
   const provenance = input.provenance ?? {};
   const nodeId = input.nodeId ?? provenance.nodeId;
   const schemaVersion = optionalString(value, "schema_version") ?? FINDINGS_SCHEMA_VERSION;
   if (schemaVersion !== FINDINGS_SCHEMA_VERSION) {
-    throw new Error(`finding ${index} has unsupported schema_version ${JSON.stringify(schemaVersion)}`);
+    throw new FindingsValidationError(
+      `finding ${index} has unsupported schema_version ${JSON.stringify(schemaVersion)}`
+    );
   }
 
   const normalized: Record<string, unknown> = { ...value };
@@ -155,7 +172,7 @@ function assignIfMissing(target: Record<string, unknown>, key: string, value: un
 function requiredString(record: Record<string, unknown>, key: string, index: number): string {
   const value = optionalString(record, key);
   if (value === undefined) {
-    throw new Error(`finding ${index} missing required field ${key}`);
+    throw new FindingsValidationError(`finding ${index} missing required field ${key}`);
   }
   return value;
 }
@@ -168,7 +185,7 @@ function requiredEnum<const T extends readonly string[]>(
 ): T[number] {
   const value = requiredString(record, key, index);
   if (!(allowed as readonly string[]).includes(value)) {
-    throw new Error(`finding ${index} field ${key} must be one of: ${allowed.join(", ")}`);
+    throw new FindingsValidationError(`finding ${index} field ${key} must be one of: ${allowed.join(", ")}`);
   }
   return value;
 }
@@ -179,7 +196,7 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
     return undefined;
   }
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`field ${key} must be a non-empty string`);
+    throw new FindingsValidationError(`field ${key} must be a non-empty string`);
   }
   return value.trim();
 }
@@ -190,7 +207,7 @@ function validateOptionalStringArray(record: Record<string, unknown>, key: strin
     return;
   }
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
-    throw new Error(`field ${key} must be an array of strings`);
+    throw new FindingsValidationError(`field ${key} must be an array of strings`);
   }
   if (safePath) {
     for (const entry of value) {
@@ -246,17 +263,17 @@ function validateEvidence(value: unknown, index: number): void {
     return;
   }
   if (!Array.isArray(value)) {
-    throw new Error(`finding ${index} evidence must be an array`);
+    throw new FindingsValidationError(`finding ${index} evidence must be an array`);
   }
   for (const entry of value) {
     if (typeof entry === "string") {
       if (entry.trim().length === 0) {
-        throw new Error(`finding ${index} evidence entries must be non-empty strings or objects`);
+        throw new FindingsValidationError(`finding ${index} evidence entries must be non-empty strings or objects`);
       }
       continue;
     }
     if (!isPlainRecord(entry)) {
-      throw new Error(`finding ${index} evidence entries must be non-empty strings or objects`);
+      throw new FindingsValidationError(`finding ${index} evidence entries must be non-empty strings or objects`);
     }
     optionalString(entry, "kind");
     optionalString(entry, "command");
@@ -266,7 +283,7 @@ function validateEvidence(value: unknown, index: number): void {
       if (looksLikeEvidenceCommand(evidencePath)) {
         const existingCommand = optionalString(entry, "command");
         if (existingCommand !== undefined && existingCommand !== evidencePath) {
-          throw new Error(`evidence command conflicts with existing command field`);
+          throw new FindingsValidationError(`evidence command conflicts with existing command field`);
         }
         entry.command = evidencePath;
         delete entry.path;
@@ -277,7 +294,7 @@ function validateEvidence(value: unknown, index: number): void {
       const existingFragment = optionalString(entry, "fragment");
       if (reference.line !== undefined) {
         if (existingLine !== undefined && existingLine !== reference.line) {
-          throw new Error(`evidence path line conflicts with existing line field`);
+          throw new FindingsValidationError(`evidence path line conflicts with existing line field`);
         }
         entry.line = reference.line;
       } else if (existingLine !== undefined) {
@@ -285,7 +302,7 @@ function validateEvidence(value: unknown, index: number): void {
       }
       if (reference.fragment !== undefined) {
         if (existingFragment !== undefined && existingFragment !== reference.fragment) {
-          throw new Error(`evidence path fragment conflicts with existing fragment field`);
+          throw new FindingsValidationError(`evidence path fragment conflicts with existing fragment field`);
         }
         entry.fragment = reference.fragment;
       } else if (existingFragment !== undefined) {
@@ -363,7 +380,7 @@ function optionalLineNumber(record: Record<string, unknown>, key: string): numbe
         ? Number(value)
         : undefined;
   if (parsed === undefined || !Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error(`field ${key} must be a positive integer`);
+    throw new FindingsValidationError(`field ${key} must be a positive integer`);
   }
   return parsed;
 }

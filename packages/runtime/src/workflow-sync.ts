@@ -5,6 +5,7 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  FindingsValidationError,
   getNodeArtifactDir,
   layoutForRunRoot,
   normalizeFindings,
@@ -1024,7 +1025,7 @@ async function synchronizeTasks(input: {
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
-        ...(previous?.provenance ?? {}),
+        ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
           task_id: task.smithersNodeId,
@@ -1075,8 +1076,9 @@ async function synchronizeTasks(input: {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
       finished_at: finishedAtForStatus(aggregateStatus, previous),
+      last_error: undefined,
       provenance: {
-        ...(previous?.provenance ?? {}),
+        ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
           aggregate_attempt_statuses: statuses
@@ -1345,6 +1347,7 @@ async function finalizeSucceededTask(input: {
   });
 
   let findingsCount: number | undefined;
+  let findingsValidationFailed = false;
   const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
   if (fs.existsSync(findingsPath)) {
     try {
@@ -1367,10 +1370,12 @@ async function finalizeSucceededTask(input: {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) {
         throw error;
       }
+      findingsValidationFailed = error instanceof FindingsValidationError;
       diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_NORMALIZE_FAILED"));
     }
   }
 
+  let artifactManifestWritten = false;
   try {
     assertSynchronizationBudget(input.control);
     const manifest = writeArtifactManifest({
@@ -1378,6 +1383,7 @@ async function finalizeSucceededTask(input: {
       nodeId: input.task.attemptId,
       provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
     });
+    artifactManifestWritten = true;
     events.push({
       eventType: "artifact-manifest-written",
       status: "succeeded",
@@ -1393,7 +1399,13 @@ async function finalizeSucceededTask(input: {
     diagnostics.push(diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"));
   }
 
-  if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+  const errorDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  if (errorDiagnostics.length > 0) {
+    const taskOutputValidationFailure =
+      findingsValidationFailed &&
+      artifactManifestWritten &&
+      errorDiagnostics.length === 1 &&
+      errorDiagnostics[0]?.code === "FINDINGS_NORMALIZE_FAILED";
     return {
       status: "failed",
       diagnostics,
@@ -1402,7 +1414,15 @@ async function finalizeSucceededTask(input: {
         required_artifacts: { ok: gate.ok, missing: gate.missing },
         ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
         ...(previousGrace === undefined ? {} : { artifact_reconciliation_grace: grace }),
-        ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
+        ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
+        ...(taskOutputValidationFailure
+          ? {
+              terminal_disposition: {
+                schema_version: "ultrafuzz.terminal-disposition.v1",
+                kind: "task-output-validation-failure"
+              }
+            }
+          : {})
       },
       events
     };
@@ -1712,6 +1732,13 @@ function nodePatchChanges(previous: NodeState | undefined, patch: Partial<Omit<N
 
 function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function withoutTerminalDisposition(provenance: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (provenance === undefined) return {};
+  const result = { ...provenance };
+  delete result.terminal_disposition;
+  return result;
 }
 
 function eventsByWorkflowNode(events: WorkflowEvent[]): Map<string, WorkflowEvent[]> {
