@@ -20,6 +20,22 @@ export interface ArtifactReconciliationResult {
   materialized: string[];
 }
 
+export interface ArtifactReconciliationControl {
+  now?: () => number;
+  signal?: AbortSignal;
+  deadlineMs?: number;
+}
+
+export class ArtifactReconciliationInterruptedError extends Error {
+  readonly code: "WORKFLOW_SYNC_CANCELLED" | "WORKFLOW_SYNC_DEADLINE_EXCEEDED";
+
+  constructor(code: "WORKFLOW_SYNC_CANCELLED" | "WORKFLOW_SYNC_DEADLINE_EXCEEDED", message: string) {
+    super(message);
+    this.name = "ArtifactReconciliationInterruptedError";
+    this.code = code;
+  }
+}
+
 export class RetryableArtifactReconciliationError extends Error {
   readonly code = "WORKSPACE_ARTIFACT_RECONCILE_RETRYABLE";
 
@@ -33,11 +49,13 @@ export function isRetryableArtifactReconciliationError(error: unknown): error is
   return error instanceof RetryableArtifactReconciliationError;
 }
 
-export function reconcileRequiredArtifactsFromWorkspace(input: {
+export async function reconcileRequiredArtifactsFromWorkspace(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
   attemptId: string;
-}): ArtifactReconciliationResult {
+  control?: ArtifactReconciliationControl;
+}): Promise<ArtifactReconciliationResult> {
+  reconciliationCheckpoint(input.control);
   const artifactDir = getNodeArtifactDir(input.layout, input.attemptId, { create: true });
   const workspaceDir = getNodeWorkspaceDir(input.layout, input.attemptId);
   const mirroredArtifactDir = safeResolveInside(
@@ -52,8 +70,9 @@ export function reconcileRequiredArtifactsFromWorkspace(input: {
   }
 
   const result: ArtifactReconciliationResult = { materialized: [] };
-  reconcileTargets({ artifactDir, workspaceDir, mirroredArtifactDir, targets, result });
+  await reconcileTargets({ artifactDir, workspaceDir, mirroredArtifactDir, targets, result, control: input.control });
 
+  reconciliationCheckpoint(input.control);
   const generatedManifest = safeResolveInside(artifactDir, "generated-tests.json", "generated test manifest");
   if (
     input.node.required_artifacts.includes("generated-tests.json") &&
@@ -62,12 +81,13 @@ export function reconcileRequiredArtifactsFromWorkspace(input: {
   ) {
     const parsed = validateGeneratedTestManifestSchema(readJsonFile(generatedManifest));
     if (parsed.ok && parsed.value !== undefined) {
-      reconcileTargets({
+      await reconcileTargets({
         artifactDir,
         workspaceDir,
         mirroredArtifactDir,
         targets: new Set(parsed.value.generated_tests.map((entry) => entry.path)),
-        result
+        result,
+        control: input.control
       });
     }
   }
@@ -77,14 +97,16 @@ export function reconcileRequiredArtifactsFromWorkspace(input: {
   };
 }
 
-function reconcileTargets(input: {
+async function reconcileTargets(input: {
   artifactDir: string;
   workspaceDir: string;
   mirroredArtifactDir: string;
   targets: Set<string>;
   result: ArtifactReconciliationResult;
-}): void {
+  control?: ArtifactReconciliationControl;
+}): Promise<void> {
   for (const target of input.targets) {
+    reconciliationCheckpoint(input.control);
     const destination = safeResolveInside(input.artifactDir, target, "reconciled artifact");
     if (fs.existsSync(destination)) {
       continue;
@@ -93,18 +115,21 @@ function reconcileTargets(input: {
     if (!fs.existsSync(source)) {
       continue;
     }
-    if (copyRegularFileExclusive(input.workspaceDir, source, input.artifactDir, target)) {
+    reconciliationCheckpoint(input.control);
+    if (await copyRegularFileExclusive(input.workspaceDir, source, input.artifactDir, target, input.control)) {
       input.result.materialized.push(target);
     }
   }
 }
 
-function copyRegularFileExclusive(
+async function copyRegularFileExclusive(
   workspaceDir: string,
   source: string,
   artifactDir: string,
-  relativeDestination: string
-): boolean {
+  relativeDestination: string,
+  control?: ArtifactReconciliationControl
+): Promise<boolean> {
+  reconciliationCheckpoint(control);
   assertRegularFileInside(workspaceDir, source, "workspace artifact source");
   const sourceBeforeOpen = fs.statSync(source, { bigint: true });
   const destination = prepareSafeFilePath(artifactDir, relativeDestination);
@@ -121,6 +146,7 @@ function copyRegularFileExclusive(
   let temporaryIdentity: FileIdentity | undefined;
   let linked = false;
   try {
+    reconciliationCheckpoint(control);
     sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const sourceStat = fs.fstatSync(sourceFd, { bigint: true });
     if (!sameIdentity(sourceBeforeOpen, sourceStat)) {
@@ -166,6 +192,7 @@ function copyRegularFileExclusive(
     let sourceOffset = 0;
     let copiedBytes = 0n;
     for (;;) {
+      reconciliationCheckpoint(control);
       const bytesRead = fs.readSync(sourceFd, buffer, 0, buffer.length, sourceOffset);
       if (bytesRead === 0) {
         break;
@@ -175,13 +202,19 @@ function copyRegularFileExclusive(
       digest.update(buffer.subarray(0, bytesRead));
       let written = 0;
       while (written < bytesRead) {
+        reconciliationCheckpoint(control);
         const bytesWritten = fs.writeSync(temporaryFd, buffer, written, bytesRead - written);
         if (bytesWritten === 0) {
           throw new Error("reconciled artifact copy made no write progress");
         }
         written += bytesWritten;
       }
+      // Individual filesystem syscalls are non-preemptible critical sections. Yielding after
+      // every bounded chunk makes AbortSignal delivery and the overall deadline observable
+      // before any further copy or publication work.
+      await reconciliationYield(control);
     }
+    reconciliationCheckpoint(control);
     const sourceAfterCopy = fs.fstatSync(sourceFd, { bigint: true });
     validateOpenedDescriptorInside(workspaceDir, sourceFd, "workspace artifact source");
     assertRegularFileInside(workspaceDir, source, "workspace artifact source");
@@ -199,11 +232,15 @@ function copyRegularFileExclusive(
         "workspace artifact regular-file contents changed while they were copied"
       );
     }
+    reconciliationCheckpoint(control);
     fs.fsyncSync(temporaryFd);
+    reconciliationCheckpoint(control);
 
     try {
+      reconciliationCheckpoint(control);
       fs.linkSync(temporary, anchoredDestination);
       linked = true;
+      reconciliationCheckpoint(control);
     } catch (error) {
       if (isAlreadyExistsError(error)) {
         return false;
@@ -216,9 +253,10 @@ function copyRegularFileExclusive(
     if (!sameFileIdentity(temporaryIdentity, destinationStat)) {
       throw new Error("reconciled artifact destination changed during publication");
     }
-    if (hashOpenFile(destinationFd) !== digest.digest("hex")) {
+    if ((await hashOpenFile(destinationFd, control)) !== digest.digest("hex")) {
       throw new Error("reconciled artifact digest mismatch");
     }
+    reconciliationCheckpoint(control);
     fs.closeSync(temporaryFd);
     temporaryFd = undefined;
     if (!unlinkIfOwned(temporary, temporaryIdentity)) {
@@ -226,7 +264,9 @@ function copyRegularFileExclusive(
     }
     temporary = undefined;
     validateOpenedDescriptorInside(artifactDir, directoryFd, "reconciled artifact directory");
+    reconciliationCheckpoint(control);
     fs.fsyncSync(directoryFd);
+    reconciliationCheckpoint(control);
     return true;
   } catch (error) {
     if (linked && anchoredDestination !== undefined && temporaryIdentity !== undefined) {
@@ -300,19 +340,45 @@ function validateOpenedDescriptorInside(root: string, fd: number, label: string)
   }
 }
 
-function hashOpenFile(fd: number): string {
+async function hashOpenFile(fd: number, control?: ArtifactReconciliationControl): Promise<string> {
   const digest = crypto.createHash("sha256");
   const buffer = Buffer.allocUnsafe(64 * 1024);
   let offset = 0;
   for (;;) {
+    reconciliationCheckpoint(control);
     const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, offset);
     if (bytesRead === 0) {
       break;
     }
     offset += bytesRead;
     digest.update(buffer.subarray(0, bytesRead));
+    await reconciliationYield(control);
   }
   return digest.digest("hex");
+}
+
+function reconciliationCheckpoint(control: ArtifactReconciliationControl | undefined): void {
+  if (control === undefined) {
+    return;
+  }
+  if (control?.signal?.aborted === true) {
+    throw new ArtifactReconciliationInterruptedError(
+      "WORKFLOW_SYNC_CANCELLED",
+      "workflow synchronization was cancelled at an artifact reconciliation checkpoint"
+    );
+  }
+  const nowMs = control.now?.() ?? Date.now();
+  if (control.deadlineMs !== undefined && nowMs >= control.deadlineMs) {
+    throw new ArtifactReconciliationInterruptedError(
+      "WORKFLOW_SYNC_DEADLINE_EXCEEDED",
+      "workflow synchronization reached its deadline at an artifact reconciliation checkpoint"
+    );
+  }
+}
+
+async function reconciliationYield(control: ArtifactReconciliationControl | undefined): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  reconciliationCheckpoint(control);
 }
 
 function unlinkIfOwned(filePath: string, identity: FileIdentity): boolean {

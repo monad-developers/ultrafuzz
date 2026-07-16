@@ -15,6 +15,7 @@ import {
 } from "../src/smithers-package.js";
 
 import {
+  ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
   ARTIFACT_RECONCILIATION_GRACE_MS,
   ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
   ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
@@ -2316,6 +2317,19 @@ test("syncRun fails closed for semantically invalid persisted artifact grace", a
       mutate: (grace) => {
         grace.attempts = ARTIFACT_RECONCILIATION_MAX_ATTEMPTS + 1;
       }
+    },
+    {
+      label: "future-window",
+      mutate: (grace) => {
+        const futureStartedAt =
+          Date.parse("2026-07-03T00:01:20.000Z") +
+          ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS +
+          ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS +
+          1;
+        grace.started_at = new Date(futureStartedAt).toISOString();
+        grace.last_attempt_at = new Date(futureStartedAt).toISOString();
+        grace.deadline_at = new Date(futureStartedAt + ARTIFACT_RECONCILIATION_GRACE_MS).toISOString();
+      }
     }
   ];
   for (const variant of variants) {
@@ -2796,6 +2810,106 @@ test("syncRun honors cancellation and an overall deadline before starting artifa
   );
   assert.equal(clockReads, 2);
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8"), before);
+});
+
+test("syncRun interrupts large reconciliation copies without publishing or mutating state and events", async () => {
+  for (const mode of ["deadline", "abort"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const workflowRunId = `ultrafuzz-sync-large-copy-${mode}`;
+    const runId = `sync-large-copy-${mode}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+        { type: "RunFinished" }
+      ])
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const mirrorRoot = path.join(
+      run.value!.run_root,
+      "workspaces",
+      "project-discovery",
+      "artifacts",
+      "project-discovery"
+    );
+    writeRequiredArtifactSet(path.dirname(path.dirname(mirrorRoot)), "project-discovery", [
+      "setup/project-discovery.md",
+      "findings.json"
+    ]);
+    const source = path.join(mirrorRoot, "setup", "project-discovery.md");
+    fs.writeFileSync(source, Buffer.alloc(8 * 1024 * 1024, 0x61));
+
+    const statePath = path.join(run.value!.run_root, "state.json");
+    const eventsPath = path.join(run.value!.run_root, "events.jsonl");
+    const stateBefore = fs.readFileSync(statePath, "utf8");
+    const eventsBefore = fs.readFileSync(eventsPath, "utf8");
+    const artifactDir = path.join(run.value!.run_root, "artifacts", "project-discovery");
+    const destination = path.join(artifactDir, "setup", "project-discovery.md");
+    const controller = new AbortController();
+    const startedAt = Date.parse("2026-07-03T00:04:30.000Z");
+    const deadline = startedAt + 100;
+    let currentTime = startedAt;
+    let sourceReads = 0;
+    let abortScheduled = false;
+    const originalReadSync = fs.readSync;
+    fs.readSync = ((fd, buffer, offset, length, position) => {
+      const bytesRead = originalReadSync(fd, buffer, offset, length, position);
+      let openedPath = "";
+      try {
+        openedPath = fs.realpathSync(`/proc/self/fd/${fd}`);
+      } catch {
+        // Ignore unrelated descriptors that close between read and inspection.
+      }
+      if (bytesRead > 0 && openedPath === source) {
+        sourceReads += 1;
+        if (mode === "deadline" && sourceReads === 2) {
+          currentTime = deadline;
+        }
+        if (mode === "abort" && !abortScheduled) {
+          abortScheduled = true;
+          setImmediate(() => controller.abort());
+        }
+      }
+      return bytesRead;
+    }) as typeof fs.readSync;
+
+    let interrupted;
+    try {
+      interrupted = await syncRun(
+        { projectRoot: project, runId, env },
+        mode === "deadline"
+          ? { now: () => currentTime, deadlineMs: deadline }
+          : { now: () => currentTime, signal: controller.signal }
+      );
+    } finally {
+      fs.readSync = originalReadSync;
+    }
+
+    assert.equal(interrupted.ok, false, mode);
+    assert.ok(
+      interrupted.diagnostics.some(
+        (diagnostic) =>
+          diagnostic.code === (mode === "deadline" ? "WORKFLOW_SYNC_DEADLINE_EXCEEDED" : "WORKFLOW_SYNC_CANCELLED")
+      ),
+      mode
+    );
+    assert.ok(sourceReads >= 1, mode);
+    assert.equal(fs.existsSync(destination), false, mode);
+    assert.equal(
+      fs.readdirSync(artifactDir, { recursive: true }).some((entry) => String(entry).includes(".reconcile-")),
+      false,
+      mode
+    );
+    assert.equal(fs.readFileSync(statePath, "utf8"), stateBefore, mode);
+    assert.equal(fs.readFileSync(eventsPath, "utf8"), eventsBefore, mode);
+  }
 });
 
 test("syncRun aborts or times out a blocked inspection child without durable mutation", async () => {
