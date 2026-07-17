@@ -108,6 +108,15 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
+    writeProjectFile(
+      projectRoot,
+      ".smithers/agents/toml.ts",
+      loadRuntimeTemplate("smithers/agents/toml.tsx"),
+      input.force === true,
+      created,
+      preserved,
+      overwritten
+    );
     for (const agent of AGENT_TEMPLATES) {
       writeProjectFile(
         projectRoot,

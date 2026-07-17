@@ -594,6 +594,14 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
+  // The TOML parser is shared, so a fix reaches every backend at once.
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
+  const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
+  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.doesNotMatch(codexAgentText, /function readStringTable/);
+  // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
+  assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
+  assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
@@ -620,6 +628,9 @@ test("init preserves existing project-owned files and validate exposes launch po
   // skipGitRepoCheck is a CodexAgent option and has no ClaudeCodeAgent equivalent.
   assert.doesNotMatch(claudeAgentText, /skipGitRepoCheck/);
   assert.doesNotMatch(claudeAgentText, /=\s*createClaudeAgent\(\)/);
+  assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.doesNotMatch(claudeAgentText, /function readStringTable/);
+  assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));

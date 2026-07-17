@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type ClaudeAuthOptions = { apiKey?: string; configDir?: string };
@@ -39,38 +40,6 @@ function readClaudeAuthConfig(): ClaudeAuthConfig {
     api_key_env: stringField(claude, "api_key_env"),
     config_dir: stringField(claude, "config_dir")
   };
-}
-
-function readStringTable(text: string, tableName: string): Record<string, string> {
-  const fields: Record<string, string> = {};
-  let inTable = false;
-  for (const rawLine of text.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (line === "" || line.startsWith("#")) {
-      continue;
-    }
-    const table = /^\[([^\]]+)\]$/u.exec(line);
-    if (table) {
-      inTable = table[1]?.trim() === tableName;
-      continue;
-    }
-    if (!inTable) {
-      continue;
-    }
-    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*"((?:\\.|[^"\\])*)"\s*(?:#.*)?$/u.exec(line);
-    if (assignment?.[1] && assignment[2] !== undefined) {
-      fields[assignment[1]] = JSON.parse(`"${assignment[2]}"`) as string;
-    }
-  }
-  return fields;
-}
-
-function stringField(table: Record<string, string>, key: string): string | undefined {
-  const value = table[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  return value;
 }
 
 function requiredEnv(name: string): string {
