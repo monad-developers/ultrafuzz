@@ -434,6 +434,17 @@ describe("deterministic scorer math", () => {
 
     expect(requests).toHaveLength(2);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
+    expect(requests[0]?.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: {
+        name: "ultrafuzz_judge_result",
+        strict: true,
+        schema: {
+          additionalProperties: false,
+          required: ["matched_ground_truth_bug_id", "score", "signals", "classification", "rationale", "confidence"]
+        }
+      }
+    });
     expect(requests[0]?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
@@ -450,7 +461,7 @@ describe("deterministic scorer math", () => {
     expect(scored.rowScore.true_positives).toBe(1);
   });
 
-  it("sends adaptive thinking parameters to Claude judges", async () => {
+  it("omits optional Claude reasoning parameters in structured-output mode", async () => {
     let requestBody: Record<string, unknown> | undefined;
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -488,9 +499,10 @@ describe("deterministic scorer math", () => {
 
     expect(requestBody).toMatchObject({
       model: "claude-fable-5",
-      thinking: { type: "adaptive" },
-      output_config: { effort: "max" }
+      response_format: { type: "json_schema", json_schema: { name: "ultrafuzz_judge_result", strict: true } }
     });
+    expect(requestBody).not.toHaveProperty("thinking");
+    expect(requestBody).not.toHaveProperty("output_config");
     expect(requestBody).not.toHaveProperty("reasoning_effort");
   });
 

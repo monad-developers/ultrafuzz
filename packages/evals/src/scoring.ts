@@ -63,7 +63,37 @@ const llmJudgeSchema = z.looseObject({
   confidence: z.number().min(0).max(1)
 });
 const JUDGE_OUTPUT_CONTRACT =
-  'Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0. classification must be exactly one of "true-positive", "false-positive", or "needs-human-review".';
+  'Return exactly one JSON object with matched_ground_truth_bug_id (a candidate label string or null), score, signals, classification, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0. classification must be exactly one of "true-positive", "false-positive", or "needs-human-review".';
+const JUDGE_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "ultrafuzz_judge_result",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        matched_ground_truth_bug_id: { type: ["string", "null"] },
+        score: { type: "number", minimum: 0, maximum: 1 },
+        signals: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            root_cause: { type: "number", minimum: 0, maximum: 1 },
+            affected_area: { type: "number", minimum: 0, maximum: 1 },
+            impact: { type: "number", minimum: 0, maximum: 1 },
+            evidence: { type: "number", minimum: 0, maximum: 1 }
+          },
+          required: ["root_cause", "affected_area", "impact", "evidence"]
+        },
+        classification: { type: "string", enum: ["true-positive", "false-positive", "needs-human-review"] },
+        rationale: { type: "string", minLength: 1 },
+        confidence: { type: "number", minimum: 0, maximum: 1 }
+      },
+      required: ["matched_ground_truth_bug_id", "score", "signals", "classification", "rationale", "confidence"]
+    }
+  }
+} as const;
 
 export interface ScoreEvalRunInput {
   projectRoot: string;
@@ -598,7 +628,7 @@ export function gatewayLlmJudge(
                   ])
             ],
             ...judgeReasoningParameters(model, input.row.judge_reasoning),
-            response_format: { type: "json_object" }
+            response_format: JUDGE_RESPONSE_FORMAT
           }),
           signal: controller.signal
         });
@@ -638,7 +668,8 @@ export function gatewayLlmJudge(
 function judgeReasoningParameters(model: string, reasoning: string | undefined): Record<string, unknown> {
   if (reasoning === undefined) return {};
   if (model.toLowerCase().startsWith("claude-")) {
-    return { thinking: { type: "adaptive" }, output_config: { effort: reasoning } };
+    // Adaptive thinking can consume the structured response instead of filling it.
+    return {};
   }
   return { reasoning_effort: reasoning };
 }
