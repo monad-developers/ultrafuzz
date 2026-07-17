@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { loadProjectConfig, redactDiagnostics, resolveConfig, type ResolvedConfig } from "@ultrafuzz/config";
+import {
+  applyDefaultProfileOverrides,
+  loadProjectConfig,
+  redactDiagnostics,
+  resolveConfig,
+  type ResolvedConfig
+} from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
 import { expandTopology, loadTopology, resolveTopologyPath, type ModelProfileSelection } from "@ultrafuzz/topology";
 
@@ -272,17 +278,5 @@ function agentRefExported(registryText: string, agentRef: string): boolean {
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {
-  if (input.agent === undefined && input.model === undefined) {
-    return;
-  }
-  const profile = config.models.profiles[config.models.default];
-  if (profile === undefined) {
-    return;
-  }
-  if (input.agent !== undefined) {
-    profile.agent = input.agent;
-  }
-  if (input.model !== undefined) {
-    profile.model = input.model;
-  }
+  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model });
 }

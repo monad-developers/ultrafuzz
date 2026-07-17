@@ -36,6 +36,48 @@ Set `auth = "api-key"` to bill through an OpenAI API key read from
 from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
 at a specific Codex config directory.
 
+## Claude agent
+
+`ultrafuzz init` also generates a `ClaudeAgent`, backed by the Claude Code CLI
+(`claude --print`). It is available as an opt-in profile; the default profile
+stays on `CodexAgent`:
+
+```toml
+[models.claude]
+agent = "ClaudeAgent"
+model = "claude-opus-4-8"
+
+[agents.ClaudeAgent]
+auth = "subscription"
+```
+
+Select it per node or group in `.ultrafuzz/topology.yml`
+(`model_profiles = ["claude"]`). `--agent` and `--model` override fields of the
+default profile rather than selecting a profile by id, so a one-off Claude run
+is `ultrafuzz run --agent ClaudeAgent`; add `--model claude-sonnet-5` to pin a
+model, otherwise the Claude CLI default is used.
+
+Set `auth = "subscription"` to run against your logged-in Claude Code CLI
+session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the
+subscription is used; optional `config_dir` sets an isolated `CLAUDE_CONFIG_DIR`
+for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
+to bill against the Anthropic API using the key read from `api_key_env`
+(default `ANTHROPIC_API_KEY`). Both modes drive the `claude` CLI, so it must be
+installed either way; `auth` only changes how that CLI authenticates.
+
+Unlike `CodexAgent`, the Claude Code CLI exposes no reasoning-effort control, so
+a `reasoning` value on a Claude profile is ignored. Pin the model through the
+profile's `model` field rather than under `[agents.ClaudeAgent]`.
+
+`ClaudeAgent` runs every task with Claude Code's permission checks bypassed
+(`--permission-mode bypassPermissions`): the agent has unattended access to the
+filesystem and shell inside its worktree, because no operator is present to
+answer a permission prompt. This follows `permissions.trust_model =
+"skip-permissions"`, the only trust model ultrafuzz accepts, and matches how
+`CodexAgent` already runs. It is fixed rather than configurable per agent — a
+project that needs stricter behaviour must edit the generated
+`.smithers/agents/claude.ts`.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml

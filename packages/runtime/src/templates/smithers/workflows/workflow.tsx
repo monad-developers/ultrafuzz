@@ -6,7 +6,10 @@
 import { readFileSync } from "node:fs";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
-import * as projectAgents from "../agents";
+// Imported via the explicit index path: Smithers' bootstrap can scaffold a
+// sibling .smithers/agents.ts, which bun's resolution would prefer over the
+// .smithers/agents/ directory this workflow needs.
+import * as projectAgents from "../agents/index.ts";
 
 const inputTaskSchema = z.object({
   id: z.string(),

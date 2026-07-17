@@ -2,6 +2,11 @@ import { z, type ZodIssue } from "zod/v4";
 import { DEFAULT_MODEL_PROFILE_ID, synthesizeDefaultModelProfile } from "./defaults.js";
 import { diagnostic, type ConfigDiagnostic, type ResolvedConfig } from "./types.js";
 
+export interface DefaultProfileOverrides {
+  agent?: string;
+  model?: string;
+}
+
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_AGENT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
@@ -87,6 +92,28 @@ export function syncDefaultModelProfile(config: ResolvedConfig): void {
 
 export function validProfileId(id: string): boolean {
   return profileIdSchema.safeParse(id).success;
+}
+
+export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: DefaultProfileOverrides): void {
+  if (overrides.agent === undefined && overrides.model === undefined) {
+    return;
+  }
+  const profile = config.models.profiles[config.models.default];
+  if (profile === undefined) {
+    return;
+  }
+  // A profile's model and reasoning are chosen for its agent, so switching the
+  // agent without naming a model must not hand one backend's model to another.
+  if (overrides.agent !== undefined && overrides.agent !== profile.agent && overrides.model === undefined) {
+    delete profile.model;
+    delete profile.reasoning;
+  }
+  if (overrides.agent !== undefined) {
+    profile.agent = overrides.agent;
+  }
+  if (overrides.model !== undefined) {
+    profile.model = overrides.model;
+  }
 }
 
 function schemaIssues(schema: z.ZodType, value: unknown): ZodIssue[] {

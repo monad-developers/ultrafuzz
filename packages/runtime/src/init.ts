@@ -8,10 +8,16 @@ import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts"
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { renderSmithersPackageJson } from "./smithers-package.js";
-import type { InitProjectInput, InitProjectResult } from "./types.js";
+import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
 const DEFAULT_TOPOLOGY = loadDefaultTopology();
+
+const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
+const AGENT_TEMPLATES = [
+  { file: "claude.ts", template: "smithers/agents/claude.tsx", ref: "ClaudeAgent" },
+  { file: "codex.ts", template: "smithers/agents/codex.tsx", ref: "CodexAgent" }
+] as const;
 
 export function initProject(input: InitProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -104,13 +110,24 @@ export function initProject(input: InitProjectInput) {
     );
     writeProjectFile(
       projectRoot,
-      ".smithers/agents/codex.ts",
-      loadRuntimeTemplate("smithers/agents/codex.tsx"),
+      ".smithers/agents/toml.ts",
+      loadRuntimeTemplate("smithers/agents/toml.tsx"),
       input.force === true,
       created,
       preserved,
       overwritten
     );
+    for (const agent of AGENT_TEMPLATES) {
+      writeProjectFile(
+        projectRoot,
+        `.smithers/agents/${agent.file}`,
+        loadRuntimeTemplate(agent.template),
+        input.force === true,
+        created,
+        preserved,
+        overwritten
+      );
+    }
   } catch {
     return runtimeFailure<InitProjectResult>([
       {
@@ -152,12 +169,48 @@ export function initProject(input: InitProjectInput) {
     preserved.push(toProjectRelative(projectRoot, absolutePath));
   }
 
-  return runtimeResult(true, {
-    project_root: projectRoot,
-    created: publicInitPaths(created),
-    preserved: publicInitPaths(preserved),
-    overwritten: publicInitPaths(overwritten)
-  });
+  return runtimeResult(
+    true,
+    {
+      project_root: projectRoot,
+      created: publicInitPaths(created),
+      preserved: publicInitPaths(preserved),
+      overwritten: publicInitPaths(overwritten)
+    },
+    staleAgentRegistryDiagnostics(projectRoot)
+  );
+}
+
+// init preserves project-owned files, so a project scaffolded before an agent
+// was added keeps its old registry: the new adapter lands on disk but nothing
+// exports it, and the agent is only rejected later, at launch. Report it here
+// instead of leaving the mismatch silent.
+function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
+  const registryPath = path.join(projectRoot, AGENT_REGISTRY_FILE);
+  if (!fs.existsSync(registryPath)) {
+    return [];
+  }
+  const registryText = fs.readFileSync(registryPath, "utf8");
+  return AGENT_TEMPLATES.filter(
+    (agent) =>
+      fs.existsSync(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
+      !registersAgentFactory(registryText, agent.ref)
+  ).map((agent) => ({
+    code: "INIT_AGENT_REGISTRY_STALE",
+    message: `${AGENT_REGISTRY_FILE} does not register ${agent.ref} in agentFactories, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or add the entry by hand`,
+    severity: "warning" as const,
+    source: "runtime",
+    path: AGENT_REGISTRY_FILE
+  }));
+}
+
+// Generated adapters export only their factory, so agentFactories is the sole
+// path that resolves them. Merely naming the agent elsewhere in the registry --
+// an `export { ClaudeAgent }` left over from an older adapter, say -- does not
+// make it selectable, so match the factory entry rather than the bare name.
+function registersAgentFactory(registryText: string, ref: string): boolean {
+  const factories = /agentFactories\s*=\s*\{([^}]*)\}/u.exec(registryText);
+  return factories === null ? false : new RegExp(`\\b${ref}\\s*:`, "u").test(factories[1] ?? "");
 }
 
 function writeProjectFile(

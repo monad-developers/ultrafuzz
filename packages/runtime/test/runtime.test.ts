@@ -594,9 +594,43 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
   assert.match(codexAgentText, /ultrafuzz\.toml/);
   assert.match(codexAgentText, /codexAuthOptions/);
+  // The TOML parser is shared, so a fix reaches every backend at once.
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/toml.ts")), true);
+  const tomlHelperText = fs.readFileSync(path.join(project, ".smithers/agents/toml.ts"), "utf8");
+  assert.match(codexAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.doesNotMatch(codexAgentText, /function readStringTable/);
+  // TOML's \UXXXXXXXX has no JSON equivalent, so values are not JSON.parse'd.
+  assert.doesNotMatch(tomlHelperText, /JSON\.parse/);
+  assert.match(tomlHelperText, /escape !== "u" && escape !== "U"/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
+
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
+  const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
+  assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
+  assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
+  // Importing the registry must not construct any agent: doing so reads that
+  // agent's auth and fails a project that only uses the other backend.
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude)Agent\(\)/);
+  assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
+  const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
+  assert.match(claudeAgentText, /ClaudeCodeAgent/);
+  assert.match(claudeAgentText, /createClaudeAgent/);
+  assert.match(claudeAgentText, /permissionMode:\s*"bypassPermissions"/);
+  assert.match(claudeAgentText, /claudeAuthOptions/);
+  assert.match(claudeAgentText, /ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(claudeAgentText, /apiKey:\s*process\.env\.ANTHROPIC_API_KEY/);
+  // The model comes from the resolved model profile, never hard-coded in the template.
+  assert.doesNotMatch(claudeAgentText, /model:\s*"claude-[\w.-]+"/);
+  // skipGitRepoCheck is a CodexAgent option and has no ClaudeCodeAgent equivalent.
+  assert.doesNotMatch(claudeAgentText, /skipGitRepoCheck/);
+  assert.doesNotMatch(claudeAgentText, /=\s*createClaudeAgent\(\)/);
+  assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
+  assert.doesNotMatch(claudeAgentText, /function readStringTable/);
+  assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -889,6 +923,90 @@ nodes:
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
 });
 
+test("startRun --agent does not carry the previous agent's model onto the new agent", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // The default profile is CodexAgent/gpt-5.5/xhigh; switching only the agent
+  // must not hand Codex's model and reasoning to Claude.
+  const run = await startRun({
+    projectRoot: project,
+    runId: "agent-switch",
+    agent: "ClaudeAgent",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const smithersTasks = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
+  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null; reasoningEffort?: string | null }> };
+  assert.equal(smithersTasks.tasks[0]?.agentRef, "ClaudeAgent");
+  assert.equal(smithersTasks.tasks[0]?.modelName ?? null, null);
+  assert.equal(smithersTasks.tasks[0]?.reasoningEffort ?? null, null);
+
+  // An explicit --model still pins the model for the overridden agent.
+  const pinned = await startRun({
+    projectRoot: project,
+    runId: "agent-switch-pinned",
+    agent: "ClaudeAgent",
+    model: "claude-sonnet-5",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(pinned.ok, true, JSON.stringify(pinned.diagnostics));
+  const pinnedTasks = JSON.parse(
+    fs.readFileSync(path.join(pinned.value!.run_root, "smithers", "tasks.json"), "utf8")
+  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null }> };
+  assert.equal(pinnedTasks.tasks[0]?.agentRef, "ClaudeAgent");
+  assert.equal(pinnedTasks.tasks[0]?.modelName, "claude-sonnet-5");
+});
+
+test("init reports an agent registry that does not export a generated agent", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+
+  // Simulate a project scaffolded before ClaudeAgent existed: the registry
+  // predates the adapter, and init preserves project-owned files.
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  fs.writeFileSync(
+    registryPath,
+    'import { createCodexAgent } from "./codex";\n' +
+      'export { createCodexAgent } from "./codex";\n' +
+      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+    "utf8"
+  );
+
+  const upgraded = initProject({ projectRoot: project });
+  assert.equal(upgraded.ok, true);
+  const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
+  assert.equal(stale.length, 1, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale[0]?.severity, "warning");
+  assert.match(stale[0]?.message ?? "", /ClaudeAgent/);
+
+  // A registry that names the agent without registering its factory is still
+  // stale: nothing resolves it, since generated adapters export only factories.
+  fs.writeFileSync(
+    registryPath,
+    'import { createCodexAgent } from "./codex";\n' +
+      'export { CodexAgent, createCodexAgent } from "./codex";\n' +
+      'export { ClaudeAgent } from "./claude";\n' +
+      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+    "utf8"
+  );
+  const named = initProject({ projectRoot: project });
+  const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
+  assert.equal(namedStale.length, 1, JSON.stringify(named.diagnostics));
+  assert.match(namedStale[0]?.message ?? "", /ClaudeAgent/);
+
+  // A registry that exports every generated agent stays quiet.
+  const regenerated = initProject({ projectRoot: project, force: true });
+  assert.equal(
+    regenerated.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE").length,
+    0,
+    JSON.stringify(regenerated.diagnostics)
+  );
+});
+
 test("startRun compiles normal Smithers tasks, persists provenance, and submits through Smithers CLI", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -965,6 +1083,10 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
     "utf8"
   );
   assert.match(workflowSource, /smithers-orchestrator/);
+  // Explicit index path: a sibling .smithers/agents.ts scaffolded by Smithers
+  // would otherwise shadow the .smithers/agents/ directory under bun.
+  assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
+  assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /"modelName": "gpt-runtime-override"/);
   assert.match(workflowSource, /"reasoningEffort": "max"/);

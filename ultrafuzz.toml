@@ -20,9 +20,27 @@ agent = "CodexAgent"
 model = "gpt-5.5"
 reasoning = "xhigh"
 
+# Opt-in Claude profile. Select it per node/group in .ultrafuzz/topology.yml
+# (model_profiles = ["claude"]), or for a one-off run with `--agent ClaudeAgent`.
+# ClaudeAgent has no reasoning-effort control, so `reasoning` is not set here.
+[models.claude]
+agent = "ClaudeAgent"
+model = "claude-opus-4-8"
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
+
+[agents.ClaudeAgent]
+# "subscription" uses your logged-in Claude Code CLI (`claude -p`); no API key needed,
+# and ANTHROPIC_API_KEY is cleared so the subscription wins. Switch to "api-key" to
+# bill against the Anthropic API instead (reads ANTHROPIC_API_KEY unless api_key_env
+# names another variable).
+#
+# Per permissions.trust_model below, this agent runs with Claude Code's permission
+# checks bypassed, so tasks get unattended filesystem and shell access inside their
+# worktree. That is set in .smithers/agents/claude.ts, not here.
+auth = "subscription"
 
 [permissions]
 trust_model = "skip-permissions"
