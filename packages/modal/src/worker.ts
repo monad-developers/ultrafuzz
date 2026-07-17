@@ -26,6 +26,11 @@ const RECOVERY_POLL_MS = 60_000;
 
 interface DurableNodeState {
   status?: string;
+  provenance?: {
+    workflow?: {
+      task_id?: string;
+    };
+  };
 }
 
 interface DurableRunState {
@@ -344,39 +349,23 @@ async function recoverFailedWorkflow(target: string, evalRunId: string): Promise
     if (state?.status !== "failed" || state.run_id === undefined || state.nodes === undefined) {
       return false;
     }
-    const failedNodes = Object.entries(state.nodes)
-      .filter(([, node]) => node.status === "failed")
-      .map(([nodeId]) => nodeId);
+    const failedNodes = Object.entries(state.nodes).filter(([, node]) => node.status === "failed");
     const resetNode = failedNodes[0];
     if (resetNode === undefined) {
       return false;
     }
+    const [nodeId, node] = resetNode;
 
     await appendFile(
       LOG_PATH,
-      `${new Date().toISOString()} [workflow recovery] resetting ${resetNode} (${attempt}/${RECOVERY_MAX_RESETS})\n`
+      `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${attempt}/${RECOVERY_MAX_RESETS})\n`
     );
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
       failed_node_count: failedNodes.length
     });
-    await runChecked(
-      [
-        "node",
-        CLI,
-        "resume",
-        state.run_id,
-        "--project",
-        target,
-        "--reset-node",
-        resetNode,
-        "--max-concurrency",
-        "1",
-        "--json"
-      ],
-      { label: `workflow recovery ${attempt}` }
-    );
+    await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
 
     const terminal = await waitForWorkflowTerminal(target);
     if (terminal?.status === "succeeded") {
@@ -384,6 +373,50 @@ async function recoverFailedWorkflow(target: string, evalRunId: string): Promise
     }
   }
   return durableRunState(target).then((state) => state?.status === "succeeded");
+}
+
+async function resumeWithResetCandidates(
+  runId: string,
+  target: string,
+  resetNodes: string[],
+  attempt: number
+): Promise<void> {
+  let lastError: unknown;
+  for (const resetNode of resetNodes) {
+    try {
+      await runChecked(
+        [
+          "node",
+          CLI,
+          "resume",
+          runId,
+          "--project",
+          target,
+          "--reset-node",
+          resetNode,
+          "--max-concurrency",
+          "1",
+          "--json"
+        ],
+        { label: `workflow recovery ${attempt}` }
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      await appendFile(
+        LOG_PATH,
+        `${new Date().toISOString()} [workflow recovery] reset candidate failed: ${resetNode}\n`
+      );
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function resetNodeCandidates(nodeId: string, node: DurableNodeState): string[] {
+  const candidates = [node.provenance?.workflow?.task_id, nodeId].filter(
+    (value): value is string => value !== undefined && value.trim() !== ""
+  );
+  return [...new Set(candidates)];
 }
 
 async function waitForWorkflowTerminal(target: string): Promise<DurableRunState | undefined> {
