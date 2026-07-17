@@ -5,13 +5,12 @@ import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type ClaudeAuthOptions = { apiKey?: string; configDir?: string };
-// reasoningEffort is part of the shared agent factory contract but has no
-// ClaudeCodeAgent equivalent, so it is accepted and ignored.
 export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string };
 
 export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClaudeCodeAgent {
   return new SmithersClaudeCodeAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.reasoningEffort === undefined ? {} : { extraArgs: ["--effort", options.reasoningEffort] }),
     // Every task runs with Claude Code's permission checks off: agents work
     // unattended in a throwaway worktree, so there is nobody to answer a
     // prompt. This mirrors permissions.trust_model = "skip-permissions" in

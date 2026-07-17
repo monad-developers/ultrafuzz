@@ -101,9 +101,10 @@ ultrafuzz run \
   [--json]
 ```
 
-`--input` accepts inline JSON or a project-relative JSON file path. `--agent`
-and `--model` override the configured default model profile for the launched
-workflow. The profile's configured `reasoning` setting is retained.
+`--input` accepts inline JSON or a project-relative JSON file path. Model-only
+overrides keep the configured agent and reasoning. When `--agent` selects
+another agent, backend-specific reasoning is cleared, including when `--model`
+also pins a replacement model.
 `--max-concurrency` caps workflow task submission concurrency.
 
 Runs require pinned reference material to already be present in the local cache

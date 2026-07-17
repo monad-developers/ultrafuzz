@@ -620,6 +620,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
   assert.match(claudeAgentText, /createClaudeAgent/);
   assert.match(claudeAgentText, /permissionMode:\s*"bypassPermissions"/);
+  assert.match(claudeAgentText, /extraArgs:\s*\["--effort",\s*options\.reasoningEffort\]/);
   assert.match(claudeAgentText, /claudeAuthOptions/);
   assert.match(claudeAgentText, /ANTHROPIC_API_KEY/);
   assert.doesNotMatch(claudeAgentText, /apiKey:\s*process\.env\.ANTHROPIC_API_KEY/);
@@ -956,9 +957,10 @@ test("startRun --agent does not carry the previous agent's model onto the new ag
   assert.equal(pinned.ok, true, JSON.stringify(pinned.diagnostics));
   const pinnedTasks = JSON.parse(
     fs.readFileSync(path.join(pinned.value!.run_root, "smithers", "tasks.json"), "utf8")
-  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null }> };
+  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null; reasoningEffort?: string | null }> };
   assert.equal(pinnedTasks.tasks[0]?.agentRef, "ClaudeAgent");
   assert.equal(pinnedTasks.tasks[0]?.modelName, "claude-sonnet-5");
+  assert.equal(pinnedTasks.tasks[0]?.reasoningEffort ?? null, null);
 });
 
 test("init reports an agent registry that does not export a generated agent", async () => {
