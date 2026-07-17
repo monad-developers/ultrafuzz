@@ -16,6 +16,8 @@ import {
   type ModalLaunchMode,
   type ModalModelSpec
 } from "./defaults.js";
+import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
+import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
 
 const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.string().min(1);
@@ -108,8 +110,8 @@ export type ModalWorkerStatusCategory =
   | "incompatible-checkpoint";
 
 export interface ModalWorkerStatus {
-  schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION;
-  updated_at: string;
+  schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION | typeof WORKER_RESULT_SCHEMA_VERSION;
+  updated_at?: string;
   stage: string;
   category: ModalWorkerStatusCategory;
   model_work_started: boolean;
@@ -120,6 +122,7 @@ export interface ModalWorkerStatus {
   run_status?: string;
   node_counts?: Record<string, number>;
   error_code?: string;
+  result_generation?: number;
 }
 
 const lineageFingerprintsSchema = z
@@ -247,6 +250,70 @@ const workerStatusSchema = z
   })
   .strict();
 
+const workerResultStatusSchema = z
+  .object({
+    schema_version: z.literal(WORKER_RESULT_SCHEMA_VERSION),
+    result_type: z.enum(["partial", "terminal"]),
+    generation: z.number().int().positive(),
+    launch_generation: z.number().int().positive(),
+    attempt: z.number().int().positive(),
+    model_work_started: z.boolean(),
+    counts: z
+      .object({
+        succeeded: z.number().int().nonnegative(),
+        failed: z.number().int().nonnegative(),
+        remaining: z.number().int().nonnegative()
+      })
+      .strict(),
+    checkpoint: z
+      .object({
+        age_ms: z.number().int().nonnegative().nullable(),
+        digest: z
+          .string()
+          .regex(/^sha256:[a-f0-9]{64}$/u)
+          .nullable()
+      })
+      .strict(),
+    exit_category: z.enum(OPERATIONAL_DISPOSITION_CATEGORIES),
+    runtime_ms: z.number().int().nonnegative(),
+    usage: z
+      .object({
+        input_tokens: z.number().int().nonnegative(),
+        output_tokens: z.number().int().nonnegative(),
+        cache_read_tokens: z.number().int().nonnegative(),
+        cache_write_tokens: z.number().int().nonnegative(),
+        reasoning_tokens: z.number().int().nonnegative(),
+        total_tokens: z.number().int().nonnegative(),
+        estimated_cost_usd: z.number().nonnegative().nullable(),
+        partial_pricing: z.boolean(),
+        event_count: z.number().int().nonnegative(),
+        priced_event_count: z.number().int().nonnegative(),
+        unpriced_event_count: z.number().int().nonnegative()
+      })
+      .strict()
+      .nullable(),
+    pricing: z
+      .object({
+        source: z.enum(["models.dev", "configured-catalog", "disabled"]),
+        status: z.enum(["available", "disabled", "unavailable"]),
+        fetched_at: timestampSchema.optional(),
+        resolved_model_count: z.number().int().nonnegative(),
+        unresolved_model_count: z.number().int().nonnegative()
+      })
+      .strict()
+      .optional(),
+    diagnostic_code: z.enum(WORKER_DIAGNOSTIC_CODES)
+  })
+  .strict()
+  .superRefine((status, context) => {
+    if (status.result_type === "partial" && status.exit_category !== "live") {
+      context.addIssue({ code: "custom", message: "partial worker result must be live" });
+    }
+    if (status.result_type === "terminal" && status.exit_category === "live") {
+      context.addIssue({ code: "custom", message: "terminal worker result cannot be live" });
+    }
+  });
+
 export function parseModalLaunchState(value: unknown): ModalLaunchState {
   return launchStateSchema.parse(value) as ModalLaunchState;
 }
@@ -255,9 +322,47 @@ export function parseModalWorkerLineage(value: unknown): ModalWorkerLineage {
   return workerLineageSchema.parse(value) as ModalWorkerLineage;
 }
 
-export function parseModalWorkerStatus(value: unknown): ModalWorkerStatus | undefined {
+export function parseModalWorkerStatus(
+  value: unknown,
+  expected?: { generation: number; attempt: number }
+): ModalWorkerStatus | undefined {
   const parsed = workerStatusSchema.safeParse(value);
-  return parsed.success ? (parsed.data as ModalWorkerStatus) : undefined;
+  if (parsed.success) {
+    const status = parsed.data as ModalWorkerStatus;
+    return matchesWorkerAttempt(status, expected) ? status : undefined;
+  }
+  const workerResult = workerResultStatusSchema.safeParse(value);
+  if (!workerResult.success) return undefined;
+  const contract = workerResult.data as WorkerResultContract;
+  const status: ModalWorkerStatus = {
+    schema_version: WORKER_RESULT_SCHEMA_VERSION,
+    stage: contract.result_type,
+    category: workerResultCategory(contract),
+    model_work_started: contract.model_work_started,
+    retryable: workerResultCategory(contract) === "transient-operational-failure",
+    generation: contract.launch_generation,
+    attempt: contract.attempt,
+    error_code: contract.diagnostic_code,
+    result_generation: contract.generation
+  };
+  return matchesWorkerAttempt(status, expected) ? status : undefined;
+}
+
+function matchesWorkerAttempt(
+  status: Pick<ModalWorkerStatus, "generation" | "attempt">,
+  expected: { generation: number; attempt: number } | undefined
+): boolean {
+  return expected === undefined || (status.generation === expected.generation && status.attempt === expected.attempt);
+}
+
+function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatusCategory {
+  if (contract.exit_category === "finished") return "succeeded";
+  if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
+  if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
+  if (contract.exit_category === "live") return contract.model_work_started ? "model-work" : "preparing";
+  if (contract.model_work_started) return "resume-required";
+  if (contract.exit_category === "authentication-failure") return "permanent-operational-failure";
+  return "transient-operational-failure";
 }
 
 export function fingerprintModalImage(imageName: string, imageId: string): string {

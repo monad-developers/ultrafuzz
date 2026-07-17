@@ -19,6 +19,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalPreModelRetryDelay,
+  parseModalWorkerStatus,
   readModalLaunchState,
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
@@ -26,6 +27,7 @@ import {
   type ModalLaunchState,
   type ModalWorkerStatus
 } from "../src/launch-state.js";
+import { WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "../src/worker-result.js";
 
 const MODEL: ModalModelSpec = {
   slug: "model-one",
@@ -67,6 +69,24 @@ function workerStatus(category: ModalWorkerStatus["category"], modelWorkStarted:
     retryable: category === "transient-operational-failure",
     generation: 1,
     attempt: 1
+  };
+}
+
+function workerResult(overrides: Partial<WorkerResultContract> = {}): WorkerResultContract {
+  return {
+    schema_version: WORKER_RESULT_SCHEMA_VERSION,
+    result_type: "terminal",
+    generation: 2,
+    launch_generation: 1,
+    attempt: 1,
+    model_work_started: true,
+    counts: { succeeded: 1, failed: 0, remaining: 0 },
+    checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+    exit_category: "finished",
+    runtime_ms: 1,
+    usage: null,
+    diagnostic_code: "worker-finished",
+    ...overrides
   };
 }
 
@@ -215,6 +235,42 @@ describe("Modal lineage", () => {
 });
 
 describe("Modal runner status", () => {
+  it("adapts sanitized worker contracts and rejects stale launch attempts", () => {
+    expect(
+      parseModalWorkerStatus(
+        workerResult({
+          result_type: "partial",
+          model_work_started: true,
+          exit_category: "live",
+          diagnostic_code: "worker-live"
+        }),
+        { generation: 1, attempt: 1 }
+      )
+    ).toMatchObject({
+      schema_version: WORKER_RESULT_SCHEMA_VERSION,
+      category: "model-work",
+      model_work_started: true,
+      generation: 1,
+      attempt: 1,
+      result_generation: 2
+    });
+    expect(parseModalWorkerStatus(workerResult(), { generation: 1, attempt: 2 })).toBeUndefined();
+    expect(
+      parseModalWorkerStatus(
+        workerResult({ exit_category: "sandbox-exited", diagnostic_code: "checkpoint-incompatible" })
+      )
+    ).toMatchObject({ category: "incompatible-checkpoint", retryable: false });
+    expect(
+      parseModalWorkerStatus(
+        workerResult({
+          model_work_started: false,
+          exit_category: "authentication-failure",
+          diagnostic_code: "authentication-failure"
+        })
+      )
+    ).toMatchObject({ category: "permanent-operational-failure", retryable: false });
+  });
+
   it("keeps live and genuine outcomes as no-ops while relaunching interrupted model work", () => {
     expect(classifyModalRunnerStatus({ sandbox: "live", attempt: 1 }).action).toBe("none");
     expect(

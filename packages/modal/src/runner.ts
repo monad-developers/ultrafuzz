@@ -261,7 +261,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     const persisted = await readVolumeFiles(input.modal, input.app, input.image, volume, record.remote_root, [
       "status.json"
     ]);
-    const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"));
+    const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"), {
+      generation: record.generation,
+      attempt: record.attempt
+    });
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
       attempt: record.attempt,
@@ -492,7 +495,10 @@ export async function modalBenchmarkStatus(input: {
       const probe = await probeModalSandbox(modal, launch.sandbox_id);
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, ["status.json"]);
-      const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"));
+      const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"), {
+        generation: launch.generation,
+        attempt: launch.attempt
+      });
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
         attempt: launch.attempt,
