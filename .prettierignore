@@ -2,6 +2,8 @@ node_modules
 dist
 dist-test
 coverage
+.agents
+.claude
 .smithers
 .worktrees
 .ultrafuzz

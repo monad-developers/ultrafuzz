@@ -1,4 +1,6 @@
 .worktrees/
+.agents/
+.claude/
 .codex-runs/
 .smithers/
 .ultrafuzz/*

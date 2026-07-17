@@ -135,14 +135,15 @@ export async function forkRun(input: WorkflowLifecycleInput) {
 }
 
 export async function pauseRun(input: PauseRunInput) {
-  const evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   if (!evidence.ok) {
     return runtimeFailure<PauseRunValue>(evidence.diagnostics);
   }
   try {
     const result = await requestSmithersPause({
       smithersRunId: evidence.smithersRunId,
-      projectRoot: path.resolve(input.projectRoot),
+      projectRoot,
       env: input.env
     });
     if (result.status === "paused") {

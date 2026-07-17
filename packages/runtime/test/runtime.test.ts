@@ -181,7 +181,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
       "    ;;",
       "  pause)",
-      '    if [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
+      '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
+      "      exit 0",
+      '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
       "      printf '%s\\n' '{\"status\":\"paused\"}'",
       "    else",
       "      printf '%s\\n' '{\"status\":\"pause-requested\"}'",
@@ -1054,6 +1056,26 @@ test("pauseRun accepts the workflow runner pause-request exit and is idempotent 
   };
   assert.equal(state.status, "paused");
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /pause ultrafuzz-pause-run --format json/);
+});
+
+test("pauseRun requires explicit workflow confirmation before persisting paused state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "pause-empty", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  env.SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS = "1";
+  const requested = await pauseRun({ projectRoot: project, runId: "pause-empty", env });
+
+  assert.equal(requested.ok, true, JSON.stringify(requested.diagnostics));
+  assert.equal(requested.value?.status, "pause-requested");
+  assert.equal(requested.value?.submitted, true);
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status: string;
+  };
+  assert.equal(state.status, "running");
 });
 
 test("workflow synchronization preserves the paused run state", async () => {

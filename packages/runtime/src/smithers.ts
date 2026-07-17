@@ -394,7 +394,7 @@ export async function requestSmithersPause(input: {
     acceptedExitCodes: [2]
   });
   const reportedStatus = firstStringField(jsonField(result.stdout).json, ["status"]);
-  const status = reportedStatus === "paused" || result.exitCode === 0 ? "paused" : "pause-requested";
+  const status = result.exitCode === 0 && reportedStatus === "paused" ? "paused" : "pause-requested";
   return { ...result, status };
 }
 
