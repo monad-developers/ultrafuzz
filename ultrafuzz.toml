@@ -36,6 +36,10 @@ api_key_env = "OPENAI_API_KEY"
 # and ANTHROPIC_API_KEY is cleared so the subscription wins. Switch to "api-key" to
 # bill against the Anthropic API instead (reads ANTHROPIC_API_KEY unless api_key_env
 # names another variable).
+#
+# Per permissions.trust_model below, this agent runs with Claude Code's permission
+# checks bypassed, so tasks get unattended filesystem and shell access inside their
+# worktree. That is set in .smithers/agents/claude.ts, not here.
 auth = "subscription"
 
 [permissions]

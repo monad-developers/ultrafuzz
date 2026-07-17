@@ -12,6 +12,12 @@ export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string };
 export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClaudeCodeAgent {
   return new SmithersClaudeCodeAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
+    // Every task runs with Claude Code's permission checks off: agents work
+    // unattended in a throwaway worktree, so there is nobody to answer a
+    // prompt. This mirrors permissions.trust_model = "skip-permissions" in
+    // ultrafuzz.toml, which is the only trust model ultrafuzz accepts, and is
+    // deliberately not configurable per agent -- edit this generated file if a
+    // project needs otherwise.
     permissionMode: "bypassPermissions",
     ...claudeAuthOptions()
   });

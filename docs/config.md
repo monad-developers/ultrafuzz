@@ -69,6 +69,15 @@ Unlike `CodexAgent`, the Claude Code CLI exposes no reasoning-effort control, so
 a `reasoning` value on a Claude profile is ignored. Pin the model through the
 profile's `model` field rather than under `[agents.ClaudeAgent]`.
 
+`ClaudeAgent` runs every task with Claude Code's permission checks bypassed
+(`--permission-mode bypassPermissions`): the agent has unattended access to the
+filesystem and shell inside its worktree, because no operator is present to
+answer a permission prompt. This follows `permissions.trust_model =
+"skip-permissions"`, the only trust model ultrafuzz accepts, and matches how
+`CodexAgent` already runs. It is fixed rather than configurable per agent — a
+project that needs stricter behaviour must edit the generated
+`.smithers/agents/claude.ts`.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml
