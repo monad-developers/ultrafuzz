@@ -60,6 +60,7 @@ Run statuses are:
 
 - `pending`
 - `running`
+- `paused`
 - `succeeded`
 - `failed`
 - `timed-out`

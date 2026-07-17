@@ -12,6 +12,8 @@ import {
 
 import type {
   QueryRunEventsValue,
+  RunHealthValue,
+  RunHealthVerdict,
   RunListEntry,
   RunListValue,
   RunStatusValue,
@@ -19,6 +21,7 @@ import type {
 } from "./types.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import { readLinkedWorkflowEvidence } from "./start-run.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
@@ -125,6 +128,74 @@ export async function getRunStatus(input: {
           ...diagnosticsForWorkflowSnapshot(workflowSnapshots.events, "WORKFLOW_EVENTS_FAILED")
         ]
       : syncDiagnostics
+  );
+}
+
+export async function getRunHealth(input: {
+  projectRoot: string;
+  runId: string;
+  windowMinutes?: number;
+  env?: Record<string, string | undefined>;
+}) {
+  if (input.windowMinutes !== undefined && (!Number.isFinite(input.windowMinutes) || input.windowMinutes <= 0)) {
+    return runtimeFailure<RunHealthValue>([
+      {
+        code: "RUN_STATUS_WINDOW_INVALID",
+        message: "status window must be a positive number of minutes",
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  if (!evidence.ok) {
+    return runtimeFailure<RunHealthValue>(evidence.diagnostics);
+  }
+  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const syncDiagnostics = sync.ok
+    ? sync.diagnostics
+    : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
+  const snapshot = await runSmithersInspectionCommand({
+    args: [
+      "status",
+      evidence.smithersRunId,
+      ...(input.windowMinutes === undefined ? [] : ["--window", String(input.windowMinutes)]),
+      "--format",
+      "json"
+    ],
+    projectRoot,
+    env: input.env
+  });
+  if (!snapshot.ok) {
+    return runtimeFailure<RunHealthValue>([
+      ...syncDiagnostics,
+      ...diagnosticsForWorkflowSnapshot(snapshot, "WORKFLOW_STATUS_FAILED").map((diagnostic) => ({
+        ...diagnostic,
+        severity: "error" as const
+      }))
+    ]);
+  }
+  const health = parseRunHealth(snapshot.json);
+  if (health === undefined) {
+    return runtimeFailure<RunHealthValue>([
+      ...syncDiagnostics,
+      {
+        code: "WORKFLOW_STATUS_INVALID",
+        message: "workflow runner returned an invalid status summary",
+        severity: "error",
+        source: "workflow"
+      }
+    ]);
+  }
+  return runtimeResult(
+    true,
+    {
+      ...readRunListEntry(evidence.layout.root, evidence.layout.runId),
+      workflow_run_id: evidence.smithersRunId,
+      ...health
+    },
+    syncDiagnostics
   );
 }
 
@@ -276,6 +347,188 @@ function extractWorkflowRuns(value: unknown): Record<string, unknown>[] {
 function stringField(value: Record<string, unknown>, key: string): string | undefined {
   const field = value[key];
   return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
+function parseRunHealth(value: unknown): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id"> | undefined {
+  const data = commandData(value);
+  const counts = recordField(data, "counts");
+  const throughput = recordField(data, "throughput");
+  const verdict = stringField(data ?? {}, "verdict");
+  const workflowStatus = stringField(data ?? {}, "status");
+  const reason = stringField(data ?? {}, "reason");
+  const generatedAtMs = numberField(data, "generatedAtMs");
+  if (
+    data === undefined ||
+    counts === undefined ||
+    throughput === undefined ||
+    !isRunHealthVerdict(verdict) ||
+    workflowStatus === undefined ||
+    reason === undefined ||
+    generatedAtMs === undefined
+  ) {
+    return undefined;
+  }
+  const parsedCounts = {
+    finished: numberField(counts, "finished"),
+    in_progress: numberField(counts, "inProgress"),
+    pending: numberField(counts, "pending"),
+    failed: numberField(counts, "failed"),
+    waiting_approval: numberField(counts, "waitingApproval"),
+    waiting_event: numberField(counts, "waitingEvent"),
+    waiting_timer: numberField(counts, "waitingTimer"),
+    skipped: numberField(counts, "skipped"),
+    other: numberField(counts, "other"),
+    total: numberField(counts, "total")
+  };
+  if (Object.values(parsedCounts).some((entry) => entry === undefined)) {
+    return undefined;
+  }
+  const recentFinished = numberField(throughput, "recentFinished");
+  const windowMs = numberField(throughput, "windowMs");
+  const totalFinished = numberField(throughput, "totalFinished");
+  const lastFinishedAtMs = nullableNumberField(throughput, "lastFinishedAtMs");
+  if (
+    recentFinished === undefined ||
+    windowMs === undefined ||
+    totalFinished === undefined ||
+    lastFinishedAtMs === undefined
+  ) {
+    return undefined;
+  }
+  const modelMixRows = recordArrayField(data, "modelMix");
+  const bottleneck = recordArrayField(data, "bottleneck");
+  if (modelMixRows === undefined || bottleneck === undefined) {
+    return undefined;
+  }
+  const modelMix = modelMixRows.flatMap((entry) => {
+    const engine = stringField(entry, "engine");
+    const model = stringField(entry, "model");
+    const attempts = numberField(entry, "attempts");
+    const quotaParked = booleanField(entry, "quotaParked");
+    return engine === undefined || model === undefined || attempts === undefined || quotaParked === undefined
+      ? []
+      : [{ engine, model, attempts, quota_parked: quotaParked }];
+  });
+  const gating = bottleneck.flatMap((entry) => {
+    const nodeId = stringField(entry, "nodeId");
+    const iteration = numberField(entry, "iteration");
+    const state = stringField(entry, "state");
+    const detail = nullableStringField(entry, "detail");
+    return nodeId === undefined || iteration === undefined || state === undefined || detail === undefined
+      ? []
+      : [{ node_id: nodeId, iteration, state, detail }];
+  });
+  if (modelMix.length !== modelMixRows.length || gating.length !== bottleneck.length) {
+    return undefined;
+  }
+  const gatingOmitted = numberField(data, "bottleneckOmitted");
+  const quotaValue = data.quota;
+  let quota: RunHealthValue["quota"];
+  if (quotaValue === null) {
+    quota = null;
+  } else {
+    const quotaRecord = objectRecord(quotaValue);
+    const parkedCount = numberField(quotaRecord, "parkedCount");
+    const resetAtMs = nullableNumberField(quotaRecord, "resetAtMs");
+    const parkedNodeIds = stringArrayField(quotaRecord, "parkedNodeIds");
+    if (
+      quotaRecord === undefined ||
+      parkedCount === undefined ||
+      resetAtMs === undefined ||
+      parkedNodeIds === undefined
+    ) {
+      return undefined;
+    }
+    quota = { parked_count: parkedCount, parked_node_ids: parkedNodeIds, reset_at_ms: resetAtMs };
+  }
+  if (gatingOmitted === undefined) {
+    return undefined;
+  }
+  return {
+    workflow_status: workflowStatus,
+    verdict,
+    reason: publicHealthReason(reason),
+    counts: parsedCounts as RunHealthValue["counts"],
+    model_mix: modelMix,
+    throughput: {
+      recent_finished: recentFinished,
+      window_ms: windowMs,
+      total_finished: totalFinished,
+      last_finished_at_ms: lastFinishedAtMs
+    },
+    gating,
+    gating_omitted: gatingOmitted,
+    quota,
+    generated_at_ms: generatedAtMs
+  };
+}
+
+const RUN_HEALTH_VERDICTS = new Set<RunHealthVerdict>([
+  "done",
+  "running-healthy",
+  "progressing",
+  "stalled",
+  "blocked",
+  "waiting-quota",
+  "paused",
+  "cancelled",
+  "failed"
+]);
+
+function isRunHealthVerdict(value: string | undefined): value is RunHealthVerdict {
+  return value !== undefined && RUN_HEALTH_VERDICTS.has(value as RunHealthVerdict);
+}
+
+function publicHealthReason(value: string): string {
+  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz inspect`").replace(/smithers/giu, "workflow runner");
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function recordField(value: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+  return objectRecord(value?.[key]);
+}
+
+function recordArrayField(
+  value: Record<string, unknown> | undefined,
+  key: string
+): Record<string, unknown>[] | undefined {
+  const field = value?.[key];
+  if (!Array.isArray(field)) {
+    return undefined;
+  }
+  const records = field.flatMap((entry) => {
+    const record = objectRecord(entry);
+    return record === undefined ? [] : [record];
+  });
+  return records.length === field.length ? records : undefined;
+}
+
+function numberField(value: Record<string, unknown> | undefined, key: string): number | undefined {
+  const field = value?.[key];
+  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
+}
+
+function nullableNumberField(value: Record<string, unknown> | undefined, key: string): number | null | undefined {
+  const field = value?.[key];
+  return field === null ? null : typeof field === "number" && Number.isFinite(field) ? field : undefined;
+}
+
+function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
+  const field = value?.[key];
+  return typeof field === "boolean" ? field : undefined;
+}
+
+function nullableStringField(value: Record<string, unknown> | undefined, key: string): string | null | undefined {
+  const field = value?.[key];
+  return field === null ? null : typeof field === "string" ? field : undefined;
+}
+
+function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] | undefined {
+  const field = value?.[key];
+  return Array.isArray(field) && field.every((entry) => typeof entry === "string") ? field : undefined;
 }
 
 function diagnosticsForWorkflowSnapshot(snapshot: { ok: boolean; error?: string; stderr?: string }, code: string) {

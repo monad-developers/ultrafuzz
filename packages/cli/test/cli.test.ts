@@ -25,11 +25,21 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
     [
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
-      'if [ "$1" = "fork" ]; then',
-      "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-forked\"}'",
-      "else",
-      "  printf '%s\\n' '{\"ok\":true}'",
-      "fi",
+      'case "$1" in',
+      "  fork)",
+      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-forked\"}'",
+      "    ;;",
+      "  pause)",
+      "    printf '%s\\n' '{\"status\":\"pause-requested\"}'",
+      "    exit 2",
+      "    ;;",
+      "  status)",
+      '    printf \'%s\\n\' \'{"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      "    ;;",
+      "  *)",
+      "    printf '%s\\n' '{\"ok\":true}'",
+      "    ;;",
+      "esac",
       ""
     ].join("\n"),
     "utf8"
@@ -239,7 +249,7 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.equal("repository_mutation" in posture, false);
 });
 
-test("run, ps, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
+test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
   writeSmallTopology(project);
@@ -296,6 +306,21 @@ test("run, ps, inspect, report, materialize, clean, and lifecycle commands expos
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
+
+  const status = await cli(project, ["status", runData.run_id, "--window", "5", "--json"], env);
+  assert.equal(status.code, 0, status.stderr);
+  const statusBody = parseJson(status);
+  assertNoSmithersSurface(statusBody);
+  const statusData = statusBody.data as {
+    run_id: string;
+    verdict: string;
+    counts: { in_progress: number };
+    gating: Array<{ node_id: string }>;
+  };
+  assert.equal(statusData.run_id, "cli-run");
+  assert.equal(statusData.verdict, "running-healthy");
+  assert.equal(statusData.counts.in_progress, 1);
+  assert.equal(statusData.gating[0]?.node_id, "project-discovery");
 
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
@@ -452,6 +477,15 @@ test("run, ps, inspect, report, materialize, clean, and lifecycle commands expos
   const forkData = forkBody.data as { submitted: boolean; workflow_run_id: string };
   assert.equal(forkData.submitted, true);
   assert.equal(forkData.workflow_run_id, "ultrafuzz-cli-run-forked");
+
+  const pause = await cli(project, ["pause", runData.run_id, "--json"], env);
+  assert.equal(pause.code, 0, pause.stderr);
+  const pauseBody = parseJson(pause);
+  assertNoSmithersSurface(pauseBody);
+  const pauseData = pauseBody.data as { action: string; status: string; submitted: boolean };
+  assert.equal(pauseData.action, "pause");
+  assert.equal(pauseData.status, "pause-requested");
+  assert.equal(pauseData.submitted, true);
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {
@@ -461,7 +495,6 @@ test("old commands and backend flags are rejected instead of aliased or shimmed"
   for (const argv of [
     ["doctor", "--json"],
     ["list", "--json"],
-    ["status", "cli-run", "--json"],
     ["restart", "cli-run", "--json"],
     ["continue", "cli-run", "--json"],
     ["dashboard", "--json"],

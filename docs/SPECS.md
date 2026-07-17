@@ -291,9 +291,9 @@ Reporting is agentic and lives in final-report artifacts.
 Run and node state MUST be explicit. Node statuses MUST include pending,
 ready, runnable, running, succeeded, failed, skipped, timed-out,
 reused-from-prior-run, and invalidated. Run statuses MUST include pending,
-running, succeeded, failed, timed-out, and canceled.
+running, paused, succeeded, failed, timed-out, and canceled.
 
-`resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
+`status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
 linked workflow identity or lifecycle evidence.
 
