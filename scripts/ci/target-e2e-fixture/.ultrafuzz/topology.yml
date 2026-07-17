@@ -39,7 +39,6 @@ nodes:
       - project-discovery
     required_artifacts:
       - signal-analysis.md
-      - generated-tests.json
       - findings.json
     primary_artifact: findings.json
     timeout_seconds: __NODE_TIMEOUT__

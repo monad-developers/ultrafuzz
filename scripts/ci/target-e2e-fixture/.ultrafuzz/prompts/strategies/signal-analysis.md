@@ -11,7 +11,6 @@ Use:
 Write:
 
 - {{artifact_path}}/signal-analysis.md
-- {{artifact_path}}/generated-tests.json
 - {{output_findings_path}}
 
 Run exactly this command and then stop. Do not install dependencies, run extra analysis, edit production files, or include secret values.

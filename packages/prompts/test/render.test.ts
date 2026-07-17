@@ -94,6 +94,19 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
   });
 
+  it("does not require a deleted generated-test contract template for legacy artifact manifests", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes[2]!.requiredArtifacts = ["generated-tests.json", "findings.json"];
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
+    expect(result.renderedMarkdown).not.toContain("generated_tests");
+    expect(result.renderedMarkdown).toContain("severity_guess");
+  });
+
   it("returns model provenance for task metadata", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

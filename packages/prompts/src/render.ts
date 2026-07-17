@@ -300,12 +300,6 @@ function appendOutputContract(rendered: string, input: PromptRenderInput, curren
     findings_contract: requiredArtifacts.includes("findings.json")
       ? renderOutputContractTemplate("findings.mdx", {})
       : "",
-    generated_tests_contract: requiredArtifacts.includes("generated-tests.json")
-      ? renderOutputContractTemplate("generated-tests.mdx", {
-          generated_tests_dir: path.join(input.node.artifactDir, "generated-tests"),
-          strategy_attempt_test_dir: strategyAttemptTestDir(input)
-        })
-      : "",
     boundary_recipes_contract:
       requiredArtifacts.includes("boundary-recipes.md") || requiredArtifacts.includes("boundary-recipes.json")
         ? renderOutputContractTemplate("boundary-recipes.mdx", {})

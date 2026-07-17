@@ -8,7 +8,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 
 type JsonObject = Record<string, unknown>;
@@ -133,30 +133,6 @@ function signalAnalysis(repo: string, artifact: string, out: string): void {
   );
   const findings = expected === "eq:0" ? [] : [finding(profile, sourceFiles, testFiles)];
   writeJson(out, findings);
-  writeJson(join(artifact, "generated-tests.json"), generatedTestsManifest(artifact));
-}
-
-function generatedTestsManifest(artifact: string): JsonObject {
-  return {
-    schema_version: "1.0",
-    run_id: inferRunId(artifact),
-    node_id: inferNodeId(artifact),
-    generated_tests: []
-  };
-}
-
-function inferRunId(artifact: string): string {
-  const parent = dirname(artifact);
-  const grandparent = basename(dirname(parent));
-  if (basename(parent) === "artifacts" && grandparent !== "") {
-    return grandparent;
-  }
-  return "ci-target-e2e";
-}
-
-function inferNodeId(artifact: string): string {
-  const name = basename(artifact);
-  return name !== "" ? name : "signal-analysis";
 }
 
 function finding(profile: string, sourceFiles: string[], testFiles: string[]): JsonObject {
