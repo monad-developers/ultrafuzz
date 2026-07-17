@@ -20,7 +20,9 @@ async function main(): Promise<void> {
     const state = await launchModalBenchmark({
       configPath,
       modelSlugs: options(argv, "--model"),
-      statePath: option(argv, "--state")
+      statePath: option(argv, "--state"),
+      repoRoot: option(argv, "--repo-root"),
+      mode: argv.includes("--fresh") ? "fresh" : "resume"
     });
     console.log(JSON.stringify(state, null, 2));
     return;
@@ -37,7 +39,9 @@ async function main(): Promise<void> {
     });
     return;
   }
-  throw new Error("usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]");
+  throw new Error(
+    "usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path] [--fresh]"
+  );
 }
 
 function option(argv: string[], name: string): string | undefined {

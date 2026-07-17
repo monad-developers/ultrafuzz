@@ -1,23 +1,55 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { ModalClient, type App, type Image, type Sandbox, type Volume } from "modal";
+import { ModalClient, NotFoundError, type App, type Image, type Sandbox, type Volume } from "modal";
 
-import { runnerApiKeyEnv, subscriptionAuthCopy } from "./auth.js";
-import { loadModalBenchmarkConfig, type ModalBenchmarkConfig } from "./config.js";
+import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
+import {
+  fingerprintModalConfigFile,
+  fingerprintModalModel,
+  loadModalBenchmarkConfig,
+  type ModalBenchmarkConfig
+} from "./config.js";
 import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
-  MODAL_LAUNCH_STATE_SCHEMA_VERSION,
+  MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_SANDBOX_TIMEOUT_MS,
+  type ModalLaunchMode,
   type ModalModelSpec,
   type ModelProvider
 } from "./defaults.js";
 import {
+  assertExactModalLineage,
+  classifyModalRunnerStatus,
+  createModalLaunchState,
+  fingerprintModalImage,
+  fingerprintTrackedSource,
+  hasExactModalLaunchTags,
+  isTransientModalError,
+  markModalLaunchFailed,
+  markModalLaunchReady,
+  markModalSandboxCreated,
+  modalLaunchTags,
+  modalWorkerLineage,
+  parseModalWorkerStatus,
+  readModalLaunchState,
+  reserveModalLaunchAttempt,
+  withModalLaunchStateLock,
+  writeModalLaunchState,
+  type ModalAttemptProvenance,
+  type ModalLaunchRecord,
+  type ModalLaunchState,
+  type ModalLineageFingerprints,
+  type ModalSandboxState
+} from "./launch-state.js";
+import {
   REMOTE_CONFIG_DIR,
   REMOTE_CONFIG_PATH,
+  REMOTE_LINEAGE_PATH,
+  modalVolumeName,
   persistentDataRoot,
   remoteAuthDir,
   remoteAuthPath,
@@ -28,22 +60,7 @@ const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 
-export interface ModalLaunchRecord extends ModalModelSpec {
-  sandbox_id: string;
-  volume_name: string;
-  remote_root: string;
-  launched_at: string;
-}
-
-export interface ModalLaunchState {
-  schema_version: typeof MODAL_LAUNCH_STATE_SCHEMA_VERSION;
-  run_id: string;
-  app: string;
-  image: string;
-  timeout_ms: number;
-  source_revision: string;
-  launches: ModalLaunchRecord[];
-}
+export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
 
 export interface BuildModalImageInput {
   appName?: string;
@@ -92,14 +109,25 @@ export async function launchModalBenchmark(input: {
   configPath: string;
   modelSlugs?: string[];
   statePath?: string;
+  mode?: ModalLaunchMode;
+  repoRoot?: string;
   env?: Record<string, string | undefined>;
 }): Promise<ModalLaunchState> {
   const configPath = path.resolve(input.configPath);
+  const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
   const selected = selectModels(config, input.modelSlugs);
   const statePath = path.resolve(input.statePath ?? defaultStatePath(config.run_id));
+  const mode = input.mode ?? "resume";
+  if (mode === "fresh" && selected.length !== config.models.length) {
+    throw new Error("fresh launch must include every configured model");
+  }
   const env = input.env ?? process.env;
-  const prepared = [];
+  const prepared: Array<{
+    model: ModalModelSpec;
+    auth: SubscriptionAuthCopy | undefined;
+    secrets: Record<string, string>;
+  }> = [];
   for (const model of selected) {
     const auth = subscriptionAuthCopy(model, env);
     if (auth !== undefined) await access(auth.source);
@@ -109,59 +137,314 @@ export async function launchModalBenchmark(input: {
   try {
     const app = await modal.apps.fromName(config.app_name, { createIfMissing: true });
     const image = await modal.images.fromName(config.image_name);
-    const state = await readOrCreateState(statePath, config);
-    for (const { model, auth, secrets } of prepared) {
-      if (state.launches.some((launch) => launch.slug === model.slug)) continue;
-      const secret = await modal.secrets.fromObject(secrets);
-      const volumeName = volumeNameFor(config.run_id, model.slug);
-      const volume = await modal.volumes.fromName(volumeName, { createIfMissing: true });
-      const remoteRoot = persistentDataRoot(config.run_id, model.slug);
-      const sandbox = await modal.sandboxes.create(app, image, {
-        name: `eval-${model.slug}`,
-        command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider)],
-        cpu: 4,
-        cpuLimit: 4,
-        memoryMiB: 12_288,
-        memoryLimitMiB: 16_384,
-        timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
-        workdir: "/opt/ultrafuzz",
-        env: {
-          ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
-          ULTRAFUZZ_MODAL_MODEL: JSON.stringify(model),
-          ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
-          ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
-        },
-        secrets: [secret],
-        volumes: { "/data": volume },
-        tags: { purpose: "ultrafuzz-eval", run: config.run_id, model: model.slug }
-      });
-      try {
-        await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
-        await sandbox.filesystem.copyFromLocal(configPath, REMOTE_CONFIG_PATH);
-        await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH]);
-        if (auth !== undefined) {
-          await runChecked(sandbox, ["install", "-d", "-m", "700", remoteAuthDir(model.provider)]);
-          await sandbox.filesystem.copyFromLocal(auth.source, auth.destination);
-          await runChecked(sandbox, ["chmod", "600", auth.destination]);
+    const fingerprints: ModalLineageFingerprints = {
+      config: fingerprintModalConfigFile(configPath),
+      source: fingerprintTrackedSource(repoRoot),
+      image: fingerprintModalImage(config.image_name, image.imageId)
+    };
+    return await withModalLaunchStateLock(statePath, async () => {
+      let state = await readModalLaunchState(statePath);
+      if (state === undefined) {
+        state = createModalLaunchState({
+          logicalRunId: config.run_id,
+          generation: 1,
+          generationMode: mode,
+          app: config.app_name,
+          image: config.image_name,
+          imageId: image.imageId,
+          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
+          sourceRevision: sourceRevision(repoRoot),
+          fingerprints
+        });
+        await writeModalLaunchState(statePath, state);
+      } else if (mode === "fresh") {
+        if (state.logical_run_id !== config.run_id) {
+          throw new Error(`launch state belongs to ${state.logical_run_id}, not ${config.run_id}`);
         }
-      } catch (error) {
-        await sandbox.terminate({ wait: true }).catch(() => undefined);
-        throw error;
+        await assertNoLiveGeneration(modal, app, state);
+        const previousFingerprints = state.fingerprints;
+        const history = [
+          ...state.attempt_history,
+          ...state.launches.map((launch) => attemptProvenance(launch, previousFingerprints))
+        ];
+        state = createModalLaunchState({
+          logicalRunId: config.run_id,
+          generation: state.generation + 1,
+          generationMode: "fresh",
+          app: config.app_name,
+          image: config.image_name,
+          imageId: image.imageId,
+          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
+          sourceRevision: sourceRevision(repoRoot),
+          fingerprints,
+          attemptHistory: history
+        });
+        await writeModalLaunchState(statePath, state);
+      } else {
+        assertExactModalLineage(state, {
+          logicalRunId: config.run_id,
+          app: config.app_name,
+          image: config.image_name,
+          imageId: image.imageId,
+          fingerprints
+        });
       }
-      state.launches.push({
-        ...model,
-        sandbox_id: sandbox.sandboxId,
-        volume_name: volumeName,
-        remote_root: remoteRoot,
-        launched_at: new Date().toISOString()
-      });
-      await writeState(statePath, state);
-      sandbox.detach();
-    }
-    return state;
+
+      for (const entry of prepared) {
+        await launchOrResumeModel({ modal, app, image, configPath, statePath, state, ...entry });
+      }
+      return state;
+    });
   } finally {
     modal.close();
   }
+}
+
+interface LaunchModelInput {
+  modal: ModalClient;
+  app: App;
+  image: Image;
+  configPath: string;
+  statePath: string;
+  state: ModalLaunchState;
+  model: ModalModelSpec;
+  auth?: SubscriptionAuthCopy;
+  secrets: Record<string, string>;
+}
+
+async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
+  let record = input.state.launches.find((launch) => launch.slug === input.model.slug);
+  const modelFingerprint = fingerprintModalModel(input.model);
+  if (record !== undefined && record.model_fingerprint !== modelFingerprint) {
+    throw new Error(`incompatible Modal checkpoint: model fingerprint mismatch for ${input.model.slug}`);
+  }
+
+  const volumeName = record?.volume_name ?? modalVolumeName(input.state.logical_run_id, input.model.slug);
+  const remoteRoot = record?.remote_root ?? persistentDataRoot(input.state.logical_run_id, input.model.slug);
+  const volume = await input.modal.volumes.fromName(volumeName, {
+    createIfMissing: record === undefined || input.state.generation_mode === "fresh"
+  });
+
+  if (record !== undefined) {
+    if (record.phase === "reserved" && record.sandbox_id === undefined) {
+      const orphans = await taggedLaunches(input.modal, input.app, input.state, record);
+      if (orphans.length > 1) {
+        for (const orphan of orphans) orphan.detach();
+        throw new Error(`multiple running sandboxes have the exact lineage for ${record.slug}`);
+      }
+      const orphan = orphans[0];
+      if (orphan !== undefined) {
+        markModalSandboxCreated(record, orphan.sandboxId);
+        await writeModalLaunchState(input.statePath, input.state);
+        await finishReservedLaunch(input, record, orphan);
+        return;
+      }
+    }
+    const probe = await probeModalSandbox(input.modal, record.sandbox_id);
+    if (probe.state === "live") {
+      if (record.phase === "sandbox-created") {
+        const sandbox = await input.modal.sandboxes.fromId(record.sandbox_id!);
+        try {
+          await finishReservedLaunch(input, record, sandbox);
+        } catch (error) {
+          markModalLaunchFailed(
+            record,
+            isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure"
+          );
+          await writeModalLaunchState(input.statePath, input.state);
+          throw error;
+        }
+      }
+      return;
+    }
+
+    const persisted = await readVolumeFiles(input.modal, input.app, input.image, volume, record.remote_root, [
+      "status.json"
+    ]);
+    const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"));
+    const runnerStatus = classifyModalRunnerStatus({
+      sandbox: probe.state,
+      attempt: record.attempt,
+      ...(workerStatus === undefined ? {} : { workerStatus })
+    });
+    if (runnerStatus.action === "none") {
+      if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
+      throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
+    }
+    if (runnerStatus.retry_after_ms > 0) await sleep(runnerStatus.retry_after_ms);
+  }
+
+  const secret = await input.modal.secrets.fromObject(input.secrets);
+  for (;;) {
+    record = reserveModalLaunchAttempt({
+      state: input.state,
+      model: input.model,
+      modelFingerprint,
+      volumeName,
+      remoteRoot,
+      workspaceMode: input.state.generation_mode
+    });
+    await writeModalLaunchState(input.statePath, input.state);
+
+    let sandbox: Sandbox | undefined;
+    try {
+      const orphans = await taggedLaunches(input.modal, input.app, input.state, record);
+      if (orphans.length > 1) {
+        for (const orphan of orphans) orphan.detach();
+        throw new Error(`multiple running sandboxes have the exact lineage for ${record.slug}`);
+      }
+      sandbox = orphans[0];
+      if (sandbox === undefined) {
+        sandbox = await input.modal.sandboxes.create(input.app, input.image, {
+          name: modalSandboxName(input.state.logical_run_id, record),
+          command: [
+            "bash",
+            "-lc",
+            modalWorkerEntrypointCommand(input.auth === undefined ? undefined : input.model.provider)
+          ],
+          cpu: 4,
+          cpuLimit: 4,
+          memoryMiB: 12_288,
+          memoryLimitMiB: 16_384,
+          timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
+          workdir: "/opt/ultrafuzz",
+          env: {
+            ULTRAFUZZ_MODAL_RUN_ID: input.state.logical_run_id,
+            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
+            ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
+            ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
+          },
+          secrets: [secret],
+          volumes: { "/data": volume },
+          tags: modalLaunchTags(input.state, record)
+        });
+      }
+
+      // Persist the identifier before any fallible staging operation. A process
+      // that dies in the tiny create/commit window is recovered by exact tags.
+      markModalSandboxCreated(record, sandbox.sandboxId);
+      await writeModalLaunchState(input.statePath, input.state);
+      await finishReservedLaunch(input, record, sandbox);
+      return;
+    } catch (error) {
+      await sandbox?.terminate({ wait: true }).catch(() => undefined);
+      const category = isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
+      markModalLaunchFailed(record, category);
+      await writeModalLaunchState(input.statePath, input.state);
+      if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
+      await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
+    }
+  }
+}
+
+async function finishReservedLaunch(
+  input: LaunchModelInput,
+  record: ModalLaunchRecord,
+  sandbox: Sandbox
+): Promise<void> {
+  try {
+    await stageLaunchFiles(sandbox, input.configPath, modalWorkerLineage(input.state, record), input.auth);
+    markModalLaunchReady(record);
+    await writeModalLaunchState(input.statePath, input.state);
+    sandbox.detach();
+  } catch (error) {
+    await sandbox.terminate({ wait: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function stageLaunchFiles(
+  sandbox: Sandbox,
+  configPath: string,
+  lineage: ReturnType<typeof modalWorkerLineage>,
+  auth: SubscriptionAuthCopy | undefined
+): Promise<void> {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-lineage-"));
+  const lineagePath = path.join(temporary, "lineage.json");
+  try {
+    await writeFile(lineagePath, `${JSON.stringify(lineage, null, 2)}\n`, { mode: 0o600 });
+    await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
+    await sandbox.filesystem.copyFromLocal(configPath, REMOTE_CONFIG_PATH);
+    await sandbox.filesystem.copyFromLocal(lineagePath, REMOTE_LINEAGE_PATH);
+    await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH]);
+    if (auth !== undefined) {
+      await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(auth.destination)]);
+      await sandbox.filesystem.copyFromLocal(auth.source, auth.destination);
+      await runChecked(sandbox, ["chmod", "600", auth.destination]);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function taggedLaunches(
+  modal: ModalClient,
+  app: App,
+  state: ModalLaunchState,
+  record: ModalLaunchRecord
+): Promise<Sandbox[]> {
+  const expected = modalLaunchTags(state, record);
+  const matches: Sandbox[] = [];
+  for await (const sandbox of modal.sandboxes.list({ appId: app.appId, tags: expected })) {
+    const tags = await sandbox.getTags();
+    if (hasExactModalLaunchTags(tags, expected)) matches.push(sandbox);
+    else sandbox.detach();
+  }
+  return matches;
+}
+
+async function assertNoLiveGeneration(modal: ModalClient, app: App, state: ModalLaunchState): Promise<void> {
+  for (const record of state.launches) {
+    const probe = await probeModalSandbox(modal, record.sandbox_id);
+    if (probe.state === "live") throw new Error(`fresh launch refuses live sandbox for ${record.slug}`);
+    const orphans = await taggedLaunches(modal, app, state, record);
+    if (orphans.length > 0) {
+      for (const sandbox of orphans) sandbox.detach();
+      throw new Error(`fresh launch refuses tagged live sandbox for ${record.slug}`);
+    }
+  }
+}
+
+async function probeModalSandbox(
+  modal: ModalClient,
+  sandboxId: string | undefined
+): Promise<{ state: ModalSandboxState; exitCode?: number | null }> {
+  if (sandboxId === undefined) return { state: "missing" };
+  try {
+    const sandbox = await modal.sandboxes.fromId(sandboxId);
+    const exitCode = await sandbox.poll();
+    sandbox.detach();
+    return exitCode === null ? { state: "live", exitCode } : { state: "exited", exitCode };
+  } catch (error) {
+    if (error instanceof NotFoundError) return { state: "missing" };
+    throw error;
+  }
+}
+
+export function modalSandboxName(
+  logicalRunId: string,
+  record: Pick<ModalLaunchRecord, "slug" | "generation" | "attempt" | "attempt_id">
+): string {
+  const suffix = `-g${record.generation}-a${record.attempt}-${record.attempt_id.slice(0, 8)}`;
+  const prefix = `eval-${logicalRunId}-${record.slug}`.slice(0, 64 - suffix.length).replace(/[-.]+$/u, "");
+  return `${prefix}${suffix}`;
+}
+
+function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineageFingerprints): ModalAttemptProvenance {
+  return {
+    slug: record.slug,
+    generation: record.generation,
+    attempt: record.attempt,
+    attempt_id: record.attempt_id,
+    model_fingerprint: record.model_fingerprint,
+    fingerprints,
+    workspace_mode: record.workspace_mode,
+    reserved_at: record.reserved_at,
+    ...(record.sandbox_id === undefined ? {} : { sandbox_id: record.sandbox_id }),
+    ...(record.launched_at === undefined ? {} : { launched_at: record.launched_at }),
+    ...(record.finished_at === undefined ? {} : { finished_at: record.finished_at }),
+    phase: record.phase
+  };
 }
 
 export function modalImageBuildCommand(): string {
@@ -177,6 +460,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
   return [
     "set -euo pipefail",
     `until test -s '${REMOTE_CONFIG_PATH}'; do sleep 1; done`,
+    `until test -s '${REMOTE_LINEAGE_PATH}'; do sleep 1; done`,
     ...(authPath === undefined ? [] : [`until test -s '${authPath}'; do sleep 1; done`]),
     'volume_root="$(realpath /data)"',
     'data_root="$volume_root/$ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT"',
@@ -197,31 +481,33 @@ export async function modalBenchmarkStatus(input: {
   statePath: string;
   env?: Record<string, string | undefined>;
 }): Promise<Array<Record<string, unknown>>> {
-  const state = JSON.parse(await readFile(path.resolve(input.statePath), "utf8")) as ModalLaunchState;
+  const state = await requiredLaunchState(input.statePath);
   const modal = modalClient(input.env);
   try {
     const app = await modal.apps.fromName(state.app, { createIfMissing: false });
     const image = await modal.images.fromName(state.image);
+    assertStateImage(state, image);
     const rows: Array<Record<string, unknown>> = [];
     for (const launch of state.launches) {
-      let runner = "finished";
-      let exitCode: number | null | undefined;
-      try {
-        const sandbox = await modal.sandboxes.fromId(launch.sandbox_id);
-        exitCode = await sandbox.poll();
-        runner = exitCode === null ? "running" : "finished";
-        sandbox.detach();
-      } catch {
-        runner = "not-running";
-      }
-      const volume = await modal.volumes.fromName(launch.volume_name);
+      const probe = await probeModalSandbox(modal, launch.sandbox_id);
+      const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, ["status.json"]);
+      const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"));
+      const runnerStatus = classifyModalRunnerStatus({
+        sandbox: probe.state,
+        attempt: launch.attempt,
+        ...(workerStatus === undefined ? {} : { workerStatus })
+      });
       rows.push({
+        logical_run_id: state.logical_run_id,
+        generation: launch.generation,
+        attempt: launch.attempt,
         model: launch.model,
         slug: launch.slug,
-        runner,
-        exit_code: exitCode,
-        status: parseJson(persisted["status.json"] ?? "{}")
+        runner: probe.state,
+        exit_code: probe.exitCode,
+        runner_status: runnerStatus,
+        worker_status: workerStatus ?? null
       });
     }
     return rows;
@@ -235,13 +521,14 @@ export async function collectModalBenchmark(input: {
   outputDir: string;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
-  const state = JSON.parse(await readFile(path.resolve(input.statePath), "utf8")) as ModalLaunchState;
+  const state = await requiredLaunchState(input.statePath);
   const modal = modalClient(input.env);
   try {
     const app = await modal.apps.fromName(state.app, { createIfMissing: false });
     const image = await modal.images.fromName(state.image);
+    assertStateImage(state, image);
     for (const launch of state.launches) {
-      const volume = await modal.volumes.fromName(launch.volume_name);
+      const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
         "status.json",
         "worker.log",
@@ -325,40 +612,26 @@ function defaultStatePath(runId: string): string {
   return path.resolve(".ultrafuzz", "modal", runId, "launch-state.json");
 }
 
-function volumeNameFor(runId: string, slug: string): string {
-  return `ultrafuzz-${runId}-${slug}`.slice(0, 63);
-}
-
-async function readOrCreateState(statePath: string, config: ModalBenchmarkConfig): Promise<ModalLaunchState> {
+function sourceRevision(repoRoot: string): string {
   try {
-    const state = JSON.parse(await readFile(statePath, "utf8")) as ModalLaunchState;
-    if (state.run_id !== config.run_id)
-      throw new Error(`launch state belongs to ${state.run_id}, not ${config.run_id}`);
-    return state;
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  return {
-    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
-    run_id: config.run_id,
-    app: config.app_name,
-    image: config.image_name,
-    timeout_ms: MODAL_SANDBOX_TIMEOUT_MS,
-    source_revision: sourceRevision(),
-    launches: []
-  };
-}
-
-async function writeState(statePath: string, state: ModalLaunchState): Promise<void> {
-  await mkdir(path.dirname(statePath), { recursive: true });
-  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-}
-
-function sourceRevision(): string {
-  try {
-    return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
   } catch {
     return "unknown";
+  }
+}
+
+async function requiredLaunchState(statePath: string): Promise<ModalLaunchState> {
+  const state = await readModalLaunchState(path.resolve(statePath));
+  if (state === undefined) throw new Error(`Modal launch state not found: ${path.resolve(statePath)}`);
+  return state;
+}
+
+function assertStateImage(state: ModalLaunchState, image: Image): void {
+  if (
+    state.image_id !== image.imageId ||
+    state.fingerprints.image !== fingerprintModalImage(state.image, image.imageId)
+  ) {
+    throw new Error("incompatible Modal checkpoint: image fingerprint mismatch");
   }
 }
 
@@ -419,4 +692,8 @@ function parseJson(value: string): unknown {
   } catch {
     return {};
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

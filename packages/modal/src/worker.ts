@@ -1,13 +1,48 @@
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFileSync, realpathSync } from "node:fs";
+import {
+  access,
+  appendFile,
+  copyFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  unlink,
+  writeFile
+} from "node:fs/promises";
 import path from "node:path";
 
-import { loadModalBenchmarkConfig } from "./config.js";
-import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
+import { fingerprintModalConfigFile, fingerprintModalModel, loadModalBenchmarkConfig } from "./config.js";
+import {
+  EVAL_WATCH_TIMEOUT_SECONDS,
+  MODAL_PRE_MODEL_RETRY_LIMIT,
+  MODAL_WORKER_STATUS_SCHEMA_VERSION,
+  type ModalModelSpec
+} from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
-import { REMOTE_CONFIG_PATH, persistentDataRoot, resolvePersistentRemoteRoot } from "./layout.js";
-import { canScoreBenchmarkRow, inspectTerminalDisposition, runBenchmarkExecutionOnce } from "./terminal-disposition.js";
+import { parseModalWorkerLineage, type ModalWorkerStatusCategory } from "./launch-state.js";
+import {
+  PERSISTED_LINEAGE_FILE,
+  REMOTE_CONFIG_PATH,
+  REMOTE_LINEAGE_PATH,
+  persistentDataRoot,
+  resolvePersistentRemoteRoot
+} from "./layout.js";
+import {
+  locateModalResumeWorkspace,
+  repairModalEvalRunRecord,
+  type ModalResumeRunState,
+  type ModalResumeWorkspace
+} from "./resume.js";
+import {
+  canScoreBenchmarkRow,
+  inspectTerminalDisposition,
+  runBenchmarkExecutionOnce,
+  type TerminalDisposition
+} from "./terminal-disposition.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -15,45 +50,65 @@ const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const RUN_ID = requiredEnv("ULTRAFUZZ_MODAL_RUN_ID");
 const MODEL = JSON.parse(requiredEnv("ULTRAFUZZ_MODAL_MODEL")) as ModalModelSpec;
 const CONFIG = loadModalBenchmarkConfig(REMOTE_CONFIG_PATH);
+const LINEAGE = parseModalWorkerLineage(JSON.parse(readFileSync(REMOTE_LINEAGE_PATH, "utf8")) as unknown);
 const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");
 const REMOTE_DATA_ROOT = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT ?? persistentDataRoot(RUN_ID, MODEL.slug);
 const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_ROOT);
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
+const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
+let modelWorkStarted = false;
+let currentStage = "preparing";
 
 async function main(): Promise<void> {
   try {
     assertWorkerInput();
     await mkdir(DATA_ROOT, { recursive: true });
-    await writeFile(LOG_PATH, "");
-    await setStatus("preparing");
-    const { target, control, suitePath, evalRunId } = await prepareWorkspace();
-    await setStatus("running", { eval_run_id: evalRunId });
-    let terminalDisposition = await runBenchmarkExecutionOnce(
-      () =>
-        runEval(
-          [
-            "node",
-            CLI,
-            "eval",
-            "run",
-            "--project",
-            control,
-            "--suite",
-            suitePath,
-            "--provider",
-            "braintrust",
-            "--eval-run-id",
-            evalRunId,
-            "--watch-timeout-seconds",
-            String(EVAL_WATCH_TIMEOUT_SECONDS),
-            "--json"
-          ],
-          target
-        ),
-      () => inspectTerminalDisposition(target)
+    await ensurePersistentLineage();
+    await appendFile(
+      LOG_PATH,
+      `${new Date().toISOString()} [generation ${LINEAGE.generation} attempt ${LINEAGE.attempt}] worker started\n`
     );
+    await setStatus("preparing");
+    let target: string;
+    let control: string;
+    let evalRunId: string;
+    let terminalDisposition: TerminalDisposition | undefined;
+    const existing = await hasExistingEvalWorkspace();
+    if (existing) {
+      const resumed = await resumeExistingEvaluation();
+      ({ target, control, evalRunId, terminalDisposition } = resumed);
+    } else {
+      const prepared = await prepareWorkspace();
+      ({ target, control, evalRunId } = prepared);
+      modelWorkStarted = true;
+      await setStatus("running", { eval_run_id: evalRunId });
+      terminalDisposition = await runBenchmarkExecutionOnce(
+        () =>
+          runEval(
+            [
+              "node",
+              CLI,
+              "eval",
+              "run",
+              "--project",
+              control,
+              "--suite",
+              prepared.suitePath,
+              "--provider",
+              "braintrust",
+              "--eval-run-id",
+              evalRunId,
+              "--watch-timeout-seconds",
+              String(EVAL_WATCH_TIMEOUT_SECONDS),
+              "--json"
+            ],
+            target
+          ),
+        () => inspectTerminalDisposition(target)
+      );
+    }
 
     const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
     const runSummary = JSON.parse(await readFile(path.join(evalDir, "run-summary.json"), "utf8")) as {
@@ -125,39 +180,188 @@ async function main(): Promise<void> {
     await mkdir(DATA_ROOT, { recursive: true });
     await captureFailureDetails().catch(() => undefined);
     await appendFile(LOG_PATH, `${new Date().toISOString()} FATAL ${message}\n`).catch(() => undefined);
-    await setStatus("failed", { error: message.slice(0, 12_000) }).catch(() => undefined);
+    const category: ModalWorkerStatusCategory =
+      error instanceof CheckpointIncompatibleError
+        ? "incompatible-checkpoint"
+        : modelWorkStarted
+          ? "resume-required"
+          : LINEAGE.attempt < MODAL_PRE_MODEL_RETRY_LIMIT
+            ? "transient-operational-failure"
+            : "permanent-operational-failure";
+    await setStatus("failed", { error_code: failureCode(error) }, category).catch(() => undefined);
     throw error;
   }
 }
 
 function assertWorkerInput(): void {
-  if (CONFIG.run_id !== RUN_ID) throw new Error("run id does not match runtime config");
+  if (CONFIG.run_id !== RUN_ID) throw new CheckpointIncompatibleError("run id does not match runtime config");
+  if (LINEAGE.logical_run_id !== RUN_ID) {
+    throw new CheckpointIncompatibleError("logical run does not match worker lineage");
+  }
+  if (LINEAGE.fingerprints.config !== fingerprintModalConfigFile(REMOTE_CONFIG_PATH)) {
+    throw new CheckpointIncompatibleError("configuration fingerprint does not match worker lineage");
+  }
   const configured = CONFIG.models.find((candidate) => candidate.slug === MODEL.slug);
   if (configured === undefined || JSON.stringify(configured) !== JSON.stringify(MODEL)) {
-    throw new Error("model does not match runtime config");
+    throw new CheckpointIncompatibleError("model does not match runtime config");
+  }
+  if (LINEAGE.model_fingerprint !== fingerprintModalModel(MODEL)) {
+    throw new CheckpointIncompatibleError("model fingerprint does not match worker lineage");
   }
 }
 
-async function prepareWorkspace(): Promise<{ target: string; control: string; suitePath: string; evalRunId: string }> {
+async function ensurePersistentLineage(): Promise<void> {
+  let persisted: ReturnType<typeof parseModalWorkerLineage> | undefined;
+  try {
+    persisted = parseModalWorkerLineage(JSON.parse(await readFile(LINEAGE_PATH, "utf8")) as unknown);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw new CheckpointIncompatibleError("persisted lineage record is invalid");
+    }
+  }
+
+  if (persisted !== undefined && samePersistentLineage(persisted, LINEAGE)) return;
+  if (persisted !== undefined) {
+    if (LINEAGE.workspace_mode !== "fresh" || LINEAGE.generation <= persisted.generation) {
+      throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
+    }
+    await clearFreshGeneration();
+    await writeJsonAtomic(LINEAGE_PATH, LINEAGE);
+    return;
+  }
+
+  const existingWorkspace = (await readdir(WORK_ROOT).catch(() => [])).length > 0;
+  if (existingWorkspace && LINEAGE.workspace_mode !== "fresh") {
+    throw new CheckpointIncompatibleError("unversioned persistent workspace cannot be resumed");
+  }
+  if (LINEAGE.workspace_mode === "fresh") await clearFreshGeneration();
+  await writeJsonAtomic(LINEAGE_PATH, LINEAGE);
+}
+
+function samePersistentLineage(
+  left: ReturnType<typeof parseModalWorkerLineage>,
+  right: ReturnType<typeof parseModalWorkerLineage>
+): boolean {
+  return (
+    left.logical_run_id === right.logical_run_id &&
+    left.generation === right.generation &&
+    left.fingerprints.config === right.fingerprints.config &&
+    left.fingerprints.source === right.fingerprints.source &&
+    left.fingerprints.image === right.fingerprints.image &&
+    left.model_fingerprint === right.model_fingerprint
+  );
+}
+
+async function clearFreshGeneration(): Promise<void> {
   await rm(WORK_ROOT, { recursive: true, force: true });
-  await mkdir(WORK_ROOT, { recursive: true });
+  for (const entry of ["result.json", "failure-details.json", "outcome"] as const) {
+    await rm(path.join(DATA_ROOT, entry), { recursive: true, force: true });
+  }
+}
+
+async function hasExistingEvalWorkspace(): Promise<boolean> {
+  const evalRoot = path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs");
+  return (await readdir(evalRoot).catch(() => [])).length > 0;
+}
+
+async function resumeExistingEvaluation(): Promise<{
+  target: string;
+  control: string;
+  evalRunId: string;
+  terminalDisposition: TerminalDisposition | undefined;
+}> {
+  const workspace = await locateModalResumeWorkspace(WORK_ROOT);
+  modelWorkStarted = true;
+  let state = await durableRunState(workspace.target, workspace.productRunId);
+  if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
+  let disposition = await terminalDispositionForState(workspace, state);
+  if (!isTerminalRunStatus(state.status)) {
+    await setStatus("resuming", { eval_run_id: workspace.evalRunId, run_status: state.status });
+    await runChecked(["node", CLI, "resume", state.run_id, "--project", workspace.target, "--json"], {
+      label: "resume durable run"
+    });
+    state = await waitForTerminalRun(workspace);
+    disposition = await terminalDispositionForState(workspace, state);
+  }
+  await repairModalEvalRunRecord(workspace, state, disposition);
+  return {
+    target: workspace.target,
+    control: workspace.control,
+    evalRunId: workspace.evalRunId,
+    terminalDisposition: disposition
+  };
+}
+
+async function terminalDispositionForState(
+  workspace: ModalResumeWorkspace,
+  state: ModalResumeRunState
+): Promise<TerminalDisposition | undefined> {
+  if (!isTerminalRunStatus(state.status)) return undefined;
+  if (state.status === "succeeded") return undefined;
+  return inspectTerminalDisposition(workspace.target);
+}
+
+async function waitForTerminalRun(workspace: ModalResumeWorkspace): Promise<ModalResumeRunState> {
+  const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
+  while (Date.now() < deadline) {
+    await runChecked(["node", CLI, "inspect", workspace.productRunId, "--project", workspace.target, "--json"], {
+      label: "sync resumed run"
+    });
+    const state = await durableRunState(workspace.target, workspace.productRunId);
+    if (state !== undefined) {
+      await reportProgress(workspace.target);
+      if (isTerminalRunStatus(state.status)) return state;
+    }
+    await sleep(60_000);
+  }
+  throw new Error("resumed durable run did not reach a terminal state before the bounded watch deadline");
+}
+
+function isTerminalRunStatus(status: string | undefined): boolean {
+  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+}
+
+async function prepareWorkspace(): Promise<{ target: string; control: string; suitePath: string; evalRunId: string }> {
+  const existing = await readdir(WORK_ROOT).catch(() => []);
   const target = path.join(WORK_ROOT, "target");
   const control = path.join(WORK_ROOT, "control");
-  const groundTruthRepo = path.join(WORK_ROOT, "ground-truth-repo");
   const groundTruth = path.join(WORK_ROOT, "ground-truth");
-  await mkdir(control, { recursive: true });
-  await mkdir(groundTruth, { recursive: true });
-
-  await cloneAtRef(CONFIG.target.repo, CONFIG.target.ref, target, "target");
-  await cloneAtRef(CONFIG.ground_truth.repo, CONFIG.ground_truth.ref, groundTruthRepo, "ground truth");
-  await runChecked(["node", CLI, "init", "--project", target, "--force", "--json"], { label: "target init" });
-  await runChecked(["node", CLI, "init", "--project", control, "--force", "--json"], { label: "control init" });
-  await configureTarget(target);
-  await materializeGroundTruth(
-    path.join(groundTruthRepo, CONFIG.ground_truth.file),
-    path.join(groundTruth, "findings.yml")
-  );
-  const suitePath = await configureControl(control, target, groundTruth);
+  const suitePath = path.join(control, "modal-suite.yml");
+  if (existing.length === 0) {
+    const stagingRoot = `${WORK_ROOT}.preparing-${LINEAGE.attempt_id}`;
+    const stagingTarget = path.join(stagingRoot, "target");
+    const stagingControl = path.join(stagingRoot, "control");
+    const stagingGroundTruthRepo = path.join(stagingRoot, "ground-truth-repo");
+    const stagingGroundTruth = path.join(stagingRoot, "ground-truth");
+    await rm(stagingRoot, { recursive: true, force: true });
+    try {
+      await mkdir(stagingControl, { recursive: true, mode: 0o700 });
+      await mkdir(stagingGroundTruth, { recursive: true, mode: 0o700 });
+      await cloneAtRef(CONFIG.target.repo, CONFIG.target.ref, stagingTarget, "target");
+      await cloneAtRef(CONFIG.ground_truth.repo, CONFIG.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
+      await runChecked(["node", CLI, "init", "--project", stagingTarget, "--force", "--json"], {
+        label: "target init"
+      });
+      await runChecked(["node", CLI, "init", "--project", stagingControl, "--force", "--json"], {
+        label: "control init"
+      });
+      await configureTarget(stagingTarget);
+      await materializeGroundTruth(
+        path.join(stagingGroundTruthRepo, CONFIG.ground_truth.file),
+        path.join(stagingGroundTruth, "findings.yml")
+      );
+      await configureControl(stagingControl, target, groundTruth);
+      await rename(stagingRoot, WORK_ROOT);
+    } finally {
+      await rm(stagingRoot, { recursive: true, force: true });
+    }
+  } else {
+    for (const required of [target, control, path.join(groundTruth, "findings.yml"), suitePath]) {
+      await access(required).catch(() => {
+        throw new CheckpointIncompatibleError("persistent pre-model workspace is incomplete");
+      });
+    }
+  }
   await runChecked(["node", CLI, "references", "sync", "--project", target, "--json"], {
     label: "references sync"
   });
@@ -326,17 +530,20 @@ async function reportProgress(target: string): Promise<void> {
   await setStatus("running", { run_status: state.status, node_counts: counts });
 }
 
-async function durableRunState(
-  target: string
-): Promise<{ status?: string; nodes?: Record<string, { status?: string }> } | undefined> {
-  const runs = await readdir(path.join(target, ".ultrafuzz/runs")).catch(() => []);
-  for (const run of runs.sort().reverse()) {
+async function durableRunState(target: string, expectedRunId?: string): Promise<ModalResumeRunState | undefined> {
+  const available = await readdir(path.join(target, ".ultrafuzz/runs")).catch(() => []);
+  const runs =
+    expectedRunId === undefined ? available.sort().reverse() : available.filter((run) => run === expectedRunId);
+  for (const run of runs) {
     try {
       const state = JSON.parse(await readFile(path.join(target, ".ultrafuzz/runs", run, "state.json"), "utf8")) as {
+        run_id?: string;
         status?: string;
         nodes?: Record<string, { status?: string }>;
       };
-      if (state.nodes !== undefined) return state;
+      if (state.nodes !== undefined && (state.run_id === undefined || state.run_id === run)) {
+        return { ...state, run_id: run };
+      }
     } catch {
       // Keep looking for a durable state file.
     }
@@ -365,21 +572,30 @@ async function runChecked(
   if (exitCode !== 0) throw new Error(`${options.label} failed with exit code ${exitCode}`);
 }
 
-async function setStatus(stage: string, extra: Record<string, unknown> = {}): Promise<void> {
-  await writeFile(
-    STATUS_PATH,
-    `${JSON.stringify(
-      {
-        schema_version: "ultrafuzz.modal.worker-status.v1",
-        updated_at: new Date().toISOString(),
-        stage,
-        model: MODEL,
-        ...extra
-      },
-      null,
-      2
-    )}\n`
-  );
+async function setStatus(
+  stage: string,
+  extra: Record<string, unknown> = {},
+  category = statusCategoryForStage(stage)
+): Promise<void> {
+  currentStage = stage;
+  await writeJsonAtomic(STATUS_PATH, {
+    schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
+    updated_at: new Date().toISOString(),
+    stage,
+    category,
+    model_work_started: modelWorkStarted,
+    retryable: category === "transient-operational-failure",
+    generation: LINEAGE.generation,
+    attempt: LINEAGE.attempt,
+    ...extra
+  });
+}
+
+function statusCategoryForStage(stage: string): ModalWorkerStatusCategory {
+  if (stage === "succeeded") return "succeeded";
+  if (["scoring", "publishing"].includes(stage)) return "post-processing";
+  if (["running", "resuming"].includes(stage)) return "model-work";
+  return "preparing";
 }
 
 async function persistOutcomeArtifacts(target: string, control: string, evalRunId: string): Promise<void> {
@@ -420,6 +636,32 @@ function requiredEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
   return value;
+}
+
+async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    await rename(temporary, filePath);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+function failureCode(error: unknown): string {
+  if (error instanceof CheckpointIncompatibleError) return "CHECKPOINT_INCOMPATIBLE";
+  return modelWorkStarted
+    ? `RESUME_REQUIRED_${currentStage.toUpperCase().replace(/[^A-Z0-9]+/gu, "_")}`
+    : "PRE_MODEL_OPERATION_FAILED";
+}
+
+class CheckpointIncompatibleError extends Error {
+  override readonly name = "CheckpointIncompatibleError";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 void main().catch((error) => {

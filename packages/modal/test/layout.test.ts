@@ -10,6 +10,8 @@ import {
 } from "../src/defaults.js";
 import {
   REMOTE_CONFIG_PATH,
+  REMOTE_LINEAGE_PATH,
+  modalVolumeName,
   persistentWorkspaceRoot,
   remoteAuthPath,
   resolvePersistentRemoteRoot
@@ -19,8 +21,19 @@ describe("Modal storage layout", () => {
   it("persists workspaces while keeping config and auth ephemeral", () => {
     expect(persistentWorkspaceRoot("run-1", "model-1")).toBe("/data/run-1/model-1/workspace");
     expect(REMOTE_CONFIG_PATH).toBe("/run/ultrafuzz-config/benchmark.json");
+    expect(REMOTE_LINEAGE_PATH).toBe("/run/ultrafuzz-config/lineage.json");
     expect(remoteAuthPath("openai")).toBe("/run/ultrafuzz-auth/codex/auth.json");
     expect(remoteAuthPath("anthropic")).toBe("/run/ultrafuzz-auth/claude/.credentials.json");
+  });
+
+  it("uses stable collision-resistant volume names for logical run identity", () => {
+    const sharedPrefix = "x".repeat(120);
+    const first = modalVolumeName(`${sharedPrefix}-one`, "model");
+    const second = modalVolumeName(`${sharedPrefix}-two`, "model");
+    expect(first).toHaveLength(63);
+    expect(second).toHaveLength(63);
+    expect(first).not.toBe(second);
+    expect(modalVolumeName(`${sharedPrefix}-one`, "model")).toBe(first);
   });
 
   it("keeps the bounded eval watch below the sandbox maximum with a fixed completion margin", () => {
