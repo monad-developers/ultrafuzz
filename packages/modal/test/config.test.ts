@@ -1,6 +1,10 @@
+import fs, { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import { parseModalBenchmarkConfig } from "../src/config.js";
+import { fingerprintModalConfigFile, fingerprintModalModel, parseModalBenchmarkConfig } from "../src/config.js";
 import { DEFAULT_BENCHMARK_MODELS, MODAL_BENCHMARK_SCHEMA_VERSION } from "../src/defaults.js";
 
 function minimalConfig(): Record<string, unknown> {
@@ -78,5 +82,17 @@ describe("Modal benchmark config", () => {
 
     expect(config.ground_truth.expected_findings).toBe(2);
     expect(config.braintrust.judge_credential_ttl_seconds).toBe(57_600);
+  });
+
+  it("fingerprints exact configuration bytes and every model field", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-config-"));
+    const file = path.join(root, "config.json");
+    fs.writeFileSync(file, '{"value":1}\n');
+    const first = fingerprintModalConfigFile(file);
+    fs.writeFileSync(file, '{ "value": 1 }\n');
+    expect(fingerprintModalConfigFile(file)).not.toBe(first);
+    expect(fingerprintModalModel(DEFAULT_BENCHMARK_MODELS[0]!)).not.toBe(
+      fingerprintModalModel({ ...DEFAULT_BENCHMARK_MODELS[0]!, reasoning: "different" })
+    );
   });
 });

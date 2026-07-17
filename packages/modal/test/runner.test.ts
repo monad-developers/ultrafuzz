@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   createTrackedSourceArchive,
   modalImageBuildCommand,
+  modalSandboxName,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand
 } from "../src/runner.js";
@@ -46,6 +47,24 @@ describe("Modal worker identity", () => {
     expect(command).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/claude'");
     expect(command).toContain("runuser -u ubuntu -- env HOME='/home/ubuntu'");
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
+    expect(command).toContain("/run/ultrafuzz-config/lineage.json");
+  });
+
+  it("gives each generation attempt a bounded unique sandbox name", () => {
+    const first = modalSandboxName("logical-run", {
+      slug: "model-one",
+      generation: 1,
+      attempt: 1,
+      attempt_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    });
+    const second = modalSandboxName("logical-run", {
+      slug: "model-one",
+      generation: 1,
+      attempt: 2,
+      attempt_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    });
+    expect(first.length).toBeLessThanOrEqual(64);
+    expect(first).not.toBe(second);
   });
 
   it("maps only /data children into the volume-relative root", () => {

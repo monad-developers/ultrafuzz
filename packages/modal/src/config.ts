@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 import { z } from "zod/v4";
@@ -97,4 +98,25 @@ export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig 
 export function loadModalBenchmarkConfig(filePath: string): ModalBenchmarkConfig {
   const absolute = path.resolve(filePath);
   return parseModalBenchmarkConfig(JSON.parse(fs.readFileSync(absolute, "utf8")) as unknown);
+}
+
+export function fingerprintModalConfigFile(filePath: string): string {
+  return createHash("sha256")
+    .update(fs.readFileSync(path.resolve(filePath)))
+    .digest("hex");
+}
+
+export function fingerprintModalModel(model: ModalModelSpec): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        slug: model.slug,
+        model: model.model,
+        provider: model.provider,
+        agent: model.agent,
+        reasoning: model.reasoning,
+        auth_mode: model.auth_mode
+      })
+    )
+    .digest("hex");
 }
