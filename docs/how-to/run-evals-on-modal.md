@@ -47,11 +47,11 @@ Opus 4.8, with `loops` fixed to `1`.
   "schema_version": "ultrafuzz.modal.benchmark.v1",
   "run_id": "example-run",
   "target": {
-    "repo": "https://example.invalid/private-target.git",
+    "repo": "https://example.invalid/subject.git",
     "ref": "full-commit-sha"
   },
   "ground_truth": {
-    "repo": "https://example.invalid/private-ground-truth.git",
+    "repo": "https://example.invalid/reference-findings.git",
     "ref": "full-commit-sha",
     "file": "findings.yml"
   },
