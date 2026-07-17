@@ -21,6 +21,7 @@ import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResul
 
 const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.string().min(1);
+const LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v1" as const;
 const modelSchema = z
   .object({
     slug: z.string().min(1),
@@ -210,6 +211,43 @@ const launchStateSchema = z
     }
   });
 
+const legacyLaunchRecordSchema = modelSchema
+  .extend({
+    sandbox_id: z.string().min(1),
+    volume_name: z.string().min(1),
+    remote_root: z.string().min(1),
+    launched_at: timestampSchema
+  })
+  .strict();
+
+const legacyLaunchStateSchema = z
+  .object({
+    schema_version: z.literal(LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
+    run_id: z.string().min(1),
+    app: z.string().min(1),
+    image: z.string().min(1),
+    timeout_ms: z.number().int().positive(),
+    source_revision: z.string().min(1),
+    launches: z.array(legacyLaunchRecordSchema)
+  })
+  .strict()
+  .superRefine((state, context) => {
+    const slugs = new Set<string>();
+    for (const launch of state.launches) {
+      if (slugs.has(launch.slug)) {
+        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
+      }
+      slugs.add(launch.slug);
+    }
+  });
+
+type LegacyModalLaunchState = z.infer<typeof legacyLaunchStateSchema>;
+
+export interface ModalLaunchStateCompatibilityContext {
+  imageId: string;
+  fingerprints: ModalLineageFingerprints;
+}
+
 const workerLineageSchema = z
   .object({
     schema_version: z.literal(MODAL_WORKER_LINEAGE_SCHEMA_VERSION),
@@ -318,6 +356,20 @@ export function parseModalLaunchState(value: unknown): ModalLaunchState {
   return launchStateSchema.parse(value) as ModalLaunchState;
 }
 
+export function parseCompatibleModalLaunchState(
+  value: unknown,
+  compatibility?: ModalLaunchStateCompatibilityContext
+): ModalLaunchState {
+  const current = launchStateSchema.safeParse(value);
+  if (current.success) return current.data as ModalLaunchState;
+  const legacy = legacyLaunchStateSchema.safeParse(value);
+  if (!legacy.success) return launchStateSchema.parse(value) as ModalLaunchState;
+  if (compatibility === undefined) {
+    throw new Error("legacy Modal launch state requires compatibility context");
+  }
+  return migrateLegacyLaunchState(legacy.data, compatibility);
+}
+
 export function parseModalWorkerLineage(value: unknown): ModalWorkerLineage {
   return workerLineageSchema.parse(value) as ModalWorkerLineage;
 }
@@ -413,6 +465,37 @@ export function createModalLaunchState(input: {
     fingerprints: input.fingerprints,
     launches: [],
     attempt_history: input.attemptHistory ?? []
+  });
+}
+
+function migrateLegacyLaunchState(
+  state: LegacyModalLaunchState,
+  compatibility: ModalLaunchStateCompatibilityContext
+): ModalLaunchState {
+  return parseModalLaunchState({
+    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
+    logical_run_id: state.run_id,
+    generation: 1,
+    generation_mode: "resume",
+    app: state.app,
+    image: state.image,
+    image_id: compatibility.imageId,
+    timeout_ms: state.timeout_ms,
+    source_revision: state.source_revision,
+    fingerprints: compatibility.fingerprints,
+    launches: state.launches.map((launch, index) => ({
+      ...launch,
+      generation: 1,
+      attempt: 1,
+      attempt_id: legacyAttemptId(launch, index),
+      model_fingerprint: fingerprintLegacyModel(launch),
+      workspace_mode: "resume",
+      phase: "launched",
+      reserved_at: launch.launched_at,
+      sandbox_id: launch.sandbox_id,
+      launched_at: launch.launched_at
+    })),
+    attempt_history: []
   });
 }
 
@@ -598,9 +681,15 @@ export function isTransientModalError(error: unknown): boolean {
   return false;
 }
 
-export async function readModalLaunchState(statePath: string): Promise<ModalLaunchState | undefined> {
+export async function readModalLaunchState(
+  statePath: string,
+  compatibility?: ModalLaunchStateCompatibilityContext
+): Promise<ModalLaunchState | undefined> {
   try {
-    return parseModalLaunchState(JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown);
+    return parseCompatibleModalLaunchState(
+      JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown,
+      compatibility
+    );
   } catch (error) {
     if (isNodeError(error, "ENOENT")) return undefined;
     throw error;
@@ -751,6 +840,23 @@ function updateFramed(hash: ReturnType<typeof createHash>, value: string | Buffe
   hash.update("\0");
   hash.update(contents);
   hash.update("\0");
+}
+
+function legacyAttemptId(launch: Pick<ModalLaunchRecord, "slug" | "sandbox_id">, index: number): string {
+  return `legacy-${sha256(`${launch.slug}\0${launch.sandbox_id}\0${index}`).slice(0, 32)}`;
+}
+
+function fingerprintLegacyModel(model: ModalModelSpec): string {
+  return sha256(
+    JSON.stringify({
+      slug: model.slug,
+      model: model.model,
+      provider: model.provider,
+      agent: model.agent,
+      reasoning: model.reasoning,
+      auth_mode: model.auth_mode
+    })
+  );
 }
 
 function sha256(value: string | Buffer): string {

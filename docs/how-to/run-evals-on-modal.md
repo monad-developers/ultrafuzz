@@ -137,6 +137,12 @@ pnpm exec ultrafuzz-modal collect \
   --output .ultrafuzz/modal/results
 ```
 
+Launch-state files written by the earlier Modal runner are upgraded in place on
+the next guarded resume after the current config, source, and image identity are
+captured for hardened lineage checks. Unversioned durable workspaces are not
+resumed; start a fresh generation when an old volume does not contain the
+hardened lineage record.
+
 ## Read status and sanitized results
 
 Runner state (`live`, `exited`, or `missing`) describes the Modal sandbox. The

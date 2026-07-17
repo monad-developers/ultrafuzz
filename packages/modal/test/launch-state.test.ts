@@ -19,6 +19,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalPreModelRetryDelay,
+  parseCompatibleModalLaunchState,
   parseModalWorkerStatus,
   readModalLaunchState,
   reserveModalLaunchAttempt,
@@ -180,6 +181,73 @@ describe("Modal launch ownership", () => {
 });
 
 describe("Modal lineage", () => {
+  it("adapts legacy launch state files for inspection and guarded resume", async () => {
+    const legacy = {
+      schema_version: "ultrafuzz.modal.launch-state.v1",
+      run_id: "logical-run",
+      app: "app-placeholder",
+      image: "image-placeholder",
+      timeout_ms: 60_000,
+      source_revision: "revision-placeholder",
+      launches: [
+        {
+          ...MODEL,
+          sandbox_id: "sandbox-one",
+          volume_name: "volume-placeholder",
+          remote_root: "/data/logical-run/model-one",
+          launched_at: "2026-01-01T00:00:00.000Z"
+        }
+      ]
+    };
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-legacy-state-"));
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(statePath, `${JSON.stringify(legacy, null, 2)}\n`, { mode: 0o600 });
+
+    const migrated = await readModalLaunchState(statePath, {
+      imageId: "image-id-placeholder",
+      fingerprints: {
+        config: CONFIG_FINGERPRINT,
+        source: SOURCE_FINGERPRINT,
+        image: IMAGE_FINGERPRINT
+      }
+    });
+
+    expect(migrated).toMatchObject({
+      schema_version: "ultrafuzz.modal.launch-state.v2",
+      logical_run_id: "logical-run",
+      generation: 1,
+      generation_mode: "resume",
+      image_id: "image-id-placeholder",
+      fingerprints: {
+        config: CONFIG_FINGERPRINT,
+        source: SOURCE_FINGERPRINT,
+        image: IMAGE_FINGERPRINT
+      },
+      launches: [
+        expect.objectContaining({
+          slug: MODEL.slug,
+          generation: 1,
+          attempt: 1,
+          phase: "launched",
+          sandbox_id: "sandbox-one",
+          launched_at: "2026-01-01T00:00:00.000Z"
+        })
+      ],
+      attempt_history: []
+    });
+    expect(migrated!.launches[0]!.attempt_id).toBe(
+      parseCompatibleModalLaunchState(legacy, {
+        imageId: "image-id-placeholder",
+        fingerprints: {
+          config: CONFIG_FINGERPRINT,
+          source: SOURCE_FINGERPRINT,
+          image: IMAGE_FINGERPRINT
+        }
+      }).launches[0]!.attempt_id
+    );
+    expect(() => parseCompatibleModalLaunchState(legacy)).toThrow(/legacy Modal launch state/u);
+  });
+
   it("fails closed on every incompatible checkpoint fingerprint", () => {
     const state = launchState();
     const expected = {

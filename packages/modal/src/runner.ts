@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -35,6 +35,7 @@ import {
   modalLaunchTags,
   modalWorkerLineage,
   parseModalWorkerStatus,
+  parseCompatibleModalLaunchState,
   readModalLaunchState,
   reserveModalLaunchAttempt,
   withModalLaunchStateLock,
@@ -144,7 +145,7 @@ export async function launchModalBenchmark(input: {
       image: fingerprintModalImage(config.image_name, image.imageId)
     };
     return await withModalLaunchStateLock(statePath, async () => {
-      let state = await readModalLaunchState(statePath);
+      let state = await readModalLaunchState(statePath, { imageId: image.imageId, fingerprints });
       if (state === undefined) {
         state = createModalLaunchState({
           logicalRunId: config.run_id,
@@ -189,6 +190,7 @@ export async function launchModalBenchmark(input: {
           imageId: image.imageId,
           fingerprints
         });
+        await writeModalLaunchState(statePath, state);
       }
 
       for (const entry of prepared) {
@@ -485,12 +487,9 @@ export async function modalBenchmarkStatus(input: {
   statePath: string;
   env?: Record<string, string | undefined>;
 }): Promise<Array<Record<string, unknown>>> {
-  const state = await requiredLaunchState(input.statePath);
   const modal = modalClient(input.env);
   try {
-    const app = await modal.apps.fromName(state.app, { createIfMissing: false });
-    const image = await modal.images.fromName(state.image);
-    assertStateImage(state, image);
+    const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
     const rows: Array<Record<string, unknown>> = [];
     for (const launch of state.launches) {
       const probe = await probeModalSandbox(modal, launch.sandbox_id);
@@ -528,12 +527,9 @@ export async function collectModalBenchmark(input: {
   outputDir: string;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
-  const state = await requiredLaunchState(input.statePath);
   const modal = modalClient(input.env);
   try {
-    const app = await modal.apps.fromName(state.app, { createIfMissing: false });
-    const image = await modal.images.fromName(state.image);
-    assertStateImage(state, image);
+    const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
     for (const launch of state.launches) {
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
@@ -626,10 +622,45 @@ function sourceRevision(repoRoot: string): string {
   }
 }
 
-async function requiredLaunchState(statePath: string): Promise<ModalLaunchState> {
-  const state = await readModalLaunchState(path.resolve(statePath));
-  if (state === undefined) throw new Error(`Modal launch state not found: ${path.resolve(statePath)}`);
-  return state;
+async function requiredLaunchStateForInspection(
+  statePath: string,
+  modal: ModalClient
+): Promise<{ state: ModalLaunchState; app: App; image: Image }> {
+  const absolute = path.resolve(statePath);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
+    }
+    throw error;
+  }
+  const metadata = launchStateMetadata(raw);
+  const app = await modal.apps.fromName(metadata.app, { createIfMissing: false });
+  const image = await modal.images.fromName(metadata.image);
+  const state = parseCompatibleModalLaunchState(raw, {
+    imageId: image.imageId,
+    fingerprints: {
+      config: "0".repeat(64),
+      source: "0".repeat(64),
+      image: fingerprintModalImage(metadata.image, image.imageId)
+    }
+  });
+  assertStateImage(state, image);
+  return { state, app, image };
+}
+
+function launchStateMetadata(value: unknown): { app: string; image: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Modal launch state is invalid");
+  }
+  const app = (value as { app?: unknown }).app;
+  const image = (value as { image?: unknown }).image;
+  if (typeof app !== "string" || app.trim() === "" || typeof image !== "string" || image.trim() === "") {
+    throw new Error("Modal launch state is invalid");
+  }
+  return { app, image };
 }
 
 function assertStateImage(state: ModalLaunchState, image: Image): void {
