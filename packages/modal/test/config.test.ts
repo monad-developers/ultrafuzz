@@ -53,7 +53,7 @@ describe("Modal benchmark config", () => {
     expect(() =>
       parseModalBenchmarkConfig({
         ...minimalConfig(),
-        models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeCodeAgent" }]
+        models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeAgent" }]
       })
     ).toThrow(/provider and agent/u);
   });

@@ -15,7 +15,7 @@ export interface ModalModelSpec {
   slug: string;
   model: string;
   provider: ModelProvider;
-  agent: "CodexAgent" | "ClaudeCodeAgent";
+  agent: "CodexAgent" | "ClaudeAgent";
   reasoning: string;
   auth_mode: ModelAuthMode;
 }
@@ -57,7 +57,7 @@ export const DEFAULT_BENCHMARK_MODELS: readonly ModalModelSpec[] = [
     slug: "claude-fable-5",
     model: "claude-fable-5",
     provider: "anthropic",
-    agent: "ClaudeCodeAgent",
+    agent: "ClaudeAgent",
     reasoning: "max",
     auth_mode: "subscription"
   },
@@ -65,7 +65,7 @@ export const DEFAULT_BENCHMARK_MODELS: readonly ModalModelSpec[] = [
     slug: "claude-opus-4-8",
     model: "claude-opus-4-8",
     provider: "anthropic",
-    agent: "ClaudeCodeAgent",
+    agent: "ClaudeAgent",
     reasoning: "max",
     auth_mode: "subscription"
   }

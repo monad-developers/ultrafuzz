@@ -4,7 +4,7 @@ import { remoteAuthDir } from "./layout.js";
 export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number): string {
   const selectedProfile = modelProfileToml(model);
   const codex = agentToml(model, "CodexAgent", "openai");
-  const claude = agentToml(model, "ClaudeCodeAgent", "anthropic");
+  const claude = agentToml(model, "ClaudeAgent", "anthropic");
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
 
