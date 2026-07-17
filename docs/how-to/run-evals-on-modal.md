@@ -18,9 +18,9 @@ environment variable, persistent volume, launch-state file, or log.
 
 Non-secret run state is stored under `/data/<run-id>/<model>/workspace` on a
 private Modal Volume. This preserves Ultrafuzz state, generated tests, reports,
-and Smithers workspaces when a sandbox exits. Each sandbox has a 16-hour
-timeout; eval watching uses 15 hours so scoring and publishing have one hour to
-finish.
+and Smithers workspaces when a sandbox exits. Each sandbox has a 24-hour
+timeout; eval watching stops two hours earlier so terminal persistence, scoring,
+publishing, and volume flushing retain a bounded completion window.
 
 ## Authenticate locally
 
@@ -80,20 +80,51 @@ credential in memory immediately before scoring and never persists it.
 pnpm install
 pnpm --filter @ultrafuzz/modal build
 pnpm exec ultrafuzz-modal build --repo-root .
-pnpm exec ultrafuzz-modal launch --config .ultrafuzz/modal/benchmark.json
+pnpm exec ultrafuzz-modal launch \
+  --config .ultrafuzz/modal/benchmark.json \
+  --mode fresh
 ```
 
 Image staging includes Git-tracked files only. Commit the runner changes you
 intend to build; ignored and untracked benchmark material cannot enter the
 image archive.
 
-To canary one model first, repeat `--model` as needed:
+To canary one model under a new run ID, use non-destructive resume mode and
+repeat `--model` as needed:
 
 ```bash
 pnpm exec ultrafuzz-modal launch \
   --config .ultrafuzz/modal/benchmark.json \
+  --mode resume \
   --model gpt-5-6-sol
 ```
+
+`fresh` starts an explicit generation and must include every configured model.
+For an existing launch-state file, it first proves that no current-generation
+sandbox is live, increments the generation, retains sanitized attempt history,
+and clears each durable workspace. Use a new run ID when the prior volume must
+remain available.
+
+## Resume after a sandbox stops
+
+Resume only after the prior sandbox is no longer running. Use the same private
+config, launch-state file, model selection, and durable volume:
+
+```bash
+pnpm exec ultrafuzz-modal launch \
+  --config .ultrafuzz/modal/benchmark.json \
+  --state .ultrafuzz/modal/example-run/launch-state.json \
+  --mode resume \
+  --model example-model
+```
+
+Resume validates the preserved model, source, configuration, and image identity,
+attaches at most one new worker to the existing volume, and lets the workflow
+engine reuse completed nodes. It does not make a fresh workspace or repeat
+completed work. If the previous sandbox is still live, it remains the owner; if
+another exact-lineage continuation exists, the runner adopts that owner instead
+of launching another. Use `fresh` when run-defining inputs should intentionally
+start a new generation.
 
 The launch command writes an ignored, sanitized launch-state file under
 `.ultrafuzz/modal/<run-id>/launch-state.json`. Use that file for status and
@@ -105,6 +136,61 @@ pnpm exec ultrafuzz-modal collect \
   --state .ultrafuzz/modal/example-run/launch-state.json \
   --output .ultrafuzz/modal/results
 ```
+
+## Read status and sanitized results
+
+Runner state (`live`, `exited`, or `missing`) describes the Modal sandbox. The
+runner combines that state with the exact-attempt worker snapshot to select a
+machine-readable action such as `succeeded`, `resume-required`,
+`transient-operational-failure`, `permanent-operational-failure`, or
+`incompatible-checkpoint`.
+
+Persisted worker snapshots use this separate stable exit taxonomy:
+
+| Worker category              | Meaning                                                                |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `live`                       | A partial checkpoint from a worker that may still make progress.       |
+| `finished`                   | The row and terminal persistence completed normally.                   |
+| `capacity-unavailable`       | Required compute capacity was not available.                           |
+| `authentication-failure`     | A required provider-scoped authentication path could not be used.      |
+| `sandbox-exited`             | The sandbox stopped without a more specific safe classification.       |
+| `unreachable`                | A required service or persistence operation could not be reached.      |
+| `genuine-evaluation-failure` | The workflow finished with verified task failures, not an infra error. |
+
+`status.json` is a replaceable partial or terminal snapshot. `result.json` is
+terminal. Both contain only an allowlisted aggregate contract: monotonic write
+generation, launch generation and attempt, whether model work started, node
+counts, checkpoint age and digest, exit category, runtime, aggregate usage,
+pricing provenance, and a generic diagnostic code. They never contain
+source text, prompts, findings, provider output, exception text, or raw
+artifacts. `collect` preserves this boundary; investigate sensitive run data on
+the private volume under the repository's normal access controls.
+
+## Run the opt-in real-Modal smoke
+
+The smoke is a dedicated cloud command, not part of `test`, and has no
+environment toggle. Build and publish the current production image first, then
+run each provider independently so one authentication path is never a
+prerequisite for the other:
+
+```bash
+pnpm --filter @ultrafuzz/modal smoke -- --provider openai
+pnpm --filter @ultrafuzz/modal smoke -- --provider anthropic
+```
+
+Each invocation uses the published production image and its installed compiled
+smoke entrypoint with a tiny generic state fixture. It checks the selected
+subscription-auth path without copying the other provider's credential, asserts
+the worker is non-root, writes to a Modal Volume, terminates the first sandbox
+after one unit completes, resumes on that same volume, verifies the completed
+unit was not repeated, and races two continuation requests to prove that
+exactly one owns the launch. The temporary volume is closed after the run, and
+the command prints only boolean checks and aggregate counts.
+
+The smoke lane intentionally does not implement benchmark runner recovery,
+worker checkpointing, or result classification. Those core integrations must
+land from their owning lanes; a smoke failure must remain a blocker rather than
+being bypassed with a test toggle or a smoke-only runner branch.
 
 The Modal entrypoint stages mounts and runtime-only credentials as root, then
 changes ownership of only those run-scoped paths and executes the worker as the

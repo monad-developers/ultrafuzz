@@ -5,5 +5,7 @@ export * from "./layout.js";
 export * from "./launch-state.js";
 export * from "./runner.js";
 export * from "./resume.js";
+export * from "./smoke-modal.js";
+export * from "./smoke.js";
 export * from "./terminal-disposition.js";
 export * from "./worker-result.js";
