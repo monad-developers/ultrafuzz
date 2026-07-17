@@ -782,6 +782,7 @@ export async function withModalLaunchStateLock<T>(
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 25;
   const token = options.token ?? randomUUID();
+  const pidStartTicks = readProcessStartTicksSync(process.pid);
   const deadline = now() + timeoutMs;
   await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   let handle;
@@ -790,7 +791,12 @@ export async function withModalLaunchStateLock<T>(
       const candidate = await open(lockPath, "wx", 0o600);
       try {
         await candidate.writeFile(
-          `${JSON.stringify({ token, pid: process.pid, created_at: new Date(now()).toISOString() })}\n`
+          `${JSON.stringify({
+            token,
+            pid: process.pid,
+            ...(pidStartTicks === undefined ? {} : { pid_start_ticks: pidStartTicks }),
+            created_at: new Date(now()).toISOString()
+          })}\n`
         );
         await candidate.sync();
         handle = candidate;
@@ -903,7 +909,7 @@ function sha256(value: string | Buffer): string {
 
 interface ObservedLaunchLock {
   identity: string;
-  owner: { token?: unknown; pid?: unknown } | undefined;
+  owner: { token?: unknown; pid?: unknown; pid_start_ticks?: unknown } | undefined;
   dead: boolean;
 }
 
@@ -913,7 +919,7 @@ async function observeLaunchLock(lockPath: string): Promise<ObservedLaunchLock |
     const metadata = await stat(lockPath);
     let owner: ObservedLaunchLock["owner"];
     try {
-      owner = JSON.parse(contents) as { token?: unknown; pid?: unknown };
+      owner = JSON.parse(contents) as { token?: unknown; pid?: unknown; pid_start_ticks?: unknown };
     } catch {
       owner = undefined;
     }
@@ -921,7 +927,13 @@ async function observeLaunchLock(lockPath: string): Promise<ObservedLaunchLock |
     if (typeof owner?.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
       try {
         process.kill(owner.pid, 0);
-        dead = false;
+        const expectedStartTicks = owner.pid_start_ticks;
+        const actualStartTicks =
+          typeof expectedStartTicks === "string" ? await readProcessStartTicks(owner.pid) : undefined;
+        dead =
+          typeof expectedStartTicks === "string" && actualStartTicks !== undefined
+            ? actualStartTicks !== expectedStartTicks
+            : false;
       } catch (error) {
         dead = isNodeError(error, "ESRCH");
       }
@@ -957,6 +969,33 @@ async function reclaimDeadLaunchLock(lockPath: string): Promise<boolean> {
     await claim.close().catch(() => undefined);
     await unlink(claimPath).catch(() => undefined);
   }
+}
+
+function readProcessStartTicksSync(pid: number): string | undefined {
+  try {
+    return parseProcessStartTicks(readFileSync(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+async function readProcessStartTicks(pid: number): Promise<string | undefined> {
+  try {
+    return parseProcessStartTicks(await readFile(`/proc/${pid}/stat`, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function parseProcessStartTicks(contents: string): string | undefined {
+  const commandEnd = contents.lastIndexOf(") ");
+  if (commandEnd === -1) return undefined;
+  const fieldsFromState = contents
+    .slice(commandEnd + 2)
+    .trim()
+    .split(/\s+/u);
+  const startTicks = fieldsFromState[19];
+  return startTicks !== undefined && /^\d+$/u.test(startTicks) ? startTicks : undefined;
 }
 
 function isNodeError(error: unknown, code: string): boolean {

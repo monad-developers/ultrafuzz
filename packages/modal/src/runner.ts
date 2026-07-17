@@ -1,9 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { ModalClient, NotFoundError, type App, type Image, type Sandbox, type Volume } from "modal";
+import {
+  ModalClient,
+  NotFoundError,
+  SandboxFilesystemNotFoundError,
+  type App,
+  type Image,
+  type Sandbox,
+  type Volume
+} from "modal";
 
 import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
 import {
@@ -50,6 +58,7 @@ import {
 import {
   REMOTE_CONFIG_DIR,
   REMOTE_CONFIG_PATH,
+  REMOTE_LAUNCH_READY_PATH,
   REMOTE_LINEAGE_PATH,
   modalVolumeName,
   persistentDataRoot,
@@ -218,6 +227,13 @@ interface LaunchModelInput {
   secrets: Record<string, string>;
 }
 
+export interface ModalLaunchStagingInput {
+  configPath: string;
+  statePath: string;
+  state: ModalLaunchState;
+  auth?: SubscriptionAuthCopy;
+}
+
 async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
   let record = input.state.launches.find((launch) => launch.slug === input.model.slug);
   const modelFingerprint = fingerprintModalModel(input.model);
@@ -242,24 +258,15 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       if (orphan !== undefined) {
         markModalSandboxCreated(record, orphan.sandboxId);
         await writeModalLaunchState(input.statePath, input.state);
-        await finishReservedLaunch(input, record, orphan);
+        await recoverExistingSandboxLaunch(input, record, orphan);
         return;
       }
     }
     const probe = await probeModalSandbox(input.modal, record.sandbox_id);
     if (probe.state === "live") {
-      if (record.phase === "sandbox-created") {
+      if (record.phase === "sandbox-created" || record.phase === "launched") {
         const sandbox = await input.modal.sandboxes.fromId(record.sandbox_id!);
-        try {
-          await finishReservedLaunch(input, record, sandbox);
-        } catch (error) {
-          markModalLaunchFailed(
-            record,
-            isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure"
-          );
-          await writeModalLaunchState(input.statePath, input.state);
-          throw error;
-        }
+        await recoverExistingSandboxLaunch(input, record, sandbox);
       }
       return;
     }
@@ -334,33 +341,80 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       // that dies in the tiny create/commit window is recovered by exact tags.
       markModalSandboxCreated(record, sandbox.sandboxId);
       await writeModalLaunchState(input.statePath, input.state);
-      await finishReservedLaunch(input, record, sandbox);
+      await finishReservedModalLaunch(input, record, sandbox);
       return;
     } catch (error) {
-      await sandbox?.terminate({ wait: true }).catch(() => undefined);
+      const modelMayHaveStarted = record.phase === "launched";
+      const terminationConfirmed = sandbox === undefined ? true : await terminateModalSandbox(sandbox);
       const category = isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
       markModalLaunchFailed(record, category);
       await writeModalLaunchState(input.statePath, input.state);
+      if (!terminationConfirmed) {
+        throw new Error("could not confirm Modal sandbox termination", { cause: error });
+      }
+      if (modelMayHaveStarted) {
+        throw new Error("Modal launch readiness was uncertain", { cause: error });
+      }
       if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
 }
 
-async function finishReservedLaunch(
+async function recoverExistingSandboxLaunch(
   input: LaunchModelInput,
   record: ModalLaunchRecord,
   sandbox: Sandbox
 ): Promise<void> {
   try {
+    await finishReservedModalLaunch(input, record, sandbox);
+  } catch (error) {
+    const modelMayHaveStarted = record.phase === "launched";
+    const terminationConfirmed = await terminateModalSandbox(sandbox);
+    markModalLaunchFailed(
+      record,
+      isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure"
+    );
+    await writeModalLaunchState(input.statePath, input.state);
+    if (!terminationConfirmed) {
+      throw new Error("could not confirm Modal sandbox termination", { cause: error });
+    }
+    if (modelMayHaveStarted) {
+      throw new Error("Modal launch readiness was uncertain", { cause: error });
+    }
+    throw error;
+  }
+}
+
+export async function finishReservedModalLaunch(
+  input: ModalLaunchStagingInput,
+  record: ModalLaunchRecord,
+  sandbox: Sandbox
+): Promise<void> {
+  const publishedAttempt = await readOptionalModalSandboxText(sandbox.filesystem, REMOTE_LAUNCH_READY_PATH);
+  if (publishedAttempt !== undefined) {
+    if (publishedAttempt.trim() !== record.attempt_id) {
+      throw new Error("incompatible Modal launch readiness marker");
+    }
+    if (record.phase === "sandbox-created") {
+      markModalLaunchReady(record);
+      await writeModalLaunchState(input.statePath, input.state);
+    } else if (record.phase !== "launched") {
+      throw new Error(`cannot recover launch readiness from a ${record.phase} launch`);
+    }
+    sandbox.detach();
+    return;
+  }
+
+  if (record.phase === "sandbox-created") {
     await stageLaunchFiles(sandbox, input.configPath, modalWorkerLineage(input.state, record), input.auth);
     markModalLaunchReady(record);
     await writeModalLaunchState(input.statePath, input.state);
-    sandbox.detach();
-  } catch (error) {
-    await sandbox.terminate({ wait: true }).catch(() => undefined);
-    throw error;
+  } else if (record.phase !== "launched") {
+    throw new Error(`cannot finish a ${record.phase} launch`);
   }
+  await publishLaunchReady(sandbox, record.attempt_id);
+  sandbox.detach();
 }
 
 async function stageLaunchFiles(
@@ -384,6 +438,27 @@ async function stageLaunchFiles(
     }
   } finally {
     await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function publishLaunchReady(sandbox: Sandbox, attemptId: string): Promise<void> {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-ready-"));
+  const readyPath = path.join(temporary, "launch-ready");
+  try {
+    await writeFile(readyPath, `${attemptId}\n`, { mode: 0o600 });
+    await sandbox.filesystem.copyFromLocal(readyPath, REMOTE_LAUNCH_READY_PATH);
+    await runChecked(sandbox, ["chmod", "600", REMOTE_LAUNCH_READY_PATH]);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function terminateModalSandbox(sandbox: Sandbox): Promise<boolean> {
+  try {
+    await sandbox.terminate({ wait: true });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -472,6 +547,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     `until test -s '${REMOTE_CONFIG_PATH}'; do sleep 1; done`,
     `until test -s '${REMOTE_LINEAGE_PATH}'; do sleep 1; done`,
     ...(authPath === undefined ? [] : [`until test -s '${authPath}'; do sleep 1; done`]),
+    `until test -s '${REMOTE_LAUNCH_READY_PATH}'; do sleep 1; done`,
     'volume_root="$(realpath /data)"',
     'data_root="$volume_root/$ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT"',
     `install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} "$data_root"`,
@@ -718,12 +794,24 @@ async function readVolumeFiles(
   try {
     const files: Record<string, string> = {};
     for (const name of names) {
-      const contents = await inspector.filesystem.readText(path.posix.join(root, name)).catch(() => undefined);
+      const contents = await readOptionalModalSandboxText(inspector.filesystem, path.posix.join(root, name));
       if (contents !== undefined) files[name] = contents;
     }
     return files;
   } finally {
     await inspector.terminate({ wait: true });
+  }
+}
+
+export async function readOptionalModalSandboxText(
+  filesystem: Pick<Sandbox["filesystem"], "readText">,
+  filePath: string
+): Promise<string | undefined> {
+  try {
+    return await filesystem.readText(filePath);
+  } catch (error) {
+    if (error instanceof SandboxFilesystemNotFoundError) return undefined;
+    throw error;
   }
 }
 
@@ -776,7 +864,14 @@ export async function replaceSanitizedModalCollectedFiles(
     for (const name of MODAL_COLLECT_RESULT_FILES) {
       const contents = files[name];
       if (contents === undefined) continue;
-      await writeFile(path.join(staging, name), contents, { mode: 0o600, flag: "wx" });
+      const staged = path.join(staging, name);
+      const handle = await open(staged, "wx", 0o600);
+      try {
+        await handle.writeFile(contents, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
     }
     for (const name of MODAL_COLLECT_RESULT_FILES) {
       const staged = path.join(staging, name);
@@ -794,8 +889,18 @@ export async function replaceSanitizedModalCollectedFiles(
         if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
       });
     }
+    await syncDirectory(output);
   } finally {
     await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const directory = await open(directoryPath, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
   }
 }
 

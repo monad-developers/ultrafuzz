@@ -336,7 +336,8 @@ export async function runWithTerminalPersistence(input: {
 
 export async function readWorkerCheckpoint(projectRoot: string, nowMs = Date.now()): Promise<WorkerCheckpointSnapshot> {
   const runsRoot = path.join(projectRoot, ".ultrafuzz", "runs");
-  for (const run of (await readdir(runsRoot).catch(() => [])).sort().reverse()) {
+  const runs = await readdirIfExists(runsRoot);
+  for (const run of runs.sort().reverse()) {
     const runRoot = path.join(runsRoot, run);
     const statePath = path.join(runRoot, "state.json");
     try {
@@ -355,7 +356,8 @@ export async function readWorkerCheckpoint(projectRoot: string, nowMs = Date.now
         usage: aggregateUsage(metadata),
         ...(pricing === undefined ? {} : { pricing })
       };
-    } catch {
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT") && !(error instanceof SyntaxError)) throw error;
       // A missing or mid-write checkpoint is reported as unavailable, never copied into the result.
     }
   }
@@ -409,6 +411,19 @@ async function readJsonRecord(filePath: string): Promise<Record<string, unknown>
   } catch {
     return undefined;
   }
+}
+
+async function readdirIfExists(directoryPath: string): Promise<string[]> {
+  try {
+    return await readdir(directoryPath);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return [];
+    throw error;
+  }
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {

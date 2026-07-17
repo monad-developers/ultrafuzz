@@ -2,7 +2,15 @@ import { access } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import { AlreadyExistsError, ModalClient, type App, type Image, type Sandbox, type Volume } from "modal";
+import {
+  AlreadyExistsError,
+  ModalClient,
+  SandboxFilesystemNotFoundError,
+  type App,
+  type Image,
+  type Sandbox,
+  type Volume
+} from "modal";
 
 import { subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
 import { DEFAULT_MODAL_APP, DEFAULT_MODAL_IMAGE, type ModelProvider } from "./defaults.js";
@@ -146,7 +154,12 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
     const sandbox = this.sandboxFor(launch);
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const contents = await sandbox.filesystem.readText(filePath).catch(() => undefined);
+      let contents: string | undefined;
+      try {
+        contents = await sandbox.filesystem.readText(filePath);
+      } catch (error) {
+        if (!(error instanceof SandboxFilesystemNotFoundError)) throw error;
+      }
       if (contents !== undefined) return JSON.parse(contents) as unknown;
       const exitCode = await sandbox.poll();
       if (exitCode !== null) throw new Error("smoke worker exited before evidence was ready");

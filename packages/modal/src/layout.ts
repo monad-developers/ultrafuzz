@@ -6,6 +6,7 @@ import type { ModelProvider } from "./defaults.js";
 export const REMOTE_CONFIG_PATH = "/run/ultrafuzz-config/benchmark.json";
 export const REMOTE_CONFIG_DIR = path.posix.dirname(REMOTE_CONFIG_PATH);
 export const REMOTE_LINEAGE_PATH = path.posix.join(REMOTE_CONFIG_DIR, "lineage.json");
+export const REMOTE_LAUNCH_READY_PATH = path.posix.join(REMOTE_CONFIG_DIR, "launch-ready");
 
 export const PERSISTED_LINEAGE_FILE = "lineage.json";
 

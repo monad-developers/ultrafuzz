@@ -4,18 +4,40 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
+import { describe, expect, it, vi } from "vitest";
 
+import { fingerprintModalModel } from "../src/config.js";
+import type { ModalModelSpec } from "../src/defaults.js";
+import {
+  createModalLaunchState,
+  markModalSandboxCreated,
+  readModalLaunchState,
+  reserveModalLaunchAttempt,
+  writeModalLaunchState
+} from "../src/launch-state.js";
+import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } from "../src/layout.js";
 import {
   MODAL_COLLECT_RESULT_FILES,
   assertSanitizedModalCollectedFiles,
   createTrackedSourceArchive,
+  finishReservedModalLaunch,
   modalImageBuildCommand,
   modalSandboxName,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
+  readOptionalModalSandboxText,
   replaceSanitizedModalCollectedFiles
 } from "../src/runner.js";
+
+const MODEL: ModalModelSpec = {
+  slug: "model-one",
+  model: "model-placeholder",
+  provider: "openai",
+  agent: "CodexAgent",
+  reasoning: "high",
+  auth_mode: "api-key"
+};
 
 describe("Modal image source staging", () => {
   it("archives tracked files only", () => {
@@ -131,6 +153,92 @@ describe("Modal worker identity", () => {
     expect(command).toContain("runuser -u ubuntu -- env HOME='/home/ubuntu'");
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
     expect(command).toContain("/run/ultrafuzz-config/lineage.json");
+    expect(command).toContain("/run/ultrafuzz-config/launch-ready");
+  });
+
+  it("publishes worker readiness only after launch state and all staged inputs are durable", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-staging-"));
+    const configPath = path.join(root, "benchmark.json");
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(configPath, "{}\n", { mode: 0o600 });
+    const state = createModalLaunchState({
+      logicalRunId: "logical-run",
+      generation: 1,
+      generationMode: "resume",
+      app: "app-placeholder",
+      image: "image-placeholder",
+      imageId: "image-id-placeholder",
+      timeoutMs: 60_000,
+      sourceRevision: "revision-placeholder",
+      fingerprints: { config: "a".repeat(64), source: "b".repeat(64), image: "c".repeat(64) }
+    });
+    const record = reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      attemptId: "attempt-one"
+    });
+    markModalSandboxCreated(record, "sandbox-one");
+    await writeModalLaunchState(statePath, state);
+
+    const copied: string[] = [];
+    let readinessObservedDurableState = false;
+    const sandbox = {
+      filesystem: {
+        readText: vi.fn(async () => {
+          throw new SandboxFilesystemNotFoundError("missing");
+        }),
+        copyFromLocal: vi.fn(async (_localPath: string, remotePath: string) => {
+          if (remotePath === REMOTE_LAUNCH_READY_PATH) {
+            const persisted = await readModalLaunchState(statePath);
+            readinessObservedDurableState = persisted?.launches[0]?.phase === "launched";
+          }
+          copied.push(remotePath);
+        })
+      },
+      exec: vi.fn(async () => ({
+        stdin: new WritableStream<string>(),
+        stdout: emptyReadableStream(),
+        stderr: emptyReadableStream(),
+        wait: async () => 0
+      })),
+      detach: vi.fn()
+    } as unknown as Sandbox;
+
+    await finishReservedModalLaunch({ configPath, statePath, state }, record, sandbox);
+
+    expect(copied).toEqual([REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH, REMOTE_LAUNCH_READY_PATH]);
+    expect(readinessObservedDurableState).toBe(true);
+    expect((await readModalLaunchState(statePath))?.launches[0]?.phase).toBe("launched");
+    expect(sandbox.detach).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats only an explicit remote not-found as an absent persisted file", async () => {
+    await expect(
+      readOptionalModalSandboxText(
+        {
+          readText: async () => {
+            throw new SandboxFilesystemNotFoundError("missing");
+          }
+        },
+        "/data/status.json"
+      )
+    ).resolves.toBeUndefined();
+
+    const failure = new Error("generic remote read failure");
+    await expect(
+      readOptionalModalSandboxText(
+        {
+          readText: async () => {
+            throw failure;
+          }
+        },
+        "/data/status.json"
+      )
+    ).rejects.toBe(failure);
   });
 
   it("gives each generation attempt a bounded unique sandbox name", () => {
@@ -155,3 +263,11 @@ describe("Modal worker identity", () => {
     expect(() => modalVolumeRelativeRoot("/outside/run-one")).toThrow("must be a child of /data");
   });
 });
+
+function emptyReadableStream(): ReadableStream<string> {
+  return new ReadableStream<string>({
+    start(controller) {
+      controller.close();
+    }
+  });
+}

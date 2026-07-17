@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,18 +8,21 @@ import {
 } from "../src/defaults.js";
 import {
   REMOTE_CONFIG_PATH,
+  REMOTE_LAUNCH_READY_PATH,
   REMOTE_LINEAGE_PATH,
   modalVolumeName,
   persistentWorkspaceRoot,
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "../src/layout.js";
+import { modalEvalRunCommand } from "../src/resume.js";
 
 describe("Modal storage layout", () => {
   it("persists workspaces while keeping config and auth ephemeral", () => {
     expect(persistentWorkspaceRoot("run-1", "model-1")).toBe("/data/run-1/model-1/workspace");
     expect(REMOTE_CONFIG_PATH).toBe("/run/ultrafuzz-config/benchmark.json");
     expect(REMOTE_LINEAGE_PATH).toBe("/run/ultrafuzz-config/lineage.json");
+    expect(REMOTE_LAUNCH_READY_PATH).toBe("/run/ultrafuzz-config/launch-ready");
     expect(remoteAuthPath("openai")).toBe("/run/ultrafuzz-auth/codex/auth.json");
     expect(remoteAuthPath("anthropic")).toBe("/run/ultrafuzz-auth/claude/.credentials.json");
   });
@@ -43,10 +44,13 @@ describe("Modal storage layout", () => {
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBe(MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS);
     expect(EVAL_WATCH_TIMEOUT_SECONDS * 1000).toBeLessThan(MODAL_SANDBOX_TIMEOUT_MS);
 
-    const runnerSource = fs.readFileSync(new URL("../src/runner.ts", import.meta.url), "utf8");
-    const workerSource = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
-    expect(runnerSource).toContain("timeoutMs: MODAL_SANDBOX_TIMEOUT_MS");
-    expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
+    const command = modalEvalRunCommand({
+      cliPath: "/opt/tool/cli.js",
+      controlRoot: "/workspace/control",
+      suitePath: "/workspace/control/suite.yml",
+      evalRunId: "evaluation-one"
+    });
+    expect(command[command.indexOf("--watch-timeout-seconds") + 1]).toBe(String(EVAL_WATCH_TIMEOUT_SECONDS));
   });
 
   it("maps only trusted /data children through the resolved Modal mount", () => {

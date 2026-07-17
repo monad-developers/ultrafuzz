@@ -155,6 +155,24 @@ describe("Modal launch ownership", () => {
     expect(fs.readdirSync(root).filter((name) => name.includes(".reclaim-"))).toEqual([]);
   });
 
+  it("reclaims a stale lock when its PID has been reused by another process", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-reused-pid-lock-"));
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(
+      `${statePath}.lock`,
+      `${JSON.stringify({
+        token: "crashed-owner",
+        pid: process.pid,
+        pid_start_ticks: "0",
+        created_at: "2026-01-01T00:00:00.000Z"
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    await expect(withModalLaunchStateLock(statePath, async () => "new-owner")).resolves.toBe("new-owner");
+    expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+  });
+
   it("persists reservation, sandbox identity, readiness, and replacement provenance", () => {
     const state = launchState();
     const first = reserveModalLaunchAttempt({

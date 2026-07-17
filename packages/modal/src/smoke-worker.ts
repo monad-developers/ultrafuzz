@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import type { ModelProvider } from "./defaults.js";
@@ -71,7 +73,25 @@ async function completeUnitOnce(): Promise<boolean> {
 }
 
 async function writeJson(filePath: string, value: Record<string, unknown>): Promise<void> {
-  await writeFile(filePath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, filePath);
+    const directory = await open(path.dirname(filePath), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+  }
 }
 
 async function flushWrites(): Promise<void> {

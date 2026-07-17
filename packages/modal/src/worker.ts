@@ -30,6 +30,8 @@ import {
 } from "./layout.js";
 import {
   locateModalResumeWorkspace,
+  modalDurableResumeCommand,
+  modalEvalRunCommand,
   repairModalEvalRunRecord,
   type ModalResumeRunState,
   type ModalResumeWorkspace
@@ -105,28 +107,18 @@ async function main(): Promise<void> {
         const prepared = await prepareWorkspace();
         target = prepared.target;
         ({ control, evalRunId } = prepared);
+        await flushVolume();
         modelWorkStarted = true;
         await writer.writePartial(await readWorkerCheckpoint(target));
         terminalDisposition = await runBenchmarkExecutionOnce(
           () =>
             runEval(
-              [
-                "node",
-                CLI,
-                "eval",
-                "run",
-                "--project",
-                control,
-                "--suite",
-                prepared.suitePath,
-                "--provider",
-                "braintrust",
-                "--eval-run-id",
-                evalRunId,
-                "--watch-timeout-seconds",
-                String(EVAL_WATCH_TIMEOUT_SECONDS),
-                "--json"
-              ],
+              modalEvalRunCommand({
+                cliPath: CLI,
+                controlRoot: control,
+                suitePath: prepared.suitePath,
+                evalRunId
+              }),
               target!,
               writer
             ),
@@ -223,7 +215,7 @@ async function ensurePersistentLineage(): Promise<void> {
     return;
   }
 
-  const existingWorkspace = (await readdir(WORK_ROOT).catch(() => [])).length > 0;
+  const existingWorkspace = (await readdirIfExists(WORK_ROOT)).length > 0;
   if (existingWorkspace && LINEAGE.workspace_mode !== "fresh") {
     throw new CheckpointIncompatibleError("unversioned persistent workspace cannot be resumed");
   }
@@ -255,7 +247,7 @@ async function clearFreshGeneration(): Promise<void> {
 
 async function hasExistingEvalWorkspace(): Promise<boolean> {
   const evalRoot = path.join(WORK_ROOT, "control", ".ultrafuzz", "evals", "runs");
-  return (await readdir(evalRoot).catch(() => [])).length > 0;
+  return (await readdirIfExists(evalRoot)).length > 0;
 }
 
 async function resumeExistingEvaluation(
@@ -272,9 +264,15 @@ async function resumeExistingEvaluation(
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
   let disposition = await terminalDispositionForState(workspace, state);
   if (!isTerminalRunStatus(state.status)) {
-    await runChecked(["node", CLI, "resume", state.run_id, "--project", workspace.target, "--json"], {
-      label: "resume durable run"
-    });
+    const resumeRunId = state.run_id;
+    await runBenchmarkExecutionOnce(
+      () =>
+        runChecked(modalDurableResumeCommand(CLI, resumeRunId, workspace.target), {
+          label: "resume durable run",
+          failureCategory: "unreachable"
+        }),
+      () => inspectTerminalDisposition(workspace.target)
+    );
     state = await waitForTerminalRun(workspace, writer);
     disposition = await terminalDispositionForState(workspace, state);
   }
@@ -302,7 +300,8 @@ async function waitForTerminalRun(
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
   while (Date.now() < deadline) {
     await runChecked(["node", CLI, "inspect", workspace.productRunId, "--project", workspace.target, "--json"], {
-      label: "sync resumed run"
+      label: "sync resumed run",
+      failureCategory: "unreachable"
     });
     const state = await durableRunState(workspace.target, workspace.productRunId);
     if (state !== undefined) {
@@ -319,7 +318,7 @@ function isTerminalRunStatus(status: string | undefined): boolean {
 }
 
 async function prepareWorkspace(): Promise<{ target: string; control: string; suitePath: string; evalRunId: string }> {
-  const existing = await readdir(WORK_ROOT).catch(() => []);
+  const existing = await readdirIfExists(WORK_ROOT);
   const target = path.join(WORK_ROOT, "target");
   const control = path.join(WORK_ROOT, "control");
   const groundTruth = path.join(WORK_ROOT, "ground-truth");
@@ -434,7 +433,7 @@ async function cloneAtRef(repo: string, ref: string, destination: string, label:
 
 async function configureTarget(target: string): Promise<void> {
   const agentsPath = path.join(target, "AGENTS.md");
-  const existingAgents = await readFile(agentsPath, "utf8").catch(() => "");
+  const existingAgents = (await readTextIfExists(agentsPath)) ?? "";
   await writeFile(
     agentsPath,
     `# Authorized defensive benchmark\n\nThis checkout is being analyzed in an isolated, sanctioned defensive security benchmark. Work only on this checkout and local test or fuzz tooling.\n\n${existingAgents}`
@@ -537,7 +536,7 @@ async function reportProgress(target: string, writer: WorkerResultWriter): Promi
 }
 
 async function durableRunState(target: string, expectedRunId?: string): Promise<ModalResumeRunState | undefined> {
-  const available = await readdir(path.join(target, ".ultrafuzz/runs")).catch(() => []);
+  const available = await readdirIfExists(path.join(target, ".ultrafuzz/runs"));
   const runs =
     expectedRunId === undefined ? available.sort().reverse() : available.filter((run) => run === expectedRunId);
   for (const run of runs) {
@@ -660,6 +659,28 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
 
 class CheckpointIncompatibleError extends Error {
   override readonly name = "CheckpointIncompatibleError";
+}
+
+async function readdirIfExists(directoryPath: string): Promise<string[]> {
+  try {
+    return await readdir(directoryPath);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return [];
+    throw error;
+  }
+}
+
+async function readTextIfExists(filePath: string): Promise<string | undefined> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function sleep(ms: number): Promise<void> {

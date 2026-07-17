@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/p
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
+import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
 
 export interface ModalResumeWorkspace {
@@ -16,6 +17,35 @@ export interface ModalResumeRunState {
   run_id: string;
   status?: string;
   nodes?: Record<string, { status?: string }>;
+}
+
+export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
+  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--json"];
+}
+
+export function modalEvalRunCommand(input: {
+  cliPath: string;
+  controlRoot: string;
+  suitePath: string;
+  evalRunId: string;
+}): string[] {
+  return [
+    "node",
+    input.cliPath,
+    "eval",
+    "run",
+    "--project",
+    input.controlRoot,
+    "--suite",
+    input.suitePath,
+    "--provider",
+    "braintrust",
+    "--eval-run-id",
+    input.evalRunId,
+    "--watch-timeout-seconds",
+    String(EVAL_WATCH_TIMEOUT_SECONDS),
+    "--json"
+  ];
 }
 
 export async function locateModalResumeWorkspace(workRoot: string): Promise<ModalResumeWorkspace> {

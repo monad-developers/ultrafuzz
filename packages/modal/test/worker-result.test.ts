@@ -181,6 +181,18 @@ describe("sanitized worker result contracts", () => {
     expect(JSON.stringify(snapshot)).not.toContain("placeholder-one");
   });
 
+  it("propagates checkpoint storage failures instead of reporting an empty successful snapshot", async () => {
+    const root = await temporaryRoot();
+    const runsRoot = path.join(root, ".ultrafuzz", "runs");
+    fs.mkdirSync(runsRoot, { recursive: true, mode: 0o700 });
+    fs.chmodSync(runsRoot, 0o000);
+    try {
+      await expect(readWorkerCheckpoint(root)).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      fs.chmodSync(runsRoot, 0o700);
+    }
+  });
+
   it.each([
     ["successful completion", "finished"],
     ["genuine evaluation failure", "genuine-evaluation-failure"]

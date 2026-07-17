@@ -126,6 +126,12 @@ another exact-lineage continuation exists, the runner adopts that owner instead
 of launching another. Use `fresh` when run-defining inputs should intentionally
 start a new generation.
 
+Before a new worker can start, the runner stages every ephemeral input, persists
+the sandbox identity and launched phase, and then publishes an attempt-scoped
+readiness marker. A restart adopts the exact tagged sandbox and completes that
+handshake; an uncertain termination is never followed by an automatic competing
+launch.
+
 The launch command writes an ignored, sanitized launch-state file under
 `.ultrafuzz/modal/<run-id>/launch-state.json`. Use that file for status and
 collection:

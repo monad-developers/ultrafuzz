@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { locateModalResumeWorkspace, repairModalEvalRunRecord } from "../src/resume.js";
+import { locateModalResumeWorkspace, modalDurableResumeCommand, repairModalEvalRunRecord } from "../src/resume.js";
 
 function fixture() {
   const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-"));
@@ -29,9 +29,15 @@ function fixture() {
 
 describe("Modal durable evaluation resume", () => {
   it("uses durable resume without any node reset path", () => {
-    const workerSource = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
-    expect(workerSource).toContain('"resume", state.run_id');
-    expect(workerSource).not.toContain("--reset-node");
+    expect(modalDurableResumeCommand("/opt/tool/cli.js", "durable-run-one", "/workspace/target")).toEqual([
+      "node",
+      "/opt/tool/cli.js",
+      "resume",
+      "durable-run-one",
+      "--project",
+      "/workspace/target",
+      "--json"
+    ]);
   });
 
   it("locates one exact linked durable run and rejects ambiguity", async () => {
