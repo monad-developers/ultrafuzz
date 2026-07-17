@@ -33,7 +33,7 @@ const modelSchema = z
     slug: safeId,
     model: z.string().min(1).max(256),
     provider: z.enum(["openai", "anthropic"]),
-    agent: z.enum(["CodexAgent", "ClaudeCodeAgent"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent"]),
     reasoning: z.string().min(1).max(64),
     auth_mode: z.enum(["api-key", "subscription"])
   })
@@ -41,7 +41,7 @@ const modelSchema = z
   .refine(
     (model) =>
       (model.provider === "openai" && model.agent === "CodexAgent") ||
-      (model.provider === "anthropic" && model.agent === "ClaudeCodeAgent"),
+      (model.provider === "anthropic" && model.agent === "ClaudeAgent"),
     "model provider and agent do not match"
   );
 

@@ -8,8 +8,8 @@ describe("Modal target model profiles", () => {
     const model = DEFAULT_BENCHMARK_MODELS[4]!;
     const config = modalTargetToml(model, 7_200);
 
-    expect(config).toContain(`[models.default]\nagent = "ClaudeCodeAgent"\nmodel = "claude-fable-5"`);
-    expect(config).toContain(`[models.benchmark]\nagent = "ClaudeCodeAgent"\nmodel = "claude-fable-5"`);
+    expect(config).toContain(`[models.default]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
+    expect(config).toContain(`[models.benchmark]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).not.toContain('model = "gpt-5.5"');
   });
 });
