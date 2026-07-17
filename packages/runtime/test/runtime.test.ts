@@ -972,6 +972,21 @@ test("init reports an agent registry that does not export a generated agent", as
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale[0]?.message ?? "", /ClaudeAgent/);
 
+  // A registry that names the agent without registering its factory is still
+  // stale: nothing resolves it, since generated adapters export only factories.
+  fs.writeFileSync(
+    registryPath,
+    'import { createCodexAgent } from "./codex";\n' +
+      'export { CodexAgent, createCodexAgent } from "./codex";\n' +
+      'export { ClaudeAgent } from "./claude";\n' +
+      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+    "utf8"
+  );
+  const named = initProject({ projectRoot: project });
+  const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
+  assert.equal(namedStale.length, 1, JSON.stringify(named.diagnostics));
+  assert.match(namedStale[0]?.message ?? "", /ClaudeAgent/);
+
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });
   assert.equal(
