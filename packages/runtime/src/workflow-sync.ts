@@ -1188,6 +1188,9 @@ function finalRunStatus(
   if (workflowStatus === "cancelled" || workflowStatus === "canceled") {
     return "canceled";
   }
+  if (workflowStatus === "paused") {
+    return "paused";
+  }
   if (
     [
       "running",

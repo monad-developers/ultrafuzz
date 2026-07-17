@@ -8,6 +8,7 @@ import {
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
+  RUN_STATE_STATUSES,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
@@ -44,6 +45,7 @@ test("finding schema accepts minimal normalized findings and rejects malformed p
 });
 
 test("run state schema covers all required node states and rejects malformed state", () => {
+  assert.ok(RUN_STATE_STATUSES.includes("paused"));
   assert.ok(NODE_STATE_STATUSES.includes("ready"));
   assert.ok(NODE_STATE_STATUSES.includes("runnable"));
   assert.ok(NODE_STATE_STATUSES.includes("reused-from-prior-run"));

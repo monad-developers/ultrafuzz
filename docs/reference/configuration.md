@@ -83,11 +83,14 @@ empty path components, and dot components fail validation.
 | `output_dir`              | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`. |
 | `max_parallel_agents`     | integer | Positive workflow submission concurrency default.                  |
 | `max_parallel_nodes`      | integer | Positive graph planning parallelism limit.                         |
-| `keep_workspaces`         | boolean | Whether generated node workspaces are retained.                    |
+| `keep_workspaces`         | boolean | Retain successful-run node workspaces instead of reaping them.     |
 | `workspace_mode`          | string  | Must be `git-worktree`.                                            |
 | `default_timeout_seconds` | integer | Default node timeout in seconds.                                   |
 
 Other workspace modes are outside the product contract.
+Successful runs remove their generated workspaces by default. Setting
+`keep_workspaces = true` retains them; dirty or unpushed workspaces are always
+preserved by the workflow runner.
 
 ## Model Profiles
 

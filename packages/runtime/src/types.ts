@@ -224,6 +224,61 @@ export interface RunStatusValue extends RunListEntry {
   };
 }
 
+export type RunHealthVerdict =
+  | "done"
+  | "running-healthy"
+  | "progressing"
+  | "stalled"
+  | "blocked"
+  | "waiting-quota"
+  | "paused"
+  | "cancelled"
+  | "failed";
+
+export interface RunHealthValue extends RunListEntry {
+  workflow_run_id: string;
+  workflow_status: string;
+  verdict: RunHealthVerdict;
+  reason: string;
+  counts: {
+    finished: number;
+    in_progress: number;
+    pending: number;
+    failed: number;
+    waiting_approval: number;
+    waiting_event: number;
+    waiting_timer: number;
+    skipped: number;
+    other: number;
+    total: number;
+  };
+  model_mix: Array<{
+    engine: string;
+    model: string;
+    attempts: number;
+    quota_parked: boolean;
+  }>;
+  throughput: {
+    recent_finished: number;
+    window_ms: number;
+    total_finished: number;
+    last_finished_at_ms: number | null;
+  };
+  gating: Array<{
+    node_id: string;
+    iteration: number;
+    state: string;
+    detail: string | null;
+  }>;
+  gating_omitted: number;
+  quota: {
+    parked_count: number;
+    parked_node_ids: string[];
+    reset_at_ms: number | null;
+  } | null;
+  generated_at_ms: number;
+}
+
 export interface QueryRunEventsInput {
   projectRoot: string;
   runId: string;
@@ -351,6 +406,20 @@ export interface WorkflowLifecycleValue {
   workflow_run_id?: string;
   workflow_path?: string;
   action: "resume" | "replay" | "fork";
+  submitted: boolean;
+}
+
+export interface PauseRunInput {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}
+
+export interface PauseRunValue {
+  run_id: string;
+  workflow_run_id: string;
+  action: "pause";
+  status: "pause-requested" | "paused";
   submitted: boolean;
 }
 
