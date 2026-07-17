@@ -4,8 +4,14 @@ import path from "node:path";
 
 import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
 
+const usage = "usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]";
+
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
+  if (command === "--help" || command === "-h") {
+    console.log(usage);
+    return;
+  }
   if (command === "build") {
     const result = await buildModalImage({
       appName: option(argv, "--app"),
@@ -37,7 +43,7 @@ async function main(): Promise<void> {
     });
     return;
   }
-  throw new Error("usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]");
+  throw new Error(usage);
 }
 
 function option(argv: string[], name: string): string | undefined {
