@@ -45,9 +45,9 @@ references, run evidence, and materialized outputs remain under root
 - `--max-concurrency <n>`
 - `--json`
 
-Agent and model flags override the default Ultrafuzz model profile for the
-launched workflow. The selected profile's `reasoning` setting remains in
-effect and is recorded with the workflow task metadata.
+Model-only overrides keep the configured agent and reasoning. When `--agent`
+selects another agent, backend-specific reasoning is cleared, including when
+`--model` also pins a replacement model.
 
 ## Reference Commands
 

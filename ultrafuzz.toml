@@ -22,7 +22,7 @@ reasoning = "xhigh"
 
 # Opt-in Claude profile. Select it per node/group in .ultrafuzz/topology.yml
 # (model_profiles = ["claude"]), or for a one-off run with `--agent ClaudeAgent`.
-# ClaudeAgent has no reasoning-effort control, so `reasoning` is not set here.
+# ClaudeAgent passes profile `reasoning` to the current Claude Code CLI as --effort.
 [models.claude]
 agent = "ClaudeAgent"
 model = "claude-opus-4-8"

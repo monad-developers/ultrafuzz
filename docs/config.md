@@ -65,8 +65,8 @@ to bill against the Anthropic API using the key read from `api_key_env`
 (default `ANTHROPIC_API_KEY`). Both modes drive the `claude` CLI, so it must be
 installed either way; `auth` only changes how that CLI authenticates.
 
-Unlike `CodexAgent`, the Claude Code CLI exposes no reasoning-effort control, so
-a `reasoning` value on a Claude profile is ignored. Pin the model through the
+When a Claude profile sets `reasoning`, the generated adapter passes it to the
+current Claude Code CLI as `--effort <value>`. Pin the model through the
 profile's `model` field rather than under `[agents.ClaudeAgent]`.
 
 `ClaudeAgent` runs every task with Claude Code's permission checks bypassed

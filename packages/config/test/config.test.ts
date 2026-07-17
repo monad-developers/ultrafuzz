@@ -9,6 +9,7 @@ import {
   DEFAULT_TRIAGE_QUORUM,
   REDACTION_PLACEHOLDER,
   assertNoRedactionPlaceholders,
+  applyDefaultProfileOverrides,
   loadProjectConfig,
   parseProjectConfigToml,
   redactDiagnostics,
@@ -238,6 +239,28 @@ describe("redaction", () => {
 });
 
 describe("model profile and triage validation", () => {
+  it("clears default reasoning whenever an agent override switches agents", () => {
+    const agentOnly = resolveConfig({ env: {} });
+    expect(agentOnly.ok).toBe(true);
+    if (!agentOnly.ok) return;
+    applyDefaultProfileOverrides(agentOnly.value, { agent: "ClaudeAgent" });
+    expect(agentOnly.value.models.profiles.default).toMatchObject({
+      agent: "ClaudeAgent"
+    });
+    expect(agentOnly.value.models.profiles.default?.model ?? null).toBeNull();
+    expect(agentOnly.value.models.profiles.default?.reasoning ?? null).toBeNull();
+
+    const pinned = resolveConfig({ env: {} });
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) return;
+    applyDefaultProfileOverrides(pinned.value, { agent: "ClaudeAgent", model: "claude-sonnet-5" });
+    expect(pinned.value.models.profiles.default).toMatchObject({
+      agent: "ClaudeAgent",
+      model: "claude-sonnet-5"
+    });
+    expect(pinned.value.models.profiles.default?.reasoning ?? null).toBeNull();
+  });
+
   it("fails invalid model profiles with typed diagnostics", () => {
     const resolved = resolveConfig({
       env: {},

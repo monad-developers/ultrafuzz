@@ -103,9 +103,12 @@ export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: 
     return;
   }
   // A profile's model and reasoning are chosen for its agent, so switching the
-  // agent without naming a model must not hand one backend's model to another.
-  if (overrides.agent !== undefined && overrides.agent !== profile.agent && overrides.model === undefined) {
-    delete profile.model;
+  // agent must not hand backend-specific reasoning to another backend. A model
+  // survives only when the override explicitly replaces it below.
+  if (overrides.agent !== undefined && overrides.agent !== profile.agent) {
+    if (overrides.model === undefined) {
+      delete profile.model;
+    }
     delete profile.reasoning;
   }
   if (overrides.agent !== undefined) {
