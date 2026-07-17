@@ -20,10 +20,12 @@ import {
   ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
   ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
   forkRun,
+  getRunHealth,
   getRunStatus,
   initProject,
   listRuns,
   planRun,
+  pauseRun,
   replayRun,
   resumeRun,
   startRun,
@@ -175,11 +177,30 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
       "fi",
-      'if [ "$1" = "fork" ]; then',
-      "  printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
-      "else",
-      '  printf \'%s\\n\' \'{"ok":true,"smithers":"accepted"}\'',
+      'if [ -n "$SMITHERS_FAKE_KEEP_WORKTREES_LOG" ]; then',
+      '  printf \'%s\\n\' "$SMITHERS_KEEP_WORKTREES" > "$SMITHERS_FAKE_KEEP_WORKTREES_LOG"',
       "fi",
+      'case "$1" in',
+      "  fork)",
+      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
+      "    ;;",
+      "  pause)",
+      '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
+      "      exit 0",
+      '    elif [ -n "$SMITHERS_FAKE_ALREADY_PAUSED" ]; then',
+      "      printf '%s\\n' '{\"status\":\"paused\"}'",
+      "    else",
+      "      printf '%s\\n' '{\"status\":\"pause-requested\"}'",
+      "      exit 2",
+      "    fi",
+      "    ;;",
+      "  status)",
+      '    printf \'%s\\n\' \'{"data":{"status":"running","verdict":"running-healthy","reason":"1 running, 2 finished in last 10m","counts":{"finished":2,"inProgress":1,"pending":3,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":6},"modelMix":[{"engine":"codex","model":"gpt-test","attempts":3,"quotaParked":false}],"throughput":{"recentFinished":2,"windowMs":600000,"totalFinished":2,"lastFinishedAtMs":1000},"bottleneck":[{"nodeId":"project-discovery","iteration":0,"state":"in-progress","detail":"running 1m"}],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      "    ;;",
+      "  *)",
+      '    printf \'%s\\n\' \'{"ok":true,"smithers":"accepted"}\'',
+      "    ;;",
+      "esac",
       ""
     ].join("\n"),
     "utf8"
@@ -593,7 +614,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.27.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.28.0");
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -1135,6 +1156,122 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
 });
 
+test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "health-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const health = await getRunHealth({ projectRoot: project, runId: "health-run", windowMinutes: 5, env });
+
+  assert.equal(health.ok, true, JSON.stringify(health.diagnostics));
+  assert.equal(health.value?.run_id, "health-run");
+  assert.equal(health.value?.workflow_run_id, "ultrafuzz-health-run");
+  assert.equal(health.value?.verdict, "running-healthy");
+  assert.equal(health.value?.counts.in_progress, 1);
+  assert.equal(health.value?.model_mix[0]?.quota_parked, false);
+  assert.equal(health.value?.gating[0]?.node_id, "project-discovery");
+  assert.doesNotMatch(JSON.stringify(health.value), /smithers/iu);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /status ultrafuzz-health-run --window 5/);
+});
+
+test("pauseRun accepts the workflow runner pause-request exit and is idempotent once paused", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "pause-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const requested = await pauseRun({ projectRoot: project, runId: "pause-run", env });
+  assert.equal(requested.ok, true, JSON.stringify(requested.diagnostics));
+  assert.equal(requested.value?.status, "pause-requested");
+  assert.equal(requested.value?.submitted, true);
+
+  env.SMITHERS_FAKE_ALREADY_PAUSED = "1";
+  const paused = await pauseRun({ projectRoot: project, runId: "pause-run", env });
+  assert.equal(paused.ok, true, JSON.stringify(paused.diagnostics));
+  assert.equal(paused.value?.status, "paused");
+  assert.equal(paused.value?.submitted, false);
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status: string;
+  };
+  assert.equal(state.status, "paused");
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /pause ultrafuzz-pause-run --format json/);
+});
+
+test("pauseRun requires explicit workflow confirmation before persisting paused state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "pause-empty", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  env.SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS = "1";
+  const requested = await pauseRun({ projectRoot: project, runId: "pause-empty", env });
+
+  assert.equal(requested.ok, true, JSON.stringify(requested.diagnostics));
+  assert.equal(requested.value?.status, "pause-requested");
+  assert.equal(requested.value?.submitted, true);
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status: string;
+  };
+  assert.equal(state.status, "running");
+});
+
+test("workflow synchronization preserves the paused run state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const launchEnv = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "paused-sync", env: launchEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-paused-sync",
+      status: "paused",
+      state: "paused",
+      steps: [{ id: "node:project-discovery", state: "pending" }]
+    })
+  });
+
+  const status = await getRunStatus({ projectRoot: project, runId: "paused-sync", env });
+
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.status, "paused");
+  assert.equal(status.value?.workflow?.status, "paused");
+});
+
+test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
+  for (const keepWorkspaces of [false, true]) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    if (keepWorkspaces) {
+      const configPath = path.join(project, "ultrafuzz.toml");
+      fs.writeFileSync(
+        configPath,
+        fs.readFileSync(configPath, "utf8").replace("keep_workspaces = false", "keep_workspaces = true"),
+        "utf8"
+      );
+    }
+    const keepLog = path.join(project, "keep-worktrees.log");
+    const env = {
+      ...fakeSmithersEnv(project),
+      SMITHERS_KEEP_WORKTREES: "1",
+      SMITHERS_FAKE_KEEP_WORKTREES_LOG: keepLog
+    };
+
+    const run = await startRun({ projectRoot: project, runId: `keep-workspaces-${keepWorkspaces}`, env });
+
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    assert.equal(fs.readFileSync(keepLog, "utf8"), keepWorkspaces ? "1\n" : "\n");
+  }
+});
+
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -1386,6 +1523,39 @@ test("startRun migrates the known generated Smithers caret manifest without drop
   assert.equal(migrated.scripts.custom, "node custom.js");
 });
 
+test("startRun migrates the previous exact Smithers manifest without dropping custom fields", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const packageJson = path.join(project, ".smithers", "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+  };
+  manifest.dependencies["smithers-orchestrator"] = "0.27.0";
+  manifest.dependencies["custom-agent-package"] = "1.2.3";
+  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeFakeInstalledSmithers(project, { version: "0.27.0" });
+  const installer = writeFakeNpmInstaller(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "migrated-exact-smithers-run",
+    env: {
+      PATH: `${installer.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      SMITHERS_FAKE_LOG: installer.smithersLogPath
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    dependencies: Record<string, string>;
+  };
+  assert.equal(migrated.dependencies["smithers-orchestrator"], "0.28.0");
+  assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
+  assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
+});
+
 test("startRun reinstalls a stale target-local Smithers package before launch", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -1450,7 +1620,7 @@ test("generated workflow dependencies require exact runner versions while allowi
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
       dependencies: {
-        "smithers-orchestrator": "0.27.0",
+        "smithers-orchestrator": "0.28.0",
         zod: "4.4.3",
         "custom-agent-package": "1.2.3"
       },

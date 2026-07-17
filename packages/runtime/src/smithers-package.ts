@@ -1,4 +1,4 @@
-export const SMITHERS_ORCHESTRATOR_VERSION = "0.27.0";
+export const SMITHERS_ORCHESTRATOR_VERSION = "0.28.0";
 export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
 
 const REQUIRED_SMITHERS_DEPENDENCIES = {
@@ -18,6 +18,16 @@ const LEGACY_SMITHERS_DEPENDENCIES = {
   },
   devDependencies: {
     typescript: "^6.0.3"
+  }
+} as const;
+
+const PREVIOUS_SMITHERS_DEPENDENCIES = {
+  dependencies: {
+    "smithers-orchestrator": "0.27.0",
+    zod: "4.4.3"
+  },
+  devDependencies: {
+    typescript: "6.0.3"
   }
 } as const;
 
@@ -62,7 +72,9 @@ export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPa
     value.name !== "ultrafuzz-smithers" ||
     value.private !== true ||
     value.type !== "module" ||
-    !hasRequiredVersions(value, LEGACY_SMITHERS_DEPENDENCIES)
+    ![PREVIOUS_SMITHERS_DEPENDENCIES, LEGACY_SMITHERS_DEPENDENCIES].some((dependencies) =>
+      hasRequiredVersions(value, dependencies)
+    )
   ) {
     return { manifest: value, migrated: false };
   }
@@ -86,7 +98,8 @@ export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPa
 
 function hasRequiredVersions(
   value: Record<string, unknown>,
-  required: typeof REQUIRED_SMITHERS_DEPENDENCIES | typeof LEGACY_SMITHERS_DEPENDENCIES
+  required:
+    typeof REQUIRED_SMITHERS_DEPENDENCIES | typeof PREVIOUS_SMITHERS_DEPENDENCIES | typeof LEGACY_SMITHERS_DEPENDENCIES
 ): boolean {
   for (const [section, expected] of Object.entries(required)) {
     const actual = value[section];

@@ -7,6 +7,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  MODAL_COLLECT_RESULT_FILES,
   createTrackedSourceArchive,
   modalImageBuildCommand,
   modalSandboxName,
@@ -32,6 +33,13 @@ describe("Modal image source staging", () => {
     expect(entries).toEqual(expect.arrayContaining([".gitignore", "tracked.txt"]));
     expect(entries).not.toContain("untracked.txt");
     expect(entries).not.toContain(".private/benchmark.json");
+  });
+});
+
+describe("Modal result collection", () => {
+  it("collects only sanitized status, terminal result, and generic worker log files", () => {
+    expect(MODAL_COLLECT_RESULT_FILES).toEqual(["status.json", "worker.log", "result.json"]);
+    expect(MODAL_COLLECT_RESULT_FILES).not.toContain("failure-details.json");
   });
 });
 

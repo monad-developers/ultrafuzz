@@ -163,8 +163,9 @@ generation, launch generation and attempt, whether model work started, node
 counts, checkpoint age and digest, exit category, runtime, aggregate usage,
 pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
-artifacts. `collect` preserves this boundary; investigate sensitive run data on
-the private volume under the repository's normal access controls.
+artifacts. `collect` copies only `status.json`, `result.json`, and the generic
+worker lifecycle log; investigate sensitive run data on the private volume under
+the repository's normal access controls.
 
 ## Run the opt-in real-Modal smoke
 

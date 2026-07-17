@@ -6,6 +6,7 @@ import {
   appendFile,
   copyFile,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -13,6 +14,7 @@ import {
   unlink,
   writeFile
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import { fingerprintModalConfigFile, fingerprintModalModel, loadModalBenchmarkConfig } from "./config.js";
@@ -634,10 +636,22 @@ function requiredEnv(name: string, category: OperationalFailureCategory = "sandb
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: FileHandle | undefined;
   try {
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
     await rename(temporary, filePath);
+    const directory = await open(path.dirname(filePath), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
   } finally {
+    await handle?.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
   }
 }

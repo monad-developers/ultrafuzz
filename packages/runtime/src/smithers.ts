@@ -213,6 +213,7 @@ export interface SubmitSmithersInput {
   compiled: CompiledSmithersWorkflow;
   projectRoot: string;
   maxConcurrency: number;
+  keepWorkspaces: boolean;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
   operatorPrompt?: string;
@@ -221,6 +222,13 @@ export interface SubmitSmithersInput {
 
 export interface SmithersSubmissionResult {
   smithersRunId: string;
+  command: readonly string[];
+  stdout: string;
+  stderr: string;
+}
+
+export interface SmithersPauseResult {
+  status: "pause-requested" | "paused";
   command: readonly string[];
   stdout: string;
   stderr: string;
@@ -355,7 +363,8 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    environmentVariableNames: input.environmentVariableNames,
+    keepWorkspaces: input.keepWorkspaces
   });
   writeJsonDurable(path.join(path.dirname(input.compiled.inputPath), "submission.json"), {
     schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
@@ -373,6 +382,22 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
   };
 }
 
+export async function requestSmithersPause(input: {
+  smithersRunId: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+}): Promise<SmithersPauseResult> {
+  const result = await execSmithersCli({
+    args: ["pause", input.smithersRunId, "--format", "json"],
+    projectRoot: input.projectRoot,
+    env: input.env,
+    acceptedExitCodes: [2]
+  });
+  const reportedStatus = firstStringField(jsonField(result.stdout).json, ["status"]);
+  const status = result.exitCode === 0 && reportedStatus === "paused" ? "paused" : "pause-requested";
+  return { ...result, status };
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -387,6 +412,7 @@ export async function runSmithersLifecycleCommand(input: {
     inputPath: string;
     logsDir: string;
   };
+  keepWorkspaces: boolean;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
 }): Promise<{
@@ -429,7 +455,8 @@ export async function runSmithersLifecycleCommand(input: {
         args: recoveryCommand,
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
       });
       writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
         schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
@@ -480,7 +507,8 @@ export async function runSmithersLifecycleCommand(input: {
         ],
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
       });
       resetStderr = resetResult.stderr;
       if (resetMarkerPath !== undefined) {
@@ -510,7 +538,8 @@ export async function runSmithersLifecycleCommand(input: {
         ],
         projectRoot: input.projectRoot,
         env: input.env,
-        environmentVariableNames: input.environmentVariableNames
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
       });
     } catch (error) {
       if (error instanceof Error && resetMarkerPath !== undefined) {
@@ -547,7 +576,8 @@ export async function runSmithersLifecycleCommand(input: {
       args: forkCommand,
       projectRoot: input.projectRoot,
       env: input.env,
-      environmentVariableNames: input.environmentVariableNames
+      environmentVariableNames: input.environmentVariableNames,
+      keepWorkspaces: input.keepWorkspaces
     });
     const forkedRunId = parseForkedRunId(forkResult.stdout);
     if (forkedRunId === undefined) {
@@ -570,7 +600,8 @@ export async function runSmithersLifecycleCommand(input: {
       args: resumeCommand,
       projectRoot: input.projectRoot,
       env: input.env,
-      environmentVariableNames: input.environmentVariableNames
+      environmentVariableNames: input.environmentVariableNames,
+      keepWorkspaces: input.keepWorkspaces
     });
     return {
       stdout: resumeResult.stdout,
@@ -601,7 +632,8 @@ export async function runSmithersLifecycleCommand(input: {
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
-    environmentVariableNames: input.environmentVariableNames
+    environmentVariableNames: input.environmentVariableNames,
+    keepWorkspaces: input.keepWorkspaces
   });
   return {
     ...result,
@@ -701,9 +733,11 @@ async function execSmithersCli(input: {
   projectRoot: string;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
+  keepWorkspaces?: boolean;
+  acceptedExitCodes?: readonly number[];
   signal?: AbortSignal;
   timeoutMs?: number;
-}): Promise<{ stdout: string; stderr: string; command: string[] }> {
+}): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
   await ensureSmithersDependencies(input.projectRoot, input.env, {
@@ -713,14 +747,28 @@ async function execSmithersCli(input: {
   const commandTimeoutMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
   const executable = smithersExecutable(input.projectRoot, input.env);
-  const { stdout, stderr } = await execFileAsync(executable, command, {
-    cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames),
-    maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-    ...(input.signal === undefined ? {} : { signal: input.signal }),
-    ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
-  });
-  return { stdout, stderr, command: smithersDisplayCommand(command) };
+  try {
+    const { stdout, stderr } = await execFileAsync(executable, command, {
+      cwd: input.projectRoot,
+      env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
+    });
+    return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
+  } catch (error) {
+    const record =
+      error && typeof error === "object" ? (error as { code?: unknown; stdout?: unknown; stderr?: unknown }) : {};
+    if (typeof record.code === "number" && input.acceptedExitCodes?.includes(record.code)) {
+      return {
+        stdout: typeof record.stdout === "string" ? record.stdout : "",
+        stderr: typeof record.stderr === "string" ? record.stderr : "",
+        command: smithersDisplayCommand(command),
+        exitCode: record.code
+      };
+    }
+    throw error;
+  }
 }
 
 function smithersDisplayCommand(command: readonly string[]): string[] {
@@ -977,9 +1025,13 @@ function localSmithersExecutable(projectRoot: string): string {
 function smithersCommandEnv(
   projectRoot: string,
   env: Record<string, string | undefined> | undefined,
-  environmentVariableNames: readonly string[] = []
+  environmentVariableNames: readonly string[] = [],
+  keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  if (keepWorkspaces !== undefined) {
+    source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
+  }
   const forwarded = new Set(environmentVariableNames.map((name) => name.toUpperCase()));
   const merged: NodeJS.ProcessEnv = {};
   let sourcePath: string | undefined;

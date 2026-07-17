@@ -14,7 +14,7 @@
       "minLength": 1
     },
     "status": {
-      "enum": ["pending", "running", "succeeded", "failed", "timed-out", "canceled"]
+      "enum": ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"]
     },
     "graph_fingerprint": {
       "type": "string"

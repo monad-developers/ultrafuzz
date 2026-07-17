@@ -5,8 +5,15 @@ import path from "node:path";
 import type { ModalLaunchMode, ModelProvider } from "./defaults.js";
 import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
 
+const usage =
+  "usage: ultrafuzz-modal <build|launch|status|collect|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--provider openai|anthropic]";
+
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
+  if (command === "--help" || command === "-h") {
+    console.log(usage);
+    return;
+  }
   if (command === "smoke") {
     const provider = requiredProvider(argv);
     const { runRealModalSmoke } = await import("./smoke-modal.js");
@@ -48,9 +55,7 @@ async function main(): Promise<void> {
     });
     return;
   }
-  throw new Error(
-    "usage: ultrafuzz-modal <build|launch|status|collect|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--provider openai|anthropic]"
-  );
+  throw new Error(usage);
 }
 
 function modalLaunchMode(argv: string[]): ModalLaunchMode {

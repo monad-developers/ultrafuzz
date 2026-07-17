@@ -17,6 +17,8 @@ import type { ResolvedConfig } from "@ultrafuzz/config";
 
 import {
   type PlannedGraph,
+  type PauseRunInput,
+  type PauseRunValue,
   type RuntimeDiagnostic,
   type StartRunInput,
   type StartRunValue,
@@ -27,6 +29,7 @@ import { planRun } from "./plan-run.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
+  requestSmithersPause,
   runSmithersLifecycleCommand,
   smithersDiagnostic,
   submitSmithersWorkflow,
@@ -79,6 +82,7 @@ export async function startRun(input: StartRunInput) {
       compiled,
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
+      keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       env: input.env,
       environmentVariableNames: agentEnvironmentVariableNames(
         plan.resolved_config,
@@ -130,6 +134,41 @@ export async function forkRun(input: WorkflowLifecycleInput) {
   return submitLifecycleAction(input, "fork");
 }
 
+export async function pauseRun(input: PauseRunInput) {
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  if (!evidence.ok) {
+    return runtimeFailure<PauseRunValue>(evidence.diagnostics);
+  }
+  try {
+    const result = await requestSmithersPause({
+      smithersRunId: evidence.smithersRunId,
+      projectRoot,
+      env: input.env
+    });
+    if (result.status === "paused") {
+      updateRunStatus(evidence.layout, "paused");
+    }
+    appendEvent(evidence.layout, {
+      eventType: result.status === "paused" ? "workflow-lifecycle-already-paused" : "workflow-pause-requested",
+      status: result.status === "paused" ? "paused" : "running",
+      payload: {
+        action: "pause",
+        workflow_run_id: evidence.smithersRunId
+      }
+    });
+    return runtimeResult(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      action: "pause" as const,
+      status: result.status,
+      submitted: result.status === "pause-requested"
+    });
+  } catch (error) {
+    return runtimeFailure<PauseRunValue>([smithersDiagnostic(error, "WORKFLOW_PAUSE_FAILED")]);
+  }
+}
+
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
   if (action === "fork" && input.forkFrame === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>([
@@ -168,6 +207,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
               logsDir: path.join(evidence.layout.root, "smithers", "logs")
             }
           : undefined,
+      keepWorkspaces: resolved.config.run.keepWorkspaces,
       env: input.env,
       environmentVariableNames: agentEnvironmentVariableNames(
         resolved.config,

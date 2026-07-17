@@ -59,6 +59,7 @@ import {
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
+export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
 
@@ -536,14 +537,13 @@ export async function collectModalBenchmark(input: {
     for (const launch of state.launches) {
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
-        "status.json",
-        "worker.log",
-        "result.json",
-        "failure-details.json"
+        ...MODAL_COLLECT_RESULT_FILES
       ]);
       const output = path.resolve(input.outputDir, launch.slug);
-      await mkdir(output, { recursive: true });
-      for (const [name, contents] of Object.entries(files)) await writeFile(path.join(output, name), contents);
+      await mkdir(output, { recursive: true, mode: 0o700 });
+      for (const [name, contents] of Object.entries(files)) {
+        await writeFile(path.join(output, name), contents, { mode: 0o600 });
+      }
     }
   } finally {
     modal.close();

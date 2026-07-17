@@ -13,6 +13,8 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `references update`    | Rewrite the project reference catalog to current default-branch SHAs with `--latest`.                                     |
 | `ps`                   | List Ultrafuzz runs with linked workflow status.                                                                          |
 | `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                              |
+| `status <run-id>`      | Show a concise health verdict, progress, throughput, and gating nodes.                                                    |
+| `pause <run-id>`       | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
 | `resume <run-id>`      | Resume a linked run after product checks.                                                                                 |
 | `replay <run-id>`      | Replay a linked run after product checks.                                                                                 |
 | `fork <run-id>`        | Fork a linked run after product checks.                                                                                   |
@@ -48,6 +50,14 @@ references, run evidence, and materialized outputs remain under root
 Model-only overrides keep the configured agent and reasoning. When `--agent`
 selects another agent, backend-specific reasoning is cleared, including when
 `--model` also pins a replacement model.
+
+## Run Lifecycle
+
+- `status <run-id> [--window <minutes>]` shows whether a run is healthy,
+  blocked, stalled, quota-parked, paused, or finished.
+- `pause <run-id>` stops new task scheduling and lets in-flight work settle
+  before the run becomes `paused`.
+- `resume <run-id>` continues a paused run using the existing linked workflow.
 
 ## Reference Commands
 

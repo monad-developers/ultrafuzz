@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import type { TerminalDisposition } from "./terminal-disposition.js";
@@ -72,7 +73,7 @@ export async function repairModalEvalRunRecord(
     record.final_status === finalStatus
       ? record
       : { ...record, final_status: finalStatus, finished_at: new Date().toISOString() };
-  if (updated !== record) await writeFile(recordsPath, `${JSON.stringify(updated)}\n`, { flag: "a", mode: 0o600 });
+  if (updated !== record) await appendLineDurable(recordsPath, `${JSON.stringify(updated)}\n`);
   await writeJsonAtomic(path.join(evalDir, "run-summary.json"), {
     eval_run_id: workspace.evalRunId,
     launched: 1,
@@ -91,11 +92,39 @@ async function readRecords(filePath: string): Promise<Array<Record<string, unkno
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let handle: FileHandle | undefined;
   try {
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
     await rename(temporary, filePath);
+    await syncDirectory(path.dirname(filePath));
   } finally {
+    await handle?.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function appendLineDurable(filePath: string, line: string): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const handle = await open(filePath, "a", 0o600);
+  try {
+    await handle.writeFile(line, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(path.dirname(filePath));
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const directory = await open(directoryPath, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
   }
 }
 

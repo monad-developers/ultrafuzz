@@ -6,7 +6,15 @@ import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js"
 
 export const STATE_SCHEMA_VERSION = "1.0";
 
-export const RUN_STATE_STATUSES = ["pending", "running", "succeeded", "failed", "timed-out", "canceled"] as const;
+export const RUN_STATE_STATUSES = [
+  "pending",
+  "running",
+  "paused",
+  "succeeded",
+  "failed",
+  "timed-out",
+  "canceled"
+] as const;
 
 export type RunStatus = (typeof RUN_STATE_STATUSES)[number];
 
