@@ -14,6 +14,7 @@ import {
   fingerprintModalImage,
   fingerprintTrackedSource,
   hasExactModalLaunchTags,
+  latestModalWorkerStatus,
   markModalLaunchFailed,
   markModalLaunchReady,
   markModalSandboxCreated,
@@ -138,6 +139,20 @@ describe("Modal launch ownership", () => {
     expect(persisted.launches[0]?.attempt_id).toBe("attempt-first");
     expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
     expect(fs.readdirSync(root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("reclaims a crashed owner before admitting the restarted process", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-crashed-lock-"));
+    const statePath = path.join(root, "launch-state.json");
+    fs.writeFileSync(
+      `${statePath}.lock`,
+      `${JSON.stringify({ token: "crashed-owner", pid: 2_147_483_647, created_at: "2026-01-01T00:00:00.000Z" })}\n`,
+      { mode: 0o600 }
+    );
+
+    await expect(withModalLaunchStateLock(statePath, async () => "restarted")).resolves.toBe("restarted");
+    expect(fs.existsSync(`${statePath}.lock`)).toBe(false);
+    expect(fs.readdirSync(root).filter((name) => name.includes(".reclaim-"))).toEqual([]);
   });
 
   it("persists reservation, sandbox identity, readiness, and replacement provenance", () => {
@@ -331,12 +346,54 @@ describe("Modal runner status", () => {
     expect(
       parseModalWorkerStatus(
         workerResult({
-          model_work_started: false,
+          model_work_started: true,
           exit_category: "authentication-failure",
           diagnostic_code: "authentication-failure"
         })
       )
     ).toMatchObject({ category: "permanent-operational-failure", retryable: false });
+    expect(
+      parseModalWorkerStatus({
+        schema_version: "ultrafuzz.modal.worker-status.v2",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        stage: "generic-stage",
+        category: "preparing",
+        model_work_started: false,
+        retryable: true,
+        generation: 1,
+        attempt: 1,
+        eval_run_id: "generic-evaluation",
+        run_status: "running",
+        node_counts: { running: 1 },
+        error_code: "worker-live"
+      })
+    ).toEqual({
+      schema_version: "ultrafuzz.modal.worker-status.v2",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      stage: "preparing",
+      category: "preparing",
+      model_work_started: false,
+      retryable: true,
+      generation: 1,
+      attempt: 1,
+      error_code: "worker-live"
+    });
+  });
+
+  it("uses the newest exact-attempt contract after a split terminal write", () => {
+    const partial = workerResult({
+      result_type: "partial",
+      generation: 3,
+      exit_category: "live",
+      diagnostic_code: "worker-live"
+    });
+    const terminal = workerResult({ generation: 4 });
+
+    expect(latestModalWorkerStatus([partial, terminal], { generation: 1, attempt: 1 })).toMatchObject({
+      category: "succeeded",
+      result_generation: 4
+    });
+    expect(latestModalWorkerStatus([terminal], { generation: 1, attempt: 2 })).toBeUndefined();
   });
 
   it("keeps live and genuine outcomes as no-ops while relaunching interrupted model work", () => {
@@ -387,5 +444,12 @@ describe("Modal runner status", () => {
     });
     markModalLaunchFailed(record, "transient-operational-failure", "2026-01-01T00:00:00.000Z");
     expect(record).toMatchObject({ phase: "failed", failure_category: "transient-operational-failure" });
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "missing",
+        attempt: 1,
+        launchFailure: "permanent-operational-failure"
+      })
+    ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
   });
 });

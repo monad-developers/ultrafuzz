@@ -60,6 +60,7 @@ const RESOLVED_VOLUME_ROOT = realpathSync.native("/data");
 const REMOTE_DATA_ROOT = process.env.ULTRAFUZZ_MODAL_REMOTE_ROOT ?? persistentDataRoot(RUN_ID, MODEL.slug);
 const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_ROOT);
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
+const PREPARING_ROOT = `${WORK_ROOT}.preparing`;
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESULT_PATH = path.join(DATA_ROOT, "result.json");
@@ -246,6 +247,7 @@ function samePersistentLineage(
 
 async function clearFreshGeneration(): Promise<void> {
   await rm(WORK_ROOT, { recursive: true, force: true });
+  await rm(PREPARING_ROOT, { recursive: true, force: true });
   for (const entry of ["status.json", "result.json", "worker.log", "failure-details.json", "outcome"] as const) {
     await rm(path.join(DATA_ROOT, entry), { recursive: true, force: true });
   }
@@ -323,7 +325,7 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
   const groundTruth = path.join(WORK_ROOT, "ground-truth");
   const suitePath = path.join(control, "modal-suite.yml");
   if (existing.length === 0) {
-    const stagingRoot = `${WORK_ROOT}.preparing-${LINEAGE.attempt_id}`;
+    const stagingRoot = PREPARING_ROOT;
     const stagingTarget = path.join(stagingRoot, "target");
     const stagingControl = path.join(stagingRoot, "control");
     const stagingGroundTruthRepo = path.join(stagingRoot, "ground-truth-repo");

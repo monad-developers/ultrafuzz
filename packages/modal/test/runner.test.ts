@@ -8,11 +8,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   MODAL_COLLECT_RESULT_FILES,
+  assertSanitizedModalCollectedFiles,
   createTrackedSourceArchive,
   modalImageBuildCommand,
   modalSandboxName,
   modalVolumeRelativeRoot,
-  modalWorkerEntrypointCommand
+  modalWorkerEntrypointCommand,
+  replaceSanitizedModalCollectedFiles
 } from "../src/runner.js";
 
 describe("Modal image source staging", () => {
@@ -40,6 +42,79 @@ describe("Modal result collection", () => {
   it("collects only sanitized status, terminal result, and generic worker log files", () => {
     expect(MODAL_COLLECT_RESULT_FILES).toEqual(["status.json", "worker.log", "result.json"]);
     expect(MODAL_COLLECT_RESULT_FILES).not.toContain("failure-details.json");
+  });
+
+  it("accepts only exact-attempt aggregate contracts and generic lifecycle logs", () => {
+    const context = { generation: 1, attempt: 2 };
+    const base = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      generation: 4,
+      launch_generation: 1,
+      attempt: 2,
+      model_work_started: true,
+      counts: { succeeded: 1, failed: 0, remaining: 0 },
+      checkpoint: { age_ms: 0, digest: `sha256:${"a".repeat(64)}` },
+      runtime_ms: 100,
+      usage: null
+    };
+    const files = {
+      "status.json": `${JSON.stringify({
+        ...base,
+        result_type: "partial",
+        exit_category: "live",
+        diagnostic_code: "worker-live"
+      })}\n`,
+      "result.json": `${JSON.stringify({
+        ...base,
+        generation: 5,
+        result_type: "terminal",
+        exit_category: "finished",
+        diagnostic_code: "worker-finished"
+      })}\n`,
+      "worker.log": "2026-01-01T00:00:00.000Z worker-started\n"
+    };
+
+    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+    expect(() => assertSanitizedModalCollectedFiles({ ...files, "result.json": '{"legacy":true}\n' }, context)).toThrow(
+      /unsanitized Modal result/u
+    );
+    expect(() =>
+      assertSanitizedModalCollectedFiles({ ...files, "worker.log": "unexpected detail\n" }, context)
+    ).toThrow(/unsanitized Modal worker log/u);
+  });
+
+  it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-collect-"));
+    const output = path.join(root, "model-one");
+    fs.mkdirSync(output, { mode: 0o755 });
+    fs.writeFileSync(path.join(output, "result.json"), '{"legacy":true}\n', { mode: 0o644 });
+    fs.writeFileSync(path.join(output, "failure-details.json"), "{}\n", { mode: 0o644 });
+    const status = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      result_type: "partial",
+      generation: 1,
+      launch_generation: 1,
+      attempt: 1,
+      model_work_started: false,
+      counts: { succeeded: 0, failed: 0, remaining: 0 },
+      checkpoint: { age_ms: null, digest: null },
+      exit_category: "live",
+      runtime_ms: 0,
+      usage: null,
+      diagnostic_code: "worker-live"
+    };
+
+    await replaceSanitizedModalCollectedFiles(
+      output,
+      { "status.json": `${JSON.stringify(status)}\n`, "worker.log": "" },
+      { generation: 1, attempt: 1 }
+    );
+
+    expect(fs.existsSync(path.join(output, "result.json"))).toBe(false);
+    expect(fs.existsSync(path.join(output, "failure-details.json"))).toBe(false);
+    expect(fs.statSync(output).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(path.join(output, "status.json")).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(output).filter((name) => name.startsWith(".collect-"))).toEqual([]);
   });
 });
 

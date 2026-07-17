@@ -296,6 +296,7 @@ export async function runWithTerminalPersistence(input: {
       finalizationFailure = error;
       if (workerFailure === undefined) category = "unreachable";
     }
+    let terminalWriteFailed = false;
     try {
       await input.writer.writeTerminal(
         category,
@@ -303,12 +304,27 @@ export async function runWithTerminalPersistence(input: {
         workerFailure === undefined ? undefined : input.diagnosticCodeForError?.(workerFailure)
       );
     } catch (error) {
+      terminalWriteFailed = true;
       finalizationFailure ??= error;
     }
+    let flushFailed = false;
     try {
       await input.flush();
     } catch (error) {
+      flushFailed = true;
       finalizationFailure ??= error;
+    }
+    if (terminalWriteFailed || flushFailed) {
+      try {
+        await input.writer.writeTerminal("unreachable", snapshot);
+      } catch (error) {
+        finalizationFailure ??= error;
+      }
+      try {
+        await input.flush();
+      } catch (error) {
+        finalizationFailure ??= error;
+      }
     }
   }
   if (workerFailure !== undefined) throw workerFailure;

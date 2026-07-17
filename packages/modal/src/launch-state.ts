@@ -284,7 +284,7 @@ const workerStatusSchema = z
     eval_run_id: z.string().min(1).optional(),
     run_status: z.string().min(1).optional(),
     node_counts: z.record(z.string(), z.number().int().nonnegative()).optional(),
-    error_code: z.string().min(1).optional()
+    error_code: z.enum(WORKER_DIAGNOSTIC_CODES).optional()
   })
   .strict();
 
@@ -380,12 +380,22 @@ export function parseModalWorkerStatus(
 ): ModalWorkerStatus | undefined {
   const parsed = workerStatusSchema.safeParse(value);
   if (parsed.success) {
-    const status = parsed.data as ModalWorkerStatus;
+    const candidate = parsed.data;
+    const status: ModalWorkerStatus = {
+      schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
+      updated_at: candidate.updated_at,
+      stage: candidate.category,
+      category: candidate.category,
+      model_work_started: candidate.model_work_started,
+      retryable: candidate.retryable,
+      generation: candidate.generation,
+      attempt: candidate.attempt,
+      ...(candidate.error_code === undefined ? {} : { error_code: candidate.error_code })
+    };
     return matchesWorkerAttempt(status, expected) ? status : undefined;
   }
-  const workerResult = workerResultStatusSchema.safeParse(value);
-  if (!workerResult.success) return undefined;
-  const contract = workerResult.data as WorkerResultContract;
+  const contract = parseModalWorkerResult(value, expected);
+  if (contract === undefined) return undefined;
   const status: ModalWorkerStatus = {
     schema_version: WORKER_RESULT_SCHEMA_VERSION,
     stage: contract.result_type,
@@ -397,7 +407,34 @@ export function parseModalWorkerStatus(
     error_code: contract.diagnostic_code,
     result_generation: contract.generation
   };
-  return matchesWorkerAttempt(status, expected) ? status : undefined;
+  return status;
+}
+
+export function parseModalWorkerResult(
+  value: unknown,
+  expected?: { generation: number; attempt: number }
+): WorkerResultContract | undefined {
+  const parsed = workerResultStatusSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const contract = parsed.data as WorkerResultContract;
+  return matchesWorkerAttempt({ generation: contract.launch_generation, attempt: contract.attempt }, expected)
+    ? contract
+    : undefined;
+}
+
+export function latestModalWorkerStatus(
+  values: readonly unknown[],
+  expected?: { generation: number; attempt: number }
+): ModalWorkerStatus | undefined {
+  let latest: ModalWorkerStatus | undefined;
+  for (const value of values) {
+    const candidate = parseModalWorkerStatus(value, expected);
+    if (candidate === undefined) continue;
+    if (latest === undefined || (candidate.result_generation ?? 0) >= (latest.result_generation ?? 0)) {
+      latest = candidate;
+    }
+  }
+  return latest;
 }
 
 function matchesWorkerAttempt(
@@ -412,8 +449,8 @@ function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatus
   if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
   if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
   if (contract.exit_category === "live") return contract.model_work_started ? "model-work" : "preparing";
-  if (contract.model_work_started) return "resume-required";
   if (contract.exit_category === "authentication-failure") return "permanent-operational-failure";
+  if (contract.model_work_started) return "resume-required";
   return "transient-operational-failure";
 }
 
@@ -638,6 +675,7 @@ export function classifyModalRunnerStatus(input: {
   sandbox: ModalSandboxState;
   attempt: number;
   workerStatus?: ModalWorkerStatus;
+  launchFailure?: ModalLaunchFailureCategory;
 }): ModalRunnerStatus {
   if (input.sandbox === "live") {
     return status("live", "none", input.workerStatus?.model_work_started ?? false, false, 0);
@@ -660,6 +698,9 @@ export function classifyModalRunnerStatus(input: {
     worker?.category === "resume-required"
   ) {
     return status("resume-required", "relaunch", true, false, 0);
+  }
+  if (input.launchFailure === "permanent-operational-failure") {
+    return status("permanent-operational-failure", "none", false, false, 0);
   }
   if (input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) {
     return status("permanent-operational-failure", "none", false, false, 0);
@@ -760,10 +801,7 @@ export async function withModalLaunchStateLock<T>(
       }
     } catch (error) {
       if (!isNodeError(error, "EEXIST")) throw error;
-      if (await lockOwnerIsDead(lockPath)) {
-        await unlink(lockPath).catch(() => undefined);
-        continue;
-      }
+      if (await reclaimDeadLaunchLock(lockPath)) continue;
       if (now() >= deadline) {
         throw new Error(`timed out acquiring Modal launch state lock: ${lockPath}`, { cause: error });
       }
@@ -863,20 +901,61 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function lockOwnerIsDead(lockPath: string): Promise<boolean> {
+interface ObservedLaunchLock {
+  identity: string;
+  owner: { token?: unknown; pid?: unknown } | undefined;
+  dead: boolean;
+}
+
+async function observeLaunchLock(lockPath: string): Promise<ObservedLaunchLock | undefined> {
   try {
-    const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
-    if (typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+    const contents = await readFile(lockPath, "utf8");
+    const metadata = await stat(lockPath);
+    let owner: ObservedLaunchLock["owner"];
     try {
-      process.kill(owner.pid, 0);
-      return false;
-    } catch (error) {
-      return isNodeError(error, "ESRCH");
+      owner = JSON.parse(contents) as { token?: unknown; pid?: unknown };
+    } catch {
+      owner = undefined;
     }
-  } catch {
-    return stat(lockPath)
-      .then((value) => Date.now() - value.mtimeMs > 5_000)
-      .catch(() => false);
+    let dead = Date.now() - metadata.mtimeMs > 5_000;
+    if (typeof owner?.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0) {
+      try {
+        process.kill(owner.pid, 0);
+        dead = false;
+      } catch (error) {
+        dead = isNodeError(error, "ESRCH");
+      }
+    }
+    return { identity: sha256(contents), owner, dead };
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+async function reclaimDeadLaunchLock(lockPath: string): Promise<boolean> {
+  const observed = await observeLaunchLock(lockPath);
+  if (observed === undefined) return true;
+  if (!observed.dead) return false;
+  const claimPath = `${lockPath}.reclaim-${observed.identity.slice(0, 32)}`;
+  let claim;
+  try {
+    claim = await open(claimPath, "wx", 0o600);
+  } catch (error) {
+    if (isNodeError(error, "EEXIST")) return false;
+    throw error;
+  }
+  try {
+    await claim.writeFile(`${JSON.stringify({ pid: process.pid, created_at: new Date().toISOString() })}\n`);
+    await claim.sync();
+    const current = await observeLaunchLock(lockPath);
+    if (current === undefined) return true;
+    if (current.identity !== observed.identity || !current.dead) return false;
+    await unlink(lockPath);
+    return true;
+  } finally {
+    await claim.close().catch(() => undefined);
+    await unlink(claimPath).catch(() => undefined);
   }
 }
 

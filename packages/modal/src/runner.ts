@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -29,12 +29,13 @@ import {
   fingerprintTrackedSource,
   hasExactModalLaunchTags,
   isTransientModalError,
+  latestModalWorkerStatus,
   markModalLaunchFailed,
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
   modalWorkerLineage,
-  parseModalWorkerStatus,
+  parseModalWorkerResult,
   parseCompatibleModalLaunchState,
   readModalLaunchState,
   reserveModalLaunchAttempt,
@@ -60,6 +61,8 @@ import {
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
+const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
+const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
@@ -262,16 +265,17 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     }
 
     const persisted = await readVolumeFiles(input.modal, input.app, input.image, volume, record.remote_root, [
-      "status.json"
+      "status.json",
+      "result.json"
     ]);
-    const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"), {
-      generation: record.generation,
-      attempt: record.attempt
-    });
+    const workerStatus = latestPersistedWorkerStatus(persisted, record);
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
       attempt: record.attempt,
-      ...(workerStatus === undefined ? {} : { workerStatus })
+      ...(workerStatus === undefined ? {} : { workerStatus }),
+      ...(record.phase === "failed" && record.failure_category !== undefined
+        ? { launchFailure: record.failure_category }
+        : {})
     });
     if (runnerStatus.action === "none") {
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
@@ -494,15 +498,18 @@ export async function modalBenchmarkStatus(input: {
     for (const launch of state.launches) {
       const probe = await probeModalSandbox(modal, launch.sandbox_id);
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
-      const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, ["status.json"]);
-      const workerStatus = parseModalWorkerStatus(parseJson(persisted["status.json"] ?? "{}"), {
-        generation: launch.generation,
-        attempt: launch.attempt
-      });
+      const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
+        "status.json",
+        "result.json"
+      ]);
+      const workerStatus = latestPersistedWorkerStatus(persisted, launch);
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
         attempt: launch.attempt,
-        ...(workerStatus === undefined ? {} : { workerStatus })
+        ...(workerStatus === undefined ? {} : { workerStatus }),
+        ...(launch.phase === "failed" && launch.failure_category !== undefined
+          ? { launchFailure: launch.failure_category }
+          : {})
       });
       rows.push({
         logical_run_id: state.logical_run_id,
@@ -536,10 +543,7 @@ export async function collectModalBenchmark(input: {
         ...MODAL_COLLECT_RESULT_FILES
       ]);
       const output = path.resolve(input.outputDir, launch.slug);
-      await mkdir(output, { recursive: true, mode: 0o700 });
-      for (const [name, contents] of Object.entries(files)) {
-        await writeFile(path.join(output, name), contents, { mode: 0o600 });
-      }
+      await replaceSanitizedModalCollectedFiles(output, files, launch);
     }
   } finally {
     modal.close();
@@ -729,6 +733,84 @@ function parseJson(value: string): unknown {
   } catch {
     return {};
   }
+}
+
+function latestPersistedWorkerStatus(
+  files: Readonly<Record<string, string>>,
+  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+) {
+  return latestModalWorkerStatus(
+    [parseJson(files["status.json"] ?? "{}"), parseJson(files["result.json"] ?? "{}")],
+    launch
+  );
+}
+
+export function assertSanitizedModalCollectedFiles(
+  files: Readonly<Record<string, string>>,
+  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+): void {
+  for (const name of ["status.json", "result.json"] as const) {
+    const contents = files[name];
+    if (contents === undefined) continue;
+    const contract = parseModalWorkerResult(parseJson(contents), launch);
+    if (contract === undefined || (name === "result.json" && contract.result_type !== "terminal")) {
+      throw new Error(`refusing to collect an unsanitized Modal ${name}`);
+    }
+  }
+  const log = files["worker.log"];
+  if (log !== undefined && !isGenericWorkerLifecycleLog(log)) {
+    throw new Error("refusing to collect an unsanitized Modal worker log");
+  }
+}
+
+export async function replaceSanitizedModalCollectedFiles(
+  output: string,
+  files: Readonly<Record<string, string>>,
+  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+): Promise<void> {
+  assertSanitizedModalCollectedFiles(files, launch);
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  await chmod(output, 0o700);
+  const staging = await mkdtemp(path.join(output, ".collect-"));
+  try {
+    for (const name of MODAL_COLLECT_RESULT_FILES) {
+      const contents = files[name];
+      if (contents === undefined) continue;
+      await writeFile(path.join(staging, name), contents, { mode: 0o600, flag: "wx" });
+    }
+    for (const name of MODAL_COLLECT_RESULT_FILES) {
+      const staged = path.join(staging, name);
+      const destination = path.join(output, name);
+      if (files[name] === undefined) {
+        await unlink(destination).catch((error: unknown) => {
+          if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+        });
+      } else {
+        await rename(staged, destination);
+      }
+    }
+    for (const name of LEGACY_UNSAFE_COLLECT_FILES) {
+      await unlink(path.join(output, name)).catch((error: unknown) => {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      });
+    }
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+function isGenericWorkerLifecycleLog(contents: string): boolean {
+  if (Buffer.byteLength(contents, "utf8") > MAX_GENERIC_WORKER_LOG_BYTES) return false;
+  if (contents === "") return true;
+  if (!contents.endsWith("\n")) return false;
+  return contents
+    .slice(0, -1)
+    .split("\n")
+    .every((line) =>
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (?:worker-started|operation-started|operation-finished|operation-failed)$/u.test(
+        line
+      )
+    );
 }
 
 function sleep(ms: number): Promise<void> {

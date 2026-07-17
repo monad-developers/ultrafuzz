@@ -237,6 +237,25 @@ describe("sanitized worker result contracts", () => {
     expect(serialized).not.toContain("placeholder-private-detail");
   });
 
+  it("reclassifies a terminal contract when the first durable flush fails", async () => {
+    const harness = await terminalHarness();
+    harness.flush.mockRejectedValueOnce(new Error("generic flush failure")).mockResolvedValueOnce(undefined);
+
+    await expect(runWithTerminalPersistence({ ...harness.input, run: async () => "finished" })).rejects.toMatchObject({
+      name: "OperationalDispositionError",
+      category: "unreachable"
+    });
+
+    expect(harness.flush).toHaveBeenCalledTimes(2);
+    expect(readContract(harness.resultPath)).toMatchObject({
+      generation: 2,
+      result_type: "terminal",
+      exit_category: "unreachable",
+      diagnostic_code: "dependency-unreachable"
+    });
+    expect(readContract(harness.statusPath)).toEqual(readContract(harness.resultPath));
+  });
+
   it("persists allowlisted launch context and generic checkpoint diagnostics", async () => {
     const root = await temporaryRoot();
     let modelWorkStarted = false;

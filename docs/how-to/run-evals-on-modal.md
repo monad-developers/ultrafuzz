@@ -164,14 +164,18 @@ Persisted worker snapshots use this separate stable exit taxonomy:
 | `genuine-evaluation-failure` | The workflow finished with verified task failures, not an infra error. |
 
 `status.json` is a replaceable partial or terminal snapshot. `result.json` is
-terminal. Both contain only an allowlisted aggregate contract: monotonic write
+terminal. Status and resume inspect both files and use the newest exact-attempt
+generation, so a crash between the two atomic replacements cannot hide a
+durable terminal result. Both contain only an allowlisted aggregate contract: monotonic write
 generation, launch generation and attempt, whether model work started, node
 counts, checkpoint age and digest, exit category, runtime, aggregate usage,
 pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
 artifacts. `collect` copies only `status.json`, `result.json`, and the generic
 worker lifecycle log; investigate sensitive run data on the private volume under
-the repository's normal access controls.
+the repository's normal access controls. Collection validates each contract and
+generic log line before writing locally and refuses pre-hardening or malformed
+volume artifacts.
 
 ## Run the opt-in real-Modal smoke
 
