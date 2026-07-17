@@ -7,6 +7,36 @@ export type TerminalDisposition =
   | { kind: "incomplete"; failedTasks: number; operationalFailures: number }
   | { kind: "operational-failure"; failedTasks: number; operationalFailures: number };
 
+export const OPERATIONAL_DISPOSITION_CATEGORIES = [
+  "live",
+  "finished",
+  "capacity-unavailable",
+  "authentication-failure",
+  "sandbox-exited",
+  "unreachable",
+  "genuine-evaluation-failure"
+] as const;
+
+export type OperationalDispositionCategory = (typeof OPERATIONAL_DISPOSITION_CATEGORIES)[number];
+export type OperationalFailureCategory = Extract<
+  OperationalDispositionCategory,
+  "capacity-unavailable" | "authentication-failure" | "sandbox-exited" | "unreachable"
+>;
+
+export class OperationalDispositionError extends Error {
+  readonly category: OperationalFailureCategory;
+
+  constructor(category: OperationalFailureCategory, options: { cause?: unknown } = {}) {
+    super("worker operation failed", options);
+    this.name = "OperationalDispositionError";
+    this.category = category;
+  }
+}
+
+export function operationalDispositionForError(error: unknown): OperationalFailureCategory {
+  return error instanceof OperationalDispositionError ? error.category : "sandbox-exited";
+}
+
 interface TaskBinding {
   attemptId: string;
   concreteNodeId: string;

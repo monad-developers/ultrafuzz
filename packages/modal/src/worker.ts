@@ -1,13 +1,25 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { loadModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { REMOTE_CONFIG_PATH, persistentDataRoot, resolvePersistentRemoteRoot } from "./layout.js";
-import { canScoreBenchmarkRow, inspectTerminalDisposition, runBenchmarkExecutionOnce } from "./terminal-disposition.js";
+import {
+  canScoreBenchmarkRow,
+  inspectTerminalDisposition,
+  OperationalDispositionError,
+  runBenchmarkExecutionOnce,
+  type OperationalFailureCategory
+} from "./terminal-disposition.js";
+import {
+  emptyWorkerCheckpoint,
+  readWorkerCheckpoint,
+  runWithTerminalPersistence,
+  WorkerResultWriter
+} from "./worker-result.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -21,113 +33,101 @@ const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
+const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 
 async function main(): Promise<void> {
-  try {
-    assertWorkerInput();
-    await mkdir(DATA_ROOT, { recursive: true });
-    await writeFile(LOG_PATH, "");
-    await setStatus("preparing");
-    const { target, control, suitePath, evalRunId } = await prepareWorkspace();
-    await setStatus("running", { eval_run_id: evalRunId });
-    let terminalDisposition = await runBenchmarkExecutionOnce(
-      () =>
-        runEval(
-          [
-            "node",
-            CLI,
-            "eval",
-            "run",
-            "--project",
-            control,
-            "--suite",
-            suitePath,
-            "--provider",
-            "braintrust",
-            "--eval-run-id",
-            evalRunId,
-            "--watch-timeout-seconds",
-            String(EVAL_WATCH_TIMEOUT_SECONDS),
-            "--json"
-          ],
-          target
-        ),
-      () => inspectTerminalDisposition(target)
-    );
+  await mkdir(DATA_ROOT, { recursive: true });
+  await writeFile(LOG_PATH, "", { mode: 0o600 });
+  const writer = await WorkerResultWriter.create({ statusPath: STATUS_PATH, resultPath: RESULT_PATH });
+  let target: string | undefined;
+  await runWithTerminalPersistence({
+    writer,
+    snapshot: () => (target === undefined ? Promise.resolve(emptyWorkerCheckpoint()) : readWorkerCheckpoint(target)),
+    flush: flushVolume,
+    run: async () => {
+      await writer.writePartial(emptyWorkerCheckpoint());
+      assertWorkerInput();
+      const prepared = await prepareWorkspace();
+      target = prepared.target;
+      const { control, suitePath, evalRunId } = prepared;
+      await writer.writePartial(await readWorkerCheckpoint(target));
+      let terminalDisposition = await runBenchmarkExecutionOnce(
+        () =>
+          runEval(
+            [
+              "node",
+              CLI,
+              "eval",
+              "run",
+              "--project",
+              control,
+              "--suite",
+              suitePath,
+              "--provider",
+              "braintrust",
+              "--eval-run-id",
+              evalRunId,
+              "--watch-timeout-seconds",
+              String(EVAL_WATCH_TIMEOUT_SECONDS),
+              "--json"
+            ],
+            target!,
+            writer
+          ),
+        () => inspectTerminalDisposition(target!)
+      );
 
-    const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
-    const runSummary = JSON.parse(await readFile(path.join(evalDir, "run-summary.json"), "utf8")) as {
-      records?: Array<{ final_status?: string }>;
-    };
-    if (runSummary.records?.length !== 1) {
-      throw new Error("benchmark row did not finish successfully");
-    }
-    if (runSummary.records[0]?.final_status !== "succeeded" && terminalDisposition === undefined) {
-      terminalDisposition = await inspectTerminalDisposition(target);
-    }
-    if (!canScoreBenchmarkRow(runSummary.records[0]?.final_status, terminalDisposition)) {
-      throw new Error("benchmark row did not finish successfully");
-    }
-
-    await setStatus("scoring", { eval_run_id: evalRunId });
-    const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
-    const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv));
-    await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
-      label: "eval score",
-      env: {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
-        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
-        ...(CONFIG.braintrust.judge_url === undefined ? {} : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
+      const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
+      const runSummary = JSON.parse(await readFile(path.join(evalDir, "run-summary.json"), "utf8")) as {
+        records?: Array<{ final_status?: string }>;
+      };
+      if (runSummary.records?.length !== 1) {
+        throw new OperationalDispositionError("unreachable");
       }
-    });
-    await setStatus("publishing", { eval_run_id: evalRunId });
-    await runChecked(
-      [
-        "node",
-        CLI,
-        "eval",
-        "publish",
-        evalRunId,
-        "--project",
-        control,
-        "--provider",
-        "braintrust",
-        "--resume",
-        "--json"
-      ],
-      { label: "eval publish" }
-    );
-    await runChecked(["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"], {
-      label: "eval report"
-    });
-    const scoreSummary = JSON.parse(await readFile(path.join(evalDir, "summary.json"), "utf8")) as unknown;
-    await persistOutcomeArtifacts(target, control, evalRunId);
-    await writeFile(
-      path.join(DATA_ROOT, "result.json"),
-      `${JSON.stringify(
-        {
-          schema_version: "ultrafuzz.modal.result.v1",
-          completed_at: new Date().toISOString(),
-          run_id: RUN_ID,
-          model: MODEL,
-          eval_run_id: evalRunId,
-          run_summary: runSummary,
-          score_summary: scoreSummary
-        },
-        null,
-        2
-      )}\n`
-    );
-    await setStatus("succeeded", { eval_run_id: evalRunId });
-    await runChecked(["sync"], { label: "volume sync", cwd: DATA_ROOT });
-  } catch (error) {
-    const message = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error);
-    await mkdir(DATA_ROOT, { recursive: true });
-    await captureFailureDetails().catch(() => undefined);
-    await appendFile(LOG_PATH, `${new Date().toISOString()} FATAL ${message}\n`).catch(() => undefined);
-    await setStatus("failed", { error: message.slice(0, 12_000) }).catch(() => undefined);
-    throw error;
-  }
+      if (runSummary.records[0]?.final_status !== "succeeded" && terminalDisposition === undefined) {
+        terminalDisposition = await inspectTerminalDisposition(target!);
+      }
+      if (!canScoreBenchmarkRow(runSummary.records[0]?.final_status, terminalDisposition)) {
+        throw new OperationalDispositionError("unreachable");
+      }
+
+      await writer.writePartial(await readWorkerCheckpoint(target!));
+      const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
+      const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv, "authentication-failure"));
+      await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
+        label: "eval score",
+        failureCategory: "unreachable",
+        env: {
+          ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
+          ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
+          ...(CONFIG.braintrust.judge_url === undefined
+            ? {}
+            : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
+        }
+      });
+      await writer.writePartial(await readWorkerCheckpoint(target!));
+      await runChecked(
+        [
+          "node",
+          CLI,
+          "eval",
+          "publish",
+          evalRunId,
+          "--project",
+          control,
+          "--provider",
+          "braintrust",
+          "--resume",
+          "--json"
+        ],
+        { label: "eval publish", failureCategory: "unreachable" }
+      );
+      await runChecked(["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"], {
+        label: "eval report"
+      });
+      return terminalDisposition?.kind === "genuine-task-failures" ? "genuine-evaluation-failure" : "finished";
+    }
+  });
 }
 
 function assertWorkerInput(): void {
@@ -183,35 +183,51 @@ async function materializeGroundTruth(source: string, destination: string): Prom
 async function ephemeralJudgeCredential(sourceKey: string): Promise<string> {
   const endpoint = CONFIG.braintrust.judge_credential_endpoint;
   if (endpoint === undefined) return sourceKey;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    redirect: "error",
-    cache: "no-store",
-    headers: { authorization: `Bearer ${sourceKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      model: MODEL.model,
-      ttl_seconds: CONFIG.braintrust.judge_credential_ttl_seconds
-    })
-  });
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      redirect: "error",
+      cache: "no-store",
+      headers: { authorization: `Bearer ${sourceKey}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL.model,
+        ttl_seconds: CONFIG.braintrust.judge_credential_ttl_seconds
+      })
+    });
+  } catch (error) {
+    throw new OperationalDispositionError("unreachable", { cause: error });
+  }
   const body = await response.text();
-  if (!response.ok) throw new Error(`judge credential request failed with status ${response.status}`);
-  if (body.length > 64 * 1024) throw new Error("judge credential response is too large");
+  if (!response.ok) {
+    const category =
+      response.status === 401 || response.status === 403
+        ? "authentication-failure"
+        : response.status === 429 || response.status === 503
+          ? "capacity-unavailable"
+          : "unreachable";
+    throw new OperationalDispositionError(category);
+  }
+  if (body.length > 64 * 1024) throw new OperationalDispositionError("unreachable");
   let parsed: unknown;
   try {
     parsed = JSON.parse(body) as unknown;
-  } catch {
-    throw new Error("judge credential response is not JSON");
+  } catch (error) {
+    throw new OperationalDispositionError("unreachable", { cause: error });
   }
   const key =
     typeof parsed === "object" && parsed !== null && "key" in parsed && typeof parsed.key === "string"
       ? parsed.key
       : undefined;
-  if (key === undefined || key.trim() === "") throw new Error("judge credential response is missing key");
+  if (key === undefined || key.trim() === "") throw new OperationalDispositionError("authentication-failure");
   return key;
 }
 
 async function cloneAtRef(repo: string, ref: string, destination: string, label: string): Promise<void> {
-  await runChecked(["git", "clone", "--quiet", repo, destination], { label: `${label} clone` });
+  await runChecked(["git", "clone", "--quiet", repo, destination], {
+    label: `${label} clone`,
+    failureCategory: "unreachable"
+  });
   await runChecked(["git", "checkout", "--detach", ref], { label: `${label} checkout`, cwd: destination });
 }
 
@@ -305,124 +321,97 @@ function yamlString(value: string): string {
   return JSON.stringify(value);
 }
 
-async function runEval(argv: string[], target: string): Promise<void> {
-  const progress = setInterval(() => void reportProgress(target), 60_000);
+async function runEval(argv: string[], target: string, writer: WorkerResultWriter): Promise<void> {
+  const progress = setInterval(() => void reportProgress(target, writer).catch(() => undefined), 60_000);
   try {
-    await runChecked(argv, { label: "eval run" });
+    await runChecked(argv, { label: "eval run", failureCategory: "unreachable" });
   } finally {
     clearInterval(progress);
-    await reportProgress(target);
+    await reportProgress(target, writer);
   }
 }
 
-async function reportProgress(target: string): Promise<void> {
-  const state = await durableRunState(target);
-  if (state === undefined) return;
-  const counts: Record<string, number> = {};
-  for (const node of Object.values(state.nodes ?? {})) {
-    const status = node.status ?? "unknown";
-    counts[status] = (counts[status] ?? 0) + 1;
-  }
-  await setStatus("running", { run_status: state.status, node_counts: counts });
+async function reportProgress(target: string, writer: WorkerResultWriter): Promise<void> {
+  await writer.writePartial(await readWorkerCheckpoint(target));
 }
 
-async function durableRunState(
-  target: string
-): Promise<{ status?: string; nodes?: Record<string, { status?: string }> } | undefined> {
-  const runs = await readdir(path.join(target, ".ultrafuzz/runs")).catch(() => []);
-  for (const run of runs.sort().reverse()) {
-    try {
-      const state = JSON.parse(await readFile(path.join(target, ".ultrafuzz/runs", run, "state.json"), "utf8")) as {
-        status?: string;
-        nodes?: Record<string, { status?: string }>;
-      };
-      if (state.nodes !== undefined) return state;
-    } catch {
-      // Keep looking for a durable state file.
-    }
+async function flushVolume(): Promise<void> {
+  const child = spawn("sync", [], { cwd: DATA_ROOT, stdio: "ignore" });
+  let exitCode: number;
+  try {
+    exitCode = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+  } catch (error) {
+    throw new OperationalDispositionError(capacityFailure(error) ? "capacity-unavailable" : "unreachable", {
+      cause: error
+    });
   }
-  return undefined;
+  if (exitCode !== 0) throw new OperationalDispositionError("unreachable");
 }
 
 async function runChecked(
   argv: string[],
-  options: { label: string; cwd?: string; env?: Record<string, string> }
+  options: {
+    label: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    failureCategory?: OperationalFailureCategory;
+  }
 ): Promise<void> {
-  await appendFile(LOG_PATH, `${new Date().toISOString()} [${options.label}] ${argv.join(" ")}\n`);
+  await appendGenericLog("operation-started");
   const child = spawn(argv[0]!, argv.slice(1), {
     cwd: options.cwd ?? ULTRAFUZZ_ROOT,
     env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"]
   });
   const streams = [child.stdout, child.stderr].map(async (stream) => {
-    for await (const chunk of stream) await appendFile(LOG_PATH, String(chunk));
-  });
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  });
-  await Promise.all(streams);
-  if (exitCode !== 0) throw new Error(`${options.label} failed with exit code ${exitCode}`);
-}
-
-async function setStatus(stage: string, extra: Record<string, unknown> = {}): Promise<void> {
-  await writeFile(
-    STATUS_PATH,
-    `${JSON.stringify(
-      {
-        schema_version: "ultrafuzz.modal.worker-status.v1",
-        updated_at: new Date().toISOString(),
-        stage,
-        model: MODEL,
-        ...extra
-      },
-      null,
-      2
-    )}\n`
-  );
-}
-
-async function persistOutcomeArtifacts(target: string, control: string, evalRunId: string): Promise<void> {
-  const output = path.join(DATA_ROOT, "outcome");
-  const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
-  await mkdir(output, { recursive: true });
-  for (const name of ["run-summary.json", "summary.json", "summary.md"]) {
-    await copyFile(path.join(evalDir, name), path.join(output, name)).catch(() => undefined);
-  }
-  const runs = await readdir(path.join(target, ".ultrafuzz/runs")).catch(() => []);
-  for (const run of runs.sort().reverse()) {
-    const runRoot = path.join(target, ".ultrafuzz/runs", run);
-    const state = await readFile(path.join(runRoot, "state.json"), "utf8").catch(() => "{}");
-    try {
-      if ((JSON.parse(state) as { nodes?: unknown }).nodes === undefined) continue;
-      for (const name of ["report.json", "report.md", "findings.normalized.json"]) {
-        await copyFile(path.join(runRoot, "artifacts/final-report", name), path.join(output, name)).catch(
-          () => undefined
-        );
-      }
-      break;
-    } catch {
-      // Keep looking.
+    for await (const _chunk of stream) {
+      // Drain child output without persisting provider responses or benchmark contents.
     }
+  });
+  let exitCode: number;
+  try {
+    exitCode = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+  } catch (error) {
+    await Promise.all(streams).catch(() => undefined);
+    await appendGenericLog("operation-failed");
+    throw new OperationalDispositionError(capacityFailure(error) ? "capacity-unavailable" : failureCategory(options), {
+      cause: error
+    });
   }
+  await Promise.all(streams);
+  if (exitCode !== 0) {
+    await appendGenericLog("operation-failed");
+    throw new OperationalDispositionError(failureCategory(options));
+  }
+  await appendGenericLog("operation-finished");
 }
 
-async function captureFailureDetails(): Promise<void> {
-  const target = path.join(WORK_ROOT, "target");
-  const state = await durableRunState(target);
-  await writeFile(
-    path.join(DATA_ROOT, "failure-details.json"),
-    `${JSON.stringify({ captured_at: new Date().toISOString(), state: state ?? {} }, null, 2)}\n`
-  );
+function failureCategory(options: { failureCategory?: OperationalFailureCategory }): OperationalFailureCategory {
+  return options.failureCategory ?? "sandbox-exited";
 }
 
-function requiredEnv(name: string): string {
+function capacityFailure(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error) || typeof error.code !== "string") return false;
+  return ["EAGAIN", "ENOMEM", "ENOSPC"].includes(error.code);
+}
+
+async function appendGenericLog(event: "operation-started" | "operation-finished" | "operation-failed"): Promise<void> {
+  await appendFile(LOG_PATH, `${new Date().toISOString()} ${event}\n`);
+}
+
+function requiredEnv(name: string, category: OperationalFailureCategory = "sandbox-exited"): string {
   const value = process.env[name];
-  if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
+  if (value === undefined || value.trim() === "") throw new OperationalDispositionError(category);
   return value;
 }
 
-void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
+void main().catch(() => {
+  console.error("worker terminated");
   process.exitCode = 1;
 });
