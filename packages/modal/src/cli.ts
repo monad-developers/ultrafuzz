@@ -2,10 +2,19 @@
 
 import path from "node:path";
 
+import type { ModelProvider } from "./defaults.js";
 import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
+  if (command === "smoke") {
+    const provider = requiredProvider(argv);
+    const { runRealModalSmoke } = await import("./smoke-modal.js");
+    const result = await runRealModalSmoke(provider);
+    console.log(JSON.stringify(result, null, 2));
+    if (result.status !== "passed") process.exitCode = 1;
+    return;
+  }
   if (command === "build") {
     const result = await buildModalImage({
       appName: option(argv, "--app"),
@@ -37,7 +46,15 @@ async function main(): Promise<void> {
     });
     return;
   }
-  throw new Error("usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]");
+  throw new Error(
+    "usage: ultrafuzz-modal <build|launch|status|collect|smoke> [--config path] [--model slug] [--state path] [--provider openai|anthropic]"
+  );
+}
+
+function requiredProvider(argv: string[]): ModelProvider {
+  const value = requiredOption(argv, "--provider");
+  if (value !== "openai" && value !== "anthropic") throw new Error("--provider must be openai or anthropic");
+  return value;
 }
 
 function option(argv: string[], name: string): string | undefined {
