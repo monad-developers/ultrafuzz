@@ -598,6 +598,14 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
+  const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
+  assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
+  // Importing the registry must not construct any agent: doing so reads that
+  // agent's auth and fails a project that only uses a different backend.
+  assert.doesNotMatch(agentsIndexText, /=\s*createCodexAgent\(\)/);
+  assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
+
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
   assert.equal(validate.value?.policy_posture.trust.status, "pass");

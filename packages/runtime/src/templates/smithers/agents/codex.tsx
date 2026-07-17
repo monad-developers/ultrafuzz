@@ -15,8 +15,6 @@ export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexA
   });
 }
 
-export const CodexAgent = createCodexAgent();
-
 function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
