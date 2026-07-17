@@ -912,6 +912,75 @@ nodes:
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
 });
 
+test("startRun --agent does not carry the previous agent's model onto the new agent", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  // The default profile is CodexAgent/gpt-5.5/xhigh; switching only the agent
+  // must not hand Codex's model and reasoning to Claude.
+  const run = await startRun({
+    projectRoot: project,
+    runId: "agent-switch",
+    agent: "ClaudeAgent",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const smithersTasks = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
+  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null; reasoningEffort?: string | null }> };
+  assert.equal(smithersTasks.tasks[0]?.agentRef, "ClaudeAgent");
+  assert.equal(smithersTasks.tasks[0]?.modelName ?? null, null);
+  assert.equal(smithersTasks.tasks[0]?.reasoningEffort ?? null, null);
+
+  // An explicit --model still pins the model for the overridden agent.
+  const pinned = await startRun({
+    projectRoot: project,
+    runId: "agent-switch-pinned",
+    agent: "ClaudeAgent",
+    model: "claude-sonnet-5",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(pinned.ok, true, JSON.stringify(pinned.diagnostics));
+  const pinnedTasks = JSON.parse(
+    fs.readFileSync(path.join(pinned.value!.run_root, "smithers", "tasks.json"), "utf8")
+  ) as { tasks: Array<{ agentRef?: string; modelName?: string | null }> };
+  assert.equal(pinnedTasks.tasks[0]?.agentRef, "ClaudeAgent");
+  assert.equal(pinnedTasks.tasks[0]?.modelName, "claude-sonnet-5");
+});
+
+test("init reports an agent registry that does not export a generated agent", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+
+  // Simulate a project scaffolded before ClaudeAgent existed: the registry
+  // predates the adapter, and init preserves project-owned files.
+  const registryPath = path.join(project, ".smithers/agents/index.ts");
+  fs.writeFileSync(
+    registryPath,
+    'import { createCodexAgent } from "./codex";\n' +
+      'export { createCodexAgent } from "./codex";\n' +
+      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+    "utf8"
+  );
+
+  const upgraded = initProject({ projectRoot: project });
+  assert.equal(upgraded.ok, true);
+  const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
+  assert.equal(stale.length, 1, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale[0]?.severity, "warning");
+  assert.match(stale[0]?.message ?? "", /ClaudeAgent/);
+
+  // A registry that exports every generated agent stays quiet.
+  const regenerated = initProject({ projectRoot: project, force: true });
+  assert.equal(
+    regenerated.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE").length,
+    0,
+    JSON.stringify(regenerated.diagnostics)
+  );
+});
+
 test("startRun compiles normal Smithers tasks, persists provenance, and submits through Smithers CLI", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

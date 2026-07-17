@@ -8,10 +8,16 @@ import { builtInPromptRelativePaths, scaffoldPrompts } from "@ultrafuzz/prompts"
 import { defaultReferenceCatalogYaml } from "@ultrafuzz/references";
 import { loadRuntimeTemplate } from "./runtime-template.js";
 import { renderSmithersPackageJson } from "./smithers-package.js";
-import type { InitProjectInput, InitProjectResult } from "./types.js";
+import type { InitProjectInput, InitProjectResult, RuntimeDiagnostic } from "./types.js";
 import { configDiagnostics, runtimeFailure, runtimeResult, toProjectRelative } from "./utils.js";
 
 const DEFAULT_TOPOLOGY = loadDefaultTopology();
+
+const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
+const AGENT_TEMPLATES = [
+  { file: "claude.ts", template: "smithers/agents/claude.tsx", ref: "ClaudeAgent" },
+  { file: "codex.ts", template: "smithers/agents/codex.tsx", ref: "CodexAgent" }
+] as const;
 
 export function initProject(input: InitProjectInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -102,24 +108,17 @@ export function initProject(input: InitProjectInput) {
       preserved,
       overwritten
     );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/codex.ts",
-      loadRuntimeTemplate("smithers/agents/codex.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
-    writeProjectFile(
-      projectRoot,
-      ".smithers/agents/claude.ts",
-      loadRuntimeTemplate("smithers/agents/claude.tsx"),
-      input.force === true,
-      created,
-      preserved,
-      overwritten
-    );
+    for (const agent of AGENT_TEMPLATES) {
+      writeProjectFile(
+        projectRoot,
+        `.smithers/agents/${agent.file}`,
+        loadRuntimeTemplate(agent.template),
+        input.force === true,
+        created,
+        preserved,
+        overwritten
+      );
+    }
   } catch {
     return runtimeFailure<InitProjectResult>([
       {
@@ -161,12 +160,39 @@ export function initProject(input: InitProjectInput) {
     preserved.push(toProjectRelative(projectRoot, absolutePath));
   }
 
-  return runtimeResult(true, {
-    project_root: projectRoot,
-    created: publicInitPaths(created),
-    preserved: publicInitPaths(preserved),
-    overwritten: publicInitPaths(overwritten)
-  });
+  return runtimeResult(
+    true,
+    {
+      project_root: projectRoot,
+      created: publicInitPaths(created),
+      preserved: publicInitPaths(preserved),
+      overwritten: publicInitPaths(overwritten)
+    },
+    staleAgentRegistryDiagnostics(projectRoot)
+  );
+}
+
+// init preserves project-owned files, so a project scaffolded before an agent
+// was added keeps its old registry: the new adapter lands on disk but nothing
+// exports it, and the agent is only rejected later, at launch. Report it here
+// instead of leaving the mismatch silent.
+function staleAgentRegistryDiagnostics(projectRoot: string): RuntimeDiagnostic[] {
+  const registryPath = path.join(projectRoot, AGENT_REGISTRY_FILE);
+  if (!fs.existsSync(registryPath)) {
+    return [];
+  }
+  const registryText = fs.readFileSync(registryPath, "utf8");
+  return AGENT_TEMPLATES.filter(
+    (agent) =>
+      fs.existsSync(path.join(projectRoot, ".smithers", "agents", agent.file)) &&
+      !new RegExp(`\\b${agent.ref}\\b`, "u").test(registryText)
+  ).map((agent) => ({
+    code: "INIT_AGENT_REGISTRY_STALE",
+    message: `${AGENT_REGISTRY_FILE} does not export ${agent.ref}, so runs cannot select it; rerun ultrafuzz init --force to regenerate the registry, or export it from .smithers/agents/${agent.file} by hand`,
+    severity: "warning" as const,
+    source: "runtime",
+    path: AGENT_REGISTRY_FILE
+  }));
 }
 
 function writeProjectFile(

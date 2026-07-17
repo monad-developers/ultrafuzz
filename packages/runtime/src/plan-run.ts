@@ -11,7 +11,11 @@ import {
   type NodeStateInput,
   type RunLayout
 } from "@ultrafuzz/artifacts";
-import { redactResolvedConfig, serializeRedactedResolvedConfigToml } from "@ultrafuzz/config";
+import {
+  applyDefaultProfileOverrides,
+  redactResolvedConfig,
+  serializeRedactedResolvedConfigToml
+} from "@ultrafuzz/config";
 import {
   loadPromptCatalog,
   renderPrompt,
@@ -398,19 +402,7 @@ function renderPromptsForPlan(input: {
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {
-  if (input.agent === undefined && input.model === undefined) {
-    return;
-  }
-  const profile = config.models.profiles[config.models.default];
-  if (profile === undefined) {
-    return;
-  }
-  if (input.agent !== undefined) {
-    profile.agent = input.agent;
-  }
-  if (input.model !== undefined) {
-    profile.model = input.model;
-  }
+  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model });
 }
 
 function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {

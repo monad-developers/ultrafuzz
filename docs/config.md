@@ -49,21 +49,21 @@ model = "claude-opus-4-8"
 
 [agents.ClaudeAgent]
 auth = "subscription"
-api_key_env = "ANTHROPIC_API_KEY"
 ```
 
 Select it per node or group in `.ultrafuzz/topology.yml`
-(`model_profiles = ["claude"]`) or for a single run with
-`ultrafuzz run --model claude`.
+(`model_profiles = ["claude"]`). `--agent` and `--model` override fields of the
+default profile rather than selecting a profile by id, so a one-off Claude run
+is `ultrafuzz run --agent ClaudeAgent`; add `--model claude-sonnet-5` to pin a
+model, otherwise the Claude CLI default is used.
 
 Set `auth = "subscription"` to run against your logged-in Claude Code CLI
 session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the
 subscription is used; optional `config_dir` sets an isolated `CLAUDE_CONFIG_DIR`
 for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
 to bill against the Anthropic API using the key read from `api_key_env`
-(default `ANTHROPIC_API_KEY`). Either mode requires the `claude` CLI to be
-installed. Under subscription auth there is no per-token billing, so run
-cost/token accounting is reported as unavailable; api-key auth restores it.
+(default `ANTHROPIC_API_KEY`). Both modes drive the `claude` CLI, so it must be
+installed either way; `auth` only changes how that CLI authenticates.
 
 Unlike `CodexAgent`, the Claude Code CLI exposes no reasoning-effort control, so
 a `reasoning` value on a Claude profile is ignored. Pin the model through the
