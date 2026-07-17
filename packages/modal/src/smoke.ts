@@ -6,6 +6,8 @@ export const MODAL_SMOKE_ENTRY_PATH = "/opt/ultrafuzz/packages/modal/dist/smoke-
 export const MODAL_SMOKE_DATA_ROOT = "/data/ultrafuzz-modal-smoke";
 
 export type ModalSmokePhase = "fresh" | "resume";
+export type ModalSmokeFailureStage =
+  "prepare" | "fresh-launch" | "checkpoint" | "fresh-terminate" | "resume-launch" | "completion" | "cleanup";
 
 export interface ModalSmokePrepared {
   imageName: string;
@@ -58,6 +60,7 @@ export interface ModalSmokeResult {
     repeated_units: number;
     launch_owners: number;
     failure_code?: "cloud-operation-failed";
+    failure_stage?: ModalSmokeFailureStage;
   };
 }
 
@@ -100,7 +103,7 @@ export async function runModalSmoke(provider: ModelProvider, driver: ModalSmokeD
   }
 }
 
-export function cloudFailureResult(provider: ModelProvider): ModalSmokeResult {
+export function cloudFailureResult(provider: ModelProvider, failureStage: ModalSmokeFailureStage): ModalSmokeResult {
   return {
     schema_version: MODAL_SMOKE_RESULT_SCHEMA_VERSION,
     status: "failed",
@@ -119,7 +122,8 @@ export function cloudFailureResult(provider: ModelProvider): ModalSmokeResult {
       completed_units: 0,
       repeated_units: 0,
       launch_owners: 0,
-      failure_code: "cloud-operation-failed"
+      failure_code: "cloud-operation-failed",
+      failure_stage: failureStage
     }
   };
 }

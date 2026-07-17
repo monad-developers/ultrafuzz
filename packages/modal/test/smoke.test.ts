@@ -6,6 +6,7 @@ import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "../src/defaults.js";
 import { remoteAuthPath } from "../src/layout.js";
 import {
   MODAL_SMOKE_ENTRY_PATH,
+  cloudFailureResult,
   modalSmokeEntrypointCommand,
   runModalSmoke,
   type ModalSmokeCheckpoint,
@@ -62,6 +63,19 @@ describe("Modal smoke orchestration", () => {
     const ambiguousResult = await runModalSmoke("openai", ambiguous);
     expect(ambiguousResult.status).toBe("failed");
     expect(ambiguousResult.checks.single_launch_owner).toBe(false);
+  });
+
+  it("reports only an allowlisted cloud failure stage", () => {
+    const result = cloudFailureResult("openai", "checkpoint");
+
+    expect(result.status).toBe("failed");
+    expect(result.diagnostics).toEqual({
+      completed_units: 0,
+      repeated_units: 0,
+      launch_owners: 0,
+      failure_code: "cloud-operation-failed",
+      failure_stage: "checkpoint"
+    });
   });
 });
 

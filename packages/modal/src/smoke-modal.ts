@@ -23,6 +23,7 @@ import {
   type ModalSmokeCheckpoint,
   type ModalSmokeCompletion,
   type ModalSmokeDriver,
+  type ModalSmokeFailureStage,
   type ModalSmokeLaunch,
   type ModalSmokePhase,
   type ModalSmokePrepared,
@@ -39,13 +40,14 @@ export async function runRealModalSmoke(provider: ModelProvider): Promise<ModalS
   try {
     return await runModalSmoke(provider, driver);
   } catch {
-    return cloudFailureResult(provider);
+    return cloudFailureResult(provider, driver.failureStage);
   } finally {
-    await driver.dispose();
+    await driver.dispose().catch(() => undefined);
   }
 }
 
 class RealModalSmokeDriver implements ModalSmokeDriver {
+  failureStage: ModalSmokeFailureStage = "prepare";
   private modal: ModalClient | undefined;
   private app: App | undefined;
   private image: Image | undefined;
@@ -56,6 +58,7 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   private namePrefix = "";
 
   async prepare(provider: ModelProvider): Promise<ModalSmokePrepared> {
+    this.failureStage = "prepare";
     this.modal = new ModalClient();
     this.provider = provider;
     this.auth = subscriptionAuthCopy({ provider, auth_mode: "subscription" });
@@ -73,6 +76,7 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   }
 
   async launch(prepared: ModalSmokePrepared, phase: ModalSmokePhase, candidate: number): Promise<ModalSmokeLaunch> {
+    this.failureStage = phase === "fresh" ? "fresh-launch" : "resume-launch";
     const modal = required(this.modal);
     const app = required(this.app);
     const image = required(this.image);
@@ -116,17 +120,20 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   }
 
   async waitForCheckpoint(launch: ModalSmokeLaunch): Promise<ModalSmokeCheckpoint> {
+    this.failureStage = "checkpoint";
     const value = await this.readEvidence(launch, CHECKPOINT_PATH);
     return parseCheckpoint(value);
   }
 
   async terminate(launch: ModalSmokeLaunch): Promise<void> {
+    this.failureStage = "fresh-terminate";
     const sandbox = this.sandboxFor(launch);
     await sandbox.terminate({ wait: true });
     this.sandboxes.delete(sandbox.sandboxId);
   }
 
   async waitForCompletion(launch: ModalSmokeLaunch): Promise<ModalSmokeCompletion> {
+    this.failureStage = "completion";
     const sandbox = this.sandboxFor(launch);
     const value = await this.readEvidence(launch, RESULT_PATH);
     const result = parseCompletion(value);
@@ -137,7 +144,12 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   }
 
   async cleanup(_prepared: ModalSmokePrepared, _launches: ModalSmokeLaunch[]): Promise<void> {
-    await this.dispose();
+    try {
+      await this.dispose();
+    } catch (error) {
+      this.failureStage = "cleanup";
+      throw error;
+    }
   }
 
   async dispose(): Promise<void> {
