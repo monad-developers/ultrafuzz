@@ -598,13 +598,28 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
+  assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
   // Importing the registry must not construct any agent: doing so reads that
-  // agent's auth and fails a project that only uses a different backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*createCodexAgent\(\)/);
+  // agent's auth and fails a project that only uses the other backend.
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
+  const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
+  assert.match(claudeAgentText, /ClaudeCodeAgent/);
+  assert.match(claudeAgentText, /createClaudeAgent/);
+  assert.match(claudeAgentText, /permissionMode:\s*"bypassPermissions"/);
+  assert.match(claudeAgentText, /claudeAuthOptions/);
+  assert.match(claudeAgentText, /ANTHROPIC_API_KEY/);
+  assert.doesNotMatch(claudeAgentText, /apiKey:\s*process\.env\.ANTHROPIC_API_KEY/);
+  // The model comes from the resolved model profile, never hard-coded in the template.
+  assert.doesNotMatch(claudeAgentText, /model:\s*"claude-[\w.-]+"/);
+  // skipGitRepoCheck is a CodexAgent option and has no ClaudeCodeAgent equivalent.
+  assert.doesNotMatch(claudeAgentText, /skipGitRepoCheck/);
+  assert.doesNotMatch(claudeAgentText, /=\s*createClaudeAgent\(\)/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));

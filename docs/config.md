@@ -36,6 +36,39 @@ Set `auth = "api-key"` to bill through an OpenAI API key read from
 from `CODEX_HOME/auth.json`; optional `config_dir` points one generated agent
 at a specific Codex config directory.
 
+## Claude agent
+
+`ultrafuzz init` also generates a `ClaudeAgent`, backed by the Claude Code CLI
+(`claude --print`). It is available as an opt-in profile; the default profile
+stays on `CodexAgent`:
+
+```toml
+[models.claude]
+agent = "ClaudeAgent"
+model = "claude-opus-4-8"
+
+[agents.ClaudeAgent]
+auth = "subscription"
+api_key_env = "ANTHROPIC_API_KEY"
+```
+
+Select it per node or group in `.ultrafuzz/topology.yml`
+(`model_profiles = ["claude"]`) or for a single run with
+`ultrafuzz run --model claude`.
+
+Set `auth = "subscription"` to run against your logged-in Claude Code CLI
+session with no API key — `ClaudeAgent` clears `ANTHROPIC_API_KEY` so the
+subscription is used; optional `config_dir` sets an isolated `CLAUDE_CONFIG_DIR`
+for running multiple Claude subscriptions side by side. Set `auth = "api-key"`
+to bill against the Anthropic API using the key read from `api_key_env`
+(default `ANTHROPIC_API_KEY`). Either mode requires the `claude` CLI to be
+installed. Under subscription auth there is no per-token billing, so run
+cost/token accounting is reported as unavailable; api-key auth restores it.
+
+Unlike `CodexAgent`, the Claude Code CLI exposes no reasoning-effort control, so
+a `reasoning` value on a Claude profile is ignored. Pin the model through the
+profile's `model` field rather than under `[agents.ClaudeAgent]`.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml
