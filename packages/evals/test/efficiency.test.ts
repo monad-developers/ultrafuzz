@@ -111,6 +111,60 @@ describe("terminal eval efficiency", () => {
     });
   });
 
+  it("ignores never-executed terminal graph nodes when calculating active time", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-pending-node-"));
+    writeTerminalRun(runRoot);
+    const statePath = path.join(runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      nodes: Record<string, unknown>;
+    };
+    state.nodes.waiting = {
+      node_id: "waiting",
+      status: "pending",
+      retry_count: 0,
+      timed_out: false
+    };
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.runtime).toEqual({ status: "complete", reason: null });
+    expect(summary.efficiency.active_time_seconds).toBe(7);
+    expect(summary.efficiency.wait_time_seconds).toBe(3);
+  });
+
+  it("does not undercount active time when an executed terminal node is missing timestamps", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-missing-node-times-"));
+    writeRunFixture({
+      runRoot,
+      runId: "generated-run",
+      state: {
+        schema_version: "1.0",
+        run_id: "generated-run",
+        status: "succeeded",
+        created_at: "2026-07-09T00:00:00.000Z",
+        started_at: WORKFLOW_STARTED,
+        finished_at: WORKFLOW_FINISHED,
+        nodes: {
+          done: {
+            node_id: "done",
+            status: "succeeded",
+            retry_count: 0,
+            timed_out: false
+          }
+        }
+      }
+    });
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.runtime).toEqual({
+      status: "unavailable",
+      reason: "node-timestamps-unavailable"
+    });
+    expect(summary.efficiency.wall_time_seconds).toBeNull();
+    expect(summary.efficiency.active_time_seconds).toBeNull();
+    expect(summary.efficiency.wait_time_seconds).toBeNull();
+  });
+
   it("keeps incomplete usage null and marks a known partial cost independently", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-partial-"));
     writeTerminalRun(runRoot);

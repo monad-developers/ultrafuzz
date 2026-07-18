@@ -19,7 +19,14 @@ export interface EvalTerminalSummary {
 
 const TERMINAL_WORKFLOW_STATUSES = new Set<EvalWorkflowStatus>(["succeeded", "failed", "timed-out", "canceled"]);
 
-const INACTIVE_NODE_STATUSES = new Set(["skipped", "reused-from-prior-run", "invalidated"]);
+const NON_EXECUTING_NODE_STATUSES = new Set([
+  "pending",
+  "ready",
+  "runnable",
+  "skipped",
+  "reused-from-prior-run",
+  "invalidated"
+]);
 
 /**
  * Join launcher evidence with the authoritative durable workflow state and
@@ -152,10 +159,7 @@ function activeMilliseconds(
     }
     const started = timestamp(node.started_at);
     const finished = timestamp(node.finished_at);
-    if (started.kind === "missing" && finished.kind === "missing") {
-      continue;
-    }
-    if (started.kind === "missing" && INACTIVE_NODE_STATUSES.has(node.status)) {
+    if (started.kind === "missing" && finished.kind === "missing" && NON_EXECUTING_NODE_STATUSES.has(node.status)) {
       continue;
     }
     if (started.kind === "missing" || finished.kind === "missing") {
