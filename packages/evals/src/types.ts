@@ -1,3 +1,4 @@
+import type { RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
@@ -126,11 +127,117 @@ export interface EvalMatrixRow {
   workflow_input?: unknown;
 }
 
+export interface EvalCandidateProvenance {
+  label: string;
+  commit: string;
+  dirty: boolean | null;
+  execution_artifact_id?: string;
+}
+
+export interface EvalBenchmarkTargetProvenance {
+  id: string;
+  repo: string;
+  commit: string;
+  dirty: boolean | null;
+}
+
+export interface EvalExecutionPolicyProvenance {
+  revision: string;
+  fingerprint: string;
+  max_parallel_targets: number | null;
+  max_parallel_runs: number;
+  node_telemetry: boolean;
+  heartbeat_interval_seconds: number;
+  controller_mode: "watch" | "detached";
+  watch_timeout_seconds: number;
+  poll_interval_ms: number;
+}
+
+export interface EvalBenchmarkProvenance {
+  availability: "available" | "incomplete";
+  series: string;
+  protocol_revision: string;
+  cohort_fingerprint: string;
+  targets: EvalBenchmarkTargetProvenance[];
+  ground_truth_sha256: Record<string, string>;
+  execution_policy: EvalExecutionPolicyProvenance;
+}
+
+export interface EvalRunProvenance {
+  candidate: EvalCandidateProvenance;
+  benchmark: EvalBenchmarkProvenance;
+}
+
+export interface EvalScoringProvenance {
+  implementation_revision: string;
+  implementation_dirty: boolean | null;
+  judge_mode: "deterministic" | "llm";
+  judge_prompt_version: string;
+  judge_models: string[];
+  ground_truth_sha256: Record<string, string>;
+  fingerprint: string;
+}
+
+export interface EvalSummaryProvenance {
+  availability: "available" | "historical-unavailable";
+  candidate?: EvalCandidateProvenance;
+  benchmark?: EvalBenchmarkProvenance;
+  scoring: EvalScoringProvenance;
+}
+
 export interface EvalPlanValue {
   suite_path: string;
   project_root: string;
   suite: EvalSuiteSpec;
   matrix: EvalMatrixRow[];
+  provenance?: EvalRunProvenance;
+}
+
+export interface EvalLauncherLifecycle {
+  status: "succeeded" | "failed" | "unavailable";
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type EvalWorkflowStatus = RunStatus | "unavailable";
+
+export interface EvalWorkflowLifecycle {
+  status: EvalWorkflowStatus;
+  terminal: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface EvalRowLifecycle {
+  launcher: EvalLauncherLifecycle;
+  workflow: EvalWorkflowLifecycle;
+}
+
+export type EvalEfficiencyReason =
+  | "workflow-state-unavailable"
+  | "workflow-not-terminal"
+  | "workflow-timestamps-unavailable"
+  | "workflow-timestamps-invalid"
+  | "node-timestamps-unavailable"
+  | "node-timestamps-invalid"
+  | "node-attempt-timestamps-unavailable"
+  | "accounting-unavailable"
+  | "usage-incomplete"
+  | "pricing-unavailable"
+  | "pricing-incomplete";
+
+export type EvalEfficiencyCompleteness =
+  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalEfficiencyReason };
+
+export interface EvalEfficiency {
+  wall_time_seconds: number | null;
+  active_time_seconds: number | null;
+  wait_time_seconds: number | null;
+  total_tokens: number | null;
+  cost_usd: number | null;
+  runtime: EvalEfficiencyCompleteness;
+  usage: EvalEfficiencyCompleteness;
+  cost: EvalEfficiencyCompleteness;
 }
 
 export interface EvalRunRecord {
@@ -145,9 +252,20 @@ export interface EvalRunRecord {
   report_json_path?: string;
   status: "launched" | "failed";
   final_status?: string;
+  graph_fingerprint?: string;
+  config_fingerprint?: string;
+  candidate_label?: string;
+  candidate_commit?: string;
+  execution_artifact_id?: string;
   workflow_ids: string[];
-  started_at: string;
-  finished_at: string;
+  /** Explicit launcher-process lifecycle for new records. */
+  launcher?: EvalLauncherLifecycle;
+  /** Last observed durable workflow lifecycle; summaries always re-read state.json. */
+  workflow?: EvalWorkflowLifecycle;
+  /** Legacy launcher timestamp retained for reading existing eval runs. */
+  started_at?: string;
+  /** Legacy launcher timestamp retained for reading existing eval runs. */
+  finished_at?: string;
   diagnostics: RuntimeDiagnostic[];
 }
 
@@ -254,8 +372,12 @@ export interface EvalRowScore {
   severity_accuracy: number | null;
   true_positive_accuracy: number;
   duplicate_rate: number;
+  /** @deprecated Use `efficiency.wall_time_seconds`. */
   runtime_seconds: number | null;
+  /** @deprecated Use `efficiency.cost_usd`. */
   cost_estimate: number | null;
+  lifecycle: EvalRowLifecycle;
+  efficiency: EvalEfficiency;
 }
 
 export interface EvalScoreSummary {
@@ -267,6 +389,7 @@ export interface EvalScoreSummary {
   scores_path: string;
   summary_path: string;
   review_queue_path: string;
+  provenance?: EvalSummaryProvenance;
 }
 
 export interface EvalVariantScoreSummary {
@@ -284,4 +407,24 @@ export interface EvalVariantScoreSummary {
 export interface EvalCompareValue {
   baseline: string;
   variants: Array<EvalVariantScoreSummary & { delta_f1_score: number; delta_recall: number; delta_precision: number }>;
+}
+
+export interface EvalLongitudinalVariantComparison {
+  variant_id: string;
+  baseline: EvalVariantScoreSummary;
+  candidate: EvalVariantScoreSummary;
+  delta_f1_score: number;
+  delta_recall: number;
+  delta_precision: number;
+}
+
+export interface EvalLongitudinalCompareValue {
+  baseline_eval_run_id: string;
+  candidate_eval_run_id: string;
+  compatible: boolean;
+  waiver_applied: boolean;
+  differences: string[];
+  baseline_candidate?: EvalCandidateProvenance;
+  candidate?: EvalCandidateProvenance;
+  variants: EvalLongitudinalVariantComparison[];
 }

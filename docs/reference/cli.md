@@ -249,6 +249,12 @@ ultrafuzz eval run \
 ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]
 ultrafuzz eval report <eval-run-id> [--project <path>] [--json]
 ultrafuzz eval compare <eval-run-id> --baseline <variant-id> [--project <path>] [--json]
+ultrafuzz eval bundle <eval-run-id> --output <directory> [--project <path>] [--json]
+ultrafuzz eval compare <candidate-eval-run-id> \
+  --against <baseline-eval-run-id> \
+  [--allow-incompatible] \
+  [--project <path>] \
+  [--json]
 ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
   [--provider braintrust|langsmith] \
@@ -279,9 +285,17 @@ suite's judge model profile when `--llm-judge` is passed. The gateway judge
 requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
 `ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA=true`. An optional
 `ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without credentials, and redirects
-are rejected. `report` shows the
-scored variant ranking, and `compare` diffs variants against a required
-`--baseline` variant.
+are rejected. `report` shows the scored variant ranking. `compare` either
+diffs variants against a `--baseline` variant or compares a candidate run to
+an `--against` baseline run after verifying cohort identity, scoring identity,
+and variant scope; `--allow-incompatible` is an explicit, reported waiver.
+
+`bundle` derives a versioned, self-contained analysis directory from local
+eval evidence. Its fixed allowlist contains aggregate terminal status,
+evaluation metrics, accounting, and sanitized attempt history. Raw reports,
+findings, diagnostics, configuration, and execution-local identifiers are not
+representable in the bundle. Missing optional evidence is recorded in a typed
+omission manifest.
 
 `publish` replays a recorded eval run's journals from offset 0 and
 reconstructs the full node trace on a provider post hoc; `--resume` continues

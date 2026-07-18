@@ -8,7 +8,9 @@ import {
   readRunState,
   safeResolveInside,
   updateNodeState,
+  validateArtifactContract,
   validateGeneratedTestManifestSchema,
+  verifyArtifactManifestPrerequisites,
   type RunLayout,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -69,12 +71,36 @@ export function checkDependencyLegality(graph: PlannedGraph): RuntimeDiagnostic[
   return diagnostics;
 }
 
-export function dependencyGateForNode(node: PlannedGraphNode, state: RunState): DependencyGateDecision {
+export function dependencyGateForNode(
+  node: PlannedGraphNode,
+  state: RunState,
+  layout?: RunLayout
+): DependencyGateDecision {
   const blockedBy = node.depends_on.filter((dependency) => {
     const status = state.nodes[dependency]?.status;
     return status !== "succeeded" && status !== "reused-from-prior-run";
   });
   if (blockedBy.length === 0) {
+    if (layout !== undefined) {
+      const causallyInvalid = node.depends_on.filter((dependency) => {
+        if (state.nodes[dependency]?.status !== "reused-from-prior-run") {
+          return false;
+        }
+        try {
+          return !verifyArtifactManifestPrerequisites(layout, dependency).ok;
+        } catch {
+          return true;
+        }
+      });
+      if (causallyInvalid.length > 0) {
+        return {
+          ok: false,
+          reason_code: "CAUSAL_MANIFEST_MISMATCH",
+          reason: `node ${node.id} cannot reuse descendants after a prerequisite manifest changed`,
+          blocked_by: causallyInvalid
+        };
+      }
+    }
     return { ok: true };
   }
   return {
@@ -104,7 +130,8 @@ export function verifyRequiredArtifactsForAttempt(
     return { ok: false, diagnostics, missing };
   }
 
-  for (const required of node.required_artifacts) {
+  for (const output of node.outputs) {
+    const required = output.path;
     try {
       const absolutePath = safeResolveInside(artifactDir, required, "required artifact");
       if (!fs.existsSync(absolutePath)) {
@@ -122,18 +149,7 @@ export function verifyRequiredArtifactsForAttempt(
         if (!requiredStat.isFile() || requiredStat.isSymbolicLink()) {
           throw new Error(`required artifact ${required} must be a regular file`);
         }
-        if (requiredStat.size === 0) {
-          missing.push(required);
-          diagnostics.push({
-            code: "REQUIRED_ARTIFACT_EMPTY",
-            message: `required artifact ${required} produced by ${attemptId} is empty`,
-            severity: "error",
-            source: "artifact-gates",
-            path: path.posix.join("artifacts", attemptId, required)
-          });
-        } else {
-          diagnostics.push(...verifyRequiredArtifactShape(artifactDir, absolutePath, required));
-        }
+        diagnostics.push(...verifyRequiredArtifactShape(artifactDir, absolutePath, output));
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifact-gates", "REQUIRED_ARTIFACT_INVALID"));
@@ -148,12 +164,24 @@ export function verifyRequiredArtifactsForAttempt(
   };
 }
 
-function verifyRequiredArtifactShape(artifactDir: string, absolutePath: string, required: string): RuntimeDiagnostic[] {
-  if (required !== "generated-tests.json") {
-    return [];
+function verifyRequiredArtifactShape(
+  artifactDir: string,
+  absolutePath: string,
+  output: PlannedGraphNode["outputs"][number]
+): RuntimeDiagnostic[] {
+  const contract = validateArtifactContract(output.contract, fs.readFileSync(absolutePath, "utf8"), absolutePath);
+  const diagnostics: RuntimeDiagnostic[] = contract.issues.map((issue) => ({
+    code: issue.code,
+    message: issue.message,
+    severity: "error",
+    source: "artifact-contracts",
+    path: issue.path,
+    details: { contract: output.contract, contract_digest: output.contract_digest }
+  }));
+  if (!contract.ok || output.contract !== "ultrafuzz/generated-tests@1") {
+    return diagnostics;
   }
 
-  const diagnostics: RuntimeDiagnostic[] = [];
   const parsed = validateGeneratedTestManifestSchema(readJsonFile(absolutePath));
   if (!parsed.ok || parsed.value === undefined) {
     return parsed.issues.map((issue) => ({

@@ -1,17 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, validateFindingsSchema } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, validateArtifactContract, validateFindingsSchema } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
+import { summarizeEvalTerminal } from "./efficiency.js";
 import { boundedResponseText } from "./reporters/http.js";
+import { buildEvalSummaryProvenance, EVAL_JUDGE_PROMPT_VERSION } from "./lineage.js";
 import {
   type EvalCompareValue,
   type EvalFindingScore,
   type EvalMatrixRow,
+  type EvalLongitudinalCompareValue,
   type EvalRowScore,
   type EvalRunRecord,
+  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec,
   type EvalVariantScoreSummary,
@@ -21,9 +25,17 @@ import {
   type GroundTruthBug,
   type HumanReviewQueueItem
 } from "./types.js";
-import { EvalError, evalRunRoot, isRecord, jsonFile, mean, readJsonLines, roundMetric } from "./utils.js";
+import {
+  EvalError,
+  evalRunRoot,
+  isRecord,
+  jsonFile,
+  mean,
+  readJsonLines,
+  resolveTerminalReportPath,
+  roundMetric
+} from "./utils.js";
 
-const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
@@ -127,7 +139,9 @@ export interface ScoreFindingsAgainstGroundTruthInput {
 
 export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreSummary> {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec }>(path.join(root, "eval.json"));
+  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec; provenance?: EvalRunProvenance }>(
+    path.join(root, "eval.json")
+  );
   if (evalManifest.suite === undefined) {
     throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
   }
@@ -137,18 +151,27 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
   const scoresPath = path.join(root, "scores.jsonl");
   const reviewQueuePath = path.join(root, "review", "new-findings.jsonl");
+  const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
   const llmJudge = resolveJudge(input.llmJudge, input.env);
   const rowScores: EvalRowScore[] = [];
   const findingScores: EvalFindingScore[] = [];
   const reviewQueue: HumanReviewQueueItem[] = [];
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
+    const reportResolution = resolveTerminalReportPath({
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
+      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
+      fallbackPath: defaultReportPath(row)
+    });
+    if (reportResolution.path === undefined) {
+      throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
+    }
     const scored = await scoreRow({
       suite,
       row,
       record,
       llmJudge,
-      reportPath: record?.report_json_path ?? defaultReportPath(row)
+      reportPath: reportResolution.path
     });
     rowScores.push(scored.rowScore);
     findingScores.push(...scored.findingScores);
@@ -166,7 +189,14 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     variants,
     scores_path: scoresPath,
     summary_path: summaryPath,
-    review_queue_path: reviewQueuePath
+    review_queue_path: reviewQueuePath,
+    provenance: buildEvalSummaryProvenance({
+      projectRoot: input.projectRoot,
+      suite,
+      matrix,
+      judgeMode,
+      ...(evalManifest.provenance !== undefined ? { runProvenance: evalManifest.provenance } : {})
+    })
   };
   replaceScoringOutputs(root, [
     { filePath: scoresPath, contents: serializeJsonLines(findingScores) },
@@ -313,9 +343,127 @@ export function compareEvalRun(input: { projectRoot: string; evalRunId: string; 
   };
 }
 
+export function compareEvalRuns(input: {
+  projectRoot: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+  allowIncompatible?: boolean;
+}): EvalLongitudinalCompareValue {
+  const baseline = readEvalSummary(input.projectRoot, input.baselineEvalRunId);
+  const candidate = readEvalSummary(input.projectRoot, input.candidateEvalRunId);
+  const differences = comparisonDifferences(baseline, candidate);
+  const compatible = differences.length === 0;
+  if (!compatible && input.allowIncompatible !== true) {
+    throw new EvalError(
+      "EVAL_PROVENANCE_INCOMPATIBLE",
+      `eval runs are not directly comparable: ${differences.join("; ")}`,
+      { differences }
+    );
+  }
+  const baselineVariants = new Map(baseline.variants.map((variant) => [variant.variant_id, variant]));
+  const variants = candidate.variants.flatMap((candidateVariant) => {
+    const baselineVariant = baselineVariants.get(candidateVariant.variant_id);
+    if (baselineVariant === undefined) {
+      return [];
+    }
+    return [
+      {
+        variant_id: candidateVariant.variant_id,
+        baseline: baselineVariant,
+        candidate: candidateVariant,
+        delta_f1_score: roundMetric(candidateVariant.f1_score - baselineVariant.f1_score),
+        delta_recall: roundMetric(candidateVariant.recall - baselineVariant.recall),
+        delta_precision: roundMetric(candidateVariant.precision - baselineVariant.precision)
+      }
+    ];
+  });
+  return {
+    baseline_eval_run_id: input.baselineEvalRunId,
+    candidate_eval_run_id: input.candidateEvalRunId,
+    compatible,
+    waiver_applied: !compatible && input.allowIncompatible === true,
+    differences,
+    ...(baseline.provenance?.candidate !== undefined ? { baseline_candidate: baseline.provenance.candidate } : {}),
+    ...(candidate.provenance?.candidate !== undefined ? { candidate: candidate.provenance.candidate } : {}),
+    variants
+  };
+}
+
+function readEvalSummary(projectRoot: string, evalRunId: string): EvalScoreSummary {
+  return jsonFile<EvalScoreSummary>(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
+}
+
+function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  return [...provenanceDifferences(baseline, candidate), ...variantScopeDifferences(baseline, candidate)];
+}
+
+function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  const differences: string[] = [];
+  const baselineCandidate = baseline.provenance?.candidate;
+  const candidateCandidate = candidate.provenance?.candidate;
+  if (
+    baselineCandidate === undefined ||
+    candidateCandidate === undefined ||
+    baselineCandidate.commit === "unavailable" ||
+    candidateCandidate.commit === "unavailable" ||
+    baselineCandidate.dirty !== false ||
+    candidateCandidate.dirty !== false ||
+    baselineCandidate.execution_artifact_id === undefined ||
+    candidateCandidate.execution_artifact_id === undefined
+  ) {
+    differences.push("candidate execution provenance is not immutable");
+  }
+  const baselineBenchmark = baseline.provenance?.benchmark;
+  const candidateBenchmark = candidate.provenance?.benchmark;
+  if (baselineBenchmark === undefined || candidateBenchmark === undefined) {
+    differences.push("benchmark provenance is unavailable");
+  } else {
+    if (baselineBenchmark.availability !== "available" || candidateBenchmark.availability !== "available") {
+      differences.push("benchmark provenance is incomplete");
+    }
+    if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
+      differences.push("benchmark cohort fingerprints differ");
+    }
+    if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
+      differences.push("execution policy fingerprints differ");
+    }
+  }
+  const baselineScoring = baseline.provenance?.scoring;
+  const candidateScoring = candidate.provenance?.scoring;
+  if (baselineScoring === undefined || candidateScoring === undefined) {
+    differences.push("scoring provenance is unavailable");
+  } else {
+    if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
+      differences.push("scoring implementation provenance is not immutable");
+    }
+    if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
+      differences.push("scoring identity fingerprints differ");
+    }
+  }
+  return differences;
+}
+
+function variantScopeDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  const baselineIds = new Set(baseline.variants.map((variant) => variant.variant_id));
+  const candidateIds = new Set(candidate.variants.map((variant) => variant.variant_id));
+  const baselineOnly = [...baselineIds].filter((id) => !candidateIds.has(id)).sort();
+  const candidateOnly = [...candidateIds].filter((id) => !baselineIds.has(id)).sort();
+  return [
+    ...(baselineOnly.length > 0 ? [`baseline variants missing from candidate: ${baselineOnly.join(", ")}`] : []),
+    ...(candidateOnly.length > 0 ? [`candidate variants missing from baseline: ${candidateOnly.join(", ")}`] : [])
+  ];
+}
+
 export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
+  const candidate = summary.provenance?.candidate;
+  const benchmark = summary.provenance?.benchmark;
+  const scoring = summary.provenance?.scoring;
   const lines = [
     `# Ultrafuzz Eval ${summary.eval_run_id}`,
+    "",
+    `Candidate: ${candidate === undefined ? "unavailable (historical result)" : `${candidate.label} (${candidate.commit})`}`,
+    `Benchmark cohort: ${benchmark?.cohort_fingerprint ?? "unavailable (historical result)"}`,
+    `Scoring identity: ${scoring?.fingerprint ?? "unavailable"}`,
     "",
     `Recall threshold: ${summary.recall_threshold}`,
     "",
@@ -337,8 +485,59 @@ export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
       ].join(" | ") + " |"
     );
   }
+  lines.push(
+    "",
+    "## Row lifecycle",
+    "",
+    "| Row | Launcher status | Launcher started | Launcher finished | Workflow status | Terminal | Workflow started | Workflow finished |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |"
+  );
+  for (const row of summary.rows) {
+    lines.push(
+      [
+        `| ${row.row_id}`,
+        row.lifecycle.launcher.status,
+        markdownValue(row.lifecycle.launcher.started_at),
+        markdownValue(row.lifecycle.launcher.finished_at),
+        row.lifecycle.workflow.status,
+        row.lifecycle.workflow.terminal,
+        markdownValue(row.lifecycle.workflow.started_at),
+        markdownValue(row.lifecycle.workflow.finished_at)
+      ].join(" | ") + " |"
+    );
+  }
+  lines.push(
+    "",
+    "## Row efficiency",
+    "",
+    "| Row | Wall seconds | Active seconds | Wait seconds | Total tokens | Cost USD | Runtime completeness | Usage completeness | Cost completeness |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"
+  );
+  for (const row of summary.rows) {
+    lines.push(
+      [
+        `| ${row.row_id}`,
+        markdownValue(row.efficiency.wall_time_seconds),
+        markdownValue(row.efficiency.active_time_seconds),
+        markdownValue(row.efficiency.wait_time_seconds),
+        markdownValue(row.efficiency.total_tokens),
+        markdownValue(row.efficiency.cost_usd),
+        completenessValue(row.efficiency.runtime),
+        completenessValue(row.efficiency.usage),
+        completenessValue(row.efficiency.cost)
+      ].join(" | ") + " |"
+    );
+  }
   lines.push("");
   return `${lines.join("\n")}\n`;
+}
+
+function markdownValue(value: string | number | null): string {
+  return value === null ? "null" : String(value);
+}
+
+function completenessValue(value: EvalRowScore["efficiency"]["runtime"]): string {
+  return value.reason === null ? value.status : `${value.status} (${value.reason})`;
 }
 
 function defaultReportPath(row: EvalMatrixRow): string {
@@ -476,6 +675,7 @@ async function scoreFindings(input: {
   const recall = input.bugs.length === 0 ? 0 : roundMetric(matchedBugIds.size / input.bugs.length);
   const f1 = precision + recall === 0 ? 0 : roundMetric((2 * precision * recall) / (precision + recall));
   const judgedFindings = truePositives + falsePositives + duplicates;
+  const terminal = summarizeEvalTerminal(input.record);
   const rowScore: EvalRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,
@@ -496,8 +696,10 @@ async function scoreFindings(input: {
     severity_accuracy: severityChecks === 0 ? null : roundMetric(severityMatches / severityChecks),
     true_positive_accuracy: input.findings.length === 0 ? 0 : roundMetric(truePositives / input.findings.length),
     duplicate_rate: judgedFindings === 0 ? 0 : roundMetric(duplicates / judgedFindings),
-    runtime_seconds: null,
-    cost_estimate: null
+    runtime_seconds: terminal.efficiency.wall_time_seconds,
+    cost_estimate: terminal.efficiency.cost_usd,
+    lifecycle: terminal.lifecycle,
+    efficiency: terminal.efficiency
   };
   return { rowScore, findingScores: matches, reviewQueue };
 }
@@ -544,7 +746,7 @@ async function bestMatch(
     judge_model: judgeModel,
     judge_kind: "deterministic",
     ...(row.judge_reasoning ? { reasoning_effort: row.judge_reasoning } : {}),
-    prompt_version: SCORE_PROMPT_VERSION,
+    prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     timestamp
   };
   if (llmJudge !== undefined) {
@@ -752,7 +954,7 @@ function normalizeLlmJudgeResult(
     judge_model: input.row.judge_model ?? input.row.judge_model_profile,
     judge_kind: "llm",
     ...(input.row.judge_reasoning ? { reasoning_effort: input.row.judge_reasoning } : {}),
-    prompt_version: SCORE_PROMPT_VERSION,
+    prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     timestamp: new Date().toISOString()
   };
 }
@@ -909,29 +1111,16 @@ export function loadGroundTruth(filePath: string, groundTruthRoot: string | unde
 }
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  if (!fs.existsSync(filePath)) {
-    return { schemaValid: false, findings: [] };
+  if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (Array.isArray(parsed)) {
-      return { schemaValid: true, findings: parsed };
-    }
-    if (isRecord(parsed)) {
-      const findings = Array.isArray(parsed.findings)
-        ? parsed.findings
-        : Array.isArray(parsed.issues)
-          ? parsed.issues
-          : [];
-      return {
-        schemaValid: findings.length > 0 || Array.isArray(parsed.findings) || Array.isArray(parsed.issues),
-        findings
-      };
-    }
-  } catch {
-    return { schemaValid: false, findings: [] };
+  const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);
+  if (!validation.ok || !isRecord(validation.value)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@1", {
+      issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
+    });
   }
-  return { schemaValid: false, findings: [] };
+  return { schemaValid: true, findings: validation.value.issues as unknown[] };
 }
 
 function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {

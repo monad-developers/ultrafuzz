@@ -310,7 +310,7 @@ async function waitForTerminalRun(
     }
     await sleep(60_000);
   }
-  throw new Error("resumed durable run did not reach a terminal state before the bounded watch deadline");
+  throw new OperationalDispositionError("unreachable");
 }
 
 function isTerminalRunStatus(status: string | undefined): boolean {

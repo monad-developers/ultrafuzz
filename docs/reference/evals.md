@@ -101,6 +101,41 @@ the workflow runner:
   and partial artifacts appear within one poll interval. That is the correct
   trade for a detached orchestrator.
 
+## Versioned lineage
+
+Every new eval run records a versioned provenance block in `eval.json`:
+
+- Candidate identity is resolved from the candidate checkout's exact commit,
+  release tag when present, dirty status, and immutable local execution
+  identity when available.
+- Benchmark identity includes resolved target commits and clean-checkout state,
+  ground-truth digests, model controls, trial budget, and a normalized
+  execution-policy fingerprint. These controls produce the deterministic
+  cohort fingerprint; tracked target modifications make it incomplete.
+- Candidate-owned prompts, topology, strategies, and runtime configuration do
+  not alter the cohort. Their `graph_fingerprint` and `config_fingerprint` are
+  instead recorded on each `runs.jsonl` row so product changes remain visible.
+- `summary.json` records a separate scoring identity covering the scorer
+  implementation revision, deterministic or optional-judge mode, judge prompt
+  version, judge models, and ground-truth digests. Historical artifacts without
+  lineage remain readable and are labeled as having unavailable provenance.
+
+Braintrust receives the benchmark series, cohort fingerprint, candidate
+identity, execution-policy fingerprint, row graph/config fingerprints, and
+scoring identity as filterable metadata. Raw ground truth is never included.
+
+For release-over-release comparisons, pass the candidate run followed by the
+baseline run:
+
+```bash
+ultrafuzz eval compare <candidate-eval-run-id> --against <baseline-eval-run-id>
+```
+
+The comparison runs only when cohort and scoring identities are complete, match,
+and cover the same variant IDs. Use `--allow-incompatible` as an explicit
+waiver; the result remains marked incompatible and lists the compatibility
+differences that were waived.
+
 ## CLI surface
 
 ```
@@ -108,7 +143,8 @@ ultrafuzz eval plan      # validate config + suite, print the matrix
 ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
-ultrafuzz eval compare   # diff variants against a --baseline
+ultrafuzz eval compare   # diff variants or release runs with compatible lineage
+ultrafuzz eval bundle    # export privacy-safe aggregate evidence for offline analysis
 ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 ```
 
@@ -122,6 +158,21 @@ Grading never depends on a provider: scores are computed locally
 (deterministic matcher, optional LLM judge behind the generic `FindingJudge`
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
+
+`eval bundle <eval-run-id> --output <directory>` is the explicit offline
+analysis export. It derives fixed-schema aggregate files rather than copying
+the eval or run directories. `analysis-bundle.json` records bundle-relative
+paths, sizes, and SHA-256 checksums; `omissions.json` records typed reasons for
+expected evidence that was unavailable. Collection validates every payload,
+reference, checksum, and the privacy allowlist before replacing the output
+directory. The resulting bundle contains no raw agent output, findings,
+configuration, absolute execution paths, or deployment identifiers.
+
+Scored row summaries take lifecycle timestamps and terminal status from the
+durable run state rather than the detached launcher process. Their typed
+efficiency block reports wall/active/wait time, total tokens, and cost together
+with explicit completeness states, and `summary.md` renders those same
+structured fields.
 
 The gateway judge requires its own `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; reporter or
 general OpenAI credentials are never reused. `ULTRAFUZZ_EVAL_JUDGE_URL`, when

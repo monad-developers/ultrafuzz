@@ -22,7 +22,13 @@ function plannedNode(requiredArtifacts: string[]): PlannedGraphNode {
     kind: "agentic",
     depends_on: [],
     artifact_dir: "artifacts/strategy-a",
-    required_artifacts: requiredArtifacts,
+    outputs: requiredArtifacts.map((artifactPath, index) => ({
+      path: artifactPath,
+      contract:
+        artifactPath === "generated-tests.json" ? "ultrafuzz/generated-tests@1" : "ultrafuzz/nonempty-markdown@1",
+      contract_digest: "a".repeat(64),
+      primary: index === 0
+    })),
     prompt_id: "strategy-a",
     prompt_path: "strategies/strategy-a.md",
     loop: { index: 0, count: 1, mode: "parallel", attempt_index: 0 },
@@ -59,6 +65,29 @@ test("reconciles only the exact task-owned mirrored artifact path", async () => 
 
   assert.deepEqual(result.materialized, ["reports/output.json"]);
   assert.equal(fs.readFileSync(path.join(fixture.artifactDir, "reports", "output.json"), "utf8"), "canonical bytes\n");
+});
+
+test("reconciles without relying on Linux descriptor pseudo-paths", async () => {
+  const fixture = setup(["output.json"]);
+  writeFile(fixture.mirrorDir, "output.json", "portable bytes\n");
+  const originalRealpathSync = fs.realpathSync;
+
+  fs.realpathSync = ((candidate, options) => {
+    if (String(candidate).startsWith("/proc/self/fd/")) {
+      throw new Error("descriptor pseudo-paths are unavailable");
+    }
+    return originalRealpathSync(candidate, options as never);
+  }) as typeof fs.realpathSync;
+  try {
+    const result = await reconcileRequiredArtifactsFromWorkspace({
+      layout: fixture.layout,
+      node: fixture.node,
+      attemptId: "strategy-a"
+    });
+    assert.deepEqual(result.materialized, ["output.json"]);
+  } finally {
+    fs.realpathSync = originalRealpathSync;
+  }
 });
 
 test("ignores same-suffix files outside the exact mirrored artifact path", async () => {
@@ -181,7 +210,7 @@ test("rejects an intermediate source-directory swap between validation and open"
   assert.equal(fs.existsSync(path.join(fixture.artifactDir, "nested", "output.json")), false);
 });
 
-test("rejects a destination-directory move after opening its descriptor", async () => {
+test("rejects a destination-directory move during publication", async () => {
   const fixture = setup(["nested/output.json"]);
   writeFile(fixture.mirrorDir, "nested/output.json", "inside\n");
   const destinationDirectory = path.join(fixture.artifactDir, "nested");

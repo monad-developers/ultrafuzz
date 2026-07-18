@@ -4,8 +4,8 @@ const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
 
 export interface ModelPricing {
   inputUsdPerMillion: number;
-  cachedInputUsdPerMillion: number;
-  cacheWriteUsdPerMillion: number;
+  cachedInputUsdPerMillion?: number;
+  cacheWriteUsdPerMillion?: number;
   outputUsdPerMillion: number;
   contextTiers?: ModelPricingContextTier[];
 }
@@ -13,8 +13,8 @@ export interface ModelPricing {
 export interface ModelPricingContextTier {
   contextTokens: number;
   inputUsdPerMillion: number;
-  cachedInputUsdPerMillion: number;
-  cacheWriteUsdPerMillion: number;
+  cachedInputUsdPerMillion?: number;
+  cacheWriteUsdPerMillion?: number;
   outputUsdPerMillion: number;
 }
 
@@ -173,10 +173,12 @@ function pricingFromCatalogModel(model: CatalogModel | undefined): ModelPricing 
   if (input === undefined || output === undefined) {
     return undefined;
   }
+  const cachedInput = nonNegativeNumber(model.cost.cache_read);
+  const cacheWrite = nonNegativeNumber(model.cost.cache_write);
   const basePricing = {
     inputUsdPerMillion: input,
-    cachedInputUsdPerMillion: nonNegativeNumber(model.cost.cache_read) ?? input,
-    cacheWriteUsdPerMillion: nonNegativeNumber(model.cost.cache_write) ?? input,
+    ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
+    ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
     outputUsdPerMillion: output
   };
   const catalogTiers = Array.isArray(model.cost.tiers)
@@ -204,8 +206,10 @@ export function pricingForContext(pricing: ModelPricing, inputTokens: number): M
     }
     selected = {
       inputUsdPerMillion: tier.inputUsdPerMillion,
-      cachedInputUsdPerMillion: tier.cachedInputUsdPerMillion,
-      cacheWriteUsdPerMillion: tier.cacheWriteUsdPerMillion,
+      ...(tier.cachedInputUsdPerMillion === undefined
+        ? {}
+        : { cachedInputUsdPerMillion: tier.cachedInputUsdPerMillion }),
+      ...(tier.cacheWriteUsdPerMillion === undefined ? {} : { cacheWriteUsdPerMillion: tier.cacheWriteUsdPerMillion }),
       outputUsdPerMillion: tier.outputUsdPerMillion
     };
   }
@@ -244,11 +248,13 @@ function pricingContextTier(
     return undefined;
   }
   const input = nonNegativeNumber((value as CatalogCostTier).input) ?? base.inputUsdPerMillion;
+  const cachedInput = nonNegativeNumber((value as CatalogCostTier).cache_read) ?? base.cachedInputUsdPerMillion;
+  const cacheWrite = nonNegativeNumber((value as CatalogCostTier).cache_write) ?? base.cacheWriteUsdPerMillion;
   return {
     contextTokens,
     inputUsdPerMillion: input,
-    cachedInputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).cache_read) ?? base.cachedInputUsdPerMillion,
-    cacheWriteUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).cache_write) ?? input,
+    ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
+    ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
     outputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).output) ?? base.outputUsdPerMillion
   };
 }
@@ -261,7 +267,7 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
   const cachedInput = nonNegativeNumber(value.cachedInputUsdPerMillion);
   const cacheWrite = nonNegativeNumber(value.cacheWriteUsdPerMillion);
   const output = nonNegativeNumber(value.outputUsdPerMillion);
-  if (input === undefined || cachedInput === undefined || cacheWrite === undefined || output === undefined) {
+  if (input === undefined || output === undefined) {
     return undefined;
   }
   const contextTiers = Array.isArray(value.contextTiers)
@@ -275,18 +281,14 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
           const tierCachedInput = nonNegativeNumber(tier.cachedInputUsdPerMillion);
           const tierCacheWrite = nonNegativeNumber(tier.cacheWriteUsdPerMillion);
           const tierOutput = nonNegativeNumber(tier.outputUsdPerMillion);
-          return contextTokens === undefined ||
-            tierInput === undefined ||
-            tierCachedInput === undefined ||
-            tierCacheWrite === undefined ||
-            tierOutput === undefined
+          return contextTokens === undefined || tierInput === undefined || tierOutput === undefined
             ? []
             : [
                 {
                   contextTokens,
                   inputUsdPerMillion: tierInput,
-                  cachedInputUsdPerMillion: tierCachedInput,
-                  cacheWriteUsdPerMillion: tierCacheWrite,
+                  ...(tierCachedInput === undefined ? {} : { cachedInputUsdPerMillion: tierCachedInput }),
+                  ...(tierCacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: tierCacheWrite }),
                   outputUsdPerMillion: tierOutput
                 }
               ];
@@ -295,8 +297,8 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
     : [];
   return {
     inputUsdPerMillion: input,
-    cachedInputUsdPerMillion: cachedInput,
-    cacheWriteUsdPerMillion: cacheWrite,
+    ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
+    ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
     outputUsdPerMillion: output,
     ...(contextTiers.length === 0 ? {} : { contextTiers })
   };

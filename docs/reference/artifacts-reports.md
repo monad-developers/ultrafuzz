@@ -22,6 +22,8 @@ graph.json
 graph.fingerprint
 state.json
 events.jsonl
+usage.jsonl
+attempts.jsonl
 plan.json
 artifacts/
 review/
@@ -34,6 +36,12 @@ workspaces.json
 indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
 of the artifact contract.
 
+`usage.jsonl` is an append-only ledger of normalized workflow usage events.
+Each entry has stable event, attempt, and checkpoint-generation identifiers.
+Replaying the same continuation is idempotent, while events from later
+checkpoint generations remain distinct. The ledger stores normalized counters
+and typed usage-completeness reasons, not raw execution records.
+
 ## Run Metadata
 
 `run.json` records the run schema version, run ID, creation timestamp, mode,
@@ -45,8 +53,8 @@ values are redacted before persistence, and restore metadata is written to
 `config.redactions.json`.
 
 `graph.json` records the planned executable graph, including logical IDs,
-concrete IDs, group, prompt path, dependencies, artifact directory, required
-artifacts, primary artifact, loop metadata, reference revisions, and model
+concrete IDs, group, prompt path, dependencies, artifact directory, contracted
+outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
@@ -54,7 +62,7 @@ rendered prompt paths, and validation posture.
 
 ## State
 
-`state.json` has schema version `1.0`.
+`state.json` has schema version `1.1`.
 
 Run statuses are:
 
@@ -79,9 +87,37 @@ Node statuses are:
 - `reused-from-prior-run`
 - `invalidated`
 
-Node state can also record logical node ID, artifact directory, required
-artifacts, attempt index, loop index, model profile ID, model name, model
-index, timestamps, last error, and provenance.
+Every nonterminal node records `wait_since`, a typed `wait_reason`, and a typed
+`next_eligible_action`. Wait reasons distinguish ready work, capacity and
+dependency waits, retry backoff, external gates, controller loss, and active
+execution.
+
+Run state records the absolute `workflow_deadline_at`, `last_transition_at`, a
+renewable `controller_lease` with its configured `duration_ms`, and a concurrency snapshot. Concurrency evidence
+includes requested and peak effective concurrency, ready-queue depth, active
+work, and cumulative queued, active, and idle durations. These fields contain
+lifecycle metadata only; raw runner logs and host identifiers are not copied
+into product artifacts.
+
+Node state can also record logical node ID, artifact directory, contracted
+outputs, attempt index, loop index, model profile ID, model name, model index,
+timestamps, last error, and provenance.
+
+## Attempt Ledger
+
+`attempts.jsonl` is the append-only source of truth for completed node attempts.
+Each immutable entry gives the executor retry a stable ID and links it to its
+strategy attempt, checkpoint generation, workflow execution, controller
+invocation, and previous retry. Entries record lifecycle timestamps, a typed
+outcome, executed-versus-reused status, and SHA-256 digests for input and output
+manifests.
+
+Attempt summaries and retry counts are derived from this ledger. Replaying a
+known transition does not append it again, so resume, replay, checkpoint
+continuation, and controller takeover preserve prior lifecycle history. Reused
+work points to its source attempt and is reported separately from executed work.
+The ledger stores typed failure categories but never raw diagnostics, inputs,
+outputs, or configuration.
 
 ## Node Artifacts
 
@@ -103,14 +139,16 @@ generated-tests.json
 references/manifest.json
 ```
 
-Required artifacts are node-specific and declared in `.ultrafuzz/topology.yml`.
-Artifact paths are relative to the node artifact directory and must be safe
-project-local relative paths.
+Required outputs are node-specific and declared with versioned contracts in
+`.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
+directory and must be safe project-local relative paths.
 
 `artifact-manifest.json` records schema version, run ID, node ID, creation
-time, artifact paths, sizes, SHA-256 digests, and provenance such as logical
-node, attempt index, loop index, model profile, model name, workflow task, and
-source run when available.
+time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
+and provenance such as logical node, attempt index, loop index, model profile,
+model name, workflow task, and source run when available. It also records the
+exact prerequisite manifest digests consumed by the attempt so reuse can reject
+causally stale descendants.
 
 ## Findings
 
@@ -180,6 +218,27 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
+`accounting.segments` publishes one rollup per checkpoint generation, and
+`accounting.current` identifies the latest segment. `accounting.cumulative`
+is derived from every unique ledger entry, including prior generations and any
+source-run lineage. `accounting.checkpoint` records the ledger position used by
+the durable metadata snapshot. Usage and pricing completeness are reported
+independently through `usage_complete`/`usage_incomplete_reasons` and
+`pricing_complete`/`pricing_incomplete_reasons`.
+
+Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
+output, and reasoning as independent components. `inclusive_token_total`
+counts every reported component, while `billable_token_total` counts the
+components with a positive known rate. Per-component amounts are recorded in
+`component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
+events. `usage_complete` and `pricing_complete` are independent: their typed
+`*_incomplete_reasons` arrays distinguish missing or estimated usage from a
+missing component rate. Usage completeness is derived from reported component
+evidence regardless of whether catalog pricing is available. `partial_pricing`
+remains the backward-compatible inverse of pricing completeness. An event's
+reported total is tracked separately in `provided_cost_usd`; it does not fill
+missing component rates or make component pricing complete.
+
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.
 
@@ -242,11 +301,31 @@ summary.md
 telemetry/
 ```
 
-`eval.json` records the resolved suite, `matrix.json` records the planned
-target × variant × trial rows, and `runs.jsonl` appends one record per
-launched row. `ultrafuzz eval score` writes per-row scores to `scores.jsonl`
-and the variant ranking to `summary.json` plus a human-readable `summary.md`
+`eval.json` records the resolved suite plus candidate and benchmark lineage,
+`matrix.json` records the planned
+target × variant × trial rows, and `runs.jsonl` appends launcher and observed
+workflow lifecycle snapshots for each row. Launcher completion is recorded
+separately from durable workflow completion; a detached row remains
+nonterminal until its referenced run's `state.json` reaches a terminal state.
+
+`ultrafuzz eval score` joins the latest record with the referenced run's
+durable `state.json` and cumulative `run.json` accounting. Each row in
+`summary.json` contains the authoritative launcher/workflow lifecycle and a
+typed `efficiency` block with wall, active, and wait seconds, total tokens,
+cost in USD, and independent runtime/usage/cost completeness. Unavailable
+values are `null` with a stable reason; partial pricing is labeled separately
+from complete cost. Usage and cost remain unavailable until the durable workflow
+is terminal. Active time is the union of node execution intervals, so parallel
+nodes are not double-counted; wait time is wall time minus that union. Runs with
+retries remain typed as unavailable when the durable state does not retain every
+attempt interval. The legacy `runtime_seconds` and `cost_estimate` row fields
+remain aliases of the structured wall-time and cost values for compatibility.
+The same fields are rendered from that structure into `summary.md`, which is
 read by `ultrafuzz eval report`.
+The row records include graph/config and execution artifact identities when
+available. `ultrafuzz eval score` writes per-row scores to `scores.jsonl` and
+the variant ranking plus scoring lineage to `summary.json`, including the
+effective deterministic or optional-judge mode.
 
 `telemetry/` holds durable per-row telemetry cursors (byte offset, event dedup
 state, uploaded-artifact hashes) for live streaming, plus per-provider publish
@@ -256,3 +335,26 @@ double-publishing. The underlying Ultrafuzz runs
 live inside each target checkout, not under the eval project; eval artifacts
 reference them by run ID. Grading and these artifacts never depend on a
 reporting provider. See [Eval Suites](evals.md).
+
+## Analysis Bundles
+
+`ultrafuzz eval bundle <eval-run-id> --output <directory>` writes an offline,
+privacy-safe analysis bundle with this fixed layout:
+
+```text
+analysis-bundle.json
+omissions.json
+data/
+  terminal-status.json
+  evaluation-metrics.json
+  accounting-summary.json
+  attempt-history.json
+```
+
+Unavailable data files are absent and have a typed entry in
+`omissions.json`. The versioned bundle manifest lists only bundle-relative
+paths with byte sizes and SHA-256 checksums. The data files contain aggregate
+or sanitized derived fields only; source reports, findings, diagnostics,
+configuration, raw execution output, and execution-local identifiers are
+never copied. Bundle validation checks the schemas, strict file allowlist,
+referential integrity, checksums, and privacy policy before publication.

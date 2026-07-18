@@ -194,6 +194,9 @@ importers:
 
   packages/topology:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       '@ultrafuzz/prompts':
         specifier: workspace:*
         version: link:../prompts

@@ -71,6 +71,7 @@ const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
+const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
 
@@ -544,10 +545,12 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
   ];
   return [
     "set -euo pipefail",
-    `until test -s '${REMOTE_CONFIG_PATH}'; do sleep 1; done`,
-    `until test -s '${REMOTE_LINEAGE_PATH}'; do sleep 1; done`,
-    ...(authPath === undefined ? [] : [`until test -s '${authPath}'; do sleep 1; done`]),
-    `until test -s '${REMOTE_LAUNCH_READY_PATH}'; do sleep 1; done`,
+    `staging_deadline=$((SECONDS + ${MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS}))`,
+    "wait_for_staged_input() { until test -s \"$1\"; do if (( SECONDS >= staging_deadline )); then echo 'Modal launch staging deadline exceeded' >&2; exit 70; fi; sleep 1; done; }",
+    `wait_for_staged_input '${REMOTE_CONFIG_PATH}'`,
+    `wait_for_staged_input '${REMOTE_LINEAGE_PATH}'`,
+    ...(authPath === undefined ? [] : [`wait_for_staged_input '${authPath}'`]),
+    `wait_for_staged_input '${REMOTE_LAUNCH_READY_PATH}'`,
     'volume_root="$(realpath /data)"',
     'data_root="$volume_root/$ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT"',
     `install -d -m 700 -o ${MODAL_RUNTIME_USER} -g ${MODAL_RUNTIME_USER} "$data_root"`,

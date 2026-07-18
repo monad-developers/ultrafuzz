@@ -159,7 +159,9 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     maxParallelNodes: required(run.maxParallelNodes, "run.max_parallel_nodes", filePath),
     keepWorkspaces: required(run.keepWorkspaces, "run.keep_workspaces", filePath),
     workspaceMode: required(run.workspaceMode, "run.workspace_mode", filePath),
-    defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath)
+    defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath),
+    workflowDeadlineSeconds: required(run.workflowDeadlineSeconds, "run.workflow_deadline_seconds", filePath),
+    controllerLeaseSeconds: required(run.controllerLeaseSeconds, "run.controller_lease_seconds", filePath)
   };
 }
 
@@ -215,7 +217,13 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   for (const key of ["outputDir", "workspaceMode"] as const) {
     assertString(value.run[key], `run.${key}`, filePath);
   }
-  for (const key of ["maxParallelAgents", "maxParallelNodes", "defaultTimeoutSeconds"] as const) {
+  for (const key of [
+    "maxParallelAgents",
+    "maxParallelNodes",
+    "defaultTimeoutSeconds",
+    "workflowDeadlineSeconds",
+    "controllerLeaseSeconds"
+  ] as const) {
     assertNumber(value.run[key], `run.${key}`, filePath);
   }
   assertBoolean(value.run.keepWorkspaces, "run.keepWorkspaces", filePath);

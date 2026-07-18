@@ -154,6 +154,10 @@ describe("Modal worker identity", () => {
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
     expect(command).toContain("/run/ultrafuzz-config/lineage.json");
     expect(command).toContain("/run/ultrafuzz-config/launch-ready");
+    expect(command).toContain("staging_deadline=$((SECONDS + 900))");
+    expect(command).toContain("if (( SECONDS >= staging_deadline ))");
+    expect(command.match(/wait_for_staged_input '\/run\//gu)).toHaveLength(4);
+    expect(() => execFileSync("bash", ["-n", "-c", command])).not.toThrow();
   });
 
   it("publishes worker readiness only after launch state and all staged inputs are durable", async () => {

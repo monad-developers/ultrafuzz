@@ -63,7 +63,7 @@ export async function reconcileRequiredArtifactsFromWorkspace(input: {
     path.posix.join("artifacts", input.attemptId),
     "mirrored workspace artifact directory"
   );
-  const targets = new Set(input.node.required_artifacts);
+  const targets = new Set(input.node.outputs.map((output) => output.path));
 
   if (!fs.existsSync(mirroredArtifactDir)) {
     return { materialized: [] };
@@ -75,7 +75,7 @@ export async function reconcileRequiredArtifactsFromWorkspace(input: {
   reconciliationCheckpoint(input.control);
   const generatedManifest = safeResolveInside(artifactDir, "generated-tests.json", "generated test manifest");
   if (
-    input.node.required_artifacts.includes("generated-tests.json") &&
+    targets.has("generated-tests.json") &&
     fs.existsSync(generatedManifest) &&
     fs.lstatSync(generatedManifest).isFile()
   ) {
@@ -138,7 +138,6 @@ async function copyRegularFileExclusive(
   }
 
   let sourceFd: number | undefined;
-  let directoryFd: number | undefined;
   let temporaryFd: number | undefined;
   let destinationFd: number | undefined;
   let temporary: string | undefined;
@@ -152,7 +151,7 @@ async function copyRegularFileExclusive(
     if (!sameIdentity(sourceBeforeOpen, sourceStat)) {
       throw new Error("workspace artifact source identity changed while it was opened");
     }
-    validateOpenedDescriptorInside(workspaceDir, sourceFd, "workspace artifact source");
+    validateOpenedDescriptorInside(workspaceDir, sourceFd, source, "workspace artifact source");
     assertRegularFileInside(workspaceDir, source, "workspace artifact source");
     const sourcePathStat = fs.statSync(source, { bigint: true });
     if (!sameIdentity(sourceStat, sourcePathStat)) {
@@ -166,12 +165,10 @@ async function copyRegularFileExclusive(
     }
 
     const destinationDirectory = path.dirname(destination);
-    directoryFd = fs.openSync(
-      destinationDirectory,
-      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
-    );
-    validateOpenedDescriptorInside(artifactDir, directoryFd, "reconciled artifact directory");
-    const anchoredDirectory = descriptorPath(directoryFd);
+    const anchoredDirectory = fs.realpathSync(destinationDirectory);
+    assertPathInside(fs.realpathSync(artifactDir), anchoredDirectory, "reconciled artifact directory");
+    const directoryIdentity = fileIdentity(fs.statSync(anchoredDirectory, { bigint: true }));
+    assertNamedPathIdentity(destinationDirectory, directoryIdentity, "reconciled artifact directory");
     anchoredDestination = path.join(anchoredDirectory, path.basename(destination));
     if (fs.existsSync(anchoredDestination)) {
       return false;
@@ -185,8 +182,8 @@ async function copyRegularFileExclusive(
       fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
       0o600
     );
-    validateOpenedDescriptorInside(artifactDir, temporaryFd, "reconciled artifact temporary file");
     temporaryIdentity = fileIdentity(fs.fstatSync(temporaryFd, { bigint: true }));
+    validateOpenedDescriptorInside(artifactDir, temporaryFd, temporary, "reconciled artifact temporary file");
     const digest = crypto.createHash("sha256");
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let sourceOffset = 0;
@@ -216,7 +213,7 @@ async function copyRegularFileExclusive(
     }
     reconciliationCheckpoint(control);
     const sourceAfterCopy = fs.fstatSync(sourceFd, { bigint: true });
-    validateOpenedDescriptorInside(workspaceDir, sourceFd, "workspace artifact source");
+    validateOpenedDescriptorInside(workspaceDir, sourceFd, source, "workspace artifact source");
     assertRegularFileInside(workspaceDir, source, "workspace artifact source");
     const sourcePathAfterCopy = fs.statSync(source, { bigint: true });
     if (
@@ -238,6 +235,7 @@ async function copyRegularFileExclusive(
 
     try {
       reconciliationCheckpoint(control);
+      assertNamedPathIdentity(destinationDirectory, directoryIdentity, "reconciled artifact directory");
       fs.linkSync(temporary, anchoredDestination);
       linked = true;
       reconciliationCheckpoint(control);
@@ -248,7 +246,7 @@ async function copyRegularFileExclusive(
       throw error;
     }
     destinationFd = fs.openSync(anchoredDestination, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    validateOpenedDescriptorInside(artifactDir, destinationFd, "reconciled artifact destination");
+    validateOpenedDescriptorInside(artifactDir, destinationFd, anchoredDestination, "reconciled artifact destination");
     const destinationStat = fs.fstatSync(destinationFd, { bigint: true });
     if (!sameFileIdentity(temporaryIdentity, destinationStat)) {
       throw new Error("reconciled artifact destination changed during publication");
@@ -263,9 +261,9 @@ async function copyRegularFileExclusive(
       throw new Error("failed to remove reconciled artifact temporary file");
     }
     temporary = undefined;
-    validateOpenedDescriptorInside(artifactDir, directoryFd, "reconciled artifact directory");
+    assertNamedPathIdentity(destinationDirectory, directoryIdentity, "reconciled artifact directory");
     reconciliationCheckpoint(control);
-    fs.fsyncSync(directoryFd);
+    syncDirectoryIfSupported(destinationDirectory);
     reconciliationCheckpoint(control);
     return true;
   } catch (error) {
@@ -287,13 +285,6 @@ async function copyRegularFileExclusive(
     }
     if (temporary !== undefined && temporaryIdentity !== undefined) {
       unlinkIfOwned(temporary, temporaryIdentity);
-    }
-    if (directoryFd !== undefined) {
-      try {
-        fs.fsyncSync(directoryFd);
-      } finally {
-        fs.closeSync(directoryFd);
-      }
     }
   }
 }
@@ -325,18 +316,32 @@ function sameStableFile(before: fs.BigIntStats, after: fs.BigIntStats): boolean 
   );
 }
 
-function descriptorPath(fd: number): string {
-  return `/proc/self/fd/${fd}`;
-}
-
-function validateOpenedDescriptorInside(root: string, fd: number, label: string): void {
+function validateOpenedDescriptorInside(root: string, fd: number, openedPath: string, label: string): void {
   const realRoot = fs.realpathSync(root);
-  const openedPath = fs.realpathSync(descriptorPath(fd));
-  assertPathInside(realRoot, openedPath, label);
+  const realOpenedPath = fs.realpathSync(openedPath);
+  assertPathInside(realRoot, realOpenedPath, label);
   const descriptorStat = fs.fstatSync(fd, { bigint: true });
-  const openedPathStat = fs.statSync(openedPath, { bigint: true });
+  const openedPathStat = fs.statSync(realOpenedPath, { bigint: true });
   if (!sameIdentity(descriptorStat, openedPathStat)) {
     throw new Error(`${label} changed during descriptor validation`);
+  }
+}
+
+function assertNamedPathIdentity(filePath: string, identity: FileIdentity, label: string): void {
+  const resolved = fs.realpathSync(filePath);
+  const stat = fs.statSync(resolved, { bigint: true });
+  if (!sameFileIdentity(identity, stat)) {
+    throw new Error(`${label} changed during path validation`);
+  }
+}
+
+function syncDirectoryIfSupported(directoryPath: string): void {
+  if (process.platform === "win32") return;
+  const directoryFd = fs.openSync(directoryPath, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    fs.fsyncSync(directoryFd);
+  } finally {
+    fs.closeSync(directoryFd);
   }
 }
 

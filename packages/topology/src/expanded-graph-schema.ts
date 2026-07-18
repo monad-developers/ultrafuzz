@@ -8,6 +8,7 @@ import {
   type ExpandedNode,
   type ModelFanoutProvenance
 } from "./types.js";
+import { ARTIFACT_CONTRACT_IDS } from "@ultrafuzz/artifacts";
 
 export interface TopologySchemaValidationIssue {
   path: string;
@@ -50,7 +51,7 @@ export const expandedGraphJsonSchema = {
           "artifactDir",
           "retryPolicy",
           "loop",
-          "requiredArtifacts",
+          "outputs",
           "modelFanout"
         ],
         additionalProperties: false,
@@ -96,8 +97,20 @@ export const expandedGraphJsonSchema = {
               attemptIndex: { type: "integer", minimum: 0 }
             }
           },
-          requiredArtifacts: { type: "array", items: { type: "string", minLength: 1 } },
-          primaryArtifact: { type: "string", minLength: 1 },
+          outputs: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["path", "contract", "primary", "contractDigest"],
+              additionalProperties: false,
+              properties: {
+                path: { type: "string", minLength: 1 },
+                contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
+                primary: { type: "boolean" },
+                contractDigest: { type: "string", pattern: "^[0-9a-f]{64}$" }
+              }
+            }
+          },
           modelFanout: {
             type: "array",
             items: {
@@ -181,18 +194,45 @@ function validateExpandedNodeRecord(value: unknown, path: string, issues: Topolo
   }
   expectEnum(value, "kind", TOPOLOGY_NODE_KINDS, path, issues);
   expectOptionalEnum(value, "role", META_NODE_ROLES, path, issues);
-  for (const key of ["promptPath", "reference", "group", "primaryArtifact"]) {
+  for (const key of ["promptPath", "reference", "group"]) {
     expectOptionalString(value, key, path, issues);
   }
   validateReferenceRevision(value.referenceRevision, `${path}.referenceRevision`, issues);
   expectStringArray(value, "dependsOn", path, issues);
-  expectStringArray(value, "requiredArtifacts", path, issues);
+  validateOutputs(value.outputs, `${path}.outputs`, issues);
   if (value.timeoutSeconds !== undefined && (typeof value.timeoutSeconds !== "number" || value.timeoutSeconds <= 0)) {
     issue(issues, `${path}.timeoutSeconds`, "EXPANDED_NODE_TIMEOUT_INVALID", "timeoutSeconds must be positive");
   }
   validateRetryPolicy(value.retryPolicy, `${path}.retryPolicy`, issues);
   validateLoop(value.loop, `${path}.loop`, issues);
   validateModelFanoutArray(value.modelFanout, `${path}.modelFanout`, issues);
+}
+
+function validateOutputs(value: unknown, path: string, issues: TopologySchemaValidationIssue[]): void {
+  if (!Array.isArray(value)) {
+    issue(issues, path, "EXPANDED_NODE_OUTPUTS_REQUIRED", "outputs must be an array");
+    return;
+  }
+  value.forEach((output, index) => {
+    const outputPath = `${path}[${index}]`;
+    if (!isRecord(output)) {
+      issue(issues, outputPath, "EXPANDED_NODE_OUTPUT_INVALID", "output must be an object");
+      return;
+    }
+    expectRequiredString(output, "path", outputPath, issues);
+    expectEnum(output, "contract", ARTIFACT_CONTRACT_IDS, outputPath, issues);
+    if (typeof output.primary !== "boolean") {
+      issue(issues, `${outputPath}.primary`, "EXPANDED_NODE_OUTPUT_PRIMARY_INVALID", "primary must be boolean");
+    }
+    if (typeof output.contractDigest !== "string" || !/^[0-9a-f]{64}$/u.test(output.contractDigest)) {
+      issue(
+        issues,
+        `${outputPath}.contractDigest`,
+        "EXPANDED_NODE_OUTPUT_DIGEST_INVALID",
+        "contractDigest must be a SHA-256 digest"
+      );
+    }
+  });
 }
 
 function validateReferenceRevision(value: unknown, path: string, issues: TopologySchemaValidationIssue[]): void {
