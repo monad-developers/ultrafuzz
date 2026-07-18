@@ -1,4 +1,11 @@
-import type { EventQuery, EventRecord, NodeStateInput, RunLayout, RunState } from "@ultrafuzz/artifacts";
+import type {
+  ArtifactContractId,
+  EventQuery,
+  EventRecord,
+  NodeStateInput,
+  RunLayout,
+  RunState
+} from "@ultrafuzz/artifacts";
 import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
@@ -99,7 +106,7 @@ export interface PlannedGraphNode {
   kind: string;
   depends_on: string[];
   artifact_dir: string;
-  required_artifacts: string[];
+  outputs: PlannedArtifactOutput[];
   prompt_id: string;
   prompt_path: string;
   reference?: string;
@@ -109,7 +116,6 @@ export interface PlannedGraphNode {
     commit: string;
     paths: string[];
   };
-  primary_artifact?: string;
   role?: string;
   loop: {
     index: number;
@@ -130,6 +136,13 @@ export interface PlannedGraphNode {
     node_id?: string;
     task_node_ids?: string[];
   };
+}
+
+export interface PlannedArtifactOutput {
+  path: string;
+  contract: ArtifactContractId;
+  contract_digest: string;
+  primary: boolean;
 }
 
 export interface PlannedGraph {

@@ -22,21 +22,48 @@ function baseRenderInput(tmp: string) {
       logicalNodes: [
         {
           id: "project-discovery",
-          requiredArtifacts: ["setup/project-discovery.md"],
-          primaryArtifact: "setup/project-discovery.md",
+          outputs: [
+            {
+              path: "setup/project-discovery.md",
+              contract: "ultrafuzz/nonempty-markdown@1",
+              primary: true,
+              description: "A non-empty Markdown document."
+            }
+          ],
           artifactDir: path.join(runArtifacts, "project-discovery")
         },
         {
           id: "base-test-setup",
           dependsOn: ["project-discovery"],
-          requiredArtifacts: ["setup/base-test-setup.md"],
-          primaryArtifact: "setup/base-test-setup.md",
+          outputs: [
+            {
+              path: "setup/base-test-setup.md",
+              contract: "ultrafuzz/nonempty-markdown@1",
+              primary: true,
+              description: "A non-empty Markdown document."
+            }
+          ],
           artifactDir: path.join(runArtifacts, "base-test-setup")
         },
         {
           id: "boundary-tests",
           dependsOn: ["base-test-setup"],
-          requiredArtifacts: ["findings.json", "generated-tests.json"],
+          outputs: [
+            {
+              path: "findings.json",
+              contract: "ultrafuzz/findings@1",
+              primary: true,
+              description: "A findings array with severity_guess.",
+              validEmptyExample: "[]"
+            },
+            {
+              path: "generated-tests.json",
+              contract: "ultrafuzz/generated-tests@1",
+              primary: false,
+              description: "A manifest containing generated_tests.",
+              validEmptyExample: '{"generated_tests":[]}'
+            }
+          ],
           artifactDir: path.join(runArtifacts, "boundary-tests")
         }
       ]
@@ -122,8 +149,14 @@ describe("prompt rendering", () => {
     input.graph.logicalNodes.push({
       id: "unrelated",
       dependsOn: ["project-discovery"],
-      requiredArtifacts: ["unrelated.txt"],
-      primaryArtifact: "unrelated.txt",
+      outputs: [
+        {
+          path: "unrelated.txt",
+          contract: "ultrafuzz/text@1",
+          primary: true,
+          description: "Text."
+        }
+      ],
       artifactDir: path.join(tmp, "runs", "run-1", "artifacts", "unrelated")
     });
     input.prompt = "{{artifact_handoff:unrelated}}";
@@ -135,9 +168,12 @@ describe("prompt rendering", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    delete input.graph.logicalNodes[1]!.primaryArtifact;
+    input.graph.logicalNodes[1]!.outputs = input.graph.logicalNodes[1]!.outputs?.map((output) => ({
+      ...output,
+      primary: false
+    }));
 
-    expect(() => renderPrompt(input)).toThrow(/primary_artifact/);
+    expect(() => renderPrompt(input)).toThrow(/primary output/);
   });
 
   it("writes prompt.rendered.md before workflow launch", () => {

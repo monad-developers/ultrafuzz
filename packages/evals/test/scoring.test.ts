@@ -57,10 +57,13 @@ function scoreRunFixture(): {
   fs.writeFileSync(
     reportPath,
     JSON.stringify({
-      findings: [
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [
         matchedFinding(),
         { id: "finding-2", title: "Plausible but unknown overflow", summary: "overflow in mint" }
-      ]
+      ],
+      non_production_outcomes: []
     }),
     "utf8"
   );
@@ -239,6 +242,26 @@ describe("deterministic scorer math", () => {
       `# Ultrafuzz Eval ${fixture.evalRunId}`
     );
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("rejects an invalid terminal report before scoring or invoking a judge", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.writeFileSync(record.report_json_path, '{"issues":[]}', "utf8");
+    let judgeCalled = false;
+    await expect(
+      scoreEvalRun({
+        projectRoot: fixture.projectRoot,
+        evalRunId: fixture.evalRunId,
+        llmJudge: async (input) => {
+          judgeCalled = true;
+          return input.deterministicResult;
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+    expect(judgeCalled).toBe(false);
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {

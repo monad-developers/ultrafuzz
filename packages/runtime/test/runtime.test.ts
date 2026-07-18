@@ -334,6 +334,8 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
     const contents = relative.endsWith(".json")
       ? JSON.stringify([
           {
+            schema_version: "1.0",
+            id: `finding-${nodeId}`,
             title: "Candidate issue",
             status: "candidate",
             severity_guess: "medium",
@@ -349,7 +351,7 @@ function writeRequiredArtifactSet(runRoot: string, nodeId: string, required: str
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 1
+    `version: 2
 defaults:
   strategy_loops: 1
 nodes:
@@ -362,10 +364,12 @@ nodes:
     prompt: setup/project-discovery.md
     depends_on:
       - __start__
-    required_artifacts:
-      - setup/project-discovery.md
-      - findings.json
-    primary_artifact: setup/project-discovery.md
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@1
   - id: __finish__
     kind: meta
     role: finish
@@ -379,7 +383,7 @@ nodes:
 function writeReferenceTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 1
+    `version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -398,20 +402,24 @@ nodes:
     group: references
     depends_on:
       - __start__
-    required_artifacts:
-      - references/example.md
-      - ${RUN_REFERENCE_MANIFEST_FILE}
-    primary_artifact: references/example.md
+    outputs:
+      - path: references/example.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: ${RUN_REFERENCE_MANIFEST_FILE}
+        contract: ultrafuzz/json-object@1
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
     group: setup
     depends_on:
       - reference-properties-example
-    required_artifacts:
-      - setup/project-discovery.md
-      - findings.json
-    primary_artifact: setup/project-discovery.md
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@1
   - id: __finish__
     kind: meta
     role: finish
@@ -528,7 +536,7 @@ model = "gpt-test-deep"
   );
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 1
+    `version: 2
 defaults:
   strategy_loops: 1
 nodes:
@@ -543,10 +551,12 @@ nodes:
       - deep
     depends_on:
       - __start__
-    required_artifacts:
-      - setup/project-discovery.md
-      - findings.json
-    primary_artifact: setup/project-discovery.md
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@1
   - id: signal-analysis
     prompt: strategies/target-signal.md
     model_profiles:
@@ -554,10 +564,12 @@ nodes:
       - deep
     depends_on:
       - project-discovery
-    required_artifacts:
-      - signal-analysis.md
-      - findings.json
-    primary_artifact: signal-analysis.md
+    outputs:
+      - path: signal-analysis.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@1
   - id: __finish__
     kind: meta
     role: finish
@@ -810,7 +822,7 @@ test("plan renders prompt variables against attempt artifact directories for mod
   assert.ok(signalText.includes(path.join(setupDeepDir, "setup", "project-discovery.md")), signalText);
 });
 
-test("compileSmithersWorkflow emits native task dependencies without synthetic layers", async () => {
+test("compileSmithersWorkflow gates native dependencies on deterministic artifact verification", async () => {
   const project = tempProject();
   writeFanoutProject(project);
 
@@ -849,8 +861,10 @@ test("compileSmithersWorkflow emits native task dependencies without synthetic l
   assert.deepEqual(
     smithersTasks.tasks.find((task) => task.attemptId === "signal-analysis__model_0__attempt_0")
       ?.dependencySmithersNodeIds,
-    ["node:project-discovery__model_0__attempt_0", "node:project-discovery__model_1__attempt_1"]
+    ["verify:project-discovery__model_0__attempt_0", "verify:project-discovery__model_1__attempt_1"]
   );
+  assert.match(workflowSource, /id=\{task\.verifierId\}/);
+  assert.match(workflowSource, /validateArtifactContract/);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -888,7 +902,7 @@ test("compileSmithersWorkflow applies group timeout defaults", async () => {
   initProject({ projectRoot: project, force: true });
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 1
+    `version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -906,9 +920,10 @@ nodes:
     group: setup
     depends_on:
       - __start__
-    required_artifacts:
-      - setup/project-discovery.md
-    primary_artifact: setup/project-discovery.md
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
   - id: __finish__
     kind: meta
     role: finish
@@ -2332,10 +2347,25 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(sync.value?.status, "failed");
   assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_MISSING"));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    nodes?: Record<string, { status?: string; last_error?: string }>;
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        last_error?: string;
+        provenance?: {
+          failure?: { category?: string; causal_task_id?: string; causal_failure_category?: string };
+        };
+      }
+    >;
   };
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", /setup\/project-discovery\.md/);
+  assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.failure, {
+    category: "artifact-contract",
+    causal_task_id: "verify:project-discovery",
+    causal_failure_category: "artifact-contract",
+    dependent_task_ids: []
+  });
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     true
@@ -2438,11 +2468,27 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "failed");
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    nodes?: Record<string, { status?: string; retry_count?: number; last_error?: string }>;
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        retry_count?: number;
+        last_error?: string;
+        provenance?: {
+          failure?: { category?: string; causal_task_id?: string; causal_failure_category?: string };
+        };
+      }
+    >;
   };
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.equal(state.nodes?.["project-discovery"]?.retry_count, 1);
   assert.equal(state.nodes?.["project-discovery"]?.last_error, "agent failed again");
+  assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.failure, {
+    category: "agent-failure",
+    causal_task_id: "node:project-discovery",
+    causal_failure_category: "agent-failure",
+    dependent_task_ids: []
+  });
   assert.equal(
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     false
@@ -2556,12 +2602,31 @@ test("syncRun records model fan-out attempts independently", async () => {
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
-    nodes?: Record<string, { status?: string }>;
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          failure?: {
+            category?: string;
+            causal_task_id?: string;
+            causal_failure_category?: string;
+            dependent_task_ids?: string[];
+          };
+        };
+      }
+    >;
   };
   assert.equal(state.nodes?.["project-discovery__model_0__attempt_0"]?.status, "succeeded");
   assert.equal(state.nodes?.["project-discovery__model_1__attempt_1"]?.status, "failed");
   assert.equal(state.nodes?.["signal-analysis__model_0__attempt_0"]?.status, "running");
   assert.equal(state.nodes?.["signal-analysis__model_1__attempt_1"]?.status, "skipped");
+  assert.deepEqual(state.nodes?.["signal-analysis__model_1__attempt_1"]?.provenance?.failure, {
+    category: "dependency-cascade",
+    causal_task_id: "node:project-discovery__model_1__attempt_1",
+    causal_failure_category: "agent-failure",
+    dependent_task_ids: ["node:signal-analysis__model_1__attempt_1"]
+  });
   assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
   assert.equal(
     fs.existsSync(

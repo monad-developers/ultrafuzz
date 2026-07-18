@@ -2,7 +2,7 @@ import type { ProjectTopology } from "../src/index.js";
 
 export function validTopology(overrides: Partial<ProjectTopology> = {}): ProjectTopology {
   return {
-    version: 1,
+    version: 2,
     defaults: { strategy_loops: 2 },
     groups: {
       setup: { label: "Setup", color: "#2563eb" },
@@ -16,24 +16,21 @@ export function validTopology(overrides: Partial<ProjectTopology> = {}): Project
         prompt: "setup/setup.md",
         group: "setup",
         depends_on: ["__start__"],
-        required_artifacts: ["setup.md"],
-        primary_artifact: "setup.md"
+        outputs: [{ path: "setup.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
       },
       {
         id: "strategy",
         prompt: "strategies/strategy.md",
         group: "strategies",
         depends_on: ["setup"],
-        required_artifacts: ["findings.json"],
-        primary_artifact: "findings.json"
+        outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
       },
       {
         id: "review",
         prompt: "review/review.md",
         group: "review",
         depends_on: ["strategy"],
-        required_artifacts: ["report.md"],
-        primary_artifact: "report.md"
+        outputs: [{ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
       },
       { id: "__finish__", kind: "meta", role: "finish", depends_on: ["review"] }
     ],

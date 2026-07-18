@@ -18,6 +18,7 @@ import {
   replayEvents,
   safeResolveInside,
   updateNodeState,
+  verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
   writeGeneratedTestManifest
@@ -38,7 +39,20 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     graph: { schema_version: "1.0", nodes: [{ id: "node-a" }] },
     graphFingerprint: "graph-fp",
     configFingerprint: "config-fp",
-    stateNodes: [{ id: "node-a", logicalNodeId: "node-a", requiredArtifacts: ["setup/result.md"] }]
+    stateNodes: [
+      {
+        id: "node-a",
+        logicalNodeId: "node-a",
+        outputs: [
+          {
+            path: "setup/result.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            contract_digest: "a".repeat(64),
+            primary: true
+          }
+        ]
+      }
+    ]
   });
 
   for (const expected of [
@@ -87,6 +101,14 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   const manifest = writeArtifactManifest({
     layout,
     nodeId: "node-a",
+    outputs: [
+      {
+        path: "setup/project.md",
+        contract: "ultrafuzz/nonempty-markdown@1",
+        contract_digest: "a".repeat(64),
+        primary: true
+      }
+    ],
     provenance: {
       logical_node_id: "node-a",
       agent_ref: "CodexAgent",
@@ -104,6 +126,36 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
+  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
+  assert.deepEqual(manifest.prerequisite_manifests, []);
+});
+
+test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-causal" });
+  writeArtifact(layout, "ancestor", "result.md", "unchanged\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  writeArtifact(layout, "descendant", "result.md", "derived\n");
+  const descendant = writeArtifactManifest({
+    layout,
+    nodeId: "descendant",
+    prerequisiteNodeIds: ["ancestor"],
+    createdAt: "2026-07-18T00:00:01.000Z"
+  });
+
+  assert.equal(descendant.prerequisite_manifests.length, 1);
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: true,
+    changed: [],
+    missing: []
+  });
+
+  writeArtifact(layout, "ancestor", "result.md", "changed\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:02.000Z" });
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: false,
+    changed: ["ancestor"],
+    missing: []
+  });
 });
 
 test("events append to JSONL, redact secrets, replay, and expose query indexes", () => {

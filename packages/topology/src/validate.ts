@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { isArtifactContractId, type ArtifactContractId } from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateArtifactHandoffs } from "./artifact-handoffs.js";
@@ -15,6 +16,7 @@ import {
 } from "./types.js";
 import type {
   NormalizedProjectTopology,
+  NormalizedArtifactOutput,
   NormalizedTopologyNode,
   ProjectTopology,
   TopologyGroupDefaults,
@@ -86,12 +88,14 @@ export function normalizeTopology(topologyInput: ProjectTopology | unknown): Nor
   if (!isRecord(topologyInput)) {
     throw topologyError("INVALID_TOPOLOGY_SHAPE", "Topology document must be a mapping");
   }
+  assertOnlyKeys(topologyInput, ["version", "defaults", "groups", "nodes"], "topology document");
   if (!Number.isInteger(topologyInput.version)) {
     throw topologyError("INVALID_TOPOLOGY_SHAPE", "Topology version must be an integer");
   }
   if (!isRecord(topologyInput.defaults) || !Number.isInteger(topologyInput.defaults.strategy_loops)) {
     throw topologyError("INVALID_TOPOLOGY_SHAPE", "Topology defaults.strategy_loops must be an integer");
   }
+  assertOnlyKeys(topologyInput.defaults, ["strategy_loops"], "topology defaults");
   if (!Array.isArray(topologyInput.nodes)) {
     throw topologyError("INVALID_TOPOLOGY_SHAPE", "Topology nodes must be an array");
   }
@@ -150,6 +154,7 @@ function normalizeGroups(
         group: id
       });
     }
+    assertOnlyKeys(group, ["label", "color", "defaults"], `topology group \`${id}\``);
     groups[id] = {
       ...(typeof group.label === "string" ? { label: group.label } : {}),
       ...(typeof group.color === "string" ? { color: group.color } : {}),
@@ -165,6 +170,7 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
       group: groupId
     });
   }
+  assertOnlyKeys(input, ["loops", "timeout_seconds", "model_profiles"], `topology group \`${groupId}\` defaults`);
   return {
     ...(input.loops === undefined ? {} : { loops: normalizePositiveInteger(input.loops, "loops", groupId) }),
     ...(input.timeout_seconds === undefined
@@ -185,6 +191,24 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       index
     });
   }
+  assertOnlyKeys(
+    input,
+    [
+      "id",
+      "kind",
+      "role",
+      "prompt",
+      "reference",
+      "group",
+      "depends_on",
+      "loops",
+      "loop_mode",
+      "timeout_seconds",
+      "outputs",
+      "model_profiles"
+    ],
+    `topology node \`${input.id}\``
+  );
   const kind = normalizeKind(input.kind, input.id);
   return {
     id: input.id,
@@ -200,10 +224,44 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
     ...(input.timeout_seconds === undefined
       ? {}
       : { timeout_seconds: normalizePositiveInteger(input.timeout_seconds, "timeout_seconds", input.id) }),
-    required_artifacts: normalizeStringArray(input.required_artifacts, "required_artifacts", input.id, false),
-    ...(typeof input.primary_artifact === "string" ? { primary_artifact: input.primary_artifact } : {}),
+    outputs: normalizeOutputs(input.outputs, input.id),
     model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", input.id, false)
   };
+}
+
+function normalizeOutputs(input: unknown, nodeId: string): NormalizedArtifactOutput[] {
+  if (input === undefined || input === null) {
+    return [];
+  }
+  if (!Array.isArray(input)) {
+    throw topologyError("INVALID_OUTPUT_CONTRACT", `Node \`${nodeId}\` outputs must be an array`, { nodeId });
+  }
+  return input.map((output, index) => {
+    if (!isRecord(output)) {
+      throw topologyError("INVALID_OUTPUT_CONTRACT", `Node \`${nodeId}\` output ${index} must be a mapping`, {
+        nodeId,
+        index
+      });
+    }
+    assertOnlyKeys(output, ["path", "contract", "primary"], `node \`${nodeId}\` output ${index}`);
+    if (typeof output.path !== "string" || !isArtifactContractId(output.contract)) {
+      throw topologyError("INVALID_OUTPUT_CONTRACT", `Node \`${nodeId}\` output ${index} is incomplete`, {
+        nodeId,
+        index
+      });
+    }
+    if (output.primary !== undefined && typeof output.primary !== "boolean") {
+      throw topologyError("INVALID_OUTPUT_CONTRACT", `Node \`${nodeId}\` output ${index} primary must be boolean`, {
+        nodeId,
+        index
+      });
+    }
+    return {
+      path: output.path,
+      contract: output.contract as ArtifactContractId,
+      primary: output.primary === true
+    };
+  });
 }
 
 function normalizeKind(input: unknown, nodeId: string): TopologyNodeKind {
@@ -339,12 +397,7 @@ function validateAgenticNode(node: NormalizedTopologyNode, options: TopologyVali
       });
     }
   }
-  for (const artifact of node.required_artifacts) {
-    validateArtifactPath(node.id, artifact, "required");
-  }
-  if (node.primary_artifact !== undefined) {
-    validatePrimaryArtifact(node);
-  }
+  validateOutputs(node);
 }
 
 function validateMetaNode(node: NormalizedTopologyNode): void {
@@ -361,10 +414,9 @@ function validateMetaNode(node: NormalizedTopologyNode): void {
     ["prompt", node.prompt],
     ["reference", node.reference],
     ["group", node.group],
-    ["timeout_seconds", node.timeout_seconds],
-    ["primary_artifact", node.primary_artifact]
+    ["timeout_seconds", node.timeout_seconds]
   ].filter(([, value]) => value !== undefined);
-  if (forbidden.length > 0 || node.required_artifacts.length > 0) {
+  if (forbidden.length > 0 || node.outputs.length > 0) {
     throw topologyError("INVALID_META_NODE", "Meta nodes must not define execution fields", { nodeId: node.id });
   }
   if (node.loops !== 1 || node.loop_mode !== "parallel") {
@@ -398,29 +450,19 @@ function validateReferenceNode(node: NormalizedTopologyNode): void {
       nodeId: node.id
     });
   }
-  if (node.required_artifacts.length === 0) {
-    throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must define required_artifacts", {
-      nodeId: node.id
-    });
-  }
-  for (const artifact of node.required_artifacts) {
-    validateArtifactPath(node.id, artifact, "required");
-  }
-  if (node.primary_artifact === undefined) {
-    throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must define primary_artifact", { nodeId: node.id });
-  }
-  validatePrimaryArtifact(node);
-  if (node.primary_artifact === RUN_REFERENCE_MANIFEST_FILE) {
+  validateOutputs(node);
+  const primary = node.outputs.find((output) => output.primary);
+  if (primary?.path === RUN_REFERENCE_MANIFEST_FILE) {
     throw topologyError(
       "INVALID_REFERENCE_NODE",
-      `Reference nodes must not use ${RUN_REFERENCE_MANIFEST_FILE} as primary_artifact`,
+      `Reference nodes must not use ${RUN_REFERENCE_MANIFEST_FILE} as their primary output`,
       { nodeId: node.id }
     );
   }
-  if (!node.required_artifacts.includes(RUN_REFERENCE_MANIFEST_FILE)) {
+  if (!node.outputs.some((output) => output.path === RUN_REFERENCE_MANIFEST_FILE)) {
     throw topologyError(
       "INVALID_REFERENCE_NODE",
-      `Reference nodes must include ${RUN_REFERENCE_MANIFEST_FILE} in required_artifacts`,
+      `Reference nodes must include ${RUN_REFERENCE_MANIFEST_FILE} in outputs`,
       { nodeId: node.id }
     );
   }
@@ -447,23 +489,15 @@ function validatePromptPath(node: NormalizedTopologyNode, options: TopologyValid
   }
 }
 
-function validateArtifactPath(nodeId: string, artifact: string, kind: "required" | "primary"): void {
+function validateArtifactPath(nodeId: string, artifact: string): void {
   if (!artifact || !isString(artifact)) {
-    throw topologyError(
-      kind === "required" ? "INVALID_REQUIRED_ARTIFACT" : "INVALID_PRIMARY_ARTIFACT",
-      "Invalid artifact path",
-      {
-        nodeId,
-        path: artifact
-      }
-    );
+    throw topologyError("INVALID_OUTPUT_CONTRACT", "Invalid artifact output path", { nodeId, path: artifact });
   }
   if (!isSafeArtifactPath(artifact)) {
-    throw topologyError(
-      kind === "required" ? "INVALID_REQUIRED_ARTIFACT" : "INVALID_PRIMARY_ARTIFACT",
-      `Invalid ${kind} artifact path ${artifact}`,
-      { nodeId, path: artifact }
-    );
+    throw topologyError("INVALID_OUTPUT_CONTRACT", `Invalid artifact output path ${artifact}`, {
+      nodeId,
+      path: artifact
+    });
   }
 }
 
@@ -478,16 +512,37 @@ function isSafeArtifactPath(artifact: string): boolean {
     : false;
 }
 
-function validatePrimaryArtifact(node: NormalizedTopologyNode): void {
-  const primary = node.primary_artifact;
-  if (!primary) {
-    return;
+function validateOutputs(node: NormalizedTopologyNode): void {
+  if (node.outputs.length === 0) {
+    throw topologyError("MISSING_OUTPUT_CONTRACT", `Node \`${node.id}\` must declare at least one output`, {
+      nodeId: node.id
+    });
   }
-  validateArtifactPath(node.id, primary, "primary");
-  if (!node.required_artifacts.includes(primary)) {
-    throw topologyError("PRIMARY_ARTIFACT_NOT_REQUIRED", "primary_artifact must be listed in required_artifacts", {
+  const seen = new Set<string>();
+  for (const output of node.outputs) {
+    validateArtifactPath(node.id, output.path);
+    if (seen.has(output.path)) {
+      throw topologyError("DUPLICATE_OUTPUT_PATH", `Node \`${node.id}\` repeats output \`${output.path}\``, {
+        nodeId: node.id,
+        path: output.path
+      });
+    }
+    seen.add(output.path);
+  }
+  const primaries = node.outputs.filter((output) => output.primary);
+  if (primaries.length !== 1) {
+    throw topologyError("INVALID_PRIMARY_OUTPUT", `Node \`${node.id}\` must declare exactly one primary output`, {
       nodeId: node.id,
-      path: primary
+      count: primaries.length
+    });
+  }
+}
+
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], context: string): void {
+  const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw topologyError("UNKNOWN_TOPOLOGY_FIELD", `${context} contains unknown field \`${unknown[0]}\``, {
+      field: unknown[0]
     });
   }
 }

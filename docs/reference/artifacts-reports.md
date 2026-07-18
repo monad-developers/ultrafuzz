@@ -103,14 +103,16 @@ generated-tests.json
 references/manifest.json
 ```
 
-Required artifacts are node-specific and declared in `.ultrafuzz/topology.yml`.
-Artifact paths are relative to the node artifact directory and must be safe
-project-local relative paths.
+Required outputs are node-specific and declared with versioned contracts in
+`.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
+directory and must be safe project-local relative paths.
 
 `artifact-manifest.json` records schema version, run ID, node ID, creation
-time, artifact paths, sizes, SHA-256 digests, and provenance such as logical
-node, attempt index, loop index, model profile, model name, workflow task, and
-source run when available.
+time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
+and provenance such as logical node, attempt index, loop index, model profile,
+model name, workflow task, and source run when available. It also records the
+exact prerequisite manifest digests consumed by the attempt so reuse can reject
+causally stale descendants.
 
 ## Findings
 

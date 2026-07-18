@@ -3,13 +3,17 @@
 // smithers-description: Generated Ultrafuzz product workflow. Smithers owns execution; Ultrafuzz owns config, topology, prompts, artifacts, reports, and materialization evidence.
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import path from "node:path";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
 // Imported via the explicit index path: Smithers' bootstrap can scaffold a
 // sibling .smithers/agents.ts, which bun's resolution would prefer over the
 // .smithers/agents/ directory this workflow needs.
 import * as projectAgents from "../agents/index.ts";
+
+const { validateArtifactContract } = await import(__ULTRAFUZZ_ARTIFACTS_MODULE__);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -27,9 +31,23 @@ const taskOutput = z.object({
   summary: z.string().min(1)
 });
 
+const verificationOutput = z.object({
+  artifacts: z.array(
+    z.object({
+      path: z.string().min(1),
+      contract: z.string().min(1),
+      contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+      primary: z.boolean()
+    })
+  ),
+  primary_artifact: z.string().min(1)
+});
+
 const { Workflow, Task, Worktree, Parallel, smithers, outputs } = createSmithers({
   input: inputSchema,
-  task: taskOutput
+  task: taskOutput,
+  verification: verificationOutput
 });
 
 const agentRegistry = projectAgents as Record<string, AgentLike | AgentLike[]>;
@@ -62,6 +80,59 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
   });
 }
 
+function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifacts = task.outputs.map((output) => {
+    const artifactPath = path.resolve(artifactDir, output.path);
+    if (artifactPath !== artifactDir && !artifactPath.startsWith(`${artifactDir}${path.sep}`)) {
+      throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+    }
+    const resolvedPath = realpathSync(artifactPath);
+    if (!resolvedPath.startsWith(`${artifactDir}${path.sep}`) || !statSync(resolvedPath).isFile()) {
+      throw new Error(`artifact-contract failure: output is not a regular file ${output.path}`);
+    }
+    const contents = readFileSync(resolvedPath, "utf8");
+    const validation = validateArtifactContract(output.contract, contents, output.path);
+    if (!validation.ok) {
+      throw new Error(
+        `artifact-contract failure for ${output.path} (${output.contract}): ${validation.issues
+          .map((issue) => issue.message)
+          .join("; ")}`
+      );
+    }
+    if (output.contract === "ultrafuzz/generated-tests@1") {
+      verifyGeneratedTestFiles(artifactDir, validation.value);
+    }
+    return {
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contractDigest,
+      sha256: createHash("sha256").update(contents).digest("hex"),
+      primary: output.primary
+    };
+  });
+  const primary = artifacts.find((artifact) => artifact.primary);
+  if (primary === undefined) {
+    throw new Error("artifact-contract failure: primary artifact is missing");
+  }
+  return { artifacts, primary_artifact: primary.path };
+}
+
+function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
+  const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+  for (const entry of entries) {
+    const relativePath = entry.path ?? "";
+    const artifactPath = path.resolve(artifactDir, relativePath);
+    if (!artifactPath.startsWith(`${artifactDir}${path.sep}`)) {
+      throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
+    }
+    const resolvedPath = realpathSync(artifactPath);
+    if (!resolvedPath.startsWith(`${artifactDir}${path.sep}`) || !statSync(resolvedPath).isFile()) {
+      throw new Error(`artifact-contract failure: generated test file is missing ${relativePath}`);
+    }
+  }
+}
+
 export default smithers((ctx) => {
   const inputTasks = new Map(
     ((ctx.input as { tasks?: Array<{ id: string; prompt?: string; prompt_path?: string }> }).tasks ?? []).map(
@@ -91,6 +162,19 @@ export default smithers((ctx) => {
                 metadata={task.metadata}
               >
                 {`${untrustedContentBoundary}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`}
+              </Task>
+              <Task
+                id={task.verifierId}
+                output={outputs.verification}
+                dependsOn={[task.id]}
+                retries={0}
+                metadata={{
+                  category: "artifact-contract",
+                  agentTaskId: task.id,
+                  attemptId: task.attemptId
+                }}
+              >
+                {() => verifyArtifacts(task)}
               </Task>
             </Worktree>
           );

@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { redactSecretsInText } from "@ultrafuzz/security";
 
+import type { ArtifactContractId } from "./artifact-contracts.js";
 import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
 
 export const STATE_SCHEMA_VERSION = "1.0";
@@ -38,12 +39,19 @@ export interface NodeStateInput {
   logicalNodeId?: string;
   status?: NodeStatus;
   artifactDir?: string;
-  requiredArtifacts?: string[];
+  outputs?: NodeOutputContract[];
   attemptIndex?: number;
   loopIndex?: number;
   modelId?: string;
   model?: string;
   modelIndex?: number;
+}
+
+export interface NodeOutputContract {
+  path: string;
+  contract: ArtifactContractId;
+  contract_digest: string;
+  primary: boolean;
 }
 
 export interface NodeState {
@@ -53,7 +61,7 @@ export interface NodeState {
   timed_out: boolean;
   logical_node_id?: string;
   artifact_dir?: string;
-  required_artifacts?: string[];
+  outputs?: NodeOutputContract[];
   attempt_index?: number;
   loop_index?: number;
   model_id?: string;
@@ -134,8 +142,8 @@ export function createNodeState(input: NodeStateInput): NodeState {
   if (input.artifactDir !== undefined) {
     state.artifact_dir = input.artifactDir;
   }
-  if (input.requiredArtifacts !== undefined) {
-    state.required_artifacts = input.requiredArtifacts;
+  if (input.outputs !== undefined) {
+    state.outputs = input.outputs;
   }
   if (input.attemptIndex !== undefined) {
     state.attempt_index = input.attemptIndex;

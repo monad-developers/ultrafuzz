@@ -55,7 +55,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 function writeSmallTopology(project: string): void {
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "topology.yml"),
-    `version: 1
+    `version: 2
 defaults:
   strategy_loops: 1
 nodes:
@@ -68,9 +68,10 @@ nodes:
     prompt: setup/project-discovery.md
     depends_on:
       - __start__
-    required_artifacts:
-      - stdout.txt
-    primary_artifact: stdout.txt
+    outputs:
+      - path: stdout.txt
+        contract: ultrafuzz/text@1
+        primary: true
   - id: __finish__
     kind: meta
     role: finish

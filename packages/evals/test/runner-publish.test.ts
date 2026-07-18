@@ -51,7 +51,18 @@ function terminalRunFixture(runRoot: string): void {
       groups: { setup: {} },
       nodes: [{ id: "setup-1", logical_id: "setup-1", kind: "agentic", depends_on: [] }]
     },
-    artifacts: { "setup-1": { "report.md": "# report", "report.json": '{"findings":[]}' } }
+    artifacts: {
+      "setup-1": { "report.md": "# report" },
+      "final-report": {
+        "report.md": "# report",
+        "report.json": JSON.stringify({
+          schema_version: "1.0",
+          run_metadata: {},
+          issues: [],
+          non_production_outcomes: []
+        })
+      }
+    }
   });
 }
 
@@ -320,5 +331,33 @@ describe("eval publish (post-hoc replay)", () => {
         env: {}
       })
     ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
+  });
+
+  it("persists a typed non-publishable state before contacting a provider", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const run = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+    };
+    fs.writeFileSync(
+      path.join(run.ultrafuzz_run_root, "artifacts", "final-report", "report.json"),
+      '{"issues":[]}',
+      "utf8"
+    );
+    let contacted = false;
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        fetchImpl: (async () => {
+          contacted = true;
+          throw new Error("must not be called");
+        }) as typeof fetch
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+    expect(contacted).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@1" }]
+    });
   });
 });

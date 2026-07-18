@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, validateFindingsSchema } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, validateArtifactContract, validateFindingsSchema } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
@@ -839,28 +839,15 @@ export function loadGroundTruth(filePath: string, groundTruthRoot: string | unde
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
   if (!fs.existsSync(filePath)) {
-    return { schemaValid: false, findings: [] };
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (Array.isArray(parsed)) {
-      return { schemaValid: true, findings: parsed };
-    }
-    if (isRecord(parsed)) {
-      const findings = Array.isArray(parsed.findings)
-        ? parsed.findings
-        : Array.isArray(parsed.issues)
-          ? parsed.issues
-          : [];
-      return {
-        schemaValid: findings.length > 0 || Array.isArray(parsed.findings) || Array.isArray(parsed.issues),
-        findings
-      };
-    }
-  } catch {
-    return { schemaValid: false, findings: [] };
+  const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);
+  if (!validation.ok || !isRecord(validation.value)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@1", {
+      issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
+    });
   }
-  return { schemaValid: false, findings: [] };
+  return { schemaValid: true, findings: validation.value.issues as unknown[] };
 }
 
 function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {
