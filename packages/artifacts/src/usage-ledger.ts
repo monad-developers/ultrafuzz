@@ -71,6 +71,11 @@ export interface AppendUsageEventInput {
 export interface AppendUsageEventsResult {
   entries: UsageLedgerEntry[];
   appended: number;
+  replay: UsageLedgerReplay;
+}
+
+export interface AppendUsageEventsOptions {
+  replay?: UsageLedgerReplay;
 }
 
 export interface UsageLedgerReplay {
@@ -252,10 +257,12 @@ export function createUsageLedgerEntry(
 
 export function appendUsageEvents(
   layout: Pick<RunLayout, "runId" | "root" | "usageLedgerPath">,
-  inputs: readonly AppendUsageEventInput[]
+  inputs: readonly AppendUsageEventInput[],
+  options: AppendUsageEventsOptions = {}
 ): AppendUsageEventsResult {
-  const replay = replayUsageEvents(layout);
+  const replay = options.replay ?? replayUsageEvents(layout);
   const byId = new Map(replay.entries.map((entry) => [entry.event_id, entry]));
+  const ledgerEntries = [...replay.entries];
   const entries: UsageLedgerEntry[] = [];
   const appended: UsageLedgerEntry[] = [];
   for (const input of inputs) {
@@ -271,11 +278,20 @@ export function appendUsageEvents(
     byId.set(entry.event_id, entry);
     entries.push(entry);
     appended.push(entry);
+    ledgerEntries.push(entry);
   }
   if (appended.length > 0) {
     appendLineDurable(layout.usageLedgerPath, appended.map((entry) => JSON.stringify(entry)).join("\n"), layout.root);
   }
-  return { entries, appended: appended.length };
+  return {
+    entries,
+    appended: appended.length,
+    replay: {
+      entries: ledgerEntries,
+      malformedEntries: replay.malformedEntries,
+      duplicateEntries: replay.duplicateEntries
+    }
+  };
 }
 
 export function replayUsageEvents(layoutOrPath: Pick<RunLayout, "usageLedgerPath"> | string): UsageLedgerReplay {

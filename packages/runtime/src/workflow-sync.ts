@@ -29,7 +29,8 @@ import {
   type RunStatus,
   type UsageField,
   type UsageIncompleteReason,
-  type UsageLedgerEntry
+  type UsageLedgerEntry,
+  type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
@@ -342,8 +343,7 @@ async function synchronizeWorkflowAccounting(input: {
   changed: boolean;
   available: boolean;
 }> {
-  appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
-  const usageReplay = replayUsageEvents(input.layout);
+  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
   if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
     return { changed: false, available: false };
   }
@@ -386,13 +386,14 @@ async function synchronizeWorkflowAccounting(input: {
       checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
       workflowRunId: input.workflowRunId
     });
+  const accountingSegments = segments.length === 0 && usageReplay.malformedEntries > 0 ? [current] : segments;
 
   const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
   const sourceSummaries = sourceAccounting?.summary === undefined ? [] : [sourceAccounting.summary];
   const cumulative = cumulativeAccountingSummary(
-    [...sourceSummaries, ...segments],
+    [...sourceSummaries, ...accountingSegments],
     sourceAccounting?.sourceRunIds ?? []
   );
   const lastUsageEvent = usageReplay.entries.at(-1);
@@ -401,7 +402,7 @@ async function synchronizeWorkflowAccounting(input: {
     source: "usage-ledger",
     workflow_run_id: input.workflowRunId,
     current,
-    segments,
+    segments: accountingSegments,
     cumulative,
     checkpoint: {
       schema_version: ACCOUNTING_CHECKPOINT_SCHEMA_VERSION,
@@ -519,12 +520,16 @@ function accountingFromWorkflowEvents(
   return accountingSummaryFromTotals(totals);
 }
 
-function appendWorkflowUsageEvents(layout: RunLayout, workflowRunId: string, events: WorkflowEvent[]): void {
+function appendWorkflowUsageEvents(
+  layout: RunLayout,
+  workflowRunId: string,
+  events: WorkflowEvent[]
+): UsageLedgerReplay {
+  const replay = replayUsageEvents(layout);
   const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
   if (usageEvents.length === 0) {
-    return;
+    return replay;
   }
-  const replay = replayUsageEvents(layout);
   const existingGenerationBySourceEvent = new Map(
     replay.entries
       .filter((entry) => entry.workflow_run_id === workflowRunId)
@@ -539,7 +544,7 @@ function appendWorkflowUsageEvents(layout: RunLayout, workflowRunId: string, eve
     firstUnseenImplicitCandidate === undefined
       ? stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"])
       : stableUsageDimension("checkpoint", [workflowRunId, firstUnseenImplicitCandidate.sourceEventId]);
-  appendUsageEvents(
+  return appendUsageEvents(
     layout,
     candidates.map((candidate) => {
       const existingGeneration = existingGenerationBySourceEvent.get(candidate.sourceEventId);
@@ -547,8 +552,9 @@ function appendWorkflowUsageEvents(layout: RunLayout, workflowRunId: string, eve
         ...candidate,
         checkpointGenerationId: candidate.checkpointGenerationId ?? existingGeneration ?? fallbackGeneration
       };
-    })
-  );
+    }),
+    { replay }
+  ).replay;
 }
 
 function normalizedUsageLedgerInput(

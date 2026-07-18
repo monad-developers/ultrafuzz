@@ -2073,6 +2073,61 @@ test("syncRun assigns unseen implicit usage events to a new checkpoint segment",
   assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
 });
 
+test("syncRun propagates malformed-only usage ledger state into cumulative accounting", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-malformed-only-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "malformed-only-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  fs.writeFileSync(path.join(run.value!.run_root, "usage.jsonl"), "{malformed\n", "utf8");
+
+  const sync = await syncRun({ projectRoot: project, runId: "malformed-only-usage", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { event_count?: number; usage_complete?: boolean; usage_incomplete_reasons?: Array<{ code?: string }> };
+      segments?: Array<{ event_count?: number; usage_complete?: boolean }>;
+      cumulative?: {
+        event_count?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+      };
+      checkpoint?: { malformed_entry_count?: number };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.equal(metadata.accounting?.segments?.length, 1);
+  assert.equal(metadata.accounting?.segments?.[0]?.event_count, 1);
+  assert.equal(metadata.accounting?.segments?.[0]?.usage_complete, false);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 1);
+  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
+  assert.deepEqual(
+    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["ledger-entry-malformed"]
+  );
+  assert.deepEqual(
+    metadata.accounting?.cumulative?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["ledger-entry-malformed"]
+  );
+  assert.equal(metadata.accounting?.checkpoint?.malformed_entry_count, 1);
+});
+
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
