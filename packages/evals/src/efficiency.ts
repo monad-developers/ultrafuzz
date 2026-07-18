@@ -38,7 +38,7 @@ export function summarizeEvalTerminal(record: EvalRunRecord | undefined): EvalTe
   const state = readRunState(record?.ultrafuzz_run_root);
   const lifecycle: EvalRowLifecycle = {
     launcher: launcherLifecycle(record),
-    workflow: workflowLifecycle(state)
+    workflow: evalWorkflowLifecycle(state)
   };
   return {
     lifecycle,
@@ -67,7 +67,7 @@ function launcherLifecycle(record: EvalRunRecord | undefined): EvalRowLifecycle[
   };
 }
 
-function workflowLifecycle(state: RunState | undefined): EvalRowLifecycle["workflow"] {
+export function evalWorkflowLifecycle(state: RunState | undefined): EvalRowLifecycle["workflow"] {
   const status = workflowStatus(state?.status);
   const terminal = isTerminalWorkflowStatus(status);
   return {
@@ -128,6 +128,9 @@ function accountingEfficiency(
   }
 
   const totalTokens = nonNegativeNumber(cumulative.total_tokens ?? cumulative.totalTokens);
+  // The current durable accounting schema uses the presence of total_tokens as
+  // its completeness signal. The optional flag lets imported snapshots
+  // explicitly declare incomplete usage without making current snapshots fail.
   const usageComplete = booleanValue(cumulative.usage_complete ?? cumulative.usageComplete) ?? true;
   const usage: EvalEfficiencyCompleteness =
     usageComplete && totalTokens !== undefined ? complete() : unavailable("usage-incomplete");
@@ -164,7 +167,11 @@ function activeMilliseconds(
     if (NON_EXECUTING_NODE_STATUSES.has(node.status) || isAggregateNode(node)) {
       continue;
     }
-    if (nonNegativeNumber(node.retry_count) !== 0) {
+    const retryCount = nonNegativeInteger(node.retry_count);
+    if (retryCount === undefined) {
+      return { ok: false, reason: "node-timestamps-invalid" };
+    }
+    if (retryCount > 0) {
       return { ok: false, reason: "node-attempt-timestamps-unavailable" };
     }
     const started = timestamp(node.started_at);
@@ -286,6 +293,10 @@ function seconds(milliseconds: number): number {
 
 function nonNegativeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function booleanValue(value: unknown): boolean | undefined {

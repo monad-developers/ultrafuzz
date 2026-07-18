@@ -166,6 +166,23 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.wait_time_seconds).toBeNull();
   });
 
+  it("does not assume malformed retry metadata means zero retries", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-missing-retry-count-"));
+    writeTerminalRun(runRoot);
+    const statePath = path.join(runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      nodes: Record<string, { retry_count?: number }>;
+    };
+    delete state.nodes.first!.retry_count;
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.runtime).toEqual({
+      status: "unavailable",
+      reason: "node-timestamps-invalid"
+    });
+  });
+
   it("does not undercount active time when an executed terminal node is missing timestamps", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-missing-node-times-"));
     writeRunFixture({

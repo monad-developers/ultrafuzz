@@ -5,7 +5,7 @@ import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifa
 import type { EvalConfig } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import { isTerminalWorkflowStatus, summarizeEvalTerminal } from "./efficiency.js";
+import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
@@ -349,7 +349,7 @@ export async function watchEvalRow(
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: result.status,
-    workflow: summarizeEvalTerminal(input.record).lifecycle.workflow
+    workflow: evalWorkflowLifecycle(state)
   };
   appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
