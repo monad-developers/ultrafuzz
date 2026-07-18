@@ -2004,6 +2004,75 @@ test("syncRun preserves generated usage across checkpoint generations and replay
   );
 });
 
+test("syncRun assigns unseen implicit usage events to a new checkpoint segment", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-implicit-usage";
+  const tokenEvent = (inputTokens: number, outputTokens: number, costUsd: number) => ({
+    type: "TokenUsageReported",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    extra: {
+      iteration: 0,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      model: "generated-model",
+      agent: "generated-agent"
+    }
+  });
+  const firstSegment = [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+    tokenEvent(10, 5, 0.01),
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+    { type: "RunFinished" }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, firstSegment)
+  });
+  const run = await startRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const first = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, 0.02)]),
+    "utf8"
+  );
+  const second = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  const replayed = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      segments?: Array<{ checkpoint_generation_id?: string; total_tokens?: number; event_count?: number }>;
+      cumulative?: { total_tokens?: number; event_count?: number };
+    };
+  };
+  const segments = metadata.accounting?.segments ?? [];
+  assert.deepEqual(
+    segments.map((segment) => [segment.total_tokens, segment.event_count]),
+    [
+      [15, 1],
+      [30, 1]
+    ]
+  );
+  assert.notEqual(segments[0]?.checkpoint_generation_id, segments[1]?.checkpoint_generation_id);
+  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 2);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
+});
+
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

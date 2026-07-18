@@ -531,18 +531,23 @@ function appendWorkflowUsageEvents(layout: RunLayout, workflowRunId: string, eve
       .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
   );
   const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
-  const overlappingGeneration = candidates
-    .map((candidate) => existingGenerationBySourceEvent.get(candidate.sourceEventId))
-    .find((generation): generation is string => generation !== undefined);
+  const firstUnseenImplicitCandidate = candidates.find(
+    (candidate) =>
+      candidate.checkpointGenerationId === undefined && !existingGenerationBySourceEvent.has(candidate.sourceEventId)
+  );
   const fallbackGeneration =
-    overlappingGeneration ??
-    stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"]);
+    firstUnseenImplicitCandidate === undefined
+      ? stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"])
+      : stableUsageDimension("checkpoint", [workflowRunId, firstUnseenImplicitCandidate.sourceEventId]);
   appendUsageEvents(
     layout,
-    candidates.map((candidate) => ({
-      ...candidate,
-      checkpointGenerationId: candidate.checkpointGenerationId ?? fallbackGeneration
-    }))
+    candidates.map((candidate) => {
+      const existingGeneration = existingGenerationBySourceEvent.get(candidate.sourceEventId);
+      return {
+        ...candidate,
+        checkpointGenerationId: candidate.checkpointGenerationId ?? existingGeneration ?? fallbackGeneration
+      };
+    })
   );
 }
 
