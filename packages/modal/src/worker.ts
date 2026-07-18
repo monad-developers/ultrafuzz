@@ -61,6 +61,7 @@ async function main(): Promise<void> {
     const { target, control, suitePath, evalRunId } = RESUME_EXISTING
       ? await loadExistingWorkspace()
       : await prepareWorkspace();
+    await configureGitSafeDirectories(target);
     await setStatus("running", { eval_run_id: evalRunId });
     let terminalDisposition: TerminalDisposition | undefined;
     if (!RESUME_EXISTING) {
@@ -212,6 +213,21 @@ async function loadExistingWorkspace(): Promise<{
     await access(requiredPath);
   }
   return { target, control, suitePath, evalRunId };
+}
+
+async function configureGitSafeDirectories(target: string): Promise<void> {
+  const realTarget = realpathSync.native(target);
+  const directories = [
+    target,
+    realTarget,
+    path.join(target, ".ultrafuzz/runs/*/workspaces/*"),
+    path.join(realTarget, ".ultrafuzz/runs/*/workspaces/*")
+  ];
+  for (const directory of [...new Set(directories)]) {
+    await runChecked(["git", "config", "--global", "--add", "safe.directory", directory], {
+      label: "git safe directory"
+    });
+  }
 }
 
 async function materializeGroundTruth(source: string, destination: string): Promise<void> {

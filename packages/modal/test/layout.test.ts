@@ -39,6 +39,8 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain("WORKFLOW_STATUS_SYNC_TIMEOUT_MS");
     expect(workerSource).toContain('stdio: "ignore"');
     expect(workerSource).toContain('setStatus("waiting-judge"');
+    expect(workerSource).toContain("configureGitSafeDirectories(target)");
+    expect(workerSource).toContain('"safe.directory"');
   });
 
   it("maps only trusted /data children through the resolved Modal mount", () => {
