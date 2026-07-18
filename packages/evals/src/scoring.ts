@@ -39,6 +39,7 @@ import {
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
+const LLM_JUDGE_MAX_ATTEMPTS = 3;
 
 const groundTruthBugSchema = z.looseObject({
   id: z.string().min(1),
@@ -73,6 +74,38 @@ const llmJudgeSchema = z.looseObject({
   rationale: z.string().min(1),
   confidence: z.number().min(0).max(1)
 });
+const JUDGE_OUTPUT_CONTRACT =
+  'Return exactly one JSON object with matched_ground_truth_bug_id (a candidate label string or null), score, signals, classification, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0. classification must be exactly one of "true-positive", "false-positive", or "needs-human-review".';
+const JUDGE_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "ultrafuzz_judge_result",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        matched_ground_truth_bug_id: { type: ["string", "null"] },
+        score: { type: "number", minimum: 0, maximum: 1 },
+        signals: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            root_cause: { type: "number", minimum: 0, maximum: 1 },
+            affected_area: { type: "number", minimum: 0, maximum: 1 },
+            impact: { type: "number", minimum: 0, maximum: 1 },
+            evidence: { type: "number", minimum: 0, maximum: 1 }
+          },
+          required: ["root_cause", "affected_area", "impact", "evidence"]
+        },
+        classification: { type: "string", enum: ["true-positive", "false-positive", "needs-human-review"] },
+        rationale: { type: "string", minLength: 1 },
+        confidence: { type: "number", minimum: 0, maximum: 1 }
+      },
+      required: ["matched_ground_truth_bug_id", "score", "signals", "classification", "rationale", "confidence"]
+    }
+  }
+} as const;
 
 export interface ScoreEvalRunInput {
   projectRoot: string;
@@ -771,40 +804,76 @@ export function gatewayLlmJudge(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.max(1, profile?.timeout_seconds ?? 1800) * 1000);
     try {
-      const response = await fetchImpl(endpoint.href, {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages: judgeMessages(input),
-          response_format: { type: "json_object" }
-        }),
-        signal: controller.signal
-      });
-      const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
-      if (!response.ok) {
-        throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
-          status: response.status,
-          body: bodyText.slice(0, 1000)
+      let invalidContent: string | undefined;
+      let lastInvalid: EvalError | undefined;
+      for (let attempt = 1; attempt <= LLM_JUDGE_MAX_ATTEMPTS; attempt += 1) {
+        const response = await fetchImpl(endpoint.href, {
+          method: "POST",
+          redirect: "error",
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              ...judgeMessages(input),
+              ...(invalidContent === undefined
+                ? []
+                : [
+                    {
+                      role: "user" as const,
+                      content:
+                        `The previous response did not match the required JSON schema. ${JUDGE_OUTPUT_CONTRACT} Return one corrected JSON object only. ` +
+                        `Previous response: ${invalidContent.slice(0, 4000)}`
+                    }
+                  ])
+            ],
+            ...judgeReasoningParameters(model, input.row.judge_reasoning),
+            response_format: JUDGE_RESPONSE_FORMAT
+          }),
+          signal: controller.signal
         });
+        const bodyText = await boundedResponseText(response, "LLM judge", "EVAL_LLM_JUDGE_RESPONSE_TOO_LARGE");
+        if (!response.ok) {
+          throw new EvalError("EVAL_LLM_JUDGE_REQUEST_FAILED", "LLM judge gateway request failed", {
+            status: response.status,
+            body: bodyText.slice(0, 1000)
+          });
+        }
+        let content = "";
+        try {
+          content = chatCompletionContent(bodyText);
+          const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
+          if (parsed.success) return normalizeLlmJudgeResult(parsed.data, input);
+          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            attempt,
+            issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
+            content: content.slice(0, 1000)
+          });
+        } catch (error) {
+          lastInvalid = new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
+            attempt,
+            cause: error instanceof Error ? error.message : String(error),
+            content: content.slice(0, 1000)
+          });
+        }
+        invalidContent = content || bodyText;
       }
-      const content = chatCompletionContent(bodyText);
-      const parsed = llmJudgeSchema.safeParse(parseJsonObject(content));
-      if (!parsed.success) {
-        throw new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON", {
-          issues: parsed.error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })),
-          content: content.slice(0, 1000)
-        });
-      }
-      return normalizeLlmJudgeResult(parsed.data, input);
+      throw lastInvalid ?? new EvalError("EVAL_LLM_JUDGE_INVALID", "LLM judge returned invalid JSON");
     } finally {
       clearTimeout(timeout);
     }
   };
+}
+
+function judgeReasoningParameters(model: string, reasoning: string | undefined): Record<string, unknown> {
+  if (reasoning === undefined) return {};
+  if (model.toLowerCase().startsWith("claude-")) {
+    // Adaptive thinking can consume the structured response instead of filling it.
+    return {};
+  }
+  return { reasoning_effort: reasoning };
 }
 
 function judgeMessages(input: Parameters<FindingJudge>[0]): Array<{ role: "system" | "user"; content: string }> {
@@ -820,6 +889,8 @@ function judgeMessages(input: Parameters<FindingJudge>[0]): Array<{ role: "syste
       role: "user",
       content: [
         "Score the finding with this rubric:",
+        JUDGE_OUTPUT_CONTRACT,
+        "",
         "- 0.0: no meaningful match",
         "- 0.4: weak signal in the same area",
         "- 0.7: same root cause and impact, but incomplete localization or evidence",

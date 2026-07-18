@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  assertRegularFileInside,
   getNodeArtifactDir,
   readJsonFile,
   readRunState,
@@ -133,7 +134,7 @@ export function verifyRequiredArtifactsForAttempt(
     const required = output.path;
     try {
       const absolutePath = safeResolveInside(artifactDir, required, "required artifact");
-      if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+      if (!fs.existsSync(absolutePath)) {
         missing.push(required);
         diagnostics.push({
           code: "REQUIRED_ARTIFACT_MISSING",
@@ -143,6 +144,11 @@ export function verifyRequiredArtifactsForAttempt(
           path: path.posix.join("artifacts", attemptId, required)
         });
       } else {
+        assertRegularFileInside(artifactDir, absolutePath, "required artifact");
+        const requiredStat = fs.lstatSync(absolutePath);
+        if (!requiredStat.isFile() || requiredStat.isSymbolicLink()) {
+          throw new Error(`required artifact ${required} must be a regular file`);
+        }
         diagnostics.push(...verifyRequiredArtifactShape(artifactDir, absolutePath, output));
       }
     } catch (error) {
@@ -190,7 +196,7 @@ function verifyRequiredArtifactShape(
   for (const [index, entry] of parsed.value.generated_tests.entries()) {
     try {
       const generatedPath = safeResolveInside(artifactDir, entry.path, "generated test manifest entry");
-      if (!fs.existsSync(generatedPath) || !fs.statSync(generatedPath).isFile()) {
+      if (!fs.existsSync(generatedPath)) {
         diagnostics.push({
           code: "GENERATED_TEST_FILE_MISSING",
           message: `generated test manifest entry ${entry.path} was not produced`,
@@ -198,6 +204,21 @@ function verifyRequiredArtifactShape(
           source: "generated-tests",
           path: `${absolutePath}#$.generated_tests[${index}].path`
         });
+      } else {
+        assertRegularFileInside(artifactDir, generatedPath, "generated test manifest entry");
+        const generatedStat = fs.lstatSync(generatedPath);
+        if (!generatedStat.isFile() || generatedStat.isSymbolicLink()) {
+          throw new Error(`generated test manifest entry ${entry.path} must be a regular file`);
+        }
+        if (generatedStat.size === 0) {
+          diagnostics.push({
+            code: "GENERATED_TEST_FILE_EMPTY",
+            message: `generated test manifest entry ${entry.path} is empty`,
+            severity: "error",
+            source: "generated-tests",
+            path: `${absolutePath}#$.generated_tests[${index}].path`
+          });
+        }
       }
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "generated-tests", "GENERATED_TEST_FILE_INVALID"));

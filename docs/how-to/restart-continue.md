@@ -91,3 +91,21 @@ ultrafuzz run --project /path/to/target-protocol
 
 Sync references only when the run needs pinned references that are not already
 present in the local digest-checked cache.
+
+## Restart A Modal Evaluation Row
+
+The commands above operate on a linked local workflow run. A Modal evaluation
+row also has a sandbox lifecycle and a durable volume, so restart it through the
+Modal runner instead of invoking `ultrafuzz resume` inside a replacement
+sandbox.
+
+Use `launch --mode resume` with the original private config, launch-state file,
+and model selection. Resume reuses the same volume and completed workflow state;
+if the recorded sandbox is still live, it remains the owner and no replacement
+is launched. Use `launch --mode fresh` only to start an explicit new generation
+after every sandbox in the current generation has stopped. Fresh mode clears the
+generation's durable workspaces instead of reusing completed workflow state. Use
+a new run ID when the previous generation and volume must remain available.
+
+See [Run Evals on Modal](run-evals-on-modal.md) for the commands, worker status
+taxonomy, sanitized result contract, and the dedicated real-cloud smoke.

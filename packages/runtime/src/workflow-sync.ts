@@ -9,6 +9,7 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
@@ -46,6 +47,11 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import {
+  ArtifactReconciliationInterruptedError,
+  isRetryableArtifactReconciliationError,
+  reconcileRequiredArtifactsFromWorkspace
+} from "./artifact-reconciliation.js";
 import {
   modelPricingFromSnapshot,
   modelPricingSnapshot,
@@ -275,6 +281,21 @@ interface PendingNodeEvent {
   payload: Record<string, unknown>;
 }
 
+export interface WorkflowSynchronizationControl {
+  now?: () => number;
+  signal?: AbortSignal;
+  deadlineMs?: number;
+}
+
+interface ArtifactReconciliationGrace {
+  schema_version: "ultrafuzz.artifact-reconciliation-grace.v1";
+  started_at: string;
+  deadline_at: string;
+  attempts: number;
+  last_attempt_at: string;
+  missing_count: number;
+}
+
 const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "succeeded",
   "failed",
@@ -286,9 +307,13 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 const ACCOUNTING_USD_PRECISION = 12;
+export const ARTIFACT_RECONCILIATION_GRACE_MS = 5 * 60 * 1000;
+export const ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS = 15 * 1000;
+export const ARTIFACT_RECONCILIATION_MAX_ATTEMPTS = 20;
+export const ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS = 5 * 1000;
 
-export async function syncRun(input: SyncRunInput) {
-  const result = await synchronizeLinkedWorkflowRun(input);
+export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizationControl = {}) {
+  const result = await synchronizeLinkedWorkflowRun(input, control);
   if (!result.ok) {
     return runtimeFailure<SyncRunValue>(result.diagnostics);
   }
@@ -296,10 +321,16 @@ export async function syncRun(input: SyncRunInput) {
 }
 
 export async function synchronizeLinkedWorkflowRun(
-  input: SyncRunInput
+  input: SyncRunInput,
+  control: WorkflowSynchronizationControl = {}
 ): Promise<
   { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }
 > {
+  let synchronizationNowMs = synchronizationClock(control);
+  const budgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (budgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [budgetDiagnostic] };
+  }
   const projectRoot = path.resolve(input.projectRoot);
   const layoutResult = await checkedRunLayout(projectRoot, input.runId);
   if (!layoutResult.ok) {
@@ -334,8 +365,14 @@ export async function synchronizeLinkedWorkflowRun(
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
+  synchronizationNowMs = synchronizationClock(control);
+  const postInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (postInspectBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
+  }
   if (!inspectSnapshot.ok) {
     return {
       ok: false,
@@ -345,13 +382,25 @@ export async function synchronizeLinkedWorkflowRun(
   const eventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
+  synchronizationNowMs = synchronizationClock(control);
+  const postEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (postEventsBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postEventsBudgetDiagnostic] };
+  }
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env
+    env: input.env,
+    ...inspectionExecutionControl(control, synchronizationNowMs)
   });
+  synchronizationNowMs = synchronizationClock(control);
+  const postInspectionBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (postInspectionBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [postInspectionBudgetDiagnostic] };
+  }
   const diagnostics = [
     ...(eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")]),
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
@@ -360,14 +409,24 @@ export async function synchronizeLinkedWorkflowRun(
   const inspect = parseInspectSnapshot(inspectSnapshot.json);
   const events = parseWorkflowEvents(eventsSnapshot.stdout);
   const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout);
-  const syncResult = synchronizeTasks({
-    layout,
-    graph: loaded.graph,
-    tasks: loaded.tasks,
-    workflowRunId: evidence.smithersRunId,
-    inspect,
-    events
-  });
+  let syncResult;
+  try {
+    syncResult = await synchronizeTasks({
+      layout,
+      graph: loaded.graph,
+      tasks: loaded.tasks,
+      workflowRunId: evidence.smithersRunId,
+      inspect,
+      events,
+      control
+    });
+  } catch (error) {
+    const interrupted = synchronizationInterruptionDiagnostic(error);
+    if (interrupted !== undefined) {
+      return { ok: false, diagnostics: [interrupted] };
+    }
+    throw error;
+  }
   diagnostics.push(...syncResult.diagnostics);
   if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
     diagnostics.push({
@@ -378,12 +437,25 @@ export async function synchronizeLinkedWorkflowRun(
     });
   }
 
+  const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (preAccountingBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
+  }
   const accountingResult = await synchronizeWorkflowAccounting({
     layout,
     workflowRunId: evidence.smithersRunId,
     events: tokenEvents,
+    control,
     env: input.env ?? process.env
   });
+  if (accountingResult.budgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
+  }
+
+  const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (preFinalMutationBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
+  }
 
   const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
     evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
@@ -391,10 +463,14 @@ export async function synchronizeLinkedWorkflowRun(
   const previousRunStatus = readRunState(layout).status;
   const runStatusChanged = previousRunStatus !== finalStatus;
   if (runStatusChanged) {
+    const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preStatusWriteBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
+    }
     updateRunStatus(layout, finalStatus);
   }
-  const observedAtMs = Date.now();
-  const control = projectWorkflowControlState({
+  const observedAtMs = synchronizationClock(control);
+  const workflowControl = projectWorkflowControlState({
     previousState: previousControlState,
     state: readRunState(layout),
     graph: loaded.graph,
@@ -404,23 +480,28 @@ export async function synchronizeLinkedWorkflowRun(
     nowMs: observedAtMs
   });
   let deadlineApplied = false;
-  if (control.deadlineExceeded) {
+  if (workflowControl.deadlineExceeded) {
     try {
+      assertSynchronizationBudget(control);
       await requestSmithersCancel({
         smithersRunId: evidence.smithersRunId,
         projectRoot,
         env: input.env
       });
-      control.state.status = "timed-out";
-      control.state.finished_at = new Date(observedAtMs).toISOString();
-      control.state.last_transition_at = new Date(observedAtMs).toISOString();
+      workflowControl.state.status = "timed-out";
+      workflowControl.state.finished_at = new Date(observedAtMs).toISOString();
+      workflowControl.state.last_transition_at = new Date(observedAtMs).toISOString();
       deadlineApplied = true;
     } catch (error) {
       diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
     }
   }
-  if (control.changed || deadlineApplied) {
-    writeRunState(layout, control.state);
+  const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (preControlMutationBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
+  }
+  if (workflowControl.changed || deadlineApplied) {
+    writeRunState(layout, workflowControl.state);
   }
   if (deadlineApplied) {
     appendEvent(layout, {
@@ -428,11 +509,21 @@ export async function synchronizeLinkedWorkflowRun(
       status: "timed-out",
       payload: {
         workflow_run_id: evidence.smithersRunId,
-        deadline_at: control.state.workflow_deadline_at
+        deadline_at: workflowControl.state.workflow_deadline_at
       }
     });
   }
-  if (runStatusChanged || syncResult.changed || accountingResult.changed || control.transitioned || deadlineApplied) {
+  if (
+    runStatusChanged ||
+    syncResult.changed ||
+    accountingResult.changed ||
+    workflowControl.transitioned ||
+    deadlineApplied
+  ) {
+    const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preEventWriteBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preEventWriteBudgetDiagnostic] };
+    }
     appendEvent(layout, {
       eventType: "workflow-synced",
       status: deadlineApplied ? "timed-out" : finalStatus,
@@ -442,7 +533,7 @@ export async function synchronizeLinkedWorkflowRun(
         workflow_state: inspect.runState,
         synced_nodes: syncResult.syncedNodes,
         accounting_available: accountingResult.available,
-        recovery_due: control.recoveryDue,
+        recovery_due: workflowControl.recoveryDue,
         deadline_exceeded: deadlineApplied
       }
     });
@@ -461,14 +552,83 @@ export async function synchronizeLinkedWorkflowRun(
   };
 }
 
+function synchronizationBudgetDiagnostic(
+  control: WorkflowSynchronizationControl,
+  nowMs: number
+): RuntimeDiagnostic | undefined {
+  if (control.signal?.aborted === true) {
+    return {
+      code: "WORKFLOW_SYNC_CANCELLED",
+      message: "workflow synchronization was cancelled at a synchronization checkpoint",
+      severity: "error",
+      source: "workflow"
+    };
+  }
+  if (control.deadlineMs !== undefined && nowMs >= control.deadlineMs) {
+    return {
+      code: "WORKFLOW_SYNC_DEADLINE_EXCEEDED",
+      message: "workflow synchronization reached its overall deadline at a synchronization checkpoint",
+      severity: "error",
+      source: "workflow"
+    };
+  }
+  return undefined;
+}
+
+class WorkflowSynchronizationInterruptedError extends Error {
+  constructor(readonly diagnostic: RuntimeDiagnostic) {
+    super(diagnostic.message);
+    this.name = "WorkflowSynchronizationInterruptedError";
+  }
+}
+
+function assertSynchronizationBudget(control: WorkflowSynchronizationControl): void {
+  const diagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (diagnostic !== undefined) {
+    throw new WorkflowSynchronizationInterruptedError(diagnostic);
+  }
+}
+
+function synchronizationInterruptionDiagnostic(error: unknown): RuntimeDiagnostic | undefined {
+  if (error instanceof WorkflowSynchronizationInterruptedError) {
+    return error.diagnostic;
+  }
+  if (error instanceof ArtifactReconciliationInterruptedError) {
+    return {
+      code: error.code,
+      message: error.message,
+      severity: "error",
+      source: "workflow"
+    };
+  }
+  return undefined;
+}
+
+function synchronizationClock(control: WorkflowSynchronizationControl): number {
+  return control.now?.() ?? Date.now();
+}
+
+function inspectionExecutionControl(
+  control: WorkflowSynchronizationControl,
+  nowMs: number
+): { signal?: AbortSignal; timeoutMs?: number } {
+  const timeoutMs = control.deadlineMs === undefined ? undefined : Math.max(1, Math.ceil(control.deadlineMs - nowMs));
+  return {
+    ...(control.signal === undefined ? {} : { signal: control.signal }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs })
+  };
+}
+
 async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
   events: WorkflowEvent[];
   env?: Record<string, string | undefined>;
+  control: WorkflowSynchronizationControl;
 }): Promise<{
   changed: boolean;
   available: boolean;
+  budgetDiagnostic?: RuntimeDiagnostic;
 }> {
   const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
   if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
@@ -492,7 +652,24 @@ async function synchronizeWorkflowAccounting(input: {
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
   const livePricing =
-    missingModels.length === 0 ? undefined : await resolveLiveModelPricing({ models: missingModels, env: input.env });
+    missingModels.length === 0
+      ? undefined
+      : await resolveLiveModelPricing({
+          models: missingModels,
+          env: input.env,
+          signal: input.control.signal,
+          timeoutMs:
+            input.control.deadlineMs === undefined
+              ? undefined
+              : Math.max(1, input.control.deadlineMs - synchronizationClock(input.control))
+        });
+  const postPricingBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    input.control,
+    synchronizationClock(input.control)
+  );
+  if (postPricingBudgetDiagnostic !== undefined) {
+    return { changed: false, available: false, budgetDiagnostic: postPricingBudgetDiagnostic };
+  }
   const resolvedPricing = new Map(storedPricing);
   for (const [model, modelPricing] of livePricing?.prices ?? []) {
     resolvedPricing.set(model, modelPricing);
@@ -551,6 +728,14 @@ async function synchronizeWorkflowAccounting(input: {
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
     return { changed: false, available: true };
+  }
+
+  const preAccountingMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(
+    input.control,
+    synchronizationClock(input.control)
+  );
+  if (preAccountingMutationBudgetDiagnostic !== undefined) {
+    return { changed: false, available: false, budgetDiagnostic: preAccountingMutationBudgetDiagnostic };
   }
 
   writeJsonDurable(input.layout.runMetadataPath, {
@@ -1464,20 +1649,21 @@ function formatUsd(value: number, partial: boolean): string {
   return `$${value.toFixed(2)}${suffix}`;
 }
 
-function synchronizeTasks(input: {
+async function synchronizeTasks(input: {
   layout: RunLayout;
   graph: PlannedGraph;
   tasks: StoredWorkflowTask[];
   workflowRunId: string;
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
-}): {
+  control: WorkflowSynchronizationControl;
+}): Promise<{
   diagnostics: RuntimeDiagnostic[];
   nodeStatuses: Map<string, NodeStatus>;
   workflowStates: Map<string, string>;
   syncedNodes: number;
   changed: boolean;
-} {
+}> {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
   const workflowStates = new Map<string, string>();
@@ -1510,6 +1696,7 @@ function synchronizeTasks(input: {
 
   const orderedTasks = tasksInDependencyOrder(input.tasks);
   for (const task of orderedTasks) {
+    assertSynchronizationBudget(input.control);
     const node = graphNodeById.get(task.concreteNodeId);
     if (node === undefined) {
       continue;
@@ -1526,7 +1713,7 @@ function synchronizeTasks(input: {
         ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
         : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
     const finalization = needsFinalization
-      ? finalizeTerminalTask({
+      ? await finalizeTerminalTask({
           layout: input.layout,
           node,
           task,
@@ -1534,7 +1721,10 @@ function synchronizeTasks(input: {
           evidence,
           evidenceSource: attemptEvidence.source,
           tasksByAttempt,
-          force: previous?.status === "succeeded"
+          force: previous?.status === "succeeded",
+          previous,
+          nowMs: synchronizationClock(input.control),
+          control: input.control
         })
       : {
           status: evidence.status,
@@ -1578,7 +1768,7 @@ function synchronizeTasks(input: {
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
-        ...(previous?.provenance ?? {}),
+        ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
           task_id: attemptEvidence.taskId,
@@ -1592,12 +1782,14 @@ function synchronizeTasks(input: {
     };
     const stateChanged = nodePatchChanges(previous, patch);
     if (stateChanged) {
+      assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, finalization.events);
+      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control);
       changed = true;
     }
     syncedNodes += 1;
     if (previous?.status !== patchStatus) {
+      assertSynchronizationBudget(input.control);
       appendEvent(input.layout, {
         eventType: "node-synced",
         nodeId: task.attemptId,
@@ -1614,6 +1806,7 @@ function synchronizeTasks(input: {
   }
 
   for (const [concreteNodeId, statuses] of taskStatusesByConcreteNode) {
+    assertSynchronizationBudget(input.control);
     if (statuses.length === 0) {
       continue;
     }
@@ -1628,8 +1821,9 @@ function synchronizeTasks(input: {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
       finished_at: finishedAtForStatus(aggregateStatus, previous),
+      last_error: undefined,
       provenance: {
-        ...(previous?.provenance ?? {}),
+        ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
           aggregate_attempt_statuses: statuses
@@ -1637,6 +1831,7 @@ function synchronizeTasks(input: {
       }
     };
     if (nodePatchChanges(previous, patch)) {
+      assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, concreteNodeId, patch);
       changed = true;
     }
@@ -1645,7 +1840,118 @@ function synchronizeTasks(input: {
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
 }
 
-function finalizeTerminalTask(input: {
+function artifactReconciliationGrace(
+  previous: NodeState | undefined,
+  nowMs: number
+): ArtifactReconciliationGrace | undefined {
+  const provenance = previous?.provenance as Record<string, unknown> | undefined;
+  const stored = recordField(provenance, "artifact_reconciliation_grace");
+  if (stored === undefined) {
+    return undefined;
+  }
+  const startedAt = stringField(stored, "started_at");
+  const deadlineAt = stringField(stored, "deadline_at");
+  const lastAttemptAt = stringField(stored, "last_attempt_at");
+  const attempts = numberField(stored, "attempts");
+  const missingCount = numberField(stored, "missing_count");
+  const startedAtMs = startedAt === undefined ? Number.NaN : Date.parse(startedAt);
+  const deadlineAtMs = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt);
+  const lastAttemptAtMs = lastAttemptAt === undefined ? Number.NaN : Date.parse(lastAttemptAt);
+  if (
+    stored.schema_version !== "ultrafuzz.artifact-reconciliation-grace.v1" ||
+    startedAt === undefined ||
+    deadlineAt === undefined ||
+    lastAttemptAt === undefined ||
+    attempts === undefined ||
+    missingCount === undefined ||
+    !Number.isFinite(startedAtMs) ||
+    !Number.isFinite(deadlineAtMs) ||
+    !Number.isFinite(lastAttemptAtMs) ||
+    !Number.isFinite(nowMs) ||
+    startedAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
+    lastAttemptAtMs > nowMs + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
+    deadlineAtMs > nowMs + ARTIFACT_RECONCILIATION_GRACE_MS + ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS ||
+    deadlineAtMs < startedAtMs ||
+    deadlineAtMs > startedAtMs + ARTIFACT_RECONCILIATION_GRACE_MS ||
+    lastAttemptAtMs < startedAtMs ||
+    lastAttemptAtMs > deadlineAtMs ||
+    !Number.isInteger(attempts) ||
+    attempts < 1 ||
+    attempts > ARTIFACT_RECONCILIATION_MAX_ATTEMPTS ||
+    !Number.isInteger(missingCount) ||
+    missingCount < 0
+  ) {
+    return {
+      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
+      started_at: new Date(0).toISOString(),
+      deadline_at: new Date(0).toISOString(),
+      attempts: ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
+      last_attempt_at: new Date(0).toISOString(),
+      missing_count: Math.max(0, missingCount ?? 0)
+    };
+  }
+  return {
+    schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
+    started_at: startedAt,
+    deadline_at: deadlineAt,
+    attempts: Math.trunc(attempts),
+    last_attempt_at: lastAttemptAt,
+    missing_count: Math.trunc(missingCount)
+  };
+}
+
+function artifactReconciliationAttemptDue(previous: ArtifactReconciliationGrace | undefined, nowMs: number): boolean {
+  if (previous === undefined) {
+    return true;
+  }
+  if (previous.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS) {
+    return false;
+  }
+  const lastAttemptMs = Date.parse(previous.last_attempt_at);
+  const deadlineMs = Date.parse(previous.deadline_at);
+  return nowMs >= Math.min(lastAttemptMs + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS, deadlineMs);
+}
+
+function nextArtifactReconciliationGrace(input: {
+  previous: ArtifactReconciliationGrace | undefined;
+  nowMs: number;
+  attempted: boolean;
+  missingCount: number;
+}): ArtifactReconciliationGrace {
+  const now = new Date(input.nowMs).toISOString();
+  if (input.previous === undefined) {
+    return {
+      schema_version: "ultrafuzz.artifact-reconciliation-grace.v1",
+      started_at: now,
+      deadline_at: new Date(input.nowMs + ARTIFACT_RECONCILIATION_GRACE_MS).toISOString(),
+      attempts: input.attempted ? 1 : 0,
+      last_attempt_at: now,
+      missing_count: input.missingCount
+    };
+  }
+  return {
+    ...input.previous,
+    attempts: input.previous.attempts + (input.attempted ? 1 : 0),
+    ...(input.attempted ? { last_attempt_at: now } : {}),
+    missing_count: input.missingCount
+  };
+}
+
+function artifactReconciliationGraceExpired(grace: ArtifactReconciliationGrace, nowMs: number): boolean {
+  return nowMs >= Date.parse(grace.deadline_at) || grace.attempts >= ARTIFACT_RECONCILIATION_MAX_ATTEMPTS;
+}
+
+function onlyTransientArtifactDiagnostics(diagnostics: RuntimeDiagnostic[]): boolean {
+  const transientCodes = new Set([
+    "REQUIRED_ARTIFACT_MISSING",
+    "REQUIRED_ARTIFACT_EMPTY",
+    "GENERATED_TEST_FILE_MISSING",
+    "GENERATED_TEST_FILE_EMPTY"
+  ]);
+  return diagnostics.length > 0 && diagnostics.every((diagnostic) => transientCodes.has(diagnostic.code));
+}
+
+async function finalizeTerminalTask(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
   task: StoredWorkflowTask;
@@ -1654,7 +1960,10 @@ function finalizeTerminalTask(input: {
   evidenceSource: "agent" | "verifier";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
-}): NodeFinalization {
+  previous: NodeState | undefined;
+  nowMs: number;
+  control: WorkflowSynchronizationControl;
+}): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
     const category =
       input.evidence.status === "skipped"
@@ -1700,9 +2009,114 @@ function finalizeTerminalTask(input: {
 
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
+  assertSynchronizationBudget(input.control);
   const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId, { create: true });
+  const previousGrace = artifactReconciliationGrace(input.previous, input.nowMs);
+  const shouldReconcile = artifactReconciliationAttemptDue(previousGrace, input.nowMs);
+  let reconciledArtifacts: string[] = [];
+  let reconciliationError: RuntimeDiagnostic | undefined;
+  if (shouldReconcile) {
+    try {
+      assertSynchronizationBudget(input.control);
+      reconciledArtifacts = (
+        await reconcileRequiredArtifactsFromWorkspace({
+          layout: input.layout,
+          node: input.node,
+          attemptId: input.task.attemptId,
+          control: input.control
+        })
+      ).materialized;
+      if (reconciledArtifacts.length > 0) {
+        events.push({
+          eventType: "node-artifacts-reconciled",
+          status: "succeeded",
+          payload: { materialized: reconciledArtifacts }
+        });
+      }
+    } catch (error) {
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
+        throw error;
+      }
+      if (isRetryableArtifactReconciliationError(error)) {
+        diagnostics.push({
+          code: error.code,
+          message: error.message,
+          severity: "warning",
+          source: "artifact-reconciliation"
+        });
+      } else {
+        reconciliationError = diagnosticFromError(
+          error,
+          "artifact-reconciliation",
+          "WORKSPACE_ARTIFACT_RECONCILE_FAILED"
+        );
+        diagnostics.push(reconciliationError);
+      }
+    }
+  }
+  assertSynchronizationBudget(input.control);
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+  const grace = nextArtifactReconciliationGrace({
+    previous: previousGrace,
+    nowMs: input.nowMs,
+    attempted: shouldReconcile,
+    missingCount: gate.diagnostics.length
+  });
+  const gracePending =
+    !gate.ok &&
+    reconciliationError === undefined &&
+    onlyTransientArtifactDiagnostics(gate.diagnostics) &&
+    !artifactReconciliationGraceExpired(grace, input.nowMs);
+
+  if (gracePending) {
+    diagnostics.push({
+      code: "REQUIRED_ARTIFACT_GRACE_PENDING",
+      message:
+        "required artifacts are not yet visible; strict validation remains pending within the bounded reconciliation grace",
+      severity: "warning",
+      source: "artifact-gates",
+      details: {
+        attempts: grace.attempts,
+        missing_count: grace.missing_count,
+        deadline_at: grace.deadline_at
+      }
+    });
+    if (previousGrace === undefined) {
+      events.push({
+        eventType: "node-artifact-reconciliation-grace-started",
+        status: "running",
+        payload: {
+          attempts: grace.attempts,
+          missing_count: grace.missing_count,
+          deadline_at: grace.deadline_at
+        }
+      });
+    } else if (shouldReconcile) {
+      events.push({
+        eventType: "node-artifact-reconciliation-grace-retried",
+        status: "running",
+        payload: { attempts: grace.attempts, missing_count: grace.missing_count }
+      });
+    }
+    return {
+      status: "running",
+      diagnostics,
+      provenance: {
+        output_contracts: { ok: false, missing: gate.missing },
+        artifact_reconciliation_grace: grace
+      },
+      events
+    };
+  }
+
   diagnostics.push(...gate.diagnostics);
+  if (gate.ok && previousGrace !== undefined) {
+    events.push({
+      eventType: "node-artifact-reconciliation-grace-completed",
+      status: "succeeded",
+      payload: { attempts: grace.attempts }
+    });
+  }
   events.push({
     eventType: gate.ok ? "node-artifacts-verified" : "node-artifacts-missing",
     status: gate.ok ? "succeeded" : "failed",
@@ -1713,9 +2127,11 @@ function finalizeTerminalTask(input: {
   });
 
   let findingsCount: number | undefined;
+  let findingsValidationFailed = false;
   const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
   if (fs.existsSync(findingsPath)) {
     try {
+      assertSynchronizationBudget(input.control);
       const report = normalizeFindings({
         artifactDir,
         nodeId: input.task.attemptId,
@@ -1731,11 +2147,17 @@ function finalizeTerminalTask(input: {
         }
       });
     } catch (error) {
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
+        throw error;
+      }
+      findingsValidationFailed = error instanceof FindingsValidationError;
       diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_NORMALIZE_FAILED"));
     }
   }
 
+  let artifactManifestWritten = false;
   try {
+    assertSynchronizationBudget(input.control);
     const manifest = writeArtifactManifest({
       layout: input.layout,
       nodeId: input.task.attemptId,
@@ -1743,6 +2165,7 @@ function finalizeTerminalTask(input: {
       prerequisiteNodeIds: input.task.dependencies,
       provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
     });
+    artifactManifestWritten = true;
     events.push({
       eventType: "artifact-manifest-written",
       status: "succeeded",
@@ -1752,10 +2175,16 @@ function finalizeTerminalTask(input: {
       }
     });
   } catch (error) {
+    if (synchronizationInterruptionDiagnostic(error) !== undefined) {
+      throw error;
+    }
     diagnostics.push(diagnosticFromError(error, "artifacts", "ARTIFACT_MANIFEST_WRITE_FAILED"));
   }
 
-  if (diagnostics.some((diagnostic) => diagnostic.severity === "error")) {
+  const errorDiagnostics = diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+  if (errorDiagnostics.length > 0) {
+    const taskOutputValidationFailure =
+      findingsValidationFailed && artifactManifestWritten && reconciliationError === undefined;
     return {
       status: "failed",
       diagnostics,
@@ -1768,7 +2197,17 @@ function finalizeTerminalTask(input: {
           causal_failure_category: "artifact-contract",
           dependent_task_ids: []
         },
-        ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
+        ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
+        ...(previousGrace === undefined ? {} : { artifact_reconciliation_grace: grace }),
+        ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
+        ...(taskOutputValidationFailure
+          ? {
+              terminal_disposition: {
+                schema_version: "ultrafuzz.terminal-disposition.v1",
+                kind: "task-output-validation-failure"
+              }
+            }
+          : {})
       },
       events
     };
@@ -1778,6 +2217,8 @@ function finalizeTerminalTask(input: {
     diagnostics,
     provenance: {
       output_contracts: { ok: true, missing: [] },
+      ...(reconciledArtifacts.length > 0 ? { reconciled_artifacts: reconciledArtifacts } : {}),
+      ...(previousGrace === undefined ? {} : { artifact_reconciliation_grace: grace }),
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
       ...(input.force ? { repaired_missing_manifest: true } : {})
     },
@@ -1814,8 +2255,14 @@ function dependencyCascadeFailure(
   };
 }
 
-function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNodeEvent[]): void {
+function appendNodeEvents(
+  layout: RunLayout,
+  nodeId: string,
+  events: PendingNodeEvent[],
+  control: WorkflowSynchronizationControl
+): void {
   for (const event of events) {
+    assertSynchronizationBudget(control);
     appendEvent(layout, {
       eventType: event.eventType,
       nodeId,
@@ -2522,6 +2969,12 @@ function finalRunStatus(
   if (workflowStatus === "failed" || statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))) {
     return "failed";
   }
+  if (
+    options.evidenceComplete &&
+    statuses.some((status) => ["pending", "ready", "runnable", "running"].includes(status))
+  ) {
+    return "running";
+  }
   if (["succeeded", "finished", "continued", "success", "complete", "completed"].includes(workflowStatus)) {
     return options.evidenceComplete &&
       (statuses.length === 0 ||
@@ -2596,6 +3049,13 @@ function nodePatchChanges(previous: NodeState | undefined, patch: Partial<Omit<N
 
 function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function withoutTerminalDisposition(provenance: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (provenance === undefined) return {};
+  const result = { ...provenance };
+  delete result.terminal_disposition;
+  return result;
 }
 
 function eventsByWorkflowNode(events: WorkflowEvent[]): Map<string, WorkflowEvent[]> {

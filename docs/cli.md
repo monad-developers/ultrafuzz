@@ -99,6 +99,7 @@ Common flags:
 - `--provider <name>` (plan, run, publish)
 - `--target-root <path>` (plan, run)
 - `--row <row-id>` (run, repeatable)
+- `--watch-timeout-seconds <seconds>` (run)
 - `--no-watch` (run)
 - `--llm-judge` (score)
 - `--baseline <variant-id>` (compare variants within one run)

@@ -5,12 +5,13 @@ import { readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
 type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
-export type CodexTaskOptions = { model?: string; reasoningEffort?: string };
+export type CodexTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
   return new SmithersCodexAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
+    ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     skipGitRepoCheck: true,
     ...codexAuthOptions()
   });
@@ -20,12 +21,13 @@ function codexAuthOptions(): CodexAuthOptions {
   const config = readCodexAuthConfig();
   const auth = config.auth ?? "subscription";
   if (auth === "api-key") {
-    return { apiKey: requiredEnv(config.api_key_env ?? "OPENAI_API_KEY") };
+    const apiKey = requiredEnv(config.api_key_env ?? "OPENAI_API_KEY");
+    return { apiKey, env: { CODEX_API_KEY: apiKey } };
   }
   if (auth === "subscription") {
     return {
       ...(config.config_dir === undefined ? {} : { configDir: resolveConfigDir(config.config_dir) }),
-      env: { OPENAI_API_KEY: "" }
+      env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }
     };
   }
   throw new Error(`unsupported CodexAgent auth mode in ultrafuzz.toml: ${auth}`);

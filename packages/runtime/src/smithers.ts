@@ -675,13 +675,17 @@ export async function runSmithersInspectionCommand(input: {
   args: readonly string[];
   projectRoot: string;
   env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<SmithersCommandSnapshot> {
   const command = [...input.args];
   try {
     const result = await execSmithersCli({
       args: command,
       projectRoot: input.projectRoot,
-      env: input.env
+      env: input.env,
+      signal: input.signal,
+      timeoutMs: input.timeoutMs
     });
     return {
       command: result.command,
@@ -761,15 +765,25 @@ async function execSmithersCli(input: {
   environmentVariableNames?: readonly string[];
   keepWorkspaces?: boolean;
   acceptedExitCodes?: readonly number[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
-  await ensureSmithersDependencies(input.projectRoot, input.env);
+  const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
+  await ensureSmithersDependencies(input.projectRoot, input.env, {
+    signal: input.signal,
+    timeoutMs: input.timeoutMs
+  });
+  const commandTimeoutMs =
+    executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
   const executable = smithersExecutable(input.projectRoot, input.env);
   try {
     const { stdout, stderr } = await execFileAsync(executable, command, {
       cwd: input.projectRoot,
       env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
     });
     return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
   } catch (error) {
@@ -891,7 +905,8 @@ function truncateDiagnosticText(value: string): string {
 
 async function ensureSmithersDependencies(
   projectRoot: string,
-  env: Record<string, string | undefined> | undefined
+  env: Record<string, string | undefined> | undefined,
+  control: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<void> {
   if (explicitSmithersExecutable(env) !== undefined) {
     return;
@@ -940,7 +955,9 @@ async function ensureSmithersDependencies(
     {
       cwd: projectRoot,
       env: smithersCommandEnv(projectRoot, env),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
+      ...(control.signal === undefined ? {} : { signal: control.signal }),
+      ...(control.timeoutMs === undefined ? {} : { timeout: control.timeoutMs })
     }
   );
   const validationError = installedSmithersValidationError(projectRoot);
@@ -1311,6 +1328,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       reasoningEffort: task.reasoningEffort ?? null,
       promptPath: task.renderedPromptPath,
       workspacePath: task.workspacePath,
+      artifactDir: task.artifactDir,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
