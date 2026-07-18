@@ -137,6 +137,7 @@ export interface EvalBenchmarkTargetProvenance {
   id: string;
   repo: string;
   commit: string;
+  dirty: boolean | null;
 }
 
 export interface EvalExecutionPolicyProvenance {
@@ -169,6 +170,7 @@ export interface EvalRunProvenance {
 export interface EvalScoringProvenance {
   implementation_revision: string;
   implementation_dirty: boolean | null;
+  judge_mode: "deterministic" | "llm";
   judge_prompt_version: string;
   judge_models: string[];
   ground_truth_sha256: Record<string, string>;

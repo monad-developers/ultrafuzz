@@ -108,16 +108,17 @@ Every new eval run records a versioned provenance block in `eval.json`:
 - Candidate identity is resolved from the candidate checkout's exact commit,
   release tag when present, dirty status, and immutable local execution
   identity when available.
-- Benchmark identity includes resolved target commits, ground-truth digests,
-  model controls, trial budget, and a normalized execution-policy fingerprint.
-  These controls produce the deterministic cohort fingerprint.
+- Benchmark identity includes resolved target commits and clean-checkout state,
+  ground-truth digests, model controls, trial budget, and a normalized
+  execution-policy fingerprint. These controls produce the deterministic
+  cohort fingerprint; tracked target modifications make it incomplete.
 - Candidate-owned prompts, topology, strategies, and runtime configuration do
   not alter the cohort. Their `graph_fingerprint` and `config_fingerprint` are
   instead recorded on each `runs.jsonl` row so product changes remain visible.
 - `summary.json` records a separate scoring identity covering the scorer
-  implementation revision, judge prompt version, judge models, and
-  ground-truth digests. Historical artifacts without lineage remain readable
-  and are labeled as having unavailable provenance.
+  implementation revision, deterministic or optional-judge mode, judge prompt
+  version, judge models, and ground-truth digests. Historical artifacts without
+  lineage remain readable and are labeled as having unavailable provenance.
 
 Braintrust receives the benchmark series, cohort fingerprint, candidate
 identity, execution-policy fingerprint, row graph/config fingerprints, and

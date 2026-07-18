@@ -100,6 +100,15 @@ describe("versioned eval lineage", () => {
     const changedTarget = buildEvalRunProvenance(generated.plan, policy);
     expect(changedTarget.benchmark.cohort_fingerprint).not.toBe(first.benchmark.cohort_fingerprint);
 
+    fs.writeFileSync(path.join(generated.targetRoot, "tracked.txt"), "dirty target\n", "utf8");
+    const dirtyTarget = buildEvalRunProvenance(generated.plan, policy);
+    expect(dirtyTarget.benchmark).toMatchObject({
+      availability: "incomplete",
+      targets: [{ id: "target-a", dirty: true }]
+    });
+    expect(dirtyTarget.benchmark.cohort_fingerprint).not.toBe(changedTarget.benchmark.cohort_fingerprint);
+    fs.writeFileSync(path.join(generated.targetRoot, "tracked.txt"), "target v2\n", "utf8");
+
     const changedPolicy = buildEvalRunProvenance(generated.plan, { ...policy, watchTimeoutSeconds: 121 });
     expect(changedPolicy.benchmark.execution_policy.fingerprint).not.toBe(first.benchmark.execution_policy.fingerprint);
     expect(changedPolicy.benchmark.cohort_fingerprint).not.toBe(changedTarget.benchmark.cohort_fingerprint);
@@ -113,6 +122,13 @@ describe("versioned eval lineage", () => {
       suite: generated.plan.suite,
       matrix: generated.plan.matrix
     });
+    const llmScoring = buildScoringProvenance({
+      projectRoot: generated.candidateRoot,
+      suite: generated.plan.suite,
+      matrix: generated.plan.matrix,
+      judgeMode: "llm"
+    });
+    expect(llmScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     fs.writeFileSync(path.join(generated.candidateRoot, "scratch.log"), "local scratch\n", "utf8");
     const untracked = buildEvalRunProvenance(generated.plan, { watch: false });
     expect(untracked.candidate).toMatchObject({
@@ -143,6 +159,7 @@ describe("versioned eval lineage", () => {
     expect(dirty.benchmark.cohort_fingerprint).toBe(clean.benchmark.cohort_fingerprint);
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
+      judge_mode: "deterministic",
       judge_prompt_version: "ultrafuzz-eval-judge-v2",
       judge_models: ["gpt-5.5"],
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }

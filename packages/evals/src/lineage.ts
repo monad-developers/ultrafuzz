@@ -32,11 +32,7 @@ export interface EvalControllerPolicyInput {
  */
 export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalControllerPolicyInput): EvalRunProvenance {
   const targets = [...new Map(plan.matrix.map((row) => [row.target_id, row.target])).entries()]
-    .map(([id, target]) => ({
-      id,
-      repo: target.repo,
-      commit: resolveTargetCommit(target.path, target.ref)
-    }))
+    .map(([id, target]) => ({ id, repo: target.repo, ...resolveTargetProvenance(target.path, target.ref) }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const groundTruthSha256 = groundTruthDigests(plan.matrix);
   const executionPolicyValue = {
@@ -62,7 +58,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     execution_policy_fingerprint: executionPolicy.fingerprint
   };
   const benchmarkAvailability =
-    targets.every((target) => target.commit !== "unavailable") &&
+    targets.every((target) => target.commit !== "unavailable" && target.dirty === false) &&
     Object.values(groundTruthSha256).every((digest) => digest !== "unavailable")
       ? "available"
       : "incomplete";
@@ -84,6 +80,7 @@ export function buildScoringProvenance(input: {
   projectRoot: string;
   suite: EvalSuiteSpec;
   matrix: EvalMatrixRow[];
+  judgeMode?: "deterministic" | "llm";
 }): EvalScoringProvenance {
   const implementation = resolveCandidateProvenance(input.projectRoot);
   const groundTruthSha256 = groundTruthDigests(input.matrix);
@@ -102,6 +99,7 @@ export function buildScoringProvenance(input: {
   const identity = {
     implementation_revision: implementationRevision,
     implementation_dirty: implementation.dirty,
+    judge_mode: input.judgeMode ?? ("deterministic" as const),
     judge_prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     judge_models: judgeModels,
     ground_truth_sha256: groundTruthSha256
@@ -114,6 +112,7 @@ export function buildEvalSummaryProvenance(input: {
   suite: EvalSuiteSpec;
   matrix: EvalMatrixRow[];
   runProvenance?: EvalRunProvenance;
+  judgeMode?: "deterministic" | "llm";
 }): EvalSummaryProvenance {
   return {
     availability: input.runProvenance === undefined ? "historical-unavailable" : "available",
@@ -183,15 +182,24 @@ function sha256File(filePath: string): string {
   }
 }
 
-function resolveTargetCommit(targetPath: string | undefined, ref: string): string {
+function resolveTargetProvenance(
+  targetPath: string | undefined,
+  ref: string
+): { commit: string; dirty: boolean | null } {
   if (targetPath !== undefined) {
     try {
-      return git(targetPath, ["rev-parse", "HEAD"]).toLowerCase();
+      return {
+        commit: git(targetPath, ["rev-parse", "HEAD"]).toLowerCase(),
+        dirty: git(targetPath, ["status", "--porcelain", "--untracked-files=no"]).length > 0
+      };
     } catch {
       // A failed row still receives deterministic, explicitly unavailable provenance.
+      return { commit: "unavailable", dirty: null };
     }
   }
-  return /^[0-9a-f]{40}$/iu.test(ref) ? ref.toLowerCase() : "unavailable";
+  return /^[0-9a-f]{40}$/iu.test(ref)
+    ? { commit: ref.toLowerCase(), dirty: false }
+    : { commit: "unavailable", dirty: null };
 }
 
 function stableJson(value: unknown): string {

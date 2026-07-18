@@ -237,6 +237,7 @@ describe("deterministic scorer math", () => {
       provenance: {
         availability: "historical-unavailable",
         scoring: {
+          judge_mode: "deterministic",
           judge_prompt_version: "ultrafuzz-eval-judge-v2",
           judge_models: ["gpt-5.5"],
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -247,6 +248,27 @@ describe("deterministic scorer math", () => {
     expect(summaryMarkdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
     expect(summaryMarkdown).toContain("Candidate: unavailable (historical result)");
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("records the effective judge mode in the scoring identity", async () => {
+    const fixture = scoreRunFixture();
+    const deterministic = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId
+    });
+    const judged = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId,
+      llmJudge: async (input) => ({
+        ...input.deterministicResult,
+        judge_kind: "llm",
+        rationale: "generated judge result"
+      })
+    });
+
+    expect(deterministic.provenance?.scoring.judge_mode).toBe("deterministic");
+    expect(judged.provenance?.scoring.judge_mode).toBe("llm");
+    expect(judged.provenance?.scoring.fingerprint).not.toBe(deterministic.provenance?.scoring.fingerprint);
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {

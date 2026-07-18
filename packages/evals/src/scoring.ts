@@ -108,6 +108,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
   const scoresPath = path.join(root, "scores.jsonl");
   const reviewQueuePath = path.join(root, "review", "new-findings.jsonl");
+  const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
   const llmJudge = resolveJudge(input.llmJudge, input.env);
   const rowScores: EvalRowScore[] = [];
   const findingScores: EvalFindingScore[] = [];
@@ -142,6 +143,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
       projectRoot: input.projectRoot,
       suite,
       matrix,
+      judgeMode,
       ...(evalManifest.provenance !== undefined ? { runProvenance: evalManifest.provenance } : {})
     })
   };

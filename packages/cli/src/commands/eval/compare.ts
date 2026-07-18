@@ -45,7 +45,9 @@ export default class EvalCompare extends Command {
               ...comparison.differences.map((difference) => `Compatibility difference: ${difference}`),
               ...comparison.variants.map(
                 (variant) =>
-                  `${variant.variant_id}: f1=${variant.candidate.f1_score} (${variant.delta_f1_score >= 0 ? "+" : ""}${variant.delta_f1_score})`
+                  `${variant.variant_id}: f1=${variant.candidate.f1_score} (${signed(variant.delta_f1_score)}), ` +
+                  `recall=${variant.candidate.recall} (${signed(variant.delta_recall)}), ` +
+                  `precision=${variant.candidate.precision} (${signed(variant.delta_precision)})`
               )
             ]
               .join("\n")
@@ -87,4 +89,8 @@ export default class EvalCompare extends Command {
       );
     }
   }
+}
+
+function signed(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value}`;
 }

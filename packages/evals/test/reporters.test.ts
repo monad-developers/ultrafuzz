@@ -247,7 +247,7 @@ describe("BraintrustReporter", () => {
         series: "generated-series",
         protocol_revision: "1",
         cohort_fingerprint: "cohort-generated",
-        targets: [{ id: "target-a", repo: "https://example.com/generated", commit: "b".repeat(40) }],
+        targets: [{ id: "target-a", repo: "https://example.com/generated", commit: "b".repeat(40), dirty: false }],
         ground_truth_sha256: { "target-a": "ground-truth-generated" },
         execution_policy: {
           revision: "ultrafuzz.eval-controller.v1",
@@ -298,6 +298,7 @@ describe("BraintrustReporter", () => {
         scoring: {
           implementation_revision: "scorer-generated",
           implementation_dirty: false,
+          judge_mode: "deterministic",
           judge_prompt_version: "judge-prompt-generated",
           judge_models: ["judge-generated"],
           ground_truth_sha256: provenance.benchmark.ground_truth_sha256,
@@ -331,6 +332,7 @@ describe("BraintrustReporter", () => {
       metadata: {
         scoring_revision: "scorer-generated",
         scoring_fingerprint: "scoring-generated",
+        judge_mode: "deterministic",
         judge_prompt_version: "judge-prompt-generated",
         judge_models: ["judge-generated"]
       }

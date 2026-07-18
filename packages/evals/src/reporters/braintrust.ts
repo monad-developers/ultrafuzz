@@ -322,6 +322,7 @@ export class BraintrustReporter implements EvalReporter {
           ? {
               scoring_revision: summary.provenance.scoring.implementation_revision,
               scoring_fingerprint: summary.provenance.scoring.fingerprint,
+              judge_mode: summary.provenance.scoring.judge_mode,
               judge_prompt_version: summary.provenance.scoring.judge_prompt_version,
               judge_models: summary.provenance.scoring.judge_models
             }

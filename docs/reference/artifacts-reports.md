@@ -247,7 +247,8 @@ telemetry/
 `runs.jsonl` appends one record per launched row, including graph/config and
 execution artifact identities when available. `ultrafuzz eval score` writes
 per-row scores to `scores.jsonl` and the variant ranking plus scoring lineage
-to `summary.json`, with the same identities rendered in the human-readable
+to `summary.json`, including the effective deterministic or optional-judge
+mode, with the same identities rendered in the human-readable
 `summary.md` read by `ultrafuzz eval report`.
 
 `telemetry/` holds durable per-row telemetry cursors (byte offset, event dedup

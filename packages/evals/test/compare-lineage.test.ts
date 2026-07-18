@@ -22,7 +22,7 @@ function provenance(cohort: string, policy: string, scoring: string): EvalSummar
       series: "generated-series",
       protocol_revision: "1",
       cohort_fingerprint: cohort,
-      targets: [{ id: "generated", repo: "https://example.com/generated", commit: "b".repeat(40) }],
+      targets: [{ id: "generated", repo: "https://example.com/generated", commit: "b".repeat(40), dirty: false }],
       ground_truth_sha256: { generated: `sha256:${"c".repeat(64)}` },
       execution_policy: {
         revision: "ultrafuzz.eval-controller.v1",
@@ -39,6 +39,7 @@ function provenance(cohort: string, policy: string, scoring: string): EvalSummar
     scoring: {
       implementation_revision: "ultrafuzz.eval-scorer.v1@generated",
       implementation_dirty: false,
+      judge_mode: "deterministic",
       judge_prompt_version: "ultrafuzz-eval-judge-v2",
       judge_models: ["judge-generated"],
       ground_truth_sha256: { generated: `sha256:${"c".repeat(64)}` },
