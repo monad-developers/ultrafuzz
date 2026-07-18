@@ -292,12 +292,21 @@ function workflowInspect(input: {
 
 function workflowEvents(
   workflowRunId: string,
-  events: Array<{ type: string; nodeId?: string; attempt?: number; error?: unknown; extra?: Record<string, unknown> }>
+  events: Array<{
+    type: string;
+    nodeId?: string;
+    attempt?: number;
+    error?: unknown;
+    sequence?: number;
+    timestampMs?: number;
+    extra?: Record<string, unknown>;
+  }>
 ): string {
   const base = Date.parse("2026-07-03T00:00:00.000Z");
   return `${events
     .map((event, index) => {
-      const timestampMs = base + index * 100;
+      const sequence = event.sequence ?? index;
+      const timestampMs = event.timestampMs ?? base + index * 100;
       const payload: Record<string, unknown> = {
         type: event.type,
         runId: workflowRunId,
@@ -317,7 +326,7 @@ function workflowEvents(
       }
       return JSON.stringify({
         runId: workflowRunId,
-        seq: index,
+        seq: sequence,
         timestampMs,
         type: event.type,
         payload
@@ -2730,6 +2739,66 @@ test("syncRun distinguishes repeated retry counters by their workflow event iden
   assert.equal(ledger.length, 2);
   assert.equal(new Set(ledger.map((entry) => entry.attempt_id)).size, 2);
   assert.equal(new Set(ledger.map((entry) => entry.executor_retry_id)).size, 2);
+});
+
+test("syncRun keeps a terminal-only retry idempotent when its start event arrives later", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-late-start";
+  const startedAt = Date.parse("2026-07-03T00:00:00.100Z");
+  const finishedAt = Date.parse("2026-07-03T00:00:00.200Z");
+  const terminalEvent = {
+    type: "NodeFailed",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    sequence: 2,
+    timestampMs: finishedAt,
+    error: { message: "generated executor failure" }
+  };
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [terminalEvent])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-late-start", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-late-start", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+  const initialLedger = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+
+  const completeEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 1,
+        timestampMs: startedAt
+      },
+      terminalEvent
+    ])
+  });
+  const replayed = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-late-start",
+    env: completeEnv
+  });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), initialLedger);
+  assert.equal(initialLedger.trim().split("\n").length, 1);
 });
 
 test("syncRun attributes attempts to the controller active when the attempt starts", async () => {

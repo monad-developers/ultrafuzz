@@ -104,6 +104,7 @@ interface TerminalWorkflowAttempt {
   retry: number;
   iteration: number;
   startedSequence?: number;
+  finishedSequence?: number;
   startedAt: string;
   finishedAt: string;
   outcome: NodeAttemptOutcome;
@@ -1124,7 +1125,7 @@ function appendTerminalTaskAttempts(input: {
         stableLedgerDimension("retry", [
           input.workflowRunId,
           input.task.attemptId,
-          String(attempt.startedSequence ?? attempt.startedAt),
+          String(attempt.finishedSequence ?? attempt.finishedAt),
           String(attempt.retry)
         ])
     );
@@ -1263,6 +1264,7 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
     applyAttemptDimensionFields(current, payload);
     if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
       current.finishedAt = timestamp;
+      current.finishedSequence = event.sequence;
       current.startedAt ??= timestamp;
       current.startedSequence ??= event.sequence;
       current.outcome = terminal.outcome;
