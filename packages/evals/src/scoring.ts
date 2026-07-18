@@ -298,7 +298,7 @@ export function compareEvalRuns(input: {
 }): EvalLongitudinalCompareValue {
   const baseline = readEvalSummary(input.projectRoot, input.baselineEvalRunId);
   const candidate = readEvalSummary(input.projectRoot, input.candidateEvalRunId);
-  const differences = provenanceDifferences(baseline, candidate);
+  const differences = comparisonDifferences(baseline, candidate);
   const compatible = differences.length === 0;
   if (!compatible && input.allowIncompatible !== true) {
     throw new EvalError(
@@ -338,6 +338,10 @@ export function compareEvalRuns(input: {
 
 function readEvalSummary(projectRoot: string, evalRunId: string): EvalScoreSummary {
   return jsonFile<EvalScoreSummary>(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
+}
+
+function comparisonDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  return [...provenanceDifferences(baseline, candidate), ...variantScopeDifferences(baseline, candidate)];
 }
 
 function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
@@ -384,6 +388,17 @@ function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreS
     }
   }
   return differences;
+}
+
+function variantScopeDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  const baselineIds = new Set(baseline.variants.map((variant) => variant.variant_id));
+  const candidateIds = new Set(candidate.variants.map((variant) => variant.variant_id));
+  const baselineOnly = [...baselineIds].filter((id) => !candidateIds.has(id)).sort();
+  const candidateOnly = [...candidateIds].filter((id) => !baselineIds.has(id)).sort();
+  return [
+    ...(baselineOnly.length > 0 ? [`baseline variants missing from candidate: ${baselineOnly.join(", ")}`] : []),
+    ...(candidateOnly.length > 0 ? [`candidate variants missing from baseline: ${candidateOnly.join(", ")}`] : [])
+  ];
 }
 
 export function renderSummaryMarkdown(summary: EvalScoreSummary): string {

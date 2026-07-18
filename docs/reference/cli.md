@@ -285,8 +285,8 @@ requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
 `ULTRAFUZZ_EVAL_JUDGE_URL` must be HTTPS without credentials, and redirects
 are rejected. `report` shows the scored variant ranking. `compare` either
 diffs variants against a `--baseline` variant or compares a candidate run to
-an `--against` baseline run after verifying cohort and scoring identities;
-`--allow-incompatible` is an explicit, reported waiver.
+an `--against` baseline run after verifying cohort identity, scoring identity,
+and variant scope; `--allow-incompatible` is an explicit, reported waiver.
 
 `publish` replays a recorded eval run's journals from offset 0 and
 reconstructs the full node trace on a provider post hoc; `--resume` continues

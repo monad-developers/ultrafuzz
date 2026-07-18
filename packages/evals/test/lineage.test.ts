@@ -113,6 +113,13 @@ describe("versioned eval lineage", () => {
       suite: generated.plan.suite,
       matrix: generated.plan.matrix
     });
+    fs.writeFileSync(path.join(generated.candidateRoot, "scratch.log"), "local scratch\n", "utf8");
+    const untracked = buildEvalRunProvenance(generated.plan, { watch: false });
+    expect(untracked.candidate).toMatchObject({
+      dirty: false,
+      execution_artifact_id: clean.candidate.execution_artifact_id
+    });
+    fs.rmSync(path.join(generated.candidateRoot, "scratch.log"));
 
     fs.writeFileSync(generated.groundTruthPath, "bugs:\n  - id: GENERATED-2\n", "utf8");
     const rescoredGroundTruth = buildScoringProvenance({

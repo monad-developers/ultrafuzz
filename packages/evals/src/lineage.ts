@@ -126,7 +126,7 @@ export function buildEvalSummaryProvenance(input: {
 export function resolveCandidateProvenance(projectRoot: string): EvalCandidateProvenance {
   try {
     const commit = git(projectRoot, ["rev-parse", "HEAD"]).toLowerCase();
-    const dirty = git(projectRoot, ["status", "--porcelain", "--untracked-files=normal"]).length > 0;
+    const dirty = git(projectRoot, ["status", "--porcelain", "--untracked-files=no"]).length > 0;
     let label: string;
     try {
       label = git(projectRoot, ["describe", "--tags", "--exact-match", "HEAD"]);

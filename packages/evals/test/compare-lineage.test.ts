@@ -47,11 +47,17 @@ function provenance(cohort: string, policy: string, scoring: string): EvalSummar
   };
 }
 
-function writeSummary(projectRoot: string, evalRunId: string, f1: number, value: EvalSummaryProvenance): void {
+function writeSummary(
+  projectRoot: string,
+  evalRunId: string,
+  f1: number,
+  value: EvalSummaryProvenance,
+  variantIds = ["default"]
+): void {
   const root = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
   fs.mkdirSync(root, { recursive: true });
-  const variant = {
-    variant_id: "default",
+  const variant = (variantId: string) => ({
+    variant_id: variantId,
     row_count: 1,
     precision: f1,
     recall: f1,
@@ -60,13 +66,13 @@ function writeSummary(projectRoot: string, evalRunId: string, f1: number, value:
     human_review_queue_count: 0,
     duplicate_rate: 0,
     report_schema_valid_rate: 1
-  };
+  });
   const summary: EvalScoreSummary = {
     eval_run_id: evalRunId,
     eval_run_root: root,
     recall_threshold: 0.7,
     rows: [],
-    variants: [variant],
+    variants: variantIds.map(variant),
     scores_path: path.join(root, "scores.jsonl"),
     summary_path: path.join(root, "summary.json"),
     review_queue_path: path.join(root, "review.jsonl"),
@@ -114,6 +120,30 @@ describe("longitudinal eval comparison", () => {
       compatible: false,
       waiver_applied: true,
       differences: ["benchmark cohort fingerprints differ", "execution policy fingerprints differ"]
+    });
+  });
+
+  it("requires a waiver when longitudinal variant scope differs", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-compare-variant-scope-"));
+    const shared = provenance("cohort-1", "policy-1", "scoring-1");
+    writeSummary(projectRoot, "baseline", 0.5, shared, ["default", "hard"]);
+    writeSummary(projectRoot, "candidate", 0.75, shared, ["default", "new"]);
+
+    expect(() =>
+      compareEvalRuns({ projectRoot, baselineEvalRunId: "baseline", candidateEvalRunId: "candidate" })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVENANCE_INCOMPATIBLE" }));
+    expect(
+      compareEvalRuns({
+        projectRoot,
+        baselineEvalRunId: "baseline",
+        candidateEvalRunId: "candidate",
+        allowIncompatible: true
+      })
+    ).toMatchObject({
+      compatible: false,
+      waiver_applied: true,
+      differences: ["baseline variants missing from candidate: hard", "candidate variants missing from baseline: new"],
+      variants: [{ variant_id: "default", delta_f1_score: 0.25 }]
     });
   });
 

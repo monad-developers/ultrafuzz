@@ -42,7 +42,7 @@ export default class EvalCompare extends Command {
             data: comparison,
             text: [
               `Compatible: ${comparison.compatible ? "yes" : "no (explicit waiver applied)"}`,
-              ...comparison.differences.map((difference) => `Provenance difference: ${difference}`),
+              ...comparison.differences.map((difference) => `Compatibility difference: ${difference}`),
               ...comparison.variants.map(
                 (variant) =>
                   `${variant.variant_id}: f1=${variant.candidate.f1_score} (${variant.delta_f1_score >= 0 ? "+" : ""}${variant.delta_f1_score})`

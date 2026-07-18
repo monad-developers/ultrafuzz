@@ -130,9 +130,10 @@ baseline run:
 ultrafuzz eval compare <candidate-eval-run-id> --against <baseline-eval-run-id>
 ```
 
-The comparison runs only when cohort and scoring identities are complete and
-match. Use `--allow-incompatible` as an explicit waiver; the result remains
-marked incompatible and lists the provenance differences that were waived.
+The comparison runs only when cohort and scoring identities are complete, match,
+and cover the same variant IDs. Use `--allow-incompatible` as an explicit
+waiver; the result remains marked incompatible and lists the compatibility
+differences that were waived.
 
 ## CLI surface
 
