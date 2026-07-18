@@ -299,20 +299,22 @@ export async function synchronizeLinkedWorkflowRun(
       control.state.finished_at = new Date(observedAtMs).toISOString();
       control.state.last_transition_at = new Date(observedAtMs).toISOString();
       deadlineApplied = true;
-      appendEvent(layout, {
-        eventType: "workflow-deadline-exceeded",
-        status: "timed-out",
-        payload: {
-          workflow_run_id: evidence.smithersRunId,
-          deadline_at: control.state.workflow_deadline_at
-        }
-      });
     } catch (error) {
       diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
     }
   }
   if (control.changed || deadlineApplied) {
     writeRunState(layout, control.state);
+  }
+  if (deadlineApplied) {
+    appendEvent(layout, {
+      eventType: "workflow-deadline-exceeded",
+      status: "timed-out",
+      payload: {
+        workflow_run_id: evidence.smithersRunId,
+        deadline_at: control.state.workflow_deadline_at
+      }
+    });
   }
   if (runStatusChanged || syncResult.changed || accountingResult.changed || control.transitioned || deadlineApplied) {
     appendEvent(layout, {
