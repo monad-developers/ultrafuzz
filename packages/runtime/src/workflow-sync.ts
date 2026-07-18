@@ -1088,6 +1088,10 @@ function appendTerminalTaskAttempts(input: {
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
+  const currentTerminalAttempt =
+    input.currentAttempt === undefined
+      ? undefined
+      : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
   const prepared: Array<{
     retry: number;
     appendInput: AppendNodeAttemptInput;
@@ -1118,15 +1122,32 @@ function appendTerminalTaskAttempts(input: {
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
     let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
-    if (attempt.retry === input.currentAttempt && outcome === "succeeded" && input.currentStatus !== "succeeded") {
+    if (
+      attempt === currentTerminalAttempt &&
+      outcome === "succeeded" &&
+      input.currentStatus !== "succeeded" &&
+      terminalStatus(input.currentStatus)
+    ) {
       outcome = nodeAttemptOutcome(input.currentStatus);
-      failureCategory = finalizationFailureCategory(input.finalization, input.currentStatus);
-      outputDigest = undefined;
+      failureCategory = finalizationFailureCategory(input.finalization, outcome);
+      outputDigest = outcome === "reused" ? outputManifestDigest : undefined;
     } else if (outcome === "succeeded" && outputDigest === undefined) {
       outcome = "failed";
       failureCategory = "artifact-validation";
     }
-    const appendInput = {
+    const reuse =
+      outcome === "reused"
+        ? {
+            status: "reused" as const,
+            sourceAttemptId: reusedSourceAttemptId({
+              existing,
+              workflowRunId: input.workflowRunId,
+              task: input.task,
+              attempt
+            })
+          }
+        : undefined;
+    const appendInput: AppendNodeAttemptInput = {
       nodeId: input.task.attemptId,
       strategyAttemptId: input.task.attemptId,
       executorRetryId,
@@ -1138,6 +1159,7 @@ function appendTerminalTaskAttempts(input: {
       outcome,
       inputManifestDigest,
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
+      ...(reuse === undefined ? {} : { reuse }),
       ...(failureCategory === undefined ? {} : { failureCategory })
     };
     const preparedAttempt = {
@@ -1351,9 +1373,18 @@ function nodeAttemptOutcome(status: NodeStatus): NodeAttemptOutcome {
   }
 }
 
-function finalizationFailureCategory(finalization: NodeFinalization, status: NodeStatus): NodeAttemptFailureCategory {
-  if (status === "timed-out") {
+function finalizationFailureCategory(
+  finalization: NodeFinalization,
+  outcome: NodeAttemptOutcome
+): NodeAttemptFailureCategory | undefined {
+  if (outcome === "timed-out") {
     return "timeout";
+  }
+  if (outcome === "canceled") {
+    return "canceled";
+  }
+  if (outcome !== "failed") {
+    return undefined;
   }
   if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_NORMALIZE_FAILED")) {
     return "invalid-output";
@@ -1366,6 +1397,23 @@ function finalizationFailureCategory(finalization: NodeFinalization, status: Nod
     return "artifact-validation";
   }
   return "unknown";
+}
+
+function reusedSourceAttemptId(input: {
+  existing: ReadonlyArray<{ attempt_id: NodeAttemptId }>;
+  workflowRunId: string;
+  task: StoredWorkflowTask;
+  attempt: Pick<TerminalWorkflowAttempt, "iteration" | "retry">;
+}): string {
+  return (
+    input.existing.at(-1)?.attempt_id ??
+    stableLedgerDimension("source-attempt", [
+      input.workflowRunId,
+      input.task.attemptId,
+      String(input.attempt.iteration),
+      String(input.attempt.retry)
+    ])
+  );
 }
 
 function dimensionId(prefix: string, value: string): string {
@@ -1541,6 +1589,9 @@ function statusFromWorkflowState(state: string): NodeStatus {
   }
   if (["skipped", "skip"].includes(normalized)) {
     return "skipped";
+  }
+  if (["reused", "reuse", "reused-from-prior-run", "reused_from_prior_run"].includes(normalized)) {
+    return "reused-from-prior-run";
   }
   if (
     [
