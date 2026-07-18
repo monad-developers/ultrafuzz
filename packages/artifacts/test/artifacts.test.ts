@@ -94,6 +94,36 @@ test("generated usage events append idempotently with stable checkpoint dimensio
   assert.equal(replayUsageEvents(layout).malformedEntries, 1);
 });
 
+test("usage ledger replay rejects entries copied from another run", () => {
+  const project = tempProject();
+  const firstLayout = createRunLayout({ projectRoot: project, runId: "run-usage-first" });
+  const secondLayout = createRunLayout({ projectRoot: project, runId: "run-usage-second" });
+  const input = {
+    workflowRunId: "workflow-run-usage",
+    sourceEventId: "source-event-1",
+    checkpointGenerationId: "checkpoint-1",
+    observedAt: "2026-07-18T00:00:00.000Z",
+    nodeId: "node-a",
+    iteration: 0,
+    attempt: 1,
+    usage: { input_tokens: 1 },
+    usageComplete: true,
+    usageIncompleteReasons: []
+  };
+  appendUsageEvents(firstLayout, [input]);
+  appendUsageEvents(secondLayout, [input]);
+  appendLineDurable(
+    secondLayout.usageLedgerPath,
+    fs.readFileSync(firstLayout.usageLedgerPath, "utf8"),
+    secondLayout.root
+  );
+
+  const replay = replayUsageEvents(secondLayout);
+  assert.equal(replay.entries.length, 1);
+  assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
+  assert.equal(replay.malformedEntries, 1);
+});
+
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
   const project = tempProject();
   const outside = tempProject();

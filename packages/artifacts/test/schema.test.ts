@@ -153,15 +153,11 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
-  assert.equal(usageLedgerSnapshot.$id, usageLedgerJsonSchema.$id);
-  assert.deepEqual(usageLedgerSnapshot.required, usageLedgerJsonSchema.required);
+  assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
 });
 
-function readSchemaSnapshot(name: string): { $id?: string; required?: unknown } {
-  return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as {
-    $id?: string;
-    required?: unknown;
-  };
+function readSchemaSnapshot(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as Record<string, unknown>;
 }
 
 function findPackageRoot(start: string): string {

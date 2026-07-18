@@ -19,12 +19,42 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": { "const": "1.0" },
-    "event_id": { "type": "string", "minLength": 1 },
-    "run_id": { "type": "string", "minLength": 1 },
-    "workflow_run_id": { "type": "string", "minLength": 1 },
-    "source_event_id": { "type": "string", "minLength": 1 },
-    "attempt_id": { "type": "string", "minLength": 1 },
-    "checkpoint_generation_id": { "type": "string", "minLength": 1 },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "workflow_run_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "source_event_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "checkpoint_generation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
     "observed_at": { "type": "string", "format": "date-time" },
     "usage": {
       "type": "object",
@@ -65,5 +95,33 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "usage_complete": { "const": true } },
+        "required": ["usage_complete"]
+      },
+      "then": {
+        "properties": {
+          "usage": {
+            "anyOf": [
+              { "required": ["input_tokens"] },
+              { "required": ["output_tokens"] },
+              { "required": ["cache_read_tokens"] },
+              { "required": ["cache_write_tokens"] },
+              { "required": ["reasoning_tokens"] },
+              { "required": ["total_tokens"] }
+            ]
+          },
+          "usage_incomplete_reasons": { "maxItems": 0 }
+        }
+      },
+      "else": {
+        "properties": {
+          "usage_incomplete_reasons": { "minItems": 1 }
+        }
+      }
+    }
+  ]
 }

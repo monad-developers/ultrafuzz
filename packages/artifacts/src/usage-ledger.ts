@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { z } from "zod/v4";
 
 import { type RunLayout } from "./run-layout.js";
-import { appendLineDurable, validateSafeId } from "./safe-paths.js";
+import { SAFE_ID_PATTERN, appendLineDurable, assertRegularFileInside, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const USAGE_LEDGER_SCHEMA_VERSION = "1.0" as const;
@@ -84,11 +84,9 @@ export interface UsageLedgerReplay {
   duplicateEntries: number;
 }
 
-const dimensionId = z
-  .string()
-  .min(1)
-  .max(512)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const DIMENSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u;
+const DIMENSION_ID_MAX_LENGTH = 512;
+const dimensionId = z.string().min(1).max(DIMENSION_ID_MAX_LENGTH).regex(DIMENSION_ID_PATTERN);
 const nonNegativeNumber = z.number().finite().nonnegative();
 const usageReasonSchema = z.strictObject({
   code: z.enum(USAGE_INCOMPLETE_REASON_CODES),
@@ -110,7 +108,7 @@ export const usageLedgerEntrySchema = z
   .strictObject({
     schema_version: z.literal(USAGE_LEDGER_SCHEMA_VERSION),
     event_id: dimensionId,
-    run_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u),
+    run_id: z.string().regex(SAFE_ID_PATTERN),
     workflow_run_id: dimensionId,
     source_event_id: dimensionId,
     attempt_id: dimensionId,
@@ -166,12 +164,37 @@ export const usageLedgerJsonSchema = {
   additionalProperties: false,
   properties: {
     schema_version: { const: USAGE_LEDGER_SCHEMA_VERSION },
-    event_id: { type: "string", minLength: 1 },
-    run_id: { type: "string", minLength: 1 },
-    workflow_run_id: { type: "string", minLength: 1 },
-    source_event_id: { type: "string", minLength: 1 },
-    attempt_id: { type: "string", minLength: 1 },
-    checkpoint_generation_id: { type: "string", minLength: 1 },
+    event_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: DIMENSION_ID_MAX_LENGTH,
+      pattern: DIMENSION_ID_PATTERN.source
+    },
+    run_id: { type: "string", minLength: 1, maxLength: 128, pattern: SAFE_ID_PATTERN.source },
+    workflow_run_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: DIMENSION_ID_MAX_LENGTH,
+      pattern: DIMENSION_ID_PATTERN.source
+    },
+    source_event_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: DIMENSION_ID_MAX_LENGTH,
+      pattern: DIMENSION_ID_PATTERN.source
+    },
+    attempt_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: DIMENSION_ID_MAX_LENGTH,
+      pattern: DIMENSION_ID_PATTERN.source
+    },
+    checkpoint_generation_id: {
+      type: "string",
+      minLength: 1,
+      maxLength: DIMENSION_ID_MAX_LENGTH,
+      pattern: DIMENSION_ID_PATTERN.source
+    },
     observed_at: { type: "string", format: "date-time" },
     usage: {
       type: "object",
@@ -201,7 +224,26 @@ export const usageLedgerJsonSchema = {
         }
       }
     }
-  }
+  },
+  allOf: [
+    {
+      if: {
+        properties: { usage_complete: { const: true } },
+        required: ["usage_complete"]
+      },
+      then: {
+        properties: {
+          usage: { anyOf: USAGE_FIELDS.map((field) => ({ required: [field] })) },
+          usage_incomplete_reasons: { maxItems: 0 }
+        }
+      },
+      else: {
+        properties: {
+          usage_incomplete_reasons: { minItems: 1 }
+        }
+      }
+    }
+  ]
 } as const;
 
 export function validateUsageLedgerEntry(value: unknown, path = "$"): SchemaValidationResult<UsageLedgerEntry> {
@@ -261,6 +303,9 @@ export function appendUsageEvents(
   options: AppendUsageEventsOptions = {}
 ): AppendUsageEventsResult {
   const replay = options.replay ?? replayUsageEvents(layout);
+  if (replay.entries.some((entry) => entry.run_id !== layout.runId)) {
+    throw new Error(`usage ledger replay contains entries for a different run than ${layout.runId}`);
+  }
   const byId = new Map(replay.entries.map((entry) => [entry.event_id, entry]));
   const ledgerEntries = [...replay.entries];
   const entries: UsageLedgerEntry[] = [];
@@ -294,11 +339,17 @@ export function appendUsageEvents(
   };
 }
 
-export function replayUsageEvents(layoutOrPath: Pick<RunLayout, "usageLedgerPath"> | string): UsageLedgerReplay {
+export function replayUsageEvents(
+  layoutOrPath: (Pick<RunLayout, "usageLedgerPath"> & Partial<Pick<RunLayout, "root" | "runId">>) | string
+): UsageLedgerReplay {
   const ledgerPath = typeof layoutOrPath === "string" ? layoutOrPath : layoutOrPath.usageLedgerPath;
   if (!fs.existsSync(ledgerPath)) {
     return { entries: [], malformedEntries: 0, duplicateEntries: 0 };
   }
+  if (typeof layoutOrPath !== "string" && layoutOrPath.root !== undefined) {
+    assertRegularFileInside(layoutOrPath.root, ledgerPath, "usage ledger path");
+  }
+  const expectedRunId = typeof layoutOrPath === "string" ? undefined : layoutOrPath.runId;
   const entries: UsageLedgerEntry[] = [];
   const byId = new Map<string, UsageLedgerEntry>();
   let malformedEntries = 0;
@@ -309,6 +360,10 @@ export function replayUsageEvents(layoutOrPath: Pick<RunLayout, "usageLedgerPath
     }
     try {
       const entry = assertUsageLedgerEntry(JSON.parse(line) as unknown);
+      if (expectedRunId !== undefined && entry.run_id !== expectedRunId) {
+        malformedEntries += 1;
+        continue;
+      }
       const existing = byId.get(entry.event_id);
       if (existing !== undefined) {
         if (JSON.stringify(existing) === JSON.stringify(entry)) {

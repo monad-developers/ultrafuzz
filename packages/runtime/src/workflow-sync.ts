@@ -201,6 +201,7 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
 ]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
+const ACCOUNTING_USD_PRECISION = 12;
 
 export async function syncRun(input: SyncRunInput) {
   const result = await synchronizeLinkedWorkflowRun(input);
@@ -413,7 +414,8 @@ async function synchronizeWorkflowAccounting(input: {
         ? {}
         : {
             last_event_id: lastUsageEvent.event_id,
-            checkpoint_generation_id: lastUsageEvent.checkpoint_generation_id
+            checkpoint_generation_id: lastUsageEvent.checkpoint_generation_id,
+            workflow_run_id: lastUsageEvent.workflow_run_id
           })
     },
     pricing_catalog: pricingCatalog
@@ -475,9 +477,14 @@ function accountingFromWorkflowEvents(
           })
         : undefined;
     const estimatedCostUsd = costUsd ?? modelCostEstimate?.costUsd;
-    const tokenCount =
-      explicitTotal ??
-      (inputTokens ?? (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0)) + (outputTokens ?? reasoningTokens ?? 0);
+    const tokenCount = usageTokenCount({
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      reasoningTokens,
+      explicitTotal
+    });
     if (tokenCount <= 0 && estimatedCostUsd === undefined) {
       continue;
     }
@@ -692,24 +699,28 @@ function accountingSegmentsFromUsageLedger(
   cacheReadRatio: number | undefined,
   malformedEntries: number
 ): AccountingSegment[] {
-  const grouped = new Map<string, UsageLedgerEntry[]>();
-  for (const entry of entries) {
-    const generation = grouped.get(entry.checkpoint_generation_id) ?? [];
-    generation.push(entry);
-    grouped.set(entry.checkpoint_generation_id, generation);
+  const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
+  for (const [ledgerIndex, entry] of entries.entries()) {
+    const key = JSON.stringify([entry.workflow_run_id, entry.checkpoint_generation_id]);
+    const generation = grouped.get(key) ?? { entries: [], lastLedgerIndex: ledgerIndex };
+    generation.entries.push(entry);
+    generation.lastLedgerIndex = ledgerIndex;
+    grouped.set(key, generation);
   }
-  const groups = [...grouped.entries()];
-  return groups.map(([checkpointGenerationId, generationEntries], index) =>
-    accountingSummaryWithCompleteness(
+  const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
+  return groups.map((generation, index) => {
+    const generationEntries = generation.entries;
+    const firstEntry = generationEntries[0]!;
+    return accountingSummaryWithCompleteness(
       accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
       generationEntries,
       index === groups.length - 1 ? malformedEntries : 0,
       {
-        checkpointGenerationId,
-        workflowRunId: generationEntries[0]!.workflow_run_id
+        checkpointGenerationId: firstEntry.checkpoint_generation_id,
+        workflowRunId: firstEntry.workflow_run_id
       }
-    )
-  );
+    );
+  });
 }
 
 function accountingSummaryWithCompleteness(
@@ -767,11 +778,29 @@ function accountingSummaryWithCompleteness(
 
 function usageLedgerEntryHasAccountingValue(entry: UsageLedgerEntry): boolean {
   const usage = entry.usage;
-  const tokenCount =
-    usage.total_tokens ??
-    (usage.input_tokens ?? (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0)) +
-      (usage.output_tokens ?? usage.reasoning_tokens ?? 0);
+  const tokenCount = usageTokenCount({
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens: usage.cache_write_tokens,
+    reasoningTokens: usage.reasoning_tokens,
+    explicitTotal: usage.total_tokens
+  });
   return tokenCount > 0 || usage.cost_usd !== undefined;
+}
+
+function usageTokenCount(input: {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+  cacheReadTokens: number | undefined;
+  cacheWriteTokens: number | undefined;
+  reasoningTokens: number | undefined;
+  explicitTotal: number | undefined;
+}): number {
+  const detailedInputTokens = (input.cacheReadTokens ?? 0) + (input.cacheWriteTokens ?? 0);
+  const effectiveInputTokens = Math.max(input.inputTokens ?? 0, detailedInputTokens);
+  const effectiveOutputTokens = Math.max(input.outputTokens ?? 0, input.reasoningTokens ?? 0);
+  return Math.max(input.explicitTotal ?? 0, effectiveInputTokens + effectiveOutputTokens);
 }
 
 function emptyAccountingSummary(): AccountingSummary {
@@ -936,7 +965,9 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     return undefined;
   }
   const estimatedSpendUsd =
-    totals.pricedEventCount === 0 ? undefined : Number((totals.estimatedSpendUsd ?? 0).toFixed(6));
+    totals.pricedEventCount === 0
+      ? undefined
+      : Number((totals.estimatedSpendUsd ?? 0).toFixed(ACCOUNTING_USD_PRECISION));
   const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0;
   return {
     input_tokens: totals.inputTokens,
@@ -997,13 +1028,11 @@ function estimatedCostFromModelPricing(input: {
     }
   | undefined {
   const basePricing = pricingForModel(input.model, input.modelPricing);
-  if (
-    basePricing === undefined ||
-    (input.inputTokens <= 0 && input.outputTokens <= 0 && (input.cacheReadTokens ?? 0) <= 0)
-  ) {
+  const accountedInputTokens = Math.max(input.inputTokens, (input.cacheReadTokens ?? 0) + input.cacheWriteTokens);
+  if (basePricing === undefined || (accountedInputTokens <= 0 && input.outputTokens <= 0)) {
     return undefined;
   }
-  const pricing = pricingForContext(basePricing, Math.max(input.inputTokens, 0));
+  const pricing = pricingForContext(basePricing, Math.max(accountedInputTokens, 0));
   const cacheRateChangesCost = pricing.cachedInputUsdPerMillion !== pricing.inputUsdPerMillion;
   const cacheReadPricingEstimated =
     input.cacheReadTokens === undefined && input.inputTokens > 0 && cacheRateChangesCost;
@@ -1012,13 +1041,13 @@ function estimatedCostFromModelPricing(input: {
   }
   const cachedInputTokens = Math.min(
     Math.max(input.cacheReadTokens ?? Math.max(input.inputTokens, 0) * (input.cacheReadRatio ?? 0), 0),
-    Math.max(input.inputTokens, 0)
+    Math.max(accountedInputTokens, 0)
   );
   const cacheWriteTokens = Math.min(
     Math.max(input.cacheWriteTokens, 0),
-    Math.max(input.inputTokens - cachedInputTokens, 0)
+    Math.max(accountedInputTokens - cachedInputTokens, 0)
   );
-  const uncachedInputTokens = Math.max(input.inputTokens - cachedInputTokens - cacheWriteTokens, 0);
+  const uncachedInputTokens = Math.max(accountedInputTokens - cachedInputTokens - cacheWriteTokens, 0);
   return {
     costUsd:
       (uncachedInputTokens * pricing.inputUsdPerMillion +
@@ -1729,7 +1758,7 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
     }
   }
   return events.sort(
-    (left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0) || (left.sequence ?? 0) - (right.sequence ?? 0)
+    (left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || (left.timestampMs ?? 0) - (right.timestampMs ?? 0)
   );
 }
 
