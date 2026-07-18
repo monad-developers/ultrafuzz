@@ -180,6 +180,16 @@ available cumulative values into the markdown run summary and into
 persisted estimate is partial because some token usage did not have pricing
 data.
 
+Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
+output, and reasoning as independent components. `inclusive_token_total`
+counts every reported component, while `billable_token_total` counts the
+components with a positive known rate. Per-component amounts are recorded in
+`component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
+events. `usage_complete` and `pricing_complete` are independent: their typed
+`*_incomplete_reasons` arrays distinguish missing or estimated usage from a
+missing component rate. `partial_pricing` remains the backward-compatible
+inverse of pricing completeness.
+
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.
 

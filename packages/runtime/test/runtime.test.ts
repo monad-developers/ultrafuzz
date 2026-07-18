@@ -1996,7 +1996,7 @@ test("syncRun retries transient pricing catalog failures", async () => {
   assert.deepEqual(recoveredMetadata.accounting?.pricing_catalog?.unresolved_models, []);
 });
 
-test("syncRun snapshots live pricing and does not double-count token detail fields", async () => {
+test("syncRun prices independent usage components when cache reads exceed uncached input", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -2016,8 +2016,9 @@ test("syncRun snapshots live pricing and does not double-count token detail fiel
           iteration: 0,
           inputTokens: 100_000,
           outputTokens: 10_000,
-          cacheReadTokens: 20_000,
+          cacheReadTokens: 200_000,
           cacheWriteTokens: 10_000,
+          reasoningTokens: 5_000,
           model: "gpt-5.6-sol",
           agent: "codex"
         }
@@ -2046,10 +2047,22 @@ test("syncRun snapshots live pricing and does not double-count token detail fiel
     accounting?: {
       current?: {
         tokens_used?: string;
+        inclusive_token_total?: number;
+        billable_token_total?: number;
         estimated_spend?: string;
+        estimated_spend_usd?: number;
+        component_costs_usd?: Record<string, number>;
+        usage_complete?: boolean;
+        pricing_complete?: boolean;
         partial_pricing?: boolean;
         priced_event_count?: number;
         unpriced_event_count?: number;
+      };
+      cumulative?: {
+        inclusive_token_total?: number;
+        billable_token_total?: number;
+        estimated_spend_usd?: number;
+        component_costs_usd?: Record<string, number>;
       };
       pricing_catalog?: {
         source?: string;
@@ -2060,11 +2073,38 @@ test("syncRun snapshots live pricing and does not double-count token detail fiel
       updated_at?: string;
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "110,000");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.72");
+  assert.equal(metadata.accounting?.current?.tokens_used, "325,000");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_000);
+  assert.equal(metadata.accounting?.current?.billable_token_total, 325_000);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$1.11");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.1125);
+  assert.deepEqual(metadata.accounting?.current?.component_costs_usd, {
+    uncached_input: 0.5,
+    cache_read: 0.1,
+    cache_write: 0.0625,
+    output: 0.3,
+    reasoning: 0.15
+  });
+  assert.equal(
+    Number(
+      Object.values(metadata.accounting?.current?.component_costs_usd ?? {})
+        .reduce((total, cost) => total + cost, 0)
+        .toFixed(6)
+    ),
+    metadata.accounting?.current?.estimated_spend_usd
+  );
+  assert.equal(metadata.accounting?.current?.usage_complete, true);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 1);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_000);
+  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_000);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.1125);
+  assert.deepEqual(
+    metadata.accounting?.cumulative?.component_costs_usd,
+    metadata.accounting?.current?.component_costs_usd
+  );
   assert.equal(metadata.accounting?.pricing_catalog?.source, "configured-catalog");
   assert.equal(metadata.accounting?.pricing_catalog?.status, "available");
   assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, ["gpt-5.6-sol"]);
@@ -2081,11 +2121,93 @@ test("syncRun snapshots live pricing and does not double-count token detail fiel
   });
   const resync = await syncRun({ projectRoot: project, runId: "estimated-accounting", env });
   assert.equal(resync.ok, true, JSON.stringify(resync.diagnostics));
-  const resyncedMetadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
-    accounting?: { current?: { estimated_spend?: string }; updated_at?: string };
-  };
-  assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$0.72");
+  const resyncedMetadata = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")
+  ) as typeof metadata;
+  assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$1.11");
+  assert.deepEqual(resyncedMetadata.accounting?.current, metadata.accounting?.current);
   assert.equal(resyncedMetadata.accounting?.updated_at, metadata.accounting?.updated_at);
+});
+
+test("syncRun records a typed incomplete-pricing reason for a missing component rate", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-component-pricing";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 10_000,
+          outputTokens: 1_000,
+          cacheReadTokens: 20_000,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          model: "gpt-component-test",
+          agent: "codex"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    openai: {
+      models: {
+        "gpt-component-test": { cost: { input: 5, output: 30, cache_write: 6.25 } }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "component-pricing", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "component-pricing", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        inclusive_token_total?: number;
+        billable_token_total?: number;
+        estimated_spend?: string;
+        estimated_spend_usd?: number;
+        component_costs_usd?: Record<string, number>;
+        usage_complete?: boolean;
+        pricing_complete?: boolean;
+        pricing_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 31_000);
+  assert.equal(metadata.accounting?.current?.billable_token_total, 11_000);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.08+");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.08);
+  assert.deepEqual(metadata.accounting?.current?.component_costs_usd, {
+    uncached_input: 0.05,
+    cache_read: 0,
+    cache_write: 0,
+    output: 0.03,
+    reasoning: 0
+  });
+  assert.equal(metadata.accounting?.current?.usage_complete, true);
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.deepEqual(metadata.accounting?.current?.pricing_incomplete_reasons, [
+    {
+      code: "component-rate-unavailable",
+      component: "cache_read",
+      model: "gpt-component-test"
+    }
+  ]);
 });
 
 test("syncRun applies context-tier pricing from the live catalog", async () => {
@@ -2200,6 +2322,9 @@ test("syncRun does not assume zero cache reads when cache telemetry is missing",
     accounting?: {
       current?: {
         estimated_spend?: string;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
+        pricing_complete?: boolean;
         partial_pricing?: boolean;
         priced_event_count?: number;
         unpriced_event_count?: number;
@@ -2208,9 +2333,18 @@ test("syncRun does not assume zero cache reads when cache telemetry is missing",
     };
   };
   assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
-  assert.equal(metadata.accounting?.current?.partial_pricing, true);
-  assert.equal(metadata.accounting?.current?.priced_event_count, 0);
-  assert.equal(metadata.accounting?.current?.unpriced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(metadata.accounting?.current?.usage_incomplete_reasons, [
+    {
+      code: "component-usage-unavailable",
+      component: "cache_read",
+      model: "gpt-5.6-sol"
+    }
+  ]);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
   assert.equal(metadata.accounting?.current?.cache_read_pricing_estimated, false);
 });
 
@@ -2261,6 +2395,10 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
     accounting?: {
       current?: {
         estimated_spend?: string;
+        inclusive_token_total?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
+        pricing_complete?: boolean;
         partial_pricing?: boolean;
         priced_event_count?: number;
         unpriced_event_count?: number;
@@ -2269,7 +2407,17 @@ test("syncRun can price missing cache telemetry with an evidence-based cache rat
       };
     };
   };
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.40");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.84");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 200_000);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(metadata.accounting?.current?.usage_incomplete_reasons, [
+    {
+      code: "component-usage-estimated",
+      component: "cache_read",
+      model: "gpt-5.6-sol"
+    }
+  ]);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 1);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
