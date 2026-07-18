@@ -142,6 +142,37 @@ test("expired controller ownership requests one safe takeover without reopening 
   }
 });
 
+test("an observed recovery keeps nodes waiting and records one takeover attempt", () => {
+  const graph = syntheticGraph([node("pending")]);
+  const state = initialState(graph, 1);
+
+  const first = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map(),
+    workflowState: "recovering",
+    nowMs: BASE_MS + 5_000
+  });
+  const second = projectWorkflowControlState({
+    previousState: structuredClone(first.state),
+    state: first.state,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map(),
+    workflowState: "recovering",
+    nowMs: BASE_MS + 10_000
+  });
+
+  assert.equal(first.recoveryDue, false);
+  assert.equal(first.state.controller_lease.status, "recovering");
+  assert.equal(first.state.controller_lease.recovery_attempts, 1);
+  assert.equal(first.state.nodes.pending?.wait_reason, "controller-loss");
+  assert.equal(second.state.controller_lease.recovery_attempts, 1);
+  assert.equal(second.state.nodes.pending?.wait_since, first.state.nodes.pending?.wait_since);
+});
+
 test("parallel synthetic work records the configured safe concurrency cap and durations", () => {
   const graph = syntheticGraph([node("one"), node("two"), node("three"), node("four")]);
   const state = initialState(graph, 3);

@@ -57,6 +57,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   const leaseDurationMs = controllerLeaseDurationMs(previous);
   const workflowState = normalizeWorkflowState(input.workflowState);
   const explicitlyLostController = LOST_CONTROLLER_WORKFLOW_STATES.has(workflowState);
+  const recoveryInProgress = workflowState === "recovering";
   const hasHealthyExternalWait = [...input.workflowStates.values()].some((value) =>
     isHealthyExternalWaitWorkflowState(normalizeWorkflowState(value))
   );
@@ -76,7 +77,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
       clearWait(node);
       continue;
     }
-    if (recoveryDue) {
+    if (recoveryDue || recoveryInProgress) {
       provisional.set(nodeId, waitState("controller-loss", "controller-takeover"));
       continue;
     }
@@ -167,7 +168,9 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
       duration_ms: leaseDurationMs,
       renewed_at: now,
       expires_at: new Date(input.nowMs + leaseDurationMs).toISOString(),
-      recovery_attempts: previousLease?.recovery_attempts ?? 0
+      recovery_attempts:
+        (previousLease?.recovery_attempts ?? 0) +
+        (recoveryInProgress && !["expired", "recovering"].includes(previousLease?.status ?? "") ? 1 : 0)
     };
   }
 
