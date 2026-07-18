@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { NodeState, RunState } from "@ultrafuzz/artifacts";
+import { RUN_STATE_STATUSES, type NodeState, type RunState } from "@ultrafuzz/artifacts";
 
 import type {
   EvalEfficiency,
@@ -18,6 +18,7 @@ export interface EvalTerminalSummary {
 }
 
 const TERMINAL_WORKFLOW_STATUSES = new Set<EvalWorkflowStatus>(["succeeded", "failed", "timed-out", "canceled"]);
+const WORKFLOW_STATUSES = new Set<string>(RUN_STATE_STATUSES);
 
 const NON_EXECUTING_NODE_STATUSES = new Set([
   "pending",
@@ -131,10 +132,10 @@ function accountingEfficiency(
   const partialPricing = booleanValue(cumulative.partial_pricing ?? cumulative.partialPricing) ?? false;
   const pricingComplete = booleanValue(cumulative.pricing_complete ?? cumulative.pricingComplete) ?? !partialPricing;
   const storedCost = nonNegativeNumber(cumulative.estimated_spend_usd ?? cumulative.estimatedSpendUsd);
-  const cost = storedCost ?? (pricingComplete && totalTokens === 0 ? 0 : undefined);
+  const cost = storedCost ?? (pricingComplete && usage.status === "complete" && totalTokens === 0 ? 0 : undefined);
   const costCompleteness: EvalEfficiencyCompleteness =
     cost === undefined
-      ? unavailable("pricing-unavailable")
+      ? unavailable(usage.status === "complete" ? "pricing-unavailable" : "usage-incomplete")
       : pricingComplete
         ? complete()
         : partial("pricing-incomplete");
@@ -224,10 +225,7 @@ function readJson(filePath: string | undefined): unknown {
 }
 
 function workflowStatus(value: unknown): EvalWorkflowStatus {
-  return typeof value === "string" &&
-    ["pending", "running", "paused", "succeeded", "failed", "timed-out", "canceled"].includes(value)
-    ? (value as EvalWorkflowStatus)
-    : "unavailable";
+  return typeof value === "string" && WORKFLOW_STATUSES.has(value) ? (value as EvalWorkflowStatus) : "unavailable";
 }
 
 function timestamp(value: unknown): { kind: "missing" } | { kind: "invalid" } | { kind: "valid"; value: number } {
