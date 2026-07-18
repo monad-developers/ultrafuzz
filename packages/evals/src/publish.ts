@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { validateArtifactContract, writeJsonDurable } from "@ultrafuzz/artifacts";
 import type { EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
@@ -11,10 +12,11 @@ import {
   type EvalMatrixRow,
   type EvalPlanValue,
   type EvalRunRecord,
+  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines } from "./utils.js";
+import { EvalError, evalRunRoot, jsonFile, readJsonLines, resolveTerminalReportPath } from "./utils.js";
 
 export interface PublishEvalRunInput {
   projectRoot: string;
@@ -52,9 +54,12 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   if (!fs.existsSync(root)) {
     throw new EvalError("EVAL_RUN_NOT_FOUND", `eval run not found: ${input.evalRunId}`, { root });
   }
-  const manifest = jsonFile<{ suite?: EvalSuiteSpec; suite_path?: string; project_root?: string }>(
-    path.join(root, "eval.json")
-  );
+  const manifest = jsonFile<{
+    suite?: EvalSuiteSpec;
+    suite_path?: string;
+    project_root?: string;
+    provenance?: EvalRunProvenance;
+  }>(path.join(root, "eval.json"));
   if (manifest.suite === undefined) {
     throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
   }
@@ -62,6 +67,7 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
   const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
+  assertPublishableTerminalReports(root, matrix, recordsByRow);
 
   const resolved = resolveEvalProvider({
     ...(input.provider !== undefined ? { cliProvider: input.provider } : {}),
@@ -89,7 +95,8 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
     suite_path: manifest.suite_path ?? "",
     project_root: manifest.project_root ?? path.resolve(input.projectRoot),
     suite,
-    matrix
+    matrix,
+    ...(manifest.provenance !== undefined ? { provenance: manifest.provenance } : {})
   };
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
@@ -159,6 +166,72 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   };
 }
 
+function assertPublishableTerminalReports(
+  evalRunRoot: string,
+  matrix: EvalMatrixRow[],
+  recordsByRow: Map<string, EvalRunRecord>
+): void {
+  const diagnostics: Array<{
+    code: string;
+    row_id: string;
+    contract: "ultrafuzz/report@1";
+    reason: string;
+    report_path?: string;
+  }> = [];
+  for (const row of matrix) {
+    const record = recordsByRow.get(row.id);
+    const runRoot = record?.ultrafuzz_run_root;
+    const state = runRoot === undefined ? undefined : readJsonSafe(path.join(runRoot, "state.json"));
+    const status = isRecord(state) && typeof state.status === "string" ? state.status : record?.final_status;
+    const reportResolution = resolveTerminalReportPath({
+      ...(runRoot === undefined ? {} : { runRoot }),
+      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+    });
+    const reportPath = reportResolution.path;
+    const reportExists = reportPath !== undefined && fs.existsSync(reportPath) && fs.lstatSync(reportPath).isFile();
+    let valid = status === "succeeded" && reportExists;
+    if (valid && reportPath !== undefined) {
+      valid = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(reportPath, "utf8"), reportPath).ok;
+    }
+    if (!valid) {
+      diagnostics.push({
+        code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
+        row_id: row.id,
+        contract: "ultrafuzz/report@1",
+        reason:
+          status !== "succeeded"
+            ? `run status is ${status ?? "unknown"}`
+            : reportPath === undefined
+              ? reportResolution.reason
+              : !reportExists
+                ? "terminal report file is missing"
+                : "terminal report does not satisfy ultrafuzz/report@1",
+        ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
+      });
+    }
+  }
+  const statePath = path.join(evalRunRoot, "publication-state.json");
+  if (diagnostics.length > 0) {
+    writeJsonDurable(statePath, {
+      schema_version: "ultrafuzz.eval.publication.v1",
+      status: "non-publishable",
+      diagnostics
+    });
+    throw new EvalError("EVAL_OUTPUT_NON_PUBLISHABLE", "eval output failed terminal report validation", {
+      diagnostics
+    });
+  }
+  writeJsonDurable(statePath, {
+    schema_version: "ultrafuzz.eval.publication.v1",
+    status: "publishable",
+    diagnostics: []
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function resetCursor(cursorPath: string): void {
   fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
   fs.writeFileSync(cursorPath, `${JSON.stringify(createTelemetryCursor(), null, 2)}\n`, "utf8");
@@ -179,7 +252,10 @@ function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
     ...(record.ultrafuzz_run_id !== undefined ? { runId: record.ultrafuzz_run_id } : {}),
     runRoot,
     ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
-    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {})
+    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
+    ...(record.graph_fingerprint !== undefined ? { graphFingerprint: record.graph_fingerprint } : {}),
+    ...(record.config_fingerprint !== undefined ? { configFingerprint: record.config_fingerprint } : {}),
+    ...(record.execution_artifact_id !== undefined ? { executionArtifactId: record.execution_artifact_id } : {})
   };
 }
 

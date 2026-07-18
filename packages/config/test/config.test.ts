@@ -35,6 +35,8 @@ describe("config loading and resolution", () => {
       apiKeyEnv: "OPENAI_API_KEY"
     });
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
+    expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
+    expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
@@ -45,6 +47,8 @@ dynamic_strategies_enumerator = 5
 [run]
 max_parallel_agents = 2
 default_timeout_seconds = 1200
+workflow_deadline_seconds = 7200
+controller_lease_seconds = 45
 
 [models]
 default = "project-model"
@@ -86,6 +90,8 @@ config_dir = ".codex/team"
     if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
     expect(resolved.value.run.defaultTimeoutSeconds).toBe(1200);
     expect(resolved.value.run.maxParallelAgents).toBe(11);
+    expect(resolved.value.run.workflowDeadlineSeconds).toBe(7200);
+    expect(resolved.value.run.controllerLeaseSeconds).toBe(45);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
     expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");

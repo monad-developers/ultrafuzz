@@ -1,5 +1,7 @@
 export * from "./analysis-bundle.js";
+export * from "./efficiency.js";
 export * from "./node-telemetry.js";
+export * from "./lineage.js";
 export * from "./publish.js";
 export * from "./reporter.js";
 export * from "./reporters/index.js";

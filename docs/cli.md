@@ -101,7 +101,9 @@ Common flags:
 - `--row <row-id>` (run, repeatable)
 - `--no-watch` (run)
 - `--llm-judge` (score)
-- `--baseline <variant-id>` (compare, required)
+- `--baseline <variant-id>` (compare variants within one run)
+- `--against <eval-run-id>` (compare releases with compatible lineage)
+- `--allow-incompatible` (explicitly waive release provenance mismatches)
 - `--output <directory>` (bundle, required)
 - `--resume` (publish)
 

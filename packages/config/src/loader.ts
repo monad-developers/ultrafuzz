@@ -37,7 +37,9 @@ const RUN_KEYS = [
   "max_parallel_nodes",
   "keep_workspaces",
   "workspace_mode",
-  "default_timeout_seconds"
+  "default_timeout_seconds",
+  "workflow_deadline_seconds",
+  "controller_lease_seconds"
 ] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
@@ -168,6 +170,20 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "integer",
         assign: (value) => {
           runConfig.defaultTimeoutSeconds = value;
+        }
+      },
+      {
+        key: "workflow_deadline_seconds",
+        type: "integer",
+        assign: (value) => {
+          runConfig.workflowDeadlineSeconds = value;
+        }
+      },
+      {
+        key: "controller_lease_seconds",
+        type: "integer",
+        assign: (value) => {
+          runConfig.controllerLeaseSeconds = value;
         }
       }
     ]);

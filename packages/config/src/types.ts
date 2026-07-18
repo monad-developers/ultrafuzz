@@ -74,6 +74,8 @@ export interface RunConfig {
   keepWorkspaces: boolean;
   workspaceMode: WorkspaceMode;
   defaultTimeoutSeconds: number;
+  workflowDeadlineSeconds: number;
+  controllerLeaseSeconds: number;
 }
 
 export interface ModelProfile {

@@ -30,7 +30,7 @@ describe("loadTopology", () => {
     const dir = mkProject();
     writeFileSync(
       path.join(dir, ".ultrafuzz", "topology.yml"),
-      "version: 2\ndefaults:\n  strategy_loops: 1\nnodes: []\n"
+      "version: 1\ndefaults:\n  strategy_loops: 1\nnodes: []\n"
     );
     try {
       expect(() => loadTopology(dir)).toThrow(expect.objectContaining({ code: "UNSUPPORTED_TOPOLOGY_VERSION" }));
@@ -43,7 +43,7 @@ describe("loadTopology", () => {
     const dir = mkProject();
     writeFileSync(
       path.join(dir, ".ultrafuzz", "topology.yml"),
-      "version: 1\ndefaults:\n  strategy_loops: 1\nnodes:\n  - id: __start__\n    kind: meta\n    role: start\n    depends_on: []\n  - id: project-discovery\n    kind: agentic\n    prompt: setup/project-discovery.md\n    depends_on:\n      - __start__\n  - id: __finish__\n    kind: meta\n    role: finish\n    depends_on:\n      - project-discovery\n"
+      "version: 2\ndefaults:\n  strategy_loops: 1\nnodes:\n  - id: __start__\n    kind: meta\n    role: start\n    depends_on: []\n  - id: project-discovery\n    kind: agentic\n    prompt: setup/project-discovery.md\n    depends_on:\n      - __start__\n    outputs:\n      - path: report.md\n        contract: ultrafuzz/nonempty-markdown@1\n        primary: true\n  - id: __finish__\n    kind: meta\n    role: finish\n    depends_on:\n      - project-discovery\n"
     );
     try {
       expect(loadTopology(dir).nodes.map((node) => node.id)).toEqual(["__start__", "project-discovery", "__finish__"]);

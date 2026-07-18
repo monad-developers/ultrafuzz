@@ -5,25 +5,43 @@ import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifa
 import type { EvalConfig } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
+import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
+import {
+  buildEvalRunProvenance,
+  DEFAULT_EVAL_POLL_INTERVAL_MS,
+  DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS
+} from "./lineage.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
 import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
   type EvalMatrixRow,
+  type EvalCandidateProvenance,
   type EvalPlanValue,
   type EvalRunRecord,
   type EvalRunValue,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, appendJsonLine, diagnosticFromError, evalRunRoot, generateEvalRunId, safeEvalId } from "./utils.js";
+import {
+  EvalError,
+  appendJsonLine,
+  diagnosticFromError,
+  evalRunRoot,
+  generateEvalRunId,
+  resolveTerminalReportPath,
+  safeEvalId
+} from "./utils.js";
 
 export interface RowLaunchValue {
   ok: boolean;
   runId?: string;
   runRoot?: string;
   workflowIds: string[];
+  graphFingerprint?: string;
+  configFingerprint?: string;
+  executionArtifactId?: string;
   diagnostics: RuntimeDiagnostic[];
 }
 
@@ -53,6 +71,8 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   watchTimeoutSeconds?: number;
   pollIntervalMs?: number;
   launcher?: RowLauncher;
+  /** Immutable candidate identity supplied by an execution backend, when it is more authoritative than local git. */
+  candidateProvenance?: EvalCandidateProvenance;
   sync?: RowSync;
   fetchImpl?: typeof fetch;
 }
@@ -67,25 +87,17 @@ export interface LaunchEvalRowInput {
   evalRunRoot?: string;
   appendRecord?: boolean;
   launcher?: RowLauncher;
+  candidateProvenance?: EvalCandidateProvenance;
 }
 
 export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunValue> {
-  const plan = planEvalSuite(input);
-  const evalRunId = input.evalRunId ?? generateEvalRunId(plan.suite.suite);
-  const root = evalRunRoot(plan.project_root, evalRunId);
+  const planned = planEvalSuite(input);
+  const evalRunId = input.evalRunId ?? generateEvalRunId(planned.suite.suite);
+  const root = evalRunRoot(planned.project_root, evalRunId);
   if (fs.existsSync(root)) {
     throw new EvalError("EVAL_RUN_ALREADY_EXISTS", `eval run already exists: ${evalRunId}`, { evalRunId, root });
   }
   fs.mkdirSync(root, { recursive: true });
-  writeJsonDurable(path.join(root, "eval.json"), {
-    schema_version: EVAL_RUN_SCHEMA_VERSION,
-    eval_run_id: evalRunId,
-    suite_path: plan.suite_path,
-    project_root: plan.project_root,
-    created_at: new Date().toISOString(),
-    suite: plan.suite
-  });
-  writeJsonDurable(path.join(root, "matrix.json"), plan.matrix);
 
   const diagnostics: RuntimeDiagnostic[] = [];
   const reporters = createEvalReporters({
@@ -93,15 +105,35 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     ...(input.env !== undefined ? { env: input.env } : {}),
     ...(input.evalProviderConfig !== undefined ? { evalConfig: input.evalProviderConfig } : {}),
     evalRunId,
-    policy: plan.suite.reporting,
+    policy: planned.suite.reporting,
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
     onWarning: (diagnostic) => diagnostics.push(diagnostic)
   });
+  const watch = input.watch ?? (planned.suite.reporting.node_telemetry && reporters.length > 0);
+  const resolvedProvenance = buildEvalRunProvenance(planned, {
+    watch,
+    ...(input.watchTimeoutSeconds !== undefined ? { watchTimeoutSeconds: input.watchTimeoutSeconds } : {}),
+    ...(input.pollIntervalMs !== undefined ? { pollIntervalMs: input.pollIntervalMs } : {})
+  });
+  const provenance =
+    input.candidateProvenance === undefined
+      ? resolvedProvenance
+      : { ...resolvedProvenance, candidate: input.candidateProvenance };
+  const plan: EvalPlanValue = { ...planned, provenance };
+  writeJsonDurable(path.join(root, "eval.json"), {
+    schema_version: EVAL_RUN_SCHEMA_VERSION,
+    eval_run_id: evalRunId,
+    suite_path: plan.suite_path,
+    project_root: plan.project_root,
+    created_at: new Date().toISOString(),
+    suite: plan.suite,
+    provenance
+  });
+  writeJsonDurable(path.join(root, "matrix.json"), plan.matrix);
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
   }
 
-  const watch = input.watch ?? (plan.suite.reporting.node_telemetry && reporters.length > 0);
   const selectedRows = selectRows(plan.matrix, input.rowIds);
   const records = await mapLimit(selectedRows, plan.suite.run.max_parallel_runs ?? 1, async (row) => {
     const record = await launchEvalRow({
@@ -113,7 +145,8 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
       suite: plan.suite,
       ...(input.env !== undefined ? { env: input.env } : {}),
       appendRecord: true,
-      ...(input.launcher !== undefined ? { launcher: input.launcher } : {})
+      ...(input.launcher !== undefined ? { launcher: input.launcher } : {}),
+      ...(plan.provenance?.candidate !== undefined ? { candidateProvenance: plan.provenance.candidate } : {})
     });
     if (record.status === "launched" && record.ultrafuzz_run_root !== undefined && watch) {
       const watched = await watchEvalRow({
@@ -167,6 +200,12 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
     target_id: input.row.target_id,
     variant_id: input.row.variant_id,
     trial_id: input.row.trial_id,
+    ...(input.candidateProvenance !== undefined
+      ? {
+          candidate_label: input.candidateProvenance.label,
+          candidate_commit: input.candidateProvenance.commit
+        }
+      : {}),
     started_at: startedAt
   } as const;
 
@@ -184,23 +223,32 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   }
 
   const finishedAt = new Date().toISOString();
+  const runFingerprints = launch.ok && launch.runRoot !== undefined ? readRunFingerprints(launch.runRoot) : {};
+  const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
+  const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
+  const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
+  const reportJsonPath =
+    launch.ok && launch.runRoot !== undefined ? resolveTerminalReportPath({ runRoot: launch.runRoot }).path : undefined;
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
           ...recordBase,
           ultrafuzz_run_id: launch.runId,
           ultrafuzz_run_root: launch.runRoot,
-          report_json_path: path.join(launch.runRoot, "artifacts", "final-report", "report.json"),
+          ...(reportJsonPath === undefined ? {} : { report_json_path: reportJsonPath }),
           status: "launched",
+          ...(graphFingerprint !== undefined ? { graph_fingerprint: graphFingerprint } : {}),
+          ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),
+          ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         }
       : {
           ...recordBase,
           status: "failed",
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "failed", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         };
 
@@ -238,6 +286,8 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
       runId: result.value.run_id,
       runRoot: result.value.run_root,
       workflowIds: result.value.workflow_ids,
+      graphFingerprint: result.value.graph_fingerprint,
+      configFingerprint: result.value.config_fingerprint,
       diagnostics: result.diagnostics
     };
   }
@@ -277,8 +327,8 @@ export async function watchEvalRow(
     cursorPath: path.join(input.evalRunRoot, "telemetry", `${input.row.id}.cursor.json`)
   });
   const sync: RowSync = input.sync ?? defaultRowSync;
-  const pollIntervalMs = input.pollIntervalMs ?? 15_000;
-  const deadline = Date.now() + (input.timeoutSeconds ?? 6 * 60 * 60) * 1000;
+  const pollIntervalMs = input.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS;
+  const deadline = Date.now() + (input.timeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS) * 1000;
 
   // The detached subprocess writes graph.json only after DAG planning, which
   // can be seconds to tens of seconds after launch. Defer onRowStart until the
@@ -341,13 +391,24 @@ export async function watchEvalRow(
     runRoot,
     ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
     ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
+    ...(input.record.graph_fingerprint !== undefined ? { graphFingerprint: input.record.graph_fingerprint } : {}),
+    ...(input.record.config_fingerprint !== undefined ? { configFingerprint: input.record.config_fingerprint } : {}),
+    ...(input.record.execution_artifact_id !== undefined
+      ? { executionArtifactId: input.record.execution_artifact_id }
+      : {}),
     diagnostics
   };
   for (const reporter of input.reporters) {
     await reporter.onRowFinish(input.row, result);
   }
+  const updatedRecord: EvalRunRecord = {
+    ...input.record,
+    final_status: result.status,
+    workflow: evalWorkflowLifecycle(state)
+  };
+  appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
-    record: { ...input.record, final_status: result.status },
+    record: updatedRecord,
     diagnostics
   };
 }
@@ -373,8 +434,23 @@ function readStateSafe(runRoot: string): RunState | undefined {
   }
 }
 
+function readRunFingerprints(runRoot: string): {
+  graph_fingerprint?: string;
+  config_fingerprint?: string;
+} {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as Record<string, unknown>;
+    return {
+      ...(typeof value.graph_fingerprint === "string" ? { graph_fingerprint: value.graph_fingerprint } : {}),
+      ...(typeof value.config_fingerprint === "string" ? { config_fingerprint: value.config_fingerprint } : {})
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function isTerminalRunStatus(status: string): boolean {
-  return ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+  return isTerminalWorkflowStatus(status);
 }
 
 function rowStatus(state: RunState | undefined): EvalRowResult["status"] {

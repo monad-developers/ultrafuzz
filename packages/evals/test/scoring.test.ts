@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
-import { testRow, testSuite } from "./helpers.js";
+import { testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -53,14 +53,59 @@ function scoreRunFixture(): {
 
   const suite = testSuite(groundTruthRoot);
   const row = testRow(suite);
-  const reportPath = path.join(base, "report.json");
+  const runRoot = path.join(base, "generated-run");
+  const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
   fs.writeFileSync(
     reportPath,
     JSON.stringify({
-      findings: [
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [
         matchedFinding(),
         { id: "finding-2", title: "Plausible but unknown overflow", summary: "overflow in mint" }
+      ],
+      non_production_outcomes: []
+    }),
+    "utf8"
+  );
+  writeRunFixture({
+    runRoot,
+    state: {
+      schema_version: "1.0",
+      run_id: "generated-run",
+      status: "succeeded",
+      created_at: "2026-07-13T00:00:00.000Z",
+      started_at: "2026-07-13T00:00:02.000Z",
+      finished_at: "2026-07-13T00:00:12.000Z",
+      nodes: {}
+    }
+  });
+  fs.writeFileSync(
+    path.join(runRoot, "graph.json"),
+    JSON.stringify({
+      nodes: [
+        {
+          id: "final-report",
+          artifact_dir: "artifacts/final-report",
+          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: true }]
+        }
       ]
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    JSON.stringify({
+      accounting: {
+        cumulative: {
+          total_tokens: 123,
+          estimated_spend_usd: 0.456,
+          usage_complete: true,
+          pricing_complete: true,
+          partial_pricing: false
+        }
+      }
     }),
     "utf8"
   );
@@ -83,11 +128,16 @@ function scoreRunFixture(): {
       target_id: row.target_id,
       variant_id: row.variant_id,
       trial_id: row.trial_id,
+      ultrafuzz_run_id: "generated-run",
+      ultrafuzz_run_root: runRoot,
       report_json_path: reportPath,
       status: "launched",
       workflow_ids: [],
-      started_at: "2026-07-13T00:00:00.000Z",
-      finished_at: "2026-07-13T00:00:01.000Z",
+      launcher: {
+        status: "succeeded",
+        started_at: "2026-07-13T00:00:00.000Z",
+        finished_at: "2026-07-13T00:00:01.000Z"
+      },
       diagnostics: []
     })}\n`,
     "utf8"
@@ -222,6 +272,24 @@ describe("deterministic scorer math", () => {
 
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
+    expect(summary.rows[0]).toMatchObject({
+      runtime_seconds: 10,
+      cost_estimate: 0.456,
+      lifecycle: {
+        launcher: { status: "succeeded", finished_at: "2026-07-13T00:00:01.000Z" },
+        workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-13T00:00:12.000Z" }
+      },
+      efficiency: {
+        wall_time_seconds: 10,
+        active_time_seconds: 0,
+        wait_time_seconds: 10,
+        total_tokens: 123,
+        cost_usd: 0.456,
+        runtime: { status: "complete", reason: null },
+        usage: { status: "complete", reason: null },
+        cost: { status: "complete", reason: null }
+      }
+    });
     for (const [filePath, contents] of fixture.outputContents) {
       expect(fs.readFileSync(filePath, "utf8")).not.toBe(contents);
     }
@@ -233,12 +301,101 @@ describe("deterministic scorer math", () => {
         .split("\n")
     ).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.json"), "utf8"))).toMatchObject({
-      eval_run_id: fixture.evalRunId
+      eval_run_id: fixture.evalRunId,
+      provenance: {
+        availability: "historical-unavailable",
+        scoring: {
+          judge_mode: "deterministic",
+          judge_prompt_version: "ultrafuzz-eval-judge-v2",
+          judge_models: ["gpt-5.5"],
+          ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
+        }
+      }
     });
-    expect(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8")).toContain(
-      `# Ultrafuzz Eval ${fixture.evalRunId}`
+    const markdown = fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8");
+    expect(markdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
+    expect(markdown).toContain(
+      `| target-a-baseline-trial-1 | succeeded | 2026-07-13T00:00:00.000Z | 2026-07-13T00:00:01.000Z | succeeded | true | 2026-07-13T00:00:02.000Z | 2026-07-13T00:00:12.000Z |`
     );
+    expect(markdown).toContain(
+      "| target-a-baseline-trial-1 | 10 | 0 | 10 | 123 | 0.456 | complete | complete | complete |"
+    );
+    expect(markdown).toContain("Candidate: unavailable (historical result)");
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("records the effective judge mode in the scoring identity", async () => {
+    const fixture = scoreRunFixture();
+    const deterministic = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId
+    });
+    const judged = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId,
+      llmJudge: async (input) => ({
+        ...input.deterministicResult,
+        judge_kind: "llm",
+        rationale: "generated judge result"
+      })
+    });
+
+    expect(deterministic.provenance?.scoring.judge_mode).toBe("deterministic");
+    expect(judged.provenance?.scoring.judge_mode).toBe("llm");
+    expect(judged.provenance?.scoring.fingerprint).not.toBe(deterministic.provenance?.scoring.fingerprint);
+  });
+
+  it("rejects an invalid terminal report before scoring or invoking a judge", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.writeFileSync(record.report_json_path, '{"issues":[]}', "utf8");
+    let judgeCalled = false;
+    await expect(
+      scoreEvalRun({
+        projectRoot: fixture.projectRoot,
+        evalRunId: fixture.evalRunId,
+        llmJudge: async (input) => {
+          judgeCalled = true;
+          return input.deterministicResult;
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+    expect(judgeCalled).toBe(false);
+  });
+
+  it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
+    const fixture = scoreRunFixture();
+    const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
+      report_json_path?: string;
+    };
+    const reportContents = fs.readFileSync(record.report_json_path!, "utf8");
+    const runRoot = path.join(fixture.evalRunRoot, "topology-report-run");
+    const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
+    fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
+    fs.writeFileSync(customReportPath, reportContents, "utf8");
+    fs.writeFileSync(
+      path.join(runRoot, "graph.json"),
+      JSON.stringify({
+        nodes: [
+          {
+            id: "terminal",
+            artifact_dir: "artifacts/terminal",
+            outputs: [{ path: "custom-report.json", contract: "ultrafuzz/report@1", primary: true }]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    delete record.report_json_path;
+    record.ultrafuzz_run_root = runRoot;
+    fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
+
+    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+    expect(summary.rows[0]?.finding_count).toBe(2);
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {

@@ -402,7 +402,7 @@ type TopologyNode = {
   loops?: number;
   loop_mode?: "parallel" | "series";
   timeout_seconds?: number;
-  required_artifacts?: string[];
+  outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
 };
 
 type ProjectTopology = {
