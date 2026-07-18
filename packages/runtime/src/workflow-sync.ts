@@ -1166,10 +1166,10 @@ function appendTerminalTaskAttempts(input: {
           })
         : undefined;
     if (reuseSource !== undefined && outputDigest === undefined) {
-      outputDigest = reuseSource.manifests.output_sha256 ?? undefined;
+      outputDigest = reuseSource.outputManifestDigest;
     }
     const reuse =
-      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attempt_id };
+      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
     const appendInput: AppendNodeAttemptInput = {
       nodeId: input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
@@ -1435,7 +1435,7 @@ function reusedSourceAttempt(input: {
   existing: readonly NodeAttemptLedgerEntry[];
   sourceEntries: readonly NodeAttemptLedgerEntry[];
   outputManifestDigest?: string;
-}): NodeAttemptLedgerEntry {
+}): { attemptId: NodeAttemptId; outputManifestDigest: string } {
   const candidates = [...input.sourceEntries, ...input.existing]
     .filter(
       (entry) => (entry.outcome === "succeeded" || entry.outcome === "reused") && entry.manifests.output_sha256 !== null
@@ -1446,7 +1446,14 @@ function reusedSourceAttempt(input: {
   if (source === undefined) {
     throw new Error("reused node attempt has no recorded source attempt with an output manifest");
   }
-  return source;
+  const outputManifestDigest = source.manifests.output_sha256;
+  if (outputManifestDigest === null) {
+    throw new Error("reused node attempt source is missing its output manifest digest");
+  }
+  return {
+    attemptId: source.reuse.status === "reused" ? source.reuse.source_attempt_id : source.attempt_id,
+    outputManifestDigest
+  };
 }
 
 function sourceNodeAttempts(

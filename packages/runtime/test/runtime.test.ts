@@ -2838,16 +2838,17 @@ test("syncRun records reused override attempts with an idempotent source referen
   ) as Record<string, unknown>;
 
   const workflowRunId = "ultrafuzz-attempt-ledger-reused-override";
+  const firstReuseEvents = [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+  ];
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
       steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
     }),
-    events: workflowEvents(workflowRunId, [
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
-    ])
+    events: workflowEvents(workflowRunId, firstReuseEvents)
   });
   const run = await startRun({
     projectRoot: project,
@@ -2876,9 +2877,43 @@ test("syncRun records reused override attempts with an idempotent source referen
   assert.equal(reuse?.status, "reused");
   assert.equal(reuse?.source_attempt_id, sourceAttempt.attempt_id);
   assert.notEqual(reuse?.source_attempt_id, ledger[0]?.attempt_id);
-  const status = await getRunStatus({ projectRoot: project, runId: "attempt-ledger-reused-override", env });
+
+  const continuedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...firstReuseEvents,
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const continued = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-reused-override",
+    env: continuedEnv
+  });
+  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
+  assert.ok(!continued.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const continuedLedger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(continuedLedger.length, 2);
+  assert.deepEqual(
+    continuedLedger.map((entry) => (entry.reuse as Record<string, unknown>).source_attempt_id),
+    [sourceAttempt.attempt_id, sourceAttempt.attempt_id]
+  );
+
+  const status = await getRunStatus({
+    projectRoot: project,
+    runId: "attempt-ledger-reused-override",
+    env: continuedEnv
+  });
   assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
-  assert.equal(status.value?.attempts.reused, 1);
+  assert.equal(status.value?.attempts.reused, 2);
 });
 
 test("syncRun keeps reset workflow nodes pending while the workflow is running", async () => {
