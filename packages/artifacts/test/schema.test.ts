@@ -10,6 +10,7 @@ import {
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
+  USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
   artifactContractDefinition,
   createInitialRunState,
@@ -17,12 +18,14 @@ import {
   generatedTestsJsonSchema,
   nodeAttemptLedgerJsonSchema,
   runStateJsonSchema,
+  usageLedgerJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
-  validateNodeAttemptLedgerEntry,
   validateArtifactContract,
-  validateRunStateSchema
+  validateNodeAttemptLedgerEntry,
+  validateRunStateSchema,
+  validateUsageLedgerEntry
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -163,6 +166,29 @@ test("generated test manifest schema accepts canonical manifests and rejects leg
   assert.ok(invalid.issues.some((issue) => issue.path === "$.generated_tests"));
 });
 
+test("usage ledger schema requires typed incompleteness markers", () => {
+  const entry = {
+    schema_version: USAGE_LEDGER_SCHEMA_VERSION,
+    event_id: "usage-event-1",
+    run_id: "run-1",
+    workflow_run_id: "workflow-1",
+    source_event_id: "source-event-1",
+    attempt_id: "usage-attempt-1",
+    checkpoint_generation_id: "checkpoint-1",
+    observed_at: "2026-07-18T00:00:00.000Z",
+    usage: {},
+    usage_complete: false,
+    usage_incomplete_reasons: [{ code: "usage-missing" }]
+  };
+
+  assert.equal(validateUsageLedgerEntry(entry).ok, true);
+  assert.equal(
+    validateUsageLedgerEntry({ ...entry, usage_incomplete_reasons: [] }).ok,
+    false,
+    "incomplete generated usage must carry a typed reason"
+  );
+});
+
 test("node attempt ledger schema keeps failure categories separate from diagnostic payloads", () => {
   const entry = {
     schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
@@ -215,6 +241,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
+  const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
@@ -224,13 +251,11 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
 });
 
-function readSchemaSnapshot(name: string): { $id?: string; required?: unknown } {
-  return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as {
-    $id?: string;
-    required?: unknown;
-  };
+function readSchemaSnapshot(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as Record<string, unknown>;
 }
 
 function findPackageRoot(start: string): string {

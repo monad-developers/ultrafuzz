@@ -1962,6 +1962,527 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });
 
+test("syncRun preserves generated usage across checkpoint generations and replays idempotently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-generated-usage";
+  const inspect = workflowInspect({
+    workflowRunId,
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+  });
+  const generatedSegment = (generation: string, inputTokens: number, outputTokens: number, costUsd: number) =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: generation,
+          inputTokens,
+          outputTokens,
+          costUsd,
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect,
+    events: generatedSegment("generation-1", 10, 5, 0.01)
+  });
+  const run = await startRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const first = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  const generatedEventsPath = path.join(project, "fake-smithers-events.ndjson");
+  fs.writeFileSync(generatedEventsPath, generatedSegment("generation-2", 20, 10, 0.02), "utf8");
+  const second = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const replayed = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  fs.writeFileSync(
+    generatedEventsPath,
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-3",
+          inputTokens: "malformed",
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-3",
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]),
+    "utf8"
+  );
+  const incomplete = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(incomplete.ok, true, JSON.stringify(incomplete.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        tokens_used?: string;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_complete?: boolean;
+      };
+      segments?: Array<{
+        checkpoint_generation_id?: string;
+        total_tokens?: number;
+        event_count?: number;
+      }>;
+      cumulative?: { total_tokens?: number; event_count?: number; usage_complete?: boolean };
+      checkpoint?: { ledger_event_count?: number; checkpoint_generation_id?: string };
+    };
+  };
+  const segments = metadata.accounting?.segments ?? [];
+  assert.deepEqual(
+    segments.map((segment) => [segment.checkpoint_generation_id, segment.total_tokens, segment.event_count]),
+    [
+      ["generation-1", 15, 1],
+      ["generation-2", 30, 1],
+      ["generation-3", 0, 2]
+    ]
+  );
+  assert.equal(
+    segments.reduce((total, segment) => total + (segment.total_tokens ?? 0), 0),
+    metadata.accounting?.cumulative?.total_tokens
+  );
+  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 4);
+  assert.equal(metadata.accounting?.current?.tokens_used, "0");
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(
+    new Set(metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code)),
+    new Set(["usage-malformed", "usage-missing"])
+  );
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 4);
+  assert.equal(metadata.accounting?.checkpoint?.checkpoint_generation_id, "generation-3");
+  assert.equal(
+    fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length,
+    4,
+    "replaying a continuation must not duplicate generated usage"
+  );
+});
+
+test("syncRun keeps colliding checkpoint names separate across workflow runs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const firstWorkflowRunId = "ultrafuzz-colliding-generation";
+  const secondWorkflowRunId = "ultrafuzz-colliding-generation-fork";
+  const usageEvents = (workflowRunId: string, inputTokens: number) =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-shared",
+          inputTokens,
+          costUsd: inputTokens / 1_000,
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: firstWorkflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: usageEvents(firstWorkflowRunId, 10)
+  });
+  const run = await startRun({ projectRoot: project, runId: "colliding-generation", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId: "colliding-generation", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  const metadataPath = path.join(run.value!.run_root, "run.json");
+  const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    workflow?: { run_id?: string };
+    [key: string]: unknown;
+  };
+  metadata.workflow = { ...(metadata.workflow ?? {}), run_id: secondWorkflowRunId };
+  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-inspect.json"),
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId: secondWorkflowRunId,
+        steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+      }),
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(path.join(project, "fake-smithers-events.ndjson"), usageEvents(secondWorkflowRunId, 20), "utf8");
+
+  const second = await syncRun({ projectRoot: project, runId: "colliding-generation", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const finalMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+    accounting?: {
+      current?: { workflow_run_id?: string; total_tokens?: number };
+      segments?: Array<{ workflow_run_id?: string; checkpoint_generation_id?: string; total_tokens?: number }>;
+      cumulative?: { total_tokens?: number };
+      checkpoint?: { workflow_run_id?: string };
+    };
+  };
+  assert.deepEqual(
+    finalMetadata.accounting?.segments?.map((segment) => [
+      segment.workflow_run_id,
+      segment.checkpoint_generation_id,
+      segment.total_tokens
+    ]),
+    [
+      [firstWorkflowRunId, "generation-shared", 10],
+      [secondWorkflowRunId, "generation-shared", 20]
+    ]
+  );
+  assert.equal(finalMetadata.accounting?.current?.workflow_run_id, secondWorkflowRunId);
+  assert.equal(finalMetadata.accounting?.current?.total_tokens, 20);
+  assert.equal(finalMetadata.accounting?.cumulative?.total_tokens, 30);
+  assert.equal(finalMetadata.accounting?.checkpoint?.workflow_run_id, secondWorkflowRunId);
+});
+
+test("syncRun counts cache-only usage when aggregate input is explicitly zero", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-cache-only-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-cache",
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 12,
+          cacheWriteTokens: 3,
+          totalTokens: 0,
+          costUsd: 0.000012
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "cache-only-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "cache-only-usage", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        cache_read_tokens?: number;
+        cache_write_tokens?: number;
+        event_count?: number;
+        usage_complete?: boolean;
+        pricing_complete?: boolean;
+        estimated_spend_usd?: number;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.total_tokens, 15);
+  assert.equal(metadata.accounting?.current?.cache_read_tokens, 12);
+  assert.equal(metadata.accounting?.current?.cache_write_tokens, 3);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.usage_complete, true);
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 0.000012);
+});
+
+test("syncRun preserves sub-microdollar costs across generation rollups", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-precise-cost-usage";
+  const generatedSegment = (generation: string) =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: generation,
+          inputTokens: 1,
+          outputTokens: 0,
+          costUsd: 0.0000004
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: generatedSegment("generation-1")
+  });
+  const run = await startRun({ projectRoot: project, runId: "precise-cost-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId: "precise-cost-usage", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  fs.writeFileSync(path.join(project, "fake-smithers-events.ndjson"), generatedSegment("generation-2"), "utf8");
+
+  const second = await syncRun({ projectRoot: project, runId: "precise-cost-usage", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      segments?: Array<{ estimated_spend_usd?: number }>;
+      cumulative?: { estimated_spend_usd?: number };
+    };
+  };
+  assert.deepEqual(
+    metadata.accounting?.segments?.map((segment) => segment.estimated_spend_usd),
+    [0.0000004, 0.0000004]
+  );
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.0000008);
+});
+
+test("syncRun uses durable event sequence for the current accounting segment", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-sequenced-usage";
+  const event = (seq: number, timestampMs: number, type: string, payload: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      runId: workflowRunId,
+      seq,
+      timestampMs,
+      type,
+      payload: { runId: workflowRunId, timestampMs, type, ...payload }
+    });
+  const events = `${[
+    event(0, 100, "NodeStarted", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
+    event(1, 300, "TokenUsageReported", {
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      attempt: 1,
+      checkpointGenerationId: "generation-1",
+      inputTokens: 10,
+      costUsd: 0.01
+    }),
+    event(2, 200, "TokenUsageReported", {
+      nodeId: "node:project-discovery",
+      iteration: 0,
+      attempt: 1,
+      checkpointGenerationId: "generation-2",
+      inputTokens: 20,
+      costUsd: 0.02
+    }),
+    event(3, 400, "NodeFinished", { nodeId: "node:project-discovery", iteration: 0, attempt: 1 }),
+    event(4, 500, "RunFinished")
+  ].join("\n")}\n`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events
+  });
+  const run = await startRun({ projectRoot: project, runId: "sequenced-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sequenced-usage", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { checkpoint_generation_id?: string; total_tokens?: number };
+      segments?: Array<{ checkpoint_generation_id?: string; total_tokens?: number }>;
+    };
+  };
+  assert.deepEqual(
+    metadata.accounting?.segments?.map((segment) => [segment.checkpoint_generation_id, segment.total_tokens]),
+    [
+      ["generation-1", 10],
+      ["generation-2", 20]
+    ]
+  );
+  assert.equal(metadata.accounting?.current?.checkpoint_generation_id, "generation-2");
+  assert.equal(metadata.accounting?.current?.total_tokens, 20);
+});
+
+test("syncRun assigns unseen implicit usage events to a new checkpoint segment", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-implicit-usage";
+  const tokenEvent = (inputTokens: number, outputTokens: number, costUsd: number) => ({
+    type: "TokenUsageReported",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    extra: {
+      iteration: 0,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      model: "generated-model",
+      agent: "generated-agent"
+    }
+  });
+  const firstSegment = [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+    tokenEvent(10, 5, 0.01),
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+    { type: "RunFinished" }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, firstSegment)
+  });
+  const run = await startRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const first = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  fs.writeFileSync(
+    path.join(project, "fake-smithers-events.ndjson"),
+    workflowEvents(workflowRunId, [...firstSegment, tokenEvent(20, 10, 0.02)]),
+    "utf8"
+  );
+  const second = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  const replayed = await syncRun({ projectRoot: project, runId: "implicit-usage", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      segments?: Array<{ checkpoint_generation_id?: string; total_tokens?: number; event_count?: number }>;
+      cumulative?: { total_tokens?: number; event_count?: number };
+    };
+  };
+  const segments = metadata.accounting?.segments ?? [];
+  assert.deepEqual(
+    segments.map((segment) => [segment.total_tokens, segment.event_count]),
+    [
+      [15, 1],
+      [30, 1]
+    ]
+  );
+  assert.notEqual(segments[0]?.checkpoint_generation_id, segments[1]?.checkpoint_generation_id);
+  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 2);
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length, 2);
+});
+
+test("syncRun propagates malformed-only usage ledger state into cumulative accounting", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-malformed-only-usage";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "malformed-only-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  fs.writeFileSync(path.join(run.value!.run_root, "usage.jsonl"), "{malformed\n", "utf8");
+
+  const sync = await syncRun({ projectRoot: project, runId: "malformed-only-usage", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { event_count?: number; usage_complete?: boolean; usage_incomplete_reasons?: Array<{ code?: string }> };
+      segments?: Array<{ event_count?: number; usage_complete?: boolean }>;
+      cumulative?: {
+        event_count?: number;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+      };
+      checkpoint?: { malformed_entry_count?: number };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.equal(metadata.accounting?.segments?.length, 1);
+  assert.equal(metadata.accounting?.segments?.[0]?.event_count, 1);
+  assert.equal(metadata.accounting?.segments?.[0]?.usage_complete, false);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 1);
+  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
+  assert.deepEqual(
+    metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["ledger-entry-malformed"]
+  );
+  assert.deepEqual(
+    metadata.accounting?.cumulative?.usage_incomplete_reasons?.map((reason) => reason.code),
+    ["ledger-entry-malformed"]
+  );
+  assert.equal(metadata.accounting?.checkpoint?.malformed_entry_count, 1);
+});
+
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -2127,6 +2648,21 @@ test("syncRun prices independent usage components when cache reads exceed uncach
           agent: "codex"
         }
       },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 12,
+          cacheWriteTokens: 3,
+          totalTokens: 0,
+          model: "gpt-5.6-sol",
+          agent: "codex"
+        }
+      },
       { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
       { type: "RunFinished" }
     ])
@@ -2177,15 +2713,15 @@ test("syncRun prices independent usage components when cache reads exceed uncach
       updated_at?: string;
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "325,000");
-  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_000);
-  assert.equal(metadata.accounting?.current?.billable_token_total, 325_000);
+  assert.equal(metadata.accounting?.current?.tokens_used, "325,015");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_015);
+  assert.equal(metadata.accounting?.current?.billable_token_total, 325_015);
   assert.equal(metadata.accounting?.current?.estimated_spend, "$1.11");
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.1125);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.11252475);
   assert.deepEqual(metadata.accounting?.current?.component_costs_usd, {
     uncached_input: 0.5,
-    cache_read: 0.1,
-    cache_write: 0.0625,
+    cache_read: 0.100006,
+    cache_write: 0.06251875,
     output: 0.3,
     reasoning: 0.15
   });
@@ -2193,18 +2729,18 @@ test("syncRun prices independent usage components when cache reads exceed uncach
     Number(
       Object.values(metadata.accounting?.current?.component_costs_usd ?? {})
         .reduce((total, cost) => total + cost, 0)
-        .toFixed(6)
+        .toFixed(12)
     ),
     metadata.accounting?.current?.estimated_spend_usd
   );
   assert.equal(metadata.accounting?.current?.usage_complete, true);
   assert.equal(metadata.accounting?.current?.pricing_complete, true);
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
-  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 2);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
-  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_000);
-  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_000);
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.1125);
+  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_015);
+  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_015);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.11252475);
   assert.deepEqual(
     metadata.accounting?.cumulative?.component_costs_usd,
     metadata.accounting?.current?.component_costs_usd

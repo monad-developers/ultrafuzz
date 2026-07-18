@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  appendUsageEvents,
   appendNodeAttempt,
   appendEvent,
   appendLineDurable,
@@ -19,6 +20,7 @@ import {
   readFindings,
   readRunState,
   replayEvents,
+  replayUsageEvents,
   safeResolveInside,
   summarizeNodeAttempts,
   updateNodeState,
@@ -68,6 +70,7 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.graphFingerprintPath,
     layout.statePath,
     layout.eventsPath,
+    layout.usageLedgerPath,
     layout.attemptLedgerPath,
     layout.workspacesPath,
     path.join(layout.eventsIndexDir, "query-inputs.json")
@@ -78,6 +81,66 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     assert.equal(fs.statSync(expected).isDirectory(), true, expected);
   }
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
+});
+
+test("generated usage events append idempotently with stable checkpoint dimensions", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-usage" });
+  const generated = {
+    workflowRunId: "workflow-run-usage",
+    sourceEventId: "source-event-1",
+    checkpointGenerationId: "checkpoint-1",
+    observedAt: "2026-07-18T00:00:00.000Z",
+    nodeId: "node-a",
+    iteration: 0,
+    attempt: 1,
+    usage: { input_tokens: 12, output_tokens: 3, cost_usd: 0.01, model: "generated-model" },
+    usageComplete: true,
+    usageIncompleteReasons: []
+  };
+
+  const first = appendUsageEvents(layout, [generated]);
+  const replayed = appendUsageEvents(layout, [generated]);
+  const ledger = replayUsageEvents(layout);
+
+  assert.equal(first.appended, 1);
+  assert.equal(replayed.appended, 0);
+  assert.equal(replayed.entries[0]?.event_id, first.entries[0]?.event_id);
+  assert.match(ledger.entries[0]?.attempt_id ?? "", /^usage-attempt-/u);
+  assert.equal(ledger.entries[0]?.checkpoint_generation_id, "checkpoint-1");
+  assert.equal(ledger.entries.length, 1);
+
+  appendLineDurable(layout.usageLedgerPath, "{malformed", layout.root);
+  assert.equal(replayUsageEvents(layout).malformedEntries, 1);
+});
+
+test("usage ledger replay rejects entries copied from another run", () => {
+  const project = tempProject();
+  const firstLayout = createRunLayout({ projectRoot: project, runId: "run-usage-first" });
+  const secondLayout = createRunLayout({ projectRoot: project, runId: "run-usage-second" });
+  const input = {
+    workflowRunId: "workflow-run-usage",
+    sourceEventId: "source-event-1",
+    checkpointGenerationId: "checkpoint-1",
+    observedAt: "2026-07-18T00:00:00.000Z",
+    nodeId: "node-a",
+    iteration: 0,
+    attempt: 1,
+    usage: { input_tokens: 1 },
+    usageComplete: true,
+    usageIncompleteReasons: []
+  };
+  appendUsageEvents(firstLayout, [input]);
+  appendUsageEvents(secondLayout, [input]);
+  appendLineDurable(
+    secondLayout.usageLedgerPath,
+    fs.readFileSync(firstLayout.usageLedgerPath, "utf8"),
+    secondLayout.root
+  );
+
+  const replay = replayUsageEvents(secondLayout);
+  assert.equal(replay.entries.length, 1);
+  assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
+  assert.equal(replay.malformedEntries, 1);
 });
 
 test("node attempt ledger is append-only, idempotent, independently queryable, and exactly summarized", () => {

@@ -35,6 +35,11 @@ for the same Ultrafuzz run. When the linked workflow is still active (running,
 queued, retrying, or waiting), resume keeps the existing run attached instead
 of submitting a duplicate continuation.
 
+Usage recorded before the continuation remains in the run's append-only usage
+ledger. After synchronization, segment rollups remain attributable to their
+checkpoint generations and the cumulative rollup includes every unique usage
+event across the resumed run.
+
 Completed node attempts remain in `attempts.jsonl` across every continuation.
 `ultrafuzz inspect` derives its executed and reused attempt counts from that
 append-only ledger rather than from a mutable lifecycle counter.

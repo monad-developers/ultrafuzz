@@ -22,6 +22,7 @@ graph.json
 graph.fingerprint
 state.json
 events.jsonl
+usage.jsonl
 attempts.jsonl
 plan.json
 artifacts/
@@ -34,6 +35,12 @@ workspaces.json
 `source-run.json` is present when the run derives from another run. Event query
 indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
 of the artifact contract.
+
+`usage.jsonl` is an append-only ledger of normalized workflow usage events.
+Each entry has stable event, attempt, and checkpoint-generation identifiers.
+Replaying the same continuation is idempotent, while events from later
+checkpoint generations remain distinct. The ledger stores normalized counters
+and typed usage-completeness reasons, not raw execution records.
 
 ## Run Metadata
 
@@ -198,6 +205,14 @@ available cumulative values into the markdown run summary and into
 `report.json.run_metadata`. A trailing `+` on `estimated_spend` means the
 persisted estimate is partial because some token usage did not have pricing
 data.
+
+`accounting.segments` publishes one rollup per checkpoint generation, and
+`accounting.current` identifies the latest segment. `accounting.cumulative`
+is derived from every unique ledger entry, including prior generations and any
+source-run lineage. `accounting.checkpoint` records the ledger position used by
+the durable metadata snapshot. Usage and pricing completeness are reported
+independently through `usage_complete`/`usage_incomplete_reasons` and
+`pricing_complete`/`pricing_incomplete_reasons`.
 
 Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
 output, and reasoning as independent components. `inclusive_token_total`

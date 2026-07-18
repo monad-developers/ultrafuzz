@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  USAGE_FIELDS,
+  USAGE_INCOMPLETE_REASON_CODES,
+  appendUsageEvents,
   appendNodeAttempts,
   appendEvent,
   assertNoSymlinkComponents,
@@ -14,7 +17,9 @@ import {
   queryNodeAttempts,
   replayEvents,
   readRunState,
+  replayUsageEvents,
   safeResolveInside,
+  stableUsageDimension,
   sha256File,
   updateNodeState,
   updateRunStatus,
@@ -23,14 +28,20 @@ import {
   writeJsonDurable,
   type AppendNodeAttemptInput,
   type ArtifactProvenance,
+  type AppendUsageEventInput,
   type NodeAttemptFailureCategory,
   type NodeAttemptId,
   type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NodeState,
+  type NormalizedUsage,
   type NodeStatus,
   type RunLayout,
-  type RunStatus
+  type RunStatus,
+  type UsageField,
+  type UsageIncompleteReason as LedgerUsageIncompleteReason,
+  type UsageLedgerEntry,
+  type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
@@ -98,8 +109,26 @@ interface WorkflowInspect {
 interface WorkflowEvent {
   type: string;
   sequence?: number;
+  sourceEventId?: string;
   timestampMs?: number;
   payload?: Record<string, unknown>;
+}
+
+interface UsageCompletenessMarker {
+  code: LedgerUsageIncompleteReason["code"] | ComponentUsageIncompleteReason["code"] | "ledger-entry-malformed";
+  field?: UsageField;
+  component?: UsageComponent;
+  model?: string;
+  event_id?: string;
+  checkpoint_generation_id?: string;
+}
+
+interface PricingCompletenessMarker {
+  code: PricingIncompleteReason["code"] | "price-unavailable" | "ledger-entry-malformed";
+  component?: UsageComponent;
+  model?: string;
+  event_id?: string;
+  checkpoint_generation_id?: string;
 }
 
 interface TerminalWorkflowAttempt {
@@ -138,9 +167,9 @@ interface AccountingSummary {
   component_costs_usd: UsageComponentCosts;
   provided_cost_usd?: number;
   usage_complete: boolean;
-  usage_incomplete_reasons: UsageIncompleteReason[];
+  usage_incomplete_reasons: UsageCompletenessMarker[];
   pricing_complete: boolean;
-  pricing_incomplete_reasons: PricingIncompleteReason[];
+  pricing_incomplete_reasons: PricingCompletenessMarker[];
   partial_pricing: boolean;
   cache_read_pricing_estimated: boolean;
   cache_read_ratio_used?: number;
@@ -149,6 +178,13 @@ interface AccountingSummary {
   unpriced_event_count: number;
   models: string[];
   agents: string[];
+}
+
+interface AccountingSegment extends AccountingSummary {
+  checkpoint_generation_id: string;
+  workflow_run_id: string;
+  event_ids: string[];
+  attempt_ids: string[];
 }
 
 interface CumulativeAccountingSummary extends AccountingSummary {
@@ -166,7 +202,7 @@ interface AccountingTotals {
   estimatedSpendUsd?: number;
   componentCostsUsd: UsageComponentCosts;
   providedCostUsd?: number;
-  usageIncompleteReasons: UsageIncompleteReason[];
+  usageIncompleteReasons: ComponentUsageIncompleteReason[];
   pricingIncompleteReasons: PricingIncompleteReason[];
   partialPricing: boolean;
   cacheReadPricingEstimated: boolean;
@@ -182,7 +218,7 @@ type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output"
 
 type UsageComponentCosts = Record<UsageComponent, number>;
 
-interface UsageIncompleteReason {
+interface ComponentUsageIncompleteReason {
   code: "component-usage-unavailable" | "component-usage-estimated" | "component-breakdown-incomplete";
   component?: UsageComponent;
   model?: string;
@@ -241,6 +277,8 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "invalidated"
 ]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
+const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
+const ACCOUNTING_USD_PRECISION = 12;
 
 export async function syncRun(input: SyncRunInput) {
   const result = await synchronizeLinkedWorkflowRun(input);
@@ -383,6 +421,11 @@ async function synchronizeWorkflowAccounting(input: {
   changed: boolean;
   available: boolean;
 }> {
+  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
+  if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
+    return { changed: false, available: false };
+  }
+
   const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
   const storedAccounting = recordField(metadata, "accounting");
   const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
@@ -394,7 +437,8 @@ async function synchronizeWorkflowAccounting(input: {
     storedPricingCatalog?.status === "disabled"
       ? new Set(stringArrayField(storedPricingCatalog, "unresolved_models"))
       : new Set<string>();
-  const requiredModels = modelsRequiringPricing(input.events);
+  const ledgerEvents = workflowEventsFromUsageLedger(usageReplay.entries);
+  const requiredModels = modelsRequiringPricing(ledgerEvents);
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
@@ -410,26 +454,50 @@ async function synchronizeWorkflowAccounting(input: {
     stored: storedPricingCatalog,
     live: livePricing?.metadata
   });
-  const current = accountingFromWorkflowEvents(
-    input.events,
+  const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
+  const segments = accountingSegmentsFromUsageLedger(
+    usageReplay.entries,
     resolvedPricing,
-    configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO)
+    cacheReadRatio,
+    usageReplay.malformedEntries
   );
-  if (current === undefined) {
-    return { changed: false, available: false };
-  }
+  const current =
+    segments.at(-1) ??
+    accountingSummaryWithCompleteness(undefined, [], usageReplay.malformedEntries, {
+      checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
+      workflowRunId: input.workflowRunId
+    });
+  const accountingSegments = segments.length === 0 && usageReplay.malformedEntries > 0 ? [current] : segments;
 
   const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
   const sourceSummaries = sourceAccounting?.summary === undefined ? [] : [sourceAccounting.summary];
-  const cumulative = cumulativeAccountingSummary([...sourceSummaries, current], sourceAccounting?.sourceRunIds ?? []);
+  const cumulative = cumulativeAccountingSummary(
+    [...sourceSummaries, ...accountingSegments],
+    sourceAccounting?.sourceRunIds ?? []
+  );
+  const lastUsageEvent = usageReplay.entries.at(-1);
   const nextComparable = {
     schema_version: ACCOUNTING_SCHEMA_VERSION,
-    source: "workflow-events",
+    source: "usage-ledger",
     workflow_run_id: input.workflowRunId,
     current,
+    segments: accountingSegments,
     cumulative,
+    checkpoint: {
+      schema_version: ACCOUNTING_CHECKPOINT_SCHEMA_VERSION,
+      ledger_event_count: usageReplay.entries.length,
+      malformed_entry_count: usageReplay.malformedEntries,
+      duplicate_entry_count: usageReplay.duplicateEntries,
+      ...(lastUsageEvent === undefined
+        ? {}
+        : {
+            last_event_id: lastUsageEvent.event_id,
+            checkpoint_generation_id: lastUsageEvent.checkpoint_generation_id,
+            workflow_run_id: lastUsageEvent.workflow_run_id
+          })
+    },
     pricing_catalog: pricingCatalog
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
@@ -558,6 +626,313 @@ function accountingFromWorkflowEvents(
   return accountingSummaryFromTotals(totals);
 }
 
+function appendWorkflowUsageEvents(
+  layout: RunLayout,
+  workflowRunId: string,
+  events: WorkflowEvent[]
+): UsageLedgerReplay {
+  const replay = replayUsageEvents(layout);
+  const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
+  if (usageEvents.length === 0) {
+    return replay;
+  }
+  const existingGenerationBySourceEvent = new Map(
+    replay.entries
+      .filter((entry) => entry.workflow_run_id === workflowRunId)
+      .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
+  );
+  const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
+  const firstUnseenImplicitCandidate = candidates.find(
+    (candidate) =>
+      candidate.checkpointGenerationId === undefined && !existingGenerationBySourceEvent.has(candidate.sourceEventId)
+  );
+  const fallbackGeneration =
+    firstUnseenImplicitCandidate === undefined
+      ? stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"])
+      : stableUsageDimension("checkpoint", [workflowRunId, firstUnseenImplicitCandidate.sourceEventId]);
+  return appendUsageEvents(
+    layout,
+    candidates.map((candidate) => {
+      const existingGeneration = existingGenerationBySourceEvent.get(candidate.sourceEventId);
+      return {
+        ...candidate,
+        checkpointGenerationId: candidate.checkpointGenerationId ?? existingGeneration ?? fallbackGeneration
+      };
+    }),
+    { replay }
+  ).replay;
+}
+
+function normalizedUsageLedgerInput(
+  workflowRunId: string,
+  event: WorkflowEvent
+): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
+  const payload = event.payload ?? {};
+  const fields = [
+    normalizedNumericUsageField(payload, "input_tokens", [
+      "inputTokens",
+      "input_tokens",
+      "promptTokens",
+      "prompt_tokens"
+    ]),
+    normalizedNumericUsageField(payload, "output_tokens", [
+      "outputTokens",
+      "output_tokens",
+      "completionTokens",
+      "completion_tokens"
+    ]),
+    normalizedNumericUsageField(payload, "cache_read_tokens", ["cacheReadTokens", "cache_read_tokens"]),
+    normalizedNumericUsageField(payload, "cache_write_tokens", ["cacheWriteTokens", "cache_write_tokens"]),
+    normalizedNumericUsageField(payload, "reasoning_tokens", ["reasoningTokens", "reasoning_tokens"]),
+    normalizedNumericUsageField(payload, "total_tokens", ["totalTokens", "total_tokens"])
+  ];
+  const usage = Object.fromEntries(
+    fields.flatMap((field) => (field.value === undefined ? [] : [[field.field, field.value]]))
+  ) as NormalizedUsage;
+  const costUsd = firstNonNegativeNumericField(payload, [
+    "costUsd",
+    "costUSD",
+    "cost",
+    "estimatedCostUsd",
+    "estimated_cost_usd"
+  ]);
+  if (costUsd !== undefined) {
+    usage.cost_usd = costUsd;
+  }
+  const model = stringField(payload, "model");
+  if (model !== undefined) {
+    usage.model = model;
+  }
+  const agent = stringField(payload, "agent");
+  if (agent !== undefined) {
+    usage.agent = agent;
+  }
+
+  const usageIncompleteReasons: LedgerUsageIncompleteReason[] = fields
+    .filter((field) => field.malformed)
+    .map((field) => ({ code: "usage-malformed", field: field.field }));
+  if (!fields.some((field) => field.present)) {
+    usageIncompleteReasons.push({ code: "usage-missing" });
+  }
+  const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+  const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
+  const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+  if (nodeId === undefined || iteration === undefined || attempt === undefined) {
+    usageIncompleteReasons.push({ code: "attempt-identity-missing" });
+  }
+
+  const sourceEventId = stableUsageDimension(
+    "workflow-event",
+    event.sourceEventId === undefined
+      ? [workflowRunId, "position", event.sequence ?? null, event.timestampMs ?? null]
+      : [workflowRunId, "explicit", event.sourceEventId]
+  );
+  const explicitGeneration = checkpointGenerationId(payload, workflowRunId);
+  return {
+    workflowRunId,
+    sourceEventId,
+    ...(explicitGeneration === undefined ? {} : { checkpointGenerationId: explicitGeneration }),
+    observedAt: new Date(event.timestampMs ?? 0).toISOString(),
+    ...(nodeId === undefined ? {} : { nodeId }),
+    ...(iteration === undefined ? {} : { iteration }),
+    ...(attempt === undefined ? {} : { attempt }),
+    usage,
+    usageComplete: usageIncompleteReasons.length === 0,
+    usageIncompleteReasons: uniqueUsageIncompleteReasons(usageIncompleteReasons)
+  };
+}
+
+function checkpointGenerationId(payload: Record<string, unknown>, workflowRunId: string): string | undefined {
+  const explicit =
+    stringField(payload, "checkpointGenerationId") ??
+    stringField(payload, "checkpoint_generation_id") ??
+    firstNumericField(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
+  if (explicit === undefined) {
+    return undefined;
+  }
+  const value = String(explicit);
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value)
+    ? value
+    : stableUsageDimension("checkpoint", [workflowRunId, value]);
+}
+
+function normalizedNumericUsageField(
+  payload: Record<string, unknown>,
+  field: UsageField,
+  aliases: readonly string[]
+): { field: UsageField; present: boolean; malformed: boolean; value?: number } {
+  for (const alias of aliases) {
+    if (!Object.hasOwn(payload, alias)) {
+      continue;
+    }
+    const raw = payload[alias];
+    const value = typeof raw === "string" && raw.trim().length > 0 ? Number(raw) : raw;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? { field, present: true, malformed: false, value }
+      : { field, present: true, malformed: true };
+  }
+  return { field, present: false, malformed: false };
+}
+
+function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): WorkflowEvent[] {
+  return entries.map((entry) => ({
+    type: "TokenUsageReported",
+    timestampMs: Date.parse(entry.observed_at),
+    payload: {
+      inputTokens: entry.usage.input_tokens,
+      outputTokens: entry.usage.output_tokens,
+      cacheReadTokens: entry.usage.cache_read_tokens,
+      cacheWriteTokens: entry.usage.cache_write_tokens,
+      reasoningTokens: entry.usage.reasoning_tokens,
+      totalTokens: entry.usage.total_tokens,
+      costUsd: entry.usage.cost_usd,
+      model: entry.usage.model,
+      agent: entry.usage.agent
+    }
+  }));
+}
+
+function accountingSegmentsFromUsageLedger(
+  entries: readonly UsageLedgerEntry[],
+  modelPricing: ReadonlyMap<string, ModelPricing>,
+  cacheReadRatio: number | undefined,
+  malformedEntries: number
+): AccountingSegment[] {
+  const grouped = new Map<string, { entries: UsageLedgerEntry[]; lastLedgerIndex: number }>();
+  for (const [ledgerIndex, entry] of entries.entries()) {
+    const key = JSON.stringify([entry.workflow_run_id, entry.checkpoint_generation_id]);
+    const generation = grouped.get(key) ?? { entries: [], lastLedgerIndex: ledgerIndex };
+    generation.entries.push(entry);
+    generation.lastLedgerIndex = ledgerIndex;
+    grouped.set(key, generation);
+  }
+  const groups = [...grouped.values()].sort((left, right) => left.lastLedgerIndex - right.lastLedgerIndex);
+  return groups.map((generation, index) => {
+    const generationEntries = generation.entries;
+    const firstEntry = generationEntries[0]!;
+    return accountingSummaryWithCompleteness(
+      accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
+      generationEntries,
+      index === groups.length - 1 ? malformedEntries : 0,
+      {
+        checkpointGenerationId: firstEntry.checkpoint_generation_id,
+        workflowRunId: firstEntry.workflow_run_id
+      }
+    );
+  });
+}
+
+function accountingSummaryWithCompleteness(
+  summary: AccountingSummary | undefined,
+  entries: readonly UsageLedgerEntry[],
+  malformedEntries: number,
+  identity: { checkpointGenerationId: string; workflowRunId: string }
+): AccountingSegment {
+  const base = summary ?? emptyAccountingSummary();
+  const usageIncompleteReasons: UsageCompletenessMarker[] = [
+    ...base.usage_incomplete_reasons,
+    ...entries.flatMap((entry): UsageCompletenessMarker[] =>
+      entry.usage_incomplete_reasons.map((reason) => ({
+        ...reason,
+        event_id: entry.event_id,
+        checkpoint_generation_id: entry.checkpoint_generation_id
+      }))
+    )
+  ];
+  if (malformedEntries > 0) {
+    usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
+  }
+
+  const ignoredIncompleteEntries = entries.filter(
+    (entry) => !usageLedgerEntryHasAccountingValue(entry) && !entry.usage_complete
+  );
+  const unpricedEventCount = base.unpriced_event_count + ignoredIncompleteEntries.length + malformedEntries;
+  const pricingIncompleteReasons: PricingCompletenessMarker[] = [...base.pricing_incomplete_reasons];
+  pricingIncompleteReasons.push(
+    ...ignoredIncompleteEntries.map((entry) => ({
+      code: "price-unavailable" as const,
+      event_id: entry.event_id,
+      checkpoint_generation_id: entry.checkpoint_generation_id
+    }))
+  );
+  if (malformedEntries > 0) {
+    pricingIncompleteReasons.push({ code: "ledger-entry-malformed" });
+  }
+  const uniquePricingReasons = uniquePricingCompletenessMarkers(pricingIncompleteReasons);
+  const partialPricing = uniquePricingReasons.length > 0;
+  return {
+    ...base,
+    estimated_spend:
+      base.estimated_spend_usd === undefined ? "unavailable" : formatUsd(base.estimated_spend_usd, partialPricing),
+    usage_complete: usageIncompleteReasons.length === 0,
+    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+    pricing_complete: !partialPricing,
+    pricing_incomplete_reasons: uniquePricingReasons,
+    partial_pricing: partialPricing,
+    event_count: entries.length + malformedEntries,
+    unpriced_event_count: unpricedEventCount,
+    checkpoint_generation_id: identity.checkpointGenerationId,
+    workflow_run_id: identity.workflowRunId,
+    event_ids: entries.map((entry) => entry.event_id),
+    attempt_ids: uniqueStrings(entries.map((entry) => entry.attempt_id))
+  };
+}
+
+function usageLedgerEntryHasAccountingValue(entry: UsageLedgerEntry): boolean {
+  const usage = entry.usage;
+  const tokenCount = usageTokenCount({
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheWriteTokens: usage.cache_write_tokens,
+    reasoningTokens: usage.reasoning_tokens,
+    explicitTotal: usage.total_tokens
+  });
+  return tokenCount > 0 || usage.cost_usd !== undefined;
+}
+
+function usageTokenCount(input: {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+  cacheReadTokens: number | undefined;
+  cacheWriteTokens: number | undefined;
+  reasoningTokens: number | undefined;
+  explicitTotal: number | undefined;
+}): number {
+  const detailedInputTokens = (input.cacheReadTokens ?? 0) + (input.cacheWriteTokens ?? 0);
+  const effectiveInputTokens = Math.max(input.inputTokens ?? 0, detailedInputTokens);
+  const effectiveOutputTokens = Math.max(input.outputTokens ?? 0, input.reasoningTokens ?? 0);
+  return Math.max(input.explicitTotal ?? 0, effectiveInputTokens + effectiveOutputTokens);
+}
+
+function emptyAccountingSummary(): AccountingSummary {
+  return {
+    uncached_input_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    inclusive_token_total: 0,
+    billable_token_total: 0,
+    total_tokens: 0,
+    tokens_used: "0",
+    estimated_spend: "unavailable",
+    component_costs_usd: emptyComponentCosts(),
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: true,
+    pricing_incomplete_reasons: [],
+    partial_pricing: false,
+    cache_read_pricing_estimated: false,
+    event_count: 0,
+    priced_event_count: 0,
+    unpriced_event_count: 0,
+    models: [],
+    agents: []
+  };
+}
+
 function cumulativeAccountingForSourceRun(
   layout: RunLayout,
   sourceRunId: string
@@ -593,6 +968,8 @@ function cumulativeAccountingSummary(
   sourceRunIds: string[]
 ): CumulativeAccountingSummary {
   const totals = emptyAccountingTotals();
+  const usageIncompleteReasons: UsageCompletenessMarker[] = [];
+  const pricingIncompleteReasons: PricingCompletenessMarker[] = [];
   for (const summary of summaries) {
     totals.inputTokens += summary.input_tokens;
     totals.outputTokens += summary.output_tokens;
@@ -604,13 +981,16 @@ function cumulativeAccountingSummary(
     totals.eventCount += summary.event_count;
     totals.pricedEventCount += summary.priced_event_count;
     totals.unpricedEventCount += summary.unpriced_event_count;
-    totals.partialPricing = totals.partialPricing || summary.partial_pricing;
+    totals.partialPricing =
+      totals.partialPricing ||
+      summary.partial_pricing ||
+      (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
     addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd);
     if (summary.provided_cost_usd !== undefined) {
       totals.providedCostUsd = addUsd(totals.providedCostUsd, summary.provided_cost_usd);
     }
-    totals.usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
-    totals.pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
+    usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
+    pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
     if (summary.cache_read_ratio_used !== undefined) {
       totals.cacheReadRatioUsed =
@@ -628,33 +1008,13 @@ function cumulativeAccountingSummary(
       totals.agents.add(agent);
     }
   }
-  const summary = accountingSummaryFromTotals(totals) ?? {
-    uncached_input_tokens: 0,
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_read_tokens: 0,
-    cache_write_tokens: 0,
-    reasoning_tokens: 0,
-    inclusive_token_total: 0,
-    billable_token_total: 0,
-    total_tokens: 0,
-    tokens_used: "0",
-    estimated_spend: "unavailable",
-    component_costs_usd: emptyComponentCosts(),
-    usage_complete: true,
-    usage_incomplete_reasons: [],
-    pricing_complete: true,
-    pricing_incomplete_reasons: [],
-    partial_pricing: false,
-    cache_read_pricing_estimated: false,
-    event_count: 0,
-    priced_event_count: 0,
-    unpriced_event_count: 0,
-    models: [],
-    agents: []
-  };
+  const summary = accountingSummaryFromTotals(totals) ?? emptyAccountingSummary();
   return {
     ...summary,
+    usage_complete: usageIncompleteReasons.length === 0,
+    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+    pricing_complete: pricingIncompleteReasons.length === 0,
+    pricing_incomplete_reasons: uniquePricingCompletenessMarkers(pricingIncompleteReasons),
     source_run_ids: uniqueStrings(sourceRunIds)
   };
 }
@@ -672,8 +1032,15 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
   const componentCosts = storedComponentCosts(componentCostsValue);
   const providedCostUsd = firstNumericField(value, ["provided_cost_usd", "providedCostUsd"]);
   const partialPricing = booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false;
-  const usageIncompleteReasons = storedUsageIncompleteReasons(value.usage_incomplete_reasons);
-  const pricingIncompleteReasons = storedPricingIncompleteReasons(value.pricing_incomplete_reasons);
+  const usageComplete = booleanField(value, "usage_complete") ?? booleanField(value, "usageComplete") ?? true;
+  const usageIncompleteReasons = storedUsageCompletenessMarkers(
+    value.usage_incomplete_reasons ?? value.usageIncompleteReasons
+  );
+  const pricingComplete =
+    booleanField(value, "pricing_complete") ?? booleanField(value, "pricingComplete") ?? !partialPricing;
+  const pricingIncompleteReasons = storedPricingCompletenessMarkers(
+    value.pricing_incomplete_reasons ?? value.pricingIncompleteReasons
+  );
   return {
     uncached_input_tokens:
       firstNumericField(value, ["uncached_input_tokens", "uncachedInputTokens", "input_tokens", "inputTokens"]) ?? 0,
@@ -699,13 +1066,14 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
       : providedCostUsd === undefined
         ? {}
         : { provided_cost_usd: providedCostUsd }),
-    usage_complete: booleanField(value, "usage_complete") ?? usageIncompleteReasons.length === 0,
-    usage_incomplete_reasons: usageIncompleteReasons,
-    pricing_complete: booleanField(value, "pricing_complete") ?? !partialPricing,
+    usage_complete: usageComplete,
+    usage_incomplete_reasons:
+      usageComplete || usageIncompleteReasons.length > 0 ? usageIncompleteReasons : [{ code: "usage-missing" }],
+    pricing_complete: pricingComplete,
     pricing_incomplete_reasons:
-      pricingIncompleteReasons.length > 0 || !partialPricing
+      pricingComplete || pricingIncompleteReasons.length > 0
         ? pricingIncompleteReasons
-        : [{ code: "event-pricing-reported-partial" }],
+        : [{ code: "price-unavailable" }],
     partial_pricing: partialPricing,
     cache_read_pricing_estimated:
       booleanField(value, "cache_read_pricing_estimated") ?? booleanField(value, "cacheReadPricingEstimated") ?? false,
@@ -727,7 +1095,7 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
   const estimatedSpendUsd = totals.estimatedSpendUsd;
   const usageIncompleteReasons = uniqueReasons(totals.usageIncompleteReasons);
   const pricingIncompleteReasons = uniqueReasons(totals.pricingIncompleteReasons);
-  const partialPricing = totals.partialPricing || pricingIncompleteReasons.length > 0;
+  const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0 || pricingIncompleteReasons.length > 0;
   return {
     uncached_input_tokens: totals.inputTokens,
     input_tokens: totals.inputTokens,
@@ -790,7 +1158,7 @@ function normalizeUsageComponents(input: {
   cacheReadRatio: number | undefined;
 }): {
   components: NormalizedUsageComponents;
-  incompleteReasons: UsageIncompleteReason[];
+  incompleteReasons: ComponentUsageIncompleteReason[];
   cacheReadPricingEstimated: boolean;
   cacheReadRatioUsed?: number;
 } {
@@ -802,7 +1170,7 @@ function normalizeUsageComponents(input: {
   const cacheReadUsageUnknown = input.cacheReadTokens === undefined && hasTokenActivity;
   const cacheReadPricingEstimated =
     cacheReadUsageUnknown && uncachedInputTokens > 0 && input.cacheReadRatio !== undefined;
-  const incompleteReasons: UsageIncompleteReason[] = [];
+  const incompleteReasons: ComponentUsageIncompleteReason[] = [];
   if (cacheReadUsageUnknown) {
     incompleteReasons.push({
       code: cacheReadPricingEstimated ? "component-usage-estimated" : "component-usage-unavailable",
@@ -926,10 +1294,10 @@ function addUsd(current: number | undefined, amount: number): number {
 }
 
 function roundUsd(value: number): number {
-  return Number(value.toFixed(6));
+  return Number(value.toFixed(ACCOUNTING_USD_PRECISION));
 }
 
-function uniqueReasons<T extends UsageIncompleteReason | PricingIncompleteReason>(reasons: T[]): T[] {
+function uniqueReasons<T extends ComponentUsageIncompleteReason | PricingIncompleteReason>(reasons: T[]): T[] {
   const unique = new Map<string, T>();
   for (const reason of reasons) {
     unique.set(`${reason.code}:${reason.component ?? ""}:${reason.model ?? ""}`, reason);
@@ -949,58 +1317,6 @@ function storedComponentCosts(value: Record<string, unknown> | undefined): Usage
     output: firstNumericField(value, ["output"]) ?? 0,
     reasoning: firstNumericField(value, ["reasoning"]) ?? 0
   };
-}
-
-function storedUsageIncompleteReasons(value: unknown): UsageIncompleteReason[] {
-  const codes = new Set<UsageIncompleteReason["code"]>([
-    "component-usage-unavailable",
-    "component-usage-estimated",
-    "component-breakdown-incomplete"
-  ]);
-  return storedCompletenessReasons(value).flatMap((reason): UsageIncompleteReason[] =>
-    codes.has(reason.code as UsageIncompleteReason["code"])
-      ? [{ ...reason, code: reason.code as UsageIncompleteReason["code"] }]
-      : []
-  );
-}
-
-function storedPricingIncompleteReasons(value: unknown): PricingIncompleteReason[] {
-  const codes = new Set<PricingIncompleteReason["code"]>([
-    "model-pricing-unavailable",
-    "component-rate-unavailable",
-    "event-pricing-reported-partial"
-  ]);
-  return storedCompletenessReasons(value).flatMap((reason): PricingIncompleteReason[] =>
-    codes.has(reason.code as PricingIncompleteReason["code"])
-      ? [{ ...reason, code: reason.code as PricingIncompleteReason["code"] }]
-      : []
-  );
-}
-
-function storedCompletenessReasons(
-  value: unknown
-): Array<{ code: string; component?: UsageComponent; model?: string }> {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const components = new Set<UsageComponent>(["uncached_input", "cache_read", "cache_write", "output", "reasoning"]);
-  return value.flatMap((reason): Array<{ code: string; component?: UsageComponent; model?: string }> => {
-    if (!isRecord(reason) || typeof reason.code !== "string") {
-      return [];
-    }
-    const component =
-      typeof reason.component === "string" && components.has(reason.component as UsageComponent)
-        ? (reason.component as UsageComponent)
-        : undefined;
-    const model = typeof reason.model === "string" ? reason.model : undefined;
-    return [
-      {
-        code: reason.code,
-        ...(component === undefined ? {} : { component }),
-        ...(model === undefined ? {} : { model })
-      }
-    ];
-  });
 }
 
 function configuredCacheReadRatio(value: string | undefined): number | undefined {
@@ -1045,7 +1361,9 @@ function comparableAccounting(value: Record<string, unknown> | undefined): Recor
     source: value.source,
     workflow_run_id: value.workflow_run_id,
     current: value.current,
+    segments: value.segments,
     cumulative: value.cumulative,
+    checkpoint: value.checkpoint,
     pricing_catalog: value.pricing_catalog
   };
 }
@@ -2285,7 +2603,12 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       }
       events.push({
         type,
-        sequence: numberField(parsed, "seq") ?? numberField(payload, "seq"),
+        sequence: numberField(parsed, "seq") ?? numberField(payload, "seq") ?? events.length,
+        sourceEventId:
+          stringField(parsed, "eventId") ??
+          stringField(parsed, "event_id") ??
+          stringField(payload, "eventId") ??
+          stringField(payload, "event_id"),
         timestampMs: numberField(parsed, "timestampMs") ?? numberField(payload, "timestampMs"),
         ...(payload ? { payload } : {})
       });
@@ -2294,7 +2617,7 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
     }
   }
   return events.sort(
-    (left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0) || (left.sequence ?? 0) - (right.sequence ?? 0)
+    (left, right) => (left.sequence ?? 0) - (right.sequence ?? 0) || (left.timestampMs ?? 0) - (right.timestampMs ?? 0)
   );
 }
 
@@ -2486,6 +2809,22 @@ function firstNumericField(value: Record<string, unknown> | undefined, keys: str
   return undefined;
 }
 
+function firstNonNegativeNumericField(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): number | undefined {
+  const field = firstNumericField(value, [...keys]);
+  return field !== undefined && field >= 0 ? field : undefined;
+}
+
+function firstNonNegativeIntegerField(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): number | undefined {
+  const field = firstNonNegativeNumericField(value, keys);
+  return field !== undefined && Number.isInteger(field) ? field : undefined;
+}
+
 function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
   const field = value?.[key];
   return typeof field === "boolean" ? field : undefined;
@@ -2494,6 +2833,128 @@ function booleanField(value: Record<string, unknown> | undefined, key: string): 
 function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] {
   const field = value?.[key];
   return Array.isArray(field) ? field.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function storedUsageCompletenessMarkers(value: unknown): UsageCompletenessMarker[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniqueUsageCompletenessMarkers(
+    value.flatMap((entry): UsageCompletenessMarker[] => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const code = stringField(entry, "code");
+      const componentUsageCodes = new Set<ComponentUsageIncompleteReason["code"]>([
+        "component-usage-unavailable",
+        "component-usage-estimated",
+        "component-breakdown-incomplete"
+      ]);
+      if (
+        code === undefined ||
+        (code !== "ledger-entry-malformed" &&
+          !USAGE_INCOMPLETE_REASON_CODES.includes(code as LedgerUsageIncompleteReason["code"]) &&
+          !componentUsageCodes.has(code as ComponentUsageIncompleteReason["code"]))
+      ) {
+        return [];
+      }
+      const field = stringField(entry, "field");
+      const component = stringField(entry, "component");
+      const components = new Set<UsageComponent>([
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "reasoning"
+      ]);
+      return [
+        {
+          code: code as UsageCompletenessMarker["code"],
+          ...(field !== undefined && USAGE_FIELDS.includes(field as UsageField) ? { field: field as UsageField } : {}),
+          ...(component !== undefined && components.has(component as UsageComponent)
+            ? { component: component as UsageComponent }
+            : {}),
+          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
+          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
+          ...(stringField(entry, "checkpoint_generation_id") === undefined
+            ? {}
+            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
+        }
+      ];
+    })
+  );
+}
+
+function storedPricingCompletenessMarkers(value: unknown): PricingCompletenessMarker[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniquePricingCompletenessMarkers(
+    value.flatMap((entry): PricingCompletenessMarker[] => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const code = stringField(entry, "code");
+      const pricingCodes = new Set<PricingIncompleteReason["code"]>([
+        "model-pricing-unavailable",
+        "component-rate-unavailable",
+        "event-pricing-reported-partial"
+      ]);
+      if (
+        code === undefined ||
+        (code !== "price-unavailable" &&
+          code !== "ledger-entry-malformed" &&
+          !pricingCodes.has(code as PricingIncompleteReason["code"]))
+      ) {
+        return [];
+      }
+      const component = stringField(entry, "component");
+      const components = new Set<UsageComponent>([
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "reasoning"
+      ]);
+      return [
+        {
+          code: code as PricingCompletenessMarker["code"],
+          ...(component !== undefined && components.has(component as UsageComponent)
+            ? { component: component as UsageComponent }
+            : {}),
+          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
+          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
+          ...(stringField(entry, "checkpoint_generation_id") === undefined
+            ? {}
+            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
+        }
+      ];
+    })
+  );
+}
+
+function uniqueUsageIncompleteReasons(reasons: readonly LedgerUsageIncompleteReason[]): LedgerUsageIncompleteReason[] {
+  return uniqueByJson(reasons);
+}
+
+function uniqueUsageCompletenessMarkers(reasons: readonly UsageCompletenessMarker[]): UsageCompletenessMarker[] {
+  return uniqueByJson(reasons);
+}
+
+function uniquePricingCompletenessMarkers(reasons: readonly PricingCompletenessMarker[]): PricingCompletenessMarker[] {
+  return uniqueByJson(reasons);
+}
+
+function uniqueByJson<T>(values: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function maxDefinedNumber(left: number | undefined, right: number | undefined): number | undefined {
