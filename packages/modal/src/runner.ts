@@ -11,6 +11,9 @@ import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
   MODAL_LAUNCH_STATE_SCHEMA_VERSION,
+  MODAL_OVERSEER_POLL_MS,
+  MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+  MODAL_RECOVERY_STATE_SCHEMA_VERSION,
   MODAL_SANDBOX_TIMEOUT_MS,
   type ModalModelSpec,
   type ModelProvider
@@ -43,6 +46,29 @@ export interface ModalLaunchState {
   timeout_ms: number;
   source_revision: string;
   launches: ModalLaunchRecord[];
+}
+
+export interface ModalRecoveryRecord extends ModalModelSpec {
+  sandbox_id: string;
+  volume_name: string;
+  remote_root: string;
+  attempt: number;
+  launched_at: string;
+}
+
+export interface ModalRecoveryState {
+  schema_version: typeof MODAL_RECOVERY_STATE_SCHEMA_VERSION;
+  run_id: string;
+  app: string;
+  image: string;
+  recoveries: ModalRecoveryRecord[];
+}
+
+export interface ModalOverseerJob {
+  configPath: string;
+  statePath: string;
+  recoveryStatePath: string;
+  recoveryImage?: string;
 }
 
 export interface BuildModalImageInput {
@@ -136,14 +162,7 @@ export async function launchModalBenchmark(input: {
         tags: { purpose: "ultrafuzz-eval", run: config.run_id, model: model.slug }
       });
       try {
-        await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
-        await sandbox.filesystem.copyFromLocal(configPath, REMOTE_CONFIG_PATH);
-        await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH]);
-        if (auth !== undefined) {
-          await runChecked(sandbox, ["install", "-d", "-m", "700", remoteAuthDir(model.provider)]);
-          await sandbox.filesystem.copyFromLocal(auth.source, auth.destination);
-          await runChecked(sandbox, ["chmod", "600", auth.destination]);
-        }
+        await stageModalSandboxInputs(sandbox, configPath, model, auth);
       } catch (error) {
         await sandbox.terminate({ wait: true }).catch(() => undefined);
         throw error;
@@ -168,7 +187,7 @@ export function modalImageBuildCommand(): string {
   return "rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar -xzf /tmp/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
 }
 
-export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
+export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider, resumeExisting = false): string {
   const authPath = subscriptionProvider === undefined ? undefined : remoteAuthPath(subscriptionProvider);
   const ownedRuntimeDirectories = [
     REMOTE_CONFIG_DIR,
@@ -185,12 +204,55 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     ...ownedRuntimeDirectories.map(
       (directory) => `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} '${directory}'`
     ),
-    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' node /opt/ultrafuzz/packages/modal/dist/worker.js`
+    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}'${
+      resumeExisting ? " ULTRAFUZZ_MODAL_RESUME_EXISTING='1'" : ""
+    } node /opt/ultrafuzz/packages/modal/dist/worker.js`
   ].join("; ");
 }
 
 export function modalVolumeRelativeRoot(remoteRoot: string): string {
   return path.posix.relative("/data", resolvePersistentRemoteRoot(remoteRoot, "/data"));
+}
+
+async function stageModalSandboxInputs(
+  sandbox: Sandbox,
+  configPath: string,
+  model: Pick<ModalModelSpec, "provider">,
+  auth: { source: string; destination: string } | undefined
+): Promise<void> {
+  await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
+  await sandbox.filesystem.copyFromLocal(configPath, REMOTE_CONFIG_PATH);
+  await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH]);
+  if (auth !== undefined) {
+    await runChecked(sandbox, ["install", "-d", "-m", "700", remoteAuthDir(model.provider)]);
+    await sandbox.filesystem.copyFromLocal(auth.source, auth.destination);
+    await runChecked(sandbox, ["chmod", "600", auth.destination]);
+  }
+}
+
+async function sandboxRunning(modal: ModalClient, sandboxId: string): Promise<boolean> {
+  try {
+    const sandbox = await modal.sandboxes.fromId(sandboxId);
+    const exitCode = await sandbox.poll();
+    sandbox.detach();
+    return exitCode === null;
+  } catch {
+    return false;
+  }
+}
+
+async function recoverySandboxRunning(modal: ModalClient, state: ModalRecoveryState, slug: string): Promise<boolean> {
+  const records = state.recoveries
+    .filter((record) => record.slug === slug)
+    .sort((left, right) => right.attempt - left.attempt);
+  for (const record of records) {
+    if (await sandboxRunning(modal, record.sandbox_id)) return true;
+  }
+  return false;
+}
+
+function recoverySandboxName(runId: string, slug: string, attempt: number): string {
+  return `recovery-${runId}-${slug}-a${attempt}`.slice(0, 63);
 }
 
 export async function modalBenchmarkStatus(input: {
@@ -215,16 +277,125 @@ export async function modalBenchmarkStatus(input: {
         runner = "not-running";
       }
       const volume = await modal.volumes.fromName(launch.volume_name);
-      const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, ["status.json"]);
+      const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
+        "status.json",
+        "result.json"
+      ]);
       rows.push({
         model: launch.model,
         slug: launch.slug,
         runner,
         exit_code: exitCode,
-        status: parseJson(persisted["status.json"] ?? "{}")
+        status: parseJson(persisted["status.json"] ?? "{}"),
+        result_present: persisted["result.json"] !== undefined
       });
     }
     return rows;
+  } finally {
+    modal.close();
+  }
+}
+
+export async function overseeModalBenchmarks(input: {
+  jobs: ModalOverseerJob[];
+  pollMs?: number;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  if (input.jobs.length === 0) throw new Error("at least one Modal overseer job is required");
+  const pollMs = input.pollMs ?? MODAL_OVERSEER_POLL_MS;
+  for (;;) {
+    const snapshots = [];
+    for (const job of input.jobs) snapshots.push(await overseeModalBenchmarkOnce({ ...job, env: input.env }));
+    console.log(JSON.stringify({ updated_at: new Date().toISOString(), jobs: snapshots }));
+    if (snapshots.every((snapshot) => snapshot.complete)) return;
+    await sleep(pollMs);
+  }
+}
+
+async function overseeModalBenchmarkOnce(
+  input: ModalOverseerJob & { env?: Record<string, string | undefined> }
+): Promise<{ run_id: string; complete: boolean; rows: Array<Record<string, unknown>> }> {
+  const configPath = path.resolve(input.configPath);
+  const config = loadModalBenchmarkConfig(configPath);
+  const state = JSON.parse(await readFile(path.resolve(input.statePath), "utf8")) as ModalLaunchState;
+  if (state.run_id !== config.run_id) throw new Error(`launch state belongs to ${state.run_id}, not ${config.run_id}`);
+  const recoveryStatePath = path.resolve(input.recoveryStatePath);
+  const recoveryState = await readOrCreateRecoveryState(recoveryStatePath, state, input.recoveryImage ?? state.image);
+  const env = input.env ?? process.env;
+  const modal = modalClient(env);
+  try {
+    const app = await modal.apps.fromName(state.app, { createIfMissing: false });
+    const image = await modal.images.fromName(input.recoveryImage ?? state.image);
+    const rows: Array<Record<string, unknown>> = [];
+    for (const launch of state.launches) {
+      const volume = await modal.volumes.fromName(launch.volume_name);
+      const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
+        "status.json",
+        "result.json"
+      ]);
+      if (persisted["result.json"] !== undefined) {
+        rows.push({ slug: launch.slug, complete: true, recovery: false });
+        continue;
+      }
+      const originalRunning = await sandboxRunning(modal, launch.sandbox_id);
+      const recoveryRunning = await recoverySandboxRunning(modal, recoveryState, launch.slug);
+      if (!originalRunning && !recoveryRunning) {
+        const auth = subscriptionAuthCopy(launch, env);
+        if (auth !== undefined) await access(auth.source);
+        const secret = await modal.secrets.fromObject(secretValues(config, launch, env));
+        const attempt =
+          Math.max(
+            0,
+            ...recoveryState.recoveries.filter((record) => record.slug === launch.slug).map((record) => record.attempt)
+          ) + 1;
+        const sandbox = await modal.sandboxes.create(app, image, {
+          name: recoverySandboxName(config.run_id, launch.slug, attempt),
+          command: [
+            "bash",
+            "-lc",
+            modalWorkerEntrypointCommand(auth === undefined ? undefined : launch.provider, true)
+          ],
+          cpu: 4,
+          cpuLimit: 4,
+          memoryMiB: 12_288,
+          memoryLimitMiB: 16_384,
+          timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+          workdir: "/opt/ultrafuzz",
+          env: {
+            ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
+            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(launch),
+            ULTRAFUZZ_MODAL_REMOTE_ROOT: launch.remote_root,
+            ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(launch.remote_root)
+          },
+          secrets: [secret],
+          volumes: { "/data": volume },
+          tags: {
+            purpose: "ultrafuzz-eval-recovery",
+            run: config.run_id,
+            model: launch.slug,
+            attempt: String(attempt)
+          }
+        });
+        recoveryState.recoveries.push({
+          ...launch,
+          sandbox_id: sandbox.sandboxId,
+          attempt,
+          launched_at: new Date().toISOString()
+        });
+        await writeRecoveryState(recoveryStatePath, recoveryState);
+        try {
+          await stageModalSandboxInputs(sandbox, configPath, launch, auth);
+        } catch (error) {
+          await sandbox.terminate({ wait: true }).catch(() => undefined);
+          throw error;
+        }
+        sandbox.detach();
+        rows.push({ slug: launch.slug, complete: false, recovery: true, attempt });
+      } else {
+        rows.push({ slug: launch.slug, complete: false, recovery: recoveryRunning });
+      }
+    }
+    return { run_id: config.run_id, complete: rows.every((row) => row.complete === true), rows };
   } finally {
     modal.close();
   }
@@ -354,6 +525,34 @@ async function writeState(statePath: string, state: ModalLaunchState): Promise<v
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
+async function readOrCreateRecoveryState(
+  statePath: string,
+  launchState: ModalLaunchState,
+  image: string
+): Promise<ModalRecoveryState> {
+  try {
+    const state = JSON.parse(await readFile(statePath, "utf8")) as ModalRecoveryState;
+    if (state.run_id !== launchState.run_id) {
+      throw new Error(`recovery state belongs to ${state.run_id}, not ${launchState.run_id}`);
+    }
+    return state;
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  return {
+    schema_version: MODAL_RECOVERY_STATE_SCHEMA_VERSION,
+    run_id: launchState.run_id,
+    app: launchState.app,
+    image,
+    recoveries: []
+  };
+}
+
+async function writeRecoveryState(statePath: string, state: ModalRecoveryState): Promise<void> {
+  await mkdir(path.dirname(statePath), { recursive: true });
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
 function sourceRevision(): string {
   try {
     return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -383,6 +582,10 @@ async function drainStream(stream: ReadableStream<string>, limit = 12_000): Prom
     output = `${output}${chunk}`.slice(-limit);
   }
   return output.trim();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readVolumeFiles(

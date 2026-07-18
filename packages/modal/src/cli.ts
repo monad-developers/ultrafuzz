@@ -2,9 +2,16 @@
 
 import path from "node:path";
 
-import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
+import {
+  buildModalImage,
+  collectModalBenchmark,
+  launchModalBenchmark,
+  modalBenchmarkStatus,
+  overseeModalBenchmarks
+} from "./runner.js";
 
-const usage = "usage: ultrafuzz-modal <build|launch|status|collect> [--config path] [--model slug] [--state path]";
+const usage =
+  "usage: ultrafuzz-modal <build|launch|status|collect|overseer> [--config path] [--model slug] [--state path]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -43,6 +50,29 @@ async function main(): Promise<void> {
     });
     return;
   }
+  if (command === "overseer") {
+    const configPaths = options(argv, "--config");
+    const statePaths = options(argv, "--state");
+    const recoveryStatePaths = options(argv, "--recovery-state");
+    const recoveryImages = options(argv, "--image");
+    if (
+      configPaths.length === 0 ||
+      configPaths.length !== statePaths.length ||
+      configPaths.length !== recoveryStatePaths.length
+    ) {
+      throw new Error("overseer requires matching repeated --config, --state, and --recovery-state options");
+    }
+    await overseeModalBenchmarks({
+      jobs: configPaths.map((configPath, index) => ({
+        configPath,
+        statePath: statePaths[index]!,
+        recoveryStatePath: recoveryStatePaths[index]!,
+        ...(recoveryImages[index] === undefined ? {} : { recoveryImage: recoveryImages[index] })
+      })),
+      pollMs: pollSeconds(argv) * 1000
+    });
+    return;
+  }
   throw new Error(usage);
 }
 
@@ -59,6 +89,14 @@ function requiredOption(argv: string[], name: string): string {
 
 function options(argv: string[], name: string): string[] {
   return argv.flatMap((value, index) => (value === name && argv[index + 1] !== undefined ? [argv[index + 1]!] : []));
+}
+
+function pollSeconds(argv: string[]): number {
+  const value = option(argv, "--poll-seconds");
+  if (value === undefined) return 60;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 1) throw new Error("--poll-seconds must be a positive number");
+  return seconds;
 }
 
 await main();

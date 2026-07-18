@@ -1,13 +1,18 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { loadModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { REMOTE_CONFIG_PATH, persistentDataRoot, resolvePersistentRemoteRoot } from "./layout.js";
-import { canScoreBenchmarkRow, inspectTerminalDisposition, runBenchmarkExecutionOnce } from "./terminal-disposition.js";
+import {
+  canScoreBenchmarkRow,
+  inspectTerminalDisposition,
+  runBenchmarkExecutionOnce,
+  type TerminalDisposition
+} from "./terminal-disposition.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -21,7 +26,8 @@ const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
-const RECOVERY_MAX_RESETS = 8;
+const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
+const RECOVERY_MAX_RESETS = 32;
 const RECOVERY_POLL_MS = 60_000;
 
 interface DurableNodeState {
@@ -43,34 +49,43 @@ async function main(): Promise<void> {
   try {
     assertWorkerInput();
     await mkdir(DATA_ROOT, { recursive: true });
-    await writeFile(LOG_PATH, "");
-    await setStatus("preparing");
-    const { target, control, suitePath, evalRunId } = await prepareWorkspace();
+    if (RESUME_EXISTING) {
+      await appendFile(LOG_PATH, `\n${new Date().toISOString()} [worker] resuming persisted workspace\n`);
+    } else {
+      await writeFile(LOG_PATH, "");
+    }
+    await setStatus(RESUME_EXISTING ? "resuming" : "preparing");
+    const { target, control, suitePath, evalRunId } = RESUME_EXISTING
+      ? await loadExistingWorkspace()
+      : await prepareWorkspace();
     await setStatus("running", { eval_run_id: evalRunId });
-    let terminalDisposition = await runBenchmarkExecutionOnce(
-      () =>
-        runEval(
-          [
-            "node",
-            CLI,
-            "eval",
-            "run",
-            "--project",
-            control,
-            "--suite",
-            suitePath,
-            "--provider",
-            "braintrust",
-            "--eval-run-id",
-            evalRunId,
-            "--watch-timeout-seconds",
-            String(EVAL_WATCH_TIMEOUT_SECONDS),
-            "--json"
-          ],
-          target
-        ),
-      () => inspectTerminalDisposition(target)
-    );
+    let terminalDisposition: TerminalDisposition | undefined;
+    if (!RESUME_EXISTING) {
+      terminalDisposition = await runBenchmarkExecutionOnce(
+        () =>
+          runEval(
+            [
+              "node",
+              CLI,
+              "eval",
+              "run",
+              "--project",
+              control,
+              "--suite",
+              suitePath,
+              "--provider",
+              "braintrust",
+              "--eval-run-id",
+              evalRunId,
+              "--watch-timeout-seconds",
+              String(EVAL_WATCH_TIMEOUT_SECONDS),
+              "--json"
+            ],
+            target
+          ),
+        () => inspectTerminalDisposition(target)
+      );
+    }
 
     const evalDir = path.join(control, ".ultrafuzz/evals/runs", evalRunId);
     let runSummary = await readRunSummary(evalDir);
@@ -81,7 +96,7 @@ async function main(): Promise<void> {
       terminalDisposition = await inspectTerminalDisposition(target);
     }
     if (!canScoreBenchmarkRow(runSummary.records[0]?.final_status, terminalDisposition)) {
-      const recovered = await recoverFailedWorkflow(target, evalRunId);
+      const recovered = await recoverWorkflow(target, evalRunId);
       if (recovered) {
         runSummary = markRunSummarySucceeded(await readRunSummary(evalDir));
         await writeFile(path.join(evalDir, "run-summary.json"), `${JSON.stringify(runSummary, null, 2)}\n`);
@@ -188,6 +203,22 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
     label: "eval plan"
   });
   return { target, control, suitePath, evalRunId: `${RUN_ID}-${MODEL.slug}` };
+}
+
+async function loadExistingWorkspace(): Promise<{
+  target: string;
+  control: string;
+  suitePath: string;
+  evalRunId: string;
+}> {
+  const target = path.join(WORK_ROOT, "target");
+  const control = path.join(WORK_ROOT, "control");
+  const suitePath = path.join(WORK_ROOT, "modal-suite.yml");
+  const evalRunId = `${RUN_ID}-${MODEL.slug}`;
+  for (const requiredPath of [target, control, suitePath, path.join(control, ".ultrafuzz/evals/runs", evalRunId)]) {
+    await access(requiredPath);
+  }
+  return { target, control, suitePath, evalRunId };
 }
 
 async function materializeGroundTruth(source: string, destination: string): Promise<void> {
@@ -340,37 +371,45 @@ async function runEval(argv: string[], target: string): Promise<void> {
   }
 }
 
-async function recoverFailedWorkflow(target: string, evalRunId: string): Promise<boolean> {
+async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
     const state = await durableRunState(target);
     if (state?.status === "succeeded") {
       return true;
     }
-    if (state?.status !== "failed" || state.run_id === undefined || state.nodes === undefined) {
+    if (state?.run_id === undefined || state.nodes === undefined) {
       return false;
     }
     const failedNodes = Object.entries(state.nodes).filter(([, node]) => node.status === "failed");
     const resetNode = failedNodes[0];
-    if (resetNode === undefined) {
-      return false;
-    }
-    const [nodeId, node] = resetNode;
-
-    await appendFile(
-      LOG_PATH,
-      `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${attempt}/${RECOVERY_MAX_RESETS})\n`
-    );
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
-      failed_node_count: failedNodes.length
+      failed_node_count: failedNodes.length,
+      workflow_status: state.status
     });
-    await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
+    if (resetNode !== undefined) {
+      const [nodeId, node] = resetNode;
+      await appendFile(
+        LOG_PATH,
+        `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${attempt}/${RECOVERY_MAX_RESETS})\n`
+      );
+      await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
+    } else {
+      await appendFile(
+        LOG_PATH,
+        `${new Date().toISOString()} [workflow recovery] resuming workflow (${attempt}/${RECOVERY_MAX_RESETS})\n`
+      );
+      await runChecked(["node", CLI, "resume", state.run_id, "--project", target, "--max-concurrency", "1", "--json"], {
+        label: `workflow resume ${attempt}`
+      });
+    }
 
     const terminal = await waitForWorkflowTerminal(target);
     if (terminal?.status === "succeeded") {
       return true;
     }
+    if (terminal?.status !== "failed") return false;
   }
   return durableRunState(target).then((state) => state?.status === "succeeded");
 }

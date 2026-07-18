@@ -48,6 +48,10 @@ describe("Modal worker identity", () => {
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
   });
 
+  it("can launch a worker that resumes the persisted workspace", () => {
+    expect(modalWorkerEntrypointCommand("openai", true)).toContain("ULTRAFUZZ_MODAL_RESUME_EXISTING='1'");
+  });
+
   it("maps only /data children into the volume-relative root", () => {
     expect(modalVolumeRelativeRoot("/data/run-one/model-one")).toBe("run-one/model-one");
     expect(() => modalVolumeRelativeRoot("/outside/run-one")).toThrow("must be a child of /data");
