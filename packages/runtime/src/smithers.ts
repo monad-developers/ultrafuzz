@@ -214,6 +214,7 @@ export interface SubmitSmithersInput {
   projectRoot: string;
   maxConcurrency: number;
   keepWorkspaces: boolean;
+  controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
   operatorPrompt?: string;
@@ -362,7 +363,8 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     "--input",
     inputJson,
     "--format",
-    "json"
+    "json",
+    ...supervisorCommandArgs(input.controllerLeaseSeconds)
   ];
   fs.mkdirSync(input.compiled.logsDir, { recursive: true });
   const {
@@ -408,6 +410,19 @@ export async function requestSmithersPause(input: {
   return { ...result, status };
 }
 
+export async function requestSmithersCancel(input: {
+  smithersRunId: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+}): Promise<void> {
+  await execSmithersCli({
+    args: ["cancel", input.smithersRunId, "--format", "json"],
+    projectRoot: input.projectRoot,
+    env: input.env,
+    acceptedExitCodes: [2]
+  });
+}
+
 export async function runSmithersLifecycleCommand(input: {
   action: "resume" | "replay" | "fork";
   smithersRunId: string;
@@ -423,6 +438,7 @@ export async function runSmithersLifecycleCommand(input: {
     logsDir: string;
   };
   keepWorkspaces: boolean;
+  controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
 }): Promise<{
@@ -459,7 +475,8 @@ export async function runSmithersLifecycleCommand(input: {
         "--input",
         inputJson,
         "--format",
-        "json"
+        "json",
+        ...supervisorCommandArgs(input.controllerLeaseSeconds)
       ];
       const recoveryResult = await execSmithersCli({
         args: recoveryCommand,
@@ -544,7 +561,8 @@ export async function runSmithersLifecycleCommand(input: {
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--format",
-          "json"
+          "json",
+          ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ],
         projectRoot: input.projectRoot,
         env: input.env,
@@ -604,7 +622,8 @@ export async function runSmithersLifecycleCommand(input: {
       "--detach",
       ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
       "--format",
-      "json"
+      "json",
+      ...supervisorCommandArgs(input.controllerLeaseSeconds)
     ];
     const resumeResult = await execSmithersCli({
       args: resumeCommand,
@@ -633,7 +652,8 @@ export async function runSmithersLifecycleCommand(input: {
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--format",
-          "json"
+          "json",
+          ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
       : input.action === "fork"
         ? [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--run", "--format", "json"]
@@ -771,6 +791,20 @@ function smithersDisplayCommand(command: readonly string[]): string[] {
   return [
     "smithers",
     ...command.map((argument, index) => (command[index - 1] === "--input" ? "<redacted>" : argument))
+  ];
+}
+
+function supervisorCommandArgs(controllerLeaseSeconds: number): string[] {
+  const staleThresholdSeconds = Math.max(1, Math.floor(controllerLeaseSeconds));
+  const intervalSeconds = Math.max(1, Math.floor(staleThresholdSeconds / 3));
+  return [
+    "--supervise",
+    "--supervise-interval",
+    `${intervalSeconds}s`,
+    "--supervise-stale-threshold",
+    `${staleThresholdSeconds}s`,
+    "--supervise-max-concurrent",
+    "1"
   ];
 }
 

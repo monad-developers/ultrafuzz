@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import type { RunState } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
@@ -230,6 +231,10 @@ function fakeLifecycleSmithersEnv(
       'case "$1" in',
       "  inspect)",
       '    cat "$SMITHERS_FAKE_INSPECT"',
+      "    ;;",
+      "  cancel)",
+      "    printf '%s\\n' '{\"status\":\"cancel-requested\"}'",
+      "    exit 2",
       "    ;;",
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
@@ -1221,6 +1226,18 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+  assert.ok(submission.command?.includes("--supervise"));
+  const staleThresholdIndex = submission.command?.indexOf("--supervise-stale-threshold") ?? -1;
+  assert.deepEqual(submission.command?.slice(staleThresholdIndex, staleThresholdIndex + 4), [
+    "--supervise-stale-threshold",
+    "30s",
+    "--supervise-max-concurrent",
+    "1"
+  ]);
+  const durableState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(durableState.workflow_deadline_at !== undefined, true);
+  assert.equal(durableState.concurrency.requested_concurrency, 2);
+  assert.equal(durableState.controller_lease.status, "active");
 });
 
 test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", async () => {
@@ -3972,6 +3989,85 @@ test("syncRun keeps reset workflow nodes pending while the workflow is running",
   assert.equal(state.nodes?.["project-discovery"]?.finished_at, undefined);
 });
 
+test("syncRun records external wait reasons from workflow events", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-wait-event-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodePending", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeWaitingApproval", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "wait-event-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "wait-event-run", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(state.nodes["project-discovery"]?.wait_reason, "approval");
+  assert.equal(state.nodes["project-discovery"]?.next_eligible_action, "approve");
+});
+
+test("syncRun cancels a nonterminal workflow at its durable workflow deadline", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-deadline-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 0 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "deadline-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  state.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const sync = await syncRun({ projectRoot: project, runId: "deadline-run", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "timed-out");
+  const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(persisted.status, "timed-out");
+  assert.equal(typeof persisted.finished_at, "string");
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /cancel ultrafuzz-deadline-run --format json/u);
+  assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /workflow-deadline-exceeded/u);
+
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_INSPECT!,
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId,
+        status: "canceled",
+        state: "canceled",
+        steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+      })
+    )}\n`,
+    "utf8"
+  );
+  const acknowledged = await syncRun({ projectRoot: project, runId: "deadline-run", env });
+
+  assert.equal(acknowledged.ok, true, JSON.stringify(acknowledged.diagnostics));
+  assert.equal(acknowledged.value?.status, "timed-out");
+  assert.equal((fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").match(/^cancel /gmu) ?? []).length, 1);
+});
+
 test("syncRun records model fan-out attempts independently", async () => {
   const project = tempProject();
   writeFanoutProject(project);
@@ -4069,6 +4165,9 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
+  const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(resumedState.concurrency.requested_concurrency, 8);
+  assert.equal(resumedState.controller_lease.duration_ms, 30_000);
 
   const resetResumed = await resumeRun({
     projectRoot: project,

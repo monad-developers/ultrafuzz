@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   appendEvent,
+  createInitialRunState,
   artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
@@ -110,6 +111,7 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
+  const createdAt = new Date().toISOString();
   const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
     id: node.id,
     logicalNodeId: node.logical_id,
@@ -119,8 +121,22 @@ export async function planRun(input: PlanRunInput) {
     loopIndex: node.loop.index,
     modelId: node.model_fanout[0]?.model_profile_id,
     model: node.model_fanout[0]?.model_name,
-    modelIndex: node.model_fanout[0]?.model_index
+    modelIndex: node.model_fanout[0]?.model_index,
+    waitSince: createdAt,
+    waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
+    nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
   }));
+  const initialState = createInitialRunState({
+    runId,
+    ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
+    graphFingerprint,
+    configFingerprint,
+    createdAt,
+    workflowDeadlineSeconds: resolved.config.run.workflowDeadlineSeconds,
+    controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
+    requestedConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
+    nodes: stateNodes
+  });
 
   let layout;
   try {
@@ -129,12 +145,13 @@ export async function planRun(input: PlanRunInput) {
       outputRoot,
       runId,
       sourceRunId: input.sourceRunId,
+      createdAt,
       resolvedConfigToml: serializeRedactedResolvedConfigToml(redacted),
       configRedactions: redacted.manifest,
       graph,
       graphFingerprint,
       configFingerprint,
-      stateNodes,
+      state: initialState,
       runMetadata: {
         mode: input.mode ?? "run",
         workflow_ids: [],
@@ -241,6 +258,9 @@ function materializeReferenceNodesForPlan(input: {
       status: "succeeded",
       started_at: startedAt,
       finished_at: finishedAt,
+      wait_since: undefined,
+      wait_reason: undefined,
+      next_eligible_action: undefined,
       provenance: {
         origin: "pinned-reference",
         reference: node.reference,

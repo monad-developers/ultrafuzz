@@ -122,6 +122,12 @@ test("run state schema covers all required node states and rejects malformed sta
   });
 
   assert.equal(validateRunStateSchema(state).ok, true);
+  assert.equal(state.schema_version, "1.1");
+  assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
+  assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
+  assert.equal(state.controller_lease.status, "active");
+  assert.equal(state.controller_lease.duration_ms, 30_000);
+  assert.equal(state.concurrency.requested_concurrency, 1);
 
   const invalid = validateRunStateSchema({
     ...state,
@@ -135,6 +141,12 @@ test("run state schema covers all required node states and rejects malformed sta
 
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path.endsWith(".status")));
+
+  const missingWait = structuredClone(state);
+  delete missingWait.nodes["node-1"]?.wait_since;
+  const invalidWait = validateRunStateSchema(missingWait);
+  assert.equal(invalidWait.ok, false);
+  assert.ok(invalidWait.issues.some((issue) => issue.path.endsWith(".wait_since")));
 });
 
 test("generated test manifest schema accepts canonical manifests and rejects legacy test_files", () => {

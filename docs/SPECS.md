@@ -91,7 +91,8 @@ A compatible config MUST support:
 - `dynamic_strategies_enumerator`
 - `[project] repo`
 - `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
-  `keep_workspaces`, `workspace_mode`, and `default_timeout_seconds`
+  `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
+  `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
 - `[permissions] trust_model`, `prompt_review_required`, and
@@ -309,6 +310,14 @@ Run and node state MUST be explicit. Node statuses MUST include pending,
 ready, runnable, running, succeeded, failed, skipped, timed-out,
 reused-from-prior-run, and invalidated. Run statuses MUST include pending,
 running, paused, succeeded, failed, timed-out, and canceled.
+
+Every nonterminal node MUST persist when its current wait began, a typed wait
+reason, and the next action that can make it eligible. Run state MUST persist
+the workflow deadline, last state transition, renewable controller-lease
+status, requested and effective concurrency, queue depth, active work, and
+queued, active, and idle durations. Lost-controller recovery MUST use an atomic
+takeover claim and MUST NOT repeat completed work. Workflow deadlines and
+recovery decisions MUST be testable with a fake clock.
 
 Completed node attempts MUST be appended immutably to `attempts.jsonl` with
 stable strategy-attempt, executor-retry, checkpoint-generation,

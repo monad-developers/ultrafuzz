@@ -9,3 +9,4 @@ export * from "./state-export.js";
 export * from "./types.js";
 export * from "./validate.js";
 export * from "./workflow-sync.js";
+export * from "./workflow-control.js";
