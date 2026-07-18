@@ -17,6 +17,7 @@
     "typecheck": "pnpm --filter @ultrafuzz/topology^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/references": "workspace:*",
     "yaml": "^2.8.0"

@@ -200,6 +200,7 @@ function finalReport(
     expected_findings: expected,
     finding_count: findings.length,
     issues: findings,
+    non_production_outcomes: [],
     run_metadata: runMetadata,
     findings
   };

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { validateSafeId } from "@ultrafuzz/artifacts";
+import { safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
@@ -73,6 +73,90 @@ export function resolveProjectPath(projectRoot: string, value: string): string {
 export function isPathInside(root: string, candidate: string): boolean {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+export interface TerminalReportPathResolution {
+  path?: string;
+  relativePath?: string;
+  reason: string;
+}
+
+export function resolveTerminalReportPath(input: {
+  runRoot?: string;
+  recordedPath?: string;
+  fallbackPath?: string;
+}): TerminalReportPathResolution {
+  if (input.runRoot === undefined) {
+    const reportPath = input.recordedPath ?? input.fallbackPath;
+    return reportPath === undefined
+      ? { reason: "terminal report path is unavailable" }
+      : { path: reportPath, reason: "terminal report path came from eval metadata" };
+  }
+
+  const runRoot = path.resolve(input.runRoot);
+  let graph: unknown;
+  try {
+    graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
+  } catch {
+    return recordedReportFallback(runRoot, input.recordedPath, "run graph is unavailable");
+  }
+  const candidates = terminalReportCandidates(runRoot, graph);
+  if (candidates.length === 1) {
+    return {
+      path: candidates[0]!.path,
+      relativePath: candidates[0]!.relativePath,
+      reason: "terminal report path came from the run graph contract"
+    };
+  }
+  if (candidates.length > 1) {
+    return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
+  }
+  return recordedReportFallback(runRoot, input.recordedPath, "run graph does not declare ultrafuzz/report@1");
+}
+
+function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path: string; relativePath: string }> {
+  if (!isRecord(graph) || !Array.isArray(graph.nodes)) {
+    return [];
+  }
+  const candidates = new Map<string, { path: string; relativePath: string }>();
+  for (const node of graph.nodes) {
+    if (!isRecord(node) || typeof node.artifact_dir !== "string" || !Array.isArray(node.outputs)) {
+      continue;
+    }
+    for (const output of node.outputs) {
+      if (!isRecord(output) || output.contract !== "ultrafuzz/report@1" || typeof output.path !== "string") {
+        continue;
+      }
+      try {
+        const relativePath = path.posix.join(node.artifact_dir.replaceAll(path.sep, "/"), output.path);
+        const reportPath = safeResolveInside(runRoot, relativePath, "terminal report path");
+        candidates.set(reportPath, { path: reportPath, relativePath });
+      } catch {
+        // Invalid graph paths cannot be publication or scoring inputs.
+      }
+    }
+  }
+  return [...candidates.values()];
+}
+
+function recordedReportFallback(
+  runRoot: string,
+  recordedPath: string | undefined,
+  missingGraphReason: string
+): TerminalReportPathResolution {
+  if (recordedPath === undefined || !path.isAbsolute(recordedPath) || !isPathInside(runRoot, recordedPath)) {
+    return { reason: missingGraphReason };
+  }
+  try {
+    const relativePath = path.relative(runRoot, recordedPath).split(path.sep).join("/");
+    return {
+      path: safeResolveInside(runRoot, relativePath, "recorded terminal report path"),
+      relativePath,
+      reason: `${missingGraphReason}; using compatible recorded path`
+    };
+  } catch {
+    return { reason: `${missingGraphReason}; recorded path is unsafe` };
+  }
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {

@@ -39,9 +39,11 @@ describe("prompt semantic anchors", () => {
     );
     const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
     const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
-      nodes: { id: string; required_artifacts?: string[] }[];
+      nodes: { id: string; outputs?: Array<{ path: string }> }[];
     };
-    const requiredArtifactsById = new Map(topology.nodes.map((node) => [node.id, node.required_artifacts ?? []]));
+    const requiredArtifactsById = new Map(
+      topology.nodes.map((node) => [node.id, (node.outputs ?? []).map((output) => output.path)])
+    );
     const promptCorpus = loadBuiltInPromptAssets()
       .map((asset) => asset.markdown)
       .join("\n");
@@ -55,7 +57,7 @@ describe("prompt semantic anchors", () => {
     expect(dynamic).toContain("`generated_tests` carrying");
     expect(`${readFileSync(templatePath, "utf8")}\n${promptCorpus}`).not.toContain("test_files");
     expect(readFileSync(topologyPath, "utf8")).toMatch(
-      /id: reference-harness-author[\s\S]*required_artifacts:[\s\S]*- generated-tests\.json/u
+      /id: reference-harness-author[\s\S]*outputs:[\s\S]*path: generated-tests\.json/u
     );
     for (const sourceId of manifestSources) {
       expect(requiredArtifactsById.get(sourceId), sourceId).toContain("generated-tests.json");

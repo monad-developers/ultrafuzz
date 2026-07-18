@@ -1,4 +1,4 @@
-version: 1
+version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -24,10 +24,12 @@ nodes:
     group: setup
     depends_on:
       - __start__
-    required_artifacts:
-      - setup/project-discovery.md
-      - findings.json
-    primary_artifact: setup/project-discovery.md
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: findings.json
+        contract: ultrafuzz/findings@1
     timeout_seconds: __NODE_TIMEOUT__
   - id: signal-analysis
     kind: agentic
@@ -37,11 +39,14 @@ nodes:
     group: strategies
     depends_on:
       - project-discovery
-    required_artifacts:
-      - signal-analysis.md
-      - generated-tests.json
-      - findings.json
-    primary_artifact: findings.json
+    outputs:
+      - path: signal-analysis.md
+        contract: ultrafuzz/nonempty-markdown@1
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
     timeout_seconds: __NODE_TIMEOUT__
   - id: final-report
     kind: agentic
@@ -51,10 +56,12 @@ nodes:
     group: review
     depends_on:
       - signal-analysis
-    required_artifacts:
-      - report.md
-      - report.json
-    primary_artifact: report.md
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: report.json
+        contract: ultrafuzz/report@1
     timeout_seconds: __NODE_TIMEOUT__
   - id: __finish__
     kind: meta

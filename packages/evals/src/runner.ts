@@ -23,7 +23,15 @@ import {
   type EvalRunValue,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, appendJsonLine, diagnosticFromError, evalRunRoot, generateEvalRunId, safeEvalId } from "./utils.js";
+import {
+  EvalError,
+  appendJsonLine,
+  diagnosticFromError,
+  evalRunRoot,
+  generateEvalRunId,
+  resolveTerminalReportPath,
+  safeEvalId
+} from "./utils.js";
 
 export interface RowLaunchValue {
   ok: boolean;
@@ -218,13 +226,15 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   const graphFingerprint = launch.graphFingerprint ?? runFingerprints.graph_fingerprint;
   const configFingerprint = launch.configFingerprint ?? runFingerprints.config_fingerprint;
   const executionArtifactId = launch.executionArtifactId ?? input.candidateProvenance?.execution_artifact_id;
+  const reportJsonPath =
+    launch.ok && launch.runRoot !== undefined ? resolveTerminalReportPath({ runRoot: launch.runRoot }).path : undefined;
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
           ...recordBase,
           ultrafuzz_run_id: launch.runId,
           ultrafuzz_run_root: launch.runRoot,
-          report_json_path: path.join(launch.runRoot, "artifacts", "final-report", "report.json"),
+          ...(reportJsonPath === undefined ? {} : { report_json_path: reportJsonPath }),
           status: "launched",
           ...(graphFingerprint !== undefined ? { graph_fingerprint: graphFingerprint } : {}),
           ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),

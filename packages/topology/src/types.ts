@@ -1,5 +1,7 @@
-export const TOPOLOGY_VERSION = 1 as const;
-export const GRAPH_VERSION = "1" as const;
+import type { ArtifactContractId } from "@ultrafuzz/artifacts";
+
+export const TOPOLOGY_VERSION = 2 as const;
+export const GRAPH_VERSION = "2" as const;
 export const PROJECT_TOPOLOGY_FILE = ".ultrafuzz/topology.yml";
 export const PROJECT_PROMPT_DIR = ".ultrafuzz/prompts";
 export const START_NODE_ID = "__start__";
@@ -44,9 +46,14 @@ export interface TopologyNode {
   loops?: number;
   loop_mode?: LoopMode;
   timeout_seconds?: number;
-  required_artifacts?: string[];
-  primary_artifact?: string;
+  outputs?: TopologyArtifactOutput[];
   model_profiles?: string[];
+}
+
+export interface TopologyArtifactOutput {
+  path: string;
+  contract: ArtifactContractId;
+  primary?: boolean;
 }
 
 export interface ProjectTopology {
@@ -68,9 +75,14 @@ export interface NormalizedTopologyNode {
   explicit_loops: boolean;
   loop_mode: LoopMode;
   timeout_seconds?: number;
-  required_artifacts: string[];
-  primary_artifact?: string;
+  outputs: NormalizedArtifactOutput[];
   model_profiles: string[];
+}
+
+export interface NormalizedArtifactOutput {
+  path: string;
+  contract: ArtifactContractId;
+  primary: boolean;
 }
 
 export interface NormalizedProjectTopology {
@@ -131,9 +143,12 @@ export interface ExpandedNode {
     mode: LoopMode;
     attemptIndex: number;
   };
-  requiredArtifacts: string[];
-  primaryArtifact?: string;
+  outputs: ExpandedArtifactOutput[];
   modelFanout: ModelFanoutProvenance[];
+}
+
+export interface ExpandedArtifactOutput extends NormalizedArtifactOutput {
+  contractDigest: string;
 }
 
 export interface ReferenceRevision {
