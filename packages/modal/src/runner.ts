@@ -12,6 +12,9 @@ import {
   DEFAULT_MODAL_IMAGE,
   MODAL_LAUNCH_STATE_SCHEMA_VERSION,
   MODAL_OVERSEER_POLL_MS,
+  MODAL_RECOVERY_BACKOFF_BASE_MS,
+  MODAL_RECOVERY_BACKOFF_MAX_MS,
+  MODAL_RECOVERY_LEASE_TIMEOUT_MS,
   MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
   MODAL_RECOVERY_STATE_SCHEMA_VERSION,
   MODAL_SANDBOX_TIMEOUT_MS,
@@ -56,12 +59,20 @@ export interface ModalRecoveryRecord extends ModalModelSpec {
   launched_at: string;
 }
 
+interface ModalRecoveryLease {
+  slug: string;
+  attempt: number;
+  name: string;
+  launched_at: string;
+}
+
 export interface ModalRecoveryState {
   schema_version: typeof MODAL_RECOVERY_STATE_SCHEMA_VERSION;
   run_id: string;
   app: string;
   image: string;
   recoveries: ModalRecoveryRecord[];
+  pending_recoveries?: ModalRecoveryLease[];
 }
 
 export interface ModalOverseerJob {
@@ -241,14 +252,55 @@ async function sandboxRunning(modal: ModalClient, sandboxId: string): Promise<bo
   }
 }
 
-async function recoverySandboxRunning(modal: ModalClient, state: ModalRecoveryState, slug: string): Promise<boolean> {
+async function recoverySandboxRunning(
+  modal: ModalClient,
+  appName: string,
+  state: ModalRecoveryState,
+  slug: string
+): Promise<{ running: boolean; pending?: boolean; stateChanged?: boolean; sandboxId?: string; attempt?: number }> {
   const records = state.recoveries
     .filter((record) => record.slug === slug)
     .sort((left, right) => right.attempt - left.attempt);
   for (const record of records) {
-    if (await sandboxRunning(modal, record.sandbox_id)) return true;
+    if (await sandboxRunning(modal, record.sandbox_id)) {
+      return { running: true, sandboxId: record.sandbox_id, attempt: record.attempt };
+    }
   }
-  return false;
+  for (const record of records) {
+    const sandbox = await namedSandbox(modal, appName, recoverySandboxName(state.run_id, slug, record.attempt));
+    if (sandbox === undefined) continue;
+    const exitCode = await sandbox.poll();
+    sandbox.detach();
+    if (exitCode === null) return { running: true, sandboxId: sandbox.sandboxId, attempt: record.attempt };
+  }
+  let stateChanged = false;
+  const pending = (state.pending_recoveries ?? []).filter((lease) => lease.slug === slug);
+  for (const lease of pending.sort((left, right) => right.attempt - left.attempt)) {
+    const sandbox = await namedSandbox(modal, appName, lease.name);
+    if (sandbox !== undefined) {
+      const exitCode = await sandbox.poll();
+      sandbox.detach();
+      if (exitCode === null) {
+        return { running: true, sandboxId: sandbox.sandboxId, attempt: lease.attempt };
+      }
+    }
+    const launchedAt = Date.parse(lease.launched_at);
+    if (!Number.isFinite(launchedAt) || Date.now() - launchedAt >= MODAL_RECOVERY_LEASE_TIMEOUT_MS) {
+      state.pending_recoveries = (state.pending_recoveries ?? []).filter((candidate) => candidate !== lease);
+      stateChanged = true;
+    } else {
+      return { running: false, pending: true, stateChanged };
+    }
+  }
+  return { running: false, stateChanged };
+}
+
+async function namedSandbox(modal: ModalClient, appName: string, name: string): Promise<Sandbox | undefined> {
+  try {
+    return await modal.sandboxes.fromName(appName, name);
+  } catch {
+    return undefined;
+  }
 }
 
 function recoverySandboxName(runId: string, slug: string, attempt: number): string {
@@ -340,8 +392,42 @@ async function overseeModalBenchmarkOnce(
         continue;
       }
       const originalRunning = await sandboxRunning(modal, launch.sandbox_id);
-      const recoveryRunning = await recoverySandboxRunning(modal, recoveryState, launch.slug);
-      if (!originalRunning && !recoveryRunning) {
+      const recovery = await recoverySandboxRunning(modal, state.app, recoveryState, launch.slug);
+      if (recovery.running && recovery.sandboxId !== undefined && recovery.attempt !== undefined) {
+        const known = recoveryState.recoveries.some(
+          (record) => record.slug === launch.slug && record.sandbox_id === recovery.sandboxId
+        );
+        if (!known) {
+          const lease = recoveryState.pending_recoveries?.find(
+            (candidate) => candidate.slug === launch.slug && candidate.attempt === recovery.attempt
+          );
+          recoveryState.recoveries.push({
+            ...model,
+            sandbox_id: recovery.sandboxId,
+            volume_name: launch.volume_name,
+            remote_root: launch.remote_root,
+            attempt: recovery.attempt,
+            launched_at: lease?.launched_at ?? new Date().toISOString()
+          });
+          recoveryState.pending_recoveries = (recoveryState.pending_recoveries ?? []).filter(
+            (candidate) => !(candidate.slug === launch.slug && candidate.attempt === recovery.attempt)
+          );
+          await writeRecoveryState(recoveryStatePath, recoveryState);
+        }
+        rows.push({ slug: launch.slug, complete: false, recovery: true, attempt: recovery.attempt });
+      } else if (recovery.pending) {
+        if (recovery.stateChanged) await writeRecoveryState(recoveryStatePath, recoveryState);
+        rows.push({ slug: launch.slug, complete: false, recovery: true, pending: true });
+      } else if (!originalRunning && !recovery.running) {
+        if (recovery.stateChanged) await writeRecoveryState(recoveryStatePath, recoveryState);
+        const latestRecovery = recoveryState.recoveries
+          .filter((record) => record.slug === launch.slug)
+          .sort((left, right) => right.attempt - left.attempt)[0];
+        const retryAt = latestRecovery === undefined ? undefined : recoveryRetryAt(latestRecovery);
+        if (retryAt !== undefined && retryAt > Date.now()) {
+          rows.push({ slug: launch.slug, complete: false, recovery: false, retry_at: new Date(retryAt).toISOString() });
+          continue;
+        }
         const auth = subscriptionAuthCopy(model, env);
         if (auth !== undefined) await access(auth.source);
         const secret = await modal.secrets.fromObject(secretValues(config, model, env));
@@ -350,55 +436,83 @@ async function overseeModalBenchmarkOnce(
             0,
             ...recoveryState.recoveries.filter((record) => record.slug === launch.slug).map((record) => record.attempt)
           ) + 1;
-        const sandbox = await modal.sandboxes.create(app, image, {
-          name: recoverySandboxName(config.run_id, launch.slug, attempt),
-          command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider, true)],
-          cpu: 4,
-          cpuLimit: 4,
-          memoryMiB: 12_288,
-          memoryLimitMiB: 16_384,
-          timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
-          workdir: "/opt/ultrafuzz",
-          env: {
-            ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
-            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(model),
-            ULTRAFUZZ_MODAL_REMOTE_ROOT: launch.remote_root,
-            ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(launch.remote_root)
-          },
-          secrets: [secret],
-          volumes: { "/data": volume },
-          tags: {
-            purpose: "ultrafuzz-eval-recovery",
-            run: config.run_id,
-            model: launch.slug,
-            attempt: String(attempt)
-          }
-        });
-        recoveryState.recoveries.push({
-          ...model,
-          sandbox_id: sandbox.sandboxId,
-          volume_name: launch.volume_name,
-          remote_root: launch.remote_root,
+        const name = recoverySandboxName(config.run_id, launch.slug, attempt);
+        const lease: ModalRecoveryLease = {
+          slug: launch.slug,
           attempt,
+          name,
           launched_at: new Date().toISOString()
-        });
+        };
+        recoveryState.pending_recoveries = [...(recoveryState.pending_recoveries ?? []), lease];
         await writeRecoveryState(recoveryStatePath, recoveryState);
+        let sandbox: Sandbox | undefined;
         try {
+          sandbox = await modal.sandboxes.create(app, image, {
+            name,
+            command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider, true)],
+            cpu: 4,
+            cpuLimit: 4,
+            memoryMiB: 12_288,
+            memoryLimitMiB: 16_384,
+            timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+            workdir: "/opt/ultrafuzz",
+            env: {
+              ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
+              ULTRAFUZZ_MODAL_MODEL: JSON.stringify(model),
+              ULTRAFUZZ_MODAL_REMOTE_ROOT: launch.remote_root,
+              ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(launch.remote_root)
+            },
+            secrets: [secret],
+            volumes: { "/data": volume },
+            tags: {
+              purpose: "ultrafuzz-eval-recovery",
+              run: config.run_id,
+              model: launch.slug,
+              attempt: String(attempt)
+            }
+          });
+          recoveryState.recoveries.push({
+            ...model,
+            sandbox_id: sandbox.sandboxId,
+            volume_name: launch.volume_name,
+            remote_root: launch.remote_root,
+            attempt,
+            launched_at: lease.launched_at
+          });
+          recoveryState.pending_recoveries = (recoveryState.pending_recoveries ?? []).filter(
+            (candidate) => candidate !== lease
+          );
+          await writeRecoveryState(recoveryStatePath, recoveryState);
           await stageModalSandboxInputs(sandbox, configPath, model, auth);
         } catch (error) {
-          await sandbox.terminate({ wait: true }).catch(() => undefined);
+          if (sandbox !== undefined) await sandbox.terminate({ wait: true }).catch(() => undefined);
+          recoveryState.pending_recoveries = (recoveryState.pending_recoveries ?? []).filter(
+            (candidate) => candidate !== lease
+          );
+          await writeRecoveryState(recoveryStatePath, recoveryState).catch(() => undefined);
           throw error;
         }
         sandbox.detach();
         rows.push({ slug: launch.slug, complete: false, recovery: true, attempt });
       } else {
-        rows.push({ slug: launch.slug, complete: false, recovery: recoveryRunning });
+        if (recovery.stateChanged) await writeRecoveryState(recoveryStatePath, recoveryState);
+        rows.push({ slug: launch.slug, complete: false, recovery: recovery.running });
       }
     }
     return { run_id: config.run_id, complete: rows.every((row) => row.complete === true), rows };
   } finally {
     modal.close();
   }
+}
+
+function recoveryRetryAt(record: Pick<ModalRecoveryRecord, "attempt" | "launched_at">): number | undefined {
+  const launchedAt = Date.parse(record.launched_at);
+  if (!Number.isFinite(launchedAt)) return undefined;
+  const backoff = Math.min(
+    MODAL_RECOVERY_BACKOFF_MAX_MS,
+    MODAL_RECOVERY_BACKOFF_BASE_MS * 2 ** Math.max(0, record.attempt - 1)
+  );
+  return launchedAt + backoff;
 }
 
 export async function collectModalBenchmark(input: {
