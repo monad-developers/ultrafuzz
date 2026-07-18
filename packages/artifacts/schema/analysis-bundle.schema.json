@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle",
+  "title": "Ultrafuzz privacy-safe analysis bundle manifest",
+  "type": "object",
+  "required": ["schema_version", "policy_version", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
+    "policy_version": {
+      "const": "ultrafuzz.analysis-bundle-policy.v1"
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": ["terminal-status", "evaluation-metrics", "accounting-summary", "attempt-history", "omissions"]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "media_type": {
+            "const": "application/json"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

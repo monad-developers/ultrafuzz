@@ -248,6 +248,7 @@ ultrafuzz eval run \
 ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]
 ultrafuzz eval report <eval-run-id> [--project <path>] [--json]
 ultrafuzz eval compare <eval-run-id> --baseline <variant-id> [--project <path>] [--json]
+ultrafuzz eval bundle <eval-run-id> --output <directory> [--project <path>] [--json]
 ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
   [--provider braintrust|langsmith] \
@@ -281,6 +282,13 @@ requires `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; private targets additionally require
 are rejected. `report` shows the
 scored variant ranking, and `compare` diffs variants against a required
 `--baseline` variant.
+
+`bundle` derives a versioned, self-contained analysis directory from local
+eval evidence. Its fixed allowlist contains aggregate terminal status,
+evaluation metrics, accounting, and sanitized attempt history. Raw reports,
+findings, diagnostics, configuration, and execution-local identifiers are not
+representable in the bundle. Missing optional evidence is recorded in a typed
+omission manifest.
 
 `publish` replays a recorded eval run's journals from offset 0 and
 reconstructs the full node trace on a provider post hoc; `--resume` continues
