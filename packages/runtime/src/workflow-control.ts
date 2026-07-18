@@ -33,6 +33,7 @@ export interface WorkflowControlProjection {
 
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "timed-out", "canceled"]);
 const ACTIVE_WORKFLOW_STATES = new Set(["in-progress", "running", "started"]);
+const LOST_CONTROLLER_WORKFLOW_STATES = new Set(["orphaned", "stale"]);
 
 export function projectWorkflowControlState(input: WorkflowControlProjectionInput): WorkflowControlProjection {
   const now = new Date(input.nowMs).toISOString();
@@ -55,9 +56,9 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   const activeWork = activeAttempts.size;
   const leaseDurationMs = controllerLeaseDurationMs(previous);
   const workflowState = normalizeWorkflowState(input.workflowState);
-  const explicitlyLostController = workflowState === "orphaned";
+  const explicitlyLostController = LOST_CONTROLLER_WORKFLOW_STATES.has(workflowState);
   const hasRecognizedExternalWait = [...input.workflowStates.values()].some((value) =>
-    ["retrying", "waiting-approval", "waiting-event", "waiting-timer"].includes(normalizeWorkflowState(value))
+    isExternalWaitWorkflowState(normalizeWorkflowState(value))
   );
   const transitionAgeMs = Math.max(0, input.nowMs - timestampMs(previous.last_transition_at, input.nowMs));
   const noTransitionStall =
@@ -189,17 +190,26 @@ function waitState(reason: NodeWaitReason, nextEligibleAction: NodeNextEligibleA
 
 function waitFromWorkflowState(state: string): WaitState | undefined {
   switch (state) {
+    case "noderetrying":
     case "retrying":
       return waitState("backoff", "retry");
+    case "nodewaitingapproval":
     case "waiting-approval":
       return waitState("approval", "approve");
+    case "nodewaitingevent":
     case "waiting-event":
       return waitState("event", "signal");
+    case "nodewaitingtimer":
     case "waiting-timer":
       return waitState("timer", "timer-fire");
     default:
       return ACTIVE_WORKFLOW_STATES.has(state) ? waitState("active", "task-complete") : undefined;
   }
+}
+
+function isExternalWaitWorkflowState(state: string): boolean {
+  const wait = waitFromWorkflowState(state);
+  return wait !== undefined && wait.reason !== "active";
 }
 
 function isDispatchableControlNode(

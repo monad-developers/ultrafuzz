@@ -2530,6 +2530,34 @@ test("syncRun keeps reset workflow nodes pending while the workflow is running",
   assert.equal(state.nodes?.["project-discovery"]?.finished_at, undefined);
 });
 
+test("syncRun records external wait reasons from workflow events", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-wait-event-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodePending", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeWaitingApproval", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "wait-event-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "wait-event-run", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(state.nodes["project-discovery"]?.wait_reason, "approval");
+  assert.equal(state.nodes["project-discovery"]?.next_eligible_action, "approve");
+});
+
 test("syncRun cancels a nonterminal workflow at its durable workflow deadline", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

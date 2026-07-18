@@ -40,42 +40,73 @@ test("synthetic scheduler fixtures persist distinct capacity, dependency, and ba
   assert.equal(projection.state.nodes.retrying?.next_eligible_action, "retry");
 });
 
-test("expired controller ownership requests one safe takeover without reopening completed work", () => {
-  const graph = syntheticGraph([node("complete"), node("pending", ["complete"])]);
-  const state = initialState(graph, 2);
-  state.nodes.complete!.status = "succeeded";
-  delete state.nodes.complete!.wait_since;
-  delete state.nodes.complete!.wait_reason;
-  delete state.nodes.complete!.next_eligible_action;
+test("external wait states persist typed gate reasons", () => {
+  const graph = syntheticGraph([node("approval"), node("event"), node("timer")]);
+  const state = initialState(graph, 3);
+  for (const id of ["approval", "event", "timer"]) {
+    state.nodes[id]!.status = "running";
+  }
 
-  const first = projectWorkflowControlState({
+  const projection = projectWorkflowControlState({
     previousState: structuredClone(state),
     state,
     graph,
     tasks: tasksFor(graph),
-    workflowStates: new Map(),
-    workflowState: "orphaned",
-    nowMs: BASE_MS + 31_000
-  });
-  const second = projectWorkflowControlState({
-    previousState: structuredClone(first.state),
-    state: first.state,
-    graph,
-    tasks: tasksFor(graph),
-    workflowStates: new Map(),
-    workflowState: "orphaned",
-    nowMs: BASE_MS + 40_000
+    workflowStates: new Map([
+      ["approval", "NodeWaitingApproval"],
+      ["event", "NodeWaitingEvent"],
+      ["timer", "NodeWaitingTimer"]
+    ]),
+    workflowState: "running",
+    nowMs: BASE_MS + 5_000
   });
 
-  assert.equal(first.recoveryDue, true);
-  assert.equal(first.state.controller_lease.status, "expired");
-  assert.equal(first.state.controller_lease.recovery_attempts, 1);
-  assert.equal(first.state.nodes.pending?.wait_reason, "controller-loss");
-  assert.equal(first.state.nodes.pending?.next_eligible_action, "controller-takeover");
-  assert.equal(first.state.nodes.complete?.status, "succeeded");
-  assert.equal(first.state.nodes.complete?.wait_reason, undefined);
-  assert.equal(second.state.controller_lease.recovery_attempts, 1);
-  assert.equal(second.state.nodes.pending?.wait_since, first.state.nodes.pending?.wait_since);
+  assert.equal(projection.state.nodes.approval?.wait_reason, "approval");
+  assert.equal(projection.state.nodes.approval?.next_eligible_action, "approve");
+  assert.equal(projection.state.nodes.event?.wait_reason, "event");
+  assert.equal(projection.state.nodes.event?.next_eligible_action, "signal");
+  assert.equal(projection.state.nodes.timer?.wait_reason, "timer");
+  assert.equal(projection.state.nodes.timer?.next_eligible_action, "timer-fire");
+});
+
+test("expired controller ownership requests one safe takeover without reopening completed work", () => {
+  for (const workflowState of ["orphaned", "stale"]) {
+    const graph = syntheticGraph([node("complete"), node("pending", ["complete"])]);
+    const state = initialState(graph, 2);
+    state.nodes.complete!.status = "succeeded";
+    delete state.nodes.complete!.wait_since;
+    delete state.nodes.complete!.wait_reason;
+    delete state.nodes.complete!.next_eligible_action;
+
+    const first = projectWorkflowControlState({
+      previousState: structuredClone(state),
+      state,
+      graph,
+      tasks: tasksFor(graph),
+      workflowStates: new Map(),
+      workflowState,
+      nowMs: BASE_MS + 31_000
+    });
+    const second = projectWorkflowControlState({
+      previousState: structuredClone(first.state),
+      state: first.state,
+      graph,
+      tasks: tasksFor(graph),
+      workflowStates: new Map(),
+      workflowState,
+      nowMs: BASE_MS + 40_000
+    });
+
+    assert.equal(first.recoveryDue, true, workflowState);
+    assert.equal(first.state.controller_lease.status, "expired", workflowState);
+    assert.equal(first.state.controller_lease.recovery_attempts, 1, workflowState);
+    assert.equal(first.state.nodes.pending?.wait_reason, "controller-loss", workflowState);
+    assert.equal(first.state.nodes.pending?.next_eligible_action, "controller-takeover", workflowState);
+    assert.equal(first.state.nodes.complete?.status, "succeeded", workflowState);
+    assert.equal(first.state.nodes.complete?.wait_reason, undefined, workflowState);
+    assert.equal(second.state.controller_lease.recovery_attempts, 1, workflowState);
+    assert.equal(second.state.nodes.pending?.wait_since, first.state.nodes.pending?.wait_since, workflowState);
+  }
 });
 
 test("parallel synthetic work records the configured safe concurrency cap and durations", () => {

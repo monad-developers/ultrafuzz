@@ -1188,8 +1188,13 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         evidence = { ...evidence, status: "running", workflowState: "retrying", ...attemptPatch };
         break;
       case "NodeWaitingApproval":
+        evidence = { ...evidence, status: "running", workflowState: "waiting-approval", ...attemptPatch };
+        break;
+      case "NodeWaitingEvent":
+        evidence = { ...evidence, status: "running", workflowState: "waiting-event", ...attemptPatch };
+        break;
       case "NodeWaitingTimer":
-        evidence = { ...evidence, status: "running", workflowState: event.type, ...attemptPatch };
+        evidence = { ...evidence, status: "running", workflowState: "waiting-timer", ...attemptPatch };
         break;
       default:
         break;
