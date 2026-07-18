@@ -924,6 +924,8 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   );
   assert.match(workflowSource, /id=\{task\.verifierId\}/);
   assert.match(workflowSource, /validateArtifactContract/);
+  assert.match(workflowSource, /candidate !== root && candidate\.startsWith/);
+  assert.match(workflowSource, /isStrictlyInsideDirectory\(artifactDir, artifactPath\)/);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {

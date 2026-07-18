@@ -21,7 +21,16 @@ import {
   type GroundTruthBug,
   type HumanReviewQueueItem
 } from "./types.js";
-import { EvalError, evalRunRoot, isRecord, jsonFile, mean, readJsonLines, roundMetric } from "./utils.js";
+import {
+  EvalError,
+  evalRunRoot,
+  isRecord,
+  jsonFile,
+  mean,
+  readJsonLines,
+  resolveTerminalReportPath,
+  roundMetric
+} from "./utils.js";
 
 const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
@@ -110,12 +119,20 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const reviewQueue: HumanReviewQueueItem[] = [];
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
+    const reportResolution = resolveTerminalReportPath({
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
+      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
+      fallbackPath: defaultReportPath(row)
+    });
+    if (reportResolution.path === undefined) {
+      throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
+    }
     const scored = await scoreRow({
       suite,
       row,
       record,
       llmJudge,
-      reportPath: record?.report_json_path ?? defaultReportPath(row)
+      reportPath: reportResolution.path
     });
     rowScores.push(scored.rowScore);
     findingScores.push(...scored.findingScores);
@@ -838,7 +855,7 @@ export function loadGroundTruth(filePath: string, groundTruthRoot: string | unde
 }
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  if (!fs.existsSync(filePath)) {
+  if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
     throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
   }
   const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);

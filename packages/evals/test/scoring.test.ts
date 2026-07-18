@@ -264,6 +264,39 @@ describe("deterministic scorer math", () => {
     expect(judgeCalled).toBe(false);
   });
 
+  it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
+    const fixture = scoreRunFixture();
+    const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
+      report_json_path?: string;
+    };
+    const reportContents = fs.readFileSync(record.report_json_path!, "utf8");
+    const runRoot = path.join(fixture.evalRunRoot, "topology-report-run");
+    const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
+    fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
+    fs.writeFileSync(customReportPath, reportContents, "utf8");
+    fs.writeFileSync(
+      path.join(runRoot, "graph.json"),
+      JSON.stringify({
+        nodes: [
+          {
+            id: "terminal",
+            artifact_dir: "artifacts/terminal",
+            outputs: [{ path: "custom-report.json", contract: "ultrafuzz/report@1", primary: true }]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    delete record.report_json_path;
+    record.ultrafuzz_run_root = runRoot;
+    fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
+
+    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+    expect(summary.rows[0]?.finding_count).toBe(2);
+  });
+
   it("requires a dedicated credential for the optional gateway judge", () => {
     expect(() => gatewayLlmJudge({ OPENAI_API_KEY: "provider-key" })).toThrowError(
       expect.objectContaining({ code: "EVAL_LLM_JUDGE_KEY_MISSING" })

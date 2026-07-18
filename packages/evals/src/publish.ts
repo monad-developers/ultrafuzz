@@ -15,7 +15,7 @@ import {
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines } from "./utils.js";
+import { EvalError, evalRunRoot, jsonFile, readJsonLines, resolveTerminalReportPath } from "./utils.js";
 
 export interface PublishEvalRunInput {
   projectRoot: string;
@@ -166,16 +166,25 @@ function assertPublishableTerminalReports(
   matrix: EvalMatrixRow[],
   recordsByRow: Map<string, EvalRunRecord>
 ): void {
-  const diagnostics: Array<{ code: string; row_id: string; contract: "ultrafuzz/report@1" }> = [];
+  const diagnostics: Array<{
+    code: string;
+    row_id: string;
+    contract: "ultrafuzz/report@1";
+    reason: string;
+    report_path?: string;
+  }> = [];
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     const runRoot = record?.ultrafuzz_run_root;
     const state = runRoot === undefined ? undefined : readJsonSafe(path.join(runRoot, "state.json"));
     const status = isRecord(state) && typeof state.status === "string" ? state.status : record?.final_status;
-    const reportPath =
-      record?.report_json_path ??
-      (runRoot === undefined ? undefined : path.join(runRoot, "artifacts", "final-report", "report.json"));
-    let valid = status === "succeeded" && reportPath !== undefined && fs.existsSync(reportPath);
+    const reportResolution = resolveTerminalReportPath({
+      ...(runRoot === undefined ? {} : { runRoot }),
+      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+    });
+    const reportPath = reportResolution.path;
+    const reportExists = reportPath !== undefined && fs.existsSync(reportPath) && fs.lstatSync(reportPath).isFile();
+    let valid = status === "succeeded" && reportExists;
     if (valid && reportPath !== undefined) {
       valid = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(reportPath, "utf8"), reportPath).ok;
     }
@@ -183,7 +192,16 @@ function assertPublishableTerminalReports(
       diagnostics.push({
         code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
         row_id: row.id,
-        contract: "ultrafuzz/report@1"
+        contract: "ultrafuzz/report@1",
+        reason:
+          status !== "succeeded"
+            ? `run status is ${status ?? "unknown"}`
+            : reportPath === undefined
+              ? reportResolution.reason
+              : !reportExists
+                ? "terminal report file is missing"
+                : "terminal report does not satisfy ultrafuzz/report@1",
+        ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
       });
     }
   }

@@ -80,15 +80,19 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
   });
 }
 
+function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
+  return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
+}
+
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifacts = task.outputs.map((output) => {
     const artifactPath = path.resolve(artifactDir, output.path);
-    if (artifactPath !== artifactDir && !artifactPath.startsWith(`${artifactDir}${path.sep}`)) {
+    if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
     }
     const resolvedPath = realpathSync(artifactPath);
-    if (!resolvedPath.startsWith(`${artifactDir}${path.sep}`) || !statSync(resolvedPath).isFile()) {
+    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
       throw new Error(`artifact-contract failure: output is not a regular file ${output.path}`);
     }
     const contents = readFileSync(resolvedPath, "utf8");
@@ -123,11 +127,11 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
   for (const entry of entries) {
     const relativePath = entry.path ?? "";
     const artifactPath = path.resolve(artifactDir, relativePath);
-    if (!artifactPath.startsWith(`${artifactDir}${path.sep}`)) {
+    if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
     }
     const resolvedPath = realpathSync(artifactPath);
-    if (!resolvedPath.startsWith(`${artifactDir}${path.sep}`) || !statSync(resolvedPath).isFile()) {
+    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
       throw new Error(`artifact-contract failure: generated test file is missing ${relativePath}`);
     }
   }
