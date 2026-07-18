@@ -128,7 +128,9 @@ describe("privacy-safe eval analysis bundles", () => {
       terminal: true,
       status: "mixed",
       run_count: 2,
-      status_counts: { succeeded: 1, failed: 1 }
+      status_counts: { succeeded: 1, failed: 1 },
+      started_at: "2026-01-01T00:00:00.000Z",
+      finished_at: "2026-01-01T00:01:00.000Z"
     });
     const metrics = JSON.parse(fs.readFileSync(path.join(firstOutput, "data", "evaluation-metrics.json"), "utf8"));
     expect(metrics).toMatchObject({ row_count: 2, metrics: { precision: 0.75, recall: 0.75, f1_score: 0.75 } });
@@ -176,11 +178,59 @@ describe("privacy-safe eval analysis bundles", () => {
     const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
 
     expect(result.omissions.omissions).toEqual([
-      { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "data-unavailable" },
-      { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "source-missing" }
+      { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "not-terminal" },
+      { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "not-terminal" }
     ]);
     const terminal = JSON.parse(fs.readFileSync(path.join(output, "data", "terminal-status.json"), "utf8"));
     expect(terminal).toMatchObject({ terminal: false, status: "unknown", status_counts: { unknown: 1 } });
+    expect(() => validateAnalysisBundle(output)).not.toThrow();
+  });
+
+  it("omits zero-row metrics instead of reporting synthetic zero scores", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-empty-score-"));
+    const evalRunId = "eval-synthetic-empty-score";
+    const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
+    fs.mkdirSync(evalRoot, { recursive: true });
+    writeJson(path.join(evalRoot, "summary.json"), { rows: [] });
+
+    const output = path.join(projectRoot, "bundle");
+    const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+
+    expect(result.omissions.omissions).toContainEqual({
+      kind: "evaluation-metrics",
+      path: "data/evaluation-metrics.json",
+      reason: "data-unavailable"
+    });
+    expect(fs.existsSync(path.join(output, "data", "evaluation-metrics.json"))).toBe(false);
+    expect(() => validateAnalysisBundle(output)).not.toThrow();
+  });
+
+  it("retains accounting aggregates when run records are unavailable", () => {
+    const projectRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-analysis-score-accounting-"));
+    const evalRunId = "eval-synthetic-score-accounting";
+    const evalRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
+    fs.mkdirSync(evalRoot, { recursive: true });
+    writeJson(path.join(evalRoot, "summary.json"), {
+      rows: [scoreRow({ runtime_seconds: 12, cost_estimate: 0.5 })]
+    });
+
+    const output = path.join(projectRoot, "bundle");
+    const result = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: output });
+    const accounting = JSON.parse(fs.readFileSync(path.join(output, "data", "accounting-summary.json"), "utf8"));
+
+    expect(result.omissions.omissions).toEqual([
+      { kind: "attempt-history", path: "data/attempt-history.json", reason: "source-missing" },
+      { kind: "terminal-status", path: "data/terminal-status.json", reason: "source-missing" }
+    ]);
+    expect(accounting).toMatchObject({
+      run_count: 1,
+      accounted_run_count: 1,
+      runtime_observed_run_count: 1,
+      runtime_seconds: 12,
+      total_tokens: 0,
+      estimated_spend_usd: 0.5,
+      partial_pricing: false
+    });
     expect(() => validateAnalysisBundle(output)).not.toThrow();
   });
 });

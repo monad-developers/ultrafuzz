@@ -62,6 +62,11 @@ const evalSummarySourceSchema = z.looseObject({
 
 type EvalRunRecordSource = z.infer<typeof evalRunRecordSourceSchema>;
 type EvalRowMetricsSource = z.infer<typeof evalRowMetricsSourceSchema>;
+type WorkflowObservation = {
+  status: AnalysisAttemptHistory["attempts"][number]["workflow_status"];
+  started_at?: string;
+  finished_at?: string;
+};
 type SourceState<T> = {
   value?: T;
   reason?: Extract<AnalysisBundleOmissionReason, "source-missing" | "source-invalid">;
@@ -88,33 +93,41 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
   const summarySource = readJsonSource(path.join(root, "summary.json"), evalSummarySourceSchema);
   const payloads: Partial<Record<AnalysisBundleDataKind, unknown>> = {};
   const omissions: Partial<Record<AnalysisBundleDataKind, AnalysisBundleOmissionReason>> = {};
+  let terminalPayload: AnalysisTerminalStatus | undefined;
 
   if (recordsSource.value === undefined) {
     const reason = recordsSource.reason ?? "data-unavailable";
     omissions["terminal-status"] = reason;
     omissions["attempt-history"] = reason;
-    omissions["accounting-summary"] = reason;
   } else if (recordsSource.value.length === 0) {
     omissions["terminal-status"] = "data-unavailable";
     omissions["attempt-history"] = "data-unavailable";
-    omissions["accounting-summary"] = "data-unavailable";
   } else {
     const records = recordsSource.value;
-    const workflowStatuses = workflowStatusesForRecords(records);
-    payloads["terminal-status"] = terminalStatus(records, workflowStatuses);
-    payloads["attempt-history"] = attemptHistory(records, workflowStatuses);
-    const accounting = accountingSummary(latestRecordsByRow(records), summarySource.value?.rows ?? []);
-    if (accounting === undefined) {
-      omissions["accounting-summary"] = "data-unavailable";
-    } else {
-      payloads["accounting-summary"] = accounting;
-    }
+    const workflowObservations = workflowObservationsForRecords(records);
+    terminalPayload = terminalStatus(records, workflowObservations);
+    payloads["terminal-status"] = terminalPayload;
+    payloads["attempt-history"] = attemptHistory(records, workflowObservations);
   }
 
   if (summarySource.value === undefined) {
-    omissions["evaluation-metrics"] = summarySource.reason ?? "data-unavailable";
+    const reason = summarySource.reason ?? "data-unavailable";
+    omissions["evaluation-metrics"] =
+      reason === "source-missing" && terminalPayload?.terminal === false ? "not-terminal" : reason;
+  } else if (summarySource.value.rows.length === 0) {
+    omissions["evaluation-metrics"] = "data-unavailable";
   } else {
     payloads["evaluation-metrics"] = evaluationMetrics(summarySource.value.rows);
+  }
+
+  const accounting = accountingSummary(
+    recordsSource.value === undefined ? [] : latestRecordsByRow(recordsSource.value),
+    summarySource.value?.rows ?? []
+  );
+  if (accounting === undefined) {
+    omissions["accounting-summary"] = accountingOmissionReason(recordsSource, summarySource, terminalPayload);
+  } else {
+    payloads["accounting-summary"] = accounting;
   }
 
   return writeAnalysisBundle({ outputDir: input.outputDir, payloads, omissions });
@@ -122,10 +135,10 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
 
 function terminalStatus(
   records: EvalRunRecordSource[],
-  workflowStatuses: ReadonlyMap<EvalRunRecordSource, AnalysisAttemptHistory["attempts"][number]["workflow_status"]>
+  workflowObservations: ReadonlyMap<EvalRunRecordSource, WorkflowObservation>
 ): AnalysisTerminalStatus {
   const latest = latestRecordsByRow(records);
-  const statuses = latest.map((record) => workflowStatuses.get(record) ?? "unknown");
+  const statuses = latest.map((record) => workflowObservations.get(record)?.status ?? "unknown");
   const statusCounts: AnalysisTerminalStatus["status_counts"] = {
     pending: 0,
     running: 0,
@@ -139,8 +152,21 @@ function terminalStatus(
   for (const status of statuses) {
     statusCounts[status] += 1;
   }
-  const startedAt = minTimestamp(latest.map((record) => record.started_at));
-  const finishedAt = maxTimestamp(latest.map((record) => record.finished_at));
+  const startedAt = minTimestamp(
+    latest.map((record) => workflowObservations.get(record)?.started_at ?? record.started_at)
+  );
+  const observedFinishedAt = maxTimestamp(
+    latest.map((record) => {
+      const observation = workflowObservations.get(record);
+      if (observation !== undefined) return observation.finished_at;
+      const status = knownWorkflowStatus(record.final_status) ?? (record.status === "failed" ? "failed" : undefined);
+      return status !== undefined && TERMINAL_WORKFLOW_STATUSES.has(status) ? record.finished_at : undefined;
+    })
+  );
+  const finishedAt =
+    startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
+      ? undefined
+      : observedFinishedAt;
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     terminal: statuses.length > 0 && statuses.every((status) => TERMINAL_WORKFLOW_STATUSES.has(status as RunStatus)),
@@ -154,17 +180,21 @@ function terminalStatus(
 
 function attemptHistory(
   records: EvalRunRecordSource[],
-  workflowStatuses: ReadonlyMap<EvalRunRecordSource, AnalysisAttemptHistory["attempts"][number]["workflow_status"]>
+  workflowObservations: ReadonlyMap<EvalRunRecordSource, WorkflowObservation>
 ): AnalysisAttemptHistory {
   return {
     schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
     attempts: records.map((record, index) => {
       const startedAt = normalizedTimestamp(record.started_at);
-      const finishedAt = normalizedTimestamp(record.finished_at);
+      const observedFinishedAt = normalizedTimestamp(record.finished_at);
+      const finishedAt =
+        startedAt !== undefined && observedFinishedAt !== undefined && observedFinishedAt < startedAt
+          ? undefined
+          : observedFinishedAt;
       return {
         ordinal: index + 1,
         launcher_status: record.status,
-        workflow_status: workflowStatuses.get(record) ?? "unknown",
+        workflow_status: workflowObservations.get(record)?.status ?? "unknown",
         ...(startedAt === undefined ? {} : { started_at: startedAt }),
         ...(finishedAt === undefined ? {} : { finished_at: finishedAt })
       };
@@ -271,6 +301,12 @@ function readAccountingSummary(runRoot: string): StoredAccountingSummary | undef
       return undefined;
     }
     const estimatedSpendUsd = nonNegativeNumberField(summary, "estimated_spend_usd");
+    const eventCount = nonNegativeIntegerField(summary, "event_count") ?? 0;
+    const pricedEventCount = nonNegativeIntegerField(summary, "priced_event_count") ?? 0;
+    const unpricedEventCount = nonNegativeIntegerField(summary, "unpriced_event_count") ?? 0;
+    if (eventCount !== pricedEventCount + unpricedEventCount) {
+      return undefined;
+    }
     return {
       input_tokens: nonNegativeIntegerField(summary, "input_tokens") ?? 0,
       output_tokens: nonNegativeIntegerField(summary, "output_tokens") ?? 0,
@@ -279,42 +315,47 @@ function readAccountingSummary(runRoot: string): StoredAccountingSummary | undef
       reasoning_tokens: nonNegativeIntegerField(summary, "reasoning_tokens") ?? 0,
       total_tokens: totalTokens,
       ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
-      partial_pricing: summary.partial_pricing === true,
-      event_count: nonNegativeIntegerField(summary, "event_count") ?? 0,
-      priced_event_count: nonNegativeIntegerField(summary, "priced_event_count") ?? 0,
-      unpriced_event_count: nonNegativeIntegerField(summary, "unpriced_event_count") ?? 0
+      partial_pricing: summary.partial_pricing === true || unpricedEventCount > 0,
+      event_count: eventCount,
+      priced_event_count: pricedEventCount,
+      unpriced_event_count: unpricedEventCount
     };
   } catch {
     return undefined;
   }
 }
 
-function workflowStatusesForRecords(
-  records: EvalRunRecordSource[]
-): Map<EvalRunRecordSource, AnalysisAttemptHistory["attempts"][number]["workflow_status"]> {
-  const statuses = new Map<EvalRunRecordSource, AnalysisAttemptHistory["attempts"][number]["workflow_status"]>();
-  const byRoot = new Map<string, RunStatus | undefined>();
+function workflowObservationsForRecords(records: EvalRunRecordSource[]): Map<EvalRunRecordSource, WorkflowObservation> {
+  const observations = new Map<EvalRunRecordSource, WorkflowObservation>();
+  const byRoot = new Map<string, WorkflowObservation | undefined>();
   for (const record of records) {
-    let status: RunStatus | undefined;
+    let observation: WorkflowObservation | undefined;
     if (record.ultrafuzz_run_root !== undefined && path.isAbsolute(record.ultrafuzz_run_root)) {
       if (!byRoot.has(record.ultrafuzz_run_root)) {
-        byRoot.set(record.ultrafuzz_run_root, readWorkflowStatus(record.ultrafuzz_run_root));
+        byRoot.set(record.ultrafuzz_run_root, readWorkflowObservation(record.ultrafuzz_run_root));
       }
-      status = byRoot.get(record.ultrafuzz_run_root);
+      observation = byRoot.get(record.ultrafuzz_run_root);
     }
-    status ??= knownWorkflowStatus(record.final_status);
-    status ??= record.status === "failed" ? "failed" : undefined;
-    statuses.set(record, status ?? "unknown");
+    const status =
+      observation?.status ??
+      knownWorkflowStatus(record.final_status) ??
+      (record.status === "failed" ? "failed" : "unknown");
+    observations.set(record, { ...observation, status });
   }
-  return statuses;
+  return observations;
 }
 
-function readWorkflowStatus(runRoot: string): RunStatus | undefined {
+function readWorkflowObservation(runRoot: string): WorkflowObservation | undefined {
   const statePath = path.join(runRoot, "state.json");
   try {
     assertRegularFileInside(runRoot, statePath, "analysis workflow state source");
     const parsed = validateRunStateSchema(readJsonBounded(statePath));
-    return parsed.ok ? parsed.value?.status : undefined;
+    if (!parsed.ok || parsed.value === undefined) return undefined;
+    return {
+      status: parsed.value.status,
+      ...(parsed.value.started_at === undefined ? {} : { started_at: parsed.value.started_at }),
+      ...(parsed.value.finished_at === undefined ? {} : { finished_at: parsed.value.finished_at })
+    };
   } catch {
     return undefined;
   }
@@ -358,15 +399,35 @@ function knownWorkflowStatus(value: string | undefined): RunStatus | undefined {
 
 function minTimestamp(values: Array<string | undefined>): string | undefined {
   return values
-    .flatMap((value) => (normalizedTimestamp(value) === undefined ? [] : [normalizedTimestamp(value)!]))
+    .flatMap((value) => {
+      const timestamp = normalizedTimestamp(value);
+      return timestamp === undefined ? [] : [timestamp];
+    })
     .sort()[0];
 }
 
 function maxTimestamp(values: Array<string | undefined>): string | undefined {
   return values
-    .flatMap((value) => (normalizedTimestamp(value) === undefined ? [] : [normalizedTimestamp(value)!]))
+    .flatMap((value) => {
+      const timestamp = normalizedTimestamp(value);
+      return timestamp === undefined ? [] : [timestamp];
+    })
     .sort()
     .at(-1);
+}
+
+function accountingOmissionReason(
+  recordsSource: SourceState<EvalRunRecordSource[]>,
+  summarySource: SourceState<{ rows: EvalRowMetricsSource[] }>,
+  terminalPayload: AnalysisTerminalStatus | undefined
+): AnalysisBundleOmissionReason {
+  if (summarySource.reason === "source-missing" && terminalPayload?.terminal === false) {
+    return "not-terminal";
+  }
+  if (recordsSource.value === undefined) {
+    return recordsSource.reason ?? "data-unavailable";
+  }
+  return "data-unavailable";
 }
 
 function normalizedTimestamp(value: string | undefined): string | undefined {
@@ -441,7 +502,8 @@ function sumAccounting(summaries: StoredAccountingSummary[], key: keyof StoredAc
 }
 
 function mean(values: number[]): number {
-  return values.length === 0 ? 0 : roundMetric(values.reduce((total, value) => total + value, 0) / values.length);
+  if (values.length === 0) throw new Error("cannot average an empty metric set");
+  return roundMetric(values.reduce((total, value) => total + value, 0) / values.length);
 }
 
 function roundMetric(value: number): number {

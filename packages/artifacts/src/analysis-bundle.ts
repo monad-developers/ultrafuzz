@@ -97,11 +97,21 @@ export const analysisTerminalStatusSchema = z
     if (value.terminal !== (value.run_count > 0 && terminalCount === value.run_count)) {
       ctx.addIssue({ code: "custom", path: ["terminal"], message: "must match the aggregate status counts" });
     }
+    if (value.status !== aggregateStatusFromCounts(value.status_counts)) {
+      ctx.addIssue({ code: "custom", path: ["status"], message: "must match the aggregate status counts" });
+    }
+    if (
+      value.started_at !== undefined &&
+      value.finished_at !== undefined &&
+      Date.parse(value.started_at) > Date.parse(value.finished_at)
+    ) {
+      ctx.addIssue({ code: "custom", path: ["finished_at"], message: "cannot precede started_at" });
+    }
   });
 
 export const analysisEvaluationMetricsSchema = z.strictObject({
   schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
-  row_count: nonNegativeInteger,
+  row_count: z.number().int().positive(),
   totals: z.strictObject({
     ground_truth_bug_count: nonNegativeInteger,
     finding_count: nonNegativeInteger,
@@ -157,6 +167,23 @@ export const analysisAccountingSummarySchema = z
         message: "cannot exceed run_count"
       });
     }
+    if (value.event_count !== value.priced_event_count + value.unpriced_event_count) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["event_count"],
+        message: "must equal priced_event_count plus unpriced_event_count"
+      });
+    }
+    if (value.unpriced_event_count > 0 && !value.partial_pricing) {
+      ctx.addIssue({ code: "custom", path: ["partial_pricing"], message: "must be true when events are unpriced" });
+    }
+    if ((value.runtime_seconds === null) !== (value.runtime_observed_run_count === 0)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime_seconds"],
+        message: "must be present exactly when runtime observations exist"
+      });
+    }
   });
 
 export const analysisAttemptHistorySchema = z
@@ -179,6 +206,17 @@ export const analysisAttemptHistorySchema = z
           code: "custom",
           path: ["attempts", index, "ordinal"],
           message: "must be a contiguous one-based ordinal"
+        });
+      }
+      if (
+        attempt.started_at !== undefined &&
+        attempt.finished_at !== undefined &&
+        Date.parse(attempt.started_at) > Date.parse(attempt.finished_at)
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["attempts", index, "finished_at"],
+          message: "cannot precede started_at"
         });
       }
     });
@@ -444,7 +482,8 @@ export function writeAnalysisBundle(input: WriteAnalysisBundleInput): WriteAnaly
 
 export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManifest {
   const root = path.resolve(bundleRoot);
-  if (!fs.existsSync(root) || !fs.lstatSync(root).isDirectory() || fs.lstatSync(root).isSymbolicLink()) {
+  const rootStat = fs.existsSync(root) ? fs.lstatSync(root) : undefined;
+  if (rootStat === undefined || !rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error("analysis bundle root must be a regular directory");
   }
   const manifestPath = safeResolveInside(root, ANALYSIS_BUNDLE_MANIFEST_FILE, "analysis bundle manifest");
@@ -473,9 +512,9 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
   if (!entriesByKind.has("omissions")) {
     throw new Error("analysis bundle manifest must include the omission manifest");
   }
-  assertStrictBundleTree(root);
-  const actualPaths = listSafeFiles(root).map((entry) => entry.relativePath);
   const expectedPaths = [ANALYSIS_BUNDLE_MANIFEST_FILE, ...entriesByPath.keys()].sort();
+  assertStrictBundleTree(root, expectedPaths);
+  const actualPaths = listSafeFiles(root).map((entry) => entry.relativePath);
   if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) {
     throw new Error("analysis bundle contains a file outside the strict allowlist");
   }
@@ -633,15 +672,32 @@ function readJsonBounded(filePath: string): unknown {
   return JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
 }
 
-function assertStrictBundleTree(directory: string): void {
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const entryPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      assertStrictBundleTree(entryPath);
-    } else if (!entry.isFile()) {
-      throw new Error("analysis bundle contains a non-regular filesystem entry");
+function assertStrictBundleTree(root: string, expectedFiles: string[]): void {
+  const allowedDirectories = new Set<string>();
+  for (const expectedFile of expectedFiles) {
+    let directory = path.posix.dirname(expectedFile);
+    while (directory !== ".") {
+      allowedDirectories.add(directory);
+      directory = path.posix.dirname(directory);
     }
   }
+
+  function walk(directory: string, relativeDirectory: string): void {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!allowedDirectories.has(relativePath)) {
+          throw new Error("analysis bundle contains a directory outside the strict allowlist");
+        }
+        walk(entryPath, relativePath);
+      } else if (!entry.isFile()) {
+        throw new Error("analysis bundle contains a non-regular filesystem entry");
+      }
+    }
+  }
+
+  walk(root, "");
 }
 
 function isSorted(values: string[]): boolean {
@@ -650,4 +706,16 @@ function isSorted(values: string[]): boolean {
 
 function serializeJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function aggregateStatusFromCounts(
+  counts: Record<(typeof ATTEMPT_WORKFLOW_STATUS_VALUES)[number], number>
+): (typeof TERMINAL_STATUS_VALUES)[number] {
+  const populated = ATTEMPT_WORKFLOW_STATUS_VALUES.filter((status) => counts[status] > 0);
+  if (populated.length === 0) return "unknown";
+  if (populated.length === 1) return populated[0]!;
+  for (const active of ["running", "paused", "pending"] as const) {
+    if (counts[active] > 0) return active;
+  }
+  return "mixed";
 }

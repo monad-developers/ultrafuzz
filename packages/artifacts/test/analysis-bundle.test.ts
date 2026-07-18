@@ -179,6 +179,25 @@ test("analysis bundle policy rejects non-allowlisted payload fields before creat
     /not allowlisted/u
   );
   assert.equal(fs.existsSync(output), false);
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: output,
+        payloads: { "evaluation-metrics": { ...metrics, row_count: 0 } }
+      }),
+    /schema validation failed/u
+  );
+  assert.equal(fs.existsSync(output), false);
+  const { terminal } = syntheticPayloads();
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: output,
+        payloads: { "terminal-status": { ...terminal, status: "failed" } }
+      }),
+    /schema validation failed/u
+  );
+  assert.equal(fs.existsSync(output), false);
 });
 
 test("analysis bundle validation rejects modified payload bytes", () => {
@@ -189,6 +208,16 @@ test("analysis bundle validation rejects modified payload bytes", () => {
 
   fs.appendFileSync(path.join(output, "data", "terminal-status.json"), " ", "utf8");
   assert.throws(() => validateAnalysisBundle(output), /checksum mismatch/u);
+});
+
+test("analysis bundle validation rejects directories outside the fixed layout", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-tree-"));
+  const output = path.join(root, "bundle");
+  const { terminal } = syntheticPayloads();
+  writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
+
+  fs.mkdirSync(path.join(output, "unexpected-empty-directory"));
+  assert.throws(() => validateAnalysisBundle(output), /directory outside the strict allowlist/u);
 });
 
 test("analysis bundle replacement refuses unrelated output directories", () => {
