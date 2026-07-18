@@ -34,6 +34,8 @@ describe("Modal storage layout", () => {
     const workerSource = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
     expect(runnerSource).toContain("timeoutMs: MODAL_SANDBOX_TIMEOUT_MS");
     expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
+    expect(workerSource).toMatch(/CLI,\s*"status",\s*runId/u);
+    expect(workerSource).toContain('setStatus("waiting-judge"');
   });
 
   it("maps only trusted /data children through the resolved Modal mount", () => {

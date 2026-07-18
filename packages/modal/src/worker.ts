@@ -29,6 +29,8 @@ const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
 const RECOVERY_MAX_RESETS = 32;
 const RECOVERY_POLL_MS = 60_000;
+const SCORE_RETRY_BASE_MS = 5 * 60_000;
+const SCORE_RETRY_MAX_MS = 15 * 60_000;
 
 interface DurableNodeState {
   status?: string;
@@ -106,17 +108,7 @@ async function main(): Promise<void> {
       throw new Error("benchmark row did not finish successfully");
     }
 
-    await setStatus("scoring", { eval_run_id: evalRunId });
-    const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
-    const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv));
-    await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
-      label: "eval score",
-      env: {
-        ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
-        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
-        ...(CONFIG.braintrust.judge_url === undefined ? {} : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
-      }
-    });
+    await scoreWithRetry(control, evalRunId);
     await setStatus("publishing", { eval_run_id: evalRunId });
     await runChecked(
       [
@@ -373,7 +365,7 @@ async function runEval(argv: string[], target: string): Promise<void> {
 
 async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
-    const state = await durableRunState(target);
+    const state = await synchronizedRunState(target);
     if (state?.status === "succeeded") {
       return true;
     }
@@ -411,7 +403,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
     }
     if (terminal?.status !== "failed") return false;
   }
-  return durableRunState(target).then((state) => state?.status === "succeeded");
+  return synchronizedRunState(target).then((state) => state?.status === "succeeded");
 }
 
 async function resumeWithResetCandidates(
@@ -461,17 +453,18 @@ function resetNodeCandidates(nodeId: string, node: DurableNodeState): string[] {
 async function waitForWorkflowTerminal(target: string): Promise<DurableRunState | undefined> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
   while (Date.now() < deadline) {
-    await sleep(RECOVERY_POLL_MS);
-    await reportProgress(target);
-    const state = await durableRunState(target);
+    const state = await synchronizedRunState(target);
+    await reportProgress(target, state);
     if (state === undefined) {
+      await sleep(RECOVERY_POLL_MS);
       continue;
     }
     if (isTerminalWorkflowStatus(state.status)) {
       return state;
     }
+    await sleep(RECOVERY_POLL_MS);
   }
-  return durableRunState(target);
+  return synchronizedRunState(target);
 }
 
 function isTerminalWorkflowStatus(status: string | undefined): boolean {
@@ -498,8 +491,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function reportProgress(target: string): Promise<void> {
-  const state = await durableRunState(target);
+async function reportProgress(target: string, knownState?: DurableRunState): Promise<void> {
+  const state = knownState ?? (await durableRunState(target));
   if (state === undefined) return;
   const counts: Record<string, number> = {};
   for (const node of Object.values(state.nodes ?? {})) {
@@ -507,6 +500,76 @@ async function reportProgress(target: string): Promise<void> {
     counts[status] = (counts[status] ?? 0) + 1;
   }
   await setStatus("running", { run_status: state.status, node_counts: counts });
+}
+
+async function synchronizedRunState(target: string): Promise<DurableRunState | undefined> {
+  const state = await durableRunState(target);
+  if (state?.run_id === undefined) return state;
+  await synchronizeWorkflowState(target, state.run_id);
+  return durableRunState(target);
+}
+
+async function synchronizeWorkflowState(target: string, runId: string): Promise<void> {
+  const child = spawn(
+    "node",
+    [CLI, "status", runId, "--project", target, "--window", "30", "--json"],
+    {
+      cwd: ULTRAFUZZ_ROOT,
+      env: process.env,
+      stdio: ["ignore", "ignore", "pipe"]
+    }
+  );
+  const exit = new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+  let stderr = "";
+  for await (const chunk of child.stderr) stderr = `${stderr}${String(chunk)}`.slice(-4_000);
+  const exitCode = await exit;
+  if (exitCode !== 0) {
+    await appendFile(
+      LOG_PATH,
+      `${new Date().toISOString()} [workflow status sync] exit=${exitCode}${
+        stderr.trim() === "" ? "" : ` ${stderr.trim()}`
+      }\n`
+    );
+  }
+}
+
+async function scoreWithRetry(control: string, evalRunId: string): Promise<void> {
+  const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
+  for (let attempt = 1; ; attempt++) {
+    await setStatus("scoring", { eval_run_id: evalRunId, score_attempt: attempt });
+    try {
+      const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
+      const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv));
+      await runChecked(
+        ["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"],
+        {
+          label: "eval score",
+          env: {
+            ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
+            ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
+            ...(CONFIG.braintrust.judge_url === undefined
+              ? {}
+              : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
+          }
+        }
+      );
+      return;
+    } catch (error) {
+      const delay = Math.min(SCORE_RETRY_MAX_MS, SCORE_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
+      if (Date.now() + delay >= deadline) throw error;
+      const retryAt = new Date(Date.now() + delay).toISOString();
+      await appendFile(LOG_PATH, `${new Date().toISOString()} [eval score] retry ${attempt} at ${retryAt}\n`);
+      await setStatus("waiting-judge", {
+        eval_run_id: evalRunId,
+        score_attempt: attempt,
+        next_retry_at: retryAt
+      });
+      await sleep(delay);
+    }
+  }
 }
 
 async function durableRunState(target: string): Promise<DurableRunState | undefined> {
