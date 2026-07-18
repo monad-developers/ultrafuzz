@@ -21,6 +21,7 @@ import {
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
+  type AppendNodeAttemptInput,
   type ArtifactProvenance,
   type NodeAttemptFailureCategory,
   type NodeAttemptId,
@@ -1087,7 +1088,13 @@ function appendTerminalTaskAttempts(input: {
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
-  const prepared = terminalAttempts.map((attempt) => {
+  const prepared: Array<{
+    retry: number;
+    appendInput: AppendNodeAttemptInput;
+    attemptId: NodeAttemptId;
+  }> = [];
+  const preparedById = new Map<string, (typeof prepared)[number]>();
+  for (const attempt of terminalAttempts) {
     const controllerInvocationId = dimensionId(
       "controller",
       attempt.controllerInvocationId ??
@@ -1133,12 +1140,21 @@ function appendTerminalTaskAttempts(input: {
       ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
       ...(failureCategory === undefined ? {} : { failureCategory })
     };
-    return {
+    const preparedAttempt = {
       retry: attempt.retry,
       appendInput,
       attemptId: createNodeAttemptLedgerEntry(input.layout, appendInput).attempt_id
     };
-  });
+    const duplicate = preparedById.get(preparedAttempt.attemptId);
+    if (duplicate !== undefined) {
+      if (JSON.stringify(duplicate.appendInput) !== JSON.stringify(preparedAttempt.appendInput)) {
+        throw new Error(`node attempt ${preparedAttempt.attemptId} was observed with conflicting terminal data`);
+      }
+      continue;
+    }
+    preparedById.set(preparedAttempt.attemptId, preparedAttempt);
+    prepared.push(preparedAttempt);
+  }
 
   const existingById = new Set(existing.map((entry) => entry.attempt_id));
   let parentAttemptId: NodeAttemptId | undefined;
@@ -1167,10 +1183,7 @@ function appendTerminalTaskAttempts(input: {
 }
 
 function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
-  const attempts = new Map<
-    string,
-    Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">
-  >();
+  const attempts: Array<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">> = [];
   for (const event of events) {
     const payload = event.payload ?? {};
     const retry = numberField(payload, "attempt");
@@ -1178,25 +1191,31 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
       continue;
     }
     const iteration = numberField(payload, "iteration") ?? 0;
-    const key = `${iteration}:${retry}`;
-    const current = attempts.get(key) ?? { retry, iteration };
-    applyAttemptDimensionFields(current, payload);
     const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
+    const terminal = terminalOutcomeForEvent(event);
+    let current = latestOpenWorkflowAttempt(attempts, retry, iteration);
     if (event.type === "NodeStarted" && timestamp !== undefined) {
-      current.startedAt ??= timestamp;
-    }
-    if (current.finishedAt === undefined && timestamp !== undefined) {
-      const terminal = terminalOutcomeForEvent(event);
-      if (terminal !== undefined) {
-        current.finishedAt = timestamp;
-        current.startedAt ??= timestamp;
-        current.outcome = terminal.outcome;
-        current.failureCategory = terminal.failureCategory;
+      if (current === undefined || current.startedAt !== undefined) {
+        current = { retry, iteration };
+        attempts.push(current);
       }
+      applyAttemptDimensionFields(current, payload);
+      current.startedAt = timestamp;
+      continue;
     }
-    attempts.set(key, current);
+    if (current === undefined) {
+      current = { retry, iteration };
+      attempts.push(current);
+    }
+    applyAttemptDimensionFields(current, payload);
+    if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
+      current.finishedAt = timestamp;
+      current.startedAt ??= timestamp;
+      current.outcome = terminal.outcome;
+      current.failureCategory = terminal.failureCategory;
+    }
   }
-  return [...attempts.values()]
+  return attempts
     .filter(
       (attempt): attempt is TerminalWorkflowAttempt =>
         attempt.startedAt !== undefined && attempt.finishedAt !== undefined && attempt.outcome !== undefined
@@ -1205,6 +1224,20 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
       (left, right) =>
         left.finishedAt.localeCompare(right.finishedAt) || left.iteration - right.iteration || left.retry - right.retry
     );
+}
+
+function latestOpenWorkflowAttempt(
+  attempts: ReadonlyArray<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">>,
+  retry: number,
+  iteration: number
+): (Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">) | undefined {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index]!;
+    if (attempt.retry === retry && attempt.iteration === iteration && attempt.finishedAt === undefined) {
+      return attempt;
+    }
+  }
+  return undefined;
 }
 
 function terminalOutcomeForEvent(

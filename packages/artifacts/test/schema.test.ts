@@ -143,6 +143,26 @@ test("node attempt ledger schema keeps failure categories separate from diagnost
   };
   assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
   assert.equal(validateNodeAttemptLedgerEntry({ ...entry, diagnostic: { message: "raw failure" } }).ok, false);
+  assert.equal(
+    validateNodeAttemptLedgerEntry({
+      ...entry,
+      lifecycle: {
+        started_at: "2026-07-18T10:00:00.000+02:00",
+        finished_at: "2026-07-18T08:30:00.000Z"
+      }
+    }).ok,
+    true
+  );
+  assert.equal(
+    validateNodeAttemptLedgerEntry({
+      ...entry,
+      lifecycle: {
+        started_at: "2026-07-18T10:00:00.000+02:00",
+        finished_at: "2026-07-18T07:59:59.000Z"
+      }
+    }).ok,
+    false
+  );
 });
 
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {

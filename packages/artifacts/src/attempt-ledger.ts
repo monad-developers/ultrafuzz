@@ -162,7 +162,7 @@ export const nodeAttemptLedgerEntrySchema = z
     failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional()
   })
   .superRefine((entry, ctx) => {
-    if (entry.lifecycle.finished_at < entry.lifecycle.started_at) {
+    if (Date.parse(entry.lifecycle.finished_at) < Date.parse(entry.lifecycle.started_at)) {
       ctx.addIssue({
         code: "custom",
         path: ["lifecycle", "finished_at"],
