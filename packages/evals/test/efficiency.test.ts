@@ -120,9 +120,23 @@ describe("terminal eval efficiency", () => {
     };
     state.nodes.waiting = {
       node_id: "waiting",
-      status: "pending",
+      status: "skipped",
       retry_count: 0,
-      timed_out: false
+      timed_out: false,
+      finished_at: WORKFLOW_FINISHED
+    };
+    state.nodes.aggregate = {
+      node_id: "aggregate",
+      status: "succeeded",
+      retry_count: 0,
+      timed_out: false,
+      finished_at: WORKFLOW_FINISHED,
+      provenance: {
+        workflow: {
+          run_id: "generated-workflow",
+          aggregate_attempt_statuses: ["succeeded", "succeeded"]
+        }
+      }
     };
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
 
@@ -130,6 +144,26 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.runtime).toEqual({ status: "complete", reason: null });
     expect(summary.efficiency.active_time_seconds).toBe(7);
     expect(summary.efficiency.wait_time_seconds).toBe(3);
+  });
+
+  it("does not report complete active time when retry attempt intervals are unavailable", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-retried-node-"));
+    writeTerminalRun(runRoot);
+    const statePath = path.join(runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      nodes: Record<string, { retry_count: number }>;
+    };
+    state.nodes.first!.retry_count = 1;
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.runtime).toEqual({
+      status: "unavailable",
+      reason: "node-attempt-timestamps-unavailable"
+    });
+    expect(summary.efficiency.wall_time_seconds).toBeNull();
+    expect(summary.efficiency.active_time_seconds).toBeNull();
+    expect(summary.efficiency.wait_time_seconds).toBeNull();
   });
 
   it("does not undercount active time when an executed terminal node is missing timestamps", () => {
@@ -214,5 +248,38 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.usage).toEqual({ status: "unavailable", reason: "usage-incomplete" });
     expect(summary.efficiency.cost_usd).toBeNull();
     expect(summary.efficiency.cost).toEqual({ status: "unavailable", reason: "usage-incomplete" });
+  });
+
+  it("does not publish terminal usage or cost completeness while the workflow is still running", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-running-accounting-"));
+    writeTerminalRun(runRoot);
+    const statePath = path.join(runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      status: string;
+      finished_at?: string;
+    };
+    state.status = "running";
+    delete state.finished_at;
+    fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      JSON.stringify({
+        accounting: {
+          cumulative: {
+            total_tokens: 123,
+            estimated_spend_usd: 0.456,
+            partial_pricing: false
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.lifecycle.workflow).toMatchObject({ status: "running", terminal: false });
+    expect(summary.efficiency.total_tokens).toBeNull();
+    expect(summary.efficiency.cost_usd).toBeNull();
+    expect(summary.efficiency.usage).toEqual({ status: "unavailable", reason: "workflow-not-terminal" });
+    expect(summary.efficiency.cost).toEqual({ status: "unavailable", reason: "workflow-not-terminal" });
   });
 });

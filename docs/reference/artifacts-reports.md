@@ -254,8 +254,12 @@ durable `state.json` and cumulative `run.json` accounting. Each row in
 typed `efficiency` block with wall, active, and wait seconds, total tokens,
 cost in USD, and independent runtime/usage/cost completeness. Unavailable
 values are `null` with a stable reason; partial pricing is labeled separately
-from complete cost. Active time is the union of node execution intervals, so
-parallel nodes are not double-counted; wait time is wall time minus that union.
+from complete cost. Usage and cost remain unavailable until the durable workflow
+is terminal. Active time is the union of node execution intervals, so parallel
+nodes are not double-counted; wait time is wall time minus that union. Runs with
+retries remain typed as unavailable when the durable state does not retain every
+attempt interval. The legacy `runtime_seconds` and `cost_estimate` row fields
+remain aliases of the structured wall-time and cost values for compatibility.
 The same fields are rendered from that structure into `summary.md`, which is
 read by `ultrafuzz eval report`.
 

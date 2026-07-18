@@ -44,7 +44,7 @@ export function summarizeEvalTerminal(record: EvalRunRecord | undefined): EvalTe
     lifecycle,
     efficiency: {
       ...runtimeEfficiency(state, lifecycle.workflow.status),
-      ...accountingEfficiency(record?.ultrafuzz_run_root)
+      ...accountingEfficiency(record?.ultrafuzz_run_root, lifecycle.workflow.status)
     }
   };
 }
@@ -112,16 +112,19 @@ function runtimeEfficiency(
 }
 
 function accountingEfficiency(
-  runRoot: string | undefined
+  runRoot: string | undefined,
+  workflowStatus: EvalWorkflowStatus
 ): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
+  if (workflowStatus === "unavailable") {
+    return unavailableAccounting("workflow-state-unavailable");
+  }
+  if (!isTerminalWorkflowStatus(workflowStatus)) {
+    return unavailableAccounting("workflow-not-terminal");
+  }
+
   const cumulative = readCumulativeAccounting(runRoot);
   if (cumulative === undefined) {
-    return {
-      total_tokens: null,
-      cost_usd: null,
-      usage: unavailable("accounting-unavailable"),
-      cost: unavailable("accounting-unavailable")
-    };
+    return unavailableAccounting("accounting-unavailable");
   }
 
   const totalTokens = nonNegativeNumber(cumulative.total_tokens ?? cumulative.totalTokens);
@@ -158,11 +161,14 @@ function activeMilliseconds(
     if (!isRecord(node) || typeof node.status !== "string") {
       return { ok: false, reason: "node-timestamps-invalid" };
     }
-    const started = timestamp(node.started_at);
-    const finished = timestamp(node.finished_at);
-    if (started.kind === "missing" && finished.kind === "missing" && NON_EXECUTING_NODE_STATUSES.has(node.status)) {
+    if (NON_EXECUTING_NODE_STATUSES.has(node.status) || isAggregateNode(node)) {
       continue;
     }
+    if (nonNegativeNumber(node.retry_count) !== 0) {
+      return { ok: false, reason: "node-attempt-timestamps-unavailable" };
+    }
+    const started = timestamp(node.started_at);
+    const finished = timestamp(node.finished_at);
     if (started.kind === "missing" || finished.kind === "missing") {
       return { ok: false, reason: "node-timestamps-unavailable" };
     }
@@ -251,6 +257,17 @@ function unavailableRuntime(
   };
 }
 
+function unavailableAccounting(
+  reason: EvalEfficiencyReason
+): Pick<EvalEfficiency, "total_tokens" | "cost_usd" | "usage" | "cost"> {
+  return {
+    total_tokens: null,
+    cost_usd: null,
+    usage: unavailable(reason),
+    cost: unavailable(reason)
+  };
+}
+
 function complete(): EvalEfficiencyCompleteness {
   return { status: "complete", reason: null };
 }
@@ -277,4 +294,10 @@ function booleanValue(value: unknown): boolean | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAggregateNode(node: Record<string, unknown>): boolean {
+  const provenance = isRecord(node.provenance) ? node.provenance : undefined;
+  const workflow = provenance !== undefined && isRecord(provenance.workflow) ? provenance.workflow : undefined;
+  return workflow !== undefined && Array.isArray(workflow.aggregate_attempt_statuses);
 }

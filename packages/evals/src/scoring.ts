@@ -516,6 +516,8 @@ async function scoreFindings(input: {
     severity_accuracy: severityChecks === 0 ? null : roundMetric(severityMatches / severityChecks),
     true_positive_accuracy: input.findings.length === 0 ? 0 : roundMetric(truePositives / input.findings.length),
     duplicate_rate: judgedFindings === 0 ? 0 : roundMetric(duplicates / judgedFindings),
+    runtime_seconds: terminal.efficiency.wall_time_seconds,
+    cost_estimate: terminal.efficiency.cost_usd,
     lifecycle: terminal.lifecycle,
     efficiency: terminal.efficiency
   };

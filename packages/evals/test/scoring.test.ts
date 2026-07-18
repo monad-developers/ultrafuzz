@@ -256,6 +256,8 @@ describe("deterministic scorer math", () => {
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
     expect(summary.rows[0]).toMatchObject({
+      runtime_seconds: 10,
+      cost_estimate: 0.456,
       lifecycle: {
         launcher: { status: "succeeded", finished_at: "2026-07-13T00:00:01.000Z" },
         workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-13T00:00:12.000Z" }
