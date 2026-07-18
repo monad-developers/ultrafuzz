@@ -1917,12 +1917,26 @@ test("syncRun records unavailable spend when workflow token events are unpriced"
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     accounting?: {
-      current?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
+      current?: {
+        tokens_used?: string;
+        estimated_spend?: string;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
+        partial_pricing?: boolean;
+      };
       cumulative?: { tokens_used?: string; estimated_spend?: string; partial_pricing?: boolean };
     };
   };
   assert.equal(metadata.accounting?.current?.tokens_used, "30");
   assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(metadata.accounting?.current?.usage_incomplete_reasons, [
+    {
+      code: "component-usage-unavailable",
+      component: "cache_read",
+      model: "gpt-test"
+    }
+  ]);
   assert.equal(metadata.accounting?.current?.partial_pricing, true);
   assert.equal(metadata.accounting?.cumulative?.tokens_used, "30");
   assert.equal(metadata.accounting?.cumulative?.estimated_spend, "unavailable");
@@ -2129,6 +2143,7 @@ test("syncRun prices independent usage components when cache reads exceed uncach
   ) as typeof metadata;
   assert.equal(resyncedMetadata.accounting?.current?.estimated_spend, "$1.11");
   assert.deepEqual(resyncedMetadata.accounting?.current, metadata.accounting?.current);
+  assert.deepEqual(resyncedMetadata.accounting?.cumulative, metadata.accounting?.cumulative);
   assert.equal(resyncedMetadata.accounting?.updated_at, metadata.accounting?.updated_at);
 });
 

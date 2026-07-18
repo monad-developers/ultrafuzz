@@ -187,8 +187,9 @@ components with a positive known rate. Per-component amounts are recorded in
 `component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
 events. `usage_complete` and `pricing_complete` are independent: their typed
 `*_incomplete_reasons` arrays distinguish missing or estimated usage from a
-missing component rate. `partial_pricing` remains the backward-compatible
-inverse of pricing completeness.
+missing component rate. Usage completeness is derived from reported component
+evidence regardless of whether catalog pricing is available. `partial_pricing`
+remains the backward-compatible inverse of pricing completeness.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

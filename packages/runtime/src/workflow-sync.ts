@@ -443,8 +443,7 @@ function accountingFromWorkflowEvents(
       cacheReadTokens,
       cacheWriteTokens: cacheWriteTokens ?? 0,
       reasoningTokens: reasoningTokens ?? 0,
-      cacheReadRatio,
-      modelPricing
+      cacheReadRatio
     });
     const componentTokenCount = sumUsageComponents(normalizedUsage.components);
     const tokenCount = Math.max(explicitTotal ?? 0, componentTokenCount);
@@ -749,7 +748,6 @@ function normalizeUsageComponents(input: {
   cacheWriteTokens: number;
   reasoningTokens: number;
   cacheReadRatio: number | undefined;
-  modelPricing: ReadonlyMap<string, ModelPricing>;
 }): {
   components: NormalizedUsageComponents;
   incompleteReasons: UsageIncompleteReason[];
@@ -758,17 +756,12 @@ function normalizeUsageComponents(input: {
 } {
   const uncachedInputTokens = Math.max(input.inputTokens, 0);
   const cacheWriteTokens = Math.max(input.cacheWriteTokens, 0);
-  const basePricing = pricingForModel(input.model, input.modelPricing);
-  const pricing =
-    basePricing === undefined
-      ? undefined
-      : pricingForContext(
-          basePricing,
-          uncachedInputTokens + cacheWriteTokens + Math.max(input.cacheReadTokens ?? 0, 0)
-        );
-  const cacheReadUsageUnknown =
-    input.cacheReadTokens === undefined && uncachedInputTokens > 0 && pricing?.cachedInputUsdPerMillion !== undefined;
-  const cacheReadPricingEstimated = cacheReadUsageUnknown && input.cacheReadRatio !== undefined;
+  const outputTokens = Math.max(input.outputTokens, 0);
+  const reasoningTokens = Math.max(input.reasoningTokens, 0);
+  const hasTokenActivity = uncachedInputTokens > 0 || cacheWriteTokens > 0 || outputTokens > 0 || reasoningTokens > 0;
+  const cacheReadUsageUnknown = input.cacheReadTokens === undefined && hasTokenActivity;
+  const cacheReadPricingEstimated =
+    cacheReadUsageUnknown && uncachedInputTokens > 0 && input.cacheReadRatio !== undefined;
   const incompleteReasons: UsageIncompleteReason[] = [];
   if (cacheReadUsageUnknown) {
     incompleteReasons.push({
@@ -782,8 +775,8 @@ function normalizeUsageComponents(input: {
       uncached_input: uncachedInputTokens,
       cache_read: Math.max(input.cacheReadTokens ?? uncachedInputTokens * (input.cacheReadRatio ?? 0), 0),
       cache_write: cacheWriteTokens,
-      output: Math.max(input.outputTokens, 0),
-      reasoning: Math.max(input.reasoningTokens, 0)
+      output: outputTokens,
+      reasoning: reasoningTokens
     },
     incompleteReasons,
     cacheReadPricingEstimated,
