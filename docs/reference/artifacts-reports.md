@@ -54,7 +54,7 @@ rendered prompt paths, and validation posture.
 
 ## State
 
-`state.json` has schema version `1.0`.
+`state.json` has schema version `1.1`.
 
 Run statuses are:
 
@@ -79,9 +79,21 @@ Node statuses are:
 - `reused-from-prior-run`
 - `invalidated`
 
+Every nonterminal node records `wait_since`, a typed `wait_reason`, and a typed
+`next_eligible_action`. Wait reasons distinguish ready work, capacity and
+dependency waits, retry backoff, external gates, controller loss, and active
+execution.
+
+Run state records the absolute `workflow_deadline_at`, `last_transition_at`, a
+renewable `controller_lease`, and a concurrency snapshot. Concurrency evidence
+includes requested and peak effective concurrency, ready-queue depth, active
+work, and cumulative queued, active, and idle durations. These fields contain
+lifecycle metadata only; raw runner logs and host identifiers are not copied
+into product artifacts.
+
 Node state can also record logical node ID, artifact directory, required
-artifacts, attempt index, loop index, model profile ID, model name, model
-index, timestamps, last error, and provenance.
+artifacts, attempt index, loop index, model profile ID, model name, model index,
+timestamps, last error, and provenance.
 
 ## Node Artifacts
 

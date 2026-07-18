@@ -61,6 +61,8 @@ const resolvedConfigValidationSchema = z
         maxParallelAgents: positiveIntegerSchema,
         maxParallelNodes: positiveIntegerSchema,
         defaultTimeoutSeconds: timeoutSecondsSchema,
+        workflowDeadlineSeconds: timeoutSecondsSchema,
+        controllerLeaseSeconds: timeoutSecondsSchema,
         workspaceMode: z.literal("git-worktree")
       })
       .passthrough(),
@@ -133,7 +135,9 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     max_parallel_nodes: clone.run.maxParallelNodes,
     keep_workspaces: clone.run.keepWorkspaces,
     workspace_mode: clone.run.workspaceMode,
-    default_timeout_seconds: clone.run.defaultTimeoutSeconds
+    default_timeout_seconds: clone.run.defaultTimeoutSeconds,
+    workflow_deadline_seconds: clone.run.workflowDeadlineSeconds,
+    controller_lease_seconds: clone.run.controllerLeaseSeconds
   });
   pushTable(lines, "models", {
     default: clone.models.default === DEFAULT_MODEL_PROFILE_ID ? undefined : clone.models.default,
@@ -452,6 +456,8 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
     case "schema_version":
       return "CONFIG_SCHEMA_VERSION_EMPTY";
     case "run.default_timeout_seconds":
+    case "run.workflow_deadline_seconds":
+    case "run.controller_lease_seconds":
     case "invariants.invariant_testing_fuzzer_timeout":
       return "CONFIG_TIMEOUT_INVALID";
     case "run.workspace_mode":
@@ -507,6 +513,10 @@ function configPathSegment(segment: string): string {
       return "max_parallel_nodes";
     case "defaultTimeoutSeconds":
       return "default_timeout_seconds";
+    case "workflowDeadlineSeconds":
+      return "workflow_deadline_seconds";
+    case "controllerLeaseSeconds":
+      return "controller_lease_seconds";
     case "workspaceMode":
       return "workspace_mode";
     case "propertyPriorityThreshold":

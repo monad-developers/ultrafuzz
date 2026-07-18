@@ -15,6 +15,7 @@ import {
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
+  writeRunState,
   type ArtifactProvenance,
   type NodeState,
   type NodeStatus,
@@ -40,8 +41,14 @@ import {
   type SyncRunValue
 } from "./types.js";
 import { diagnosticFromError, readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
-import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
+import {
+  requestSmithersCancel,
+  runSmithersInspectionCommand,
+  smithersDiagnostic,
+  type SmithersCommandSnapshot
+} from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
+import { projectWorkflowControlState } from "./workflow-control.js";
 
 interface StoredWorkflowTask {
   attemptId: string;
@@ -206,6 +213,7 @@ export async function synchronizeLinkedWorkflowRun(
   if (!loaded.ok) {
     return { ok: false, diagnostics: loaded.diagnostics };
   }
+  const previousControlState = structuredClone(readRunState(layout));
 
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
@@ -269,16 +277,55 @@ export async function synchronizeLinkedWorkflowRun(
   if (runStatusChanged) {
     updateRunStatus(layout, finalStatus);
   }
-  if (runStatusChanged || syncResult.changed || accountingResult.changed) {
+  const observedAtMs = Date.now();
+  const control = projectWorkflowControlState({
+    previousState: previousControlState,
+    state: readRunState(layout),
+    graph: loaded.graph,
+    tasks: loaded.tasks,
+    workflowStates: syncResult.workflowStates,
+    workflowState: inspect.runState ?? inspect.runStatus,
+    nowMs: observedAtMs
+  });
+  let deadlineApplied = false;
+  if (control.deadlineExceeded) {
+    try {
+      await requestSmithersCancel({
+        smithersRunId: evidence.smithersRunId,
+        projectRoot,
+        env: input.env
+      });
+      control.state.status = "timed-out";
+      control.state.finished_at = new Date(observedAtMs).toISOString();
+      control.state.last_transition_at = new Date(observedAtMs).toISOString();
+      deadlineApplied = true;
+      appendEvent(layout, {
+        eventType: "workflow-deadline-exceeded",
+        status: "timed-out",
+        payload: {
+          workflow_run_id: evidence.smithersRunId,
+          deadline_at: control.state.workflow_deadline_at
+        }
+      });
+    } catch (error) {
+      diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
+    }
+  }
+  if (control.changed || deadlineApplied) {
+    writeRunState(layout, control.state);
+  }
+  if (runStatusChanged || syncResult.changed || accountingResult.changed || control.transitioned || deadlineApplied) {
     appendEvent(layout, {
       eventType: "workflow-synced",
-      status: finalStatus,
+      status: deadlineApplied ? "timed-out" : finalStatus,
       payload: {
         workflow_run_id: evidence.smithersRunId,
         workflow_status: inspect.runStatus,
         workflow_state: inspect.runState,
         synced_nodes: syncResult.syncedNodes,
-        accounting_available: accountingResult.available
+        accounting_available: accountingResult.available,
+        recovery_due: control.recoveryDue,
+        deadline_exceeded: deadlineApplied
       }
     });
   }
@@ -780,9 +827,16 @@ function synchronizeTasks(input: {
   workflowRunId: string;
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
-}): { diagnostics: RuntimeDiagnostic[]; nodeStatuses: Map<string, NodeStatus>; syncedNodes: number; changed: boolean } {
+}): {
+  diagnostics: RuntimeDiagnostic[];
+  nodeStatuses: Map<string, NodeStatus>;
+  workflowStates: Map<string, string>;
+  syncedNodes: number;
+  changed: boolean;
+} {
   const diagnostics: RuntimeDiagnostic[] = [];
   const nodeStatuses = new Map<string, NodeStatus>();
+  const workflowStates = new Map<string, string>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
@@ -827,6 +881,7 @@ function synchronizeTasks(input: {
     diagnostics.push(...finalization.diagnostics);
     const patchStatus = finalization.status;
     nodeStatuses.set(task.attemptId, patchStatus);
+    workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
     const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteStatuses.push(patchStatus);
     taskStatusesByConcreteNode.set(task.concreteNodeId, concreteStatuses);
@@ -903,7 +958,7 @@ function synchronizeTasks(input: {
     }
   }
 
-  return { diagnostics, nodeStatuses, syncedNodes, changed };
+  return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
 }
 
 function finalizeSucceededTask(input: {
@@ -1218,8 +1273,8 @@ function finalRunStatus(
       ? "succeeded"
       : "failed";
   }
-  if (["stale", "orphaned"].includes(workflowStatus)) {
-    return "failed";
+  if (["stale", "orphaned", "recovering"].includes(workflowStatus)) {
+    return "running";
   }
   return currentStatus === "pending" ? "running" : currentStatus;
 }

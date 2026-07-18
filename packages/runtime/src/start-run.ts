@@ -83,6 +83,7 @@ export async function startRun(input: StartRunInput) {
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
+      controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
       env: input.env,
       environmentVariableNames: agentEnvironmentVariableNames(
         plan.resolved_config,
@@ -208,6 +209,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
             }
           : undefined,
       keepWorkspaces: resolved.config.run.keepWorkspaces,
+      controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
       env: input.env,
       environmentVariableNames: agentEnvironmentVariableNames(
         resolved.config,

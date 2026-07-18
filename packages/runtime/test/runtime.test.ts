@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import type { RunState } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
@@ -1134,6 +1135,18 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   };
   assert.equal(submission.smithers_run_id, "ultrafuzz-smithers-run");
   assert.ok(submission.command?.includes(path.join(project, ".smithers", "workflows", "ultrafuzz-smithers-run.tsx")));
+  assert.ok(submission.command?.includes("--supervise"));
+  const staleThresholdIndex = submission.command?.indexOf("--supervise-stale-threshold") ?? -1;
+  assert.deepEqual(submission.command?.slice(staleThresholdIndex, staleThresholdIndex + 4), [
+    "--supervise-stale-threshold",
+    "30s",
+    "--supervise-max-concurrent",
+    "1"
+  ]);
+  const durableState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(durableState.workflow_deadline_at !== undefined, true);
+  assert.equal(durableState.concurrency.requested_concurrency, 2);
+  assert.equal(durableState.controller_lease.status, "active");
 });
 
 test("getRunHealth adapts the workflow health summary to the Ultrafuzz run", async () => {
@@ -2515,6 +2528,39 @@ test("syncRun keeps reset workflow nodes pending while the workflow is running",
   assert.equal(state.nodes?.["project-discovery"]?.timed_out, false);
   assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
   assert.equal(state.nodes?.["project-discovery"]?.finished_at, undefined);
+});
+
+test("syncRun cancels a nonterminal workflow at its durable workflow deadline", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-deadline-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 0 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "deadline-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  state.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const sync = await syncRun({ projectRoot: project, runId: "deadline-run", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "timed-out");
+  const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.equal(persisted.status, "timed-out");
+  assert.equal(typeof persisted.finished_at, "string");
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /cancel ultrafuzz-deadline-run --format json/u);
+  assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /workflow-deadline-exceeded/u);
 });
 
 test("syncRun records model fan-out attempts independently", async () => {

@@ -4,7 +4,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 
 import { readJsonFile, validateSafeId, writeJsonDurable } from "./safe-paths.js";
 
-export const STATE_SCHEMA_VERSION = "1.0";
+export const STATE_SCHEMA_VERSION = "1.1";
 
 export const RUN_STATE_STATUSES = [
   "pending",
@@ -33,6 +33,47 @@ export const NODE_STATE_STATUSES = [
 
 export type NodeStatus = (typeof NODE_STATE_STATUSES)[number];
 
+export const TERMINAL_NODE_STATE_STATUSES = [
+  "succeeded",
+  "failed",
+  "skipped",
+  "timed-out",
+  "reused-from-prior-run",
+  "invalidated"
+] as const satisfies readonly NodeStatus[];
+
+export const NODE_WAIT_REASONS = [
+  "ready",
+  "capacity",
+  "dependency",
+  "backoff",
+  "approval",
+  "event",
+  "timer",
+  "controller-loss",
+  "active"
+] as const;
+
+export type NodeWaitReason = (typeof NODE_WAIT_REASONS)[number];
+
+export const NODE_NEXT_ELIGIBLE_ACTIONS = [
+  "dispatch",
+  "capacity-available",
+  "dependency-complete",
+  "retry",
+  "approve",
+  "signal",
+  "timer-fire",
+  "controller-takeover",
+  "task-complete"
+] as const;
+
+export type NodeNextEligibleAction = (typeof NODE_NEXT_ELIGIBLE_ACTIONS)[number];
+
+export const CONTROLLER_LEASE_STATUSES = ["active", "expired", "recovering"] as const;
+
+export type ControllerLeaseStatus = (typeof CONTROLLER_LEASE_STATUSES)[number];
+
 export interface NodeStateInput {
   id: string;
   logicalNodeId?: string;
@@ -44,6 +85,9 @@ export interface NodeStateInput {
   modelId?: string;
   model?: string;
   modelIndex?: number;
+  waitReason?: NodeWaitReason;
+  nextEligibleAction?: NodeNextEligibleAction;
+  waitSince?: string;
 }
 
 export interface NodeState {
@@ -62,7 +106,28 @@ export interface NodeState {
   started_at?: string;
   finished_at?: string;
   last_error?: string;
+  wait_since?: string;
+  wait_reason?: NodeWaitReason;
+  next_eligible_action?: NodeNextEligibleAction;
   provenance?: Record<string, unknown>;
+}
+
+export interface ControllerLeaseState {
+  status: ControllerLeaseStatus;
+  renewed_at: string;
+  expires_at: string;
+  recovery_attempts: number;
+}
+
+export interface RunConcurrencyState {
+  requested_concurrency: number;
+  effective_concurrency: number;
+  ready_queue_depth: number;
+  active_work: number;
+  queued_duration_ms: number;
+  active_duration_ms: number;
+  idle_duration_ms: number;
+  observed_at: string;
 }
 
 export interface RunState {
@@ -76,6 +141,10 @@ export interface RunState {
   source_run_id?: string;
   started_at?: string;
   finished_at?: string;
+  workflow_deadline_at?: string;
+  last_transition_at: string;
+  controller_lease: ControllerLeaseState;
+  concurrency: RunConcurrencyState;
   provenance?: Record<string, unknown>;
 }
 
@@ -85,6 +154,9 @@ export interface CreateInitialRunStateInput {
   graphFingerprint?: string;
   configFingerprint?: string;
   createdAt?: string;
+  workflowDeadlineSeconds?: number;
+  controllerLeaseSeconds?: number;
+  requestedConcurrency?: number;
   nodes?: NodeStateInput[];
   provenance?: Record<string, unknown>;
 }
@@ -96,10 +168,14 @@ export interface RunLayoutStateLike {
 
 export function createInitialRunState(input: CreateInitialRunStateInput): RunState {
   const runId = validateSafeId(input.runId, "run ID");
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const createdAtMs = Date.parse(createdAt);
+  const controllerLeaseSeconds = positiveInteger(input.controllerLeaseSeconds ?? 30, "controller lease seconds");
+  const requestedConcurrency = positiveInteger(input.requestedConcurrency ?? 1, "requested concurrency");
   const nodes: Record<string, NodeState> = {};
   for (const node of input.nodes ?? []) {
     const nodeId = validateSafeId(node.id, "node ID");
-    nodes[nodeId] = createNodeState(node);
+    nodes[nodeId] = createNodeState({ ...node, waitSince: node.waitSince ?? createdAt });
   }
 
   const state: RunState = {
@@ -108,9 +184,32 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
     status: "pending",
     graph_fingerprint: input.graphFingerprint ?? "",
     config_fingerprint: input.configFingerprint ?? "",
-    created_at: input.createdAt ?? new Date().toISOString(),
-    nodes
+    created_at: createdAt,
+    nodes,
+    last_transition_at: createdAt,
+    controller_lease: {
+      status: "active",
+      renewed_at: createdAt,
+      expires_at: timestampAfter(createdAtMs, controllerLeaseSeconds),
+      recovery_attempts: 0
+    },
+    concurrency: {
+      requested_concurrency: requestedConcurrency,
+      effective_concurrency: 0,
+      ready_queue_depth: 0,
+      active_work: 0,
+      queued_duration_ms: 0,
+      active_duration_ms: 0,
+      idle_duration_ms: 0,
+      observed_at: createdAt
+    }
   };
+  if (input.workflowDeadlineSeconds !== undefined) {
+    state.workflow_deadline_at = timestampAfter(
+      createdAtMs,
+      positiveInteger(input.workflowDeadlineSeconds, "workflow deadline seconds")
+    );
+  }
   if (input.sourceRunId !== undefined) {
     state.source_run_id = validateSafeId(input.sourceRunId, "source run ID");
   }
@@ -152,6 +251,11 @@ export function createNodeState(input: NodeStateInput): NodeState {
   if (input.modelIndex !== undefined) {
     state.model_index = input.modelIndex;
   }
+  if (!isTerminalNodeStatus(state.status)) {
+    state.wait_since = input.waitSince ?? new Date().toISOString();
+    state.wait_reason = input.waitReason ?? "ready";
+    state.next_eligible_action = input.nextEligibleAction ?? "dispatch";
+  }
   return state;
 }
 
@@ -184,6 +288,9 @@ export function updateRunStatus(
   timestamp = new Date().toISOString()
 ): RunState {
   const state = readRunState(target);
+  if (state.status !== status) {
+    state.last_transition_at = timestamp;
+  }
   state.status = status;
   if (status === "running" && state.started_at === undefined) {
     state.started_at = timestamp;
@@ -204,15 +311,51 @@ export function updateNodeState(
 ): RunState {
   const safeNodeId = validateSafeId(nodeId, "node ID");
   const state = readRunState(target);
-  state.nodes[safeNodeId] = {
-    ...(state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId })),
+  const previous = state.nodes[safeNodeId] ?? createNodeState({ id: safeNodeId });
+  const next: NodeState = {
+    ...previous,
     ...patch,
     node_id: safeNodeId
   };
+  if (isTerminalNodeStatus(next.status)) {
+    delete next.wait_since;
+    delete next.wait_reason;
+    delete next.next_eligible_action;
+  } else {
+    next.wait_since ??= new Date().toISOString();
+    next.wait_reason ??= "ready";
+    next.next_eligible_action ??= "dispatch";
+  }
+  if (
+    previous.status !== next.status ||
+    previous.wait_reason !== next.wait_reason ||
+    previous.next_eligible_action !== next.next_eligible_action
+  ) {
+    state.last_transition_at = new Date().toISOString();
+  }
+  state.nodes[safeNodeId] = next;
   writeRunState(target, state);
   return state;
 }
 
 function resolveStatePath(target: RunLayoutStateLike | string): string {
   return typeof target === "string" ? target : target.statePath;
+}
+
+export function isTerminalNodeStatus(status: NodeStatus): boolean {
+  return TERMINAL_NODE_STATE_STATUSES.includes(status as (typeof TERMINAL_NODE_STATE_STATUSES)[number]);
+}
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
+function timestampAfter(startMs: number, seconds: number): string {
+  if (!Number.isFinite(startMs)) {
+    throw new Error("createdAt must be a valid timestamp");
+  }
+  return new Date(startMs + seconds * 1_000).toISOString();
 }
