@@ -29,6 +29,7 @@ export interface RunLayout {
   graphFingerprintPath: string;
   statePath: string;
   eventsPath: string;
+  attemptLedgerPath: string;
   eventsIndexDir: string;
   workspacesPath: string;
 }
@@ -130,6 +131,9 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   if ((input.overwrite ?? false) || !fs.existsSync(layout.eventsPath)) {
     writeFileDurable(layout.eventsPath, "");
   }
+  if ((input.overwrite ?? false) || !fs.existsSync(layout.attemptLedgerPath)) {
+    writeFileDurable(layout.attemptLedgerPath, "");
+  }
   writeJsonIfNeeded(
     layout.workspacesPath,
     { schema_version: RUN_LAYOUT_SCHEMA_VERSION, run_id: runId, workspaces: [] },
@@ -168,6 +172,7 @@ export function layoutForRunRoot(root: string, runId = path.basename(root)): Run
     graphFingerprintPath: path.join(absoluteRoot, "graph.fingerprint"),
     statePath: path.join(absoluteRoot, "state.json"),
     eventsPath: path.join(absoluteRoot, "events.jsonl"),
+    attemptLedgerPath: path.join(absoluteRoot, "attempts.jsonl"),
     eventsIndexDir: path.join(absoluteRoot, "events.index"),
     workspacesPath: path.join(absoluteRoot, "workspaces.json")
   };

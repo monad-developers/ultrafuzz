@@ -21,6 +21,7 @@ export default class Inspect extends Command {
           `Run: ${status.run_id}`,
           `Status: ${status.status}`,
           `Events: ${status.events}`,
+          `Attempts: ${status.attempts.executed} executed, ${status.attempts.reused} reused`,
           `Root: ${status.run_root}`,
           status.workflow_ids.length > 0 ? `Workflow: ${status.workflow_ids.join(", ")}` : "Workflow: none",
           ""

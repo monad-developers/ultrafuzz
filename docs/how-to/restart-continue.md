@@ -35,6 +35,10 @@ for the same Ultrafuzz run. When the linked workflow is still active (running,
 queued, retrying, or waiting), resume keeps the existing run attached instead
 of submitting a duplicate continuation.
 
+Completed node attempts remain in `attempts.jsonl` across every continuation.
+`ultrafuzz inspect` derives its executed and reused attempt counts from that
+append-only ledger rather than from a mutable lifecycle counter.
+
 Use `--reset-node` to retry one failed workflow node and reset its dependents
 before the linked run continues. The reset is recorded in run evidence before
 the continuation launches; if the continuation fails to start, rerun the same

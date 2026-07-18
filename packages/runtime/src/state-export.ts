@@ -6,7 +6,9 @@ import {
   assertPathInside,
   layoutForRunRoot,
   queryEvents,
+  replayNodeAttempts,
   readRunState,
+  summarizeNodeAttempts,
   validateSafeId
 } from "@ultrafuzz/artifacts";
 
@@ -117,6 +119,7 @@ export async function getRunStatus(input: {
       ...base,
       ...(state ? { state } : {}),
       events,
+      attempts: summarizeNodeAttempts(replayNodeAttempts(layout).entries),
       graph: readJsonIfExists(layout.graphPath),
       metadata: publicRunMetadata(metadata),
       ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})

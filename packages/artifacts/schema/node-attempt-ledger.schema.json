@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger",
+  "title": "Ultrafuzz node attempt ledger entry",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "run_id",
+    "node_id",
+    "strategy_attempt_id",
+    "executor_retry_id",
+    "checkpoint_generation_id",
+    "workflow_execution_id",
+    "controller_invocation_id",
+    "lifecycle",
+    "outcome",
+    "reuse",
+    "manifests"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "node_id": { "type": "string", "minLength": 1 },
+    "strategy_attempt_id": { "type": "string", "minLength": 1 },
+    "executor_retry_id": { "type": "string", "minLength": 1 },
+    "checkpoint_generation_id": { "type": "string", "minLength": 1 },
+    "workflow_execution_id": { "type": "string", "minLength": 1 },
+    "controller_invocation_id": { "type": "string", "minLength": 1 },
+    "parent_attempt_id": { "type": "string", "minLength": 1 },
+    "lifecycle": {
+      "type": "object",
+      "required": ["started_at", "finished_at"],
+      "additionalProperties": false,
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "outcome": {
+      "enum": ["succeeded", "failed", "timed-out", "canceled", "skipped", "reused"]
+    },
+    "reuse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status"],
+          "additionalProperties": false,
+          "properties": { "status": { "const": "executed" } }
+        },
+        {
+          "type": "object",
+          "required": ["status", "source_attempt_id"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "const": "reused" },
+            "source_attempt_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "manifests": {
+      "type": "object",
+      "required": ["input_sha256", "output_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "input_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "output_sha256": {
+          "anyOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }]
+        }
+      }
+    },
+    "failure_category": {
+      "enum": [
+        "executor-error",
+        "timeout",
+        "canceled",
+        "dependency",
+        "invalid-output",
+        "artifact-validation",
+        "unknown"
+      ]
+    }
+  }
+}

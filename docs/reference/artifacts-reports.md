@@ -22,6 +22,7 @@ graph.json
 graph.fingerprint
 state.json
 events.jsonl
+attempts.jsonl
 plan.json
 artifacts/
 review/
@@ -82,6 +83,22 @@ Node statuses are:
 Node state can also record logical node ID, artifact directory, required
 artifacts, attempt index, loop index, model profile ID, model name, model
 index, timestamps, last error, and provenance.
+
+## Attempt Ledger
+
+`attempts.jsonl` is the append-only source of truth for completed node attempts.
+Each immutable entry gives the executor retry a stable ID and links it to its
+strategy attempt, checkpoint generation, workflow execution, controller
+invocation, and previous retry. Entries record lifecycle timestamps, a typed
+outcome, executed-versus-reused status, and SHA-256 digests for input and output
+manifests.
+
+Attempt summaries and retry counts are derived from this ledger. Replaying a
+known transition does not append it again, so resume, replay, checkpoint
+continuation, and controller takeover preserve prior lifecycle history. Reused
+work points to its source attempt and is reported separately from executed work.
+The ledger stores typed failure categories but never raw diagnostics, inputs,
+outputs, or configuration.
 
 ## Node Artifacts
 

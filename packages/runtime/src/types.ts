@@ -1,4 +1,11 @@
-import type { EventQuery, EventRecord, NodeStateInput, RunLayout, RunState } from "@ultrafuzz/artifacts";
+import type {
+  EventQuery,
+  EventRecord,
+  NodeAttemptLedgerSummary,
+  NodeStateInput,
+  RunLayout,
+  RunState
+} from "@ultrafuzz/artifacts";
 import type { ResolvedConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import type { MaterializeCopySelection } from "@ultrafuzz/security";
 import type { ExpandedGraph } from "@ultrafuzz/topology";
@@ -214,6 +221,7 @@ export interface WorkflowCommandSummary {
 export interface RunStatusValue extends RunListEntry {
   state?: RunState;
   events: number;
+  attempts: NodeAttemptLedgerSummary;
   graph?: unknown;
   metadata?: Record<string, unknown>;
   workflow?: {
