@@ -408,7 +408,8 @@ export async function requestSmithersCancel(input: {
   await execSmithersCli({
     args: ["cancel", input.smithersRunId, "--format", "json"],
     projectRoot: input.projectRoot,
-    env: input.env
+    env: input.env,
+    acceptedExitCodes: [2]
   });
 }
 

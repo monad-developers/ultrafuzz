@@ -232,6 +232,10 @@ function fakeLifecycleSmithersEnv(
       "  inspect)",
       '    cat "$SMITHERS_FAKE_INSPECT"',
       "    ;;",
+      "  cancel)",
+      "    printf '%s\\n' '{\"status\":\"cancel-requested\"}'",
+      "    exit 2",
+      "    ;;",
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
       "    ;;",
@@ -2589,6 +2593,24 @@ test("syncRun cancels a nonterminal workflow at its durable workflow deadline", 
   assert.equal(typeof persisted.finished_at, "string");
   assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /cancel ultrafuzz-deadline-run --format json/u);
   assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /workflow-deadline-exceeded/u);
+
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_INSPECT!,
+    `${JSON.stringify(
+      workflowInspect({
+        workflowRunId,
+        status: "canceled",
+        state: "canceled",
+        steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+      })
+    )}\n`,
+    "utf8"
+  );
+  const acknowledged = await syncRun({ projectRoot: project, runId: "deadline-run", env });
+
+  assert.equal(acknowledged.ok, true, JSON.stringify(acknowledged.diagnostics));
+  assert.equal(acknowledged.value?.status, "timed-out");
+  assert.equal((fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").match(/^cancel /gmu) ?? []).length, 1);
 });
 
 test("syncRun records model fan-out attempts independently", async () => {
@@ -2658,6 +2680,9 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(resumed.value?.submitted, true);
+  const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(resumedState.concurrency.requested_concurrency, 8);
+  assert.equal(resumedState.controller_lease.duration_ms, 30_000);
 
   const resetResumed = await resumeRun({
     projectRoot: project,

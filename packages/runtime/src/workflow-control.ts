@@ -57,14 +57,14 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   const leaseDurationMs = controllerLeaseDurationMs(previous);
   const workflowState = normalizeWorkflowState(input.workflowState);
   const explicitlyLostController = LOST_CONTROLLER_WORKFLOW_STATES.has(workflowState);
-  const hasRecognizedExternalWait = [...input.workflowStates.values()].some((value) =>
-    isExternalWaitWorkflowState(normalizeWorkflowState(value))
+  const hasHealthyExternalWait = [...input.workflowStates.values()].some((value) =>
+    isHealthyExternalWaitWorkflowState(normalizeWorkflowState(value))
   );
   const transitionAgeMs = Math.max(0, input.nowMs - timestampMs(previous.last_transition_at, input.nowMs));
   const noTransitionStall =
     workflowState === "running" &&
     activeWork === 0 &&
-    !hasRecognizedExternalWait &&
+    !hasHealthyExternalWait &&
     transitionAgeMs >= leaseDurationMs &&
     Object.values(state.nodes).some((node) => !isTerminalNodeStatus(node.status));
   const recoveryDue = explicitlyLostController || noTransitionStall;
@@ -90,6 +90,12 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
     const workflowWait = waitFromWorkflowState(directWorkflowState || relatedWorkflowStates.find(Boolean) || "");
     if (workflowWait !== undefined) {
       provisional.set(nodeId, workflowWait);
+      if (
+        workflowWait.reason === "capacity" &&
+        isDispatchableControlNode(nodeId, concreteNodeId, taskIds, state.nodes)
+      ) {
+        eligibleNodeIds.push(nodeId);
+      }
       continue;
     }
     if (activeAttempts.has(nodeId) || relatedActive) {
@@ -150,6 +156,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   if (recoveryDue) {
     state.controller_lease = {
       status: "expired",
+      duration_ms: leaseDurationMs,
       renewed_at: previousLease?.renewed_at ?? previous.created_at,
       expires_at: new Date(Math.min(input.nowMs, timestampMs(previousLease?.expires_at, input.nowMs))).toISOString(),
       recovery_attempts: (previousLease?.recovery_attempts ?? 0) + (previousLease?.status === "expired" ? 0 : 1)
@@ -157,6 +164,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   } else {
     state.controller_lease = {
       status: workflowState === "recovering" ? "recovering" : "active",
+      duration_ms: leaseDurationMs,
       renewed_at: now,
       expires_at: new Date(input.nowMs + leaseDurationMs).toISOString(),
       recovery_attempts: previousLease?.recovery_attempts ?? 0
@@ -193,6 +201,9 @@ function waitFromWorkflowState(state: string): WaitState | undefined {
     case "noderetrying":
     case "retrying":
       return waitState("backoff", "retry");
+    case "nodequeued":
+    case "queued":
+      return waitState("capacity", "capacity-available");
     case "nodewaitingapproval":
     case "waiting-approval":
       return waitState("approval", "approve");
@@ -207,9 +218,9 @@ function waitFromWorkflowState(state: string): WaitState | undefined {
   }
 }
 
-function isExternalWaitWorkflowState(state: string): boolean {
+function isHealthyExternalWaitWorkflowState(state: string): boolean {
   const wait = waitFromWorkflowState(state);
-  return wait !== undefined && wait.reason !== "active";
+  return wait !== undefined && !["active", "capacity"].includes(wait.reason);
 }
 
 function isDispatchableControlNode(
@@ -237,6 +248,10 @@ function normalizeWorkflowState(value: string | undefined): string {
 }
 
 function controllerLeaseDurationMs(state: RunState): number {
+  const configuredDuration = state.controller_lease?.duration_ms;
+  if (Number.isInteger(configuredDuration) && configuredDuration >= 1_000) {
+    return configuredDuration;
+  }
   const renewed = timestampMs(state.controller_lease?.renewed_at, 0);
   const expires = timestampMs(state.controller_lease?.expires_at, renewed + 30_000);
   return Math.max(1_000, expires - renewed);

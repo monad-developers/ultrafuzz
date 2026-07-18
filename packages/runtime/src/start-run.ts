@@ -190,13 +190,14 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   if (resolved.config === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>(resolved.diagnostics);
   }
+  const requestedConcurrency = input.maxConcurrency ?? resolved.config.run.maxParallelAgents;
   try {
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
       workflowPath: evidence.workflowPath,
       projectRoot: path.resolve(input.projectRoot),
-      maxConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
+      maxConcurrency: requestedConcurrency,
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
       label: input.label,
@@ -224,7 +225,22 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     if (workflowRunId !== evidence.smithersRunId) {
       updateLinkedWorkflowRunId(evidence.layout, workflowRunId);
     }
-    updateRunStatus(evidence.layout, "running");
+    const submittedAt = new Date().toISOString();
+    if (!lifecycleResult.alreadyRunning) {
+      const state = readRunState(evidence.layout);
+      const leaseDurationMs = resolved.config.run.controllerLeaseSeconds * 1_000;
+      state.concurrency.requested_concurrency = requestedConcurrency;
+      state.controller_lease = {
+        ...state.controller_lease,
+        status: "active",
+        duration_ms: leaseDurationMs,
+        renewed_at: submittedAt,
+        expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
+      };
+      state.last_transition_at = submittedAt;
+      writeRunState(evidence.layout, state);
+    }
+    updateRunStatus(evidence.layout, "running", submittedAt);
     appendEvent(evidence.layout, {
       eventType: lifecycleResult.alreadyRunning ? "workflow-lifecycle-already-running" : "workflow-lifecycle-submitted",
       status: "running",

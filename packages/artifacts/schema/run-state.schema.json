@@ -59,11 +59,15 @@
     },
     "controller_lease": {
       "type": "object",
-      "required": ["status", "renewed_at", "expires_at", "recovery_attempts"],
+      "required": ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
       "additionalProperties": false,
       "properties": {
         "status": {
           "enum": ["active", "expired", "recovering"]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1000
         },
         "renewed_at": {
           "type": "string",

@@ -121,6 +121,7 @@ export interface NodeState {
 
 export interface ControllerLeaseState {
   status: ControllerLeaseStatus;
+  duration_ms: number;
   renewed_at: string;
   expires_at: string;
   recovery_attempts: number;
@@ -178,6 +179,7 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
   const createdAt = input.createdAt ?? new Date().toISOString();
   const createdAtMs = Date.parse(createdAt);
   const controllerLeaseSeconds = positiveInteger(input.controllerLeaseSeconds ?? 30, "controller lease seconds");
+  const controllerLeaseDurationMs = controllerLeaseSeconds * 1_000;
   const requestedConcurrency = positiveInteger(input.requestedConcurrency ?? 1, "requested concurrency");
   const nodes: Record<string, NodeState> = {};
   for (const node of input.nodes ?? []) {
@@ -196,8 +198,9 @@ export function createInitialRunState(input: CreateInitialRunStateInput): RunSta
     last_transition_at: createdAt,
     controller_lease: {
       status: "active",
+      duration_ms: controllerLeaseDurationMs,
       renewed_at: createdAt,
-      expires_at: timestampAfter(createdAtMs, controllerLeaseSeconds),
+      expires_at: new Date(createdAtMs + controllerLeaseDurationMs).toISOString(),
       recovery_attempts: 0
     },
     concurrency: {

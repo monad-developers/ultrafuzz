@@ -44,6 +44,7 @@ export const nodeStateSchema = z.strictObject({
 
 const controllerLeaseSchema = z.strictObject({
   status: z.enum(CONTROLLER_LEASE_STATUSES),
+  duration_ms: z.number().int().min(1_000),
   renewed_at: nonEmptyString,
   expires_at: nonEmptyString,
   recovery_attempts: nonNegativeInteger
@@ -133,10 +134,11 @@ export const runStateJsonSchema = {
     last_transition_at: { type: "string", minLength: 1 },
     controller_lease: {
       type: "object",
-      required: ["status", "renewed_at", "expires_at", "recovery_attempts"],
+      required: ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
       additionalProperties: false,
       properties: {
         status: { enum: [...CONTROLLER_LEASE_STATUSES] },
+        duration_ms: { type: "integer", minimum: 1_000 },
         renewed_at: { type: "string", minLength: 1 },
         expires_at: { type: "string", minLength: 1 },
         recovery_attempts: { type: "integer", minimum: 0 }

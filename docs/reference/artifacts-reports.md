@@ -85,7 +85,7 @@ dependency waits, retry backoff, external gates, controller loss, and active
 execution.
 
 Run state records the absolute `workflow_deadline_at`, `last_transition_at`, a
-renewable `controller_lease`, and a concurrency snapshot. Concurrency evidence
+renewable `controller_lease` with its configured `duration_ms`, and a concurrency snapshot. Concurrency evidence
 includes requested and peak effective concurrency, ready-queue depth, active
 work, and cumulative queued, active, and idle durations. These fields contain
 lifecycle metadata only; raw runner logs and host identifiers are not copied

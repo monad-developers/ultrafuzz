@@ -75,6 +75,7 @@ test("run state schema covers all required node states and rejects malformed sta
   assert.equal(state.nodes["node-1"]?.wait_reason, "ready");
   assert.equal(state.nodes["node-1"]?.next_eligible_action, "dispatch");
   assert.equal(state.controller_lease.status, "active");
+  assert.equal(state.controller_lease.duration_ms, 30_000);
   assert.equal(state.concurrency.requested_concurrency, 1);
 
   const invalid = validateRunStateSchema({

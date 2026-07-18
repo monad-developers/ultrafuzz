@@ -69,6 +69,39 @@ test("external wait states persist typed gate reasons", () => {
   assert.equal(projection.state.nodes.timer?.next_eligible_action, "timer-fire");
 });
 
+test("queued workflow work persists a capacity wait before bounded stall recovery", () => {
+  const graph = syntheticGraph([node("queued")]);
+  const state = initialState(graph, 1);
+
+  const waiting = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map([["queued", "queued"]]),
+    workflowState: "running",
+    nowMs: BASE_MS + 5_000
+  });
+
+  assert.equal(waiting.recoveryDue, false);
+  assert.equal(waiting.state.nodes.queued?.wait_reason, "capacity");
+  assert.equal(waiting.state.nodes.queued?.next_eligible_action, "capacity-available");
+  assert.equal(waiting.state.concurrency.ready_queue_depth, 1);
+
+  const stalled = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map([["queued", "queued"]]),
+    workflowState: "running",
+    nowMs: BASE_MS + 30_000
+  });
+
+  assert.equal(stalled.recoveryDue, true);
+  assert.equal(stalled.state.nodes.queued?.wait_reason, "controller-loss");
+});
+
 test("expired controller ownership requests one safe takeover without reopening completed work", () => {
   for (const workflowState of ["orphaned", "stale"]) {
     const graph = syntheticGraph([node("complete"), node("pending", ["complete"])]);
@@ -169,7 +202,33 @@ test("workflow deadline decisions are deterministic at the fake-clock boundary",
   assert.equal(deadlineProjection.deadlineExceeded, true);
 });
 
-function initialState(graph: PlannedGraph, requestedConcurrency: number, workflowDeadlineSeconds = 60): RunState {
+test("controller recovery keeps the configured lease duration when timestamps are malformed", () => {
+  const graph = syntheticGraph([node("pending")]);
+  const state = initialState(graph, 1, 60, 45);
+  state.controller_lease.renewed_at = "malformed";
+  state.controller_lease.expires_at = "malformed";
+
+  const before = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: tasksFor(graph),
+    workflowStates: new Map(),
+    workflowState: "running",
+    nowMs: BASE_MS + 44_999
+  });
+
+  assert.equal(before.recoveryDue, false);
+  assert.equal(before.state.controller_lease.duration_ms, 45_000);
+  assert.equal(before.state.controller_lease.expires_at, new Date(BASE_MS + 89_999).toISOString());
+});
+
+function initialState(
+  graph: PlannedGraph,
+  requestedConcurrency: number,
+  workflowDeadlineSeconds = 60,
+  controllerLeaseSeconds = 30
+): RunState {
   const nodes: NodeStateInput[] = graph.nodes.map((entry) => ({
     id: entry.id,
     waitSince: new Date(BASE_MS).toISOString(),
@@ -181,7 +240,7 @@ function initialState(graph: PlannedGraph, requestedConcurrency: number, workflo
     graphFingerprint: "synthetic-graph",
     configFingerprint: "synthetic-config",
     createdAt: new Date(BASE_MS).toISOString(),
-    controllerLeaseSeconds: 30,
+    controllerLeaseSeconds,
     workflowDeadlineSeconds,
     requestedConcurrency,
     nodes

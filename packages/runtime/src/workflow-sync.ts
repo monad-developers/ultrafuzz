@@ -1246,7 +1246,7 @@ function finalRunStatus(
   const statuses = [...nodeStatuses.values()];
   const workflowStatus = (inspect.runState ?? inspect.runStatus ?? "").toLowerCase();
   if (workflowStatus === "cancelled" || workflowStatus === "canceled") {
-    return "canceled";
+    return currentStatus === "timed-out" ? "timed-out" : "canceled";
   }
   if (workflowStatus === "paused") {
     return "paused";
