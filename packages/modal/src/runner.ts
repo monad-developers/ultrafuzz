@@ -374,12 +374,18 @@ async function overseeModalBenchmarkOnce(
   const state = JSON.parse(await readFile(path.resolve(input.statePath), "utf8")) as ModalLaunchState;
   if (state.run_id !== config.run_id) throw new Error(`launch state belongs to ${state.run_id}, not ${config.run_id}`);
   const recoveryStatePath = path.resolve(input.recoveryStatePath);
-  const recoveryState = await readOrCreateRecoveryState(recoveryStatePath, state, input.recoveryImage ?? state.image);
+  const recoveryImage = input.recoveryImage ?? state.image;
+  const recoveryState = await readOrCreateRecoveryState(recoveryStatePath, state, recoveryImage);
+  const recoveryImageChanged = recoveryState.image !== recoveryImage;
+  if (recoveryImageChanged) {
+    recoveryState.image = recoveryImage;
+    await writeRecoveryState(recoveryStatePath, recoveryState);
+  }
   const env = input.env ?? process.env;
   const modal = modalClient(env);
   try {
     const app = await modal.apps.fromName(state.app, { createIfMissing: false });
-    const image = await modal.images.fromName(input.recoveryImage ?? state.image);
+    const image = await modal.images.fromName(recoveryImage);
     const rows: Array<Record<string, unknown>> = [];
     for (const launch of state.launches) {
       const model = config.models.find((candidate) => candidate.slug === launch.slug);
@@ -425,7 +431,8 @@ async function overseeModalBenchmarkOnce(
         const latestRecovery = recoveryState.recoveries
           .filter((record) => record.slug === launch.slug)
           .sort((left, right) => right.attempt - left.attempt)[0];
-        const retryAt = latestRecovery === undefined ? undefined : recoveryRetryAt(latestRecovery);
+        const retryAt =
+          latestRecovery === undefined || recoveryImageChanged ? undefined : recoveryRetryAt(latestRecovery);
         if (retryAt !== undefined && retryAt > Date.now()) {
           rows.push({ slug: launch.slug, complete: false, recovery: false, retry_at: new Date(retryAt).toISOString() });
           continue;
