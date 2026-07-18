@@ -6,12 +6,15 @@ import { parse } from "yaml";
 import { z } from "zod/v4";
 
 import { boundedResponseText } from "./reporters/http.js";
+import { buildEvalSummaryProvenance, EVAL_JUDGE_PROMPT_VERSION } from "./lineage.js";
 import {
   type EvalCompareValue,
   type EvalFindingScore,
   type EvalMatrixRow,
+  type EvalLongitudinalCompareValue,
   type EvalRowScore,
   type EvalRunRecord,
+  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec,
   type EvalVariantScoreSummary,
@@ -23,7 +26,6 @@ import {
 } from "./types.js";
 import { EvalError, evalRunRoot, isRecord, jsonFile, mean, readJsonLines, roundMetric } from "./utils.js";
 
-const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
 const PRIVATE_DATA_JUDGE_ACK = "ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA";
 const MAX_GROUND_TRUTH_BYTES = 1024 * 1024;
@@ -94,7 +96,9 @@ export interface ScoreFindingsAgainstGroundTruthInput {
 
 export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreSummary> {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
-  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec }>(path.join(root, "eval.json"));
+  const evalManifest = jsonFile<{ suite?: EvalSuiteSpec; provenance?: EvalRunProvenance }>(
+    path.join(root, "eval.json")
+  );
   if (evalManifest.suite === undefined) {
     throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
   }
@@ -133,7 +137,13 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     variants,
     scores_path: scoresPath,
     summary_path: summaryPath,
-    review_queue_path: reviewQueuePath
+    review_queue_path: reviewQueuePath,
+    provenance: buildEvalSummaryProvenance({
+      projectRoot: input.projectRoot,
+      suite,
+      matrix,
+      ...(evalManifest.provenance !== undefined ? { runProvenance: evalManifest.provenance } : {})
+    })
   };
   replaceScoringOutputs(root, [
     { filePath: scoresPath, contents: serializeJsonLines(findingScores) },
@@ -280,9 +290,112 @@ export function compareEvalRun(input: { projectRoot: string; evalRunId: string; 
   };
 }
 
+export function compareEvalRuns(input: {
+  projectRoot: string;
+  baselineEvalRunId: string;
+  candidateEvalRunId: string;
+  allowIncompatible?: boolean;
+}): EvalLongitudinalCompareValue {
+  const baseline = readEvalSummary(input.projectRoot, input.baselineEvalRunId);
+  const candidate = readEvalSummary(input.projectRoot, input.candidateEvalRunId);
+  const differences = provenanceDifferences(baseline, candidate);
+  const compatible = differences.length === 0;
+  if (!compatible && input.allowIncompatible !== true) {
+    throw new EvalError(
+      "EVAL_PROVENANCE_INCOMPATIBLE",
+      `eval runs are not directly comparable: ${differences.join("; ")}`,
+      { differences }
+    );
+  }
+  const baselineVariants = new Map(baseline.variants.map((variant) => [variant.variant_id, variant]));
+  const variants = candidate.variants.flatMap((candidateVariant) => {
+    const baselineVariant = baselineVariants.get(candidateVariant.variant_id);
+    if (baselineVariant === undefined) {
+      return [];
+    }
+    return [
+      {
+        variant_id: candidateVariant.variant_id,
+        baseline: baselineVariant,
+        candidate: candidateVariant,
+        delta_f1_score: roundMetric(candidateVariant.f1_score - baselineVariant.f1_score),
+        delta_recall: roundMetric(candidateVariant.recall - baselineVariant.recall),
+        delta_precision: roundMetric(candidateVariant.precision - baselineVariant.precision)
+      }
+    ];
+  });
+  return {
+    baseline_eval_run_id: input.baselineEvalRunId,
+    candidate_eval_run_id: input.candidateEvalRunId,
+    compatible,
+    waiver_applied: !compatible && input.allowIncompatible === true,
+    differences,
+    ...(baseline.provenance?.candidate !== undefined ? { baseline_candidate: baseline.provenance.candidate } : {}),
+    ...(candidate.provenance?.candidate !== undefined ? { candidate: candidate.provenance.candidate } : {}),
+    variants
+  };
+}
+
+function readEvalSummary(projectRoot: string, evalRunId: string): EvalScoreSummary {
+  return jsonFile<EvalScoreSummary>(path.join(evalRunRoot(projectRoot, evalRunId), "summary.json"));
+}
+
+function provenanceDifferences(baseline: EvalScoreSummary, candidate: EvalScoreSummary): string[] {
+  const differences: string[] = [];
+  const baselineCandidate = baseline.provenance?.candidate;
+  const candidateCandidate = candidate.provenance?.candidate;
+  if (
+    baselineCandidate === undefined ||
+    candidateCandidate === undefined ||
+    baselineCandidate.commit === "unavailable" ||
+    candidateCandidate.commit === "unavailable" ||
+    baselineCandidate.dirty !== false ||
+    candidateCandidate.dirty !== false ||
+    baselineCandidate.execution_artifact_id === undefined ||
+    candidateCandidate.execution_artifact_id === undefined
+  ) {
+    differences.push("candidate execution provenance is not immutable");
+  }
+  const baselineBenchmark = baseline.provenance?.benchmark;
+  const candidateBenchmark = candidate.provenance?.benchmark;
+  if (baselineBenchmark === undefined || candidateBenchmark === undefined) {
+    differences.push("benchmark provenance is unavailable");
+  } else {
+    if (baselineBenchmark.availability !== "available" || candidateBenchmark.availability !== "available") {
+      differences.push("benchmark provenance is incomplete");
+    }
+    if (baselineBenchmark.cohort_fingerprint !== candidateBenchmark.cohort_fingerprint) {
+      differences.push("benchmark cohort fingerprints differ");
+    }
+    if (baselineBenchmark.execution_policy.fingerprint !== candidateBenchmark.execution_policy.fingerprint) {
+      differences.push("execution policy fingerprints differ");
+    }
+  }
+  const baselineScoring = baseline.provenance?.scoring;
+  const candidateScoring = candidate.provenance?.scoring;
+  if (baselineScoring === undefined || candidateScoring === undefined) {
+    differences.push("scoring provenance is unavailable");
+  } else {
+    if (baselineScoring.implementation_dirty !== false || candidateScoring.implementation_dirty !== false) {
+      differences.push("scoring implementation provenance is not immutable");
+    }
+    if (baselineScoring.fingerprint !== candidateScoring.fingerprint) {
+      differences.push("scoring identity fingerprints differ");
+    }
+  }
+  return differences;
+}
+
 export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
+  const candidate = summary.provenance?.candidate;
+  const benchmark = summary.provenance?.benchmark;
+  const scoring = summary.provenance?.scoring;
   const lines = [
     `# Ultrafuzz Eval ${summary.eval_run_id}`,
+    "",
+    `Candidate: ${candidate === undefined ? "unavailable (historical result)" : `${candidate.label} (${candidate.commit})`}`,
+    `Benchmark cohort: ${benchmark?.cohort_fingerprint ?? "unavailable (historical result)"}`,
+    `Scoring identity: ${scoring?.fingerprint ?? "unavailable"}`,
     "",
     `Recall threshold: ${summary.recall_threshold}`,
     "",
@@ -511,7 +624,7 @@ async function bestMatch(
     judge_model: judgeModel,
     judge_kind: "deterministic",
     ...(row.judge_reasoning ? { reasoning_effort: row.judge_reasoning } : {}),
-    prompt_version: SCORE_PROMPT_VERSION,
+    prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     timestamp
   };
   if (llmJudge !== undefined) {
@@ -681,7 +794,7 @@ function normalizeLlmJudgeResult(
     judge_model: input.row.judge_model ?? input.row.judge_model_profile,
     judge_kind: "llm",
     ...(input.row.judge_reasoning ? { reasoning_effort: input.row.judge_reasoning } : {}),
-    prompt_version: SCORE_PROMPT_VERSION,
+    prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     timestamp: new Date().toISOString()
   };
 }

@@ -11,6 +11,7 @@ import {
   type EvalMatrixRow,
   type EvalPlanValue,
   type EvalRunRecord,
+  type EvalRunProvenance,
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
@@ -52,9 +53,12 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   if (!fs.existsSync(root)) {
     throw new EvalError("EVAL_RUN_NOT_FOUND", `eval run not found: ${input.evalRunId}`, { root });
   }
-  const manifest = jsonFile<{ suite?: EvalSuiteSpec; suite_path?: string; project_root?: string }>(
-    path.join(root, "eval.json")
-  );
+  const manifest = jsonFile<{
+    suite?: EvalSuiteSpec;
+    suite_path?: string;
+    project_root?: string;
+    provenance?: EvalRunProvenance;
+  }>(path.join(root, "eval.json"));
   if (manifest.suite === undefined) {
     throw new EvalError("EVAL_RUN_MANIFEST_INVALID", "eval run manifest is missing suite");
   }
@@ -89,7 +93,8 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
     suite_path: manifest.suite_path ?? "",
     project_root: manifest.project_root ?? path.resolve(input.projectRoot),
     suite,
-    matrix
+    matrix,
+    ...(manifest.provenance !== undefined ? { provenance: manifest.provenance } : {})
   };
   for (const reporter of reporters) {
     await reporter.onPlan(plan);
@@ -179,7 +184,10 @@ function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
     ...(record.ultrafuzz_run_id !== undefined ? { runId: record.ultrafuzz_run_id } : {}),
     runRoot,
     ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
-    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {})
+    ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
+    ...(record.graph_fingerprint !== undefined ? { graphFingerprint: record.graph_fingerprint } : {}),
+    ...(record.config_fingerprint !== undefined ? { configFingerprint: record.config_fingerprint } : {}),
+    ...(record.execution_artifact_id !== undefined ? { executionArtifactId: record.execution_artifact_id } : {})
   };
 }
 

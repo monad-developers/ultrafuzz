@@ -233,11 +233,19 @@ describe("deterministic scorer math", () => {
         .split("\n")
     ).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.json"), "utf8"))).toMatchObject({
-      eval_run_id: fixture.evalRunId
+      eval_run_id: fixture.evalRunId,
+      provenance: {
+        availability: "historical-unavailable",
+        scoring: {
+          judge_prompt_version: "ultrafuzz-eval-judge-v2",
+          judge_models: ["gpt-5.5"],
+          ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
+        }
+      }
     });
-    expect(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8")).toContain(
-      `# Ultrafuzz Eval ${fixture.evalRunId}`
-    );
+    const summaryMarkdown = fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8");
+    expect(summaryMarkdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
+    expect(summaryMarkdown).toContain("Candidate: unavailable (historical result)");
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
   });
 

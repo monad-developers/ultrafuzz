@@ -17,6 +17,9 @@ export interface EvalRowResult {
   runRoot?: string;
   startedAt?: string;
   finishedAt?: string;
+  graphFingerprint?: string;
+  configFingerprint?: string;
+  executionArtifactId?: string;
   diagnostics?: RuntimeDiagnostic[];
 }
 

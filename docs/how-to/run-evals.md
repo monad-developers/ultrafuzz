@@ -60,13 +60,17 @@ ultrafuzz eval score <eval-run-id>
 ultrafuzz eval score <eval-run-id> --llm-judge
 ultrafuzz eval report <eval-run-id>
 ultrafuzz eval compare <eval-run-id> --baseline baseline
+ultrafuzz eval compare <candidate-eval-run-id> --against <baseline-eval-run-id>
 ```
 
 `score` grades run reports against ground truth with a deterministic matcher;
 `--llm-judge` additionally uses the suite's judge model profile. `report`
 shows the scored variant ranking from `summary.json`/`summary.md`, and
-`compare` diffs variants against the named baseline variant. Deterministic
-scoring requires neither a provider nor provider credentials.
+`compare` either diffs variants against the named baseline variant or compares
+two releases when `--against` names the baseline eval run. Longitudinal
+comparisons require identical cohort and scoring fingerprints; an explicit
+`--allow-incompatible` waiver preserves and reports any differences.
+Deterministic scoring requires neither a provider nor provider credentials.
 
 The optional gateway judge has a separate credential and consent boundary:
 

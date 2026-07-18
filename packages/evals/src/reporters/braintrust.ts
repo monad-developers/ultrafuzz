@@ -51,6 +51,7 @@ export class BraintrustReporter implements EvalReporter {
   private projectId?: string;
   private experimentId?: string;
   private experimentName?: string;
+  private planProvenance?: EvalPlan["provenance"];
   private readonly progress = new Map<string, RowProgress>();
   private readonly rowGraphs = new Map<string, EvalRowGraph>();
 
@@ -64,6 +65,7 @@ export class BraintrustReporter implements EvalReporter {
   }
 
   async onPlan(plan: EvalPlan): Promise<void> {
+    this.planProvenance = plan.provenance;
     await this.ensureExperiment();
     await this.insertEvents([
       {
@@ -77,7 +79,18 @@ export class BraintrustReporter implements EvalReporter {
           targets: plan.suite.targets.map((target) => target.id),
           variants: plan.suite.variants.map((variant) => variant.id)
         },
-        metadata: { eval_run_id: this.options.evalRunId }
+        metadata: {
+          eval_run_id: this.options.evalRunId,
+          ...(plan.provenance !== undefined
+            ? {
+                benchmark_series: plan.provenance.benchmark.series,
+                cohort_fingerprint: plan.provenance.benchmark.cohort_fingerprint,
+                execution_policy_fingerprint: plan.provenance.benchmark.execution_policy.fingerprint,
+                candidate_label: plan.provenance.candidate.label,
+                candidate_commit: plan.provenance.candidate.commit
+              }
+            : {})
+        }
       }
     ]);
   }
@@ -104,6 +117,14 @@ export class BraintrustReporter implements EvalReporter {
           row_id: row.id,
           runner_model_profile: row.runner_model_profile,
           judge_model_profile: row.judge_model_profile,
+          ...(this.planProvenance !== undefined
+            ? {
+                benchmark_series: this.planProvenance.benchmark.series,
+                cohort_fingerprint: this.planProvenance.benchmark.cohort_fingerprint,
+                candidate_label: this.planProvenance.candidate.label,
+                candidate_commit: this.planProvenance.candidate.commit
+              }
+            : {}),
           node_count: graph.nodes.length,
           dag_edges: graph.nodes.map((node) => ({ id: node.id, depends_on: node.dependsOn }))
         }
@@ -240,6 +261,11 @@ export class BraintrustReporter implements EvalReporter {
           status: result.status,
           ...(result.runId !== undefined ? { run_id: result.runId } : {})
         },
+        metadata: {
+          ...(result.graphFingerprint !== undefined ? { graph_fingerprint: result.graphFingerprint } : {}),
+          ...(result.configFingerprint !== undefined ? { config_fingerprint: result.configFingerprint } : {}),
+          ...(result.executionArtifactId !== undefined ? { execution_artifact_id: result.executionArtifactId } : {})
+        },
         ...(result.startedAt !== undefined && result.finishedAt !== undefined
           ? { metrics: { start: epochSeconds(result.startedAt), end: epochSeconds(result.finishedAt) } }
           : {})
@@ -278,7 +304,29 @@ export class BraintrustReporter implements EvalReporter {
           [`${variant.variant_id}:f1_score`, variant.f1_score]
         ])
       ),
-      output: { variants: summary.variants }
+      output: { variants: summary.variants },
+      metadata: {
+        ...(summary.provenance?.benchmark !== undefined
+          ? {
+              benchmark_series: summary.provenance.benchmark.series,
+              cohort_fingerprint: summary.provenance.benchmark.cohort_fingerprint
+            }
+          : {}),
+        ...(summary.provenance?.candidate !== undefined
+          ? {
+              candidate_label: summary.provenance.candidate.label,
+              candidate_commit: summary.provenance.candidate.commit
+            }
+          : {}),
+        ...(summary.provenance?.scoring !== undefined
+          ? {
+              scoring_revision: summary.provenance.scoring.implementation_revision,
+              scoring_fingerprint: summary.provenance.scoring.fingerprint,
+              judge_prompt_version: summary.provenance.scoring.judge_prompt_version,
+              judge_models: summary.provenance.scoring.judge_models
+            }
+          : {})
+      }
     });
     await this.insertEvents(events);
   }

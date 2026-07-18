@@ -11,6 +11,7 @@ import {
   resolveEvalSuitePath
 } from "../src/reporters/index.js";
 import { EvalError } from "../src/utils.js";
+import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
 import { testReportingPolicy, testRow, testSuite } from "./helpers.js";
 
 interface RecordedRequest {
@@ -235,6 +236,107 @@ describe("graphFromPlannedGraph", () => {
 });
 
 describe("BraintrustReporter", () => {
+  it("mirrors comparison lineage and runtime fingerprints into provider metadata", async () => {
+    const { requests, fetchImpl } = fakeFetch();
+    const suite = testSuite("/tmp/generated-ground-truth");
+    const row = testRow(suite);
+    const provenance: EvalRunProvenance = {
+      candidate: { label: "v0.0.2", commit: "a".repeat(40), dirty: false },
+      benchmark: {
+        availability: "available",
+        series: "generated-series",
+        protocol_revision: "1",
+        cohort_fingerprint: "cohort-generated",
+        targets: [{ id: "target-a", repo: "https://example.com/generated", commit: "b".repeat(40) }],
+        ground_truth_sha256: { "target-a": "ground-truth-generated" },
+        execution_policy: {
+          revision: "ultrafuzz.eval-controller.v1",
+          fingerprint: "policy-generated",
+          max_parallel_targets: 1,
+          max_parallel_runs: 1,
+          node_telemetry: true,
+          heartbeat_interval_seconds: 60,
+          controller_mode: "watch",
+          watch_timeout_seconds: 120,
+          poll_interval_ms: 10
+        }
+      }
+    };
+    const reporter = new BraintrustReporter({
+      apiKey: "secret",
+      project: "ultrafuzz-evals",
+      evalRunId: "eval-lineage",
+      policy: testReportingPolicy(),
+      fetchImpl
+    });
+    await reporter.onPlan({
+      suite_path: "generated-suite.yml",
+      project_root: "/tmp/generated-project",
+      suite,
+      matrix: [row],
+      provenance
+    });
+    await reporter.onRowStart(row, { rowId: row.id, nodes: [] });
+    await reporter.onRowFinish(row, {
+      status: "succeeded",
+      graphFingerprint: "graph-generated",
+      configFingerprint: "config-generated",
+      executionArtifactId: "image-generated"
+    });
+    const summary: EvalScoreSummary = {
+      eval_run_id: "eval-lineage",
+      eval_run_root: "/tmp/generated-run",
+      recall_threshold: 0.7,
+      rows: [],
+      variants: [],
+      scores_path: "scores.jsonl",
+      summary_path: "summary.json",
+      review_queue_path: "review.jsonl",
+      provenance: {
+        availability: "available",
+        ...provenance,
+        scoring: {
+          implementation_revision: "scorer-generated",
+          implementation_dirty: false,
+          judge_prompt_version: "judge-prompt-generated",
+          judge_models: ["judge-generated"],
+          ground_truth_sha256: provenance.benchmark.ground_truth_sha256,
+          fingerprint: "scoring-generated"
+        }
+      }
+    };
+    await reporter.onScores([], summary);
+
+    const inserts = requests.filter((request) => request.url.includes("/insert"));
+    const events = inserts.flatMap(
+      (request) => (request.body as { events?: Array<Record<string, unknown>> }).events ?? []
+    );
+    expect(events.find((event) => event.id === "plan-eval-lineage")).toMatchObject({
+      metadata: {
+        benchmark_series: "generated-series",
+        cohort_fingerprint: "cohort-generated",
+        execution_policy_fingerprint: "policy-generated",
+        candidate_label: "v0.0.2",
+        candidate_commit: "a".repeat(40)
+      }
+    });
+    expect(events.find((event) => event.id === `row-${row.id}` && event.output !== undefined)).toMatchObject({
+      metadata: {
+        graph_fingerprint: "graph-generated",
+        config_fingerprint: "config-generated",
+        execution_artifact_id: "image-generated"
+      }
+    });
+    expect(events.find((event) => event.id === "summary-eval-lineage")).toMatchObject({
+      metadata: {
+        scoring_revision: "scorer-generated",
+        scoring_fingerprint: "scoring-generated",
+        judge_prompt_version: "judge-prompt-generated",
+        judge_models: ["judge-generated"]
+      }
+    });
+  });
+
   it("creates the experiment once and emits terminal-time node spans with backdated times", async () => {
     const { requests, fetchImpl } = fakeFetch();
     const suite = testSuite("/tmp/gt");
