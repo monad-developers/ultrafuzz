@@ -248,6 +248,7 @@ ultrafuzz eval run \
 ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]
 ultrafuzz eval report <eval-run-id> [--project <path>] [--json]
 ultrafuzz eval compare <eval-run-id> --baseline <variant-id> [--project <path>] [--json]
+ultrafuzz eval bundle <eval-run-id> --output <directory> [--project <path>] [--json]
 ultrafuzz eval compare <candidate-eval-run-id> \
   --against <baseline-eval-run-id> \
   [--allow-incompatible] \
@@ -287,6 +288,13 @@ are rejected. `report` shows the scored variant ranking. `compare` either
 diffs variants against a `--baseline` variant or compares a candidate run to
 an `--against` baseline run after verifying cohort identity, scoring identity,
 and variant scope; `--allow-incompatible` is an explicit, reported waiver.
+
+`bundle` derives a versioned, self-contained analysis directory from local
+eval evidence. Its fixed allowlist contains aggregate terminal status,
+evaluation metrics, accounting, and sanitized attempt history. Raw reports,
+findings, diagnostics, configuration, and execution-local identifiers are not
+representable in the bundle. Missing optional evidence is recorded in a typed
+omission manifest.
 
 `publish` replays a recorded eval run's journals from offset 0 and
 reconstructs the full node trace on a provider post hoc; `--resume` continues

@@ -88,7 +88,7 @@ explicit `--copy` selections for files you have reviewed.
 
 ## Eval Commands
 
-`eval plan | run | score | report | compare | publish` drive eval suites that
+`eval plan | run | score | report | compare | bundle | publish` drive eval suites that
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
@@ -104,11 +104,16 @@ Common flags:
 - `--baseline <variant-id>` (compare variants within one run)
 - `--against <eval-run-id>` (compare releases with compatible lineage)
 - `--allow-incompatible` (explicitly waive release provenance mismatches)
+- `--output <directory>` (bundle, required)
 - `--resume` (publish)
 
 Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](reference/evals.md) and the
 [CLI reference](reference/cli.md#eval) for full details.
+
+`eval bundle` exports only fixed-schema aggregate evidence for offline
+analysis. The self-contained directory is checksum-verified and excludes raw
+reports and execution-local data.
 
 ## JSON Envelope
 

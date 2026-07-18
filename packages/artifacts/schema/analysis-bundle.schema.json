@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle",
+  "title": "Ultrafuzz privacy-safe analysis bundle manifest",
+  "type": "object",
+  "required": ["schema_version", "policy_version", "files"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "ultrafuzz.analysis-bundle.v1"
+    },
+    "policy_version": {
+      "const": "ultrafuzz.analysis-bundle-policy.v1"
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "terminal-status"
+              },
+              "path": {
+                "const": "data/terminal-status.json"
+              },
+              "media_type": {
+                "const": "application/json"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "evaluation-metrics"
+              },
+              "path": {
+                "const": "data/evaluation-metrics.json"
+              },
+              "media_type": {
+                "const": "application/json"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "accounting-summary"
+              },
+              "path": {
+                "const": "data/accounting-summary.json"
+              },
+              "media_type": {
+                "const": "application/json"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "attempt-history"
+              },
+              "path": {
+                "const": "data/attempt-history.json"
+              },
+              "media_type": {
+                "const": "application/json"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "path", "media_type", "size_bytes", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "omissions"
+              },
+              "path": {
+                "const": "omissions.json"
+              },
+              "media_type": {
+                "const": "application/json"
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": { "properties": { "kind": { "const": "terminal-status" } } },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "kind": { "const": "evaluation-metrics" } } },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "kind": { "const": "accounting-summary" } } },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "kind": { "const": "attempt-history" } } },
+          "minContains": 0,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "kind": { "const": "omissions" } } },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    }
+  }
+}

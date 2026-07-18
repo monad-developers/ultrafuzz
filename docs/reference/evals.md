@@ -144,6 +144,7 @@ ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
 ultrafuzz eval compare   # diff variants or release runs with compatible lineage
+ultrafuzz eval bundle    # export privacy-safe aggregate evidence for offline analysis
 ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 ```
 
@@ -157,6 +158,15 @@ Grading never depends on a provider: scores are computed locally
 (deterministic matcher, optional LLM judge behind the generic `FindingJudge`
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
+
+`eval bundle <eval-run-id> --output <directory>` is the explicit offline
+analysis export. It derives fixed-schema aggregate files rather than copying
+the eval or run directories. `analysis-bundle.json` records bundle-relative
+paths, sizes, and SHA-256 checksums; `omissions.json` records typed reasons for
+expected evidence that was unavailable. Collection validates every payload,
+reference, checksum, and the privacy allowlist before replacing the output
+directory. The resulting bundle contains no raw agent output, findings,
+configuration, absolute execution paths, or deployment identifiers.
 
 Scored row summaries take lifecycle timestamps and terminal status from the
 durable run state rather than the detached launcher process. Their typed

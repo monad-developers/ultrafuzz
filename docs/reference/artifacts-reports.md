@@ -335,3 +335,26 @@ double-publishing. The underlying Ultrafuzz runs
 live inside each target checkout, not under the eval project; eval artifacts
 reference them by run ID. Grading and these artifacts never depend on a
 reporting provider. See [Eval Suites](evals.md).
+
+## Analysis Bundles
+
+`ultrafuzz eval bundle <eval-run-id> --output <directory>` writes an offline,
+privacy-safe analysis bundle with this fixed layout:
+
+```text
+analysis-bundle.json
+omissions.json
+data/
+  terminal-status.json
+  evaluation-metrics.json
+  accounting-summary.json
+  attempt-history.json
+```
+
+Unavailable data files are absent and have a typed entry in
+`omissions.json`. The versioned bundle manifest lists only bundle-relative
+paths with byte sizes and SHA-256 checksums. The data files contain aggregate
+or sanitized derived fields only; source reports, findings, diagnostics,
+configuration, raw execution output, and execution-local identifiers are
+never copied. Bundle validation checks the schemas, strict file allowlist,
+referential integrity, checksums, and privacy policy before publication.

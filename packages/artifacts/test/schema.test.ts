@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
+  ANALYSIS_BUNDLE_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
@@ -12,12 +13,14 @@ import {
   RUN_STATE_STATUSES,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
+  analysisBundleManifestJsonSchema,
   artifactContractDefinition,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
   nodeAttemptLedgerJsonSchema,
   runStateJsonSchema,
+  validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
@@ -178,6 +181,38 @@ test("generated test manifest schema accepts canonical manifests and rejects leg
   assert.ok(invalid.issues.some((issue) => issue.path === "$.generated_tests"));
 });
 
+test("analysis bundle manifest schema rejects unversioned and non-allowlisted entries", () => {
+  const manifest = {
+    schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
+    policy_version: "ultrafuzz.analysis-bundle-policy.v1",
+    files: [
+      {
+        kind: "omissions",
+        path: "omissions.json",
+        media_type: "application/json",
+        size_bytes: 10,
+        sha256: "a".repeat(64)
+      }
+    ]
+  };
+  assert.equal(validateAnalysisBundleManifestSchema(manifest).ok, true);
+  assert.equal(
+    validateAnalysisBundleManifestSchema({
+      ...manifest,
+      files: [...manifest.files, { ...manifest.files[0], kind: "raw-output", path: "raw-output.json" }]
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateAnalysisBundleManifestSchema({
+      ...manifest,
+      files: [{ ...manifest.files[0], kind: "terminal-status", path: "omissions.json" }]
+    }).ok,
+    false
+  );
+  assert.equal(validateAnalysisBundleManifestSchema({ ...manifest, files: [] }).ok, false);
+});
+
 test("usage ledger schema requires typed incompleteness markers", () => {
   const entry = {
     schema_version: USAGE_LEDGER_SCHEMA_VERSION,
@@ -250,12 +285,14 @@ test("node attempt ledger schema keeps failure categories separate from diagnost
 
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
+  const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
+  assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
   assert.equal(generatedTestsSnapshot.$id, generatedTestsJsonSchema.$id);
   assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
