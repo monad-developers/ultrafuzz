@@ -29,6 +29,7 @@ const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
 const RECOVERY_MAX_RESETS = 32;
 const RECOVERY_POLL_MS = 60_000;
+const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
 const SCORE_RETRY_MAX_MS = 15 * 60_000;
 
@@ -516,22 +517,28 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
     {
       cwd: ULTRAFUZZ_ROOT,
       env: process.env,
-      stdio: ["ignore", "ignore", "pipe"]
+      stdio: "ignore"
     }
   );
-  const exit = new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
+  const exitCode = await new Promise<number>((resolve) => {
+    let settled = false;
+    const finish = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(code);
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(124);
+    }, WORKFLOW_STATUS_SYNC_TIMEOUT_MS);
+    child.once("error", () => finish(1));
+    child.once("close", (code) => finish(code ?? 1));
   });
-  let stderr = "";
-  for await (const chunk of child.stderr) stderr = `${stderr}${String(chunk)}`.slice(-4_000);
-  const exitCode = await exit;
   if (exitCode !== 0) {
     await appendFile(
       LOG_PATH,
-      `${new Date().toISOString()} [workflow status sync] exit=${exitCode}${
-        stderr.trim() === "" ? "" : ` ${stderr.trim()}`
-      }\n`
+      `${new Date().toISOString()} [workflow status sync] exit=${exitCode}\n`
     );
   }
 }

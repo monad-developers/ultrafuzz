@@ -35,6 +35,8 @@ describe("Modal storage layout", () => {
     expect(runnerSource).toContain("timeoutMs: MODAL_SANDBOX_TIMEOUT_MS");
     expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
     expect(workerSource).toMatch(/CLI,\s*"status",\s*runId/u);
+    expect(workerSource).toContain("WORKFLOW_STATUS_SYNC_TIMEOUT_MS");
+    expect(workerSource).toContain('stdio: "ignore"');
     expect(workerSource).toContain('setStatus("waiting-judge"');
   });
 
