@@ -81,11 +81,36 @@
             "type": "string",
             "minLength": 1
           },
-          "required_artifacts": {
+          "outputs": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "type": "object",
+              "required": ["path", "contract", "contract_digest", "primary"],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contract": {
+                  "enum": [
+                    "ultrafuzz/findings@1",
+                    "ultrafuzz/generated-tests@1",
+                    "ultrafuzz/json-array@1",
+                    "ultrafuzz/json-object@1",
+                    "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/report@1",
+                    "ultrafuzz/text@1"
+                  ]
+                },
+                "contract_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "primary": {
+                  "type": "boolean"
+                }
+              }
             }
           },
           "attempt_index": {

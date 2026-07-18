@@ -118,15 +118,15 @@ rather than running with literal placeholders.
 ## Topology
 
 Topology MUST live at `.ultrafuzz/topology.yml`. The topology version specified
-here is `1`.
+here is `2`. Version 1 is unsupported.
 
 Topology is the campaign graph source of truth. It defines logical node IDs,
-dependencies, groups, group defaults, node overrides, required artifacts,
-primary artifacts, prompt bindings, reference bindings, loop behavior, timeout
+dependencies, groups, group defaults, node overrides, versioned output
+contracts, prompt bindings, reference bindings, loop behavior, timeout
 overrides, and explicit model-profile fan-out.
 
 ```yaml
-version: 1
+version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -148,9 +148,10 @@ nodes:
     group: strategies
     depends_on:
       - setup
-    required_artifacts:
-      - findings.json
-    primary_artifact: findings.json
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
   - id: __finish__
     kind: meta
     role: finish
@@ -160,7 +161,7 @@ nodes:
 
 Top-level fields:
 
-- `version` MUST be `1`.
+- `version` MUST be `2`.
 - `defaults.strategy_loops` is the global fallback loop count.
 - `groups` MAY define labels, colors, and defaults.
 - `nodes` MUST be an ordered list of logical nodes.
@@ -172,7 +173,9 @@ loops for normal strategy nodes through the `strategies` group and explicit
 groups.
 
 Every node MUST define `id` and `depends_on`. Agentic nodes SHOULD define
-`prompt`, `group`, `required_artifacts`, and `primary_artifact`. Meta nodes
+`prompt` and `group`, and every executable node MUST define `outputs`. Each
+output MUST name a resolvable, versioned contract, and exactly one output MUST
+be primary. Meta nodes
 MUST use `kind: meta` with `role: start` or `role: finish`. Reference nodes MUST
 use `kind: reference` with a catalog `reference` ID and required reference
 artifacts.
@@ -180,10 +183,12 @@ artifacts.
 Validation MUST reject unsupported versions, missing nodes, duplicate IDs,
 unsafe IDs, invalid groups, invalid colors, malformed meta/reference nodes,
 unknown dependencies, duplicate dependencies, cycles, zero loops, expanded graph
-size over implementation limits, unsafe artifact paths, `primary_artifact`
-values not listed in `required_artifacts`, invalid prompt paths, missing prompt
+size over implementation limits, missing or duplicate output paths, unresolved
+contracts, missing or duplicate primary outputs, unknown topology fields,
+invalid prompt paths, missing prompt
 files when prompts are required, invalid model profile IDs, and prompt artifact
-references to unknown or non-ancestor producers.
+references to unknown or non-ancestor producers. The runtime-owned
+`artifact-manifest.json` path MUST NOT be declared as a node output.
 
 Loop expansion MUST be deterministic:
 
@@ -194,8 +199,8 @@ Loop expansion MUST be deterministic:
 
 Concrete IDs MUST NOT collide. Expanded graphs SHOULD preserve graph version,
 topology version, groups, logical ID, concrete ID, label, kind, dependencies,
-artifact directory, loop metadata, required artifacts, primary artifact, timeout,
-reference revision, and model fan-out provenance.
+artifact directory, loop metadata, contracted outputs, primary output marker,
+timeout, reference revision, and model fan-out provenance.
 
 ## Prompts
 
@@ -248,8 +253,19 @@ The prompt variable set includes:
 - `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]`
 
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
-producers MUST declare a `primary_artifact`. Ancestor artifact lists MUST use
-declared `required_artifacts`.
+producers MUST declare a primary contracted output. Exact artifact paths MUST
+resolve to declared producer outputs. Ancestor artifact lists MUST use declared
+outputs.
+
+A deterministic workflow verification task MUST validate every agent output
+before downstream tasks become eligible. Artifact manifests MUST record output
+contract identities and digests plus the exact prerequisite manifest digests
+consumed by the attempt. Runtime failure evidence MUST distinguish agent,
+provider, artifact-contract, and dependency-cascade failures.
+
+The terminal structured report MUST satisfy `ultrafuzz/report@1` before scoring
+or publication. Invalid terminal output MUST persist a typed non-publishable
+state without persisting raw output or diagnostics.
 
 ## References
 
@@ -280,6 +296,7 @@ Before or at launch, each run MUST persist:
 - `graph.fingerprint`
 - `state.json`
 - `events.jsonl`
+- `attempts.jsonl`
 - `plan.json`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
@@ -292,6 +309,14 @@ Run and node state MUST be explicit. Node statuses MUST include pending,
 ready, runnable, running, succeeded, failed, skipped, timed-out,
 reused-from-prior-run, and invalidated. Run statuses MUST include pending,
 running, paused, succeeded, failed, timed-out, and canceled.
+
+Completed node attempts MUST be appended immutably to `attempts.jsonl` with
+stable strategy-attempt, executor-retry, checkpoint-generation,
+workflow-execution, and controller-invocation identities. Entries MUST preserve
+parent and reuse relationships, lifecycle timestamps, typed outcomes, and input
+and output manifest digests. Attempt counts and terminal summaries MUST derive
+from the ledger. Failure categories MUST remain separate from raw diagnostics,
+and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated

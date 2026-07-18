@@ -338,8 +338,7 @@ export function materializeReferenceArtifacts(input: {
   catalog: ReferenceCatalog;
   id: string;
   artifactDir: string;
-  requiredArtifacts: string[];
-  primaryArtifact?: string;
+  outputs: Array<{ path: string; primary: boolean }>;
   cacheRoot?: string;
 }): MaterializedReference {
   validateReferenceCatalog(input.catalog);
@@ -347,7 +346,8 @@ export function materializeReferenceArtifacts(input: {
   if (!reference) {
     throw referenceError("UNKNOWN_REFERENCE", `unknown reference \`${input.id}\``, { id: input.id });
   }
-  if (!input.primaryArtifact) {
+  const primaryArtifact = input.outputs.find((output) => output.primary)?.path;
+  if (!primaryArtifact) {
     throw referenceError(
       "MISSING_PRIMARY_ARTIFACT",
       `reference \`${input.id}\` cannot materialize without a primary artifact`,
@@ -361,7 +361,7 @@ export function materializeReferenceArtifacts(input: {
   const cacheManifest = readCacheManifest(input.id, cacheDir);
 
   const artifactDir = path.resolve(input.artifactDir);
-  const referenceArtifact = prepareSafeFilePath(artifactDir, input.primaryArtifact);
+  const referenceArtifact = prepareSafeFilePath(artifactDir, primaryArtifact);
   writeFileDurable(referenceArtifact, normalizedReferenceMarkdown(input.id, reference, cacheDir));
 
   const manifestArtifact = prepareSafeFilePath(artifactDir, RUN_REFERENCE_MANIFEST_FILE);
@@ -373,11 +373,11 @@ export function materializeReferenceArtifacts(input: {
     commit: reference.commit,
     resolved_at: reference.resolved_at,
     source_files: cacheManifest.files.filter((file) => reference.paths.includes(file.path)),
-    artifacts: [manifestFileForPath(artifactDir, input.primaryArtifact)]
+    artifacts: [manifestFileForPath(artifactDir, primaryArtifact)]
   };
   writeJsonDurable(manifestArtifact, runManifest);
 
-  for (const required of input.requiredArtifacts) {
+  for (const required of input.outputs.map((output) => output.path)) {
     const requiredPath = safeResolveInside(artifactDir, required, "required reference artifact");
     if (!fs.existsSync(requiredPath) || !fs.statSync(requiredPath).isFile()) {
       throw referenceError(

@@ -11,6 +11,7 @@ schema fragments:
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/findings`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/usage-ledger`
+- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/node-attempt-ledger`
 
 These IDs are demonstrative identifiers for schema identity and `$ref` targets.
 They are not hosted schema URLs, and clients should not expect HTTP requests to

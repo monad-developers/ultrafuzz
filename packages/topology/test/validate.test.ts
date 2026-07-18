@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ARTIFACT_MANIFEST_FILE } from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateTopology } from "../src/index.js";
@@ -46,7 +47,7 @@ describe("validateTopology", () => {
     expect(() => validateTopology(cycle)).toThrow(expect.objectContaining({ code: "CYCLE_DETECTED" }));
   });
 
-  it("rejects malformed groups, loops, artifact paths, and primary artifacts", () => {
+  it("rejects malformed groups, loops, and incomplete output contracts", () => {
     expect(() => validateTopology(validTopology({ groups: { "Review Nodes": {} } }))).toThrow(
       expect.objectContaining({ code: "INVALID_GROUP_ID" })
     );
@@ -56,15 +57,72 @@ describe("validateTopology", () => {
     expect(() => validateTopology(zeroLoops)).toThrow(expect.objectContaining({ code: "INVALID_LOOP_COUNT" }));
 
     const unsafeArtifact = validTopology();
-    unsafeArtifact.nodes[1] = { ...unsafeArtifact.nodes[1]!, required_artifacts: ["../outside.md"] };
+    unsafeArtifact.nodes[1] = {
+      ...unsafeArtifact.nodes[1]!,
+      outputs: [{ path: "../outside.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
+    };
     expect(() => validateTopology(unsafeArtifact)).toThrow(
-      expect.objectContaining({ code: "INVALID_REQUIRED_ARTIFACT" })
+      expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
+    );
+
+    const reservedManifest = validTopology();
+    reservedManifest.nodes[1] = {
+      ...reservedManifest.nodes[1]!,
+      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/json-object@1", primary: true }]
+    };
+    expect(() => validateTopology(reservedManifest)).toThrow(
+      expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
     );
 
     const missingPrimary = validTopology();
-    missingPrimary.nodes[1] = { ...missingPrimary.nodes[1]!, primary_artifact: "not-required.md" };
-    expect(() => validateTopology(missingPrimary)).toThrow(
-      expect.objectContaining({ code: "PRIMARY_ARTIFACT_NOT_REQUIRED" })
+    missingPrimary.nodes[1] = {
+      ...missingPrimary.nodes[1]!,
+      outputs: [{ path: "setup.md", contract: "ultrafuzz/nonempty-markdown@1" }]
+    };
+    expect(() => validateTopology(missingPrimary)).toThrow(expect.objectContaining({ code: "INVALID_PRIMARY_OUTPUT" }));
+  });
+
+  it("rejects topology v1, unknown fields, missing contracts, and duplicate output paths", () => {
+    expect(() => validateTopology({ ...validTopology(), version: 1 })).toThrow(
+      expect.objectContaining({ code: "UNSUPPORTED_TOPOLOGY_VERSION" })
+    );
+    expect(() => validateTopology({ ...validTopology(), typo: true })).toThrow(
+      expect.objectContaining({ code: "UNKNOWN_TOPOLOGY_FIELD" })
+    );
+    const missing = validTopology();
+    missing.nodes[1] = { ...missing.nodes[1]!, outputs: [] };
+    expect(() => validateTopology(missing)).toThrow(expect.objectContaining({ code: "MISSING_OUTPUT_CONTRACT" }));
+
+    const duplicate = validTopology();
+    duplicate.nodes[1] = {
+      ...duplicate.nodes[1]!,
+      outputs: [
+        { path: "setup.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+        { path: "setup.md", contract: "ultrafuzz/nonempty-markdown@1" }
+      ]
+    };
+    expect(() => validateTopology(duplicate)).toThrow(expect.objectContaining({ code: "DUPLICATE_OUTPUT_PATH" }));
+  });
+
+  it("rejects wrong types for optional topology v2 fields instead of silently dropping them", () => {
+    const invalidGroup = structuredClone(validTopology()) as unknown as {
+      groups: Record<string, Record<string, unknown>>;
+    };
+    invalidGroup.groups.strategies!.label = 42;
+    expect(() => validateTopology(invalidGroup)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+
+    const invalidNode = structuredClone(validTopology()) as unknown as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    invalidNode.nodes[1]!.prompt = null;
+    expect(() => validateTopology(invalidNode)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+
+    const invalidProfiles = structuredClone(validTopology()) as unknown as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    invalidProfiles.nodes[1]!.model_profiles = null;
+    expect(() => validateTopology(invalidProfiles)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
     );
   });
 
@@ -80,8 +138,10 @@ describe("validateTopology", () => {
           reference: "properties.example",
           group: "references",
           depends_on: ["__start__"],
-          required_artifacts: ["references/example.md", RUN_REFERENCE_MANIFEST_FILE],
-          primary_artifact: "references/example.md"
+          outputs: [
+            { path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/json-object@1" }
+          ]
         },
         { ...validTopology().nodes[2]!, depends_on: ["setup", "reference-properties-example"] },
         validTopology().nodes[3]!,
@@ -94,7 +154,12 @@ describe("validateTopology", () => {
     const missingManifest = {
       ...topology,
       nodes: topology.nodes.map((node) =>
-        node.id === "reference-properties-example" ? { ...node, required_artifacts: ["references/example.md"] } : node
+        node.id === "reference-properties-example"
+          ? {
+              ...node,
+              outputs: [{ path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
+            }
+          : node
       )
     };
     expect(() => validateTopology(missingManifest)).toThrow(

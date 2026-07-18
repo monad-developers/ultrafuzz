@@ -49,17 +49,24 @@ function validatePromptVariable(
 ): void {
   if (variable.name === "artifact_path" && variable.argument !== undefined) {
     const referenced = requireSingleNodeId(node, variable);
-    validateAncestorReference(node, referenced, nodeById);
+    const producer = validateAncestorReference(node, referenced, nodeById);
+    if (variable.path !== undefined && !producer.outputs.some((output) => output.path === variable.path)) {
+      throw topologyError(
+        "UNDECLARED_PROMPT_ARTIFACT_REFERENCE",
+        `Prompt references undeclared output \`${variable.path}\` from node \`${referenced}\``,
+        { nodeId: node.id, referenced, path: variable.path }
+      );
+    }
     return;
   }
 
   if (variable.name === "artifact_handoff") {
     const referenced = requireSingleNodeId(node, variable);
     const producer = validateAncestorReference(node, referenced, nodeById);
-    if (!producer.primary_artifact) {
+    if (!producer.outputs.some((output) => output.primary)) {
       throw topologyError(
         "MISSING_PROMPT_ARTIFACT_HANDOFF",
-        `Node \`${referenced}\` does not declare primary_artifact for handoff`,
+        `Node \`${referenced}\` does not declare a primary output for handoff`,
         { nodeId: node.id, referenced }
       );
     }
@@ -88,10 +95,10 @@ function validatePromptVariable(
         });
       }
       const producer = validateAncestorReference(node, producerId, nodeById);
-      if (producer.required_artifacts.length === 0) {
+      if (producer.outputs.length === 0) {
         throw topologyError(
           "INVALID_PROMPT_ARTIFACT_REFERENCE",
-          `ancestor_artifacts producer \`${producerId}\` has no required_artifacts`,
+          `ancestor_artifacts producer \`${producerId}\` has no outputs`,
           { nodeId: node.id, referenced: producerId }
         );
       }

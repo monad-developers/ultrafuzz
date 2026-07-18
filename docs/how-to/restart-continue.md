@@ -40,6 +40,10 @@ ledger. After synchronization, segment rollups remain attributable to their
 checkpoint generations and the cumulative rollup includes every unique usage
 event across the resumed run.
 
+Completed node attempts remain in `attempts.jsonl` across every continuation.
+`ultrafuzz inspect` derives its executed and reused attempt counts from that
+append-only ledger rather than from a mutable lifecycle counter.
+
 Use `--reset-node` to retry one failed workflow node and reset its dependents
 before the linked run continues. The reset is recorded in run evidence before
 the continuation launches; if the continuation fails to start, rerun the same

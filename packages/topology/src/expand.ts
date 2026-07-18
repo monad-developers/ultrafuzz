@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { artifactContractDefinition } from "@ultrafuzz/artifacts";
 import { loadReferenceCatalog, type ReferenceCatalog, type ReferenceEntry } from "@ultrafuzz/references";
 
 import { topologyError } from "./errors.js";
@@ -86,8 +87,10 @@ function expandNode(
       mode: node.loop_mode,
       attemptIndex: loopIndex
     },
-    requiredArtifacts: [...node.required_artifacts],
-    ...(node.primary_artifact ? { primaryArtifact: node.primary_artifact } : {}),
+    outputs: node.outputs.map((output) => ({
+      ...output,
+      contractDigest: artifactContractDefinition(output.contract).digest
+    })),
     modelFanout: modelFanoutFor(node, topology, loopIndex, options)
   };
 }

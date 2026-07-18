@@ -7,22 +7,63 @@ import { test } from "node:test";
 import {
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
+  NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
   USAGE_LEDGER_SCHEMA_VERSION,
+  ARTIFACT_CONTRACT_IDS,
+  artifactContractDefinition,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
+  nodeAttemptLedgerJsonSchema,
   runStateJsonSchema,
   usageLedgerJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
+  validateArtifactContract,
+  validateNodeAttemptLedgerEntry,
   validateRunStateSchema,
   validateUsageLedgerEntry
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+
+test("artifact contract registry validates structured, empty, and malformed outputs", () => {
+  const definition = artifactContractDefinition("ultrafuzz/report@1");
+  assert.match(definition.digest, /^[0-9a-f]{64}$/u);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", "[]").ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/json-object@1", "[]").ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "ultrafuzz.e2e.report.v1",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        finding_count: 0,
+        findings: []
+      })
+    ).ok,
+    true
+  );
+  for (const id of ARTIFACT_CONTRACT_IDS) {
+    const contract = artifactContractDefinition(id);
+    if (contract.validEmptyExample !== undefined) {
+      assert.equal(validateArtifactContract(id, contract.validEmptyExample).ok, true, id);
+    }
+  }
+});
 
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
   const finding = {
@@ -63,7 +104,14 @@ test("run state schema covers all required node states and rejects malformed sta
         id: "node-1",
         status: "ready",
         artifactDir: "artifacts/node-1",
-        requiredArtifacts: ["findings.json"],
+        outputs: [
+          {
+            path: "findings.json",
+            contract: "ultrafuzz/findings@1",
+            contract_digest: "a".repeat(64),
+            primary: true
+          }
+        ],
         attemptIndex: 0,
         loopIndex: 0,
         modelId: "unit-model",
@@ -141,9 +189,57 @@ test("usage ledger schema requires typed incompleteness markers", () => {
   );
 });
 
+test("node attempt ledger schema keeps failure categories separate from diagnostic payloads", () => {
+  const entry = {
+    schema_version: NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
+    attempt_id: "attempt-1",
+    run_id: "run-1",
+    node_id: "node-1",
+    strategy_attempt_id: "strategy-1",
+    executor_retry_id: "retry-1",
+    checkpoint_generation_id: "checkpoint-1",
+    workflow_execution_id: "execution-1",
+    controller_invocation_id: "controller-1",
+    lifecycle: {
+      started_at: "2026-07-18T10:00:00.000Z",
+      finished_at: "2026-07-18T10:01:00.000Z"
+    },
+    outcome: "failed",
+    reuse: { status: "executed" },
+    manifests: {
+      input_sha256: "a".repeat(64),
+      output_sha256: null
+    },
+    failure_category: "executor-error"
+  };
+  assert.equal(validateNodeAttemptLedgerEntry(entry).ok, true);
+  assert.equal(validateNodeAttemptLedgerEntry({ ...entry, diagnostic: { message: "raw failure" } }).ok, false);
+  assert.equal(
+    validateNodeAttemptLedgerEntry({
+      ...entry,
+      lifecycle: {
+        started_at: "2026-07-18T10:00:00.000+02:00",
+        finished_at: "2026-07-18T08:30:00.000Z"
+      }
+    }).ok,
+    true
+  );
+  assert.equal(
+    validateNodeAttemptLedgerEntry({
+      ...entry,
+      lifecycle: {
+        started_at: "2026-07-18T10:00:00.000+02:00",
+        finished_at: "2026-07-18T07:59:59.000Z"
+      }
+    }).ok,
+    false
+  );
+});
+
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
+  const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
@@ -151,6 +247,8 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
   assert.equal(generatedTestsSnapshot.$id, generatedTestsJsonSchema.$id);
   assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
+  assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
+  assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);

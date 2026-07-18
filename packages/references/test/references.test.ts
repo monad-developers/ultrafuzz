@@ -153,8 +153,10 @@ test("status and materialization use the pinned offline cache with digest manife
     catalog,
     id: "properties.example",
     artifactDir,
-    requiredArtifacts: ["references/example.md", RUN_REFERENCE_MANIFEST_FILE],
-    primaryArtifact: "references/example.md",
+    outputs: [
+      { path: "references/example.md", primary: true },
+      { path: RUN_REFERENCE_MANIFEST_FILE, primary: false }
+    ],
     cacheRoot
   });
 
@@ -191,8 +193,10 @@ test("digest mismatch blocks status and materialization", () => {
         catalog,
         id: "properties.example",
         artifactDir: path.join(project, "artifacts", "reference-properties-example"),
-        requiredArtifacts: ["references/example.md", RUN_REFERENCE_MANIFEST_FILE],
-        primaryArtifact: "references/example.md",
+        outputs: [
+          { path: "references/example.md", primary: true },
+          { path: RUN_REFERENCE_MANIFEST_FILE, primary: false }
+        ],
         cacheRoot
       }),
     /digest mismatch/u

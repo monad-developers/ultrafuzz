@@ -7,19 +7,24 @@ import test from "node:test";
 
 import {
   appendUsageEvents,
+  appendNodeAttempt,
   appendEvent,
   appendLineDurable,
   createRunLayout,
   getNodeArtifactDir,
   normalizeFindings,
   normalizeSafeRelativePath,
+  manifestDigest,
+  queryNodeAttempts,
   queryEvents,
   readFindings,
   readRunState,
   replayEvents,
   replayUsageEvents,
   safeResolveInside,
+  summarizeNodeAttempts,
   updateNodeState,
+  verifyArtifactManifestPrerequisites,
   writeArtifact,
   writeArtifactManifest,
   writeGeneratedTestManifest
@@ -40,7 +45,20 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     graph: { schema_version: "1.0", nodes: [{ id: "node-a" }] },
     graphFingerprint: "graph-fp",
     configFingerprint: "config-fp",
-    stateNodes: [{ id: "node-a", logicalNodeId: "node-a", requiredArtifacts: ["setup/result.md"] }]
+    stateNodes: [
+      {
+        id: "node-a",
+        logicalNodeId: "node-a",
+        outputs: [
+          {
+            path: "setup/result.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            contract_digest: "a".repeat(64),
+            primary: true
+          }
+        ]
+      }
+    ]
   });
 
   for (const expected of [
@@ -53,6 +71,7 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.statePath,
     layout.eventsPath,
     layout.usageLedgerPath,
+    layout.attemptLedgerPath,
     layout.workspacesPath,
     path.join(layout.eventsIndexDir, "query-inputs.json")
   ]) {
@@ -124,6 +143,79 @@ test("usage ledger replay rejects entries copied from another run", () => {
   assert.equal(replay.malformedEntries, 1);
 });
 
+test("node attempt ledger is append-only, idempotent, independently queryable, and exactly summarized", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger" });
+  const inputDigest = manifestDigest("generated input manifest");
+  const outputDigest = manifestDigest("generated output manifest");
+  const firstInput = {
+    nodeId: "strategy-a",
+    strategyAttemptId: "strategy-a",
+    executorRetryId: "executor-retry-1",
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1",
+    startedAt: "2026-07-18T10:00:00.000Z",
+    finishedAt: "2026-07-18T10:01:00.000Z",
+    outcome: "failed" as const,
+    inputManifestDigest: inputDigest,
+    failureCategory: "executor-error" as const
+  };
+
+  const first = appendNodeAttempt(layout, firstInput);
+  const replayedFirst = appendNodeAttempt(layout, firstInput);
+  assert.equal(first.appended, true);
+  assert.equal(replayedFirst.appended, false);
+  assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+
+  const second = appendNodeAttempt(layout, {
+    ...firstInput,
+    executorRetryId: "executor-retry-2",
+    checkpointGenerationId: "checkpoint-2",
+    workflowExecutionId: "execution-2",
+    controllerInvocationId: "controller-2",
+    parentAttemptId: first.entry.attempt_id,
+    startedAt: "2026-07-18T10:02:00.000Z",
+    finishedAt: "2026-07-18T10:03:00.000Z",
+    outcome: "succeeded",
+    outputManifestDigest: outputDigest,
+    failureCategory: undefined
+  });
+  appendNodeAttempt(layout, {
+    ...firstInput,
+    nodeId: "strategy-b",
+    strategyAttemptId: "strategy-b",
+    executorRetryId: "executor-retry-3",
+    checkpointGenerationId: "checkpoint-2",
+    workflowExecutionId: "execution-2",
+    controllerInvocationId: "controller-2",
+    startedAt: "2026-07-18T10:04:00.000Z",
+    finishedAt: "2026-07-18T10:04:00.000Z",
+    outcome: "reused",
+    reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
+    outputManifestDigest: outputDigest,
+    failureCategory: undefined
+  });
+
+  assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
+  assert.equal(queryNodeAttempts(layout, { workflowExecutionId: "execution-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { controllerInvocationId: "controller-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { reuseStatus: "reused" })[0]?.reuse.status, "reused");
+
+  const summary = summarizeNodeAttempts(queryNodeAttempts(layout));
+  assert.deepEqual(summary, {
+    total: 3,
+    executed: 2,
+    reused: 1,
+    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 1 },
+    strategy_attempts: 2,
+    executor_retries: 3,
+    checkpoint_generations: 2,
+    workflow_executions: 2,
+    controller_invocations: 2
+  });
+  assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
+});
+
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
   const project = tempProject();
   const outside = tempProject();
@@ -150,6 +242,14 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   const manifest = writeArtifactManifest({
     layout,
     nodeId: "node-a",
+    outputs: [
+      {
+        path: "setup/project.md",
+        contract: "ultrafuzz/nonempty-markdown@1",
+        contract_digest: "a".repeat(64),
+        primary: true
+      }
+    ],
     provenance: {
       logical_node_id: "node-a",
       agent_ref: "CodexAgent",
@@ -167,6 +267,64 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.producer_node_id, "node-a");
   assert.equal(manifest.files[0]!.provenance.agent_ref, "CodexAgent");
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
+  assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
+  assert.deepEqual(manifest.prerequisite_manifests, []);
+});
+
+test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-causal" });
+  writeArtifact(layout, "ancestor", "result.md", "unchanged\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  writeArtifact(layout, "descendant", "result.md", "derived\n");
+  const descendant = writeArtifactManifest({
+    layout,
+    nodeId: "descendant",
+    prerequisiteNodeIds: ["ancestor"],
+    createdAt: "2026-07-18T00:00:01.000Z"
+  });
+
+  assert.equal(descendant.prerequisite_manifests.length, 1);
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: true,
+    changed: [],
+    missing: []
+  });
+
+  writeArtifact(layout, "ancestor", "result.md", "changed\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:02.000Z" });
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: false,
+    changed: ["ancestor"],
+    missing: []
+  });
+});
+
+test("artifact manifest reuse checks the complete prerequisite chain", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-causal-chain" });
+  writeArtifact(layout, "ancestor", "result.md", "first\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  writeArtifact(layout, "middle", "result.md", "second\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: "middle",
+    prerequisiteNodeIds: ["ancestor"],
+    createdAt: "2026-07-18T00:00:01.000Z"
+  });
+  writeArtifact(layout, "descendant", "result.md", "third\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: "descendant",
+    prerequisiteNodeIds: ["middle"],
+    createdAt: "2026-07-18T00:00:02.000Z"
+  });
+
+  writeArtifact(layout, "ancestor", "result.md", "changed\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:03.000Z" });
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: false,
+    changed: ["ancestor"],
+    missing: []
+  });
 });
 
 test("events append to JSONL, redact secrets, replay, and expose query indexes", () => {

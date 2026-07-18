@@ -5,30 +5,41 @@ import {
   USAGE_FIELDS,
   USAGE_INCOMPLETE_REASON_CODES,
   appendUsageEvents,
+  appendNodeAttempts,
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
   normalizeFindings,
+  manifestDigest,
+  queryNodeAttempts,
+  replayEvents,
   readRunState,
   replayUsageEvents,
   safeResolveInside,
   stableUsageDimension,
+  sha256File,
   updateNodeState,
   updateRunStatus,
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
+  type AppendNodeAttemptInput,
   type ArtifactProvenance,
   type AppendUsageEventInput,
+  type NodeAttemptFailureCategory,
+  type NodeAttemptId,
+  type NodeAttemptLedgerEntry,
+  type NodeAttemptOutcome,
   type NodeState,
   type NormalizedUsage,
   type NodeStatus,
   type RunLayout,
   type RunStatus,
   type UsageField,
-  type UsageIncompleteReason,
+  type UsageIncompleteReason as LedgerUsageIncompleteReason,
   type UsageLedgerEntry,
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
@@ -59,6 +70,8 @@ interface StoredWorkflowTask {
   concreteNodeId: string;
   logicalNodeId: string;
   smithersNodeId: string;
+  verifierSmithersNodeId: string;
+  dependencies: string[];
   agentRef?: string;
   modelName?: string;
   metadata?: {
@@ -102,28 +115,57 @@ interface WorkflowEvent {
 }
 
 interface UsageCompletenessMarker {
-  code: UsageIncompleteReason["code"] | "ledger-entry-malformed";
+  code: LedgerUsageIncompleteReason["code"] | ComponentUsageIncompleteReason["code"] | "ledger-entry-malformed";
   field?: UsageField;
+  component?: UsageComponent;
+  model?: string;
   event_id?: string;
   checkpoint_generation_id?: string;
 }
 
 interface PricingCompletenessMarker {
-  code: "price-unavailable" | "ledger-entry-malformed";
+  code: PricingIncompleteReason["code"] | "price-unavailable" | "ledger-entry-malformed";
+  component?: UsageComponent;
+  model?: string;
   event_id?: string;
   checkpoint_generation_id?: string;
 }
 
+interface TerminalWorkflowAttempt {
+  retry: number;
+  iteration: number;
+  startedSequence?: number;
+  finishedSequence?: number;
+  startedAt: string;
+  finishedAt: string;
+  outcome: NodeAttemptOutcome;
+  failureCategory?: NodeAttemptFailureCategory;
+  executorRetryId?: string;
+  checkpointGenerationId?: string;
+  workflowExecutionId?: string;
+  controllerInvocationId?: string;
+}
+
+interface ControllerInvocation {
+  id: string;
+  invokedAt: string;
+}
+
 interface AccountingSummary {
+  uncached_input_tokens: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
   reasoning_tokens: number;
+  inclusive_token_total: number;
+  billable_token_total: number;
   total_tokens: number;
   tokens_used: string;
   estimated_spend: string;
   estimated_spend_usd?: number;
+  component_costs_usd: UsageComponentCosts;
+  provided_cost_usd?: number;
   usage_complete: boolean;
   usage_incomplete_reasons: UsageCompletenessMarker[];
   pricing_complete: boolean;
@@ -156,7 +198,12 @@ interface AccountingTotals {
   cacheWriteTokens: number;
   reasoningTokens: number;
   totalTokens: number;
+  billableTokens: number;
   estimatedSpendUsd?: number;
+  componentCostsUsd: UsageComponentCosts;
+  providedCostUsd?: number;
+  usageIncompleteReasons: ComponentUsageIncompleteReason[];
+  pricingIncompleteReasons: PricingIncompleteReason[];
   partialPricing: boolean;
   cacheReadPricingEstimated: boolean;
   cacheReadRatioUsed?: number;
@@ -167,6 +214,30 @@ interface AccountingTotals {
   agents: Set<string>;
 }
 
+type UsageComponent = "uncached_input" | "cache_read" | "cache_write" | "output" | "reasoning";
+
+type UsageComponentCosts = Record<UsageComponent, number>;
+
+interface ComponentUsageIncompleteReason {
+  code: "component-usage-unavailable" | "component-usage-estimated" | "component-breakdown-incomplete";
+  component?: UsageComponent;
+  model?: string;
+}
+
+interface PricingIncompleteReason {
+  code: "model-pricing-unavailable" | "component-rate-unavailable" | "event-pricing-reported-partial";
+  component?: UsageComponent;
+  model?: string;
+}
+
+interface NormalizedUsageComponents {
+  uncached_input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  reasoning: number;
+}
+
 interface NodeWorkflowEvidence {
   status: NodeStatus;
   workflowState?: string;
@@ -175,6 +246,12 @@ interface NodeWorkflowEvidence {
   finishedAt?: string;
   error?: string;
   timedOut?: boolean;
+}
+
+interface AttemptWorkflowEvidence {
+  evidence: NodeWorkflowEvidence;
+  source: "agent" | "verifier";
+  taskId: string;
 }
 
 interface NodeFinalization {
@@ -258,7 +335,7 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
   const eventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--type", "node", "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
     env: input.env
   });
@@ -352,7 +429,10 @@ async function synchronizeWorkflowAccounting(input: {
   const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
   const storedAccounting = recordField(metadata, "accounting");
   const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
-  const storedPricing = modelPricingFromSnapshot(storedPricingCatalog?.model_prices);
+  const storedPricing =
+    stringField(storedAccounting, "schema_version") === ACCOUNTING_SCHEMA_VERSION
+      ? modelPricingFromSnapshot(storedPricingCatalog?.model_prices)
+      : new Map<string, ModelPricing>();
   const previouslyUnresolvedModels =
     storedPricingCatalog?.status === "disabled"
       ? new Set(stringArrayField(storedPricingCatalog, "unresolved_models"))
@@ -464,58 +544,77 @@ function accountingFromWorkflowEvents(
       "estimated_cost_usd"
     ]);
     const model = stringField(payload, "model");
-    const modelCostEstimate =
-      costUsd === undefined
-        ? estimatedCostFromModelPricing({
-            model,
-            inputTokens: inputTokens ?? 0,
-            outputTokens: outputTokens ?? 0,
-            cacheReadTokens,
-            cacheWriteTokens: cacheWriteTokens ?? 0,
-            cacheReadRatio,
-            modelPricing
-          })
-        : undefined;
-    const estimatedCostUsd = costUsd ?? modelCostEstimate?.costUsd;
-    const tokenCount = usageTokenCount({
-      inputTokens,
-      outputTokens,
+    const normalizedUsage = normalizeUsageComponents({
+      model,
+      inputTokens: inputTokens ?? 0,
+      outputTokens: outputTokens ?? 0,
       cacheReadTokens,
-      cacheWriteTokens,
-      reasoningTokens,
-      explicitTotal
+      cacheWriteTokens: cacheWriteTokens ?? 0,
+      reasoningTokens: reasoningTokens ?? 0,
+      cacheReadRatio
     });
-    if (tokenCount <= 0 && estimatedCostUsd === undefined) {
-      continue;
+    const componentTokenCount = sumUsageComponents(normalizedUsage.components);
+    const tokenCount = Math.max(explicitTotal ?? 0, componentTokenCount);
+    const usageIncompleteReasons = [...normalizedUsage.incompleteReasons];
+    if (explicitTotal !== undefined && explicitTotal > componentTokenCount) {
+      usageIncompleteReasons.push({
+        code: "component-breakdown-incomplete",
+        ...(model === undefined ? {} : { model })
+      });
     }
-
-    totals.inputTokens += inputTokens ?? 0;
-    totals.outputTokens += outputTokens ?? 0;
-    totals.cacheReadTokens += cacheReadTokens ?? 0;
-    totals.cacheWriteTokens += cacheWriteTokens ?? 0;
-    totals.reasoningTokens += reasoningTokens ?? 0;
-    totals.totalTokens += tokenCount;
-    totals.eventCount += 1;
-    if (estimatedCostUsd === undefined) {
-      if (tokenCount > 0) {
-        totals.unpricedEventCount += 1;
-      }
-    } else {
-      totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + estimatedCostUsd;
-      totals.pricedEventCount += 1;
-    }
-    if (modelCostEstimate?.cacheReadPricingEstimated === true) {
-      totals.cacheReadPricingEstimated = true;
-      totals.cacheReadRatioUsed = modelCostEstimate.cacheReadRatioUsed;
-    }
+    const componentPricing = priceUsageComponents({
+      model,
+      components: normalizedUsage.components,
+      modelPricing
+    });
+    const pricingIncompleteReasons = [...componentPricing.incompleteReasons];
     if (
       booleanField(payload, "partialPricing") === true ||
       booleanField(payload, "partial_pricing") === true ||
       booleanField(payload, "pricingPartial") === true ||
       booleanField(payload, "pricing_partial") === true
     ) {
-      totals.partialPricing = true;
+      pricingIncompleteReasons.push({
+        code: "event-pricing-reported-partial",
+        ...(model === undefined ? {} : { model })
+      });
     }
+    const usageUnavailable = usageIncompleteReasons.some(
+      (reason) => reason.code === "component-usage-unavailable" || reason.code === "component-breakdown-incomplete"
+    );
+    const estimatedCostUsd = costUsd ?? (usageUnavailable ? undefined : componentPricing.costUsd);
+    if (tokenCount <= 0 && estimatedCostUsd === undefined) {
+      continue;
+    }
+
+    totals.inputTokens += normalizedUsage.components.uncached_input;
+    totals.outputTokens += normalizedUsage.components.output;
+    totals.cacheReadTokens += normalizedUsage.components.cache_read;
+    totals.cacheWriteTokens += normalizedUsage.components.cache_write;
+    totals.reasoningTokens += normalizedUsage.components.reasoning;
+    totals.totalTokens += tokenCount;
+    totals.billableTokens += componentPricing.billableTokens;
+    totals.eventCount += 1;
+    if (pricingIncompleteReasons.length === 0) {
+      totals.pricedEventCount += 1;
+    } else {
+      totals.unpricedEventCount += 1;
+    }
+    if (estimatedCostUsd !== undefined) {
+      totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, estimatedCostUsd);
+      if (costUsd === undefined) {
+        addComponentCosts(totals.componentCostsUsd, componentPricing.componentCostsUsd);
+      } else {
+        totals.providedCostUsd = addUsd(totals.providedCostUsd, costUsd);
+      }
+    }
+    totals.usageIncompleteReasons.push(...usageIncompleteReasons);
+    totals.pricingIncompleteReasons.push(...pricingIncompleteReasons);
+    if (normalizedUsage.cacheReadPricingEstimated) {
+      totals.cacheReadPricingEstimated = true;
+      totals.cacheReadRatioUsed = normalizedUsage.cacheReadRatioUsed;
+    }
+    totals.partialPricing = totals.partialPricing || pricingIncompleteReasons.length > 0;
     if (model !== undefined) {
       totals.models.add(model);
     }
@@ -609,7 +708,7 @@ function normalizedUsageLedgerInput(
     usage.agent = agent;
   }
 
-  const usageIncompleteReasons: UsageIncompleteReason[] = fields
+  const usageIncompleteReasons: LedgerUsageIncompleteReason[] = fields
     .filter((field) => field.malformed)
     .map((field) => ({ code: "usage-malformed", field: field.field }));
   if (!fields.some((field) => field.present)) {
@@ -730,13 +829,16 @@ function accountingSummaryWithCompleteness(
   identity: { checkpointGenerationId: string; workflowRunId: string }
 ): AccountingSegment {
   const base = summary ?? emptyAccountingSummary();
-  const usageIncompleteReasons = entries.flatMap((entry): UsageCompletenessMarker[] =>
-    entry.usage_incomplete_reasons.map((reason) => ({
-      ...reason,
-      event_id: entry.event_id,
-      checkpoint_generation_id: entry.checkpoint_generation_id
-    }))
-  );
+  const usageIncompleteReasons: UsageCompletenessMarker[] = [
+    ...base.usage_incomplete_reasons,
+    ...entries.flatMap((entry): UsageCompletenessMarker[] =>
+      entry.usage_incomplete_reasons.map((reason) => ({
+        ...reason,
+        event_id: entry.event_id,
+        checkpoint_generation_id: entry.checkpoint_generation_id
+      }))
+    )
+  ];
   if (malformedEntries > 0) {
     usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
   }
@@ -805,14 +907,18 @@ function usageTokenCount(input: {
 
 function emptyAccountingSummary(): AccountingSummary {
   return {
+    uncached_input_tokens: 0,
     input_tokens: 0,
     output_tokens: 0,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
     reasoning_tokens: 0,
+    inclusive_token_total: 0,
+    billable_token_total: 0,
     total_tokens: 0,
     tokens_used: "0",
     estimated_spend: "unavailable",
+    component_costs_usd: emptyComponentCosts(),
     usage_complete: true,
     usage_incomplete_reasons: [],
     pricing_complete: true,
@@ -871,6 +977,7 @@ function cumulativeAccountingSummary(
     totals.cacheWriteTokens += summary.cache_write_tokens;
     totals.reasoningTokens += summary.reasoning_tokens;
     totals.totalTokens += summary.total_tokens;
+    totals.billableTokens += summary.billable_token_total;
     totals.eventCount += summary.event_count;
     totals.pricedEventCount += summary.priced_event_count;
     totals.unpricedEventCount += summary.unpriced_event_count;
@@ -878,6 +985,10 @@ function cumulativeAccountingSummary(
       totals.partialPricing ||
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
+    addComponentCosts(totals.componentCostsUsd, summary.component_costs_usd);
+    if (summary.provided_cost_usd !== undefined) {
+      totals.providedCostUsd = addUsd(totals.providedCostUsd, summary.provided_cost_usd);
+    }
     usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
     pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
@@ -888,7 +999,7 @@ function cumulativeAccountingSummary(
           : undefined;
     }
     if (summary.estimated_spend_usd !== undefined) {
-      totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + summary.estimated_spend_usd;
+      totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, summary.estimated_spend_usd);
     }
     for (const model of summary.models) {
       totals.models.add(model);
@@ -916,6 +1027,10 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
   if (totalTokens === undefined) {
     return undefined;
   }
+  const estimatedSpendUsd = firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]);
+  const componentCostsValue = recordField(value, "component_costs_usd") ?? recordField(value, "componentCostsUsd");
+  const componentCosts = storedComponentCosts(componentCostsValue);
+  const providedCostUsd = firstNumericField(value, ["provided_cost_usd", "providedCostUsd"]);
   const partialPricing = booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false;
   const usageComplete = booleanField(value, "usage_complete") ?? booleanField(value, "usageComplete") ?? true;
   const usageIncompleteReasons = storedUsageCompletenessMarkers(
@@ -927,17 +1042,30 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
     value.pricing_incomplete_reasons ?? value.pricingIncompleteReasons
   );
   return {
-    input_tokens: firstNumericField(value, ["input_tokens", "inputTokens"]) ?? 0,
+    uncached_input_tokens:
+      firstNumericField(value, ["uncached_input_tokens", "uncachedInputTokens", "input_tokens", "inputTokens"]) ?? 0,
+    input_tokens:
+      firstNumericField(value, ["uncached_input_tokens", "uncachedInputTokens", "input_tokens", "inputTokens"]) ?? 0,
     output_tokens: firstNumericField(value, ["output_tokens", "outputTokens"]) ?? 0,
     cache_read_tokens: firstNumericField(value, ["cache_read_tokens", "cacheReadTokens"]) ?? 0,
     cache_write_tokens: firstNumericField(value, ["cache_write_tokens", "cacheWriteTokens"]) ?? 0,
     reasoning_tokens: firstNumericField(value, ["reasoning_tokens", "reasoningTokens"]) ?? 0,
+    inclusive_token_total:
+      firstNumericField(value, ["inclusive_token_total", "inclusiveTokenTotal", "total_tokens", "totalTokens"]) ??
+      totalTokens,
+    billable_token_total:
+      firstNumericField(value, ["billable_token_total", "billableTokenTotal", "total_tokens", "totalTokens"]) ??
+      totalTokens,
     total_tokens: totalTokens,
     tokens_used: stringField(value, "tokens_used") ?? stringField(value, "tokensUsed") ?? formatInteger(totalTokens),
     estimated_spend: stringField(value, "estimated_spend") ?? stringField(value, "estimatedSpend") ?? "unavailable",
-    ...(firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) === undefined
-      ? {}
-      : { estimated_spend_usd: firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) }),
+    ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
+    component_costs_usd: componentCosts,
+    ...(providedCostUsd === undefined && estimatedSpendUsd !== undefined && sumComponentCosts(componentCosts) === 0
+      ? { provided_cost_usd: estimatedSpendUsd }
+      : providedCostUsd === undefined
+        ? {}
+        : { provided_cost_usd: providedCostUsd }),
     usage_complete: usageComplete,
     usage_incomplete_reasons:
       usageComplete || usageIncompleteReasons.length > 0 ? usageIncompleteReasons : [{ code: "usage-missing" }],
@@ -964,25 +1092,29 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
   if (totals.eventCount === 0) {
     return undefined;
   }
-  const estimatedSpendUsd =
-    totals.pricedEventCount === 0
-      ? undefined
-      : Number((totals.estimatedSpendUsd ?? 0).toFixed(ACCOUNTING_USD_PRECISION));
-  const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0;
+  const estimatedSpendUsd = totals.estimatedSpendUsd;
+  const usageIncompleteReasons = uniqueReasons(totals.usageIncompleteReasons);
+  const pricingIncompleteReasons = uniqueReasons(totals.pricingIncompleteReasons);
+  const partialPricing = totals.partialPricing || totals.unpricedEventCount > 0 || pricingIncompleteReasons.length > 0;
   return {
+    uncached_input_tokens: totals.inputTokens,
     input_tokens: totals.inputTokens,
     output_tokens: totals.outputTokens,
     cache_read_tokens: totals.cacheReadTokens,
     cache_write_tokens: totals.cacheWriteTokens,
     reasoning_tokens: totals.reasoningTokens,
+    inclusive_token_total: totals.totalTokens,
+    billable_token_total: totals.billableTokens,
     total_tokens: totals.totalTokens,
     tokens_used: formatInteger(totals.totalTokens),
     estimated_spend: estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, partialPricing),
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
-    usage_complete: true,
-    usage_incomplete_reasons: [],
-    pricing_complete: !partialPricing,
-    pricing_incomplete_reasons: partialPricing ? [{ code: "price-unavailable" }] : [],
+    component_costs_usd: roundedComponentCosts(totals.componentCostsUsd),
+    ...(totals.providedCostUsd === undefined ? {} : { provided_cost_usd: totals.providedCostUsd }),
+    usage_complete: usageIncompleteReasons.length === 0,
+    usage_incomplete_reasons: usageIncompleteReasons,
+    pricing_complete: pricingIncompleteReasons.length === 0,
+    pricing_incomplete_reasons: pricingIncompleteReasons,
     partial_pricing: partialPricing,
     cache_read_pricing_estimated: totals.cacheReadPricingEstimated,
     ...(totals.cacheReadRatioUsed === undefined ? {} : { cache_read_ratio_used: totals.cacheReadRatioUsed }),
@@ -1002,6 +1134,10 @@ function emptyAccountingTotals(): AccountingTotals {
     cacheWriteTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
+    billableTokens: 0,
+    componentCostsUsd: emptyComponentCosts(),
+    usageIncompleteReasons: [],
+    pricingIncompleteReasons: [],
     partialPricing: false,
     cacheReadPricingEstimated: false,
     eventCount: 0,
@@ -1012,51 +1148,174 @@ function emptyAccountingTotals(): AccountingTotals {
   };
 }
 
-function estimatedCostFromModelPricing(input: {
+function normalizeUsageComponents(input: {
   model: string | undefined;
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number | undefined;
   cacheWriteTokens: number;
+  reasoningTokens: number;
   cacheReadRatio: number | undefined;
-  modelPricing: ReadonlyMap<string, ModelPricing>;
-}):
-  | {
-      costUsd: number;
-      cacheReadPricingEstimated: boolean;
-      cacheReadRatioUsed?: number;
-    }
-  | undefined {
-  const basePricing = pricingForModel(input.model, input.modelPricing);
-  const accountedInputTokens = Math.max(input.inputTokens, (input.cacheReadTokens ?? 0) + input.cacheWriteTokens);
-  if (basePricing === undefined || (accountedInputTokens <= 0 && input.outputTokens <= 0)) {
-    return undefined;
-  }
-  const pricing = pricingForContext(basePricing, Math.max(accountedInputTokens, 0));
-  const cacheRateChangesCost = pricing.cachedInputUsdPerMillion !== pricing.inputUsdPerMillion;
+}): {
+  components: NormalizedUsageComponents;
+  incompleteReasons: ComponentUsageIncompleteReason[];
+  cacheReadPricingEstimated: boolean;
+  cacheReadRatioUsed?: number;
+} {
+  const uncachedInputTokens = Math.max(input.inputTokens, 0);
+  const cacheWriteTokens = Math.max(input.cacheWriteTokens, 0);
+  const outputTokens = Math.max(input.outputTokens, 0);
+  const reasoningTokens = Math.max(input.reasoningTokens, 0);
+  const hasTokenActivity = uncachedInputTokens > 0 || cacheWriteTokens > 0 || outputTokens > 0 || reasoningTokens > 0;
+  const cacheReadUsageUnknown = input.cacheReadTokens === undefined && hasTokenActivity;
   const cacheReadPricingEstimated =
-    input.cacheReadTokens === undefined && input.inputTokens > 0 && cacheRateChangesCost;
-  if (cacheReadPricingEstimated && input.cacheReadRatio === undefined) {
-    return undefined;
+    cacheReadUsageUnknown && uncachedInputTokens > 0 && input.cacheReadRatio !== undefined;
+  const incompleteReasons: ComponentUsageIncompleteReason[] = [];
+  if (cacheReadUsageUnknown) {
+    incompleteReasons.push({
+      code: cacheReadPricingEstimated ? "component-usage-estimated" : "component-usage-unavailable",
+      component: "cache_read",
+      ...(input.model === undefined ? {} : { model: input.model })
+    });
   }
-  const cachedInputTokens = Math.min(
-    Math.max(input.cacheReadTokens ?? Math.max(input.inputTokens, 0) * (input.cacheReadRatio ?? 0), 0),
-    Math.max(accountedInputTokens, 0)
-  );
-  const cacheWriteTokens = Math.min(
-    Math.max(input.cacheWriteTokens, 0),
-    Math.max(accountedInputTokens - cachedInputTokens, 0)
-  );
-  const uncachedInputTokens = Math.max(accountedInputTokens - cachedInputTokens - cacheWriteTokens, 0);
   return {
-    costUsd:
-      (uncachedInputTokens * pricing.inputUsdPerMillion +
-        cachedInputTokens * pricing.cachedInputUsdPerMillion +
-        cacheWriteTokens * pricing.cacheWriteUsdPerMillion +
-        Math.max(input.outputTokens, 0) * pricing.outputUsdPerMillion) /
-      1_000_000,
+    components: {
+      uncached_input: uncachedInputTokens,
+      cache_read: Math.max(input.cacheReadTokens ?? uncachedInputTokens * (input.cacheReadRatio ?? 0), 0),
+      cache_write: cacheWriteTokens,
+      output: outputTokens,
+      reasoning: reasoningTokens
+    },
+    incompleteReasons,
     cacheReadPricingEstimated,
     ...(cacheReadPricingEstimated ? { cacheReadRatioUsed: input.cacheReadRatio } : {})
+  };
+}
+
+function priceUsageComponents(input: {
+  model: string | undefined;
+  components: NormalizedUsageComponents;
+  modelPricing: ReadonlyMap<string, ModelPricing>;
+}): {
+  costUsd?: number;
+  componentCostsUsd: UsageComponentCosts;
+  billableTokens: number;
+  incompleteReasons: PricingIncompleteReason[];
+} {
+  const componentCostsUsd = emptyComponentCosts();
+  const incompleteReasons: PricingIncompleteReason[] = [];
+  const basePricing = pricingForModel(input.model, input.modelPricing);
+  const componentEntries = Object.entries(input.components) as Array<[UsageComponent, number]>;
+  if (basePricing === undefined) {
+    for (const [component, tokens] of componentEntries) {
+      if (tokens > 0) {
+        incompleteReasons.push({
+          code: "model-pricing-unavailable",
+          component,
+          ...(input.model === undefined ? {} : { model: input.model })
+        });
+      }
+    }
+    return { componentCostsUsd, billableTokens: 0, incompleteReasons };
+  }
+
+  const pricing = pricingForContext(
+    basePricing,
+    input.components.uncached_input + input.components.cache_read + input.components.cache_write
+  );
+  const rates: Record<UsageComponent, number | undefined> = {
+    uncached_input: pricing.inputUsdPerMillion,
+    cache_read: pricing.cachedInputUsdPerMillion,
+    cache_write: pricing.cacheWriteUsdPerMillion,
+    output: pricing.outputUsdPerMillion,
+    reasoning: pricing.outputUsdPerMillion
+  };
+  let billableTokens = 0;
+  let pricedComponents = 0;
+  for (const [component, tokens] of componentEntries) {
+    if (tokens <= 0) {
+      continue;
+    }
+    const rate = rates[component];
+    if (rate === undefined) {
+      incompleteReasons.push({
+        code: "component-rate-unavailable",
+        component,
+        ...(input.model === undefined ? {} : { model: input.model })
+      });
+      continue;
+    }
+    componentCostsUsd[component] = roundUsd((tokens * rate) / 1_000_000);
+    if (rate > 0) {
+      billableTokens += tokens;
+    }
+    pricedComponents += 1;
+  }
+  return {
+    ...(pricedComponents === 0 ? {} : { costUsd: sumComponentCosts(componentCostsUsd) }),
+    componentCostsUsd,
+    billableTokens,
+    incompleteReasons
+  };
+}
+
+function sumUsageComponents(components: NormalizedUsageComponents): number {
+  return Object.values(components).reduce((total, tokens) => total + tokens, 0);
+}
+
+function emptyComponentCosts(): UsageComponentCosts {
+  return {
+    uncached_input: 0,
+    cache_read: 0,
+    cache_write: 0,
+    output: 0,
+    reasoning: 0
+  };
+}
+
+function addComponentCosts(target: UsageComponentCosts, source: UsageComponentCosts): void {
+  for (const component of Object.keys(target) as UsageComponent[]) {
+    target[component] = addUsd(target[component], source[component]);
+  }
+}
+
+function roundedComponentCosts(costs: UsageComponentCosts): UsageComponentCosts {
+  return Object.fromEntries(
+    (Object.entries(costs) as Array<[UsageComponent, number]>).map(([component, cost]) => [component, roundUsd(cost)])
+  ) as UsageComponentCosts;
+}
+
+function sumComponentCosts(costs: UsageComponentCosts): number {
+  return Object.values(costs).reduce((total, cost) => addUsd(total, cost), 0);
+}
+
+function addUsd(current: number | undefined, amount: number): number {
+  return roundUsd((current ?? 0) + amount);
+}
+
+function roundUsd(value: number): number {
+  return Number(value.toFixed(ACCOUNTING_USD_PRECISION));
+}
+
+function uniqueReasons<T extends ComponentUsageIncompleteReason | PricingIncompleteReason>(reasons: T[]): T[] {
+  const unique = new Map<string, T>();
+  for (const reason of reasons) {
+    unique.set(`${reason.code}:${reason.component ?? ""}:${reason.model ?? ""}`, reason);
+  }
+  return [...unique.values()].sort((left, right) =>
+    `${left.code}:${left.component ?? ""}:${left.model ?? ""}`.localeCompare(
+      `${right.code}:${right.component ?? ""}:${right.model ?? ""}`
+    )
+  );
+}
+
+function storedComponentCosts(value: Record<string, unknown> | undefined): UsageComponentCosts {
+  return {
+    uncached_input: firstNumericField(value, ["uncached_input", "uncachedInput"]) ?? 0,
+    cache_read: firstNumericField(value, ["cache_read", "cacheRead"]) ?? 0,
+    cache_write: firstNumericField(value, ["cache_write", "cacheWrite"]) ?? 0,
+    output: firstNumericField(value, ["output"]) ?? 0,
+    reasoning: firstNumericField(value, ["reasoning"]) ?? 0
   };
 }
 
@@ -1085,15 +1344,8 @@ function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
       continue;
     }
     const payload = event.payload ?? {};
-    const explicitCost = firstNumericField(payload, [
-      "costUsd",
-      "costUSD",
-      "cost",
-      "estimatedCostUsd",
-      "estimated_cost_usd"
-    ]);
     const model = stringField(payload, "model")?.trim().toLowerCase();
-    if (explicitCost === undefined && model !== undefined && model.length > 0) {
+    if (model !== undefined && model.length > 0) {
       models.add(model);
     }
   }
@@ -1175,36 +1427,57 @@ function synchronizeTasks(input: {
   const nodeStatuses = new Map<string, NodeStatus>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
+  const controllerInvocations = [
+    ...controllerInvocationsForWorkflow(input.layout, input.workflowRunId),
+    ...controllerInvocationsFromWorkflowEvents(input.events, input.workflowRunId)
+  ].sort((left, right) => left.invokedAt.localeCompare(right.invokedAt));
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
+  const evidenceByAttempt = new Map(
+    input.tasks.flatMap((task) => {
+      const agentEvidence = mergeNodeWorkflowEvidence(
+        steps.get(task.smithersNodeId),
+        eventsByNode.get(task.smithersNodeId) ?? []
+      );
+      const verifierEvidence = mergeNodeWorkflowEvidence(
+        steps.get(task.verifierSmithersNodeId),
+        eventsByNode.get(task.verifierSmithersNodeId) ?? []
+      );
+      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence);
+      return evidence === undefined ? [] : [[task.attemptId, evidence] as const];
+    })
+  );
+  const tasksByAttempt = new Map(input.tasks.map((task) => [task.attemptId, task]));
   let syncedNodes = 0;
   let changed = false;
 
-  for (const task of input.tasks) {
+  const orderedTasks = tasksInDependencyOrder(input.tasks);
+  for (const task of orderedTasks) {
     const node = graphNodeById.get(task.concreteNodeId);
     if (node === undefined) {
       continue;
     }
     const previous = readRunState(input.layout).nodes[task.attemptId];
-    const evidence = mergeNodeWorkflowEvidence(
-      steps.get(task.smithersNodeId),
-      eventsByNode.get(task.smithersNodeId) ?? []
-    );
-    if (evidence === undefined) {
+    const attemptEvidence = evidenceByAttempt.get(task.attemptId);
+    if (attemptEvidence === undefined) {
       continue;
     }
+    const evidence = attemptEvidence.evidence;
 
     const needsFinalization =
-      evidence.status === "succeeded" &&
-      (previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId));
+      evidence.status === "succeeded"
+        ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
+        : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
     const finalization = needsFinalization
-      ? finalizeSucceededTask({
+      ? finalizeTerminalTask({
           layout: input.layout,
           node,
           task,
           workflowRunId: input.workflowRunId,
           evidence,
+          evidenceSource: attemptEvidence.source,
+          tasksByAttempt,
           force: previous?.status === "succeeded"
         })
       : {
@@ -1223,9 +1496,26 @@ function synchronizeTasks(input: {
     const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
+    let retryCount = previous?.retry_count ?? 0;
+    try {
+      const ledger = appendTerminalTaskAttempts({
+        layout: input.layout,
+        task,
+        workflowRunId: input.workflowRunId,
+        events: eventsByNode.get(task.smithersNodeId) ?? [],
+        controllerInvocations,
+        currentAttempt: evidence.attempt,
+        currentStatus: patchStatus,
+        finalization
+      });
+      retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
+      changed ||= ledger.appended;
+    } catch (error) {
+      diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+    }
     const patch = {
       status: patchStatus,
-      retry_count: Math.max(0, (evidence.attempt ?? previous?.retry_count ?? 1) - 1),
+      retry_count: retryCount,
       timed_out: patchStatus === "timed-out",
       ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
@@ -1234,7 +1524,9 @@ function synchronizeTasks(input: {
         ...(previous?.provenance ?? {}),
         workflow: {
           run_id: input.workflowRunId,
-          task_id: task.smithersNodeId,
+          task_id: attemptEvidence.taskId,
+          agent_task_id: task.smithersNodeId,
+          verifier_task_id: task.verifierSmithersNodeId,
           state: evidence.workflowState,
           attempt: evidence.attempt
         },
@@ -1255,7 +1547,7 @@ function synchronizeTasks(input: {
         status: patchStatus,
         payload: {
           workflow_run_id: input.workflowRunId,
-          workflow_task_id: task.smithersNodeId,
+          workflow_task_id: attemptEvidence.taskId,
           previous_status: previous?.status,
           workflow_state: evidence.workflowState,
           attempt: evidence.attempt
@@ -1296,20 +1588,55 @@ function synchronizeTasks(input: {
   return { diagnostics, nodeStatuses, syncedNodes, changed };
 }
 
-function finalizeSucceededTask(input: {
+function finalizeTerminalTask(input: {
   layout: RunLayout;
   node: PlannedGraphNode;
   task: StoredWorkflowTask;
   workflowRunId: string;
   evidence: NodeWorkflowEvidence;
+  evidenceSource: "agent" | "verifier";
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
 }): NodeFinalization {
   if (input.evidence.status !== "succeeded") {
+    const category =
+      input.evidence.status === "skipped"
+        ? "dependency-cascade"
+        : input.evidenceSource === "verifier"
+          ? "artifact-contract"
+          : input.evidence.status === "timed-out"
+            ? "provider-interruption"
+            : "agent-failure";
+    const verifierFailure = input.evidenceSource === "verifier" && category === "artifact-contract";
     return {
       status: input.evidence.status,
-      diagnostics: [],
-      ...(input.evidence.error ? { lastError: input.evidence.error } : {}),
-      provenance: {},
+      diagnostics: verifierFailure
+        ? [
+            {
+              code: "ARTIFACT_VERIFIER_FAILED",
+              message: `artifact verifier did not complete successfully for ${input.task.attemptId}`,
+              severity: "error",
+              source: "artifact-contracts",
+              path: input.task.verifierSmithersNodeId
+            }
+          ]
+        : [],
+      ...(input.evidence.error
+        ? { lastError: input.evidence.error }
+        : verifierFailure
+          ? { lastError: `artifact verifier ended with status ${input.evidence.status}` }
+          : {}),
+      provenance: {
+        failure:
+          category === "dependency-cascade"
+            ? dependencyCascadeFailure(input.layout, input.task, input.tasksByAttempt)
+            : {
+                category,
+                causal_task_id: verifierFailure ? input.task.verifierSmithersNodeId : input.task.smithersNodeId,
+                causal_failure_category: category,
+                dependent_task_ids: []
+              }
+      },
       events: []
     };
   }
@@ -1323,7 +1650,7 @@ function finalizeSucceededTask(input: {
     eventType: gate.ok ? "node-artifacts-verified" : "node-artifacts-missing",
     status: gate.ok ? "succeeded" : "failed",
     payload: {
-      required_artifacts: input.node.required_artifacts,
+      output_contracts: input.node.outputs,
       missing: gate.missing
     }
   });
@@ -1355,6 +1682,8 @@ function finalizeSucceededTask(input: {
     const manifest = writeArtifactManifest({
       layout: input.layout,
       nodeId: input.task.attemptId,
+      outputs: input.node.outputs,
+      prerequisiteNodeIds: input.task.dependencies,
       provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
     });
     events.push({
@@ -1375,7 +1704,13 @@ function finalizeSucceededTask(input: {
       diagnostics,
       lastError: diagnostics.map((diagnostic) => diagnostic.message).join("; "),
       provenance: {
-        required_artifacts: { ok: gate.ok, missing: gate.missing },
+        output_contracts: { ok: gate.ok, missing: gate.missing },
+        failure: {
+          category: "artifact-contract",
+          causal_task_id: input.task.verifierSmithersNodeId,
+          causal_failure_category: "artifact-contract",
+          dependent_task_ids: []
+        },
         ...(findingsCount !== undefined ? { findings_count: findingsCount } : {})
       },
       events
@@ -1385,11 +1720,40 @@ function finalizeSucceededTask(input: {
     status: "succeeded",
     diagnostics,
     provenance: {
-      required_artifacts: { ok: true, missing: [] },
+      output_contracts: { ok: true, missing: [] },
       ...(findingsCount !== undefined ? { findings_count: findingsCount } : {}),
       ...(input.force ? { repaired_missing_manifest: true } : {})
     },
     events
+  };
+}
+
+function dependencyCascadeFailure(
+  layout: RunLayout,
+  task: StoredWorkflowTask,
+  tasksByAttempt: Map<string, StoredWorkflowTask>
+): Record<string, unknown> {
+  const state = readRunState(layout);
+  for (const dependencyId of task.dependencies) {
+    const failure = recordField(state.nodes[dependencyId]?.provenance, "failure");
+    const causalTaskId = stringField(failure, "causal_task_id");
+    const causalFailureCategory = stringField(failure, "causal_failure_category") ?? stringField(failure, "category");
+    if (causalTaskId !== undefined && causalFailureCategory !== undefined) {
+      return {
+        category: "dependency-cascade",
+        causal_task_id: causalTaskId,
+        causal_failure_category: causalFailureCategory,
+        dependent_task_ids: [task.smithersNodeId]
+      };
+    }
+  }
+  const dependencyId = task.dependencies[0];
+  const dependencyTask = dependencyId === undefined ? undefined : tasksByAttempt.get(dependencyId);
+  return {
+    category: "dependency-cascade",
+    causal_task_id: dependencyTask?.smithersNodeId ?? `node:${dependencyId ?? task.attemptId}`,
+    causal_failure_category: "agent-failure",
+    dependent_task_ids: [task.smithersNodeId]
   };
 }
 
@@ -1402,6 +1766,481 @@ function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNode
       payload: event.payload
     });
   }
+}
+
+function appendTerminalTaskAttempts(input: {
+  layout: RunLayout;
+  task: StoredWorkflowTask;
+  workflowRunId: string;
+  events: WorkflowEvent[];
+  controllerInvocations: ControllerInvocation[];
+  currentAttempt?: number;
+  currentStatus: NodeStatus;
+  finalization: NodeFinalization;
+}): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
+  const terminalAttempts = terminalWorkflowAttempts(input.events);
+  const state = readRunState(input.layout);
+  const inputManifestDigest = manifestDigest(
+    JSON.stringify({
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      strategy_attempt_id: input.task.attemptId,
+      workflow_task_id: input.task.smithersNodeId,
+      metadata: input.task.metadata ?? null
+    })
+  );
+  const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
+  const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
+  const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
+  let sourceEntries: NodeAttemptLedgerEntry[] | undefined;
+  const currentTerminalAttempt =
+    input.currentAttempt === undefined
+      ? undefined
+      : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
+  const prepared: Array<{
+    isCurrent: boolean;
+    attemptId: NodeAttemptId;
+    appendInput?: AppendNodeAttemptInput;
+    recordedEntry?: NodeAttemptLedgerEntry;
+  }> = [];
+  const preparedById = new Map<string, (typeof prepared)[number]>();
+  for (const attempt of terminalAttempts) {
+    const controllerInvocationId = dimensionId(
+      "controller",
+      attempt.controllerInvocationId ??
+        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt) ??
+        input.workflowRunId
+    );
+    const workflowExecutionId = dimensionId(
+      "execution",
+      attempt.workflowExecutionId ?? stableLedgerDimension("execution", [input.workflowRunId, controllerInvocationId])
+    );
+    const checkpointGenerationId = dimensionId(
+      "checkpoint",
+      attempt.checkpointGenerationId ??
+        stableLedgerDimension("checkpoint", [workflowExecutionId, String(attempt.iteration)])
+    );
+    const executorRetryId = dimensionId(
+      "retry",
+      attempt.executorRetryId ??
+        stableLedgerDimension("retry", [
+          input.workflowRunId,
+          input.task.attemptId,
+          String(attempt.finishedSequence ?? attempt.finishedAt),
+          String(attempt.retry)
+        ])
+    );
+    const recordedEntry = existing.find((entry) => entry.executor_retry_id === executorRetryId);
+    if (recordedEntry !== undefined) {
+      prepared.push({
+        isCurrent: attempt === currentTerminalAttempt,
+        attemptId: recordedEntry.attempt_id,
+        recordedEntry
+      });
+      continue;
+    }
+    let outcome = attempt.outcome;
+    let failureCategory = attempt.failureCategory;
+    let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
+    if (
+      attempt === currentTerminalAttempt &&
+      outcome === "succeeded" &&
+      input.currentStatus !== "succeeded" &&
+      terminalStatus(input.currentStatus)
+    ) {
+      outcome = nodeAttemptOutcome(input.currentStatus);
+      failureCategory = finalizationFailureCategory(input.finalization, outcome);
+      outputDigest = outcome === "reused" ? outputManifestDigest : undefined;
+    } else if (outcome === "succeeded" && outputDigest === undefined) {
+      outcome = "failed";
+      failureCategory = "artifact-validation";
+    }
+    const reuseSource =
+      outcome === "reused"
+        ? reusedSourceAttempt({
+            existing,
+            sourceEntries: (sourceEntries ??= sourceNodeAttempts(
+              input.layout,
+              state.source_run_id,
+              input.task.attemptId
+            )),
+            outputManifestDigest: outputDigest
+          })
+        : undefined;
+    if (reuseSource !== undefined && outputDigest === undefined) {
+      outputDigest = reuseSource.outputManifestDigest;
+    }
+    const reuse =
+      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
+    const appendInput: AppendNodeAttemptInput = {
+      nodeId: input.task.concreteNodeId,
+      strategyAttemptId: input.task.attemptId,
+      executorRetryId,
+      checkpointGenerationId,
+      workflowExecutionId,
+      controllerInvocationId,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      outcome,
+      inputManifestDigest,
+      ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
+      ...(reuse === undefined ? {} : { reuse }),
+      ...(failureCategory === undefined ? {} : { failureCategory })
+    };
+    const preparedAttempt = {
+      isCurrent: attempt === currentTerminalAttempt,
+      appendInput,
+      attemptId: createNodeAttemptLedgerEntry(input.layout, appendInput).attempt_id
+    };
+    const duplicate = preparedById.get(preparedAttempt.attemptId);
+    if (duplicate !== undefined) {
+      if (JSON.stringify(duplicate.appendInput) !== JSON.stringify(preparedAttempt.appendInput)) {
+        throw new Error(`node attempt ${preparedAttempt.attemptId} was observed with conflicting terminal data`);
+      }
+      continue;
+    }
+    preparedById.set(preparedAttempt.attemptId, preparedAttempt);
+    prepared.push(preparedAttempt);
+  }
+
+  const existingById = new Set(existing.map((entry) => entry.attempt_id));
+  let parentAttemptId: NodeAttemptId | undefined;
+  if (prepared.length > 0 && !existingById.has(prepared[0]!.attemptId)) {
+    parentAttemptId = existing.at(-1)?.attempt_id;
+  }
+  const pending: AppendNodeAttemptInput[] = [];
+  let currentAttemptExecuted = false;
+  for (const attempt of prepared) {
+    const entry = attempt.recordedEntry;
+    if (entry !== undefined) {
+      parentAttemptId = entry.attempt_id;
+      currentAttemptExecuted ||= attempt.isCurrent && entry.reuse.status === "executed";
+      continue;
+    }
+    pending.push({
+      ...attempt.appendInput!,
+      ...(parentAttemptId === undefined ? {} : { parentAttemptId })
+    });
+    parentAttemptId = attempt.attemptId;
+    currentAttemptExecuted ||= attempt.isCurrent && attempt.appendInput!.reuse?.status !== "reused";
+  }
+  const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
+  const allEntries = new Map(existing.map((entry) => [entry.attempt_id, entry]));
+  for (const result of results) {
+    allEntries.set(result.entry.attempt_id, result.entry);
+  }
+  return {
+    appended: results.some((result) => result.appended),
+    executedAttempts: [...allEntries.values()].filter((entry) => entry.reuse.status === "executed").length,
+    currentAttemptExecuted
+  };
+}
+
+function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
+  const attempts: Array<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">> = [];
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    const retry = numberField(payload, "attempt");
+    if (retry === undefined || retry < 0) {
+      continue;
+    }
+    const iteration = numberField(payload, "iteration") ?? 0;
+    const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
+    const terminal = terminalOutcomeForEvent(event);
+    let current = latestWorkflowAttempt(attempts, retry, iteration);
+    if (event.type === "NodeStarted" && timestamp !== undefined) {
+      if (current === undefined || current.startedAt !== undefined || current.finishedAt !== undefined) {
+        current = { retry, iteration };
+        attempts.push(current);
+      }
+      applyAttemptDimensionFields(current, payload);
+      current.startedSequence = event.sequence;
+      current.startedAt = timestamp;
+      continue;
+    }
+    if (current === undefined) {
+      current = { retry, iteration };
+      attempts.push(current);
+    }
+    applyAttemptDimensionFields(current, payload);
+    if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
+      current.finishedAt = timestamp;
+      current.finishedSequence = event.sequence;
+      current.startedAt ??= timestamp;
+      current.startedSequence ??= event.sequence;
+      current.outcome = terminal.outcome;
+      current.failureCategory = terminal.failureCategory;
+    }
+  }
+  return attempts
+    .filter(
+      (attempt): attempt is TerminalWorkflowAttempt =>
+        attempt.startedAt !== undefined && attempt.finishedAt !== undefined && attempt.outcome !== undefined
+    )
+    .sort(
+      (left, right) =>
+        left.finishedAt.localeCompare(right.finishedAt) || left.iteration - right.iteration || left.retry - right.retry
+    );
+}
+
+function latestWorkflowAttempt(
+  attempts: ReadonlyArray<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">>,
+  retry: number,
+  iteration: number
+): (Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">) | undefined {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index]!;
+    if (attempt.retry === retry && attempt.iteration === iteration) {
+      return attempt;
+    }
+  }
+  return undefined;
+}
+
+function terminalOutcomeForEvent(
+  event: WorkflowEvent
+): { outcome: NodeAttemptOutcome; failureCategory?: NodeAttemptFailureCategory } | undefined {
+  switch (event.type) {
+    case "NodeFinished":
+      return { outcome: "succeeded" };
+    case "TaskHeartbeatTimeout":
+      return { outcome: "timed-out", failureCategory: "timeout" };
+    case "NodeFailed":
+      return errorLooksLikeTimeout(event.payload?.error)
+        ? { outcome: "timed-out", failureCategory: "timeout" }
+        : { outcome: "failed", failureCategory: "executor-error" };
+    case "NodeCancelled":
+      return { outcome: "canceled", failureCategory: "canceled" };
+    case "NodeSkipped":
+      return { outcome: "skipped" };
+    default:
+      return undefined;
+  }
+}
+
+function applyAttemptDimensionFields(
+  attempt: Partial<TerminalWorkflowAttempt>,
+  payload: Record<string, unknown>
+): void {
+  attempt.executorRetryId ??= firstStringField(payload, ["executorRetryId", "executor_retry_id"]);
+  attempt.checkpointGenerationId ??=
+    firstStringField(payload, ["checkpointGenerationId", "checkpoint_generation_id"]) ??
+    firstNumberFieldAsString(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
+  attempt.workflowExecutionId ??= firstStringField(payload, [
+    "workflowExecutionId",
+    "workflow_execution_id",
+    "executionId",
+    "execution_id"
+  ]);
+  attempt.controllerInvocationId ??= firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
+}
+
+function controllerInvocationsForWorkflow(layout: RunLayout, workflowRunId: string): ControllerInvocation[] {
+  return replayEvents(layout).records.flatMap((event): ControllerInvocation[] => {
+    if (!["workflow-submitted", "workflow-lifecycle-submitted"].includes(event.event_type)) {
+      return [];
+    }
+    const payload = isRecord(event.payload) ? event.payload : undefined;
+    if (stringField(payload, "workflow_run_id") !== workflowRunId) {
+      return [];
+    }
+    return [
+      {
+        id: stringField(payload, "controller_invocation_id") ?? event.event_id,
+        invokedAt: stringField(payload, "controller_invoked_at") ?? event.timestamp
+      }
+    ];
+  });
+}
+
+function controllerInvocationsFromWorkflowEvents(
+  events: readonly WorkflowEvent[],
+  workflowRunId: string
+): ControllerInvocation[] {
+  const controllerEvents = new Set(["RunStarted", "RunAutoResumed", "RunHijacked", "ReplayStarted", "RunForked"]);
+  return events.flatMap((event): ControllerInvocation[] => {
+    if (!controllerEvents.has(event.type) || event.timestampMs === undefined) {
+      return [];
+    }
+    const payload = event.payload ?? {};
+    const payloadRunId = stringField(payload, "runId") ?? stringField(payload, "run_id");
+    if (payloadRunId !== undefined && payloadRunId !== workflowRunId) {
+      return [];
+    }
+    const explicitId = firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
+    return [
+      {
+        id:
+          explicitId ??
+          stableLedgerDimension("controller", [
+            workflowRunId,
+            event.type,
+            String(event.sequence ?? ""),
+            String(event.timestampMs),
+            stringField(payload, "nodeId") ?? "",
+            String(numberField(payload, "attempt") ?? "")
+          ]),
+        invokedAt: new Date(event.timestampMs).toISOString()
+      }
+    ];
+  });
+}
+
+function controllerInvocationForAttempt(
+  invocations: readonly ControllerInvocation[],
+  startedAt: string
+): string | undefined {
+  return invocations.filter((invocation) => invocation.invokedAt <= startedAt).at(-1)?.id ?? invocations[0]?.id;
+}
+
+function nodeAttemptOutcome(status: NodeStatus): NodeAttemptOutcome {
+  switch (status) {
+    case "succeeded":
+      return "succeeded";
+    case "timed-out":
+      return "timed-out";
+    case "skipped":
+      return "skipped";
+    case "reused-from-prior-run":
+      return "reused";
+    default:
+      return "failed";
+  }
+}
+
+function finalizationFailureCategory(
+  finalization: NodeFinalization,
+  outcome: NodeAttemptOutcome
+): NodeAttemptFailureCategory | undefined {
+  if (outcome === "timed-out") {
+    return "timeout";
+  }
+  if (outcome === "canceled") {
+    return "canceled";
+  }
+  if (outcome !== "failed") {
+    return undefined;
+  }
+  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_NORMALIZE_FAILED")) {
+    return "invalid-output";
+  }
+  if (
+    finalization.diagnostics.some(
+      (diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED" || diagnostic.code.includes("ARTIFACT")
+    )
+  ) {
+    return "artifact-validation";
+  }
+  return "unknown";
+}
+
+function reusedSourceAttempt(input: {
+  existing: readonly NodeAttemptLedgerEntry[];
+  sourceEntries: readonly NodeAttemptLedgerEntry[];
+  outputManifestDigest?: string;
+}): { attemptId: NodeAttemptId; outputManifestDigest: string } {
+  const candidates = [...input.sourceEntries, ...input.existing]
+    .filter(
+      (entry) => (entry.outcome === "succeeded" || entry.outcome === "reused") && entry.manifests.output_sha256 !== null
+    )
+    .reverse();
+  const source =
+    candidates.find((entry) => entry.manifests.output_sha256 === input.outputManifestDigest) ?? candidates[0];
+  if (source === undefined) {
+    throw new Error("reused node attempt has no recorded source attempt with an output manifest");
+  }
+  const outputManifestDigest = source.manifests.output_sha256;
+  if (outputManifestDigest === null) {
+    throw new Error("reused node attempt source is missing its output manifest digest");
+  }
+  return {
+    attemptId: source.reuse.status === "reused" ? source.reuse.source_attempt_id : source.attempt_id,
+    outputManifestDigest
+  };
+}
+
+function sourceNodeAttempts(
+  layout: RunLayout,
+  sourceRunId: string | undefined,
+  strategyAttemptId: string
+): NodeAttemptLedgerEntry[] {
+  if (sourceRunId === undefined) {
+    return [];
+  }
+  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  if (safeSourceRunId === layout.runId) {
+    return [];
+  }
+  const runsRoot = path.dirname(layout.root);
+  const sourceRoot = path.join(runsRoot, safeSourceRunId);
+  assertPathInside(runsRoot, sourceRoot, "source run root");
+  if (!fs.existsSync(sourceRoot)) {
+    return [];
+  }
+  assertNoSymlinkComponents(runsRoot, sourceRoot, "source run root");
+  return queryNodeAttempts(layoutForRunRoot(sourceRoot, safeSourceRunId), { strategyAttemptId });
+}
+
+function dimensionId(prefix: string, value: string): string {
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value) ? value : stableLedgerDimension(prefix, [value]);
+}
+
+function stableLedgerDimension(prefix: string, parts: readonly string[]): string {
+  return `${prefix}-${manifestDigest(JSON.stringify(parts)).slice(0, 32)}`;
+}
+
+function firstStringField(value: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const candidate = stringField(value, key);
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function firstNumberFieldAsString(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): string | undefined {
+  for (const key of keys) {
+    const candidate = numberField(value, key);
+    if (candidate !== undefined) {
+      return String(candidate);
+    }
+  }
+  return undefined;
+}
+
+function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask[] {
+  const byAttempt = new Map(tasks.map((task) => [task.attemptId, task]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const ordered: StoredWorkflowTask[] = [];
+
+  const visit = (task: StoredWorkflowTask): void => {
+    if (visited.has(task.attemptId)) {
+      return;
+    }
+    if (visiting.has(task.attemptId)) {
+      return;
+    }
+    visiting.add(task.attemptId);
+    for (const dependency of task.dependencies) {
+      const dependencyTask = byAttempt.get(dependency);
+      if (dependencyTask !== undefined) {
+        visit(dependencyTask);
+      }
+    }
+    visiting.delete(task.attemptId);
+    visited.add(task.attemptId);
+    ordered.push(task);
+  };
+
+  for (const task of tasks) {
+    visit(task);
+  }
+  return ordered;
 }
 
 function mergeNodeWorkflowEvidence(
@@ -1436,6 +2275,23 @@ function mergeNodeWorkflowEvidence(
   };
 }
 
+function completionEvidenceForTask(
+  task: StoredWorkflowTask,
+  agentEvidence: NodeWorkflowEvidence | undefined,
+  verifierEvidence: NodeWorkflowEvidence | undefined
+): AttemptWorkflowEvidence | undefined {
+  if (agentEvidence === undefined) {
+    return undefined;
+  }
+  if (agentEvidence.status !== "succeeded") {
+    return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId };
+  }
+  if (verifierEvidence === undefined) {
+    return undefined;
+  }
+  return { evidence: verifierEvidence, source: "verifier", taskId: task.verifierSmithersNodeId };
+}
+
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {
   const status = statusFromWorkflowState(step.state);
   return {
@@ -1454,13 +2310,13 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
     const attemptPatch = attempt === undefined ? {} : { attempt };
     switch (event.type) {
       case "NodePending":
-        evidence = { ...evidence, status: "pending", workflowState: "pending", ...attemptPatch };
+        evidence = { status: "pending", workflowState: "pending", ...attemptPatch };
         break;
       case "NodeStarted":
         evidence = {
-          ...evidence,
           status: "running",
           workflowState: "in-progress",
+          timedOut: false,
           ...attemptPatch,
           ...(timestamp ? { startedAt: timestamp } : {})
         };
@@ -1520,7 +2376,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         };
         break;
       case "NodeRetrying":
-        evidence = { ...evidence, status: "running", workflowState: "retrying", ...attemptPatch };
+        evidence = { status: "running", workflowState: "retrying", timedOut: false, ...attemptPatch };
         break;
       case "NodeWaitingApproval":
       case "NodeWaitingTimer":
@@ -1546,6 +2402,9 @@ function statusFromWorkflowState(state: string): NodeStatus {
   }
   if (["skipped", "skip"].includes(normalized)) {
     return "skipped";
+  }
+  if (["reused", "reuse", "reused-from-prior-run", "reused_from_prior_run"].includes(normalized)) {
+    return "reused-from-prior-run";
   }
   if (
     [
@@ -1794,11 +2653,13 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
   const concreteNodeId = stringField(value, "concreteNodeId");
   const logicalNodeId = stringField(value, "logicalNodeId");
   const smithersNodeId = stringField(value, "smithersNodeId");
+  const verifierSmithersNodeId = stringField(value, "verifierSmithersNodeId");
   if (
     attemptId === undefined ||
     concreteNodeId === undefined ||
     logicalNodeId === undefined ||
-    smithersNodeId === undefined
+    smithersNodeId === undefined ||
+    verifierSmithersNodeId === undefined
   ) {
     return [];
   }
@@ -1811,6 +2672,8 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
       concreteNodeId,
       logicalNodeId,
       smithersNodeId,
+      verifierSmithersNodeId,
+      dependencies: stringArrayField(value, "dependencies"),
       agentRef: stringField(value, "agentRef"),
       modelName: stringField(value, "modelName"),
       metadata: recordField(value, "metadata") as StoredWorkflowTask["metadata"]
@@ -1982,18 +2845,36 @@ function storedUsageCompletenessMarkers(value: unknown): UsageCompletenessMarker
         return [];
       }
       const code = stringField(entry, "code");
+      const componentUsageCodes = new Set<ComponentUsageIncompleteReason["code"]>([
+        "component-usage-unavailable",
+        "component-usage-estimated",
+        "component-breakdown-incomplete"
+      ]);
       if (
         code === undefined ||
         (code !== "ledger-entry-malformed" &&
-          !USAGE_INCOMPLETE_REASON_CODES.includes(code as UsageIncompleteReason["code"]))
+          !USAGE_INCOMPLETE_REASON_CODES.includes(code as LedgerUsageIncompleteReason["code"]) &&
+          !componentUsageCodes.has(code as ComponentUsageIncompleteReason["code"]))
       ) {
         return [];
       }
       const field = stringField(entry, "field");
+      const component = stringField(entry, "component");
+      const components = new Set<UsageComponent>([
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "reasoning"
+      ]);
       return [
         {
           code: code as UsageCompletenessMarker["code"],
           ...(field !== undefined && USAGE_FIELDS.includes(field as UsageField) ? { field: field as UsageField } : {}),
+          ...(component !== undefined && components.has(component as UsageComponent)
+            ? { component: component as UsageComponent }
+            : {}),
+          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
           ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
           ...(stringField(entry, "checkpoint_generation_id") === undefined
             ? {}
@@ -2014,12 +2895,34 @@ function storedPricingCompletenessMarkers(value: unknown): PricingCompletenessMa
         return [];
       }
       const code = stringField(entry, "code");
-      if (code !== "price-unavailable" && code !== "ledger-entry-malformed") {
+      const pricingCodes = new Set<PricingIncompleteReason["code"]>([
+        "model-pricing-unavailable",
+        "component-rate-unavailable",
+        "event-pricing-reported-partial"
+      ]);
+      if (
+        code === undefined ||
+        (code !== "price-unavailable" &&
+          code !== "ledger-entry-malformed" &&
+          !pricingCodes.has(code as PricingIncompleteReason["code"]))
+      ) {
         return [];
       }
+      const component = stringField(entry, "component");
+      const components = new Set<UsageComponent>([
+        "uncached_input",
+        "cache_read",
+        "cache_write",
+        "output",
+        "reasoning"
+      ]);
       return [
         {
-          code,
+          code: code as PricingCompletenessMarker["code"],
+          ...(component !== undefined && components.has(component as UsageComponent)
+            ? { component: component as UsageComponent }
+            : {}),
+          ...(stringField(entry, "model") === undefined ? {} : { model: stringField(entry, "model") }),
           ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
           ...(stringField(entry, "checkpoint_generation_id") === undefined
             ? {}
@@ -2030,7 +2933,7 @@ function storedPricingCompletenessMarkers(value: unknown): PricingCompletenessMa
   );
 }
 
-function uniqueUsageIncompleteReasons(reasons: readonly UsageIncompleteReason[]): UsageIncompleteReason[] {
+function uniqueUsageIncompleteReasons(reasons: readonly LedgerUsageIncompleteReason[]): LedgerUsageIncompleteReason[] {
   return uniqueByJson(reasons);
 }
 

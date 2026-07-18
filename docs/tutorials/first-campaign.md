@@ -87,7 +87,7 @@ ultrafuzz run --project /path/to/target-protocol --max-concurrency 4
 ultrafuzz run --project /path/to/target-protocol --agent CodexAgent --model gpt-5.5
 ```
 
-Loops, dependencies, required artifacts, reference bindings, and model-profile
+Loops, dependencies, contracted outputs, reference bindings, and model-profile
 fan-out belong in `.ultrafuzz/topology.yml`.
 
 ## Inspect Progress

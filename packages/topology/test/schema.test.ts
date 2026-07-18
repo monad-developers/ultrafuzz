@@ -34,7 +34,14 @@ describe("expanded graph schema", () => {
             mode: "parallel",
             attemptIndex: 0
           },
-          requiredArtifacts: ["findings.json"],
+          outputs: [
+            {
+              path: "findings.json",
+              contract: "ultrafuzz/findings@1",
+              primary: true,
+              contractDigest: "a".repeat(64)
+            }
+          ],
           modelFanout: [
             {
               modelProfileId: "default",
@@ -66,7 +73,7 @@ describe("expanded graph schema", () => {
           artifactDir: "artifacts/node-a",
           retryPolicy: { maxAttempts: 1 },
           loop: { index: 0, count: 1, mode: "parallel", attemptIndex: 0 },
-          requiredArtifacts: [],
+          outputs: [],
           modelFanout: [{ modelProfileId: "default", agentRef: "CodexAgent", modelIndex: 0, loopIndex: 0 }]
         }
       ]
