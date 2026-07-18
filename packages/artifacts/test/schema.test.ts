@@ -9,14 +9,17 @@ import {
   GENERATED_TESTS_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
+  USAGE_LEDGER_SCHEMA_VERSION,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
   runStateJsonSchema,
+  usageLedgerJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
-  validateRunStateSchema
+  validateRunStateSchema,
+  validateUsageLedgerEntry
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
@@ -115,10 +118,34 @@ test("generated test manifest schema accepts canonical manifests and rejects leg
   assert.ok(invalid.issues.some((issue) => issue.path === "$.generated_tests"));
 });
 
+test("usage ledger schema requires typed incompleteness markers", () => {
+  const entry = {
+    schema_version: USAGE_LEDGER_SCHEMA_VERSION,
+    event_id: "usage-event-1",
+    run_id: "run-1",
+    workflow_run_id: "workflow-1",
+    source_event_id: "source-event-1",
+    attempt_id: "usage-attempt-1",
+    checkpoint_generation_id: "checkpoint-1",
+    observed_at: "2026-07-18T00:00:00.000Z",
+    usage: {},
+    usage_complete: false,
+    usage_incomplete_reasons: [{ code: "usage-missing" }]
+  };
+
+  assert.equal(validateUsageLedgerEntry(entry).ok, true);
+  assert.equal(
+    validateUsageLedgerEntry({ ...entry, usage_incomplete_reasons: [] }).ok,
+    false,
+    "incomplete generated usage must carry a typed reason"
+  );
+});
+
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
+  const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
@@ -126,6 +153,8 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  assert.equal(usageLedgerSnapshot.$id, usageLedgerJsonSchema.$id);
+  assert.deepEqual(usageLedgerSnapshot.required, usageLedgerJsonSchema.required);
 });
 
 function readSchemaSnapshot(name: string): { $id?: string; required?: unknown } {

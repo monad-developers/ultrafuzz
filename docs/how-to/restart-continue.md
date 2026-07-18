@@ -35,6 +35,11 @@ for the same Ultrafuzz run. When the linked workflow is still active (running,
 queued, retrying, or waiting), resume keeps the existing run attached instead
 of submitting a duplicate continuation.
 
+Usage recorded before the continuation remains in the run's append-only usage
+ledger. After synchronization, segment rollups remain attributable to their
+checkpoint generations and the cumulative rollup includes every unique usage
+event across the resumed run.
+
 Use `--reset-node` to retry one failed workflow node and reset its dependents
 before the linked run continues. The reset is recorded in run evidence before
 the continuation launches; if the continuation fails to start, rerun the same

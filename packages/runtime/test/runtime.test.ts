@@ -1872,6 +1872,138 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });
 
+test("syncRun preserves generated usage across checkpoint generations and replays idempotently", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-generated-usage";
+  const inspect = workflowInspect({
+    workflowRunId,
+    steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+  });
+  const generatedSegment = (generation: string, inputTokens: number, outputTokens: number, costUsd: number) =>
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: generation,
+          inputTokens,
+          outputTokens,
+          costUsd,
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect,
+    events: generatedSegment("generation-1", 10, 5, 0.01)
+  });
+  const run = await startRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const first = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  const generatedEventsPath = path.join(project, "fake-smithers-events.ndjson");
+  fs.writeFileSync(generatedEventsPath, generatedSegment("generation-2", 20, 10, 0.02), "utf8");
+  const second = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const replayed = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  fs.writeFileSync(
+    generatedEventsPath,
+    workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-3",
+          inputTokens: "malformed",
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-3",
+          model: "generated-model",
+          agent: "generated-agent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ]),
+    "utf8"
+  );
+  const incomplete = await syncRun({ projectRoot: project, runId: "generated-usage", env });
+  assert.equal(incomplete.ok, true, JSON.stringify(incomplete.diagnostics));
+
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        tokens_used?: string;
+        usage_complete?: boolean;
+        usage_incomplete_reasons?: Array<{ code?: string }>;
+        pricing_complete?: boolean;
+      };
+      segments?: Array<{
+        checkpoint_generation_id?: string;
+        total_tokens?: number;
+        event_count?: number;
+      }>;
+      cumulative?: { total_tokens?: number; event_count?: number; usage_complete?: boolean };
+      checkpoint?: { ledger_event_count?: number; checkpoint_generation_id?: string };
+    };
+  };
+  const segments = metadata.accounting?.segments ?? [];
+  assert.deepEqual(
+    segments.map((segment) => [segment.checkpoint_generation_id, segment.total_tokens, segment.event_count]),
+    [
+      ["generation-1", 15, 1],
+      ["generation-2", 30, 1],
+      ["generation-3", 0, 2]
+    ]
+  );
+  assert.equal(
+    segments.reduce((total, segment) => total + (segment.total_tokens ?? 0), 0),
+    metadata.accounting?.cumulative?.total_tokens
+  );
+  assert.equal(metadata.accounting?.cumulative?.total_tokens, 45);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 4);
+  assert.equal(metadata.accounting?.current?.tokens_used, "0");
+  assert.equal(metadata.accounting?.current?.usage_complete, false);
+  assert.deepEqual(
+    new Set(metadata.accounting?.current?.usage_incomplete_reasons?.map((reason) => reason.code)),
+    new Set(["usage-malformed", "usage-missing"])
+  );
+  assert.equal(metadata.accounting?.current?.pricing_complete, false);
+  assert.equal(metadata.accounting?.cumulative?.usage_complete, false);
+  assert.equal(metadata.accounting?.checkpoint?.ledger_event_count, 4);
+  assert.equal(metadata.accounting?.checkpoint?.checkpoint_generation_id, "generation-3");
+  assert.equal(
+    fs.readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8").trim().split("\n").length,
+    4,
+    "replaying a continuation must not duplicate generated usage"
+  );
+});
+
 test("syncRun records unavailable spend when workflow token events are unpriced", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

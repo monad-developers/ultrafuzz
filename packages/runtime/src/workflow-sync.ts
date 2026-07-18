@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  USAGE_FIELDS,
+  USAGE_INCOMPLETE_REASON_CODES,
+  appendUsageEvents,
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -9,17 +12,24 @@ import {
   layoutForRunRoot,
   normalizeFindings,
   readRunState,
+  replayUsageEvents,
   safeResolveInside,
+  stableUsageDimension,
   updateNodeState,
   updateRunStatus,
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
   type ArtifactProvenance,
+  type AppendUsageEventInput,
   type NodeState,
+  type NormalizedUsage,
   type NodeStatus,
   type RunLayout,
-  type RunStatus
+  type RunStatus,
+  type UsageField,
+  type UsageIncompleteReason,
+  type UsageLedgerEntry
 } from "@ultrafuzz/artifacts";
 
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
@@ -84,8 +94,23 @@ interface WorkflowInspect {
 
 interface WorkflowEvent {
   type: string;
+  sequence?: number;
+  sourceEventId?: string;
   timestampMs?: number;
   payload?: Record<string, unknown>;
+}
+
+interface UsageCompletenessMarker {
+  code: UsageIncompleteReason["code"] | "ledger-entry-malformed";
+  field?: UsageField;
+  event_id?: string;
+  checkpoint_generation_id?: string;
+}
+
+interface PricingCompletenessMarker {
+  code: "price-unavailable" | "ledger-entry-malformed";
+  event_id?: string;
+  checkpoint_generation_id?: string;
 }
 
 interface AccountingSummary {
@@ -98,6 +123,10 @@ interface AccountingSummary {
   tokens_used: string;
   estimated_spend: string;
   estimated_spend_usd?: number;
+  usage_complete: boolean;
+  usage_incomplete_reasons: UsageCompletenessMarker[];
+  pricing_complete: boolean;
+  pricing_incomplete_reasons: PricingCompletenessMarker[];
   partial_pricing: boolean;
   cache_read_pricing_estimated: boolean;
   cache_read_ratio_used?: number;
@@ -106,6 +135,13 @@ interface AccountingSummary {
   unpriced_event_count: number;
   models: string[];
   agents: string[];
+}
+
+interface AccountingSegment extends AccountingSummary {
+  checkpoint_generation_id: string;
+  workflow_run_id: string;
+  event_ids: string[];
+  attempt_ids: string[];
 }
 
 interface CumulativeAccountingSummary extends AccountingSummary {
@@ -162,7 +198,8 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "reused-from-prior-run",
   "invalidated"
 ]);
-const ACCOUNTING_SCHEMA_VERSION = "1.0";
+const ACCOUNTING_SCHEMA_VERSION = "2.0";
+const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 
 export async function syncRun(input: SyncRunInput) {
   const result = await synchronizeLinkedWorkflowRun(input);
@@ -305,6 +342,12 @@ async function synchronizeWorkflowAccounting(input: {
   changed: boolean;
   available: boolean;
 }> {
+  appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
+  const usageReplay = replayUsageEvents(input.layout);
+  if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
+    return { changed: false, available: false };
+  }
+
   const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
   const storedAccounting = recordField(metadata, "accounting");
   const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
@@ -313,7 +356,8 @@ async function synchronizeWorkflowAccounting(input: {
     storedPricingCatalog?.status === "disabled"
       ? new Set(stringArrayField(storedPricingCatalog, "unresolved_models"))
       : new Set<string>();
-  const requiredModels = modelsRequiringPricing(input.events);
+  const ledgerEvents = workflowEventsFromUsageLedger(usageReplay.entries);
+  const requiredModels = modelsRequiringPricing(ledgerEvents);
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
@@ -329,26 +373,48 @@ async function synchronizeWorkflowAccounting(input: {
     stored: storedPricingCatalog,
     live: livePricing?.metadata
   });
-  const current = accountingFromWorkflowEvents(
-    input.events,
+  const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
+  const segments = accountingSegmentsFromUsageLedger(
+    usageReplay.entries,
     resolvedPricing,
-    configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO)
+    cacheReadRatio,
+    usageReplay.malformedEntries
   );
-  if (current === undefined) {
-    return { changed: false, available: false };
-  }
+  const current =
+    segments.at(-1) ??
+    accountingSummaryWithCompleteness(undefined, [], usageReplay.malformedEntries, {
+      checkpointGenerationId: stableUsageDimension("checkpoint", [input.workflowRunId, "malformed"]),
+      workflowRunId: input.workflowRunId
+    });
 
   const sourceRunId = stringField(metadata, "source_run_id") ?? readRunState(input.layout).source_run_id;
   const sourceAccounting =
     sourceRunId === undefined ? undefined : cumulativeAccountingForSourceRun(input.layout, sourceRunId);
   const sourceSummaries = sourceAccounting?.summary === undefined ? [] : [sourceAccounting.summary];
-  const cumulative = cumulativeAccountingSummary([...sourceSummaries, current], sourceAccounting?.sourceRunIds ?? []);
+  const cumulative = cumulativeAccountingSummary(
+    [...sourceSummaries, ...segments],
+    sourceAccounting?.sourceRunIds ?? []
+  );
+  const lastUsageEvent = usageReplay.entries.at(-1);
   const nextComparable = {
     schema_version: ACCOUNTING_SCHEMA_VERSION,
-    source: "workflow-events",
+    source: "usage-ledger",
     workflow_run_id: input.workflowRunId,
     current,
+    segments,
     cumulative,
+    checkpoint: {
+      schema_version: ACCOUNTING_CHECKPOINT_SCHEMA_VERSION,
+      ledger_event_count: usageReplay.entries.length,
+      malformed_entry_count: usageReplay.malformedEntries,
+      duplicate_entry_count: usageReplay.duplicateEntries,
+      ...(lastUsageEvent === undefined
+        ? {}
+        : {
+            last_event_id: lastUsageEvent.event_id,
+            checkpoint_generation_id: lastUsageEvent.checkpoint_generation_id
+          })
+    },
     pricing_catalog: pricingCatalog
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
@@ -453,6 +519,274 @@ function accountingFromWorkflowEvents(
   return accountingSummaryFromTotals(totals);
 }
 
+function appendWorkflowUsageEvents(layout: RunLayout, workflowRunId: string, events: WorkflowEvent[]): void {
+  const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
+  if (usageEvents.length === 0) {
+    return;
+  }
+  const replay = replayUsageEvents(layout);
+  const existingGenerationBySourceEvent = new Map(
+    replay.entries
+      .filter((entry) => entry.workflow_run_id === workflowRunId)
+      .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
+  );
+  const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
+  const overlappingGeneration = candidates
+    .map((candidate) => existingGenerationBySourceEvent.get(candidate.sourceEventId))
+    .find((generation): generation is string => generation !== undefined);
+  const fallbackGeneration =
+    overlappingGeneration ??
+    stableUsageDimension("checkpoint", [workflowRunId, candidates[0]?.sourceEventId ?? "empty-segment"]);
+  appendUsageEvents(
+    layout,
+    candidates.map((candidate) => ({
+      ...candidate,
+      checkpointGenerationId: candidate.checkpointGenerationId ?? fallbackGeneration
+    }))
+  );
+}
+
+function normalizedUsageLedgerInput(
+  workflowRunId: string,
+  event: WorkflowEvent
+): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
+  const payload = event.payload ?? {};
+  const fields = [
+    normalizedNumericUsageField(payload, "input_tokens", [
+      "inputTokens",
+      "input_tokens",
+      "promptTokens",
+      "prompt_tokens"
+    ]),
+    normalizedNumericUsageField(payload, "output_tokens", [
+      "outputTokens",
+      "output_tokens",
+      "completionTokens",
+      "completion_tokens"
+    ]),
+    normalizedNumericUsageField(payload, "cache_read_tokens", ["cacheReadTokens", "cache_read_tokens"]),
+    normalizedNumericUsageField(payload, "cache_write_tokens", ["cacheWriteTokens", "cache_write_tokens"]),
+    normalizedNumericUsageField(payload, "reasoning_tokens", ["reasoningTokens", "reasoning_tokens"]),
+    normalizedNumericUsageField(payload, "total_tokens", ["totalTokens", "total_tokens"])
+  ];
+  const usage = Object.fromEntries(
+    fields.flatMap((field) => (field.value === undefined ? [] : [[field.field, field.value]]))
+  ) as NormalizedUsage;
+  const costUsd = firstNonNegativeNumericField(payload, [
+    "costUsd",
+    "costUSD",
+    "cost",
+    "estimatedCostUsd",
+    "estimated_cost_usd"
+  ]);
+  if (costUsd !== undefined) {
+    usage.cost_usd = costUsd;
+  }
+  const model = stringField(payload, "model");
+  if (model !== undefined) {
+    usage.model = model;
+  }
+  const agent = stringField(payload, "agent");
+  if (agent !== undefined) {
+    usage.agent = agent;
+  }
+
+  const usageIncompleteReasons: UsageIncompleteReason[] = fields
+    .filter((field) => field.malformed)
+    .map((field) => ({ code: "usage-malformed", field: field.field }));
+  if (!fields.some((field) => field.present)) {
+    usageIncompleteReasons.push({ code: "usage-missing" });
+  }
+  const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+  const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
+  const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+  if (nodeId === undefined || iteration === undefined || attempt === undefined) {
+    usageIncompleteReasons.push({ code: "attempt-identity-missing" });
+  }
+
+  const sourceEventId = stableUsageDimension(
+    "workflow-event",
+    event.sourceEventId === undefined
+      ? [workflowRunId, "position", event.sequence ?? null, event.timestampMs ?? null]
+      : [workflowRunId, "explicit", event.sourceEventId]
+  );
+  const explicitGeneration = checkpointGenerationId(payload, workflowRunId);
+  return {
+    workflowRunId,
+    sourceEventId,
+    ...(explicitGeneration === undefined ? {} : { checkpointGenerationId: explicitGeneration }),
+    observedAt: new Date(event.timestampMs ?? 0).toISOString(),
+    ...(nodeId === undefined ? {} : { nodeId }),
+    ...(iteration === undefined ? {} : { iteration }),
+    ...(attempt === undefined ? {} : { attempt }),
+    usage,
+    usageComplete: usageIncompleteReasons.length === 0,
+    usageIncompleteReasons: uniqueUsageIncompleteReasons(usageIncompleteReasons)
+  };
+}
+
+function checkpointGenerationId(payload: Record<string, unknown>, workflowRunId: string): string | undefined {
+  const explicit =
+    stringField(payload, "checkpointGenerationId") ??
+    stringField(payload, "checkpoint_generation_id") ??
+    firstNumericField(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
+  if (explicit === undefined) {
+    return undefined;
+  }
+  const value = String(explicit);
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value)
+    ? value
+    : stableUsageDimension("checkpoint", [workflowRunId, value]);
+}
+
+function normalizedNumericUsageField(
+  payload: Record<string, unknown>,
+  field: UsageField,
+  aliases: readonly string[]
+): { field: UsageField; present: boolean; malformed: boolean; value?: number } {
+  for (const alias of aliases) {
+    if (!Object.hasOwn(payload, alias)) {
+      continue;
+    }
+    const raw = payload[alias];
+    const value = typeof raw === "string" && raw.trim().length > 0 ? Number(raw) : raw;
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? { field, present: true, malformed: false, value }
+      : { field, present: true, malformed: true };
+  }
+  return { field, present: false, malformed: false };
+}
+
+function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): WorkflowEvent[] {
+  return entries.map((entry) => ({
+    type: "TokenUsageReported",
+    timestampMs: Date.parse(entry.observed_at),
+    payload: {
+      inputTokens: entry.usage.input_tokens,
+      outputTokens: entry.usage.output_tokens,
+      cacheReadTokens: entry.usage.cache_read_tokens,
+      cacheWriteTokens: entry.usage.cache_write_tokens,
+      reasoningTokens: entry.usage.reasoning_tokens,
+      totalTokens: entry.usage.total_tokens,
+      costUsd: entry.usage.cost_usd,
+      model: entry.usage.model,
+      agent: entry.usage.agent
+    }
+  }));
+}
+
+function accountingSegmentsFromUsageLedger(
+  entries: readonly UsageLedgerEntry[],
+  modelPricing: ReadonlyMap<string, ModelPricing>,
+  cacheReadRatio: number | undefined,
+  malformedEntries: number
+): AccountingSegment[] {
+  const grouped = new Map<string, UsageLedgerEntry[]>();
+  for (const entry of entries) {
+    const generation = grouped.get(entry.checkpoint_generation_id) ?? [];
+    generation.push(entry);
+    grouped.set(entry.checkpoint_generation_id, generation);
+  }
+  const groups = [...grouped.entries()];
+  return groups.map(([checkpointGenerationId, generationEntries], index) =>
+    accountingSummaryWithCompleteness(
+      accountingFromWorkflowEvents(workflowEventsFromUsageLedger(generationEntries), modelPricing, cacheReadRatio),
+      generationEntries,
+      index === groups.length - 1 ? malformedEntries : 0,
+      {
+        checkpointGenerationId,
+        workflowRunId: generationEntries[0]!.workflow_run_id
+      }
+    )
+  );
+}
+
+function accountingSummaryWithCompleteness(
+  summary: AccountingSummary | undefined,
+  entries: readonly UsageLedgerEntry[],
+  malformedEntries: number,
+  identity: { checkpointGenerationId: string; workflowRunId: string }
+): AccountingSegment {
+  const base = summary ?? emptyAccountingSummary();
+  const usageIncompleteReasons = entries.flatMap((entry): UsageCompletenessMarker[] =>
+    entry.usage_incomplete_reasons.map((reason) => ({
+      ...reason,
+      event_id: entry.event_id,
+      checkpoint_generation_id: entry.checkpoint_generation_id
+    }))
+  );
+  if (malformedEntries > 0) {
+    usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
+  }
+
+  const ignoredIncompleteEntries = entries.filter(
+    (entry) => !usageLedgerEntryHasAccountingValue(entry) && !entry.usage_complete
+  );
+  const unpricedEventCount = base.unpriced_event_count + ignoredIncompleteEntries.length + malformedEntries;
+  const pricingIncompleteReasons: PricingCompletenessMarker[] = [...base.pricing_incomplete_reasons];
+  pricingIncompleteReasons.push(
+    ...ignoredIncompleteEntries.map((entry) => ({
+      code: "price-unavailable" as const,
+      event_id: entry.event_id,
+      checkpoint_generation_id: entry.checkpoint_generation_id
+    }))
+  );
+  if (malformedEntries > 0) {
+    pricingIncompleteReasons.push({ code: "ledger-entry-malformed" });
+  }
+  const uniquePricingReasons = uniquePricingCompletenessMarkers(pricingIncompleteReasons);
+  const partialPricing = uniquePricingReasons.length > 0;
+  return {
+    ...base,
+    estimated_spend:
+      base.estimated_spend_usd === undefined ? "unavailable" : formatUsd(base.estimated_spend_usd, partialPricing),
+    usage_complete: usageIncompleteReasons.length === 0,
+    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+    pricing_complete: !partialPricing,
+    pricing_incomplete_reasons: uniquePricingReasons,
+    partial_pricing: partialPricing,
+    event_count: entries.length + malformedEntries,
+    unpriced_event_count: unpricedEventCount,
+    checkpoint_generation_id: identity.checkpointGenerationId,
+    workflow_run_id: identity.workflowRunId,
+    event_ids: entries.map((entry) => entry.event_id),
+    attempt_ids: uniqueStrings(entries.map((entry) => entry.attempt_id))
+  };
+}
+
+function usageLedgerEntryHasAccountingValue(entry: UsageLedgerEntry): boolean {
+  const usage = entry.usage;
+  const tokenCount =
+    usage.total_tokens ??
+    (usage.input_tokens ?? (usage.cache_read_tokens ?? 0) + (usage.cache_write_tokens ?? 0)) +
+      (usage.output_tokens ?? usage.reasoning_tokens ?? 0);
+  return tokenCount > 0 || usage.cost_usd !== undefined;
+}
+
+function emptyAccountingSummary(): AccountingSummary {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 0,
+    tokens_used: "0",
+    estimated_spend: "unavailable",
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: true,
+    pricing_incomplete_reasons: [],
+    partial_pricing: false,
+    cache_read_pricing_estimated: false,
+    event_count: 0,
+    priced_event_count: 0,
+    unpriced_event_count: 0,
+    models: [],
+    agents: []
+  };
+}
+
 function cumulativeAccountingForSourceRun(
   layout: RunLayout,
   sourceRunId: string
@@ -488,6 +822,8 @@ function cumulativeAccountingSummary(
   sourceRunIds: string[]
 ): CumulativeAccountingSummary {
   const totals = emptyAccountingTotals();
+  const usageIncompleteReasons: UsageCompletenessMarker[] = [];
+  const pricingIncompleteReasons: PricingCompletenessMarker[] = [];
   for (const summary of summaries) {
     totals.inputTokens += summary.input_tokens;
     totals.outputTokens += summary.output_tokens;
@@ -502,6 +838,8 @@ function cumulativeAccountingSummary(
       totals.partialPricing ||
       summary.partial_pricing ||
       (summary.total_tokens > 0 && summary.estimated_spend === "unavailable");
+    usageIncompleteReasons.push(...summary.usage_incomplete_reasons);
+    pricingIncompleteReasons.push(...summary.pricing_incomplete_reasons);
     totals.cacheReadPricingEstimated = totals.cacheReadPricingEstimated || summary.cache_read_pricing_estimated;
     if (summary.cache_read_ratio_used !== undefined) {
       totals.cacheReadRatioUsed =
@@ -519,25 +857,13 @@ function cumulativeAccountingSummary(
       totals.agents.add(agent);
     }
   }
-  const summary = accountingSummaryFromTotals(totals) ?? {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_read_tokens: 0,
-    cache_write_tokens: 0,
-    reasoning_tokens: 0,
-    total_tokens: 0,
-    tokens_used: "0",
-    estimated_spend: "unavailable",
-    partial_pricing: false,
-    cache_read_pricing_estimated: false,
-    event_count: 0,
-    priced_event_count: 0,
-    unpriced_event_count: 0,
-    models: [],
-    agents: []
-  };
+  const summary = accountingSummaryFromTotals(totals) ?? emptyAccountingSummary();
   return {
     ...summary,
+    usage_complete: usageIncompleteReasons.length === 0,
+    usage_incomplete_reasons: uniqueUsageCompletenessMarkers(usageIncompleteReasons),
+    pricing_complete: pricingIncompleteReasons.length === 0,
+    pricing_incomplete_reasons: uniquePricingCompletenessMarkers(pricingIncompleteReasons),
     source_run_ids: uniqueStrings(sourceRunIds)
   };
 }
@@ -550,6 +876,16 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
   if (totalTokens === undefined) {
     return undefined;
   }
+  const partialPricing = booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false;
+  const usageComplete = booleanField(value, "usage_complete") ?? booleanField(value, "usageComplete") ?? true;
+  const usageIncompleteReasons = storedUsageCompletenessMarkers(
+    value.usage_incomplete_reasons ?? value.usageIncompleteReasons
+  );
+  const pricingComplete =
+    booleanField(value, "pricing_complete") ?? booleanField(value, "pricingComplete") ?? !partialPricing;
+  const pricingIncompleteReasons = storedPricingCompletenessMarkers(
+    value.pricing_incomplete_reasons ?? value.pricingIncompleteReasons
+  );
   return {
     input_tokens: firstNumericField(value, ["input_tokens", "inputTokens"]) ?? 0,
     output_tokens: firstNumericField(value, ["output_tokens", "outputTokens"]) ?? 0,
@@ -562,7 +898,15 @@ function storedAccountingSummary(value: Record<string, unknown> | undefined): Ac
     ...(firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) === undefined
       ? {}
       : { estimated_spend_usd: firstNumericField(value, ["estimated_spend_usd", "estimatedSpendUsd"]) }),
-    partial_pricing: booleanField(value, "partial_pricing") ?? booleanField(value, "partialPricing") ?? false,
+    usage_complete: usageComplete,
+    usage_incomplete_reasons:
+      usageComplete || usageIncompleteReasons.length > 0 ? usageIncompleteReasons : [{ code: "usage-missing" }],
+    pricing_complete: pricingComplete,
+    pricing_incomplete_reasons:
+      pricingComplete || pricingIncompleteReasons.length > 0
+        ? pricingIncompleteReasons
+        : [{ code: "price-unavailable" }],
+    partial_pricing: partialPricing,
     cache_read_pricing_estimated:
       booleanField(value, "cache_read_pricing_estimated") ?? booleanField(value, "cacheReadPricingEstimated") ?? false,
     ...(firstNumericField(value, ["cache_read_ratio_used", "cacheReadRatioUsed"]) === undefined
@@ -593,6 +937,10 @@ function accountingSummaryFromTotals(totals: AccountingTotals): AccountingSummar
     tokens_used: formatInteger(totals.totalTokens),
     estimated_spend: estimatedSpendUsd === undefined ? "unavailable" : formatUsd(estimatedSpendUsd, partialPricing),
     ...(estimatedSpendUsd === undefined ? {} : { estimated_spend_usd: estimatedSpendUsd }),
+    usage_complete: true,
+    usage_incomplete_reasons: [],
+    pricing_complete: !partialPricing,
+    pricing_incomplete_reasons: partialPricing ? [{ code: "price-unavailable" }] : [],
     partial_pricing: partialPricing,
     cache_read_pricing_estimated: totals.cacheReadPricingEstimated,
     ...(totals.cacheReadRatioUsed === undefined ? {} : { cache_read_ratio_used: totals.cacheReadRatioUsed }),
@@ -721,7 +1069,9 @@ function comparableAccounting(value: Record<string, unknown> | undefined): Recor
     source: value.source,
     workflow_run_id: value.workflow_run_id,
     current: value.current,
+    segments: value.segments,
     cumulative: value.cumulative,
+    checkpoint: value.checkpoint,
     pricing_catalog: value.pricing_catalog
   };
 }
@@ -1354,6 +1704,12 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       }
       events.push({
         type,
+        sequence: numberField(parsed, "seq") ?? numberField(payload, "seq") ?? events.length,
+        sourceEventId:
+          stringField(parsed, "eventId") ??
+          stringField(parsed, "event_id") ??
+          stringField(payload, "eventId") ??
+          stringField(payload, "event_id"),
         timestampMs: numberField(parsed, "timestampMs") ?? numberField(payload, "timestampMs"),
         ...(payload ? { payload } : {})
       });
@@ -1361,7 +1717,9 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       continue;
     }
   }
-  return events.sort((left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0));
+  return events.sort(
+    (left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0) || (left.sequence ?? 0) - (right.sequence ?? 0)
+  );
 }
 
 function loadSynchronizationInputs(
@@ -1548,6 +1906,22 @@ function firstNumericField(value: Record<string, unknown> | undefined, keys: str
   return undefined;
 }
 
+function firstNonNegativeNumericField(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): number | undefined {
+  const field = firstNumericField(value, [...keys]);
+  return field !== undefined && field >= 0 ? field : undefined;
+}
+
+function firstNonNegativeIntegerField(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): number | undefined {
+  const field = firstNonNegativeNumericField(value, keys);
+  return field !== undefined && Number.isInteger(field) ? field : undefined;
+}
+
 function booleanField(value: Record<string, unknown> | undefined, key: string): boolean | undefined {
   const field = value?.[key];
   return typeof field === "boolean" ? field : undefined;
@@ -1556,6 +1930,88 @@ function booleanField(value: Record<string, unknown> | undefined, key: string): 
 function stringArrayField(value: Record<string, unknown> | undefined, key: string): string[] {
   const field = value?.[key];
   return Array.isArray(field) ? field.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function storedUsageCompletenessMarkers(value: unknown): UsageCompletenessMarker[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniqueUsageCompletenessMarkers(
+    value.flatMap((entry): UsageCompletenessMarker[] => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const code = stringField(entry, "code");
+      if (
+        code === undefined ||
+        (code !== "ledger-entry-malformed" &&
+          !USAGE_INCOMPLETE_REASON_CODES.includes(code as UsageIncompleteReason["code"]))
+      ) {
+        return [];
+      }
+      const field = stringField(entry, "field");
+      return [
+        {
+          code: code as UsageCompletenessMarker["code"],
+          ...(field !== undefined && USAGE_FIELDS.includes(field as UsageField) ? { field: field as UsageField } : {}),
+          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
+          ...(stringField(entry, "checkpoint_generation_id") === undefined
+            ? {}
+            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
+        }
+      ];
+    })
+  );
+}
+
+function storedPricingCompletenessMarkers(value: unknown): PricingCompletenessMarker[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return uniquePricingCompletenessMarkers(
+    value.flatMap((entry): PricingCompletenessMarker[] => {
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const code = stringField(entry, "code");
+      if (code !== "price-unavailable" && code !== "ledger-entry-malformed") {
+        return [];
+      }
+      return [
+        {
+          code,
+          ...(stringField(entry, "event_id") === undefined ? {} : { event_id: stringField(entry, "event_id") }),
+          ...(stringField(entry, "checkpoint_generation_id") === undefined
+            ? {}
+            : { checkpoint_generation_id: stringField(entry, "checkpoint_generation_id") })
+        }
+      ];
+    })
+  );
+}
+
+function uniqueUsageIncompleteReasons(reasons: readonly UsageIncompleteReason[]): UsageIncompleteReason[] {
+  return uniqueByJson(reasons);
+}
+
+function uniqueUsageCompletenessMarkers(reasons: readonly UsageCompletenessMarker[]): UsageCompletenessMarker[] {
+  return uniqueByJson(reasons);
+}
+
+function uniquePricingCompletenessMarkers(reasons: readonly PricingCompletenessMarker[]): PricingCompletenessMarker[] {
+  return uniqueByJson(reasons);
+}
+
+function uniqueByJson<T>(values: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
 }
 
 function maxDefinedNumber(left: number | undefined, right: number | undefined): number | undefined {
