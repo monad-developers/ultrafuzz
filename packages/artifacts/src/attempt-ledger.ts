@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 
 import { z } from "zod/v4";
 
@@ -362,22 +363,41 @@ export function appendNodeAttempt(
   layout: Pick<RunLayout, "runId" | "root" | "attemptLedgerPath">,
   input: AppendNodeAttemptInput
 ): AppendNodeAttemptResult {
-  const entry = createNodeAttemptLedgerEntry(layout, input);
+  return appendNodeAttempts(layout, [input])[0]!;
+}
+
+export function appendNodeAttempts(
+  layout: Pick<RunLayout, "runId" | "root" | "attemptLedgerPath">,
+  inputs: readonly AppendNodeAttemptInput[]
+): AppendNodeAttemptResult[] {
+  if (inputs.length === 0) {
+    return [];
+  }
+  const entries = inputs.map((input) => createNodeAttemptLedgerEntry(layout, input));
   const replay = replayNodeAttempts(layout);
   if (replay.malformedEntries > 0) {
     throw new Error(
       `node attempt ledger contains ${replay.malformedEntries} malformed entr${replay.malformedEntries === 1 ? "y" : "ies"}`
     );
   }
-  const existing = replay.entries.find((candidate) => candidate.attempt_id === entry.attempt_id);
-  if (existing !== undefined) {
-    if (JSON.stringify(existing) !== JSON.stringify(entry)) {
-      throw new Error(`node attempt ${entry.attempt_id} was already recorded with different immutable data`);
+  const entriesById = new Map(replay.entries.map((entry) => [entry.attempt_id, entry]));
+  const pending: NodeAttemptLedgerEntry[] = [];
+  const results = entries.map((entry): AppendNodeAttemptResult => {
+    const existing = entriesById.get(entry.attempt_id);
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, entry)) {
+        throw new Error(`node attempt ${entry.attempt_id} was already recorded with different immutable data`);
+      }
+      return { entry: existing, appended: false };
     }
-    return { entry: existing, appended: false };
+    entriesById.set(entry.attempt_id, entry);
+    pending.push(entry);
+    return { entry, appended: true };
+  });
+  for (const entry of pending) {
+    appendLineDurable(layout.attemptLedgerPath, JSON.stringify(entry), layout.root);
   }
-  appendLineDurable(layout.attemptLedgerPath, JSON.stringify(entry), layout.root);
-  return { entry, appended: true };
+  return results;
 }
 
 export function replayNodeAttempts(layoutOrPath: Pick<RunLayout, "attemptLedgerPath"> | string): NodeAttemptReplay {
@@ -471,7 +491,18 @@ function stableAttemptId(input: {
   workflowExecutionId: string;
   controllerInvocationId: string;
 }): NodeAttemptId {
-  const digest = crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex").slice(0, 32);
+  const digest = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        runId: input.runId,
+        nodeId: input.nodeId,
+        strategyAttemptId: input.strategyAttemptId,
+        executorRetryId: input.executorRetryId
+      })
+    )
+    .digest("hex")
+    .slice(0, 32);
   return `attempt-${digest}` as NodeAttemptId;
 }
 

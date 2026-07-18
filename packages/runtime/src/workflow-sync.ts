@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  appendNodeAttempt,
+  appendNodeAttempts,
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
@@ -25,6 +25,7 @@ import {
   type ArtifactProvenance,
   type NodeAttemptFailureCategory,
   type NodeAttemptId,
+  type NodeAttemptLedgerEntry,
   type NodeAttemptOutcome,
   type NodeState,
   type NodeStatus,
@@ -102,6 +103,7 @@ interface WorkflowEvent {
 interface TerminalWorkflowAttempt {
   retry: number;
   iteration: number;
+  startedSequence?: number;
   startedAt: string;
   finishedAt: string;
   outcome: NodeAttemptOutcome;
@@ -878,7 +880,7 @@ function synchronizeTasks(input: {
         currentStatus: patchStatus,
         finalization
       });
-      retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptRecorded ? 1 : 0));
+      retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
       changed ||= ledger.appended;
     } catch (error) {
       diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
@@ -1073,7 +1075,7 @@ function appendTerminalTaskAttempts(input: {
   currentAttempt?: number;
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
-}): { appended: boolean; executedAttempts: number; currentAttemptRecorded: boolean } {
+}): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const terminalAttempts = terminalWorkflowAttempts(input.events);
   const state = readRunState(input.layout);
   const inputManifestDigest = manifestDigest(
@@ -1088,14 +1090,16 @@ function appendTerminalTaskAttempts(input: {
   const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
   const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
   const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
+  let sourceEntries: NodeAttemptLedgerEntry[] | undefined;
   const currentTerminalAttempt =
     input.currentAttempt === undefined
       ? undefined
       : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
   const prepared: Array<{
-    retry: number;
-    appendInput: AppendNodeAttemptInput;
+    isCurrent: boolean;
     attemptId: NodeAttemptId;
+    appendInput?: AppendNodeAttemptInput;
+    recordedEntry?: NodeAttemptLedgerEntry;
   }> = [];
   const preparedById = new Map<string, (typeof prepared)[number]>();
   for (const attempt of terminalAttempts) {
@@ -1117,8 +1121,22 @@ function appendTerminalTaskAttempts(input: {
     const executorRetryId = dimensionId(
       "retry",
       attempt.executorRetryId ??
-        stableLedgerDimension("retry", [input.task.attemptId, checkpointGenerationId, String(attempt.retry)])
+        stableLedgerDimension("retry", [
+          input.workflowRunId,
+          input.task.attemptId,
+          String(attempt.startedSequence ?? attempt.startedAt),
+          String(attempt.retry)
+        ])
     );
+    const recordedEntry = existing.find((entry) => entry.executor_retry_id === executorRetryId);
+    if (recordedEntry !== undefined) {
+      prepared.push({
+        isCurrent: attempt === currentTerminalAttempt,
+        attemptId: recordedEntry.attempt_id,
+        recordedEntry
+      });
+      continue;
+    }
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
     let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
@@ -1135,20 +1153,25 @@ function appendTerminalTaskAttempts(input: {
       outcome = "failed";
       failureCategory = "artifact-validation";
     }
-    const reuse =
+    const reuseSource =
       outcome === "reused"
-        ? {
-            status: "reused" as const,
-            sourceAttemptId: reusedSourceAttemptId({
-              existing,
-              workflowRunId: input.workflowRunId,
-              task: input.task,
-              attempt
-            })
-          }
+        ? reusedSourceAttempt({
+            existing,
+            sourceEntries: (sourceEntries ??= sourceNodeAttempts(
+              input.layout,
+              state.source_run_id,
+              input.task.attemptId
+            )),
+            outputManifestDigest: outputDigest
+          })
         : undefined;
+    if (reuseSource !== undefined && outputDigest === undefined) {
+      outputDigest = reuseSource.manifests.output_sha256 ?? undefined;
+    }
+    const reuse =
+      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attempt_id };
     const appendInput: AppendNodeAttemptInput = {
-      nodeId: input.task.attemptId,
+      nodeId: input.task.concreteNodeId,
       strategyAttemptId: input.task.attemptId,
       executorRetryId,
       checkpointGenerationId,
@@ -1163,7 +1186,7 @@ function appendTerminalTaskAttempts(input: {
       ...(failureCategory === undefined ? {} : { failureCategory })
     };
     const preparedAttempt = {
-      retry: attempt.retry,
+      isCurrent: attempt === currentTerminalAttempt,
       appendInput,
       attemptId: createNodeAttemptLedgerEntry(input.layout, appendInput).attempt_id
     };
@@ -1183,24 +1206,31 @@ function appendTerminalTaskAttempts(input: {
   if (prepared.length > 0 && !existingById.has(prepared[0]!.attemptId)) {
     parentAttemptId = existing.at(-1)?.attempt_id;
   }
-  let appended = false;
-  let currentAttemptRecorded = false;
+  const pending: AppendNodeAttemptInput[] = [];
+  let currentAttemptExecuted = false;
   for (const attempt of prepared) {
-    const result = appendNodeAttempt(input.layout, {
-      ...attempt.appendInput,
+    const entry = attempt.recordedEntry;
+    if (entry !== undefined) {
+      parentAttemptId = entry.attempt_id;
+      currentAttemptExecuted ||= attempt.isCurrent && entry.reuse.status === "executed";
+      continue;
+    }
+    pending.push({
+      ...attempt.appendInput!,
       ...(parentAttemptId === undefined ? {} : { parentAttemptId })
     });
-    appended ||= result.appended;
-    parentAttemptId = result.entry.attempt_id;
-    currentAttemptRecorded ||= attempt.retry === input.currentAttempt;
+    parentAttemptId = attempt.attemptId;
+    currentAttemptExecuted ||= attempt.isCurrent && attempt.appendInput!.reuse?.status !== "reused";
+  }
+  const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
+  const allEntries = new Map(existing.map((entry) => [entry.attempt_id, entry]));
+  for (const result of results) {
+    allEntries.set(result.entry.attempt_id, result.entry);
   }
   return {
-    appended,
-    executedAttempts: queryNodeAttempts(input.layout, {
-      strategyAttemptId: input.task.attemptId,
-      reuseStatus: "executed"
-    }).length,
-    currentAttemptRecorded
+    appended: results.some((result) => result.appended),
+    executedAttempts: [...allEntries.values()].filter((entry) => entry.reuse.status === "executed").length,
+    currentAttemptExecuted
   };
 }
 
@@ -1215,13 +1245,14 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
     const iteration = numberField(payload, "iteration") ?? 0;
     const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
     const terminal = terminalOutcomeForEvent(event);
-    let current = latestOpenWorkflowAttempt(attempts, retry, iteration);
+    let current = latestWorkflowAttempt(attempts, retry, iteration);
     if (event.type === "NodeStarted" && timestamp !== undefined) {
-      if (current === undefined || current.startedAt !== undefined) {
+      if (current === undefined || current.startedAt !== undefined || current.finishedAt !== undefined) {
         current = { retry, iteration };
         attempts.push(current);
       }
       applyAttemptDimensionFields(current, payload);
+      current.startedSequence = event.sequence;
       current.startedAt = timestamp;
       continue;
     }
@@ -1233,6 +1264,7 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
     if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
       current.finishedAt = timestamp;
       current.startedAt ??= timestamp;
+      current.startedSequence ??= event.sequence;
       current.outcome = terminal.outcome;
       current.failureCategory = terminal.failureCategory;
     }
@@ -1248,14 +1280,14 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
     );
 }
 
-function latestOpenWorkflowAttempt(
+function latestWorkflowAttempt(
   attempts: ReadonlyArray<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">>,
   retry: number,
   iteration: number
 ): (Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">) | undefined {
   for (let index = attempts.length - 1; index >= 0; index -= 1) {
     const attempt = attempts[index]!;
-    if (attempt.retry === retry && attempt.iteration === iteration && attempt.finishedAt === undefined) {
+    if (attempt.retry === retry && attempt.iteration === iteration) {
       return attempt;
     }
   }
@@ -1399,21 +1431,44 @@ function finalizationFailureCategory(
   return "unknown";
 }
 
-function reusedSourceAttemptId(input: {
-  existing: ReadonlyArray<{ attempt_id: NodeAttemptId }>;
-  workflowRunId: string;
-  task: StoredWorkflowTask;
-  attempt: Pick<TerminalWorkflowAttempt, "iteration" | "retry">;
-}): string {
-  return (
-    input.existing.at(-1)?.attempt_id ??
-    stableLedgerDimension("source-attempt", [
-      input.workflowRunId,
-      input.task.attemptId,
-      String(input.attempt.iteration),
-      String(input.attempt.retry)
-    ])
-  );
+function reusedSourceAttempt(input: {
+  existing: readonly NodeAttemptLedgerEntry[];
+  sourceEntries: readonly NodeAttemptLedgerEntry[];
+  outputManifestDigest?: string;
+}): NodeAttemptLedgerEntry {
+  const candidates = [...input.sourceEntries, ...input.existing]
+    .filter(
+      (entry) => (entry.outcome === "succeeded" || entry.outcome === "reused") && entry.manifests.output_sha256 !== null
+    )
+    .reverse();
+  const source =
+    candidates.find((entry) => entry.manifests.output_sha256 === input.outputManifestDigest) ?? candidates[0];
+  if (source === undefined) {
+    throw new Error("reused node attempt has no recorded source attempt with an output manifest");
+  }
+  return source;
+}
+
+function sourceNodeAttempts(
+  layout: RunLayout,
+  sourceRunId: string | undefined,
+  strategyAttemptId: string
+): NodeAttemptLedgerEntry[] {
+  if (sourceRunId === undefined) {
+    return [];
+  }
+  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  if (safeSourceRunId === layout.runId) {
+    return [];
+  }
+  const runsRoot = path.dirname(layout.root);
+  const sourceRoot = path.join(runsRoot, safeSourceRunId);
+  assertPathInside(runsRoot, sourceRoot, "source run root");
+  if (!fs.existsSync(sourceRoot)) {
+    return [];
+  }
+  assertNoSymlinkComponents(runsRoot, sourceRoot, "source run root");
+  return queryNodeAttempts(layoutForRunRoot(sourceRoot, safeSourceRunId), { strategyAttemptId });
 }
 
 function dimensionId(prefix: string, value: string): string {
@@ -1497,13 +1552,13 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
     const attemptPatch = attempt === undefined ? {} : { attempt };
     switch (event.type) {
       case "NodePending":
-        evidence = { ...evidence, status: "pending", workflowState: "pending", ...attemptPatch };
+        evidence = { status: "pending", workflowState: "pending", ...attemptPatch };
         break;
       case "NodeStarted":
         evidence = {
-          ...evidence,
           status: "running",
           workflowState: "in-progress",
+          timedOut: false,
           ...attemptPatch,
           ...(timestamp ? { startedAt: timestamp } : {})
         };
@@ -1563,7 +1618,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         };
         break;
       case "NodeRetrying":
-        evidence = { ...evidence, status: "running", workflowState: "retrying", ...attemptPatch };
+        evidence = { status: "running", workflowState: "retrying", timedOut: false, ...attemptPatch };
         break;
       case "NodeWaitingApproval":
       case "NodeWaitingTimer":
@@ -1798,7 +1853,9 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       continue;
     }
   }
-  return events.sort((left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0));
+  return events.sort(
+    (left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0) || (left.sequence ?? 0) - (right.sequence ?? 0)
+  );
 }
 
 function loadSynchronizationInputs(
