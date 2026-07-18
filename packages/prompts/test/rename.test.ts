@@ -13,8 +13,13 @@ describe("prompt ID rename sync", () => {
             id: "boundary-tests",
             prompt: "strategies/boundary-tests.mdx",
             depends_on: ["base-test-setup"],
-            required_artifacts: ["boundary-tests/generated-tests.json"],
-            primary_artifact: "boundary-tests/generated-tests.json"
+            outputs: [
+              {
+                path: "boundary-tests/generated-tests.json",
+                contract: "ultrafuzz/generated-tests@1",
+                primary: true
+              }
+            ]
           },
           {
             id: "dedupe-findings",
@@ -51,7 +56,9 @@ describe("prompt ID rename sync", () => {
 
     expect(result.topology.nodes[0]?.id).toBe("edge-tests");
     expect(result.topology.nodes[0]?.prompt).toBe("strategies/edge-tests.mdx");
-    expect(result.topology.nodes[0]?.required_artifacts).toEqual(["edge-tests/generated-tests.json"]);
+    expect(result.topology.nodes[0]?.outputs?.map((output) => output.path)).toEqual([
+      "edge-tests/generated-tests.json"
+    ]);
     expect(result.topology.nodes[1]?.depends_on).toEqual(["edge-tests"]);
     expect(result.promptFiles[0]?.path).toBe("strategies/edge-tests.mdx");
     expect(result.promptFiles[0]?.contents).toContain("id: edge-tests");

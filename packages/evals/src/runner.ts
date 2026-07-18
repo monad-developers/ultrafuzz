@@ -17,7 +17,15 @@ import {
   type EvalRunValue,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, appendJsonLine, diagnosticFromError, evalRunRoot, generateEvalRunId, safeEvalId } from "./utils.js";
+import {
+  EvalError,
+  appendJsonLine,
+  diagnosticFromError,
+  evalRunRoot,
+  generateEvalRunId,
+  resolveTerminalReportPath,
+  safeEvalId
+} from "./utils.js";
 
 export interface RowLaunchValue {
   ok: boolean;
@@ -184,13 +192,15 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   }
 
   const finishedAt = new Date().toISOString();
+  const reportJsonPath =
+    launch.ok && launch.runRoot !== undefined ? resolveTerminalReportPath({ runRoot: launch.runRoot }).path : undefined;
   const record: EvalRunRecord =
     launch.ok && launch.runId !== undefined && launch.runRoot !== undefined
       ? {
           ...recordBase,
           ultrafuzz_run_id: launch.runId,
           ultrafuzz_run_root: launch.runRoot,
-          report_json_path: path.join(launch.runRoot, "artifacts", "final-report", "report.json"),
+          ...(reportJsonPath === undefined ? {} : { report_json_path: reportJsonPath }),
           status: "launched",
           workflow_ids: launch.workflowIds,
           finished_at: finishedAt,

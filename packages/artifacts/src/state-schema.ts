@@ -1,5 +1,6 @@
 import { z } from "zod/v4";
 
+import { ARTIFACT_CONTRACT_IDS } from "./artifact-contracts.js";
 import {
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
@@ -14,6 +15,12 @@ export const RUN_STATE_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#s
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
 const looseRecord = z.record(z.string(), z.unknown());
+const outputContractSchema = z.strictObject({
+  path: nonEmptyString,
+  contract: z.enum(ARTIFACT_CONTRACT_IDS),
+  contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
+  primary: z.boolean()
+});
 
 export const nodeStateSchema = z.strictObject({
   node_id: nonEmptyString,
@@ -22,7 +29,7 @@ export const nodeStateSchema = z.strictObject({
   timed_out: z.boolean(),
   logical_node_id: nonEmptyString.optional(),
   artifact_dir: nonEmptyString.optional(),
-  required_artifacts: z.array(nonEmptyString).optional(),
+  outputs: z.array(outputContractSchema).optional(),
   attempt_index: nonNegativeInteger.optional(),
   loop_index: nonNegativeInteger.optional(),
   model_id: nonEmptyString.optional(),
@@ -91,7 +98,20 @@ export const runStateJsonSchema = {
           timed_out: { type: "boolean" },
           logical_node_id: { type: "string", minLength: 1 },
           artifact_dir: { type: "string", minLength: 1 },
-          required_artifacts: { type: "array", items: { type: "string", minLength: 1 } },
+          outputs: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["path", "contract", "contract_digest", "primary"],
+              additionalProperties: false,
+              properties: {
+                path: { type: "string", minLength: 1 },
+                contract: { enum: [...ARTIFACT_CONTRACT_IDS] },
+                contract_digest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+                primary: { type: "boolean" }
+              }
+            }
+          },
           attempt_index: { type: "integer", minimum: 0 },
           loop_index: { type: "integer", minimum: 0 },
           model_id: { type: "string", minLength: 1 },
