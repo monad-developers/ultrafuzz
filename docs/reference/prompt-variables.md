@@ -74,12 +74,11 @@ timeouts, backend settings, or artifact requirements.
 | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `ancestor_artifacts`                                          | Markdown list of required artifact files from direct topology dependencies. |
 | `artifact_path:<logical-node-id>`                             | Absolute artifact directory path for an ancestor producer.                  |
-| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's `primary_artifact`.                 |
+| `artifact_handoff:<logical-node-id>`                          | Absolute path to an ancestor producer's primary contracted output.          |
 | `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]` | Markdown list of required artifact files from selected ancestor producers.  |
 
 Artifact variables may reference only ancestor nodes. Handoff producers must
-declare `primary_artifact`, and the primary artifact must also be listed in
-`required_artifacts`.
+declare exactly one `outputs` entry with `primary: true`.
 
 `artifact_path` variables may include a safe relative suffix:
 
@@ -88,7 +87,7 @@ Read the setup notes at {{artifact_path:setup-foundry}}/setup/setup-foundry.md.
 ```
 
 `artifact_handoff` resolves to a file and does not accept a suffix.
-`ancestor_artifacts` resolves to declared `required_artifacts` and does not
+`ancestor_artifacts` resolves to declared contracted outputs and does not
 accept a suffix.
 
 Looped producers render as a Markdown bullet list of concrete attempt paths.
@@ -100,10 +99,9 @@ n % {{strategy_loop_count}} == {{strategy_loop_index}}
 
 ## Output Contract
 
-When a topology node declares `required_artifacts`, Ultrafuzz appends an output
-contract to the rendered prompt. Nodes that require `findings.json` receive the
-normalized findings contract, and nodes that require generated-test artifacts
-receive generated-test path guidance.
+For every executable topology node, Ultrafuzz appends its declared output paths,
+contract identities, shape requirements, primary artifact, and valid-empty
+forms to the rendered prompt. The same registry drives runtime validation.
 
 Agents should write durable cross-node handoff files under `{{artifact_path}}`
-and list those files in topology `required_artifacts`.
+and list those files in topology `outputs` with a named contract.

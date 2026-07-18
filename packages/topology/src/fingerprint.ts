@@ -48,8 +48,7 @@ function fingerprintNode(node: ExpandedNode): FingerprintNodePayload {
     ...(node.timeoutSeconds !== undefined ? { timeoutSeconds: node.timeoutSeconds } : {}),
     retryPolicy: node.retryPolicy,
     loop: node.loop,
-    requiredArtifacts: [...node.requiredArtifacts].sort(),
-    ...(node.primaryArtifact ? { primaryArtifact: node.primaryArtifact } : {}),
+    outputs: [...node.outputs].sort((left, right) => left.path.localeCompare(right.path)),
     modelFanout: [...node.modelFanout].sort((left, right) => {
       if (left.loopIndex !== right.loopIndex) {
         return left.loopIndex - right.loopIndex;

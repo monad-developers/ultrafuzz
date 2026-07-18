@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside, validateFindingsSchema } from "@ultrafuzz/artifacts";
+import { assertRegularFileInside, validateArtifactContract, validateFindingsSchema } from "@ultrafuzz/artifacts";
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
@@ -21,7 +21,16 @@ import {
   type GroundTruthBug,
   type HumanReviewQueueItem
 } from "./types.js";
-import { EvalError, evalRunRoot, isRecord, jsonFile, mean, readJsonLines, roundMetric } from "./utils.js";
+import {
+  EvalError,
+  evalRunRoot,
+  isRecord,
+  jsonFile,
+  mean,
+  readJsonLines,
+  resolveTerminalReportPath,
+  roundMetric
+} from "./utils.js";
 
 const SCORE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
 const DEFAULT_EVAL_JUDGE_ENDPOINT = "https://gateway.braintrust.dev/v1/chat/completions";
@@ -110,12 +119,20 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const reviewQueue: HumanReviewQueueItem[] = [];
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
+    const reportResolution = resolveTerminalReportPath({
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
+      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
+      fallbackPath: defaultReportPath(row)
+    });
+    if (reportResolution.path === undefined) {
+      throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
+    }
     const scored = await scoreRow({
       suite,
       row,
       record,
       llmJudge,
-      reportPath: record?.report_json_path ?? defaultReportPath(row)
+      reportPath: reportResolution.path
     });
     rowScores.push(scored.rowScore);
     findingScores.push(...scored.findingScores);
@@ -838,29 +855,16 @@ export function loadGroundTruth(filePath: string, groundTruthRoot: string | unde
 }
 
 function readReport(filePath: string): { schemaValid: boolean; findings: unknown[] } {
-  if (!fs.existsSync(filePath)) {
-    return { schemaValid: false, findings: [] };
+  if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile()) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report is missing", { path: filePath });
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (Array.isArray(parsed)) {
-      return { schemaValid: true, findings: parsed };
-    }
-    if (isRecord(parsed)) {
-      const findings = Array.isArray(parsed.findings)
-        ? parsed.findings
-        : Array.isArray(parsed.issues)
-          ? parsed.issues
-          : [];
-      return {
-        schemaValid: findings.length > 0 || Array.isArray(parsed.findings) || Array.isArray(parsed.issues),
-        findings
-      };
-    }
-  } catch {
-    return { schemaValid: false, findings: [] };
+  const validation = validateArtifactContract("ultrafuzz/report@1", fs.readFileSync(filePath, "utf8"), filePath);
+  if (!validation.ok || !isRecord(validation.value)) {
+    throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", "terminal report does not satisfy ultrafuzz/report@1", {
+      issues: validation.issues.map((issue) => ({ code: issue.code, path: issue.path }))
+    });
   }
-  return { schemaValid: false, findings: [] };
+  return { schemaValid: true, findings: validation.value.issues as unknown[] };
 }
 
 function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {

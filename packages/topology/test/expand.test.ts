@@ -37,7 +37,7 @@ describe("expandTopology", () => {
       prompt: "review/collision.md",
       group: "review",
       depends_on: ["strategy"],
-      required_artifacts: ["collision.md"]
+      outputs: [{ path: "collision.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }]
     });
     topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["strategy-0"] };
     expect(() => validateTopology(topology)).toThrow(expect.objectContaining({ code: "CONCRETE_NODE_ID_COLLISION" }));
@@ -148,8 +148,10 @@ describe("expandTopology", () => {
           reference: "properties.example",
           group: "references",
           depends_on: ["__start__"],
-          required_artifacts: ["references/example.md", RUN_REFERENCE_MANIFEST_FILE],
-          primary_artifact: "references/example.md"
+          outputs: [
+            { path: "references/example.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true },
+            { path: RUN_REFERENCE_MANIFEST_FILE, contract: "ultrafuzz/json-object@1" }
+          ]
         },
         { ...validTopology().nodes[2]!, depends_on: ["setup", "reference-properties-example"] },
         validTopology().nodes[3]!,
