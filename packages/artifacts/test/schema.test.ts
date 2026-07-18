@@ -140,6 +140,14 @@ test("analysis bundle manifest schema rejects unversioned and non-allowlisted en
     }).ok,
     false
   );
+  assert.equal(
+    validateAnalysisBundleManifestSchema({
+      ...manifest,
+      files: [{ ...manifest.files[0], kind: "terminal-status", path: "omissions.json" }]
+    }).ok,
+    false
+  );
+  assert.equal(validateAnalysisBundleManifestSchema({ ...manifest, files: [] }).ok, false);
 });
 
 test("artifact schema snapshots are present and aligned with exported schema constants", () => {
@@ -151,6 +159,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.equal(analysisBundleSnapshot.$id, analysisBundleManifestJsonSchema.$id);
   assert.deepEqual(analysisBundleSnapshot.required, analysisBundleManifestJsonSchema.required);
+  assert.deepEqual(analysisBundleSnapshot.properties?.files, analysisBundleManifestJsonSchema.properties.files);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
   assert.equal(generatedTestsSnapshot.$id, generatedTestsJsonSchema.$id);
   assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
@@ -158,10 +167,11 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
 });
 
-function readSchemaSnapshot(name: string): { $id?: string; required?: unknown } {
+function readSchemaSnapshot(name: string): { $id?: string; required?: unknown; properties?: Record<string, unknown> } {
   return JSON.parse(readFileSync(path.join(packageRoot, "schema", name), "utf8")) as {
     $id?: string;
     required?: unknown;
+    properties?: Record<string, unknown>;
   };
 }
 

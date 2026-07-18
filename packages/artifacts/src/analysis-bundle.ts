@@ -5,14 +5,7 @@ import path from "node:path";
 import { z } from "zod/v4";
 
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
-import {
-  assertRegularFileInside,
-  listSafeFiles,
-  normalizeSafeRelativePath,
-  safeResolveInside,
-  sha256Bytes,
-  sha256File
-} from "./safe-paths.js";
+import { assertRegularFileInside, listSafeFiles, safeResolveInside, sha256Bytes, sha256File } from "./safe-paths.js";
 
 export const ANALYSIS_BUNDLE_SCHEMA_VERSION = "ultrafuzz.analysis-bundle.v1" as const;
 export const ANALYSIS_BUNDLE_POLICY_VERSION = "ultrafuzz.analysis-bundle-policy.v1" as const;
@@ -71,16 +64,6 @@ const nonNegativeNumber = z.number().finite().nonnegative();
 const unitMetric = z.number().finite().min(0).max(1);
 const isoTimestamp = z.string().datetime({ offset: true });
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
-const safeRelativePath = z.string().refine(
-  (value) => {
-    try {
-      return normalizeSafeRelativePath(value) === value;
-    } catch {
-      return false;
-    }
-  },
-  { message: "must be a normalized safe bundle-relative path" }
-);
 
 export const analysisTerminalStatusSchema = z
   .strictObject({
@@ -201,13 +184,31 @@ export const analysisAttemptHistorySchema = z
     });
   });
 
-const manifestEntrySchema = z.strictObject({
-  kind: z.enum([...ANALYSIS_BUNDLE_DATA_KINDS, "omissions"]),
-  path: safeRelativePath,
-  media_type: z.literal("application/json"),
-  size_bytes: nonNegativeInteger,
-  sha256
-});
+function manifestEntryForKind(kind: AnalysisBundleFileKind) {
+  return z.strictObject({
+    kind: z.literal(kind),
+    path: z.literal(expectedPath(kind)),
+    media_type: z.literal("application/json"),
+    size_bytes: nonNegativeInteger,
+    sha256
+  });
+}
+
+function omissionEntryForKind(kind: AnalysisBundleDataKind) {
+  return z.strictObject({
+    kind: z.literal(kind),
+    path: z.literal(DATA_PATHS[kind]),
+    reason: z.enum(ANALYSIS_BUNDLE_OMISSION_REASONS)
+  });
+}
+
+const manifestEntrySchema = z.discriminatedUnion("kind", [
+  manifestEntryForKind("terminal-status"),
+  manifestEntryForKind("evaluation-metrics"),
+  manifestEntryForKind("accounting-summary"),
+  manifestEntryForKind("attempt-history"),
+  manifestEntryForKind("omissions")
+]);
 
 export const analysisBundleManifestSchema = z
   .strictObject({
@@ -219,22 +220,50 @@ export const analysisBundleManifestSchema = z
     if (!isSorted(value.files.map((entry) => entry.path))) {
       ctx.addIssue({ code: "custom", path: ["files"], message: "must be sorted by path" });
     }
+    const seenKinds = new Set<AnalysisBundleFileKind>();
+    const seenPaths = new Set<string>();
+    for (const [index, entry] of value.files.entries()) {
+      if (seenKinds.has(entry.kind)) {
+        ctx.addIssue({ code: "custom", path: ["files", index, "kind"], message: "must be unique" });
+      }
+      if (seenPaths.has(entry.path)) {
+        ctx.addIssue({ code: "custom", path: ["files", index, "path"], message: "must be unique" });
+      }
+      seenKinds.add(entry.kind);
+      seenPaths.add(entry.path);
+    }
+    if (!seenKinds.has("omissions")) {
+      ctx.addIssue({ code: "custom", path: ["files"], message: "must include the omission manifest" });
+    }
   });
 
 export const analysisBundleOmissionsSchema = z
   .strictObject({
     schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
     omissions: z.array(
-      z.strictObject({
-        kind: z.enum(ANALYSIS_BUNDLE_DATA_KINDS),
-        path: safeRelativePath,
-        reason: z.enum(ANALYSIS_BUNDLE_OMISSION_REASONS)
-      })
+      z.discriminatedUnion("kind", [
+        omissionEntryForKind("terminal-status"),
+        omissionEntryForKind("evaluation-metrics"),
+        omissionEntryForKind("accounting-summary"),
+        omissionEntryForKind("attempt-history")
+      ])
     )
   })
   .superRefine((value, ctx) => {
     if (!isSorted(value.omissions.map((entry) => entry.path))) {
       ctx.addIssue({ code: "custom", path: ["omissions"], message: "must be sorted by path" });
+    }
+    const seenKinds = new Set<AnalysisBundleDataKind>();
+    const seenPaths = new Set<string>();
+    for (const [index, entry] of value.omissions.entries()) {
+      if (seenKinds.has(entry.kind)) {
+        ctx.addIssue({ code: "custom", path: ["omissions", index, "kind"], message: "must be unique" });
+      }
+      if (seenPaths.has(entry.path)) {
+        ctx.addIssue({ code: "custom", path: ["omissions", index, "path"], message: "must be unique" });
+      }
+      seenKinds.add(entry.kind);
+      seenPaths.add(entry.path);
     }
   });
 
@@ -244,6 +273,28 @@ export type AnalysisAccountingSummary = z.infer<typeof analysisAccountingSummary
 export type AnalysisAttemptHistory = z.infer<typeof analysisAttemptHistorySchema>;
 export type AnalysisBundleManifest = z.infer<typeof analysisBundleManifestSchema>;
 export type AnalysisBundleOmissions = z.infer<typeof analysisBundleOmissionsSchema>;
+
+const analysisBundleFilesJsonSchema = {
+  type: "array",
+  minItems: 1,
+  maxItems: 5,
+  items: {
+    oneOf: [
+      analysisBundleFileEntryJsonSchema("terminal-status", DATA_PATHS["terminal-status"]),
+      analysisBundleFileEntryJsonSchema("evaluation-metrics", DATA_PATHS["evaluation-metrics"]),
+      analysisBundleFileEntryJsonSchema("accounting-summary", DATA_PATHS["accounting-summary"]),
+      analysisBundleFileEntryJsonSchema("attempt-history", DATA_PATHS["attempt-history"]),
+      analysisBundleFileEntryJsonSchema("omissions", ANALYSIS_BUNDLE_OMISSIONS_FILE)
+    ]
+  },
+  allOf: [
+    { contains: { properties: { kind: { const: "terminal-status" } } }, minContains: 0, maxContains: 1 },
+    { contains: { properties: { kind: { const: "evaluation-metrics" } } }, minContains: 0, maxContains: 1 },
+    { contains: { properties: { kind: { const: "accounting-summary" } } }, minContains: 0, maxContains: 1 },
+    { contains: { properties: { kind: { const: "attempt-history" } } }, minContains: 0, maxContains: 1 },
+    { contains: { properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
+  ]
+} as const;
 
 export const analysisBundleManifestJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -255,23 +306,24 @@ export const analysisBundleManifestJsonSchema = {
   properties: {
     schema_version: { const: ANALYSIS_BUNDLE_SCHEMA_VERSION },
     policy_version: { const: ANALYSIS_BUNDLE_POLICY_VERSION },
-    files: {
-      type: "array",
-      items: {
-        type: "object",
-        required: ["kind", "path", "media_type", "size_bytes", "sha256"],
-        additionalProperties: false,
-        properties: {
-          kind: { enum: [...ANALYSIS_BUNDLE_DATA_KINDS, "omissions"] },
-          path: { type: "string", minLength: 1 },
-          media_type: { const: "application/json" },
-          size_bytes: { type: "integer", minimum: 0 },
-          sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }
-        }
-      }
-    }
+    files: analysisBundleFilesJsonSchema
   }
 } as const;
+
+function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativePath: string): object {
+  return {
+    type: "object",
+    required: ["kind", "path", "media_type", "size_bytes", "sha256"],
+    additionalProperties: false,
+    properties: {
+      kind: { const: kind },
+      path: { const: relativePath },
+      media_type: { const: "application/json" },
+      size_bytes: { type: "integer", minimum: 0 },
+      sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }
+    }
+  };
+}
 
 const PAYLOAD_SCHEMAS = {
   "terminal-status": analysisTerminalStatusSchema,
