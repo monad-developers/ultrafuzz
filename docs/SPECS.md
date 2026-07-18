@@ -198,8 +198,8 @@ Loop expansion MUST be deterministic:
 
 Concrete IDs MUST NOT collide. Expanded graphs SHOULD preserve graph version,
 topology version, groups, logical ID, concrete ID, label, kind, dependencies,
-artifact directory, loop metadata, required artifacts, primary artifact, timeout,
-reference revision, and model fan-out provenance.
+artifact directory, loop metadata, contracted outputs, primary output marker,
+timeout, reference revision, and model fan-out provenance.
 
 ## Prompts
 

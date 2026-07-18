@@ -37,7 +37,7 @@ export interface ArtifactContractValidationResult {
   value?: unknown;
 }
 
-const terminalReportSchema = z.strictObject({
+const terminalReportSchema = z.looseObject({
   schema_version: z.string().min(1),
   run_metadata: z.record(z.string(), z.unknown()),
   issues: z.array(z.unknown()),
@@ -80,7 +80,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/report@1",
     format: "json",
     description:
-      "A terminal report object with non-empty schema_version, run_metadata, issues, and non_production_outcomes.",
+      "A terminal report object with non-empty schema_version, run_metadata, issues, and non_production_outcomes. Additional adapter fields are allowed.",
     validEmptyExample: '{"schema_version":"1.0","run_metadata":{},"issues":[],"non_production_outcomes":[]}'
   },
   {

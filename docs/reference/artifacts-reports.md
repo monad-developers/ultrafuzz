@@ -45,8 +45,8 @@ values are redacted before persistence, and restore metadata is written to
 `config.redactions.json`.
 
 `graph.json` records the planned executable graph, including logical IDs,
-concrete IDs, group, prompt path, dependencies, artifact directory, required
-artifacts, primary artifact, loop metadata, reference revisions, and model
+concrete IDs, group, prompt path, dependencies, artifact directory, contracted
+outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
@@ -79,9 +79,9 @@ Node statuses are:
 - `reused-from-prior-run`
 - `invalidated`
 
-Node state can also record logical node ID, artifact directory, required
-artifacts, attempt index, loop index, model profile ID, model name, model
-index, timestamps, last error, and provenance.
+Node state can also record logical node ID, artifact directory, contracted
+outputs, attempt index, loop index, model profile ID, model name, model index,
+timestamps, last error, and provenance.
 
 ## Node Artifacts
 
