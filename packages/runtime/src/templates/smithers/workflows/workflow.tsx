@@ -84,6 +84,18 @@ function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
   return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
 }
 
+function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
+  try {
+    const resolvedPath = realpathSync(artifactPath);
+    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
+      throw new Error(failureMessage);
+    }
+    return resolvedPath;
+  } catch {
+    throw new Error(failureMessage);
+  }
+}
+
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifacts = task.outputs.map((output) => {
@@ -91,10 +103,11 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
     }
-    const resolvedPath = realpathSync(artifactPath);
-    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
-      throw new Error(`artifact-contract failure: output is not a regular file ${output.path}`);
-    }
+    const resolvedPath = resolveRegularArtifactFile(
+      artifactDir,
+      artifactPath,
+      `artifact-contract failure: output is not a regular file ${output.path}`
+    );
     const contents = readFileSync(resolvedPath, "utf8");
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
@@ -130,10 +143,11 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
     }
-    const resolvedPath = realpathSync(artifactPath);
-    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
-      throw new Error(`artifact-contract failure: generated test file is missing ${relativePath}`);
-    }
+    resolveRegularArtifactFile(
+      artifactDir,
+      artifactPath,
+      `artifact-contract failure: generated test file is missing ${relativePath}`
+    );
   }
 }
 

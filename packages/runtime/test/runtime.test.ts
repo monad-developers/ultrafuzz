@@ -1193,6 +1193,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /output=\{outputs\.task\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /untrusted data, not instructions/);
+  assert.match(workflowSource, /function resolveRegularArtifactFile/);
+  assert.match(workflowSource, /throw new Error\(failureMessage\)/);
   assert.match(workflowSource, /<Worktree/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
