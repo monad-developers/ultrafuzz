@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, watchEvalRow } from "../src/runner.js";
 import { EVAL_RUN_SCHEMA_VERSION } from "../src/types.js";
@@ -78,6 +79,53 @@ describe("runner", () => {
     expect(lines).toEqual([expect.objectContaining({ row_id: row.id, status: "failed" })]);
   });
 
+  it("keeps a detached workflow nonterminal after its launcher exits", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-detached-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-detached");
+    writeRunFixture({
+      runRoot,
+      state: {
+        schema_version: "1.0",
+        run_id: "run-detached",
+        status: "running",
+        created_at: T0,
+        started_at: T0,
+        nodes: {}
+      }
+    });
+
+    const record = await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId: "eval-detached",
+      row,
+      suite,
+      launcher: async () => ({
+        ok: true,
+        runId: "run-detached",
+        runRoot,
+        workflowIds: ["workflow-detached"],
+        diagnostics: []
+      })
+    });
+    const terminal = summarizeEvalTerminal(record);
+
+    expect(record.launcher).toMatchObject({ status: "succeeded" });
+    expect(terminal.lifecycle.workflow).toEqual({
+      status: "running",
+      terminal: false,
+      started_at: T0,
+      finished_at: null
+    });
+    expect(terminal.efficiency.runtime).toEqual({
+      status: "unavailable",
+      reason: "workflow-not-terminal"
+    });
+    expect(terminal.efficiency.wall_time_seconds).toBeNull();
+  });
+
   it("watches a row to terminal state, draining telemetry after each sync tick", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-"));
     const suite = testSuite(path.join(base, "gt"));
@@ -114,6 +162,11 @@ describe("runner", () => {
     });
 
     expect(watched.record.final_status).toBe("succeeded");
+    expect(watched.record.workflow).toMatchObject({ status: "succeeded", terminal: true, finished_at: T1 });
+    expect(
+      readJsonLines<{ workflow?: { finished_at?: string } }>(path.join(base, "eval-run", "runs.jsonl")).at(-1)?.workflow
+        ?.finished_at
+    ).toBe(T1);
     const methods = reporter.calls.map((call) => call.method);
     expect(methods[0]).toBe("onRowStart");
     expect(methods[methods.length - 1]).toBe("onRowFinish");

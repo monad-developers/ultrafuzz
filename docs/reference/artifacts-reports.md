@@ -243,9 +243,20 @@ telemetry/
 ```
 
 `eval.json` records the resolved suite, `matrix.json` records the planned
-target × variant × trial rows, and `runs.jsonl` appends one record per
-launched row. `ultrafuzz eval score` writes per-row scores to `scores.jsonl`
-and the variant ranking to `summary.json` plus a human-readable `summary.md`
+target × variant × trial rows, and `runs.jsonl` appends launcher and observed
+workflow lifecycle snapshots for each row. Launcher completion is recorded
+separately from durable workflow completion; a detached row remains
+nonterminal until its referenced run's `state.json` reaches a terminal state.
+
+`ultrafuzz eval score` joins the latest record with the referenced run's
+durable `state.json` and cumulative `run.json` accounting. Each row in
+`summary.json` contains the authoritative launcher/workflow lifecycle and a
+typed `efficiency` block with wall, active, and wait seconds, total tokens,
+cost in USD, and independent runtime/usage/cost completeness. Unavailable
+values are `null` with a stable reason; partial pricing is labeled separately
+from complete cost. Active time is the union of node execution intervals, so
+parallel nodes are not double-counted; wait time is wall time minus that union.
+The same fields are rendered from that structure into `summary.md`, which is
 read by `ultrafuzz eval report`.
 
 `telemetry/` holds durable per-row telemetry cursors (byte offset, event dedup

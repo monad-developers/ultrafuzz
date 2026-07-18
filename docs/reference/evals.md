@@ -123,6 +123,12 @@ Grading never depends on a provider: scores are computed locally
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
 
+Scored row summaries take lifecycle timestamps and terminal status from the
+durable run state rather than the detached launcher process. Their typed
+efficiency block reports wall/active/wait time, total tokens, and cost together
+with explicit completeness states, and `summary.md` renders those same
+structured fields.
+
 The gateway judge requires its own `ULTRAFUZZ_EVAL_JUDGE_API_KEY`; reporter or
 general OpenAI credentials are never reused. `ULTRAFUZZ_EVAL_JUDGE_URL`, when
 set, must be HTTPS without embedded credentials, and redirects are rejected.

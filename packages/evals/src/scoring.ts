@@ -5,6 +5,7 @@ import { assertRegularFileInside, validateFindingsSchema } from "@ultrafuzz/arti
 import { parse } from "yaml";
 import { z } from "zod/v4";
 
+import { summarizeEvalTerminal } from "./efficiency.js";
 import { boundedResponseText } from "./reporters/http.js";
 import {
   type EvalCompareValue,
@@ -304,8 +305,59 @@ export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
       ].join(" | ") + " |"
     );
   }
+  lines.push(
+    "",
+    "## Row lifecycle",
+    "",
+    "| Row | Launcher status | Launcher started | Launcher finished | Workflow status | Terminal | Workflow started | Workflow finished |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |"
+  );
+  for (const row of summary.rows) {
+    lines.push(
+      [
+        `| ${row.row_id}`,
+        row.lifecycle.launcher.status,
+        markdownValue(row.lifecycle.launcher.started_at),
+        markdownValue(row.lifecycle.launcher.finished_at),
+        row.lifecycle.workflow.status,
+        row.lifecycle.workflow.terminal,
+        markdownValue(row.lifecycle.workflow.started_at),
+        markdownValue(row.lifecycle.workflow.finished_at)
+      ].join(" | ") + " |"
+    );
+  }
+  lines.push(
+    "",
+    "## Row efficiency",
+    "",
+    "| Row | Wall seconds | Active seconds | Wait seconds | Total tokens | Cost USD | Runtime completeness | Usage completeness | Cost completeness |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"
+  );
+  for (const row of summary.rows) {
+    lines.push(
+      [
+        `| ${row.row_id}`,
+        markdownValue(row.efficiency.wall_time_seconds),
+        markdownValue(row.efficiency.active_time_seconds),
+        markdownValue(row.efficiency.wait_time_seconds),
+        markdownValue(row.efficiency.total_tokens),
+        markdownValue(row.efficiency.cost_usd),
+        completenessValue(row.efficiency.runtime),
+        completenessValue(row.efficiency.usage),
+        completenessValue(row.efficiency.cost)
+      ].join(" | ") + " |"
+    );
+  }
   lines.push("");
   return `${lines.join("\n")}\n`;
+}
+
+function markdownValue(value: string | number | null): string {
+  return value === null ? "null" : String(value);
+}
+
+function completenessValue(value: EvalRowScore["efficiency"]["runtime"]): string {
+  return value.reason === null ? value.status : `${value.status} (${value.reason})`;
 }
 
 function defaultReportPath(row: EvalMatrixRow): string {
@@ -443,6 +495,7 @@ async function scoreFindings(input: {
   const recall = input.bugs.length === 0 ? 0 : roundMetric(matchedBugIds.size / input.bugs.length);
   const f1 = precision + recall === 0 ? 0 : roundMetric((2 * precision * recall) / (precision + recall));
   const judgedFindings = truePositives + falsePositives + duplicates;
+  const terminal = summarizeEvalTerminal(input.record);
   const rowScore: EvalRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,
@@ -463,8 +516,8 @@ async function scoreFindings(input: {
     severity_accuracy: severityChecks === 0 ? null : roundMetric(severityMatches / severityChecks),
     true_positive_accuracy: input.findings.length === 0 ? 0 : roundMetric(truePositives / input.findings.length),
     duplicate_rate: judgedFindings === 0 ? 0 : roundMetric(duplicates / judgedFindings),
-    runtime_seconds: null,
-    cost_estimate: null
+    lifecycle: terminal.lifecycle,
+    efficiency: terminal.efficiency
   };
   return { rowScore, findingScores: matches, reviewQueue };
 }

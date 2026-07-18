@@ -5,6 +5,7 @@ import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifa
 import type { EvalConfig } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
+import { isTerminalWorkflowStatus, summarizeEvalTerminal } from "./efficiency.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
@@ -166,8 +167,7 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
     row_id: input.row.id,
     target_id: input.row.target_id,
     variant_id: input.row.variant_id,
-    trial_id: input.row.trial_id,
-    started_at: startedAt
+    trial_id: input.row.trial_id
   } as const;
 
   const launcher = input.launcher ?? runtimeRowLauncher;
@@ -193,14 +193,14 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           report_json_path: path.join(launch.runRoot, "artifacts", "final-report", "report.json"),
           status: "launched",
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         }
       : {
           ...recordBase,
           status: "failed",
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "failed", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         };
 
@@ -346,8 +346,14 @@ export async function watchEvalRow(
   for (const reporter of input.reporters) {
     await reporter.onRowFinish(input.row, result);
   }
+  const updatedRecord: EvalRunRecord = {
+    ...input.record,
+    final_status: result.status,
+    workflow: summarizeEvalTerminal(input.record).lifecycle.workflow
+  };
+  appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
-    record: { ...input.record, final_status: result.status },
+    record: updatedRecord,
     diagnostics
   };
 }
@@ -374,7 +380,7 @@ function readStateSafe(runRoot: string): RunState | undefined {
 }
 
 export function isTerminalRunStatus(status: string): boolean {
-  return ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+  return isTerminalWorkflowStatus(status);
 }
 
 function rowStatus(state: RunState | undefined): EvalRowResult["status"] {

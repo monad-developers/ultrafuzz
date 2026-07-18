@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
-import { testRow, testSuite } from "./helpers.js";
+import { testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -64,6 +64,34 @@ function scoreRunFixture(): {
     }),
     "utf8"
   );
+  const runRoot = path.join(base, "generated-run");
+  writeRunFixture({
+    runRoot,
+    state: {
+      schema_version: "1.0",
+      run_id: "generated-run",
+      status: "succeeded",
+      created_at: "2026-07-13T00:00:00.000Z",
+      started_at: "2026-07-13T00:00:02.000Z",
+      finished_at: "2026-07-13T00:00:12.000Z",
+      nodes: {}
+    }
+  });
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    JSON.stringify({
+      accounting: {
+        cumulative: {
+          total_tokens: 123,
+          estimated_spend_usd: 0.456,
+          usage_complete: true,
+          pricing_complete: true,
+          partial_pricing: false
+        }
+      }
+    }),
+    "utf8"
+  );
 
   const evalRunId = "eval-transaction";
   const evalRunRoot = path.join(projectRoot, ".ultrafuzz", "evals", "runs", evalRunId);
@@ -83,11 +111,16 @@ function scoreRunFixture(): {
       target_id: row.target_id,
       variant_id: row.variant_id,
       trial_id: row.trial_id,
+      ultrafuzz_run_id: "generated-run",
+      ultrafuzz_run_root: runRoot,
       report_json_path: reportPath,
       status: "launched",
       workflow_ids: [],
-      started_at: "2026-07-13T00:00:00.000Z",
-      finished_at: "2026-07-13T00:00:01.000Z",
+      launcher: {
+        status: "succeeded",
+        started_at: "2026-07-13T00:00:00.000Z",
+        finished_at: "2026-07-13T00:00:01.000Z"
+      },
       diagnostics: []
     })}\n`,
     "utf8"
@@ -222,6 +255,22 @@ describe("deterministic scorer math", () => {
 
     const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
     expect(summary.eval_run_id).toBe(fixture.evalRunId);
+    expect(summary.rows[0]).toMatchObject({
+      lifecycle: {
+        launcher: { status: "succeeded", finished_at: "2026-07-13T00:00:01.000Z" },
+        workflow: { status: "succeeded", terminal: true, finished_at: "2026-07-13T00:00:12.000Z" }
+      },
+      efficiency: {
+        wall_time_seconds: 10,
+        active_time_seconds: 0,
+        wait_time_seconds: 10,
+        total_tokens: 123,
+        cost_usd: 0.456,
+        runtime: { status: "complete", reason: null },
+        usage: { status: "complete", reason: null },
+        cost: { status: "complete", reason: null }
+      }
+    });
     for (const [filePath, contents] of fixture.outputContents) {
       expect(fs.readFileSync(filePath, "utf8")).not.toBe(contents);
     }
@@ -235,8 +284,13 @@ describe("deterministic scorer math", () => {
     expect(JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.json"), "utf8"))).toMatchObject({
       eval_run_id: fixture.evalRunId
     });
-    expect(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8")).toContain(
-      `# Ultrafuzz Eval ${fixture.evalRunId}`
+    const markdown = fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8");
+    expect(markdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
+    expect(markdown).toContain(
+      `| target-a-baseline-trial-1 | succeeded | 2026-07-13T00:00:00.000Z | 2026-07-13T00:00:01.000Z | succeeded | true | 2026-07-13T00:00:02.000Z | 2026-07-13T00:00:12.000Z |`
+    );
+    expect(markdown).toContain(
+      "| target-a-baseline-trial-1 | 10 | 0 | 10 | 123 | 0.456 | complete | complete | complete |"
     );
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
   });
