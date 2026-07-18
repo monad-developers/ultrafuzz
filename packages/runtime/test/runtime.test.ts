@@ -2672,6 +2672,48 @@ test("syncRun records checkpoint continuation entries even when workflow retry c
   });
 });
 
+test("syncRun attributes attempts to the controller active when the attempt starts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-controller";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted", extra: { controllerInvocationId: "controller-start" } },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-1",
+          workflowExecutionId: "execution-1"
+        }
+      },
+      { type: "RunAutoResumed", extra: { controllerInvocationId: "controller-resume" } },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  const ledger = ledgerText
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0]?.controller_invocation_id, "controller-start");
+});
+
 test("syncRun keeps reset workflow nodes pending while the workflow is running", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

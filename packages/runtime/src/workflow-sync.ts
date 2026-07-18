@@ -1098,7 +1098,7 @@ function appendTerminalTaskAttempts(input: {
     const controllerInvocationId = dimensionId(
       "controller",
       attempt.controllerInvocationId ??
-        controllerInvocationForAttempt(input.controllerInvocations, attempt.finishedAt) ??
+        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt) ??
         input.workflowRunId
     );
     const workflowExecutionId = dimensionId(
