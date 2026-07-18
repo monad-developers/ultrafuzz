@@ -111,7 +111,8 @@ Every executable node must declare at least one output, every output must name a
 resolvable contract, and exactly one output must set `primary: true`. Prompt
 paths and artifact paths must be relative, traversal-free paths. Output paths
 are relative to the node artifact directory and must not start
-with `artifacts/` or `.ultrafuzz/`.
+with `artifacts/` or `.ultrafuzz/`. The runtime-owned
+`artifact-manifest.json` path is reserved and cannot be declared as an output.
 
 Built-in contracts include `ultrafuzz/findings@1`,
 `ultrafuzz/generated-tests@1`, `ultrafuzz/nonempty-markdown@1`,

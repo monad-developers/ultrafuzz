@@ -142,6 +142,12 @@ interface NodeWorkflowEvidence {
   timedOut?: boolean;
 }
 
+interface AttemptWorkflowEvidence {
+  evidence: NodeWorkflowEvidence;
+  source: "agent" | "verifier";
+  taskId: string;
+}
+
 interface NodeFinalization {
   status: NodeStatus;
   diagnostics: RuntimeDiagnostic[];
@@ -792,10 +798,15 @@ function synchronizeTasks(input: {
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
   const evidenceByAttempt = new Map(
     input.tasks.flatMap((task) => {
-      const evidence = mergeNodeWorkflowEvidence(
+      const agentEvidence = mergeNodeWorkflowEvidence(
         steps.get(task.smithersNodeId),
         eventsByNode.get(task.smithersNodeId) ?? []
       );
+      const verifierEvidence = mergeNodeWorkflowEvidence(
+        steps.get(task.verifierSmithersNodeId),
+        eventsByNode.get(task.verifierSmithersNodeId) ?? []
+      );
+      const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence);
       return evidence === undefined ? [] : [[task.attemptId, evidence] as const];
     })
   );
@@ -803,21 +814,18 @@ function synchronizeTasks(input: {
   let syncedNodes = 0;
   let changed = false;
 
-  const orderedTasks = [...input.tasks].sort(
-    (left, right) =>
-      Number(evidenceByAttempt.get(left.attemptId)?.status === "skipped") -
-      Number(evidenceByAttempt.get(right.attemptId)?.status === "skipped")
-  );
+  const orderedTasks = tasksInDependencyOrder(input.tasks);
   for (const task of orderedTasks) {
     const node = graphNodeById.get(task.concreteNodeId);
     if (node === undefined) {
       continue;
     }
     const previous = readRunState(input.layout).nodes[task.attemptId];
-    const evidence = evidenceByAttempt.get(task.attemptId);
-    if (evidence === undefined) {
+    const attemptEvidence = evidenceByAttempt.get(task.attemptId);
+    if (attemptEvidence === undefined) {
       continue;
     }
+    const evidence = attemptEvidence.evidence;
 
     const needsFinalization =
       evidence.status === "succeeded"
@@ -830,6 +838,7 @@ function synchronizeTasks(input: {
           task,
           workflowRunId: input.workflowRunId,
           evidence,
+          evidenceSource: attemptEvidence.source,
           tasksByAttempt,
           force: previous?.status === "succeeded"
         })
@@ -860,7 +869,9 @@ function synchronizeTasks(input: {
         ...(previous?.provenance ?? {}),
         workflow: {
           run_id: input.workflowRunId,
-          task_id: task.smithersNodeId,
+          task_id: attemptEvidence.taskId,
+          agent_task_id: task.smithersNodeId,
+          verifier_task_id: task.verifierSmithersNodeId,
           state: evidence.workflowState,
           attempt: evidence.attempt
         },
@@ -881,7 +892,7 @@ function synchronizeTasks(input: {
         status: patchStatus,
         payload: {
           workflow_run_id: input.workflowRunId,
-          workflow_task_id: task.smithersNodeId,
+          workflow_task_id: attemptEvidence.taskId,
           previous_status: previous?.status,
           workflow_state: evidence.workflowState,
           attempt: evidence.attempt
@@ -928,6 +939,7 @@ function finalizeTerminalTask(input: {
   task: StoredWorkflowTask;
   workflowRunId: string;
   evidence: NodeWorkflowEvidence;
+  evidenceSource: "agent" | "verifier";
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
 }): NodeFinalization {
@@ -935,20 +947,37 @@ function finalizeTerminalTask(input: {
     const category =
       input.evidence.status === "skipped"
         ? "dependency-cascade"
-        : input.evidence.status === "timed-out"
-          ? "provider-interruption"
-          : "agent-failure";
+        : input.evidenceSource === "verifier"
+          ? "artifact-contract"
+          : input.evidence.status === "timed-out"
+            ? "provider-interruption"
+            : "agent-failure";
+    const verifierFailure = input.evidenceSource === "verifier" && category === "artifact-contract";
     return {
       status: input.evidence.status,
-      diagnostics: [],
-      ...(input.evidence.error ? { lastError: input.evidence.error } : {}),
+      diagnostics: verifierFailure
+        ? [
+            {
+              code: "ARTIFACT_VERIFIER_FAILED",
+              message: `artifact verifier did not complete successfully for ${input.task.attemptId}`,
+              severity: "error",
+              source: "artifact-contracts",
+              path: input.task.verifierSmithersNodeId
+            }
+          ]
+        : [],
+      ...(input.evidence.error
+        ? { lastError: input.evidence.error }
+        : verifierFailure
+          ? { lastError: `artifact verifier ended with status ${input.evidence.status}` }
+          : {}),
       provenance: {
         failure:
           category === "dependency-cascade"
             ? dependencyCascadeFailure(input.layout, input.task, input.tasksByAttempt)
             : {
                 category,
-                causal_task_id: input.task.smithersNodeId,
+                causal_task_id: verifierFailure ? input.task.verifierSmithersNodeId : input.task.smithersNodeId,
                 causal_failure_category: category,
                 dependent_task_ids: []
               }
@@ -1084,6 +1113,37 @@ function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNode
   }
 }
 
+function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask[] {
+  const byAttempt = new Map(tasks.map((task) => [task.attemptId, task]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const ordered: StoredWorkflowTask[] = [];
+
+  const visit = (task: StoredWorkflowTask): void => {
+    if (visited.has(task.attemptId)) {
+      return;
+    }
+    if (visiting.has(task.attemptId)) {
+      return;
+    }
+    visiting.add(task.attemptId);
+    for (const dependency of task.dependencies) {
+      const dependencyTask = byAttempt.get(dependency);
+      if (dependencyTask !== undefined) {
+        visit(dependencyTask);
+      }
+    }
+    visiting.delete(task.attemptId);
+    visited.add(task.attemptId);
+    ordered.push(task);
+  };
+
+  for (const task of tasks) {
+    visit(task);
+  }
+  return ordered;
+}
+
 function mergeNodeWorkflowEvidence(
   step: WorkflowStep | undefined,
   events: WorkflowEvent[]
@@ -1114,6 +1174,23 @@ function mergeNodeWorkflowEvidence(
     ...(stepIsTerminal && !eventIsTerminal ? { status: fromStep.status, workflowState: fromStep.workflowState } : {}),
     ...(attempt === undefined ? {} : { attempt })
   };
+}
+
+function completionEvidenceForTask(
+  task: StoredWorkflowTask,
+  agentEvidence: NodeWorkflowEvidence | undefined,
+  verifierEvidence: NodeWorkflowEvidence | undefined
+): AttemptWorkflowEvidence | undefined {
+  if (agentEvidence === undefined) {
+    return undefined;
+  }
+  if (agentEvidence.status !== "succeeded") {
+    return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId };
+  }
+  if (verifierEvidence === undefined) {
+    return undefined;
+  }
+  return { evidence: verifierEvidence, source: "verifier", taskId: task.verifierSmithersNodeId };
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {

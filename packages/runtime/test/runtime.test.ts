@@ -268,8 +268,22 @@ function workflowInspect(input: {
   workflowRunId: string;
   status?: string;
   state?: string;
+  includeVerifierSteps?: boolean;
   steps: Array<{ id: string; state: string; attempt?: number }>;
 }): unknown {
+  const explicitStepIds = new Set(input.steps.map((step) => step.id));
+  const steps =
+    input.includeVerifierSteps === false
+      ? input.steps
+      : input.steps.flatMap((step) => {
+          if (!step.id.startsWith("node:") || statusFromTestWorkflowState(step.state) !== "succeeded") {
+            return [step];
+          }
+          const verifierId = `verify:${step.id.slice("node:".length)}`;
+          return explicitStepIds.has(verifierId)
+            ? [step]
+            : [step, { id: verifierId, state: "finished", attempt: step.attempt }];
+        });
   return {
     ok: true,
     data: {
@@ -285,9 +299,15 @@ function workflowInspect(input: {
         computedAt: "2026-07-03T00:00:03.000Z",
         state: input.state ?? (input.status === "running" ? "running" : "succeeded")
       },
-      steps: input.steps
+      steps
     }
   };
+}
+
+function statusFromTestWorkflowState(state: string): "succeeded" | "other" {
+  return ["finished", "succeeded", "success", "complete", "completed"].includes(state.toLowerCase())
+    ? "succeeded"
+    : "other";
 }
 
 function workflowEvents(
@@ -375,6 +395,45 @@ nodes:
     role: finish
     depends_on:
       - project-discovery
+`,
+    "utf8"
+  );
+}
+
+function writeOutOfOrderTopology(project: string): void {
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: actors-flows
+    kind: agentic
+    prompt: setup/actors-flows.md
+    depends_on:
+      - project-discovery
+    outputs:
+      - path: setup/actors-flows.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: project-discovery
+    kind: agentic
+    prompt: setup/project-discovery.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: setup/project-discovery.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - actors-flows
 `,
     "utf8"
   );
@@ -2382,6 +2441,130 @@ test("syncRun fails a successful workflow node that is missing required artifact
   assert.equal(repairedState.nodes?.["project-discovery"]?.last_error, undefined);
 });
 
+test("syncRun requires the deterministic verifier task to succeed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-verifier-failed";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "finished", attempt: 1 },
+        { id: "verify:project-discovery", state: "failed", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        error: { message: "deterministic artifact verification failed" }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-verifier-failed", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-verifier-failed", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_VERIFIER_FAILED"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          failure?: { category?: string; causal_task_id?: string; causal_failure_category?: string };
+          workflow?: { task_id?: string };
+        };
+      }
+    >;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.failure, {
+    category: "artifact-contract",
+    causal_task_id: "verify:project-discovery",
+    causal_failure_category: "artifact-contract",
+    dependent_task_ids: []
+  });
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.task_id, "verify:project-discovery");
+});
+
+test("syncRun does not finalize an agent before its deterministic verifier has evidence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-verifier-missing";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      includeVerifierSteps: false,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-verifier-missing", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-verifier-missing", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_TASK_EVIDENCE_MISSING"));
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
+    false
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.notEqual(state.nodes?.["project-discovery"]?.status, "succeeded");
+});
+
+test("syncRun finalizes prerequisite manifests before out-of-order descendants", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-out-of-order";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:actors-flows", state: "finished", attempt: 1 },
+        { id: "node:project-discovery", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-out-of-order", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-out-of-order", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const descendantManifest = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json"), "utf8")
+  ) as { prerequisite_manifests?: Array<{ node_id?: string }> };
+  assert.deepEqual(
+    descendantManifest.prerequisite_manifests?.map((entry) => entry.node_id),
+    ["project-discovery"]
+  );
+});
+
 test("syncRun does not mark a completed workflow succeeded without task evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -2419,16 +2602,26 @@ test("syncRun accepts workflow nodes and top-level event fields", async () => {
       data: {
         run: { id: workflowRunId, status: "completed" },
         runState: { runId: workflowRunId, state: "completed" },
-        nodes: [{ nodeId: "node:project-discovery", status: "completed", attemptIndex: 0 }]
+        nodes: [
+          { nodeId: "node:project-discovery", status: "completed", attemptIndex: 0 },
+          { nodeId: "verify:project-discovery", status: "completed", attemptIndex: 0 }
+        ]
       }
     },
-    events: `${JSON.stringify({
-      runId: workflowRunId,
-      timestampMs: Date.parse("2026-07-03T00:00:00.000Z"),
-      event: "NodeFinished",
-      nodeId: "node:project-discovery",
-      attempt: 0
-    })}\n`
+    events: `${[
+      { nodeId: "node:project-discovery", timestampMs: Date.parse("2026-07-03T00:00:00.000Z") },
+      { nodeId: "verify:project-discovery", timestampMs: Date.parse("2026-07-03T00:00:00.100Z") }
+    ]
+      .map((event) =>
+        JSON.stringify({
+          runId: workflowRunId,
+          timestampMs: event.timestampMs,
+          event: "NodeFinished",
+          nodeId: event.nodeId,
+          attempt: 0
+        })
+      )
+      .join("\n")}\n`
   });
   const run = await startRun({ projectRoot: project, runId: "sync-alt-shapes", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));

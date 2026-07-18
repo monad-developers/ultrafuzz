@@ -187,7 +187,8 @@ size over implementation limits, missing or duplicate output paths, unresolved
 contracts, missing or duplicate primary outputs, unknown topology fields,
 invalid prompt paths, missing prompt
 files when prompts are required, invalid model profile IDs, and prompt artifact
-references to unknown or non-ancestor producers.
+references to unknown or non-ancestor producers. The runtime-owned
+`artifact-manifest.json` path MUST NOT be declared as a node output.
 
 Loop expansion MUST be deterministic:
 

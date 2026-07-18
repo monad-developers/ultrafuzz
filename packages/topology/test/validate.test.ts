@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { ARTIFACT_MANIFEST_FILE } from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateTopology } from "../src/index.js";
@@ -64,6 +65,15 @@ describe("validateTopology", () => {
       expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
     );
 
+    const reservedManifest = validTopology();
+    reservedManifest.nodes[1] = {
+      ...reservedManifest.nodes[1]!,
+      outputs: [{ path: ARTIFACT_MANIFEST_FILE, contract: "ultrafuzz/json-object@1", primary: true }]
+    };
+    expect(() => validateTopology(reservedManifest)).toThrow(
+      expect.objectContaining({ code: "INVALID_OUTPUT_CONTRACT" })
+    );
+
     const missingPrimary = validTopology();
     missingPrimary.nodes[1] = {
       ...missingPrimary.nodes[1]!,
@@ -92,6 +102,28 @@ describe("validateTopology", () => {
       ]
     };
     expect(() => validateTopology(duplicate)).toThrow(expect.objectContaining({ code: "DUPLICATE_OUTPUT_PATH" }));
+  });
+
+  it("rejects wrong types for optional topology v2 fields instead of silently dropping them", () => {
+    const invalidGroup = structuredClone(validTopology()) as unknown as {
+      groups: Record<string, Record<string, unknown>>;
+    };
+    invalidGroup.groups.strategies!.label = 42;
+    expect(() => validateTopology(invalidGroup)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+
+    const invalidNode = structuredClone(validTopology()) as unknown as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    invalidNode.nodes[1]!.prompt = null;
+    expect(() => validateTopology(invalidNode)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+
+    const invalidProfiles = structuredClone(validTopology()) as unknown as {
+      nodes: Array<Record<string, unknown>>;
+    };
+    invalidProfiles.nodes[1]!.model_profiles = null;
+    expect(() => validateTopology(invalidProfiles)).toThrow(
+      expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" })
+    );
   });
 
   it("accepts reference nodes with pinned artifacts and rejects invalid reference node shapes", () => {

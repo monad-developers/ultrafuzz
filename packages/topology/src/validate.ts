@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { isArtifactContractId, type ArtifactContractId } from "@ultrafuzz/artifacts";
+import { ARTIFACT_MANIFEST_FILE, isArtifactContractId, type ArtifactContractId } from "@ultrafuzz/artifacts";
 import { RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import { validateArtifactHandoffs } from "./artifact-handoffs.js";
@@ -141,7 +141,7 @@ export function isNormalStrategyNode(node: NormalizedTopologyNode): boolean {
 function normalizeGroups(
   input: unknown
 ): Record<string, { label?: string; color?: string; defaults?: TopologyGroupDefaults }> {
-  if (input === undefined || input === null) {
+  if (input === undefined) {
     return {};
   }
   if (!isRecord(input)) {
@@ -155,9 +155,11 @@ function normalizeGroups(
       });
     }
     assertOnlyKeys(group, ["label", "color", "defaults"], `topology group \`${id}\``);
+    const label = normalizeOptionalString(group.label, "label", `Topology group \`${id}\``);
+    const color = normalizeOptionalString(group.color, "color", `Topology group \`${id}\``);
     groups[id] = {
-      ...(typeof group.label === "string" ? { label: group.label } : {}),
-      ...(typeof group.color === "string" ? { color: group.color } : {}),
+      ...(label === undefined ? {} : { label }),
+      ...(color === undefined ? {} : { color }),
       ...(group.defaults === undefined ? {} : { defaults: normalizeGroupDefaults(id, group.defaults) })
     };
   }
@@ -210,13 +212,17 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
     `topology node \`${input.id}\``
   );
   const kind = normalizeKind(input.kind, input.id);
+  const role = normalizeOptionalString(input.role, "role", `Node \`${input.id}\``);
+  const prompt = normalizeOptionalString(input.prompt, "prompt", `Node \`${input.id}\``);
+  const reference = normalizeOptionalString(input.reference, "reference", `Node \`${input.id}\``);
+  const group = normalizeOptionalString(input.group, "group", `Node \`${input.id}\``);
   return {
     id: input.id,
     kind,
-    ...(typeof input.role === "string" ? { role: input.role as never } : {}),
-    ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
-    ...(typeof input.reference === "string" ? { reference: input.reference } : {}),
-    ...(typeof input.group === "string" ? { group: input.group } : {}),
+    ...(role === undefined ? {} : { role: role as never }),
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(reference === undefined ? {} : { reference }),
+    ...(group === undefined ? {} : { group }),
     depends_on: normalizeStringArray(input.depends_on, "depends_on", input.id, true),
     loops: input.loops === undefined ? 1 : normalizePositiveInteger(input.loops, "loops", input.id),
     explicit_loops: input.loops !== undefined,
@@ -230,7 +236,7 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
 }
 
 function normalizeOutputs(input: unknown, nodeId: string): NormalizedArtifactOutput[] {
-  if (input === undefined || input === null) {
+  if (input === undefined) {
     return [];
   }
   if (!Array.isArray(input)) {
@@ -265,7 +271,7 @@ function normalizeOutputs(input: unknown, nodeId: string): NormalizedArtifactOut
 }
 
 function normalizeKind(input: unknown, nodeId: string): TopologyNodeKind {
-  if (input === undefined || input === null) {
+  if (input === undefined) {
     return "agentic";
   }
   if (input === "agentic" || input === "meta" || input === "reference") {
@@ -292,7 +298,7 @@ function normalizePositiveInteger(input: unknown, field: string, nodeId: string)
 }
 
 function normalizeStringArray(input: unknown, field: string, nodeId: string, required: boolean): string[] {
-  if (input === undefined || input === null) {
+  if (input === undefined) {
     if (required) {
       throw topologyError("INVALID_TOPOLOGY_SHAPE", `Node \`${nodeId}\` must define ${field}`, { nodeId, field });
     }
@@ -305,6 +311,16 @@ function normalizeStringArray(input: unknown, field: string, nodeId: string, req
     });
   }
   return [...input];
+}
+
+function normalizeOptionalString(input: unknown, field: string, context: string): string | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+  if (typeof input !== "string") {
+    throw topologyError("INVALID_TOPOLOGY_SHAPE", `${context} field ${field} must be a string`, { field });
+  }
+  return input;
 }
 
 function validateNodeShape(
@@ -498,6 +514,13 @@ function validateArtifactPath(nodeId: string, artifact: string): void {
       nodeId,
       path: artifact
     });
+  }
+  if (artifact === ARTIFACT_MANIFEST_FILE) {
+    throw topologyError(
+      "INVALID_OUTPUT_CONTRACT",
+      `Artifact output path ${artifact} is reserved for the runtime manifest`,
+      { nodeId, path: artifact }
+    );
   }
 }
 

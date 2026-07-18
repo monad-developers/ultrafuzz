@@ -158,6 +158,34 @@ test("artifact manifests preserve causal prerequisite digests for safe reuse", (
   });
 });
 
+test("artifact manifest reuse checks the complete prerequisite chain", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-causal-chain" });
+  writeArtifact(layout, "ancestor", "result.md", "first\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  writeArtifact(layout, "middle", "result.md", "second\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: "middle",
+    prerequisiteNodeIds: ["ancestor"],
+    createdAt: "2026-07-18T00:00:01.000Z"
+  });
+  writeArtifact(layout, "descendant", "result.md", "third\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: "descendant",
+    prerequisiteNodeIds: ["middle"],
+    createdAt: "2026-07-18T00:00:02.000Z"
+  });
+
+  writeArtifact(layout, "ancestor", "result.md", "changed\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:03.000Z" });
+  assert.deepEqual(verifyArtifactManifestPrerequisites(layout, "descendant"), {
+    ok: false,
+    changed: ["ancestor"],
+    missing: []
+  });
+});
+
 test("events append to JSONL, redact secrets, replay, and expose query indexes", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   appendEvent(layout, {

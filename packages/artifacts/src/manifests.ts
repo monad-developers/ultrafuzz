@@ -134,21 +134,47 @@ export function verifyArtifactManifestPrerequisites(
   layout: RunLayout,
   nodeId: string
 ): { ok: boolean; changed: string[]; missing: string[] } {
-  const manifest = readArtifactManifest(layout, nodeId);
-  const changed: string[] = [];
-  const missing: string[] = [];
-  for (const prerequisite of manifest.prerequisite_manifests) {
-    const manifestPath = path.join(getNodeArtifactDir(layout, prerequisite.node_id), ARTIFACT_MANIFEST_FILE);
-    if (!fs.existsSync(manifestPath)) {
-      missing.push(prerequisite.node_id);
-      continue;
+  const changed = new Set<string>();
+  const missing = new Set<string>();
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const verifyNode = (currentNodeId: string): void => {
+    if (visited.has(currentNodeId)) {
+      return;
     }
-    assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
-    if (sha256File(manifestPath) !== prerequisite.sha256) {
-      changed.push(prerequisite.node_id);
+    if (visiting.has(currentNodeId)) {
+      changed.add(currentNodeId);
+      return;
     }
-  }
-  return { ok: changed.length === 0 && missing.length === 0, changed, missing };
+    visiting.add(currentNodeId);
+    const manifest = readArtifactManifest(layout, currentNodeId);
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      const prerequisiteNodeId = validateSafeId(prerequisite.node_id, "prerequisite node ID");
+      const manifestPath = path.join(getNodeArtifactDir(layout, prerequisiteNodeId), ARTIFACT_MANIFEST_FILE);
+      if (!fs.existsSync(manifestPath)) {
+        missing.add(prerequisiteNodeId);
+        continue;
+      }
+      assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
+      if (sha256File(manifestPath) !== prerequisite.sha256) {
+        changed.add(prerequisiteNodeId);
+        continue;
+      }
+      verifyNode(prerequisiteNodeId);
+    }
+    visiting.delete(currentNodeId);
+    visited.add(currentNodeId);
+  };
+
+  verifyNode(validateSafeId(nodeId, "node ID"));
+  const changedNodes = [...changed].sort();
+  const missingNodes = [...missing].sort();
+  return {
+    ok: changedNodes.length === 0 && missingNodes.length === 0,
+    changed: changedNodes,
+    missing: missingNodes
+  };
 }
 
 function prerequisiteManifestDigests(layout: RunLayout, nodeIds: string[]): PrerequisiteManifestDigest[] {
