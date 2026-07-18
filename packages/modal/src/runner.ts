@@ -328,6 +328,8 @@ async function overseeModalBenchmarkOnce(
     const image = await modal.images.fromName(input.recoveryImage ?? state.image);
     const rows: Array<Record<string, unknown>> = [];
     for (const launch of state.launches) {
+      const model = config.models.find((candidate) => candidate.slug === launch.slug);
+      if (model === undefined) throw new Error(`model ${launch.slug} is missing from the benchmark config`);
       const volume = await modal.volumes.fromName(launch.volume_name);
       const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
         "status.json",
@@ -340,9 +342,9 @@ async function overseeModalBenchmarkOnce(
       const originalRunning = await sandboxRunning(modal, launch.sandbox_id);
       const recoveryRunning = await recoverySandboxRunning(modal, recoveryState, launch.slug);
       if (!originalRunning && !recoveryRunning) {
-        const auth = subscriptionAuthCopy(launch, env);
+        const auth = subscriptionAuthCopy(model, env);
         if (auth !== undefined) await access(auth.source);
-        const secret = await modal.secrets.fromObject(secretValues(config, launch, env));
+        const secret = await modal.secrets.fromObject(secretValues(config, model, env));
         const attempt =
           Math.max(
             0,
@@ -350,11 +352,7 @@ async function overseeModalBenchmarkOnce(
           ) + 1;
         const sandbox = await modal.sandboxes.create(app, image, {
           name: recoverySandboxName(config.run_id, launch.slug, attempt),
-          command: [
-            "bash",
-            "-lc",
-            modalWorkerEntrypointCommand(auth === undefined ? undefined : launch.provider, true)
-          ],
+          command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider, true)],
           cpu: 4,
           cpuLimit: 4,
           memoryMiB: 12_288,
@@ -363,7 +361,7 @@ async function overseeModalBenchmarkOnce(
           workdir: "/opt/ultrafuzz",
           env: {
             ULTRAFUZZ_MODAL_RUN_ID: config.run_id,
-            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(launch),
+            ULTRAFUZZ_MODAL_MODEL: JSON.stringify(model),
             ULTRAFUZZ_MODAL_REMOTE_ROOT: launch.remote_root,
             ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(launch.remote_root)
           },
@@ -377,14 +375,16 @@ async function overseeModalBenchmarkOnce(
           }
         });
         recoveryState.recoveries.push({
-          ...launch,
+          ...model,
           sandbox_id: sandbox.sandboxId,
+          volume_name: launch.volume_name,
+          remote_root: launch.remote_root,
           attempt,
           launched_at: new Date().toISOString()
         });
         await writeRecoveryState(recoveryStatePath, recoveryState);
         try {
-          await stageModalSandboxInputs(sandbox, configPath, launch, auth);
+          await stageModalSandboxInputs(sandbox, configPath, model, auth);
         } catch (error) {
           await sandbox.terminate({ wait: true }).catch(() => undefined);
           throw error;
