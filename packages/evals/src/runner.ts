@@ -5,6 +5,7 @@ import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifa
 import type { EvalConfig } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
+import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
   buildEvalRunProvenance,
@@ -240,14 +241,14 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
           ...(configFingerprint !== undefined ? { config_fingerprint: configFingerprint } : {}),
           ...(executionArtifactId !== undefined ? { execution_artifact_id: executionArtifactId } : {}),
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "succeeded", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         }
       : {
           ...recordBase,
           status: "failed",
           workflow_ids: launch.workflowIds,
-          finished_at: finishedAt,
+          launcher: { status: "failed", started_at: startedAt, finished_at: finishedAt },
           diagnostics: launch.diagnostics
         };
 
@@ -400,8 +401,14 @@ export async function watchEvalRow(
   for (const reporter of input.reporters) {
     await reporter.onRowFinish(input.row, result);
   }
+  const updatedRecord: EvalRunRecord = {
+    ...input.record,
+    final_status: result.status,
+    workflow: evalWorkflowLifecycle(state)
+  };
+  appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
-    record: { ...input.record, final_status: result.status },
+    record: updatedRecord,
     diagnostics
   };
 }
@@ -443,7 +450,7 @@ function readRunFingerprints(runRoot: string): {
 }
 
 export function isTerminalRunStatus(status: string): boolean {
-  return ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+  return isTerminalWorkflowStatus(status);
 }
 
 function rowStatus(state: RunState | undefined): EvalRowResult["status"] {

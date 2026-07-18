@@ -1,3 +1,4 @@
+import type { RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
@@ -192,6 +193,53 @@ export interface EvalPlanValue {
   provenance?: EvalRunProvenance;
 }
 
+export interface EvalLauncherLifecycle {
+  status: "succeeded" | "failed" | "unavailable";
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type EvalWorkflowStatus = RunStatus | "unavailable";
+
+export interface EvalWorkflowLifecycle {
+  status: EvalWorkflowStatus;
+  terminal: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface EvalRowLifecycle {
+  launcher: EvalLauncherLifecycle;
+  workflow: EvalWorkflowLifecycle;
+}
+
+export type EvalEfficiencyReason =
+  | "workflow-state-unavailable"
+  | "workflow-not-terminal"
+  | "workflow-timestamps-unavailable"
+  | "workflow-timestamps-invalid"
+  | "node-timestamps-unavailable"
+  | "node-timestamps-invalid"
+  | "node-attempt-timestamps-unavailable"
+  | "accounting-unavailable"
+  | "usage-incomplete"
+  | "pricing-unavailable"
+  | "pricing-incomplete";
+
+export type EvalEfficiencyCompleteness =
+  { status: "complete"; reason: null } | { status: "partial" | "unavailable"; reason: EvalEfficiencyReason };
+
+export interface EvalEfficiency {
+  wall_time_seconds: number | null;
+  active_time_seconds: number | null;
+  wait_time_seconds: number | null;
+  total_tokens: number | null;
+  cost_usd: number | null;
+  runtime: EvalEfficiencyCompleteness;
+  usage: EvalEfficiencyCompleteness;
+  cost: EvalEfficiencyCompleteness;
+}
+
 export interface EvalRunRecord {
   schema_version: typeof EVAL_RUN_SCHEMA_VERSION;
   eval_run_id: string;
@@ -210,8 +258,14 @@ export interface EvalRunRecord {
   candidate_commit?: string;
   execution_artifact_id?: string;
   workflow_ids: string[];
-  started_at: string;
-  finished_at: string;
+  /** Explicit launcher-process lifecycle for new records. */
+  launcher?: EvalLauncherLifecycle;
+  /** Last observed durable workflow lifecycle; summaries always re-read state.json. */
+  workflow?: EvalWorkflowLifecycle;
+  /** Legacy launcher timestamp retained for reading existing eval runs. */
+  started_at?: string;
+  /** Legacy launcher timestamp retained for reading existing eval runs. */
+  finished_at?: string;
   diagnostics: RuntimeDiagnostic[];
 }
 
@@ -318,8 +372,12 @@ export interface EvalRowScore {
   severity_accuracy: number | null;
   true_positive_accuracy: number;
   duplicate_rate: number;
+  /** @deprecated Use `efficiency.wall_time_seconds`. */
   runtime_seconds: number | null;
+  /** @deprecated Use `efficiency.cost_usd`. */
   cost_estimate: number | null;
+  lifecycle: EvalRowLifecycle;
+  efficiency: EvalEfficiency;
 }
 
 export interface EvalScoreSummary {

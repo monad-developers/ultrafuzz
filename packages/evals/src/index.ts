@@ -1,3 +1,4 @@
+export * from "./efficiency.js";
 export * from "./node-telemetry.js";
 export * from "./lineage.js";
 export * from "./publish.js";
