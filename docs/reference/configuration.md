@@ -25,6 +25,8 @@ max_parallel_nodes = 8
 keep_workspaces = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 1800
+workflow_deadline_seconds = 86400
+controller_lease_seconds = 30
 
 [models]
 default = "default"
@@ -78,19 +80,28 @@ empty path components, and dot components fail validation.
 
 ## Run
 
-| Key                       | Type    | Meaning                                                            |
-| ------------------------- | ------- | ------------------------------------------------------------------ |
-| `output_dir`              | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`. |
-| `max_parallel_agents`     | integer | Positive workflow submission concurrency default.                  |
-| `max_parallel_nodes`      | integer | Positive graph planning parallelism limit.                         |
-| `keep_workspaces`         | boolean | Retain successful-run node workspaces instead of reaping them.     |
-| `workspace_mode`          | string  | Must be `git-worktree`.                                            |
-| `default_timeout_seconds` | integer | Default node timeout in seconds.                                   |
+| Key                         | Type    | Meaning                                                                     |
+| --------------------------- | ------- | --------------------------------------------------------------------------- |
+| `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
+| `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
+| `max_parallel_nodes`        | integer | Positive graph planning parallelism limit.                                  |
+| `keep_workspaces`           | boolean | Retain successful-run node workspaces instead of reaping them.              |
+| `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
+| `default_timeout_seconds`   | integer | Default node timeout in seconds.                                            |
+| `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
+| `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
 
 Other workspace modes are outside the product contract.
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
 preserved by the workflow runner.
+
+Every submitted workflow starts a run-scoped recovery supervisor. The
+supervisor renews controller ownership through runner heartbeats and uses an
+atomic claim before taking over expired ownership, so completed work is not
+resubmitted. The workflow deadline is separate from per-node timeouts and is
+checked whenever run state is synchronized by status, inspect, reporting, or
+eval watchers.
 
 ## Model Profiles
 

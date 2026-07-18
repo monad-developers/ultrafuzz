@@ -14,6 +14,7 @@ import {
   writeFileDurable,
   writeJsonDurable
 } from "./safe-paths.js";
+import type { ArtifactContractId } from "./artifact-contracts.js";
 
 export const ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.0";
 export const ARTIFACT_MANIFEST_FILE = "artifact-manifest.json";
@@ -49,7 +50,21 @@ export interface ArtifactManifest {
   producer_node_id: string;
   created_at: string;
   files: ArtifactManifestEntry[];
+  output_contracts: ArtifactManifestOutputContract[];
+  prerequisite_manifests: PrerequisiteManifestDigest[];
   provenance: ArtifactProvenance;
+}
+
+export interface ArtifactManifestOutputContract {
+  path: string;
+  contract: ArtifactContractId;
+  contract_digest: string;
+  primary: boolean;
+}
+
+export interface PrerequisiteManifestDigest {
+  node_id: string;
+  sha256: string;
 }
 
 export interface WriteArtifactManifestInput {
@@ -57,6 +72,8 @@ export interface WriteArtifactManifestInput {
   nodeId: string;
   provenance?: Partial<ArtifactProvenance>;
   include?: string[];
+  outputs?: ArtifactManifestOutputContract[];
+  prerequisiteNodeIds?: string[];
   createdAt?: string;
 }
 
@@ -105,10 +122,68 @@ export function writeArtifactManifest(input: WriteArtifactManifestInput): Artifa
     producer_node_id: provenance.producer_node_id,
     created_at: input.createdAt ?? new Date().toISOString(),
     files,
+    output_contracts: input.outputs ?? [],
+    prerequisite_manifests: prerequisiteManifestDigests(input.layout, input.prerequisiteNodeIds ?? []),
     provenance
   };
   writeJsonDurable(path.join(nodeDir, ARTIFACT_MANIFEST_FILE), manifest);
   return manifest;
+}
+
+export function verifyArtifactManifestPrerequisites(
+  layout: RunLayout,
+  nodeId: string
+): { ok: boolean; changed: string[]; missing: string[] } {
+  const changed = new Set<string>();
+  const missing = new Set<string>();
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  const verifyNode = (currentNodeId: string): void => {
+    if (visited.has(currentNodeId)) {
+      return;
+    }
+    if (visiting.has(currentNodeId)) {
+      changed.add(currentNodeId);
+      return;
+    }
+    visiting.add(currentNodeId);
+    const manifest = readArtifactManifest(layout, currentNodeId);
+    for (const prerequisite of manifest.prerequisite_manifests) {
+      const prerequisiteNodeId = validateSafeId(prerequisite.node_id, "prerequisite node ID");
+      const manifestPath = path.join(getNodeArtifactDir(layout, prerequisiteNodeId), ARTIFACT_MANIFEST_FILE);
+      if (!fs.existsSync(manifestPath)) {
+        missing.add(prerequisiteNodeId);
+        continue;
+      }
+      assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
+      if (sha256File(manifestPath) !== prerequisite.sha256) {
+        changed.add(prerequisiteNodeId);
+        continue;
+      }
+      verifyNode(prerequisiteNodeId);
+    }
+    visiting.delete(currentNodeId);
+    visited.add(currentNodeId);
+  };
+
+  verifyNode(validateSafeId(nodeId, "node ID"));
+  const changedNodes = [...changed].sort();
+  const missingNodes = [...missing].sort();
+  return {
+    ok: changedNodes.length === 0 && missingNodes.length === 0,
+    changed: changedNodes,
+    missing: missingNodes
+  };
+}
+
+function prerequisiteManifestDigests(layout: RunLayout, nodeIds: string[]): PrerequisiteManifestDigest[] {
+  return [...new Set(nodeIds)].sort().map((nodeId) => {
+    const safeNodeId = validateSafeId(nodeId, "prerequisite node ID");
+    const manifestPath = path.join(getNodeArtifactDir(layout, safeNodeId), ARTIFACT_MANIFEST_FILE);
+    assertRegularFileInside(layout.artifactsDir, manifestPath, "prerequisite artifact manifest path");
+    return { node_id: safeNodeId, sha256: sha256File(manifestPath) };
+  });
 }
 
 export function readArtifactManifest(layout: RunLayout, nodeId: string): ArtifactManifest {

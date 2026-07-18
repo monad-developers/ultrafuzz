@@ -53,18 +53,22 @@ function scoreRunFixture(): {
 
   const suite = testSuite(groundTruthRoot);
   const row = testRow(suite);
-  const reportPath = path.join(base, "report.json");
+  const runRoot = path.join(base, "generated-run");
+  const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
   fs.writeFileSync(
     reportPath,
     JSON.stringify({
-      findings: [
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [
         matchedFinding(),
         { id: "finding-2", title: "Plausible but unknown overflow", summary: "overflow in mint" }
-      ]
+      ],
+      non_production_outcomes: []
     }),
     "utf8"
   );
-  const runRoot = path.join(base, "generated-run");
   writeRunFixture({
     runRoot,
     state: {
@@ -77,6 +81,19 @@ function scoreRunFixture(): {
       nodes: {}
     }
   });
+  fs.writeFileSync(
+    path.join(runRoot, "graph.json"),
+    JSON.stringify({
+      nodes: [
+        {
+          id: "final-report",
+          artifact_dir: "artifacts/final-report",
+          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: true }]
+        }
+      ]
+    }),
+    "utf8"
+  );
   fs.writeFileSync(
     path.join(runRoot, "run.json"),
     JSON.stringify({
@@ -284,7 +301,16 @@ describe("deterministic scorer math", () => {
         .split("\n")
     ).toHaveLength(1);
     expect(JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "summary.json"), "utf8"))).toMatchObject({
-      eval_run_id: fixture.evalRunId
+      eval_run_id: fixture.evalRunId,
+      provenance: {
+        availability: "historical-unavailable",
+        scoring: {
+          judge_mode: "deterministic",
+          judge_prompt_version: "ultrafuzz-eval-judge-v2",
+          judge_models: ["gpt-5.5"],
+          ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
+        }
+      }
     });
     const markdown = fs.readFileSync(path.join(fixture.evalRunRoot, "summary.md"), "utf8");
     expect(markdown).toContain(`# Ultrafuzz Eval ${fixture.evalRunId}`);
@@ -294,7 +320,82 @@ describe("deterministic scorer math", () => {
     expect(markdown).toContain(
       "| target-a-baseline-trial-1 | 10 | 0 | 10 | 123 | 0.456 | complete | complete | complete |"
     );
+    expect(markdown).toContain("Candidate: unavailable (historical result)");
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
+  });
+
+  it("records the effective judge mode in the scoring identity", async () => {
+    const fixture = scoreRunFixture();
+    const deterministic = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId
+    });
+    const judged = await scoreEvalRun({
+      projectRoot: fixture.projectRoot,
+      evalRunId: fixture.evalRunId,
+      llmJudge: async (input) => ({
+        ...input.deterministicResult,
+        judge_kind: "llm",
+        rationale: "generated judge result"
+      })
+    });
+
+    expect(deterministic.provenance?.scoring.judge_mode).toBe("deterministic");
+    expect(judged.provenance?.scoring.judge_mode).toBe("llm");
+    expect(judged.provenance?.scoring.fingerprint).not.toBe(deterministic.provenance?.scoring.fingerprint);
+  });
+
+  it("rejects an invalid terminal report before scoring or invoking a judge", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.writeFileSync(record.report_json_path, '{"issues":[]}', "utf8");
+    let judgeCalled = false;
+    await expect(
+      scoreEvalRun({
+        projectRoot: fixture.projectRoot,
+        evalRunId: fixture.evalRunId,
+        llmJudge: async (input) => {
+          judgeCalled = true;
+          return input.deterministicResult;
+        }
+      })
+    ).rejects.toMatchObject({ code: "EVAL_TERMINAL_REPORT_INVALID" });
+    expect(judgeCalled).toBe(false);
+  });
+
+  it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
+    const fixture = scoreRunFixture();
+    const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown> & {
+      report_json_path?: string;
+    };
+    const reportContents = fs.readFileSync(record.report_json_path!, "utf8");
+    const runRoot = path.join(fixture.evalRunRoot, "topology-report-run");
+    const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
+    fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
+    fs.writeFileSync(customReportPath, reportContents, "utf8");
+    fs.writeFileSync(
+      path.join(runRoot, "graph.json"),
+      JSON.stringify({
+        nodes: [
+          {
+            id: "terminal",
+            artifact_dir: "artifacts/terminal",
+            outputs: [{ path: "custom-report.json", contract: "ultrafuzz/report@1", primary: true }]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    delete record.report_json_path;
+    record.ultrafuzz_run_root = runRoot;
+    fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`, "utf8");
+
+    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+    expect(summary.rows[0]?.finding_count).toBe(2);
   });
 
   it("requires a dedicated credential for the optional gateway judge", () => {

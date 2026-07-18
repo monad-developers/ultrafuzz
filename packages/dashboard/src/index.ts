@@ -502,8 +502,8 @@ class DashboardApp {
     const groupInfo = group ? groups[group] : undefined;
     const findingCount = this.countFindings(attempts, runRoot);
     const requiredArtifacts = uniqueStrings([
-      ...(node.required_artifacts ?? []),
-      ...attempts.flatMap((attempt) => attempt.requiredArtifacts)
+      ...(node.outputs ?? []).map((output) => output.path),
+      ...attempts.flatMap((attempt) => attempt.outputs.map((output) => output.path))
     ]);
     const loopCount = Math.max(1, attempts.length || node.loops || 1);
     return {
@@ -1115,8 +1115,7 @@ class DashboardApp {
           prompt: promptPath,
           ...(group ? { group } : {}),
           depends_on: dependsOn,
-          required_artifacts: ["findings.json"],
-          primary_artifact: "findings.json"
+          outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
         }
       ]
     };
@@ -1717,7 +1716,7 @@ function writeSse(response: http.ServerResponse, event: string, data: unknown): 
 
 function emptyTopology(): ProjectTopology {
   return {
-    version: 1,
+    version: 2,
     defaults: { strategy_loops: 1 },
     groups: {},
     nodes: []

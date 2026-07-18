@@ -11,6 +11,8 @@ max_parallel_nodes = 8
 keep_workspaces = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = 1800
+workflow_deadline_seconds = 86400
+controller_lease_seconds = 30
 
 [models]
 synthesized_default = true

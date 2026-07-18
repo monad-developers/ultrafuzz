@@ -3,11 +3,22 @@
   "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state",
   "title": "Ultrafuzz run state",
   "type": "object",
-  "required": ["schema_version", "run_id", "status", "graph_fingerprint", "config_fingerprint", "created_at", "nodes"],
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "graph_fingerprint",
+    "config_fingerprint",
+    "created_at",
+    "last_transition_at",
+    "controller_lease",
+    "concurrency",
+    "nodes"
+  ],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "const": "1.1"
     },
     "run_id": {
       "type": "string",
@@ -38,6 +49,88 @@
       "type": "string",
       "minLength": 1
     },
+    "workflow_deadline_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "last_transition_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "controller_lease": {
+      "type": "object",
+      "required": ["status", "duration_ms", "renewed_at", "expires_at", "recovery_attempts"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": ["active", "expired", "recovering"]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "renewed_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recovery_attempts": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "required": [
+        "requested_concurrency",
+        "effective_concurrency",
+        "ready_queue_depth",
+        "active_work",
+        "queued_duration_ms",
+        "active_duration_ms",
+        "idle_duration_ms",
+        "observed_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requested_concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "effective_concurrency": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ready_queue_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_work": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "queued_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "idle_duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observed_at": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "provenance": {
       "type": "object"
     },
@@ -46,6 +139,23 @@
       "additionalProperties": {
         "type": "object",
         "required": ["node_id", "status", "retry_count", "timed_out"],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "not": {
+                    "enum": ["succeeded", "failed", "skipped", "timed-out", "reused-from-prior-run", "invalidated"]
+                  }
+                }
+              },
+              "required": ["status"]
+            },
+            "then": {
+              "required": ["wait_since", "wait_reason", "next_eligible_action"]
+            }
+          }
+        ],
         "additionalProperties": false,
         "properties": {
           "node_id": {
@@ -81,11 +191,36 @@
             "type": "string",
             "minLength": 1
           },
-          "required_artifacts": {
+          "outputs": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "type": "object",
+              "required": ["path", "contract", "contract_digest", "primary"],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contract": {
+                  "enum": [
+                    "ultrafuzz/findings@1",
+                    "ultrafuzz/generated-tests@1",
+                    "ultrafuzz/json-array@1",
+                    "ultrafuzz/json-object@1",
+                    "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/report@1",
+                    "ultrafuzz/text@1"
+                  ]
+                },
+                "contract_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "primary": {
+                  "type": "boolean"
+                }
+              }
             }
           },
           "attempt_index": {
@@ -119,6 +254,36 @@
           "last_error": {
             "type": "string",
             "minLength": 1
+          },
+          "wait_since": {
+            "type": "string",
+            "minLength": 1
+          },
+          "wait_reason": {
+            "enum": [
+              "ready",
+              "capacity",
+              "dependency",
+              "backoff",
+              "approval",
+              "event",
+              "timer",
+              "controller-loss",
+              "active"
+            ]
+          },
+          "next_eligible_action": {
+            "enum": [
+              "dispatch",
+              "capacity-available",
+              "dependency-complete",
+              "retry",
+              "approve",
+              "signal",
+              "timer-fire",
+              "controller-takeover",
+              "task-complete"
+            ]
           },
           "provenance": {
             "type": "object"
