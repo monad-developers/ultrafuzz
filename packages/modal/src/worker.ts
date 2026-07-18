@@ -213,7 +213,7 @@ async function loadExistingWorkspace(): Promise<{
 }> {
   const target = path.join(WORK_ROOT, "target");
   const control = path.join(WORK_ROOT, "control");
-  const suitePath = path.join(WORK_ROOT, "modal-suite.yml");
+  const suitePath = path.join(control, "modal-suite.yml");
   const evalRunId = `${RUN_ID}-${MODEL.slug}`;
   for (const requiredPath of [target, control, suitePath, path.join(control, ".ultrafuzz/evals/runs", evalRunId)]) {
     await access(requiredPath);
