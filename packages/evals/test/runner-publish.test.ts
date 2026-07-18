@@ -49,9 +49,30 @@ function terminalRunFixture(runRoot: string): void {
     graph: {
       schema_version: "1.0",
       groups: { setup: {} },
-      nodes: [{ id: "setup-1", logical_id: "setup-1", kind: "agentic", depends_on: [] }]
+      nodes: [
+        { id: "setup-1", logical_id: "setup-1", kind: "agentic", depends_on: [] },
+        {
+          id: "final-report",
+          logical_id: "final-report",
+          kind: "agentic",
+          depends_on: ["setup-1"],
+          artifact_dir: "artifacts/final-report",
+          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: false }]
+        }
+      ]
     },
-    artifacts: { "setup-1": { "report.md": "# report", "report.json": '{"findings":[]}' } }
+    artifacts: {
+      "setup-1": { "report.md": "# report" },
+      "final-report": {
+        "report.md": "# report",
+        "report.json": JSON.stringify({
+          schema_version: "1.0",
+          run_metadata: {},
+          issues: [],
+          non_production_outcomes: []
+        })
+      }
+    }
   });
 }
 
@@ -190,7 +211,7 @@ describe("runner", () => {
     expect(methods[methods.length - 1]).toBe("onRowFinish");
     // onRowStart waited for graph.json: reporters get the real node list, not an empty graph.
     const rowStartGraph = reporter.calls[0]?.args[1] as { nodes: Array<{ id: string; group: string }> };
-    expect(rowStartGraph.nodes).toHaveLength(1);
+    expect(rowStartGraph.nodes).toHaveLength(2);
     expect(rowStartGraph.nodes[0]).toMatchObject({ id: "setup-1", group: "setup" });
     // No node events were delivered before onRowStart, and all journal events still arrive.
     expect(reporter.envelopes().map((envelope) => envelope.event.type)).toEqual([
@@ -320,5 +341,62 @@ describe("eval publish (post-hoc replay)", () => {
         env: {}
       })
     ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
+  });
+
+  it("resolves a custom terminal report output from the run graph", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+    };
+    const defaultPath = path.join(record.ultrafuzz_run_root, "artifacts", "final-report", "report.json");
+    const customPath = path.join(record.ultrafuzz_run_root, "artifacts", "final-report", "custom", "terminal.json");
+    fs.mkdirSync(path.dirname(customPath), { recursive: true });
+    fs.renameSync(defaultPath, customPath);
+    const graphPath = path.join(record.ultrafuzz_run_root, "graph.json");
+    const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
+      nodes: Array<{ id: string; outputs?: Array<{ path: string }> }>;
+    };
+    graph.nodes.find((node) => node.id === "final-report")!.outputs![0]!.path = "custom/terminal.json";
+    fs.writeFileSync(graphPath, JSON.stringify(graph), "utf8");
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        evalProviderConfig: { provider: "none", providers: {} },
+        env: {}
+      })
+    ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "publishable"
+    });
+  });
+
+  it("persists a typed non-publishable state before contacting a provider", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const run = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+    };
+    fs.writeFileSync(
+      path.join(run.ultrafuzz_run_root, "artifacts", "final-report", "report.json"),
+      '{"issues":[]}',
+      "utf8"
+    );
+    let contacted = false;
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        fetchImpl: (async () => {
+          contacted = true;
+          throw new Error("must not be called");
+        }) as typeof fetch
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+    expect(contacted).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@1" }]
+    });
   });
 });

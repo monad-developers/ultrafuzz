@@ -46,8 +46,8 @@ values are redacted before persistence, and restore metadata is written to
 `config.redactions.json`.
 
 `graph.json` records the planned executable graph, including logical IDs,
-concrete IDs, group, prompt path, dependencies, artifact directory, required
-artifacts, primary artifact, loop metadata, reference revisions, and model
+concrete IDs, group, prompt path, dependencies, artifact directory, contracted
+outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
@@ -80,9 +80,9 @@ Node statuses are:
 - `reused-from-prior-run`
 - `invalidated`
 
-Node state can also record logical node ID, artifact directory, required
-artifacts, attempt index, loop index, model profile ID, model name, model
-index, timestamps, last error, and provenance.
+Node state can also record logical node ID, artifact directory, contracted
+outputs, attempt index, loop index, model profile ID, model name, model index,
+timestamps, last error, and provenance.
 
 ## Attempt Ledger
 
@@ -120,14 +120,16 @@ generated-tests.json
 references/manifest.json
 ```
 
-Required artifacts are node-specific and declared in `.ultrafuzz/topology.yml`.
-Artifact paths are relative to the node artifact directory and must be safe
-project-local relative paths.
+Required outputs are node-specific and declared with versioned contracts in
+`.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
+directory and must be safe project-local relative paths.
 
 `artifact-manifest.json` records schema version, run ID, node ID, creation
-time, artifact paths, sizes, SHA-256 digests, and provenance such as logical
-node, attempt index, loop index, model profile, model name, workflow task, and
-source run when available.
+time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
+and provenance such as logical node, attempt index, loop index, model profile,
+model name, workflow task, and source run when available. It also records the
+exact prerequisite manifest digests consumed by the attempt so reuse can reject
+causally stale descendants.
 
 ## Findings
 
@@ -196,6 +198,19 @@ available cumulative values into the markdown run summary and into
 `report.json.run_metadata`. A trailing `+` on `estimated_spend` means the
 persisted estimate is partial because some token usage did not have pricing
 data.
+
+Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
+output, and reasoning as independent components. `inclusive_token_total`
+counts every reported component, while `billable_token_total` counts the
+components with a positive known rate. Per-component amounts are recorded in
+`component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
+events. `usage_complete` and `pricing_complete` are independent: their typed
+`*_incomplete_reasons` arrays distinguish missing or estimated usage from a
+missing component rate. Usage completeness is derived from reported component
+evidence regardless of whether catalog pricing is available. `partial_pricing`
+remains the backward-compatible inverse of pricing completeness. An event's
+reported total is tracked separately in `provided_cost_usd`; it does not fill
+missing component rates or make component pricing complete.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

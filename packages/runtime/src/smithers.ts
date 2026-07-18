@@ -116,6 +116,7 @@ export interface CompiledSmithersTask {
   concreteNodeId: string;
   logicalNodeId: string;
   smithersNodeId: string;
+  verifierSmithersNodeId: string;
   agentRef: string;
   modelName?: string;
   reasoningEffort?: string;
@@ -180,8 +181,7 @@ export interface SmithersTaskMetadata {
   };
   artifacts: {
     dir: string;
-    required: readonly string[];
-    primary?: string;
+    outputs: ExpandedNode["outputs"];
     manifestPath: string;
   };
   retryPolicy: {
@@ -248,6 +248,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
   const agenticAttemptsByNodeId = new Map<string, string[]>();
+  const attemptsByNodeId = new Map<string, string[]>();
+  for (const node of input.graph.nodes.filter((candidate) => candidate.kind !== "meta")) {
+    attemptsByNodeId.set(
+      node.id,
+      nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
+    );
+  }
   for (const node of input.graph.nodes.filter((candidate) => candidate.kind === "agentic")) {
     agenticAttemptsByNodeId.set(
       node.id,
@@ -269,7 +276,10 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           runLayout: input.runLayout,
           workflowName,
           renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
-          dependencyAttemptIds: node.dependsOn.flatMap((dependency) => agenticAttemptsByNodeId.get(dependency) ?? [])
+          dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
+          dependencyAgenticAttemptIds: node.dependsOn.flatMap(
+            (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
+          )
         })
       )
   );
@@ -1054,6 +1064,7 @@ function compileTask(input: {
   workflowName: string;
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
+  dependencyAgenticAttemptIds: readonly string[];
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -1066,7 +1077,7 @@ function compileTask(input: {
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
-  const dependencySmithersNodeIds = input.dependencyAttemptIds.map(smithersNodeIdForAttempt);
+  const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const metadata: SmithersTaskMetadata = {
     schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
     run: {
@@ -1112,8 +1123,7 @@ function compileTask(input: {
     },
     artifacts: {
       dir: artifactDir,
-      required: input.node.requiredArtifacts,
-      ...(input.node.primaryArtifact ? { primary: input.node.primaryArtifact } : {}),
+      outputs: input.node.outputs,
       manifestPath: path.join(artifactDir, "artifact-manifest.json")
     },
     retryPolicy: {
@@ -1131,6 +1141,7 @@ function compileTask(input: {
     concreteNodeId: input.node.id,
     logicalNodeId: input.node.logicalId,
     smithersNodeId: smithersNodeIdForAttempt(input.attempt.attemptId),
+    verifierSmithersNodeId: verifierSmithersNodeIdForAttempt(input.attempt.attemptId),
     agentRef: profile.agent,
     ...(profile.model ? { modelName: profile.model } : {}),
     ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
@@ -1185,6 +1196,10 @@ function stableBaseAttemptId(concreteNodeId: string): string {
 
 function smithersNodeIdForAttempt(attemptId: string): string {
   return `node:${attemptId}`;
+}
+
+function verifierSmithersNodeIdForAttempt(attemptId: string): string {
+  return `verify:${attemptId}`;
 }
 
 function inferProjectRootFromRunLayout(runLayout: RunLayout): string {
@@ -1254,6 +1269,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
+      verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
       agentRef: task.agentRef,
@@ -1266,7 +1282,8 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,
-      metadata: task.metadata
+      metadata: task.metadata,
+      outputs: task.metadata.artifacts.outputs
     })),
     null,
     2
@@ -1274,6 +1291,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
-    __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName)
+    __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
+    __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts"))
   });
 }

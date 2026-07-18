@@ -7,7 +7,7 @@ the resulting evidence durable enough to audit.
 ## Topology Owns Execution Shape
 
 `.ultrafuzz/topology.yml` owns logical node identity, dependencies, grouping,
-loop settings, required artifacts, primary artifacts, reference bindings, prompt
+loop settings, versioned output contracts, reference bindings, prompt
 bindings, timeout overrides, and explicit model-profile fan-out. It is the graph
 construction source of truth.
 
@@ -38,7 +38,8 @@ validation because wrong prompt context can produce misleading artifacts.
 
 Rendered prompts are stored as run artifacts before the linked workflow starts.
 Artifact handoff helpers can reference only ancestor nodes, and producers must
-declare a `primary_artifact` before another prompt can request that handoff.
+mark exactly one contracted output as primary before another prompt can request
+that handoff.
 
 ## References Own External Context
 
@@ -55,19 +56,22 @@ required reference artifacts fail before dependent agentic nodes run.
 ## Artifacts Own Handoffs
 
 Agents write durable handoffs under their node artifact directory. Topology
-`required_artifacts` declares which files must exist for downstream nodes and
-reviewers.
+`outputs` declares which files must exist, how each is validated, which empty
+form is valid, and which file is the primary downstream handoff.
 
 This makes handoffs explicit:
 
 - The prompt tells the agent what to write.
-- The topology declares that the file is required.
-- Ultrafuzz validates and persists the artifact.
+- The topology declares a named, versioned contract for the file.
+- A deterministic workflow task validates the artifact before dependents start.
+- Ultrafuzz persists contract identities, content hashes, and prerequisite
+  manifest digests.
 - Downstream prompts reference it through typed template helpers.
 
 Findings are normalized as arrays in `findings.json`. Final reports live in
 agent-written final-report artifacts such as
 `artifacts/final-report/report.md` and `artifacts/final-report/report.json`.
+The structured terminal report is validated before scoring or publication.
 
 ## Runtime Owns Product Evidence
 

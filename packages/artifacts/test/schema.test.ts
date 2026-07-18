@@ -10,6 +10,8 @@ import {
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
+  ARTIFACT_CONTRACT_IDS,
+  artifactContractDefinition,
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
@@ -19,10 +21,46 @@ import {
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateNodeAttemptLedgerEntry,
+  validateArtifactContract,
   validateRunStateSchema
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+
+test("artifact contract registry validates structured, empty, and malformed outputs", () => {
+  const definition = artifactContractDefinition("ultrafuzz/report@1");
+  assert.match(definition.digest, /^[0-9a-f]{64}$/u);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", "[]").ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/json-object@1", "[]").ok, false);
+  assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "ultrafuzz.e2e.report.v1",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        finding_count: 0,
+        findings: []
+      })
+    ).ok,
+    true
+  );
+  for (const id of ARTIFACT_CONTRACT_IDS) {
+    const contract = artifactContractDefinition(id);
+    if (contract.validEmptyExample !== undefined) {
+      assert.equal(validateArtifactContract(id, contract.validEmptyExample).ok, true, id);
+    }
+  }
+});
 
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
   const finding = {
@@ -63,7 +101,14 @@ test("run state schema covers all required node states and rejects malformed sta
         id: "node-1",
         status: "ready",
         artifactDir: "artifacts/node-1",
-        requiredArtifacts: ["findings.json"],
+        outputs: [
+          {
+            path: "findings.json",
+            contract: "ultrafuzz/findings@1",
+            contract_digest: "a".repeat(64),
+            primary: true
+          }
+        ],
         attemptIndex: 0,
         loopIndex: 0,
         modelId: "unit-model",

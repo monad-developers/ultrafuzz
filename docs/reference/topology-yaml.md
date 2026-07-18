@@ -11,7 +11,7 @@ It is the source of truth for campaign graph construction.
 ## File Shape
 
 ```yaml
-version: 1
+version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -36,19 +36,22 @@ nodes:
     group: strategies
     depends_on:
       - setup-foundry
-    required_artifacts:
-      - findings.json
-    primary_artifact: findings.json
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
   - id: final-report
     kind: agentic
     prompt: review/final-report.md
     group: review
     depends_on:
       - boundary-tests
-    required_artifacts:
-      - report.md
-      - report.json
-    primary_artifact: report.md
+    outputs:
+      - path: report.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: report.json
+        contract: ultrafuzz/report@1
   - id: __finish__
     kind: meta
     role: finish
@@ -60,7 +63,7 @@ nodes:
 
 | Field                     | Meaning                                               |
 | ------------------------- | ----------------------------------------------------- |
-| `version`                 | Topology version. Current value is `1`.               |
+| `version`                 | Topology version. Current value is `2`.               |
 | `defaults.strategy_loops` | Global fallback loop count for normal strategy nodes. |
 | `groups`                  | Optional group labels, colors, and defaults.          |
 | `nodes`                   | Ordered list of logical topology nodes.               |
@@ -93,21 +96,29 @@ Every node must define:
 
 Agentic nodes support:
 
-| Field                | Meaning                                                     |
-| -------------------- | ----------------------------------------------------------- |
-| `kind`               | Optional. Defaults to `agentic`.                            |
-| `prompt`             | Prompt path under `.ultrafuzz/prompts/`.                    |
-| `group`              | Group ID.                                                   |
-| `loops`              | Node loop count. Overrides group and global loop defaults.  |
-| `loop_mode`          | `parallel` or `series`. Defaults to `parallel`.             |
-| `timeout_seconds`    | Node timeout override.                                      |
-| `required_artifacts` | Files the node must write under its artifact directory.     |
-| `primary_artifact`   | One required artifact used by `artifact_handoff:<node-id>`. |
-| `model_profiles`     | Explicit model profile fan-out for this node.               |
+| Field             | Meaning                                                     |
+| ----------------- | ----------------------------------------------------------- |
+| `kind`            | Optional. Defaults to `agentic`.                            |
+| `prompt`          | Prompt path under `.ultrafuzz/prompts/`.                    |
+| `group`           | Group ID.                                                   |
+| `loops`           | Node loop count. Overrides group and global loop defaults.  |
+| `loop_mode`       | `parallel` or `series`. Defaults to `parallel`.             |
+| `timeout_seconds` | Node timeout override.                                      |
+| `outputs`         | Required output paths, named contracts, and primary marker. |
+| `model_profiles`  | Explicit model profile fan-out for this node.               |
 
-Prompt paths and artifact paths must be relative, traversal-free paths. Required
-artifact paths are relative to the node artifact directory and must not start
-with `artifacts/` or `.ultrafuzz/`.
+Every executable node must declare at least one output, every output must name a
+resolvable contract, and exactly one output must set `primary: true`. Prompt
+paths and artifact paths must be relative, traversal-free paths. Output paths
+are relative to the node artifact directory and must not start
+with `artifacts/` or `.ultrafuzz/`. The runtime-owned
+`artifact-manifest.json` path is reserved and cannot be declared as an output.
+
+Built-in contracts include `ultrafuzz/findings@1`,
+`ultrafuzz/generated-tests@1`, `ultrafuzz/nonempty-markdown@1`,
+`ultrafuzz/json-object@1`, `ultrafuzz/json-array@1`, `ultrafuzz/report@1`, and
+`ultrafuzz/text@1`. Contract definitions supply both runtime validation and the
+shape and valid-empty guidance appended to prompts.
 
 ## Meta Nodes
 
@@ -140,10 +151,12 @@ Reference nodes materialize pinned cached reference content into run artifacts.
   group: references
   depends_on:
     - __start__
-  required_artifacts:
-    - references/rounding.md
-    - references/manifest.json
-  primary_artifact: references/rounding.md
+  outputs:
+    - path: references/rounding.md
+      contract: ultrafuzz/nonempty-markdown@1
+      primary: true
+    - path: references/manifest.json
+      contract: ultrafuzz/json-object@1
 ```
 
 Reference nodes must:
@@ -151,9 +164,9 @@ Reference nodes must:
 - Use `kind: reference`.
 - Set `reference` to an ID in `.ultrafuzz/references.yml`.
 - Use one parallel loop.
-- Define `required_artifacts`.
-- Include `references/manifest.json` in `required_artifacts`.
-- Define `primary_artifact`, and not use `references/manifest.json` as the primary artifact.
+- Define contracted `outputs`.
+- Include `references/manifest.json` in `outputs`.
+- Mark exactly one non-manifest output as primary.
 - Avoid `prompt`, `role`, and `model_profiles`.
 
 Downstream prompts can consume the normalized Markdown primary artifact with:
@@ -196,8 +209,10 @@ nodes:
     prompt: strategies/rounding-direction-audit.md
     depends_on:
       - base-test-setup
-    required_artifacts:
-      - findings.json
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
 ```
 
 The node above fans out across both model profiles because the group default is
@@ -223,8 +238,9 @@ Topology validation rejects:
 - Expanded graph size over implementation limits.
 - Prompt paths that escape `.ultrafuzz/prompts/`.
 - Missing prompt files during run validation.
-- Unsafe required or primary artifact paths.
-- `primary_artifact` values not listed in `required_artifacts`.
+- Unsafe, duplicate, missing, or uncontracted output paths.
+- Nodes without exactly one primary output.
+- Unknown fields at every topology level.
 - Invalid or unknown model profile IDs.
 - Prompt artifact references to unknown producers, non-ancestors, or producers
   without declared artifacts.
