@@ -7,14 +7,14 @@
   "additionalProperties": false,
   "properties": {
     "graphVersion": {
-      "const": "1"
+      "const": "2"
     },
     "runId": {
       "type": "string",
       "minLength": 1
     },
     "topologyVersion": {
-      "const": 1
+      "const": 2
     },
     "groups": {
       "type": "object"
@@ -35,7 +35,7 @@
           "artifactDir",
           "retryPolicy",
           "loop",
-          "requiredArtifacts",
+          "outputs",
           "modelFanout"
         ],
         "additionalProperties": false,
@@ -143,16 +143,37 @@
               }
             }
           },
-          "requiredArtifacts": {
+          "outputs": {
             "type": "array",
             "items": {
-              "type": "string",
-              "minLength": 1
+              "type": "object",
+              "required": ["path", "contract", "primary", "contractDigest"],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contract": {
+                  "enum": [
+                    "ultrafuzz/findings@1",
+                    "ultrafuzz/generated-tests@1",
+                    "ultrafuzz/json-array@1",
+                    "ultrafuzz/json-object@1",
+                    "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/report@1",
+                    "ultrafuzz/text@1"
+                  ]
+                },
+                "primary": {
+                  "type": "boolean"
+                },
+                "contractDigest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
             }
-          },
-          "primaryArtifact": {
-            "type": "string",
-            "minLength": 1
           },
           "modelFanout": {
             "type": "array",

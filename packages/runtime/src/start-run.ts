@@ -67,12 +67,13 @@ export async function startRun(input: StartRunInput) {
   });
 
   updateRunStatus(plan.layout, "running");
-  appendEvent(plan.layout, {
+  const controllerInvocation = appendEvent(plan.layout, {
     eventType: "workflow-submitting",
     status: "running",
     payload: {
       workflow_run_id: compiled.smithersRunId,
-      workflow_name: compiled.workflowName
+      workflow_name: compiled.workflowName,
+      action: "start"
     }
   });
 
@@ -97,7 +98,9 @@ export async function startRun(input: StartRunInput) {
       eventType: "workflow-submitted",
       status: "running",
       payload: {
-        workflow_run_id: submission.smithersRunId
+        workflow_run_id: submission.smithersRunId,
+        controller_invocation_id: controllerInvocation.event_id,
+        controller_invoked_at: controllerInvocation.timestamp
       }
     });
   } catch (error) {
@@ -192,6 +195,14 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   const requestedConcurrency = input.maxConcurrency ?? resolved.config.run.maxParallelAgents;
   try {
+    const controllerInvocation = appendEvent(evidence.layout, {
+      eventType: "workflow-lifecycle-invoking",
+      status: "running",
+      payload: {
+        action,
+        workflow_run_id: evidence.smithersRunId
+      }
+    });
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -247,6 +258,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       payload: {
         action,
         workflow_run_id: workflowRunId,
+        controller_invocation_id: controllerInvocation.event_id,
+        controller_invoked_at: controllerInvocation.timestamp,
         ...(input.resetNode !== undefined ? { reset_node: input.resetNode } : {}),
         ...(lifecycleResult.recoveredMissingRun ? { recovered_missing_workflow_run: true } : {})
       }

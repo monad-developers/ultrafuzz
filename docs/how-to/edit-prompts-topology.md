@@ -36,14 +36,14 @@ Place the prompt under `.ultrafuzz/prompts/**`:
 ```
 
 Folders are for organization. Execution comes from topology node IDs,
-dependencies, loop settings, groups, model profiles, and required artifacts.
+dependencies, loop settings, groups, model profiles, and output contracts.
 
 ## Wire A Topology Node
 
 Edit `.ultrafuzz/topology.yml`:
 
 ```yaml
-version: 1
+version: 2
 defaults:
   strategy_loops: 1
 groups:
@@ -65,10 +65,12 @@ nodes:
     group: strategies
     depends_on:
       - property-specification-fanin
-    required_artifacts:
-      - findings.json
-      - generated-tests.json
-    primary_artifact: findings.json
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
   - id: __finish__
     kind: meta
     role: finish
@@ -81,13 +83,14 @@ define arbitrary shell runners.
 
 ## Declare Durable Handoffs
 
-Use `required_artifacts` for files a node must write under its artifact
-directory. Set `primary_artifact` when downstream prompts need a concise handoff.
+Use `outputs` for files a node must write under its artifact directory. Every
+output names a contract, and exactly one output is the primary handoff.
 
 ```yaml
-required_artifacts:
-  - properties.md
-primary_artifact: properties.md
+outputs:
+  - path: properties.md
+    contract: ultrafuzz/nonempty-markdown@1
+    primary: true
 ```
 
 Downstream prompts can reference ancestor artifacts:

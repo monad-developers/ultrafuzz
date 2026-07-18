@@ -22,6 +22,8 @@ graph.json
 graph.fingerprint
 state.json
 events.jsonl
+usage.jsonl
+attempts.jsonl
 plan.json
 artifacts/
 review/
@@ -34,6 +36,12 @@ workspaces.json
 indexes are JSONL files derived from `events.jsonl`; SQLite events are not part
 of the artifact contract.
 
+`usage.jsonl` is an append-only ledger of normalized workflow usage events.
+Each entry has stable event, attempt, and checkpoint-generation identifiers.
+Replaying the same continuation is idempotent, while events from later
+checkpoint generations remain distinct. The ledger stores normalized counters
+and typed usage-completeness reasons, not raw execution records.
+
 ## Run Metadata
 
 `run.json` records the run schema version, run ID, creation timestamp, mode,
@@ -45,8 +53,8 @@ values are redacted before persistence, and restore metadata is written to
 `config.redactions.json`.
 
 `graph.json` records the planned executable graph, including logical IDs,
-concrete IDs, group, prompt path, dependencies, artifact directory, required
-artifacts, primary artifact, loop metadata, reference revisions, and model
+concrete IDs, group, prompt path, dependencies, artifact directory, contracted
+outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
@@ -91,9 +99,25 @@ work, and cumulative queued, active, and idle durations. These fields contain
 lifecycle metadata only; raw runner logs and host identifiers are not copied
 into product artifacts.
 
-Node state can also record logical node ID, artifact directory, required
-artifacts, attempt index, loop index, model profile ID, model name, model index,
+Node state can also record logical node ID, artifact directory, contracted
+outputs, attempt index, loop index, model profile ID, model name, model index,
 timestamps, last error, and provenance.
+
+## Attempt Ledger
+
+`attempts.jsonl` is the append-only source of truth for completed node attempts.
+Each immutable entry gives the executor retry a stable ID and links it to its
+strategy attempt, checkpoint generation, workflow execution, controller
+invocation, and previous retry. Entries record lifecycle timestamps, a typed
+outcome, executed-versus-reused status, and SHA-256 digests for input and output
+manifests.
+
+Attempt summaries and retry counts are derived from this ledger. Replaying a
+known transition does not append it again, so resume, replay, checkpoint
+continuation, and controller takeover preserve prior lifecycle history. Reused
+work points to its source attempt and is reported separately from executed work.
+The ledger stores typed failure categories but never raw diagnostics, inputs,
+outputs, or configuration.
 
 ## Node Artifacts
 
@@ -115,14 +139,16 @@ generated-tests.json
 references/manifest.json
 ```
 
-Required artifacts are node-specific and declared in `.ultrafuzz/topology.yml`.
-Artifact paths are relative to the node artifact directory and must be safe
-project-local relative paths.
+Required outputs are node-specific and declared with versioned contracts in
+`.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
+directory and must be safe project-local relative paths.
 
 `artifact-manifest.json` records schema version, run ID, node ID, creation
-time, artifact paths, sizes, SHA-256 digests, and provenance such as logical
-node, attempt index, loop index, model profile, model name, workflow task, and
-source run when available.
+time, artifact paths, sizes, SHA-256 digests, output contract IDs and digests,
+and provenance such as logical node, attempt index, loop index, model profile,
+model name, workflow task, and source run when available. It also records the
+exact prerequisite manifest digests consumed by the attempt so reuse can reject
+causally stale descendants.
 
 ## Findings
 
@@ -191,6 +217,27 @@ available cumulative values into the markdown run summary and into
 `report.json.run_metadata`. A trailing `+` on `estimated_spend` means the
 persisted estimate is partial because some token usage did not have pricing
 data.
+
+`accounting.segments` publishes one rollup per checkpoint generation, and
+`accounting.current` identifies the latest segment. `accounting.cumulative`
+is derived from every unique ledger entry, including prior generations and any
+source-run lineage. `accounting.checkpoint` records the ledger position used by
+the durable metadata snapshot. Usage and pricing completeness are reported
+independently through `usage_complete`/`usage_incomplete_reasons` and
+`pricing_complete`/`pricing_incomplete_reasons`.
+
+Accounting schema `2.0` keeps uncached input, cache reads, cache writes,
+output, and reasoning as independent components. `inclusive_token_total`
+counts every reported component, while `billable_token_total` counts the
+components with a positive known rate. Per-component amounts are recorded in
+`component_costs_usd` and sum to `estimated_spend_usd` for catalog-priced
+events. `usage_complete` and `pricing_complete` are independent: their typed
+`*_incomplete_reasons` arrays distinguish missing or estimated usage from a
+missing component rate. Usage completeness is derived from reported component
+evidence regardless of whether catalog pricing is available. `partial_pricing`
+remains the backward-compatible inverse of pricing completeness. An event's
+reported total is tracked separately in `provided_cost_usd`; it does not fill
+missing component rates or make component pricing complete.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

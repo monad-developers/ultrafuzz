@@ -300,7 +300,7 @@ function node(id: string, dependsOn: string[] = []): PlannedGraphNode {
     kind: "agentic",
     depends_on: dependsOn,
     artifact_dir: `artifacts/${id}`,
-    required_artifacts: [],
+    outputs: [],
     prompt_id: id,
     prompt_path: `${id}.md`,
     loop: { index: 0, count: 1, mode: "single", attempt_index: 0 },

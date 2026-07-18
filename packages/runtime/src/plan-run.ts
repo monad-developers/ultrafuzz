@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   appendEvent,
   createInitialRunState,
+  artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
   updateNodeState,
@@ -115,7 +116,7 @@ export async function planRun(input: PlanRunInput) {
     id: node.id,
     logicalNodeId: node.logical_id,
     artifactDir: node.artifact_dir,
-    requiredArtifacts: node.required_artifacts,
+    outputs: node.outputs,
     attemptIndex: node.loop.attempt_index,
     loopIndex: node.loop.index,
     modelId: node.model_fanout[0]?.model_profile_id,
@@ -234,13 +235,13 @@ function materializeReferenceNodesForPlan(input: {
       catalog,
       id: node.reference,
       artifactDir,
-      requiredArtifacts: node.required_artifacts,
-      primaryArtifact: node.primary_artifact
+      outputs: node.outputs
     });
     const finishedAt = new Date().toISOString();
     writeArtifactManifest({
       layout: input.layout,
       nodeId: node.id,
+      outputs: node.outputs,
       provenance: {
         logical_node_id: node.logical_id,
         origin: "pinned-reference",
@@ -307,7 +308,12 @@ function toPlannedGraphNode(
     kind: node.kind,
     depends_on: node.dependsOn.filter((dependency) => nodeById.get(dependency)?.kind !== "meta"),
     artifact_dir: node.artifactDir,
-    required_artifacts: [...node.requiredArtifacts],
+    outputs: node.outputs.map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contractDigest,
+      primary: output.primary
+    })),
     prompt_id: promptEntry?.id ?? node.logicalId,
     prompt_path: node.promptPath ? path.posix.join(".ultrafuzz/prompts", node.promptPath) : "",
     ...(node.reference ? { reference: node.reference } : {}),
@@ -321,7 +327,6 @@ function toPlannedGraphNode(
           }
         }
       : {}),
-    ...(node.primaryArtifact ? { primary_artifact: node.primaryArtifact } : {}),
     ...(node.role ? { role: node.role } : {}),
     loop: {
       index: node.loop.index,
@@ -446,8 +451,16 @@ function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"])
     nodes.set(node.logical_id, {
       id: node.logical_id,
       dependsOn: dependencies,
-      requiredArtifacts: node.required_artifacts,
-      primaryArtifact: node.primary_artifact,
+      outputs: node.outputs.map((output) => {
+        const definition = artifactContractDefinition(output.contract);
+        return {
+          path: output.path,
+          contract: output.contract,
+          primary: output.primary,
+          description: definition.description,
+          ...(definition.validEmptyExample === undefined ? {} : { validEmptyExample: definition.validEmptyExample })
+        };
+      }),
       artifactDirs,
       artifactDir: artifactDirs[0]
     });

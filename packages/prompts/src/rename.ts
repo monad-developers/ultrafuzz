@@ -13,10 +13,7 @@ export interface PromptTopologyNode {
   prompt?: string;
   dependsOn?: string[];
   depends_on?: string[];
-  requiredArtifacts?: string[];
-  required_artifacts?: string[];
-  primaryArtifact?: string;
-  primary_artifact?: string;
+  outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
   [key: string]: unknown;
 }
 
@@ -159,21 +156,11 @@ function renameTopology(
       if (node.depends_on) {
         renamed.depends_on = node.depends_on.map((dependency) => (dependency === oldId ? newId : dependency));
       }
-      if (node.requiredArtifacts) {
-        renamed.requiredArtifacts = node.requiredArtifacts.map((artifact) =>
-          rewriteArtifactPathForPromptId(artifact, oldId, newId)
-        );
-      }
-      if (node.required_artifacts) {
-        renamed.required_artifacts = node.required_artifacts.map((artifact) =>
-          rewriteArtifactPathForPromptId(artifact, oldId, newId)
-        );
-      }
-      if (node.primaryArtifact) {
-        renamed.primaryArtifact = rewriteArtifactPathForPromptId(node.primaryArtifact, oldId, newId);
-      }
-      if (node.primary_artifact) {
-        renamed.primary_artifact = rewriteArtifactPathForPromptId(node.primary_artifact, oldId, newId);
+      if (node.outputs) {
+        renamed.outputs = node.outputs.map((output) => ({
+          ...output,
+          path: rewriteArtifactPathForPromptId(output.path, oldId, newId)
+        }));
       }
       return renamed;
     })

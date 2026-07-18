@@ -4,15 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createRunLayout, getNodeArtifactDir } from "@ultrafuzz/artifacts";
+import {
+  createInitialRunState,
+  createRunLayout,
+  getNodeArtifactDir,
+  writeArtifact,
+  writeArtifactManifest
+} from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt, type PlannedGraphNode } from "../src/index.js";
+import { dependencyGateForNode, verifyRequiredArtifactsForAttempt, type PlannedGraphNode } from "../src/index.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
 }
 
-function plannedNode(requiredArtifacts: string[]): PlannedGraphNode {
+function plannedNode(paths: string[]): PlannedGraphNode {
   return {
     id: "strategy-a",
     logical_id: "strategy-a",
@@ -20,7 +26,17 @@ function plannedNode(requiredArtifacts: string[]): PlannedGraphNode {
     kind: "agentic",
     depends_on: [],
     artifact_dir: "artifacts/strategy-a",
-    required_artifacts: requiredArtifacts,
+    outputs: paths.map((outputPath, index) => ({
+      path: outputPath,
+      contract:
+        outputPath === "generated-tests.json"
+          ? "ultrafuzz/generated-tests@1"
+          : outputPath === "findings.json"
+            ? "ultrafuzz/findings@1"
+            : "ultrafuzz/nonempty-markdown@1",
+      contract_digest: "a".repeat(64),
+      primary: index === 0
+    })),
     prompt_id: "strategy-a",
     prompt_path: "strategies/strategy-a.md",
     loop: {
@@ -75,4 +91,55 @@ test("required artifact gate validates generated-test manifest shape and listed 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
   assert.deepEqual(valid.diagnostics, []);
   assert.equal(valid.ok, true);
+});
+
+test("artifact contracts reject malformed outputs and accept canonical empty outputs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-contracts" });
+  const artifactDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const node = plannedNode(["findings.json", "notes.md"]);
+
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "{}", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "notes.md"), "", "utf8");
+  const malformed = verifyRequiredArtifactsForAttempt(layout, node, "strategy-a");
+  assert.equal(malformed.ok, false);
+  assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_SCHEMA_INVALID"));
+  assert.ok(malformed.diagnostics.some((diagnostic) => diagnostic.code === "ARTIFACT_MARKDOWN_EMPTY"));
+
+  fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "notes.md"), "# No findings\n", "utf8");
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, "strategy-a").ok, true);
+});
+
+test("dependency gates reject reused descendants after an ancestor manifest changes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-reuse" });
+  writeArtifact(layout, "ancestor", "result.md", "first\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:00.000Z" });
+  writeArtifact(layout, "reused", "result.md", "derived\n");
+  writeArtifactManifest({
+    layout,
+    nodeId: "reused",
+    prerequisiteNodeIds: ["ancestor"],
+    createdAt: "2026-07-18T00:00:01.000Z"
+  });
+  const state = createInitialRunState({
+    runId: "run-reuse",
+    graphFingerprint: "graph",
+    configFingerprint: "config",
+    nodes: [
+      { id: "ancestor", status: "succeeded" },
+      { id: "reused", status: "reused-from-prior-run" },
+      { id: "consumer", status: "pending" }
+    ]
+  });
+  const consumer = { ...plannedNode(["result.md"]), id: "consumer", depends_on: ["reused"] };
+
+  assert.equal(dependencyGateForNode(consumer, state, layout).ok, true);
+  writeArtifact(layout, "ancestor", "result.md", "changed\n");
+  writeArtifactManifest({ layout, nodeId: "ancestor", createdAt: "2026-07-18T00:00:02.000Z" });
+  assert.deepEqual(dependencyGateForNode(consumer, state, layout), {
+    ok: false,
+    reason_code: "CAUSAL_MANIFEST_MISMATCH",
+    reason: "node consumer cannot reuse descendants after a prerequisite manifest changed",
+    blocked_by: ["reused"]
+  });
 });

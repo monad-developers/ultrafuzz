@@ -28,12 +28,23 @@ describe("artifact handoff validation", () => {
     ).toThrow(expect.objectContaining({ code: "NON_ANCESTOR_PROMPT_ARTIFACT_REFERENCE" }));
 
     const topology = validTopology();
-    topology.nodes[2] = { ...topology.nodes[2]!, primary_artifact: undefined };
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: topology.nodes[2]!.outputs?.map((output) => ({ ...output, primary: false }))
+    };
     expect(() =>
       validateTopology(topology, {
         promptTexts: { "review/review.md": "Read {{artifact_handoff:strategy}}." }
       })
-    ).toThrow(expect.objectContaining({ code: "MISSING_PROMPT_ARTIFACT_HANDOFF" }));
+    ).toThrow(expect.objectContaining({ code: "INVALID_PRIMARY_OUTPUT" }));
+  });
+
+  it("rejects exact paths that are not declared by the producer", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: { "review/review.md": "Read {{artifact_path:strategy}}/undeclared.json." }
+      })
+    ).toThrow(expect.objectContaining({ code: "UNDECLARED_PROMPT_ARTIFACT_REFERENCE" }));
   });
 
   it("rejects unknown prompt variables", () => {
