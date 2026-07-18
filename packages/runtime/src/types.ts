@@ -2,6 +2,7 @@ import type {
   ArtifactContractId,
   EventQuery,
   EventRecord,
+  NodeAttemptLedgerSummary,
   NodeStateInput,
   RunLayout,
   RunState
@@ -227,6 +228,7 @@ export interface WorkflowCommandSummary {
 export interface RunStatusValue extends RunListEntry {
   state?: RunState;
   events: number;
+  attempts: NodeAttemptLedgerSummary;
   graph?: unknown;
   metadata?: Record<string, unknown>;
   workflow?: {

@@ -2,20 +2,31 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  appendNodeAttempts,
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
   layoutForRunRoot,
   normalizeFindings,
+  manifestDigest,
+  queryNodeAttempts,
+  replayEvents,
   readRunState,
   safeResolveInside,
+  sha256File,
   updateNodeState,
   updateRunStatus,
   validateSafeId,
   writeArtifactManifest,
   writeJsonDurable,
+  type AppendNodeAttemptInput,
   type ArtifactProvenance,
+  type NodeAttemptFailureCategory,
+  type NodeAttemptId,
+  type NodeAttemptLedgerEntry,
+  type NodeAttemptOutcome,
   type NodeState,
   type NodeStatus,
   type RunLayout,
@@ -86,8 +97,29 @@ interface WorkflowInspect {
 
 interface WorkflowEvent {
   type: string;
+  sequence?: number;
   timestampMs?: number;
   payload?: Record<string, unknown>;
+}
+
+interface TerminalWorkflowAttempt {
+  retry: number;
+  iteration: number;
+  startedSequence?: number;
+  finishedSequence?: number;
+  startedAt: string;
+  finishedAt: string;
+  outcome: NodeAttemptOutcome;
+  failureCategory?: NodeAttemptFailureCategory;
+  executorRetryId?: string;
+  checkpointGenerationId?: string;
+  workflowExecutionId?: string;
+  controllerInvocationId?: string;
+}
+
+interface ControllerInvocation {
+  id: string;
+  invokedAt: string;
 }
 
 interface AccountingSummary {
@@ -265,7 +297,7 @@ export async function synchronizeLinkedWorkflowRun(
     };
   }
   const eventsSnapshot = await runSmithersInspectionCommand({
-    args: ["events", evidence.smithersRunId, "--type", "node", "--limit", "100000", "--json"],
+    args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
     env: input.env
   });
@@ -1077,6 +1109,10 @@ function synchronizeTasks(input: {
   const nodeStatuses = new Map<string, NodeStatus>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
+  const controllerInvocations = [
+    ...controllerInvocationsForWorkflow(input.layout, input.workflowRunId),
+    ...controllerInvocationsFromWorkflowEvents(input.events, input.workflowRunId)
+  ].sort((left, right) => left.invokedAt.localeCompare(right.invokedAt));
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
@@ -1142,9 +1178,26 @@ function synchronizeTasks(input: {
     const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
+    let retryCount = previous?.retry_count ?? 0;
+    try {
+      const ledger = appendTerminalTaskAttempts({
+        layout: input.layout,
+        task,
+        workflowRunId: input.workflowRunId,
+        events: eventsByNode.get(task.smithersNodeId) ?? [],
+        controllerInvocations,
+        currentAttempt: evidence.attempt,
+        currentStatus: patchStatus,
+        finalization
+      });
+      retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
+      changed ||= ledger.appended;
+    } catch (error) {
+      diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+    }
     const patch = {
       status: patchStatus,
-      retry_count: Math.max(0, (evidence.attempt ?? previous?.retry_count ?? 1) - 1),
+      retry_count: retryCount,
       timed_out: patchStatus === "timed-out",
       ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
@@ -1397,6 +1450,450 @@ function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNode
   }
 }
 
+function appendTerminalTaskAttempts(input: {
+  layout: RunLayout;
+  task: StoredWorkflowTask;
+  workflowRunId: string;
+  events: WorkflowEvent[];
+  controllerInvocations: ControllerInvocation[];
+  currentAttempt?: number;
+  currentStatus: NodeStatus;
+  finalization: NodeFinalization;
+}): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
+  const terminalAttempts = terminalWorkflowAttempts(input.events);
+  const state = readRunState(input.layout);
+  const inputManifestDigest = manifestDigest(
+    JSON.stringify({
+      graph_fingerprint: state.graph_fingerprint,
+      config_fingerprint: state.config_fingerprint,
+      strategy_attempt_id: input.task.attemptId,
+      workflow_task_id: input.task.smithersNodeId,
+      metadata: input.task.metadata ?? null
+    })
+  );
+  const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
+  const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
+  const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
+  let sourceEntries: NodeAttemptLedgerEntry[] | undefined;
+  const currentTerminalAttempt =
+    input.currentAttempt === undefined
+      ? undefined
+      : terminalAttempts.filter((attempt) => attempt.retry === input.currentAttempt).at(-1);
+  const prepared: Array<{
+    isCurrent: boolean;
+    attemptId: NodeAttemptId;
+    appendInput?: AppendNodeAttemptInput;
+    recordedEntry?: NodeAttemptLedgerEntry;
+  }> = [];
+  const preparedById = new Map<string, (typeof prepared)[number]>();
+  for (const attempt of terminalAttempts) {
+    const controllerInvocationId = dimensionId(
+      "controller",
+      attempt.controllerInvocationId ??
+        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt) ??
+        input.workflowRunId
+    );
+    const workflowExecutionId = dimensionId(
+      "execution",
+      attempt.workflowExecutionId ?? stableLedgerDimension("execution", [input.workflowRunId, controllerInvocationId])
+    );
+    const checkpointGenerationId = dimensionId(
+      "checkpoint",
+      attempt.checkpointGenerationId ??
+        stableLedgerDimension("checkpoint", [workflowExecutionId, String(attempt.iteration)])
+    );
+    const executorRetryId = dimensionId(
+      "retry",
+      attempt.executorRetryId ??
+        stableLedgerDimension("retry", [
+          input.workflowRunId,
+          input.task.attemptId,
+          String(attempt.finishedSequence ?? attempt.finishedAt),
+          String(attempt.retry)
+        ])
+    );
+    const recordedEntry = existing.find((entry) => entry.executor_retry_id === executorRetryId);
+    if (recordedEntry !== undefined) {
+      prepared.push({
+        isCurrent: attempt === currentTerminalAttempt,
+        attemptId: recordedEntry.attempt_id,
+        recordedEntry
+      });
+      continue;
+    }
+    let outcome = attempt.outcome;
+    let failureCategory = attempt.failureCategory;
+    let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
+    if (
+      attempt === currentTerminalAttempt &&
+      outcome === "succeeded" &&
+      input.currentStatus !== "succeeded" &&
+      terminalStatus(input.currentStatus)
+    ) {
+      outcome = nodeAttemptOutcome(input.currentStatus);
+      failureCategory = finalizationFailureCategory(input.finalization, outcome);
+      outputDigest = outcome === "reused" ? outputManifestDigest : undefined;
+    } else if (outcome === "succeeded" && outputDigest === undefined) {
+      outcome = "failed";
+      failureCategory = "artifact-validation";
+    }
+    const reuseSource =
+      outcome === "reused"
+        ? reusedSourceAttempt({
+            existing,
+            sourceEntries: (sourceEntries ??= sourceNodeAttempts(
+              input.layout,
+              state.source_run_id,
+              input.task.attemptId
+            )),
+            outputManifestDigest: outputDigest
+          })
+        : undefined;
+    if (reuseSource !== undefined && outputDigest === undefined) {
+      outputDigest = reuseSource.outputManifestDigest;
+    }
+    const reuse =
+      reuseSource === undefined ? undefined : { status: "reused" as const, sourceAttemptId: reuseSource.attemptId };
+    const appendInput: AppendNodeAttemptInput = {
+      nodeId: input.task.concreteNodeId,
+      strategyAttemptId: input.task.attemptId,
+      executorRetryId,
+      checkpointGenerationId,
+      workflowExecutionId,
+      controllerInvocationId,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      outcome,
+      inputManifestDigest,
+      ...(outputDigest === undefined ? {} : { outputManifestDigest: outputDigest }),
+      ...(reuse === undefined ? {} : { reuse }),
+      ...(failureCategory === undefined ? {} : { failureCategory })
+    };
+    const preparedAttempt = {
+      isCurrent: attempt === currentTerminalAttempt,
+      appendInput,
+      attemptId: createNodeAttemptLedgerEntry(input.layout, appendInput).attempt_id
+    };
+    const duplicate = preparedById.get(preparedAttempt.attemptId);
+    if (duplicate !== undefined) {
+      if (JSON.stringify(duplicate.appendInput) !== JSON.stringify(preparedAttempt.appendInput)) {
+        throw new Error(`node attempt ${preparedAttempt.attemptId} was observed with conflicting terminal data`);
+      }
+      continue;
+    }
+    preparedById.set(preparedAttempt.attemptId, preparedAttempt);
+    prepared.push(preparedAttempt);
+  }
+
+  const existingById = new Set(existing.map((entry) => entry.attempt_id));
+  let parentAttemptId: NodeAttemptId | undefined;
+  if (prepared.length > 0 && !existingById.has(prepared[0]!.attemptId)) {
+    parentAttemptId = existing.at(-1)?.attempt_id;
+  }
+  const pending: AppendNodeAttemptInput[] = [];
+  let currentAttemptExecuted = false;
+  for (const attempt of prepared) {
+    const entry = attempt.recordedEntry;
+    if (entry !== undefined) {
+      parentAttemptId = entry.attempt_id;
+      currentAttemptExecuted ||= attempt.isCurrent && entry.reuse.status === "executed";
+      continue;
+    }
+    pending.push({
+      ...attempt.appendInput!,
+      ...(parentAttemptId === undefined ? {} : { parentAttemptId })
+    });
+    parentAttemptId = attempt.attemptId;
+    currentAttemptExecuted ||= attempt.isCurrent && attempt.appendInput!.reuse?.status !== "reused";
+  }
+  const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
+  const allEntries = new Map(existing.map((entry) => [entry.attempt_id, entry]));
+  for (const result of results) {
+    allEntries.set(result.entry.attempt_id, result.entry);
+  }
+  return {
+    appended: results.some((result) => result.appended),
+    executedAttempts: [...allEntries.values()].filter((entry) => entry.reuse.status === "executed").length,
+    currentAttemptExecuted
+  };
+}
+
+function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
+  const attempts: Array<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">> = [];
+  for (const event of events) {
+    const payload = event.payload ?? {};
+    const retry = numberField(payload, "attempt");
+    if (retry === undefined || retry < 0) {
+      continue;
+    }
+    const iteration = numberField(payload, "iteration") ?? 0;
+    const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
+    const terminal = terminalOutcomeForEvent(event);
+    let current = latestWorkflowAttempt(attempts, retry, iteration);
+    if (event.type === "NodeStarted" && timestamp !== undefined) {
+      if (current === undefined || current.startedAt !== undefined || current.finishedAt !== undefined) {
+        current = { retry, iteration };
+        attempts.push(current);
+      }
+      applyAttemptDimensionFields(current, payload);
+      current.startedSequence = event.sequence;
+      current.startedAt = timestamp;
+      continue;
+    }
+    if (current === undefined) {
+      current = { retry, iteration };
+      attempts.push(current);
+    }
+    applyAttemptDimensionFields(current, payload);
+    if (terminal !== undefined && current.finishedAt === undefined && timestamp !== undefined) {
+      current.finishedAt = timestamp;
+      current.finishedSequence = event.sequence;
+      current.startedAt ??= timestamp;
+      current.startedSequence ??= event.sequence;
+      current.outcome = terminal.outcome;
+      current.failureCategory = terminal.failureCategory;
+    }
+  }
+  return attempts
+    .filter(
+      (attempt): attempt is TerminalWorkflowAttempt =>
+        attempt.startedAt !== undefined && attempt.finishedAt !== undefined && attempt.outcome !== undefined
+    )
+    .sort(
+      (left, right) =>
+        left.finishedAt.localeCompare(right.finishedAt) || left.iteration - right.iteration || left.retry - right.retry
+    );
+}
+
+function latestWorkflowAttempt(
+  attempts: ReadonlyArray<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">>,
+  retry: number,
+  iteration: number
+): (Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">) | undefined {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index]!;
+    if (attempt.retry === retry && attempt.iteration === iteration) {
+      return attempt;
+    }
+  }
+  return undefined;
+}
+
+function terminalOutcomeForEvent(
+  event: WorkflowEvent
+): { outcome: NodeAttemptOutcome; failureCategory?: NodeAttemptFailureCategory } | undefined {
+  switch (event.type) {
+    case "NodeFinished":
+      return { outcome: "succeeded" };
+    case "TaskHeartbeatTimeout":
+      return { outcome: "timed-out", failureCategory: "timeout" };
+    case "NodeFailed":
+      return errorLooksLikeTimeout(event.payload?.error)
+        ? { outcome: "timed-out", failureCategory: "timeout" }
+        : { outcome: "failed", failureCategory: "executor-error" };
+    case "NodeCancelled":
+      return { outcome: "canceled", failureCategory: "canceled" };
+    case "NodeSkipped":
+      return { outcome: "skipped" };
+    default:
+      return undefined;
+  }
+}
+
+function applyAttemptDimensionFields(
+  attempt: Partial<TerminalWorkflowAttempt>,
+  payload: Record<string, unknown>
+): void {
+  attempt.executorRetryId ??= firstStringField(payload, ["executorRetryId", "executor_retry_id"]);
+  attempt.checkpointGenerationId ??=
+    firstStringField(payload, ["checkpointGenerationId", "checkpoint_generation_id"]) ??
+    firstNumberFieldAsString(payload, ["checkpointGeneration", "checkpoint_generation", "generation"]);
+  attempt.workflowExecutionId ??= firstStringField(payload, [
+    "workflowExecutionId",
+    "workflow_execution_id",
+    "executionId",
+    "execution_id"
+  ]);
+  attempt.controllerInvocationId ??= firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
+}
+
+function controllerInvocationsForWorkflow(layout: RunLayout, workflowRunId: string): ControllerInvocation[] {
+  return replayEvents(layout).records.flatMap((event): ControllerInvocation[] => {
+    if (!["workflow-submitted", "workflow-lifecycle-submitted"].includes(event.event_type)) {
+      return [];
+    }
+    const payload = isRecord(event.payload) ? event.payload : undefined;
+    if (stringField(payload, "workflow_run_id") !== workflowRunId) {
+      return [];
+    }
+    return [
+      {
+        id: stringField(payload, "controller_invocation_id") ?? event.event_id,
+        invokedAt: stringField(payload, "controller_invoked_at") ?? event.timestamp
+      }
+    ];
+  });
+}
+
+function controllerInvocationsFromWorkflowEvents(
+  events: readonly WorkflowEvent[],
+  workflowRunId: string
+): ControllerInvocation[] {
+  const controllerEvents = new Set(["RunStarted", "RunAutoResumed", "RunHijacked", "ReplayStarted", "RunForked"]);
+  return events.flatMap((event): ControllerInvocation[] => {
+    if (!controllerEvents.has(event.type) || event.timestampMs === undefined) {
+      return [];
+    }
+    const payload = event.payload ?? {};
+    const payloadRunId = stringField(payload, "runId") ?? stringField(payload, "run_id");
+    if (payloadRunId !== undefined && payloadRunId !== workflowRunId) {
+      return [];
+    }
+    const explicitId = firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
+    return [
+      {
+        id:
+          explicitId ??
+          stableLedgerDimension("controller", [
+            workflowRunId,
+            event.type,
+            String(event.sequence ?? ""),
+            String(event.timestampMs),
+            stringField(payload, "nodeId") ?? "",
+            String(numberField(payload, "attempt") ?? "")
+          ]),
+        invokedAt: new Date(event.timestampMs).toISOString()
+      }
+    ];
+  });
+}
+
+function controllerInvocationForAttempt(
+  invocations: readonly ControllerInvocation[],
+  startedAt: string
+): string | undefined {
+  return invocations.filter((invocation) => invocation.invokedAt <= startedAt).at(-1)?.id ?? invocations[0]?.id;
+}
+
+function nodeAttemptOutcome(status: NodeStatus): NodeAttemptOutcome {
+  switch (status) {
+    case "succeeded":
+      return "succeeded";
+    case "timed-out":
+      return "timed-out";
+    case "skipped":
+      return "skipped";
+    case "reused-from-prior-run":
+      return "reused";
+    default:
+      return "failed";
+  }
+}
+
+function finalizationFailureCategory(
+  finalization: NodeFinalization,
+  outcome: NodeAttemptOutcome
+): NodeAttemptFailureCategory | undefined {
+  if (outcome === "timed-out") {
+    return "timeout";
+  }
+  if (outcome === "canceled") {
+    return "canceled";
+  }
+  if (outcome !== "failed") {
+    return undefined;
+  }
+  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_NORMALIZE_FAILED")) {
+    return "invalid-output";
+  }
+  if (
+    finalization.diagnostics.some(
+      (diagnostic) => diagnostic.code === "ARTIFACT_MANIFEST_WRITE_FAILED" || diagnostic.code.includes("ARTIFACT")
+    )
+  ) {
+    return "artifact-validation";
+  }
+  return "unknown";
+}
+
+function reusedSourceAttempt(input: {
+  existing: readonly NodeAttemptLedgerEntry[];
+  sourceEntries: readonly NodeAttemptLedgerEntry[];
+  outputManifestDigest?: string;
+}): { attemptId: NodeAttemptId; outputManifestDigest: string } {
+  const candidates = [...input.sourceEntries, ...input.existing]
+    .filter(
+      (entry) => (entry.outcome === "succeeded" || entry.outcome === "reused") && entry.manifests.output_sha256 !== null
+    )
+    .reverse();
+  const source =
+    candidates.find((entry) => entry.manifests.output_sha256 === input.outputManifestDigest) ?? candidates[0];
+  if (source === undefined) {
+    throw new Error("reused node attempt has no recorded source attempt with an output manifest");
+  }
+  const outputManifestDigest = source.manifests.output_sha256;
+  if (outputManifestDigest === null) {
+    throw new Error("reused node attempt source is missing its output manifest digest");
+  }
+  return {
+    attemptId: source.reuse.status === "reused" ? source.reuse.source_attempt_id : source.attempt_id,
+    outputManifestDigest
+  };
+}
+
+function sourceNodeAttempts(
+  layout: RunLayout,
+  sourceRunId: string | undefined,
+  strategyAttemptId: string
+): NodeAttemptLedgerEntry[] {
+  if (sourceRunId === undefined) {
+    return [];
+  }
+  const safeSourceRunId = validateSafeId(sourceRunId, "source run ID");
+  if (safeSourceRunId === layout.runId) {
+    return [];
+  }
+  const runsRoot = path.dirname(layout.root);
+  const sourceRoot = path.join(runsRoot, safeSourceRunId);
+  assertPathInside(runsRoot, sourceRoot, "source run root");
+  if (!fs.existsSync(sourceRoot)) {
+    return [];
+  }
+  assertNoSymlinkComponents(runsRoot, sourceRoot, "source run root");
+  return queryNodeAttempts(layoutForRunRoot(sourceRoot, safeSourceRunId), { strategyAttemptId });
+}
+
+function dimensionId(prefix: string, value: string): string {
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(value) ? value : stableLedgerDimension(prefix, [value]);
+}
+
+function stableLedgerDimension(prefix: string, parts: readonly string[]): string {
+  return `${prefix}-${manifestDigest(JSON.stringify(parts)).slice(0, 32)}`;
+}
+
+function firstStringField(value: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const candidate = stringField(value, key);
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function firstNumberFieldAsString(
+  value: Record<string, unknown> | undefined,
+  keys: readonly string[]
+): string | undefined {
+  for (const key of keys) {
+    const candidate = numberField(value, key);
+    if (candidate !== undefined) {
+      return String(candidate);
+    }
+  }
+  return undefined;
+}
+
 function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask[] {
   const byAttempt = new Map(tasks.map((task) => [task.attemptId, task]));
   const visiting = new Set<string>();
@@ -1495,13 +1992,13 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
     const attemptPatch = attempt === undefined ? {} : { attempt };
     switch (event.type) {
       case "NodePending":
-        evidence = { ...evidence, status: "pending", workflowState: "pending", ...attemptPatch };
+        evidence = { status: "pending", workflowState: "pending", ...attemptPatch };
         break;
       case "NodeStarted":
         evidence = {
-          ...evidence,
           status: "running",
           workflowState: "in-progress",
+          timedOut: false,
           ...attemptPatch,
           ...(timestamp ? { startedAt: timestamp } : {})
         };
@@ -1561,7 +2058,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
         };
         break;
       case "NodeRetrying":
-        evidence = { ...evidence, status: "running", workflowState: "retrying", ...attemptPatch };
+        evidence = { status: "running", workflowState: "retrying", timedOut: false, ...attemptPatch };
         break;
       case "NodeWaitingApproval":
       case "NodeWaitingTimer":
@@ -1587,6 +2084,9 @@ function statusFromWorkflowState(state: string): NodeStatus {
   }
   if (["skipped", "skip"].includes(normalized)) {
     return "skipped";
+  }
+  if (["reused", "reuse", "reused-from-prior-run", "reused_from_prior_run"].includes(normalized)) {
+    return "reused-from-prior-run";
   }
   if (
     [
@@ -1785,6 +2285,7 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       }
       events.push({
         type,
+        sequence: numberField(parsed, "seq") ?? numberField(payload, "seq"),
         timestampMs: numberField(parsed, "timestampMs") ?? numberField(payload, "timestampMs"),
         ...(payload ? { payload } : {})
       });
@@ -1792,7 +2293,9 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
       continue;
     }
   }
-  return events.sort((left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0));
+  return events.sort(
+    (left, right) => (left.timestampMs ?? 0) - (right.timestampMs ?? 0) || (left.sequence ?? 0) - (right.sequence ?? 0)
+  );
 }
 
 function loadSynchronizationInputs(

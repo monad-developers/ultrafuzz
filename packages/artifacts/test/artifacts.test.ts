@@ -6,17 +6,21 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  appendNodeAttempt,
   appendEvent,
   appendLineDurable,
   createRunLayout,
   getNodeArtifactDir,
   normalizeFindings,
   normalizeSafeRelativePath,
+  manifestDigest,
+  queryNodeAttempts,
   queryEvents,
   readFindings,
   readRunState,
   replayEvents,
   safeResolveInside,
+  summarizeNodeAttempts,
   updateNodeState,
   verifyArtifactManifestPrerequisites,
   writeArtifact,
@@ -64,6 +68,7 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     layout.graphFingerprintPath,
     layout.statePath,
     layout.eventsPath,
+    layout.attemptLedgerPath,
     layout.workspacesPath,
     path.join(layout.eventsIndexDir, "query-inputs.json")
   ]) {
@@ -73,6 +78,79 @@ test("createRunLayout persists product-owned run evidence outside checkpoints", 
     assert.equal(fs.statSync(expected).isDirectory(), true, expected);
   }
   assert.equal(path.basename(getNodeArtifactDir(layout, "node-a", { create: true })), "node-a");
+});
+
+test("node attempt ledger is append-only, idempotent, independently queryable, and exactly summarized", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-ledger" });
+  const inputDigest = manifestDigest("generated input manifest");
+  const outputDigest = manifestDigest("generated output manifest");
+  const firstInput = {
+    nodeId: "strategy-a",
+    strategyAttemptId: "strategy-a",
+    executorRetryId: "executor-retry-1",
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1",
+    startedAt: "2026-07-18T10:00:00.000Z",
+    finishedAt: "2026-07-18T10:01:00.000Z",
+    outcome: "failed" as const,
+    inputManifestDigest: inputDigest,
+    failureCategory: "executor-error" as const
+  };
+
+  const first = appendNodeAttempt(layout, firstInput);
+  const replayedFirst = appendNodeAttempt(layout, firstInput);
+  assert.equal(first.appended, true);
+  assert.equal(replayedFirst.appended, false);
+  assert.equal(replayedFirst.entry.attempt_id, first.entry.attempt_id);
+
+  const second = appendNodeAttempt(layout, {
+    ...firstInput,
+    executorRetryId: "executor-retry-2",
+    checkpointGenerationId: "checkpoint-2",
+    workflowExecutionId: "execution-2",
+    controllerInvocationId: "controller-2",
+    parentAttemptId: first.entry.attempt_id,
+    startedAt: "2026-07-18T10:02:00.000Z",
+    finishedAt: "2026-07-18T10:03:00.000Z",
+    outcome: "succeeded",
+    outputManifestDigest: outputDigest,
+    failureCategory: undefined
+  });
+  appendNodeAttempt(layout, {
+    ...firstInput,
+    nodeId: "strategy-b",
+    strategyAttemptId: "strategy-b",
+    executorRetryId: "executor-retry-3",
+    checkpointGenerationId: "checkpoint-2",
+    workflowExecutionId: "execution-2",
+    controllerInvocationId: "controller-2",
+    startedAt: "2026-07-18T10:04:00.000Z",
+    finishedAt: "2026-07-18T10:04:00.000Z",
+    outcome: "reused",
+    reuse: { status: "reused", sourceAttemptId: second.entry.attempt_id },
+    outputManifestDigest: outputDigest,
+    failureCategory: undefined
+  });
+
+  assert.equal(queryNodeAttempts(layout, { checkpointGenerationId: "checkpoint-1" }).length, 1);
+  assert.equal(queryNodeAttempts(layout, { workflowExecutionId: "execution-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { controllerInvocationId: "controller-2" }).length, 2);
+  assert.equal(queryNodeAttempts(layout, { reuseStatus: "reused" })[0]?.reuse.status, "reused");
+
+  const summary = summarizeNodeAttempts(queryNodeAttempts(layout));
+  assert.deepEqual(summary, {
+    total: 3,
+    executed: 2,
+    reused: 1,
+    outcomes: { succeeded: 1, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 1 },
+    strategy_attempts: 2,
+    executor_retries: 3,
+    checkpoint_generations: 2,
+    workflow_executions: 2,
+    controller_invocations: 2
+  });
+  assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {

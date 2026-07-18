@@ -312,12 +312,21 @@ function statusFromTestWorkflowState(state: string): "succeeded" | "other" {
 
 function workflowEvents(
   workflowRunId: string,
-  events: Array<{ type: string; nodeId?: string; attempt?: number; error?: unknown; extra?: Record<string, unknown> }>
+  events: Array<{
+    type: string;
+    nodeId?: string;
+    attempt?: number;
+    error?: unknown;
+    sequence?: number;
+    timestampMs?: number;
+    extra?: Record<string, unknown>;
+  }>
 ): string {
   const base = Date.parse("2026-07-03T00:00:00.000Z");
   return `${events
     .map((event, index) => {
-      const timestampMs = base + index * 100;
+      const sequence = event.sequence ?? index;
+      const timestampMs = event.timestampMs ?? base + index * 100;
       const payload: Record<string, unknown> = {
         type: event.type,
         runId: workflowRunId,
@@ -337,7 +346,7 @@ function workflowEvents(
       }
       return JSON.stringify({
         runId: workflowRunId,
-        seq: index,
+        seq: sequence,
         timestampMs,
         type: event.type,
         payload
@@ -2817,6 +2826,7 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     }),
     events: workflowEvents(workflowRunId, [
       { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "TaskHeartbeatTimeout", nodeId: "node:project-discovery", attempt: 1 },
       { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 1, error: { message: "agent failed" } },
       { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 },
       { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
@@ -2856,6 +2866,15 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
     fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
     false
   );
+  const failedLedger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    failedLedger.map((entry) => entry.outcome),
+    ["timed-out", "failed"]
+  );
 
   const resumedEnv = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
@@ -2882,6 +2901,497 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   assert.equal(resumedState.nodes?.["project-discovery"]?.status, "running");
   assert.equal(resumedState.nodes?.["project-discovery"]?.last_error, undefined);
   assert.equal(resumedState.nodes?.["project-discovery"]?.finished_at, undefined);
+});
+
+test("syncRun preserves retry and checkpoint generations in the immutable attempt ledger", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger";
+  const firstExecutionEvents = [
+    {
+      type: "NodeStarted",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        checkpointGenerationId: "checkpoint-1",
+        workflowExecutionId: "execution-1",
+        controllerInvocationId: "controller-1"
+      }
+    },
+    {
+      type: "NodeFailed",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      error: { message: "generated executor failure" },
+      extra: { iteration: 0 }
+    },
+    { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } },
+    {
+      type: "NodeStarted",
+      nodeId: "node:project-discovery",
+      attempt: 2,
+      extra: {
+        iteration: 0,
+        checkpointGenerationId: "checkpoint-1",
+        workflowExecutionId: "execution-1",
+        controllerInvocationId: "controller-1"
+      }
+    },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 2, extra: { iteration: 0 } }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, firstExecutionEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+
+  const continuedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 3 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...firstExecutionEvents,
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 3, extra: { iteration: 1 } },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 3,
+        extra: {
+          iteration: 1,
+          checkpointGenerationId: "checkpoint-2",
+          workflowExecutionId: "execution-2",
+          controllerInvocationId: "controller-2"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 3, extra: { iteration: 1 } }
+    ])
+  });
+  const continued = await syncRun({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
+  const replayed = await syncRun({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
+  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  const ledger = ledgerText
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 3);
+  assert.doesNotMatch(ledgerText, /generated executor failure/u);
+  assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
+  assert.equal(ledger[2]?.parent_attempt_id, ledger[1]?.attempt_id);
+
+  const status = await getRunStatus({ projectRoot: project, runId: "attempt-ledger", env: continuedEnv });
+  assert.deepEqual(status.value?.attempts, {
+    total: 3,
+    executed: 3,
+    reused: 0,
+    outcomes: { succeeded: 2, failed: 1, "timed-out": 0, canceled: 0, skipped: 0, reused: 0 },
+    strategy_attempts: 1,
+    executor_retries: 3,
+    checkpoint_generations: 2,
+    workflow_executions: 2,
+    controller_invocations: 2
+  });
+  assert.equal(status.value?.state?.nodes["project-discovery"]?.retry_count, 2);
+});
+
+test("syncRun records checkpoint continuation entries even when workflow retry counters restart", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-restarted-counter";
+  const firstExecutionEvents = [
+    {
+      type: "NodeStarted",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        checkpointGenerationId: "checkpoint-1",
+        workflowExecutionId: "execution-1",
+        controllerInvocationId: "controller-1"
+      }
+    },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, firstExecutionEvents)
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-restarted-counter", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-restarted-counter", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+
+  const continuedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...firstExecutionEvents,
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-2",
+          workflowExecutionId: "execution-2",
+          controllerInvocationId: "controller-2"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
+    ])
+  });
+  const continued = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-restarted-counter",
+    env: continuedEnv
+  });
+  const replayed = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-restarted-counter",
+    env: continuedEnv
+  });
+  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+
+  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  const ledger = ledgerText
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 2);
+  assert.equal(ledger[1]?.parent_attempt_id, ledger[0]?.attempt_id);
+
+  const status = await getRunStatus({
+    projectRoot: project,
+    runId: "attempt-ledger-restarted-counter",
+    env: continuedEnv
+  });
+  assert.deepEqual(status.value?.attempts, {
+    total: 2,
+    executed: 2,
+    reused: 0,
+    outcomes: { succeeded: 2, failed: 0, "timed-out": 0, canceled: 0, skipped: 0, reused: 0 },
+    strategy_attempts: 1,
+    executor_retries: 2,
+    checkpoint_generations: 2,
+    workflow_executions: 2,
+    controller_invocations: 2
+  });
+});
+
+test("syncRun distinguishes repeated retry counters by their workflow event identity", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-repeated-dimensions";
+  const repeatedDimensions = {
+    iteration: 0,
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1"
+  };
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: repeatedDimensions
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: repeatedDimensions
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-repeated-dimensions", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-repeated-dimensions", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 2);
+  assert.equal(new Set(ledger.map((entry) => entry.attempt_id)).size, 2);
+  assert.equal(new Set(ledger.map((entry) => entry.executor_retry_id)).size, 2);
+});
+
+test("syncRun keeps a terminal-only retry idempotent when its start event arrives later", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-late-start";
+  const startedAt = Date.parse("2026-07-03T00:00:00.100Z");
+  const finishedAt = Date.parse("2026-07-03T00:00:00.200Z");
+  const terminalEvent = {
+    type: "NodeFailed",
+    nodeId: "node:project-discovery",
+    attempt: 1,
+    sequence: 2,
+    timestampMs: finishedAt,
+    error: { message: "generated executor failure" }
+  };
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [terminalEvent])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-late-start", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const firstSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-late-start", env });
+  assert.equal(firstSync.ok, true, JSON.stringify(firstSync.diagnostics));
+  const initialLedger = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+
+  const completeEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        sequence: 1,
+        timestampMs: startedAt
+      },
+      terminalEvent
+    ])
+  });
+  const replayed = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-late-start",
+    env: completeEnv
+  });
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), initialLedger);
+  assert.equal(initialLedger.trim().split("\n").length, 1);
+});
+
+test("syncRun attributes attempts to the controller active when the attempt starts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-controller";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted", extra: { controllerInvocationId: "controller-start" } },
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "checkpoint-1",
+          workflowExecutionId: "execution-1"
+        }
+      },
+      { type: "RunAutoResumed", extra: { controllerInvocationId: "controller-resume" } },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-controller", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  const ledgerText = fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8");
+  const ledger = ledgerText
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0]?.controller_invocation_id, "controller-start");
+});
+
+test("syncRun keeps skipped override attempts schema-valid", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-attempt-ledger-skipped-override";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "skipped", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "attempt-ledger-skipped-override", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-skipped-override", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0]?.outcome, "skipped");
+  assert.equal(ledger[0]?.failure_category, undefined);
+  assert.deepEqual(ledger[0]?.reuse, { status: "executed" });
+});
+
+test("syncRun records reused override attempts with an idempotent source reference", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const sourceWorkflowRunId = "ultrafuzz-attempt-ledger-reuse-source";
+  const sourceEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: sourceWorkflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(sourceWorkflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const sourceRun = await startRun({ projectRoot: project, runId: "attempt-ledger-reuse-source", env: sourceEnv });
+  assert.equal(sourceRun.ok, true, JSON.stringify(sourceRun.diagnostics));
+  writeRequiredArtifactSet(sourceRun.value!.run_root, "project-discovery", [
+    "setup/project-discovery.md",
+    "findings.json"
+  ]);
+  const sourceSync = await syncRun({ projectRoot: project, runId: "attempt-ledger-reuse-source", env: sourceEnv });
+  assert.equal(sourceSync.ok, true, JSON.stringify(sourceSync.diagnostics));
+  const sourceAttempt = JSON.parse(
+    fs.readFileSync(path.join(sourceRun.value!.run_root, "attempts.jsonl"), "utf8").trim()
+  ) as Record<string, unknown>;
+
+  const workflowRunId = "ultrafuzz-attempt-ledger-reused-override";
+  const firstReuseEvents = [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+  ];
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, firstReuseEvents)
+  });
+  const run = await startRun({
+    projectRoot: project,
+    runId: "attempt-ledger-reused-override",
+    sourceRunId: "attempt-ledger-reuse-source",
+    env
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "attempt-ledger-reused-override", env });
+  const replayed = await syncRun({ projectRoot: project, runId: "attempt-ledger-reused-override", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.ok(!sync.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  assert.ok(!replayed.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const reuse = ledger[0]?.reuse as Record<string, unknown> | undefined;
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0]?.outcome, "reused");
+  assert.equal(ledger[0]?.failure_category, undefined);
+  assert.equal(reuse?.status, "reused");
+  assert.equal(reuse?.source_attempt_id, sourceAttempt.attempt_id);
+  assert.notEqual(reuse?.source_attempt_id, ledger[0]?.attempt_id);
+
+  const continuedEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "reused-from-prior-run", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      ...firstReuseEvents,
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }
+    ])
+  });
+  const continued = await syncRun({
+    projectRoot: project,
+    runId: "attempt-ledger-reused-override",
+    env: continuedEnv
+  });
+  assert.equal(continued.ok, true, JSON.stringify(continued.diagnostics));
+  assert.ok(!continued.diagnostics.some((diagnostic) => diagnostic.code === "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+  const continuedLedger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(continuedLedger.length, 2);
+  assert.deepEqual(
+    continuedLedger.map((entry) => (entry.reuse as Record<string, unknown>).source_attempt_id),
+    [sourceAttempt.attempt_id, sourceAttempt.attempt_id]
+  );
+
+  const status = await getRunStatus({
+    projectRoot: project,
+    runId: "attempt-ledger-reused-override",
+    env: continuedEnv
+  });
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.attempts.reused, 2);
 });
 
 test("syncRun keeps reset workflow nodes pending while the workflow is running", async () => {
@@ -2997,6 +3507,17 @@ test("syncRun records model fan-out attempts independently", async () => {
     ),
     true
   );
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const projectDiscoveryAttempts = ledger.filter((entry) => entry.node_id === "project-discovery");
+  assert.equal(projectDiscoveryAttempts.length, 2);
+  assert.deepEqual(projectDiscoveryAttempts.map((entry) => entry.strategy_attempt_id).sort(), [
+    "project-discovery__model_0__attempt_0",
+    "project-discovery__model_1__attempt_1"
+  ]);
 });
 
 test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs", async () => {

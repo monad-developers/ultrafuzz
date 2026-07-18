@@ -296,6 +296,7 @@ Before or at launch, each run MUST persist:
 - `graph.fingerprint`
 - `state.json`
 - `events.jsonl`
+- `attempts.jsonl`
 - `plan.json`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
@@ -308,6 +309,14 @@ Run and node state MUST be explicit. Node statuses MUST include pending,
 ready, runnable, running, succeeded, failed, skipped, timed-out,
 reused-from-prior-run, and invalidated. Run statuses MUST include pending,
 running, paused, succeeded, failed, timed-out, and canceled.
+
+Completed node attempts MUST be appended immutably to `attempts.jsonl` with
+stable strategy-attempt, executor-retry, checkpoint-generation,
+workflow-execution, and controller-invocation identities. Entries MUST preserve
+parent and reuse relationships, lifecycle timestamps, typed outcomes, and input
+and output manifest digests. Attempt counts and terminal summaries MUST derive
+from the ledger. Failure categories MUST remain separate from raw diagnostics,
+and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
