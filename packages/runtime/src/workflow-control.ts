@@ -1,4 +1,5 @@
 import {
+  isTerminalRunStatus,
   isTerminalNodeStatus,
   type NodeNextEligibleAction,
   type NodeState,
@@ -31,7 +32,6 @@ export interface WorkflowControlProjection {
   recoveryDue: boolean;
 }
 
-const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "timed-out", "canceled"]);
 const ACTIVE_WORKFLOW_STATES = new Set(["in-progress", "running", "started"]);
 const LOST_CONTROLLER_WORKFLOW_STATES = new Set(["orphaned", "stale"]);
 
@@ -168,7 +168,7 @@ export function projectWorkflowControlState(input: WorkflowControlProjectionInpu
   const deadlineExceeded =
     state.workflow_deadline_at !== undefined &&
     input.nowMs >= timestampMs(state.workflow_deadline_at, Number.POSITIVE_INFINITY) &&
-    !TERMINAL_RUN_STATUSES.has(state.status);
+    !isTerminalRunStatus(state.status);
 
   return {
     state,

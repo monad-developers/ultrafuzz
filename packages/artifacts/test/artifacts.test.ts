@@ -20,7 +20,8 @@ import {
   updateNodeState,
   writeArtifact,
   writeArtifactManifest,
-  writeGeneratedTestManifest
+  writeGeneratedTestManifest,
+  writeRunState
 } from "../src/index.js";
 
 function tempProject(): string {
@@ -157,6 +158,24 @@ test("run state redacts secret-looking node errors before persistence", () => {
   const serialized = fs.readFileSync(layout.statePath, "utf8");
   assert.doesNotMatch(serialized, /sk-state-secret/);
   assert.match(readRunState(layout).nodes["node-a"]?.last_error ?? "", /<redacted>/);
+});
+
+test("updateNodeState accepts an explicit transition timestamp", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-state-clock" });
+  const initial = readRunState(layout);
+  initial.nodes["node-a"] = {
+    node_id: "node-a",
+    status: "pending",
+    retry_count: 0,
+    timed_out: false
+  };
+  writeRunState(layout, initial);
+
+  updateNodeState(layout, "node-a", { status: "running" }, "2026-01-01T00:00:05.000Z");
+  const running = readRunState(layout);
+
+  assert.equal(running.last_transition_at, "2026-01-01T00:00:05.000Z");
+  assert.equal(running.nodes["node-a"]?.wait_since, "2026-01-01T00:00:05.000Z");
 });
 
 test("durable append rejects a symlinked parent before creating outside directories", () => {

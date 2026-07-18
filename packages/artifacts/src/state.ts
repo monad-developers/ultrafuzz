@@ -18,6 +18,13 @@ export const RUN_STATE_STATUSES = [
 
 export type RunStatus = (typeof RUN_STATE_STATUSES)[number];
 
+export const TERMINAL_RUN_STATE_STATUSES = [
+  "succeeded",
+  "failed",
+  "timed-out",
+  "canceled"
+] as const satisfies readonly RunStatus[];
+
 export const NODE_STATE_STATUSES = [
   "pending",
   "ready",
@@ -295,7 +302,7 @@ export function updateRunStatus(
   if (status === "running" && state.started_at === undefined) {
     state.started_at = timestamp;
   }
-  if (["succeeded", "failed", "timed-out", "canceled"].includes(status)) {
+  if (isTerminalRunStatus(status)) {
     state.finished_at = timestamp;
   } else {
     delete state.finished_at;
@@ -307,7 +314,8 @@ export function updateRunStatus(
 export function updateNodeState(
   target: RunLayoutStateLike | string,
   nodeId: string,
-  patch: Partial<Omit<NodeState, "node_id">>
+  patch: Partial<Omit<NodeState, "node_id">>,
+  timestamp = new Date().toISOString()
 ): RunState {
   const safeNodeId = validateSafeId(nodeId, "node ID");
   const state = readRunState(target);
@@ -322,7 +330,7 @@ export function updateNodeState(
     delete next.wait_reason;
     delete next.next_eligible_action;
   } else {
-    next.wait_since ??= new Date().toISOString();
+    next.wait_since ??= timestamp;
     next.wait_reason ??= "ready";
     next.next_eligible_action ??= "dispatch";
   }
@@ -331,7 +339,7 @@ export function updateNodeState(
     previous.wait_reason !== next.wait_reason ||
     previous.next_eligible_action !== next.next_eligible_action
   ) {
-    state.last_transition_at = new Date().toISOString();
+    state.last_transition_at = timestamp;
   }
   state.nodes[safeNodeId] = next;
   writeRunState(target, state);
@@ -344,6 +352,10 @@ function resolveStatePath(target: RunLayoutStateLike | string): string {
 
 export function isTerminalNodeStatus(status: NodeStatus): boolean {
   return TERMINAL_NODE_STATE_STATUSES.includes(status as (typeof TERMINAL_NODE_STATE_STATUSES)[number]);
+}
+
+export function isTerminalRunStatus(status: RunStatus): boolean {
+  return TERMINAL_RUN_STATE_STATUSES.includes(status as (typeof TERMINAL_RUN_STATE_STATUSES)[number]);
 }
 
 function positiveInteger(value: number, label: string): number {
