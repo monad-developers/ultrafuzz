@@ -1752,6 +1752,7 @@ test("syncRun persists cumulative token accounting and partial pricing from work
   assert.equal(source.ok, true, JSON.stringify(source.diagnostics));
   const sourceMetadataPath = path.join(source.value!.run_root, "run.json");
   const sourceMetadata = JSON.parse(fs.readFileSync(sourceMetadataPath, "utf8")) as Record<string, unknown>;
+  // 0.1 + 0.2 exercises cumulative USD rounding instead of leaking binary float tails.
   fs.writeFileSync(
     sourceMetadataPath,
     `${JSON.stringify(
@@ -1769,8 +1770,8 @@ test("syncRun persists cumulative token accounting and partial pricing from work
             reasoning_tokens: 0,
             total_tokens: 100,
             tokens_used: "100",
-            estimated_spend: "$0.01",
-            estimated_spend_usd: 0.01,
+            estimated_spend: "$0.10",
+            estimated_spend_usd: 0.1,
             partial_pricing: false,
             event_count: 1,
             priced_event_count: 1,
@@ -1786,8 +1787,8 @@ test("syncRun persists cumulative token accounting and partial pricing from work
             reasoning_tokens: 0,
             total_tokens: 100,
             tokens_used: "100",
-            estimated_spend: "$0.01",
-            estimated_spend_usd: 0.01,
+            estimated_spend: "$0.10",
+            estimated_spend_usd: 0.1,
             partial_pricing: false,
             event_count: 1,
             priced_event_count: 1,
@@ -1820,7 +1821,7 @@ test("syncRun persists cumulative token accounting and partial pricing from work
           iteration: 0,
           inputTokens: 10,
           outputTokens: 20,
-          costUsd: 0.02,
+          costUsd: 0.2,
           model: "gpt-test",
           agent: "codex"
         }
@@ -1858,16 +1859,18 @@ test("syncRun persists cumulative token accounting and partial pricing from work
       cumulative?: {
         tokens_used?: string;
         estimated_spend?: string;
+        estimated_spend_usd?: number;
         partial_pricing?: boolean;
         source_run_ids?: string[];
       };
     };
   };
   assert.equal(metadata.accounting?.current?.tokens_used, "35");
-  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.02+");
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$0.20+");
   assert.equal(metadata.accounting?.current?.partial_pricing, true);
   assert.equal(metadata.accounting?.cumulative?.tokens_used, "135");
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.03+");
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend, "$0.30+");
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 0.3);
   assert.equal(metadata.accounting?.cumulative?.partial_pricing, true);
   assert.deepEqual(metadata.accounting?.cumulative?.source_run_ids, ["source-accounting"]);
 });

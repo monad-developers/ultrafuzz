@@ -580,7 +580,7 @@ function cumulativeAccountingSummary(
           : undefined;
     }
     if (summary.estimated_spend_usd !== undefined) {
-      totals.estimatedSpendUsd = (totals.estimatedSpendUsd ?? 0) + summary.estimated_spend_usd;
+      totals.estimatedSpendUsd = addUsd(totals.estimatedSpendUsd, summary.estimated_spend_usd);
     }
     for (const model of summary.models) {
       totals.models.add(model);
