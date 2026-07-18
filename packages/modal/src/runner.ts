@@ -266,12 +266,14 @@ async function recoverySandboxRunning(
       return { running: true, sandboxId: record.sandbox_id, attempt: record.attempt };
     }
   }
-  for (const record of records) {
-    const sandbox = await namedSandbox(modal, appName, recoverySandboxName(state.run_id, slug, record.attempt));
-    if (sandbox === undefined) continue;
-    const exitCode = await sandbox.poll();
-    sandbox.detach();
-    if (exitCode === null) return { running: true, sandboxId: sandbox.sandboxId, attempt: record.attempt };
+  const latestRecord = records[0];
+  if (latestRecord !== undefined) {
+    const sandbox = await namedSandbox(modal, appName, recoverySandboxName(state.run_id, slug, latestRecord.attempt));
+    if (sandbox !== undefined) {
+      const exitCode = await sandbox.poll();
+      sandbox.detach();
+      if (exitCode === null) return { running: true, sandboxId: sandbox.sandboxId, attempt: latestRecord.attempt };
+    }
   }
   let stateChanged = false;
   const pending = (state.pending_recoveries ?? []).filter((lease) => lease.slug === slug);
