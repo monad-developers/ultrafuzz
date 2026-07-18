@@ -99,6 +99,45 @@ describe("runner", () => {
     expect(lines).toEqual([expect.objectContaining({ row_id: row.id, status: "failed" })]);
   });
 
+  it("propagates candidate graph, config, and execution artifact identities into row records", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-lineage-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    fs.mkdirSync(runRoot, { recursive: true });
+    const record = await launchEvalRow({
+      projectRoot: base,
+      suitePath: "suite.yml",
+      evalRunId: "eval-1",
+      row,
+      suite,
+      candidateProvenance: {
+        label: "v0.0.1",
+        commit: "a".repeat(40),
+        dirty: false,
+        execution_artifact_id: "git:generated"
+      },
+      launcher: async () => ({
+        ok: true,
+        runId: "run-1",
+        runRoot,
+        workflowIds: ["workflow-1"],
+        graphFingerprint: "graph-generated",
+        configFingerprint: "config-generated",
+        executionArtifactId: "image:generated",
+        diagnostics: []
+      })
+    });
+
+    expect(record).toMatchObject({
+      graph_fingerprint: "graph-generated",
+      config_fingerprint: "config-generated",
+      candidate_label: "v0.0.1",
+      candidate_commit: "a".repeat(40),
+      execution_artifact_id: "image:generated"
+    });
+  });
+
   it("watches a row to terminal state, draining telemetry after each sync tick", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-"));
     const suite = testSuite(path.join(base, "gt"));

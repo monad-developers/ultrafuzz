@@ -101,7 +101,9 @@ Common flags:
 - `--row <row-id>` (run, repeatable)
 - `--no-watch` (run)
 - `--llm-judge` (score)
-- `--baseline <variant-id>` (compare, required)
+- `--baseline <variant-id>` (compare variants within one run)
+- `--against <eval-run-id>` (compare releases with compatible lineage)
+- `--allow-incompatible` (explicitly waive release provenance mismatches)
 - `--resume` (publish)
 
 Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
