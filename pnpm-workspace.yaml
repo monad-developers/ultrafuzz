@@ -8,6 +8,7 @@ packages:
   - "packages/runtime"
   - "packages/evals"
   - "packages/dashboard"
+  - "packages/evmbench"
   - "packages/modal"
   - "packages/cli"
 allowBuilds:

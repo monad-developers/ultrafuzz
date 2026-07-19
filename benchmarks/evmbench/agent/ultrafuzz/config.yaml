@@ -1,0 +1,6 @@
+ultrafuzz:
+  start: ultrafuzz/start.sh
+  instruction_file_name: AGENTS.md
+  gateway_sni_hosts:
+    - chatgpt.com
+    - api.openai.com

@@ -25,4 +25,10 @@ describe("Modal audit Markdown conversion", () => {
       "expected 2 ground-truth findings, found 1"
     );
   });
+
+  it("accepts audit headings without punctuation after the issue ID", () => {
+    expect(convertAuditMarkdownGroundTruth("## [H-9004] Example condition")).toEqual({
+      bugs: [{ id: "H-9004", title: "Example condition", severity: "high" }]
+    });
+  });
 });
