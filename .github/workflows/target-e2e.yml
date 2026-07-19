@@ -6,41 +6,63 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      target_repositories:
-        description: Optional JSON array of target objects with `name`, `repository`, `signal_profile`, and `expected_findings`; omit for defaults.
-        required: false
-        default: ""
 
 permissions:
   contents: read
 
 jobs:
-  ultrafuzz-target:
-    name: Ultrafuzz target (${{ matrix.target.name }})
+  target-matrix:
+    name: Load immutable target matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.target_repositories != '' && inputs.target_repositories || '[{"name":"Aave v4","repository":"https://github.com/aave/aave-v4/releases/tag/v0.5.6","signal_profile":"aave-v4","expected_findings":"gt:0"},{"name":"Very Liquid Vaults","repository":"https://github.com/rheo-xyz/very-liquid-vaults/commit/e50384709a696c86ab0440bbbc3dd14a5f4ff6ec","signal_profile":"very-liquid-vaults","expected_findings":"gt:0"},{"name":"StableSwapNG (Vyper)","repository":"https://github.com/curvefi/stableswap-ng/commit/8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386","signal_profile":"stableswap-ng-vyper","expected_findings":"gt:0"}]') }}
-    env:
-      ULTRAFUZZ_E2E_DYNAMIC_STRATEGIES_ENUMERATOR: "1"
-      ULTRAFUZZ_E2E_INVARIANT_TIMEOUT: 2min
-      ULTRAFUZZ_E2E_MAX_PARALLEL_AGENTS: "1"
-      ULTRAFUZZ_E2E_NODE_TIMEOUT_SECONDS: "420"
-      ULTRAFUZZ_E2E_STRATEGY_LOOPS: "1"
-      ULTRAFUZZ_E2E_TRIAGE_PANEL_SIZE: "1"
-      ULTRAFUZZ_E2E_TRIAGE_QUORUM: "1"
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
-      - name: Enable Corepack
-        run: corepack enable
+      - name: Validate target matrix cardinality
+        run: |
+          jq -e '
+            .schema_version == "1.0" and
+            (.targets | type == "array" and length == 3) and
+            (([.targets[].id] | sort) == [
+              "stableswap-ng-vyper",
+              "venus-isolated-pools-hardhat",
+              "very-liquid-vaults-foundry"
+            ])
+          ' scripts/ci/target-e2e-manifest.json >/dev/null
 
-      - name: Prepare pnpm
-        run: corepack prepare pnpm@11.1.1 --activate
+      - name: Read target manifest
+        id: matrix
+        run: echo "targets=$(jq -c '.targets' scripts/ci/target-e2e-manifest.json)" >> "$GITHUB_OUTPUT"
+
+  ultrafuzz-target:
+    name: Ultrafuzz target (${{ matrix.target.name }})
+    needs: target-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.target-matrix.outputs.targets) }}
+    steps:
+      - name: Check out Ultrafuzz
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -50,6 +72,9 @@ jobs:
 
       - name: Build Ultrafuzz
         run: pnpm -w build
+
+      - name: Validate target manifest
+        run: bun scripts/ci/target-e2e-ci.ts validate-manifest scripts/ci/target-e2e-manifest.json
 
       - name: Prepare Ultrafuzz CLI
         run: |
@@ -62,12 +87,130 @@ jobs:
           echo "$GITHUB_WORKSPACE/.ci-bin" >> "$GITHUB_PATH"
           .ci-bin/ultrafuzz --help
 
-      - name: Verify Codex API key
+      - name: Check out immutable target
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: ${{ matrix.target.repository_slug }}
+          ref: ${{ matrix.target.revision }}
+          path: .target-source
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify immutable target revision
+        run: test "$(git -C .target-source rev-parse HEAD)" = "${{ matrix.target.revision }}"
+
+      - name: Initialize target evidence
+        run: |
+          evidence="$GITHUB_WORKSPACE/.codex-runs/e2e-targets/${{ matrix.target.id }}/evidence"
+          mkdir -p "$evidence"
+          bun scripts/ci/target-e2e-ci.ts write-target-metadata \
+            scripts/ci/target-e2e-manifest.json \
+            "${{ matrix.target.id }}" \
+            "$evidence/target.json" \
+            "$(git -C .target-source rev-parse HEAD)"
+
+      - name: Install Foundry
+        if: matrix.target.framework == 'foundry'
+        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
+
+      - name: Build Foundry target
+        if: matrix.target.framework == 'foundry'
+        working-directory: .target-source
+        run: |
+          log="$GITHUB_WORKSPACE/.codex-runs/e2e-targets/${{ matrix.target.id }}/evidence/target-build.log"
+          set +e
+          forge build >"$log" 2>&1
+          status=$?
+          set -e
+          bun "$GITHUB_WORKSPACE/scripts/ci/target-e2e-ci.ts" redact "$log"
+          cat "$log"
+          exit "$status"
+
+      - name: Set up compatible Hardhat runtime
+        if: matrix.target.framework == 'hardhat'
+        id: hardhat-runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 16
+
+      - name: Record compatible Hardhat runtime
+        if: matrix.target.framework == 'hardhat'
+        id: hardhat-runtime-path
+        run: echo "bin=$(dirname "$(command -v node)")" >> "$GITHUB_OUTPUT"
+
+      - name: Install and compile Hardhat target
+        if: matrix.target.framework == 'hardhat'
+        working-directory: .target-source
+        run: |
+          log="$GITHUB_WORKSPACE/.codex-runs/e2e-targets/${{ matrix.target.id }}/evidence/target-build.log"
+          set +e
+          node .yarn/releases/yarn-1.22.1.cjs install --frozen-lockfile >"$log" 2>&1 && \
+            env -u FORK_MAINNET node .yarn/releases/yarn-1.22.1.cjs hardhat:compile >>"$log" 2>&1
+          status=$?
+          set -e
+          bun "$GITHUB_WORKSPACE/scripts/ci/target-e2e-ci.ts" redact "$log"
+          cat "$log"
+          exit "$status"
+
+      - name: Set up compatible Vyper runtime
+        if: matrix.target.framework == 'vyper'
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: .target-source/poetry.lock
+
+      - name: Install and compile Vyper target
+        if: matrix.target.framework == 'vyper'
+        working-directory: .target-source
+        run: |
+          log="$GITHUB_WORKSPACE/.codex-runs/e2e-targets/${{ matrix.target.id }}/evidence/target-build.log"
+          set +e
+          python -m pip install poetry==1.5.1 >"$log" 2>&1 && \
+            poetry install --no-interaction --no-root >>"$log" 2>&1 && \
+            poetry run vyper contracts/main/CurveStableSwapNG.vy >/dev/null 2>>"$log"
+          status=$?
+          set -e
+          bun "$GITHUB_WORKSPACE/scripts/ci/target-e2e-ci.ts" redact "$log"
+          cat "$log"
+          exit "$status"
+
+      - name: Restore Ultrafuzz Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Preserve compatible Yarn runtime for agents
+        if: matrix.target.framework == 'hardhat'
+        env:
+          NODE16_BIN: ${{ steps.hardhat-runtime-path.outputs.bin }}
+        run: |
+          target_yarn_cli="$GITHUB_WORKSPACE/.target-source/.yarn/releases/yarn-1.22.1.cjs"
+          cat > .ci-bin/yarn <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          yarn_cli="$PWD/.yarn/releases/yarn-1.22.1.cjs"
+          if [ ! -f "$yarn_cli" ]; then
+            yarn_cli="__TARGET_YARN_CLI__"
+          fi
+          if [ ! -f "$yarn_cli" ]; then
+            echo "Pinned target Yarn CLI was not found." >&2
+            exit 1
+          fi
+          exec env PATH="__NODE16_BIN__:$PATH" "__NODE16_BIN__/node" "$yarn_cli" "$@"
+          SH
+          sed -i \
+            -e "s|__NODE16_BIN__|$NODE16_BIN|g" \
+            -e "s|__TARGET_YARN_CLI__|$target_yarn_cli|g" \
+            .ci-bin/yarn
+          chmod +x .ci-bin/yarn
+
+      - name: Verify model credential
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::Set OPENAI_API_KEY for the target repository E2E workflow."
+            echo "::error::The paid target smoke workflow requires its model credential."
             exit 1
           fi
           echo "::add-mask::${OPENAI_API_KEY}"
@@ -89,20 +232,12 @@ jobs:
           if ! command -v codex >/dev/null 2>&1; then
             npm install -g @openai/codex@0.144.3
           fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          if command -v codex >/dev/null 2>&1; then
-            codex --version
-          else
-            "$HOME/.local/bin/codex" --version
-          fi
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
+          codex --version
 
       - name: Authenticate Codex CLI
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: printenv OPENAI_API_KEY | codex login --with-api-key
+        run: printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
 
       - name: Verify Codex workspace-write sandbox
         env:
@@ -122,44 +257,38 @@ jobs:
                 - > "$tmp/codex-probe.jsonl" 2> "$tmp/codex-probe.stderr.log"
           status=$?
           set -e
+          bun scripts/ci/target-e2e-ci.ts redact "$tmp/codex-probe.jsonl"
+          bun scripts/ci/target-e2e-ci.ts redact "$tmp/codex-probe.stderr.log"
 
           if [ "$status" -ne 0 ]; then
-            echo "::group::Codex sandbox probe stderr"
             sed -n '1,200p' "$tmp/codex-probe.stderr.log" >&2 || true
-            echo "::endgroup::"
-            echo "::group::Codex sandbox probe jsonl"
             sed -n '1,200p' "$tmp/codex-probe.jsonl" || true
-            echo "::endgroup::"
             exit "$status"
           fi
-
-          if [ "$(tr -d '\r\n' < "$tmp/sandbox-probe.txt" 2>/dev/null)" != "ok" ]; then
-            echo "::error::Codex workspace-write sandbox probe did not create the expected file."
-            echo "::group::Codex sandbox probe stderr"
-            sed -n '1,200p' "$tmp/codex-probe.stderr.log" >&2 || true
-            echo "::endgroup::"
-            echo "::group::Codex sandbox probe jsonl"
-            sed -n '1,200p' "$tmp/codex-probe.jsonl" || true
-            echo "::endgroup::"
-            exit 1
-          fi
+          test "$(tr -d '\r\n' < "$tmp/sandbox-probe.txt" 2>/dev/null)" = "ok"
 
       - name: Run target repository E2E
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          TARGET_NAME: ${{ matrix.target.name }}
-          TARGET_REPOSITORY: ${{ matrix.target.repository }}
-          ULTRAFUZZ_E2E_EXPECTED_FINDINGS: ${{ matrix.target.expected_findings || 'any' }}
-          ULTRAFUZZ_E2E_SIGNAL_PROFILE: ${{ matrix.target.signal_profile || 'control' }}
           ULTRAFUZZ_BIN: ${{ github.workspace }}/.ci-bin/ultrafuzz
-        run: bash scripts/ci/run-target-e2e.sh "$TARGET_REPOSITORY"
+        run: bash scripts/ci/run-target-e2e.sh "${{ matrix.target.id }}" "$GITHUB_WORKSPACE/.target-source"
+
+      - name: Add report to job summary
+        if: always()
+        run: |
+          report="$(find .codex-runs/e2e-targets -path '*/evidence/report.md' -type f -print -quit 2>/dev/null || true)"
+          if [ -n "$report" ]; then
+            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Target smoke did not produce a final report." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload E2E evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ultrafuzz-target-e2e-${{ strategy.job-index }}
-          path: .codex-runs/e2e-targets/*/evidence/
+          name: ultrafuzz-target-e2e-${{ matrix.target.id }}
+          path: .codex-runs/e2e-targets/${{ matrix.target.id }}/evidence/
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30

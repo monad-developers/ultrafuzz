@@ -39,19 +39,18 @@ test("final report validation blocks matrix-inconsistent production issues", () 
   assert.match(diagnostics[1]?.message ?? "", /expected Low/);
 });
 
-test("final report validation accepts target e2e severity issue shape", () => {
+test("final report validation accepts legacy adapter issue shape", () => {
   const issue = {
     schema_version: "1.0",
-    id: "ci-control-signal-001",
-    title: "CI signal preserved for target repository surface",
+    id: "finding-001",
+    title: "Source-backed protocol condition",
     severity_guess: "medium",
     confidence: "high",
     status: "needs-review",
-    summary: "Bounded target E2E signal generated from repository structure and selected CI profile.",
-    affected_files: ["repository-root"],
-    evidence: [{ kind: "repository-sample", path: "repository-root" }],
-    reproductions: [{ type: "ci-helper", command: "bun .ultrafuzz/ci/target-e2e-artifacts.ts signal-analysis" }],
-    notes: ["impact=Medium", "likelihood=Medium", "context=CI target signal preservation via deterministic profile"]
+    summary: "A concrete condition is supported by source and test evidence.",
+    affected_files: ["src/Example.sol"],
+    evidence: [{ kind: "generated-test", path: "generated-tests/Example.t.sol" }],
+    notes: ["impact=Medium", "likelihood=Medium"]
   };
   const diagnostics = validateSeverityMatrixArtifact({
     kind: "final-report",
