@@ -27,7 +27,7 @@ const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
-const RECOVERY_MAX_RESETS = 32;
+const RECOVERY_MAX_RESETS = 96;
 const RECOVERY_POLL_MS = 60_000;
 const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
