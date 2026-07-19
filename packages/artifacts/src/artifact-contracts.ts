@@ -159,7 +159,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/report@1",
     format: "json",
     description:
-      "A terminal report object with non-empty schema_version, run_metadata, issues, and non_production_outcomes. Additional adapter fields are allowed.",
+      "A terminal report object with non-empty schema_version, run_metadata, canonical normalized issues, and non_production_outcomes. Additional adapter fields are allowed.",
     validEmptyExample: '{"schema_version":"1.0","run_metadata":{},"issues":[],"non_production_outcomes":[]}'
   },
   {
@@ -263,6 +263,14 @@ export function validateArtifactContract(
         message: issue.message,
         path: `${artifactPath}#${issue.path.join(".")}`
       }))
+    };
+  }
+  const findingsResult = validateFindingsSchema(result.data.issues, `${artifactPath}#issues`);
+  if (!findingsResult.ok) {
+    return {
+      ok: false,
+      issues: findingsResult.issues,
+      ...(findingsResult.value === undefined ? {} : { value: findingsResult.value })
     };
   }
   return { ok: true, issues: [], value: result.data };

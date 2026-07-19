@@ -140,6 +140,10 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("High impact + Low likelihood must render as Medium");
     expect(markdown).toContain("Medium impact + Low likelihood must render as Low");
     expect(markdown).toContain("Every production issue severity equals the Impact x Likelihood matrix result");
+    expect(markdown).toContain("canonical normalized finding");
+    expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
+    expect(markdown).toContain("canonical `strategy` field a non-empty");
+    expect(markdown).toContain("structured `strategy_provenance` object");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {

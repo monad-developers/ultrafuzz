@@ -469,15 +469,21 @@ contribute. Use the string `"unavailable"` for historical artifacts whose
 provenance handoffs are absent. Use an empty array for a current run with no
 property-derived findings.
 
-Each production issue object must contain `title`, `description`, `severity`,
-`likelihood`, `impact`, and `proof_of_concept`, plus `family_id`,
-`family_variants`, `related_findings`, and a structured `strategy` object
-carrying strategy names, detection rates, and loop-attempt provenance for
-downstream analysis when those fields are available. The production issue
-`severity`, `impact`, and `likelihood` values must use the same High, Medium, or
-Low report vocabulary rendered in Markdown. Do not add alternate severity fields
-that preserve nonstandard upstream severity labels. The production issue
-`title` value must include the same severity-local title ID rendered in the
+Each production issue object must satisfy the canonical normalized finding
+schema. Include at least `schema_version`, `id`, `title`, `status`,
+`severity_guess`, `confidence`, and `summary`, and keep those fields consistent
+with the final rendered issue. Also include the report-specific fields
+`description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
+`family_id`, `family_variants`, and `related_findings` when those fields are
+available. Keep the canonical `strategy` field a non-empty originating strategy
+name when one is available. Store multiple strategy names, detection rates, and
+loop-attempt provenance in a structured `strategy_provenance` object for
+downstream analysis. The production issue
+`severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
+High, Medium, or Low report vocabulary rendered in Markdown. Do not add
+alternate severity fields that preserve nonstandard upstream severity labels;
+`severity_guess` must contain the normalized matrix severity. The production
+issue `title` value must include the same severity-local title ID rendered in the
 Markdown heading, for example
 `[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
 
@@ -512,6 +518,11 @@ Before finishing, verify that:
 - `report.json` contains `schema_version`, `run_metadata`, `issues`, and
   `non_production_outcomes`, plus `property_provenance` as an array or
   `"unavailable"`.
+- Every `report.json` production issue satisfies the canonical normalized
+  finding schema, including `schema_version`, `id`, `title`, `status`,
+  `severity_guess`, `confidence`, and `summary`.
+- Every `report.json` production issue keeps canonical `strategy` as a string
+  when present and stores structured strategy details in `strategy_provenance`.
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
@@ -521,7 +532,7 @@ Before finishing, verify that:
   `run.json` when those metadata values are available.
 - `report.json.run_metadata.repository` matches the normalized `Repository`
   value rendered in `report.md`.
-- `report.json` production issue `severity`, `impact`, and `likelihood` fields
-  use only High, Medium, or Low.
+- `report.json` production issue `severity_guess`, `severity`, `impact`, and
+  `likelihood` fields use only High, Medium, or Low.
 - `report.json` does not contain alternate severity fields that preserve
   nonstandard upstream labels.

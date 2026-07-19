@@ -15,7 +15,7 @@ import type {
 export const EVAL_BENCHMARK_PROTOCOL_REVISION = "1";
 export const EVAL_EXECUTION_POLICY_REVISION = "ultrafuzz.eval-controller.v1";
 export const EVAL_SCORING_IMPLEMENTATION_REVISION = "ultrafuzz.eval-scorer.v1";
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v2";
+export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v3";
 export const DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS = 6 * 60 * 60;
 export const DEFAULT_EVAL_POLL_INTERVAL_MS = 15_000;
 
