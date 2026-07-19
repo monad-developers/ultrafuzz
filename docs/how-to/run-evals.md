@@ -132,9 +132,12 @@ ultrafuzz eval history <eval-run-id> \
 
 Use `--benchmark ultrafuzz-bench` and `--lane full` for the other cohort or
 lane. Publication refuses missing rows, failed or non-terminal workflows,
-invalid reports, incomplete lineage, unpinned targets, and missing scoring
+invalid reports, a matrix that differs from the exact public target/variant/trial
+scope, incomplete or inconsistent lineage, unpinned targets, and missing scoring
 evidence before modifying history. Repeating the same immutable eval result is
-idempotent; conflicting content for an existing result is rejected.
+idempotent; conflicting content for an existing result is rejected. Candidate,
+cohort, execution-policy, and scoring fingerprints remain available in every
+published observation.
 
 To regenerate charts without a benchmark or model call, run:
 
@@ -156,5 +159,7 @@ the documented generic runner directories. Provision all manifest target IDs
 at their exact revisions before enabling the runner label. Missing checkouts,
 revision drift, unavailable ground truth, failed model work, scoring errors, or
 partial rows fail before publication. The fixed publication branch updates one
-ready pull request; chart-only commits carry the workflow skip marker so merging
-them does not launch another benchmark generation.
+ready pull request. Before each update, pending observations are merged with the
+current base history so a later run cannot replace an unmerged generation.
+Chart-only merges are classified from their changed paths and do not allocate a
+benchmark runner, with the workflow skip marker retained as an additional signal.

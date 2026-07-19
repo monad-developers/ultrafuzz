@@ -67,6 +67,7 @@ describe("public benchmark manifests", () => {
     expect(suite.run.trials_per_variant).toBe(lanes.full.trials_per_variant);
     expect(suite.variants.every((variant) => !JSON.stringify(variant).includes("latest"))).toBe(true);
     expect(suite.variants.every((variant) => variant.workflow_input)).toBe(true);
+    expect(suite.variants.every((variant) => !JSON.stringify(variant).includes("benchmark_execution"))).toBe(true);
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {

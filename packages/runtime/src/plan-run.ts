@@ -252,7 +252,12 @@ export function transformTopologyForRun(
   topology: ProjectTopology,
   transform: PlanRunInput["topologyTransform"]
 ): ProjectTopology {
-  if (transform === undefined) return topology;
+  if (
+    transform === undefined ||
+    (transform.strategyLoops === undefined && (transform.excludedNodeIds?.length ?? 0) === 0)
+  ) {
+    return topology;
+  }
   const excluded = new Set(transform.excludedNodeIds ?? []);
   const nodeIds = new Set(topology.nodes.map((node) => node.id));
   for (const id of excluded) {

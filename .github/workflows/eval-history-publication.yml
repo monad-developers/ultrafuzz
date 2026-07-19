@@ -50,6 +50,20 @@ jobs:
         with:
           ref: main
 
+      - name: Validate publication inputs
+        env:
+          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          PUBLICATION_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
+        run: |
+          node -e '
+            const [artifactRunId, artifactName, evalRunId] = process.argv.slice(1);
+            if (!/^[0-9]+$/.test(artifactRunId)) throw new Error("artifact run ID must be numeric");
+            const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+            if (!safeId.test(artifactName)) throw new Error("artifact name is invalid");
+            if (!safeId.test(evalRunId)) throw new Error("eval run ID is invalid");
+          ' "$PUBLICATION_ARTIFACT_RUN_ID" "$PUBLICATION_ARTIFACT_NAME" "$PUBLICATION_EVAL_RUN_ID"
+
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
@@ -67,6 +81,12 @@ jobs:
       - name: Build Ultrafuzz
         run: pnpm -w build
 
+      - name: Preserve history already pending in the publication pull request
+        run: |
+          if git fetch --no-tags origin "automation/eval-history:refs/remotes/origin/automation/eval-history"; then
+            node scripts/ci/merge-pending-eval-history.mjs origin/automation/eval-history
+          fi
+
       - name: Download complete scored generation
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -76,13 +96,16 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Append history and regenerate charts
+        env:
+          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
         run: >-
-          node packages/cli/dist/index.js eval history "${{ inputs.eval_run_id }}"
+          node packages/cli/dist/index.js eval history "$PUBLICATION_EVAL_RUN_ID"
           --project .
           --benchmark "${{ inputs.benchmark }}"
           --lane "${{ inputs.lane }}"
           --repository "${{ github.server_url }}/${{ github.repository }}"
-          --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.artifact_run_id }}"
+          --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/$PUBLICATION_ARTIFACT_RUN_ID"
 
       - name: Verify deterministic publication output
         run: node packages/cli/dist/index.js eval history --project . --check

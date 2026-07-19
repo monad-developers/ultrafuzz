@@ -17,7 +17,7 @@ import {
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines } from "./utils.js";
+import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
 export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
@@ -46,6 +46,7 @@ export interface EvalHistoryObservation {
   model_profile: string;
   model: string;
   reasoning_effort: string;
+  execution_policy_fingerprint: string;
   scoring_fingerprint: string;
   precision: number;
   recall: number;
@@ -104,6 +105,7 @@ const observationSchema = z.strictObject({
   model_profile: safeText,
   model: safeText,
   reasoning_effort: safeText,
+  execution_policy_fingerprint: fingerprintSchema,
   scoring_fingerprint: fingerprintSchema,
   precision: ratio,
   recall: ratio,
@@ -238,6 +240,9 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     if (!score.lifecycle.workflow.terminal || score.lifecycle.workflow.status !== "succeeded") {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} did not finish successfully`);
     }
+    if (score.target_id !== row.target_id || score.variant_id !== row.variant_id || score.trial_id !== row.trial_id) {
+      throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} score identity is inconsistent`);
+    }
     if (!input.matchedGroundTruthByRow.has(row.id)) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} is missing scoring evidence`);
     }
@@ -258,7 +263,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       }
       return { target: target.id, revision: target.commit };
     })
-    .sort((left, right) => left.target.localeCompare(right.target));
+    .sort((left, right) => compareText(left.target, right.target));
   assertGenerationLineage(input, targetRevisions, provenance.scoring.ground_truth_sha256);
 
   return [...groups.values()]
@@ -266,9 +271,9 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       const leftRow = left[0]!;
       const rightRow = right[0]!;
       return (
-        leftRow.target_id.localeCompare(rightRow.target_id) ||
-        leftRow.variant_id.localeCompare(rightRow.variant_id) ||
-        leftRow.runner_model_profile.localeCompare(rightRow.runner_model_profile)
+        compareText(leftRow.target_id, rightRow.target_id) ||
+        compareText(leftRow.variant_id, rightRow.variant_id) ||
+        compareText(leftRow.runner_model_profile, rightRow.runner_model_profile)
       );
     })
     .map((rows) => {
@@ -315,6 +320,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         model_profile: profile,
         model,
         reasoning_effort: reasoning,
+        execution_policy_fingerprint: provenance.benchmark.execution_policy.fingerprint,
         scoring_fingerprint: provenance.scoring.fingerprint,
         precision: mean(scores.map((score) => score.precision)),
         recall: mean(scores.map((score) => score.recall)),
@@ -392,6 +398,9 @@ function completeProvenance(summary: EvalScoreSummary): {
   }
   if (!fingerprintSchema.safeParse(provenance.benchmark.cohort_fingerprint).success) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", "benchmark cohort fingerprint is invalid");
+  }
+  if (!fingerprintSchema.safeParse(provenance.benchmark.execution_policy.fingerprint).success) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", "execution policy fingerprint is invalid");
   }
   if (!fingerprintSchema.safeParse(provenance.scoring.fingerprint).success) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", "scoring fingerprint is invalid");
@@ -475,6 +484,7 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
 } {
   const root = evalRunRoot(input.projectRoot, input.evalRunId);
   const manifest = jsonFile<{
+    eval_run_id?: string;
     created_at?: string;
     suite?: EvalSuiteSpec;
     provenance?: EvalRunProvenance;
@@ -485,8 +495,18 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
   const scores = readJsonLines<EvalFindingScore>(path.join(root, "scores.jsonl"));
+  if (manifest.eval_run_id !== input.evalRunId || summary.eval_run_id !== input.evalRunId) {
+    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval artifact IDs do not match the requested run");
+  }
+  if (
+    manifest.provenance === undefined ||
+    stableStringify(manifest.provenance.candidate) !== stableStringify(summary.provenance?.candidate) ||
+    stableStringify(manifest.provenance.benchmark) !== stableStringify(summary.provenance?.benchmark)
+  ) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPATIBLE", "run and scoring lineage do not match");
+  }
   assertPublicBenchmarkGeneration(input.projectRoot, input.benchmark, input.lane, manifest.suite, matrix);
-  const matches = matchedGroundTruthByRow(matrix, scores);
+  const matches = matchedGroundTruthByRow(matrix, summary.rows, scores);
   const observations = createEvalHistoryObservations({
     benchmark: input.benchmark,
     lane: input.lane,
@@ -510,7 +530,7 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   };
 }
 
-function assertPublicBenchmarkGeneration(
+export function assertPublicBenchmarkGeneration(
   projectRoot: string,
   benchmark: EvalHistoryBenchmark,
   lane: EvalHistoryLane,
@@ -522,67 +542,122 @@ function assertPublicBenchmarkGeneration(
   );
   const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "lanes.json"));
   const expected = adaptBenchmarkManifestToEvalSuite({ benchmark, lane, cohort, lanes });
+  if (stableStringify(publicSuiteScope(suite)) !== stableStringify(publicSuiteScope(expected))) {
+    throw new EvalError(
+      "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
+      "eval suite does not match the checked-in public benchmark scope"
+    );
+  }
   const expectedTargets = new Map(expected.targets.map((target) => [target.id, target]));
-  const expectedProfiles = new Map(
-    Object.entries(expected.model_profiles).map(([id, profile]) => [
-      id,
-      `${profile.agent}\u0000${profile.model}\u0000${profile.reasoning}`
-    ])
-  );
-  const expectedVariants = new Map(
-    expected.variants.map((variant) => [variant.id, stableStringify(variant.workflow_input)])
-  );
-  if (
-    suite.suite !== expected.suite ||
-    suite.run.trials_per_variant !== expected.run.trials_per_variant ||
-    suite.targets.length !== expected.targets.length ||
-    matrix.length !== expected.targets.length * expected.variants.length * expected.run.trials_per_variant
-  ) {
+  const expectedVariants = new Map(expected.variants.map((variant) => [variant.id, variant]));
+  const expectedRows = new Set<string>();
+  for (const target of expected.targets) {
+    for (const variant of expected.variants) {
+      for (let trial = 1; trial <= expected.run.trials_per_variant; trial += 1) {
+        expectedRows.add(matrixScopeKey(target.id, variant.id, `trial-${trial}`));
+      }
+    }
+  }
+  if (matrix.length !== expectedRows.size) {
     throw new EvalError(
       "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
       "eval generation does not match the checked-in public benchmark scope"
     );
   }
-  for (const target of suite.targets) {
-    const pinned = expectedTargets.get(target.id);
-    if (pinned === undefined || target.repo !== pinned.repo || target.ref !== pinned.ref) {
-      throw new EvalError(
-        "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
-        `eval target ${target.id} is not in the checked-in public cohort`
-      );
-    }
-  }
+  const seenRows = new Set<string>();
   for (const row of matrix) {
-    const profile = expectedProfiles.get(row.runner_model_profile);
-    const actual = `${suite.model_profiles[row.runner_model_profile]?.agent ?? ""}\u0000${row.runner_model ?? ""}\u0000${row.runner_reasoning ?? ""}`;
+    const key = matrixScopeKey(row.target_id, row.variant_id, row.trial_id);
+    const target = expectedTargets.get(row.target_id);
+    const variant = expectedVariants.get(row.variant_id);
+    const runnerProfileId = variant?.runner_model_profile ?? expected.run.runner_model_profile;
+    const judgeProfileId = variant?.judge_model_profile ?? expected.run.judge_model_profile;
+    const runnerProfile = expected.model_profiles[runnerProfileId];
+    const judgeProfile = expected.model_profiles[judgeProfileId];
+    const expectedId = safeEvalId([row.target_id, row.variant_id, row.trial_id]);
+    const expectedRunId = safeEvalId([expected.suite, expectedId]);
     if (
-      !expectedTargets.has(row.target_id) ||
-      row.variant_id !== row.runner_model_profile ||
-      profile === undefined ||
-      profile !== actual ||
-      expectedVariants.get(row.variant_id) !== stableStringify(row.workflow_input)
+      !expectedRows.has(key) ||
+      seenRows.has(key) ||
+      target === undefined ||
+      variant === undefined ||
+      runnerProfile === undefined ||
+      judgeProfile === undefined ||
+      row.id !== expectedId ||
+      row.run_id !== expectedRunId ||
+      stableStringify(publicTargetScope(row.target)) !== stableStringify(target) ||
+      stableStringify(row.variant) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
+      stableStringify(row.workflow_input) !== stableStringify(variant.workflow_input) ||
+      row.runner_model_profile !== runnerProfileId ||
+      row.runner_model !== runnerProfile.model ||
+      row.runner_reasoning !== runnerProfile.reasoning ||
+      row.judge_model_profile !== judgeProfileId ||
+      row.judge_model !== judgeProfile.model ||
+      row.judge_reasoning !== judgeProfile.reasoning
     ) {
       throw new EvalError(
         "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
         `eval row ${row.id} is not part of the checked-in public benchmark matrix`
       );
     }
+    seenRows.add(key);
   }
+  if (seenRows.size !== expectedRows.size) {
+    throw new EvalError(
+      "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
+      "eval generation is missing rows from the checked-in public benchmark matrix"
+    );
+  }
+}
+
+function publicSuiteScope(suite: EvalSuiteSpec): Omit<EvalSuiteSpec, "ground_truth_root"> {
+  const { ground_truth_root: _groundTruthRoot, ...scope } = suite;
+  return {
+    ...scope,
+    targets: scope.targets.map((target) => {
+      const { path: _targetPath, ...publicTarget } = target;
+      return publicTarget;
+    })
+  };
+}
+
+function publicTargetScope(target: EvalMatrixRow["target"]): EvalSuiteSpec["targets"][number] {
+  const { path: _targetPath, ground_truth_path: _groundTruthPath, ...scope } = target;
+  return scope;
+}
+
+function matrixScopeKey(targetId: string, variantId: string, trialId: string): string {
+  return [targetId, variantId, trialId].join("\u0000");
 }
 
 function matchedGroundTruthByRow(
   matrix: EvalMatrixRow[],
+  rowScores: EvalScoreSummary["rows"],
   scores: EvalFindingScore[]
 ): Map<string, ReadonlySet<string>> {
   const result = new Map<string, Set<string>>(matrix.map((row) => [row.id, new Set<string>()]));
+  const evidenceCounts = new Map<string, number>(matrix.map((row) => [row.id, 0]));
   for (const score of scores) {
     const matches = result.get(score.row_id);
     if (matches === undefined) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `score references unknown row ${score.row_id}`);
     }
+    evidenceCounts.set(score.row_id, (evidenceCounts.get(score.row_id) ?? 0) + 1);
     const judge = score.judge_result;
     if (judge.classification === "true-positive" && judge.matched_ground_truth_bug_id !== undefined) {
       matches.add(judge.matched_ground_truth_bug_id);
+    }
+  }
+  for (const score of rowScores) {
+    const matches = result.get(score.row_id);
+    if (
+      matches === undefined ||
+      evidenceCounts.get(score.row_id) !== score.finding_count ||
+      matches.size !== score.true_positives
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `eval row ${score.row_id} has incomplete scoring evidence`
+      );
     }
   }
   return result;
@@ -653,9 +728,9 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     })
     .sort(
       (left, right) =>
-        left.series.localeCompare(right.series) ||
-        left.timestamp.localeCompare(right.timestamp) ||
-        left.commit.localeCompare(right.commit)
+        compareText(left.series, right.series) ||
+        compareText(left.timestamp, right.timestamp) ||
+        compareText(left.commit, right.commit)
     );
 }
 
@@ -750,7 +825,7 @@ function renderChart(
             `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="unavailable"><title>${xml(`${name} ${shortCommit}: unavailable`)}</title>`,
             `<line x1="${format(pointX - 4)}" y1="${format(pointY - 4)}" x2="${format(pointX + 4)}" y2="${format(pointY + 4)}" stroke="${color.get(name)}"/>`,
             `<line x1="${format(pointX + 4)}" y1="${format(pointY - 4)}" x2="${format(pointX - 4)}" y2="${format(pointY + 4)}" stroke="${color.get(name)}"/>`,
-            `<text x="${format(pointX)}" y="${format(pointY - 8)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="10" fill="#6b7280">n/a</text></a>`
+            `<text x="${format(pointX)}" y="${format(pointY - 8)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#6b7280">n/a ${shortCommit}</text></a>`
           );
           continue;
         }
@@ -762,12 +837,18 @@ function renderChart(
         );
       }
     }
-    const dateValues = [...new Set(points.map((point) => point.timestamp.slice(0, 10)))];
-    const dateLabels = dateValues.length === 1 ? dateValues : [dateValues[0]!, dateValues.at(-1)!];
-    for (const date of dateLabels) {
-      const timestamp = points.find((point) => point.timestamp.startsWith(date))?.timestamp ?? points[0]!.timestamp;
+    const chronological = [...points].sort(
+      (leftPoint, rightPoint) =>
+        compareText(leftPoint.timestamp, rightPoint.timestamp) || compareText(leftPoint.commit, rightPoint.commit)
+    );
+    const firstPoint = chronological[0]!;
+    const lastPoint = chronological.at(-1)!;
+    const dateLabels =
+      firstPoint.timestamp.slice(0, 10) === lastPoint.timestamp.slice(0, 10) ? [firstPoint] : [firstPoint, lastPoint];
+    for (const point of dateLabels) {
+      const date = point.timestamp.slice(0, 10);
       lines.push(
-        `<text x="${format(x(timestamp))}" y="${top + plotHeight + 20}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">${date}</text>`
+        `<text x="${format(x(point.timestamp))}" y="${top + plotHeight + 20}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">${date}</text>`
       );
     }
   }
@@ -876,6 +957,10 @@ function stableStringify(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function format(value: number): string {

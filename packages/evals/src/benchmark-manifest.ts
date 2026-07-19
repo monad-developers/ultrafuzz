@@ -244,10 +244,14 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
         benchmark_lane: input.lane,
         target_frameworks: Object.fromEntries(selectedTargets.map((target) => [target.id, target.framework])),
         excluded_strategy_families: lane.excluded_strategy_families,
-        benchmark_execution: {
-          ...(lane.strategy_loops === undefined ? {} : { strategy_loops: lane.strategy_loops }),
-          excluded_node_ids: lane.excluded_node_ids
-        }
+        ...(lane.strategy_loops === undefined && lane.excluded_node_ids.length === 0
+          ? {}
+          : {
+              benchmark_execution: {
+                ...(lane.strategy_loops === undefined ? {} : { strategy_loops: lane.strategy_loops }),
+                excluded_node_ids: lane.excluded_node_ids
+              }
+            })
       }
     })),
     run: {

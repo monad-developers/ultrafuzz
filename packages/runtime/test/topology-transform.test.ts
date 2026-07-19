@@ -57,6 +57,11 @@ test("per-run topology transform rejects unknown nodes, terminals, and invalid l
   assert.throws(() => transformTopologyForRun(topology(), { strategyLoops: 0 }), /positive integer/u);
 });
 
+test("an empty topology transform preserves the production topology object", () => {
+  const source = { version: 2, defaults: { strategy_loops: 3 }, nodes: topology().nodes } satisfies ProjectTopology;
+  assert.equal(transformTopologyForRun(source, { excludedNodeIds: [] }), source);
+});
+
 test("the checked-in smoke manifest produces a valid filtered production topology", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
   const lanes = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "benchmarks", "lanes.json"), "utf8")) as {

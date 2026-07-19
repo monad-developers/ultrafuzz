@@ -16,7 +16,7 @@ Published observations are append-only and reproducible from the
 [versioned history](benchmarks/history.json). Each point is labeled with and
 links to the candidate commit; series identify the benchmark cohort and
 smoke/full lane. The detailed history retains target, model, scoring, timing,
-cost, and completeness metadata.
+cost, execution-policy, and completeness metadata.
 
 | Quality                                                        | Coverage                                                                                                     |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |

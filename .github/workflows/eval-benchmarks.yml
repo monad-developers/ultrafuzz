@@ -28,12 +28,62 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  benchmark-and-publish:
+  classify_history_change:
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      !contains(github.event.workflow_run.display_title, '[skip eval-history]'))
+      github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    outputs:
+      run_benchmarks: ${{ steps.scope.outputs.run_benchmarks }}
+
+    steps:
+      - name: Check out the successful candidate
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+
+      - name: Classify the candidate change
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" != "workflow_run" ]; then
+            echo "run_benchmarks=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! changed_files="$(git diff --name-only HEAD^1 HEAD)"; then
+            echo "run_benchmarks=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          publication_file=false
+          unrelated_file=false
+          while IFS= read -r changed_file; do
+            case "$changed_file" in
+              benchmarks/history.json|docs/assets/eval-history/*)
+                publication_file=true
+                ;;
+              README.md)
+                ;;
+              "")
+                ;;
+              *)
+                unrelated_file=true
+                ;;
+            esac
+          done <<< "$changed_files"
+
+          if [ "$publication_file" = true ] && [ "$unrelated_file" = false ]; then
+            echo "run_benchmarks=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_benchmarks=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  benchmark-and-publish:
+    needs: classify_history_change
+    if: needs.classify_history_change.outputs.run_benchmarks == 'true'
     runs-on:
       - self-hosted
       - ultrafuzz-benchmark
@@ -82,6 +132,12 @@ jobs:
               --provider none
             node packages/cli/dist/index.js eval score "$eval_run_id" --project .
           done
+
+      - name: Preserve history already pending in the publication pull request
+        run: |
+          if git fetch --no-tags origin "automation/eval-history:refs/remotes/origin/automation/eval-history"; then
+            node scripts/ci/merge-pending-eval-history.mjs origin/automation/eval-history
+          fi
 
       - name: Append complete generations and regenerate charts
         run: |

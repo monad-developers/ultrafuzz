@@ -1,8 +1,17 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  adaptBenchmarkManifestToEvalSuite,
+  loadBenchmarkCohortManifest,
+  loadBenchmarkLanesManifest
+} from "../src/benchmark-manifest.js";
+import {
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
+  assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
   mergeEvalHistory,
@@ -10,12 +19,15 @@ import {
   renderEvalHistoryCharts,
   type EvalHistoryObservation
 } from "../src/history.js";
-import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary } from "../src/types.js";
+import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
+import { safeEvalId } from "../src/utils.js";
 import { testRow, testSuite } from "./helpers.js";
 
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CANDIDATE = "1111111111111111111111111111111111111111";
 const TARGET_REVISION = "2222222222222222222222222222222222222222";
 const FINGERPRINT = `sha256:${"a".repeat(64)}`;
+const EXECUTION_POLICY_FINGERPRINT = `sha256:${"d".repeat(64)}`;
 const SCORING_FINGERPRINT = `sha256:${"b".repeat(64)}`;
 
 function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHistoryObservation {
@@ -35,6 +47,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     model_profile: "benchmark-smoke",
     model: "gpt-5.6-luna",
     reasoning_effort: "high",
+    execution_policy_fingerprint: EXECUTION_POLICY_FINGERPRINT,
     scoring_fingerprint: SCORING_FINGERPRINT,
     precision: 0.75,
     recall: 0.5,
@@ -129,7 +142,7 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
         ground_truth_sha256: { "target-a": "c".repeat(64) },
         execution_policy: {
           revision: "ultrafuzz.eval.execution-policy.v1",
-          fingerprint: "d".repeat(64),
+          fingerprint: EXECUTION_POLICY_FINGERPRINT,
           max_parallel_targets: 1,
           max_parallel_runs: 1,
           node_telemetry: false,
@@ -291,6 +304,39 @@ describe("longitudinal eval history", () => {
         ])
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
+
+    const inconsistentIdentity = summary([rowScore(first.id), rowScore(second.id, { trial_id: "wrong-trial" })]);
+    expect(() =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        suite,
+        matrix: [first, second],
+        summary: inconsistentIdentity,
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set<string>()]
+        ])
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
+  });
+
+  it("requires the exact public target, variant, and trial matrix", () => {
+    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
+    const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json"));
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "smoke", cohort, lanes });
+    const matrix = publicMatrix(suite);
+
+    expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, matrix)).not.toThrow();
+
+    const duplicate = [...matrix];
+    duplicate[duplicate.length - 1] = matrix[0]!;
+    expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, duplicate)).toThrowError(
+      expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" })
+    );
   });
 
   it("renders deterministic linked SVGs and marks missing efficiency unavailable", () => {
@@ -311,6 +357,62 @@ describe("longitudinal eval history", () => {
     expect(first.get("precision.svg")).toContain(`https://github.com/monad-developers/ultrafuzz/commit/${CANDIDATE}`);
     expect(first.get("precision.svg")).toContain(CANDIDATE.slice(0, 7));
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
-    expect(first.get("wall-clock-time.svg")).toContain(">n/a<");
+    expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
+  });
+
+  it("labels the globally earliest and latest dates across series", () => {
+    const charts = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({ id: "later", benchmark: "evmbench", run_timestamp: "2026-07-19T12:00:00.000Z" }),
+          observation({
+            id: "earlier",
+            benchmark: "ultrafuzz-bench",
+            run_timestamp: "2026-07-17T12:00:00.000Z",
+            candidate_commit: "3333333333333333333333333333333333333333"
+          })
+        ]
+      })
+    );
+    const svg = charts.get("precision.svg")!;
+    expect(svg.indexOf(">2026-07-17</text>")).toBeLessThan(svg.indexOf(">2026-07-19</text>"));
   });
 });
+
+function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
+  const rows: EvalMatrixRow[] = [];
+  for (const target of suite.targets) {
+    for (const variant of suite.variants) {
+      for (let trial = 1; trial <= suite.run.trials_per_variant; trial += 1) {
+        const trialId = `trial-${trial}`;
+        const id = safeEvalId([target.id, variant.id, trialId]);
+        const runnerProfileId = variant.runner_model_profile ?? suite.run.runner_model_profile;
+        const judgeProfileId = variant.judge_model_profile ?? suite.run.judge_model_profile;
+        const runnerProfile = suite.model_profiles[runnerProfileId]!;
+        const judgeProfile = suite.model_profiles[judgeProfileId]!;
+        rows.push({
+          id,
+          target_id: target.id,
+          variant_id: variant.id,
+          trial_id: trialId,
+          run_id: safeEvalId([suite.suite, id]),
+          target: {
+            ...target,
+            path: path.join("/tmp/public-targets", target.id),
+            ground_truth_path: path.join("/tmp/public-ground-truth", target.ground_truth)
+          },
+          variant: { ...variant, prompt_overlay_paths: [] },
+          runner_model_profile: runnerProfileId,
+          judge_model_profile: judgeProfileId,
+          ...(runnerProfile.model === undefined ? {} : { runner_model: runnerProfile.model }),
+          ...(judgeProfile.model === undefined ? {} : { judge_model: judgeProfile.model }),
+          ...(runnerProfile.reasoning === undefined ? {} : { runner_reasoning: runnerProfile.reasoning }),
+          ...(judgeProfile.reasoning === undefined ? {} : { judge_reasoning: judgeProfile.reasoning }),
+          ...(variant.workflow_input === undefined ? {} : { workflow_input: variant.workflow_input })
+        });
+      }
+    }
+  }
+  return rows;
+}
