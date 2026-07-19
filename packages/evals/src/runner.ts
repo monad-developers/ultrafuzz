@@ -66,7 +66,7 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   provider?: string;
   /** `[eval]` section of the resolved ultrafuzz.toml (provider binding + credentials env names). */
   evalProviderConfig?: EvalConfig;
-  /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry with an active provider). */
+  /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry). */
   watch?: boolean;
   watchTimeoutSeconds?: number;
   pollIntervalMs?: number;
@@ -109,7 +109,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
     onWarning: (diagnostic) => diagnostics.push(diagnostic)
   });
-  const watch = input.watch ?? (planned.suite.reporting.node_telemetry && reporters.length > 0);
+  const watch = input.watch ?? planned.suite.reporting.node_telemetry;
   const resolvedProvenance = buildEvalRunProvenance(planned, {
     watch,
     ...(input.watchTimeoutSeconds !== undefined ? { watchTimeoutSeconds: input.watchTimeoutSeconds } : {}),
