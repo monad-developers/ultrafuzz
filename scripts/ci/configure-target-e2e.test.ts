@@ -85,3 +85,20 @@ describe("target E2E workflow", () => {
     expect(pnpmSetupIndex).toBeLessThan(nodeCacheIndex);
   });
 });
+
+describe("target E2E runner", () => {
+  it("syncs pinned references before validation and run launch", () => {
+    const script = readFileSync(join(repoRoot, "scripts", "ci", "run-target-e2e.sh"), "utf-8");
+    const syncCommandIndex = script.indexOf('"$ultrafuzz_bin" references sync');
+    const syncCallIndex = script.indexOf("\nsync_reference_cache\n");
+    const validateIndex = script.indexOf('run_cli_json "$evidence_root/validate.json"');
+    const runIndex = script.indexOf('run_cli_json "$evidence_root/run.json"');
+
+    expect(syncCommandIndex).toBeGreaterThanOrEqual(0);
+    expect(syncCallIndex).toBeGreaterThanOrEqual(0);
+    expect(validateIndex).toBeGreaterThanOrEqual(0);
+    expect(runIndex).toBeGreaterThanOrEqual(0);
+    expect(syncCallIndex).toBeLessThan(validateIndex);
+    expect(syncCallIndex).toBeLessThan(runIndex);
+  });
+});

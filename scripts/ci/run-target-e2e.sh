@@ -149,6 +149,16 @@ install_target_workflow_dependencies() {
   fi
 }
 
+sync_reference_cache() {
+  run_cli_json "$evidence_root/references-sync.json" "$evidence_root/references-sync.stderr.log" \
+    "$ultrafuzz_bin" references sync --project "$target_root" --json
+  assert_cli_ok "$evidence_root/references-sync.json" "references sync"
+
+  run_cli_json "$evidence_root/references-status.json" "$evidence_root/references-status.stderr.log" \
+    "$ultrafuzz_bin" references status --project "$target_root" --json
+  assert_cli_ok "$evidence_root/references-status.json" "references status"
+}
+
 wait_for_report() {
   local deadline=$((SECONDS + wait_seconds))
   while [ "$SECONDS" -le "$deadline" ]; do
@@ -193,6 +203,7 @@ assert_cli_ok "$evidence_root/init.json" "init"
 
 bun "$config_helper" "$target_root" "$node_timeout_seconds"
 install_target_workflow_dependencies
+sync_reference_cache
 
 run_cli_json "$evidence_root/validate.json" "$evidence_root/validate.stderr.log" \
   "$ultrafuzz_bin" validate --project "$target_root" --json
