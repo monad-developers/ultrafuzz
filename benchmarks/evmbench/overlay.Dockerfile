@@ -22,7 +22,7 @@ ARG FRONTIER_EVALS_COMMIT
 COPY --from=builder /opt/ultrafuzz /opt/ultrafuzz
 COPY --from=builder /opt/ultrafuzz-smithers /opt/ultrafuzz-smithers
 COPY benchmarks/evmbench/profiles/${PROFILE}.json /opt/ultrafuzz/evmbench-profile.json
-RUN node -e 'const fs=require("node:fs");const p="/opt/ultrafuzz/evmbench-profile.json";const v=JSON.parse(fs.readFileSync(p,"utf8"));v.model=process.argv[1];v.reasoning=process.argv[2];fs.writeFileSync(p,JSON.stringify(v,null,2)+"\n")' "${MODEL}" "${REASONING}"
+RUN ["node", "-e", "const fs=require('node:fs');const p='/opt/ultrafuzz/evmbench-profile.json';const model=process.env.MODEL;const reasoning=process.env.REASONING;if(!model||!reasoning)throw new Error('missing profile override');const v=JSON.parse(fs.readFileSync(p,'utf8'));v.model=model;v.reasoning=reasoning;fs.writeFileSync(p,JSON.stringify(v,null,2)+'\\n')"]
 
 LABEL org.opencontainers.image.revision="${ULTRAFUZZ_COMMIT}" \
       org.ultrafuzz.evmbench.commit="${EVMBENCH_COMMIT}" \

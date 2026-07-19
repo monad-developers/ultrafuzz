@@ -9,12 +9,15 @@ import {
   verifyEvmbenchDefinition,
   writeEvmbenchDefinition
 } from "./definition.js";
+import { invocationCwd, requireCliPath, resolveCliPath } from "./options.js";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  const harnessRoot = requiredOption(args, "--harness");
+  const cwd = invocationCwd();
+  const harnessRoot = requireCliPath(option(args, "--harness"), "--harness", cwd);
   const repoRoot = findUltrafuzzRepoRoot();
-  const benchmarkDir = path.resolve(option(args, "--benchmark-dir") ?? path.join(repoRoot, "benchmarks", "evmbench"));
+  const benchmarkDir =
+    resolveCliPath(option(args, "--benchmark-dir"), cwd) ?? path.join(repoRoot, "benchmarks", "evmbench");
   const write = args.includes("--write");
   if (write && args.includes("--check")) throw new Error("--write and --check are mutually exclusive");
   if (write) {
@@ -33,12 +36,6 @@ async function main(): Promise<void> {
 function option(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index === -1 ? undefined : args[index + 1];
-}
-
-function requiredOption(args: string[], name: string): string {
-  const value = option(args, name);
-  if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
-  return path.resolve(value);
 }
 
 await main();

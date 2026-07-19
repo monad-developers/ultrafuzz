@@ -3,7 +3,11 @@
 .claude
 .codex-runs
 .smithers
-.ultrafuzz
+.ultrafuzz/*
+!.ultrafuzz/prompts
+!.ultrafuzz/prompts/**
+!.ultrafuzz/references.yml
+!.ultrafuzz/topology.yml
 .worktrees
 .env
 .env.*

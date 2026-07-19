@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { runEvmbench, type EvmbenchRunnerOptions } from "./runner.js";
+import { invocationCwd, resolveCliPath } from "./options.js";
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
@@ -8,6 +9,7 @@ if (args.includes("--help") || args.includes("-h")) {
     "usage: pnpm benchmark:evmbench -- [--split debug|detect-tasks] [--audit id] [--profile smoke|full] [--model id] [--reasoning level] [--concurrency n] [--auth-path file] [--dry-run] [--gold]"
   );
 } else {
+  const cwd = invocationCwd();
   const options: EvmbenchRunnerOptions = {
     split: enumOption(args, "--split", ["debug", "detect-tasks"]),
     audit: option(args, "--audit"),
@@ -15,10 +17,10 @@ if (args.includes("--help") || args.includes("-h")) {
     model: option(args, "--model"),
     reasoning: option(args, "--reasoning"),
     concurrency: integerOption(args, "--concurrency"),
-    harnessRoot: option(args, "--harness"),
-    cacheDir: option(args, "--cache-dir"),
-    outputDir: option(args, "--output"),
-    authPath: option(args, "--auth-path"),
+    harnessRoot: resolveCliPath(option(args, "--harness"), cwd),
+    cacheDir: resolveCliPath(option(args, "--cache-dir"), cwd),
+    outputDir: resolveCliPath(option(args, "--output"), cwd),
+    authPath: resolveCliPath(option(args, "--auth-path"), cwd),
     dryRun: args.includes("--dry-run"),
     gold: args.includes("--gold")
   };
