@@ -127,7 +127,7 @@ function accountingEfficiency(
     return unavailableAccounting("accounting-unavailable");
   }
 
-  const totalTokens = nonNegativeNumber(cumulative.total_tokens ?? cumulative.totalTokens);
+  const totalTokens = nonNegativeInteger(cumulative.total_tokens ?? cumulative.totalTokens);
   // The current durable accounting schema uses the presence of total_tokens as
   // its completeness signal. The optional flag lets imported snapshots
   // explicitly declare incomplete usage without making current snapshots fail.

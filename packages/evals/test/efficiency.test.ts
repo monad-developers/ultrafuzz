@@ -242,6 +242,32 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
   });
 
+  it("does not publish fractional token totals as complete usage", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-fractional-tokens-"));
+    writeTerminalRun(runRoot);
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      JSON.stringify({
+        accounting: {
+          cumulative: {
+            total_tokens: 12.5,
+            estimated_spend_usd: 0.1,
+            usage_complete: true,
+            pricing_complete: true,
+            partial_pricing: false
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.total_tokens).toBeNull();
+    expect(summary.efficiency.usage).toEqual({ status: "unavailable", reason: "usage-incomplete" });
+    expect(summary.efficiency.cost_usd).toBe(0.1);
+    expect(summary.efficiency.cost).toEqual({ status: "complete", reason: null });
+  });
+
   it("does not infer zero cost from incomplete zero-token usage", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-incomplete-zero-"));
     writeTerminalRun(runRoot);
