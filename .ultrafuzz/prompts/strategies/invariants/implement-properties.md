@@ -14,6 +14,8 @@ property catalog into the existing Recon/Chimera invariant suite.
 
 Read the consolidated deduplicated property catalog before selecting work:
 
+{{artifact_path:property-specification-fanin}}/properties.json
+
 {{artifact_path:property-specification-fanin}}/properties.md
 
 Read the current invariant suite handoffs before editing:
@@ -35,14 +37,16 @@ catalog priority values are:
 
 ## Work
 
-1. Parse the catalog into a stable property list.
+1. Parse `properties.json` into a stable property list. Use `properties.md`
+   only as its human-readable companion.
    - Only select properties whose `priority` is one of the included priority
      values above.
-   - Preserve each selected property's id, title, priority, oracle, setup
+   - Preserve each selected property's canonical `id` as `property_id`, plus
+     its title, priority, oracle, setup
      requirements, preconditions, source lenses, and false-positive risks in
      the implementation artifact.
-   - If the catalog is Markdown with tables instead of JSON, extract the same
-     fields from the table and nearby prose. Do not guess missing priority.
+   - Do not guess missing priority or replace canonical IDs with Markdown row
+     numbers.
 
 2. Triage selected properties without unbounded fanout.
    - Work in-process by default. Do not spawn one sub-agent per selected
@@ -106,6 +110,29 @@ Write structured implementation records to:
 
 {{artifact_dir}}/implemented-properties.json
 
+Use this exact top-level shape:
+
+```json
+{
+  "schema_version": "ultrafuzz.implemented-properties.v1",
+  "properties": [
+    {
+      "property_id": "property-1",
+      "status": "implemented",
+      "implementation_paths": ["test/recon/Properties.sol"],
+      "test_paths": ["test/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+    }
+  ]
+}
+```
+
+`status` must be `implemented`, `pending`, `deferred`, or `blocked`. Include
+both path arrays on every record, using empty arrays when no path exists. A
+`property_id` must exactly match a canonical ID in `properties.json`; dangling
+references fail artifact validation. Preserve generated and changed test paths
+in `test_paths` and invariant/helper implementation paths in
+`implementation_paths`.
+
 Write a generated-test manifest to:
 
 {{artifact_dir}}/generated-tests.json
@@ -117,6 +144,9 @@ Write structured findings to:
 Use an empty JSON array for findings unless property implementation itself
 finds a concrete production issue. Keep implementation-only blockers in
 `implemented-properties.json`, not as production findings.
+When such a finding is caused by a catalog property, add a non-empty
+`property_ids` array containing its canonical ID or IDs. Omit `property_ids`
+for findings unrelated to a catalog property.
 
 If you changed files in the isolated workspace, save a patch at:
 

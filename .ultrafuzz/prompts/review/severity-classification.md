@@ -32,6 +32,7 @@ Write reportable severity records to
 {{artifact_path}}/severity-classified-findings.json as JSON. Each kept object
 must preserve upstream provenance fields and assign a stable `id`. Use
 `schema_version: "1.0"` on every emitted finding object.
+Preserve each property-derived finding's `property_ids` unchanged.
 
 For every production report candidate, include these machine-readable fields:
 

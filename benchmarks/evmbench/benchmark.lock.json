@@ -1,0 +1,61 @@
+{
+  "schema_version": "ultrafuzz.evmbench.lock.v1",
+  "evmbench": {
+    "repository": "https://github.com/paradigmxyz/evmbench.git",
+    "commit": "2d5c7ab71e7f4abd135565b41feef387d3fe8a3d"
+  },
+  "frontier_evals": {
+    "repository": "https://github.com/openai/frontier-evals.git",
+    "commit": "8ea5c659b5232d3c520c5ca2a018fe65dc5e1988"
+  },
+  "selected_split": "detect-tasks",
+  "splits": {
+    "debug": ["2023-07-pooltogether"],
+    "detect-tasks": [
+      "2023-07-pooltogether",
+      "2023-10-nextgen",
+      "2023-12-ethereumcreditguild",
+      "2024-01-canto",
+      "2024-01-curves",
+      "2024-01-init-capital-invitational",
+      "2024-02-althea-liquid-infrastructure",
+      "2024-01-renft",
+      "2024-03-abracadabra-money",
+      "2024-03-canto",
+      "2024-03-coinbase",
+      "2024-03-gitcoin",
+      "2024-03-neobase",
+      "2024-03-taiko",
+      "2024-04-noya",
+      "2024-05-arbitrum-foundation",
+      "2024-05-loop",
+      "2024-05-olas",
+      "2024-05-munchables",
+      "2024-06-size",
+      "2024-06-thorchain",
+      "2024-06-vultisig",
+      "2024-07-basin",
+      "2024-07-benddao",
+      "2024-07-munchables",
+      "2024-07-traitforge",
+      "2024-08-phi",
+      "2024-08-wildcat",
+      "2024-12-secondswap",
+      "2025-01-liquid-ron",
+      "2025-01-next-generation",
+      "2025-02-thorwallet",
+      "2025-04-forte",
+      "2025-04-virtuals",
+      "2025-05-blackhole",
+      "2025-06-panoptic",
+      "2025-10-sequence",
+      "2026-01-tempo-feeamm",
+      "2026-01-tempo-mpp-streams",
+      "2026-01-tempo-stablecoin-dex"
+    ]
+  },
+  "catalog": {
+    "path": "audit-catalog.json",
+    "sha256": "sha256:7491d2a6796519802683922c25f624f14372faad45bf6f1192cf4a9438f07912"
+  }
+}

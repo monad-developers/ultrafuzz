@@ -4,7 +4,7 @@ export interface ModalGroundTruthBug {
   severity?: string;
 }
 
-const ISSUE_HEADING = /\[([A-Za-z][A-Za-z0-9_-]*-\d{1,4})\]\s*[-–—:]\s*(.+)$/u;
+const ISSUE_HEADING = /\[([A-Za-z][A-Za-z0-9_-]*-\d{1,4})\](?:\s*[-–—:]\s*|\s+)(.+)$/u;
 
 export function convertAuditMarkdownGroundTruth(
   markdown: string,

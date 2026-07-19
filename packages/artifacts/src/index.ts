@@ -6,6 +6,7 @@ export * from "./findings.js";
 export * from "./findings-schema.js";
 export * from "./generated-tests.js";
 export * from "./manifests.js";
+export * from "./property-provenance.js";
 export * from "./run-layout.js";
 export * from "./safe-paths.js";
 export * from "./state.js";

@@ -115,10 +115,12 @@ with `artifacts/` or `.ultrafuzz/`. The runtime-owned
 `artifact-manifest.json` path is reserved and cannot be declared as an output.
 
 Built-in contracts include `ultrafuzz/findings@1`,
-`ultrafuzz/generated-tests@1`, `ultrafuzz/nonempty-markdown@1`,
-`ultrafuzz/json-object@1`, `ultrafuzz/json-array@1`, `ultrafuzz/report@1`, and
-`ultrafuzz/text@1`. Contract definitions supply both runtime validation and the
-shape and valid-empty guidance appended to prompts.
+`ultrafuzz/generated-tests@1`, `ultrafuzz/properties@1`,
+`ultrafuzz/implemented-properties@1`, `ultrafuzz/property-campaign@1`,
+`ultrafuzz/nonempty-markdown@1`, `ultrafuzz/json-object@1`,
+`ultrafuzz/json-array@1`, `ultrafuzz/report@1`, and `ultrafuzz/text@1`.
+Contract definitions supply both runtime validation and the shape and
+valid-empty guidance appended to prompts.
 
 ## Meta Nodes
 

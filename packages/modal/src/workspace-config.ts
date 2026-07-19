@@ -1,4 +1,9 @@
-import type { ModalModelSpec, ModelProvider } from "./defaults.js";
+import {
+  DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
+  DEFAULT_MODAL_MAX_PARALLEL_NODES,
+  type ModalModelSpec,
+  type ModelProvider
+} from "./defaults.js";
 import { remoteAuthDir } from "./layout.js";
 
 export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number): string {
@@ -13,8 +18,8 @@ repo = "."
 
 [run]
 output_dir = ".ultrafuzz/runs"
-max_parallel_agents = 4
-max_parallel_nodes = 8
+max_parallel_agents = ${DEFAULT_MODAL_MAX_PARALLEL_AGENTS}
+max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
 keep_workspaces = true
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}

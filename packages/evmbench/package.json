@@ -1,0 +1,25 @@
+{
+  "name": "@ultrafuzz/evmbench",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "benchmark": "pnpm run build && node dist/cli.js",
+    "build": "tsc -p tsconfig.build.json",
+    "lock": "pnpm run build && node dist/update-lock.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "yaml": "^2.8.0",
+    "zod": "^4.4.3"
+  }
+}

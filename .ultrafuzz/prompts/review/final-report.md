@@ -39,6 +39,26 @@ Finding lifecycle ledger:
 Dedupe report:
 `{{artifact_path:dedupe-findings}}/deduped-findings.json`
 
+Use these property provenance handoffs when they exist:
+
+Canonical property catalog:
+`{{artifact_path:property-specification-fanin}}/properties.json`
+
+Implemented property records:
+`{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
+
+Invariant campaign results:
+`{{artifact_path:stateful-invariant-campaign}}/echidna-results.json` and
+`{{artifact_path:stateful-invariant-campaign}}/medusa-results.json`
+
+These four files form the provenance join from a finding's `property_ids` to
+its canonical properties, source lens rows, implementation/test paths, and
+recorded fuzzer backends. Treat references to an unknown canonical property as
+an invalid current-run artifact. Historical or external artifacts may predate
+this contract: if any provenance handoff or `property_ids` lineage needed for
+the join is absent, render Property provenance as `unavailable` and continue
+report generation.
+
 Use these setup handoffs:
 
 Project discovery:
@@ -388,9 +408,29 @@ human-readable Strategy section. Do not call this metric Temperature.
 
 ## Additional Sections
 
+Add `## Property provenance` after the production issue entries. For every
+property-derived production or non-production finding, render one concise table
+row containing:
+
+- its final finding ID/title;
+- canonical property ID or IDs from `property_ids`;
+- every source `source_node_id` and `source_property_id` joined from
+  `properties.json`;
+- the union of `implementation_paths` and `test_paths` joined from
+  `implemented-properties.json`;
+- every originating backend recorded for the same stable finding ID in
+  `echidna-results.json` and `medusa-results.json`, otherwise `unavailable`.
+
+Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
+IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
+finding with no `property_ids`; it is a valid non-property finding. If current
+artifacts contain no property-derived findings, write `No property-derived
+findings.` If historical lineage is absent, write `unavailable` instead of
+failing or guessing.
+
 When lifecycle records contain `comparison_disposition`, add a concise
-`## Prior finding disposition` section after the production issue entries and
-before the non-production appendix. Group entries under exactly these labels
+`## Prior finding disposition` section after Property provenance and before
+the non-production appendix. Group entries under exactly these labels
 when present: `Promoted again`, `Rediscovered but demoted`, `Not reproduced`,
 and `Not searched`. Match records by `dedupe_key` or family ids from the ledger,
 not by titles.
@@ -403,10 +443,11 @@ appendix short and do not include exploit-style PoC sections for these outcomes.
 
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
-production issue entries with their Strategy sections, optional prior finding
-disposition section, and non-production actionable outcomes appendix. If there
-are no production issues and no appendix outcomes, skip the issue index table
-and write `No issues reported.`
+production issue entries with their Strategy sections, Property provenance,
+optional prior finding disposition section, and non-production actionable
+outcomes appendix. If there are no production issues and no appendix outcomes,
+skip the issue index table and write `No issues reported.` before the Property
+provenance section.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
@@ -414,17 +455,35 @@ Save the human-readable report to `{{artifact_path}}/report.md`.
 
 Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Include
 `schema_version`, a `run_metadata` object matching the public Run summary
-fields, a production `issues` array, and a `non_production_outcomes` array.
+fields, a production `issues` array, a `non_production_outcomes` array, and
+`property_provenance`.
 
-Each production issue object must contain `title`, `description`, `severity`,
-`likelihood`, `impact`, and `proof_of_concept`, plus `family_id`,
-`family_variants`, `related_findings`, and a structured `strategy` object
-carrying strategy names, detection rates, and loop-attempt provenance for
-downstream analysis when those fields are available. The production issue
-`severity`, `impact`, and `likelihood` values must use the same High, Medium, or
-Low report vocabulary rendered in Markdown. Do not add alternate severity fields
-that preserve nonstandard upstream severity labels. The production issue
-`title` value must include the same severity-local title ID rendered in the
+When provenance is available, `property_provenance` must be an array with one
+object per property-derived finding. Each object contains `finding_id`,
+`title`, non-empty `property_ids`, `sources` entries with `source_node_id` and
+`source_property_id`, `implementation_paths`, and `test_paths`. Use
+`fuzzer_backend` when exactly one backend produced the finding, or a unique
+sorted `fuzzer_backends` array when several backends produced the same stable
+finding ID. Never emit both fields. Use stable unions when several properties
+contribute. Use the string `"unavailable"` for historical artifacts whose
+provenance handoffs are absent. Use an empty array for a current run with no
+property-derived findings.
+
+Each production issue object must satisfy the canonical normalized finding
+schema. Include at least `schema_version`, `id`, `title`, `status`,
+`severity_guess`, `confidence`, and `summary`, and keep those fields consistent
+with the final rendered issue. Also include the report-specific fields
+`description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
+`family_id`, `family_variants`, and `related_findings` when those fields are
+available. Keep the canonical `strategy` field a non-empty originating strategy
+name when one is available. Store multiple strategy names, detection rates, and
+loop-attempt provenance in a structured `strategy_provenance` object for
+downstream analysis. The production issue
+`severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
+High, Medium, or Low report vocabulary rendered in Markdown. Do not add
+alternate severity fields that preserve nonstandard upstream severity labels;
+`severity_guess` must contain the normalized matrix severity. The production
+issue `title` value must include the same severity-local title ID rendered in the
 Markdown heading, for example
 `[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
 
@@ -457,14 +516,23 @@ Before finishing, verify that:
   Medium, or Low followed by a colon.
 - Every production issue severity equals the Impact x Likelihood matrix result.
 - `report.json` contains `schema_version`, `run_metadata`, `issues`, and
-  `non_production_outcomes`.
+  `non_production_outcomes`, plus `property_provenance` as an array or
+  `"unavailable"`.
+- Every `report.json` production issue satisfies the canonical normalized
+  finding schema, including `schema_version`, `id`, `title`, `status`,
+  `severity_guess`, `confidence`, and `summary`.
+- Every `report.json` production issue keeps canonical `strategy` as a string
+  when present and stores structured strategy details in `strategy_provenance`.
+- `report.md` contains `## Property provenance`, including every
+  property-derived finding and no invented property IDs for non-property
+  findings.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from
   `run.json` when those metadata values are available.
 - `report.json.run_metadata.repository` matches the normalized `Repository`
   value rendered in `report.md`.
-- `report.json` production issue `severity`, `impact`, and `likelihood` fields
-  use only High, Medium, or Low.
+- `report.json` production issue `severity_guess`, `severity`, `impact`, and
+  `likelihood` fields use only High, Medium, or Low.
 - `report.json` does not contain alternate severity fields that preserve
   nonstandard upstream labels.

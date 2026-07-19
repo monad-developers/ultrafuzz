@@ -38,6 +38,9 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(yaml@2.9.0)
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
 
   packages/artifacts:
     dependencies:
@@ -138,6 +141,15 @@ importers:
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
+  packages/evmbench:
+    dependencies:
       yaml:
         specifier: ^2.8.0
         version: 2.9.0

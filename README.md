@@ -71,6 +71,7 @@ cost, execution-policy, and completeness metadata.
 - [CLI](docs/cli.md)
 - [Config](docs/config.md)
 - [Eval Suites](docs/reference/evals.md)
+- [EVMBench integration](benchmarks/evmbench/README.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
 

@@ -160,7 +160,7 @@ describe("versioned eval lineage", () => {
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
       judge_mode: "deterministic",
-      judge_prompt_version: "ultrafuzz-eval-judge-v2",
+      judge_prompt_version: "ultrafuzz-eval-judge-v3",
       judge_models: ["gpt-5.5"],
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
     });

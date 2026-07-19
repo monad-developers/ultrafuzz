@@ -7,6 +7,8 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
+    "benchmark:evmbench": "pnpm --filter @ultrafuzz/evmbench benchmark",
+    "benchmark:evmbench:lock": "pnpm --filter @ultrafuzz/evmbench lock",
     "build": "pnpm -r build",
     "benchmark:check": "pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/config test && pnpm --filter @ultrafuzz/runtime test && pnpm --filter @ultrafuzz/evals test && node packages/cli/dist/index.js eval history --check --project .",
     "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w build && pnpm -w validate:release",
@@ -15,7 +17,8 @@
     "format:check": "prettier --check .",
     "lint": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\"",
     "lint:fix": "eslint \"packages/**/*.{ts,js,mjs}\" \"scripts/**/*.{ts,js,mjs}\" \"*.{js,mjs}\" --fix",
-    "test": "pnpm -r test",
+    "test": "pnpm run test:target-e2e && pnpm -r test",
+    "test:target-e2e": "pnpm --filter @ultrafuzz/artifacts^... build && pnpm --filter @ultrafuzz/artifacts build && bun test scripts/ci/*.test.ts",
     "validate:release": "node scripts/validate-release.mjs",
     "typecheck": "pnpm -r typecheck"
   },
@@ -29,7 +32,8 @@
     "prettier": "^3.9.4",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.62.1",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "yaml": "^2.8.0"
   },
   "workspaces": [
     "packages/security",
@@ -41,6 +45,7 @@
     "packages/runtime",
     "packages/evals",
     "packages/dashboard",
+    "packages/evmbench",
     "packages/cli"
   ]
 }
