@@ -2509,6 +2509,41 @@ test("syncRun fails active nodes when the workflow runner is orphaned", async ()
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "orphaned");
 });
 
+test("syncRun repairs complete artifacts for a nonterminal workflow node", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-artifact-produced";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 2 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-artifact-produced", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-artifact-produced", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-produced");
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts/project-discovery/artifact-manifest.json")),
+    true
+  );
+});
+
 test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

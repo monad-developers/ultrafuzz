@@ -52,6 +52,7 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain("report_attempt");
     expect(workerSource).toContain('child.kill("SIGKILL")');
     expect(workerSource).toContain("recoverableNodeEntries");
+    expect(workerSource).toContain("workflowArtifactsComplete");
     expect(workerSource).toContain("const RECOVERY_MAX_RESETS = 96");
     expect(workerSource).toContain("stale_running_node_count");
     expect(workerSource).toContain("recently_reset_node_count");

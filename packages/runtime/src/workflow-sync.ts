@@ -23,7 +23,7 @@ import {
   type RunStatus
 } from "@ultrafuzz/artifacts";
 
-import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
+import { dependencyGateForNode, verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
   ArtifactReconciliationInterruptedError,
   isRetryableArtifactReconciliationError,
@@ -987,7 +987,12 @@ async function synchronizeTasks(input: {
     }
     const recoverableEvidence = workflowHealthRecoveryEvidence(
       input.inspect,
-      artifactCompleteRecoveryEvidence(evidence, previous, input.layout, task.attemptId)
+      artifactProducedRecoveryEvidence({
+        layout: input.layout,
+        node,
+        task,
+        evidence: artifactCompleteRecoveryEvidence(evidence, previous, input.layout, task.attemptId)
+      })
     );
 
     const needsFinalization =
@@ -1545,6 +1550,33 @@ function artifactCompleteRecoveryEvidence(
     status: "succeeded",
     workflowState: "artifact-complete",
     ...(previous?.finished_at === undefined ? {} : { finishedAt: previous.finished_at })
+  };
+}
+
+function artifactProducedRecoveryEvidence(input: {
+  layout: RunLayout;
+  node: PlannedGraphNode;
+  task: StoredWorkflowTask;
+  evidence: NodeWorkflowEvidence;
+}): NodeWorkflowEvidence {
+  if (terminalStatus(input.evidence.status) || input.evidence.status === "running") {
+    return input.evidence;
+  }
+  if (input.node.required_artifacts.length === 0) {
+    return input.evidence;
+  }
+  const state = readRunState(input.layout);
+  if (!dependencyGateForNode(input.node, state).ok) {
+    return input.evidence;
+  }
+  const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+  if (!gate.ok) {
+    return input.evidence;
+  }
+  return {
+    ...input.evidence,
+    status: "succeeded",
+    workflowState: "artifact-produced"
   };
 }
 

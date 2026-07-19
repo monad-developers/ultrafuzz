@@ -417,7 +417,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
     pruneResetCooldowns(resetCooldowns);
     const state = await synchronizedRunState(target);
-    if (state?.status === "succeeded") {
+    if (state?.status === "succeeded" || workflowArtifactsComplete(state)) {
       return true;
     }
     if (state?.run_id === undefined || state.nodes === undefined) {
@@ -466,12 +466,14 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
     }
 
     const terminal = await waitForWorkflowTerminal(target, resetCooldowns);
-    if (terminal?.status === "succeeded") {
+    if (terminal?.status === "succeeded" || workflowArtifactsComplete(terminal)) {
       return true;
     }
     if (terminal?.status !== "failed") return false;
   }
-  return synchronizedRunState(target).then((state) => state?.status === "succeeded");
+  return synchronizedRunState(target).then(
+    (state) => state?.status === "succeeded" || workflowArtifactsComplete(state)
+  );
 }
 
 function resetNodeKeys(entry: RecoverableNodeEntry): string[] {
@@ -559,6 +561,9 @@ async function waitForWorkflowTerminal(
       await sleep(RECOVERY_POLL_MS);
       continue;
     }
+    if (workflowArtifactsComplete(state)) {
+      return { ...state, status: "succeeded" };
+    }
     if (isTerminalWorkflowStatus(state.status)) {
       return state;
     }
@@ -591,6 +596,13 @@ function recoverableNodeEntries(state: DurableRunState): RecoverableNodeEntry[] 
 
 function isTerminalWorkflowStatus(status: string | undefined): boolean {
   return status === "succeeded" || status === "failed" || status === "timed-out" || status === "canceled";
+}
+
+function workflowArtifactsComplete(state: DurableRunState | undefined): boolean {
+  const nodes = Object.values(state?.nodes ?? {});
+  return (
+    nodes.length > 0 && nodes.every((node) => node.status === "succeeded" || node.status === "reused-from-prior-run")
+  );
 }
 
 async function readRunSummary(evalDir: string): Promise<{ records?: Array<{ final_status?: string }> }> {
