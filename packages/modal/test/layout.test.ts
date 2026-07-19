@@ -55,6 +55,7 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain("stale_running_node_count");
     expect(workerSource).toContain("recently_reset_node_count");
     expect(workerSource).toContain("waiting for reset propagation");
+    expect(workerSource).toMatch(/waiting for reset propagation[^]+?await sleep\(RECOVERY_POLL_MS\);/su);
     expect(workerSource).toContain("CONFIG.node_timeout_seconds");
     expect(workerSource).toMatch(
       /await resumeWithResetCandidates\([^]+?\);\s+for \(const key of resetNodeKeys\(resetNode\)\)[^]+?continue;/su

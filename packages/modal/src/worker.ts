@@ -447,6 +447,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] waiting for reset propagation (${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
+      await sleep(RECOVERY_POLL_MS);
       recentlyResetNodes.clear();
     } else {
       await appendFile(
