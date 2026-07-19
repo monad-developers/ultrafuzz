@@ -12,6 +12,8 @@ campaign for the implemented invariant property suite.
 
 Read the consolidated property catalog:
 
+{{artifact_path:property-specification-fanin}}/properties.json
+
 {{artifact_path:property-specification-fanin}}/properties.md
 
 Read the implemented property records:
@@ -66,6 +68,14 @@ Use this configured invariant testing fuzzer timeout:
 3. Classify every observed failure.
    - For each fuzzer failure or deterministic reproducer, write one finding
      object in `findings.json`.
+   - When an implemented invariant property caused the failure, copy its exact
+     canonical ID from `implemented-properties.json` into a non-empty
+     `property_ids` array on both the raw failure record and finding. Use the
+     same stable `id` for the raw failure and its resulting finding so the
+     runtime can verify that the references were preserved. Omit
+     `property_ids` for setup, harness, and other failures that did not
+     originate from a catalog property. Never invent or silently drop a
+     property reference.
    - Include `stateful_failure_classification=<classification>` in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
@@ -96,6 +106,28 @@ Write the campaign report to:
 Write raw Recon-fuzzer result metadata to:
 
 {{artifact_dir}}/recon-fuzzer-results.json
+
+Use this exact top-level shape:
+
+```json
+{
+  "schema_version": "ultrafuzz.property-campaign.v1",
+  "fuzzer_backend": "recon",
+  "failures": [
+    {
+      "id": "failure-1",
+      "status": "reproduced",
+      "property_ids": ["property-1"]
+    }
+  ]
+}
+```
+
+Record the actual backend in `fuzzer_backend` when one ran; omit that field
+when unavailable. Every failure needs a non-empty `id` and `status`. Use an
+empty `failures` array when none were observed. Property IDs are optional only
+for failures not caused by an implemented catalog property. References to an
+unknown or non-implemented canonical property fail artifact validation.
 
 Write generated-test and reproducer records to:
 

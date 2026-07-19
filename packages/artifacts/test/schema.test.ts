@@ -8,9 +8,12 @@ import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
+  IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
+  PROPERTIES_SCHEMA_VERSION,
+  PROPERTY_CAMPAIGN_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
   analysisBundleManifestJsonSchema,
@@ -19,14 +22,19 @@ import {
   findingJsonSchema,
   generatedTestsJsonSchema,
   nodeAttemptLedgerJsonSchema,
+  propertiesJsonSchema,
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
+  validateImplementedPropertiesSchema,
   validateArtifactContract,
   validateNodeAttemptLedgerEntry,
+  validatePropertiesSchema,
+  validatePropertyCampaignSchema,
+  validatePropertyReferences,
   validateRunStateSchema,
   validateUsageLedgerEntry
 } from "../src/index.js";
@@ -89,6 +97,247 @@ test("finding schema accepts minimal normalized findings and rejects malformed p
 
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path === "$.summary"));
+});
+
+test("property catalog schema accepts one source and preserves multiple deduplicated sources", () => {
+  const oneSource = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-1",
+        description: "Balances remain conserved",
+        category: "accounting",
+        priority: "high",
+        sources: [
+          {
+            source_node_id: "property-specification-certora",
+            source_property_id: "certora-1"
+          }
+        ]
+      }
+    ]
+  };
+  assert.equal(validatePropertiesSchema(oneSource).ok, true);
+
+  const deduplicated = structuredClone(oneSource);
+  deduplicated.properties[0]!.sources.push({
+    source_node_id: "property-specification-crytic",
+    source_property_id: "crytic-2"
+  });
+  const result = validatePropertiesSchema(deduplicated);
+  assert.equal(result.ok, true);
+  assert.equal(result.value?.properties[0]?.sources.length, 2);
+
+  const sourceWithExtra = {
+    ...oneSource,
+    properties: [
+      {
+        ...oneSource.properties[0]!,
+        sources: [
+          {
+            ...oneSource.properties[0]!.sources[0]!,
+            note: "extra source metadata"
+          }
+        ]
+      }
+    ]
+  };
+  const invalidSource = validatePropertiesSchema(sourceWithExtra);
+  assert.equal(invalidSource.ok, false);
+  assert.ok(invalidSource.issues.some((issue) => issue.path.endsWith(".sources[0]") && /note/u.test(issue.message)));
+});
+
+test("property implementation and campaign schemas retain canonical references", () => {
+  const implemented = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/Property1.t.sol"]
+      }
+    ]
+  };
+  assert.equal(validateImplementedPropertiesSchema(implemented).ok, true);
+  assert.equal(
+    validatePropertyCampaignSchema({
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    }).ok,
+    true
+  );
+  assert.equal(
+    validatePropertyCampaignSchema({
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-1"] },
+        { id: "failure-1", status: "reproduced" }
+      ]
+    }).ok,
+    false,
+    "campaign failure IDs and property references must be unambiguous"
+  );
+});
+
+test("property implementation schema rejects duplicate canonical references", () => {
+  const duplicate = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/Property1.t.sol"]
+      },
+      {
+        property_id: "property-1",
+        status: "pending",
+        implementation_paths: [],
+        test_paths: []
+      }
+    ]
+  };
+  const invalid = validateImplementedPropertiesSchema(duplicate);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.issues.some((issue) => /Duplicate implemented property ID/u.test(issue.message)));
+});
+
+test("unknown canonical property references produce a clear diagnostic", () => {
+  const catalog = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-1",
+        description: "Balances remain conserved",
+        category: "accounting",
+        priority: "high",
+        sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+      }
+    ]
+  };
+  const parsed = validatePropertiesSchema(catalog);
+  assert.ok(parsed.value);
+  assert.deepEqual(validatePropertyReferences(parsed.value!, [{ propertyIds: ["property-unknown"], path: "$ref" }]), [
+    {
+      code: "PROPERTY_REFERENCE_UNKNOWN",
+      message: 'Unknown canonical property ID "property-unknown"',
+      path: "$ref"
+    }
+  ]);
+});
+
+test("finding and report schemas accept non-property and historical artifacts", () => {
+  const nonPropertyFinding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "finding-setup",
+    title: "Harness setup is incomplete",
+    status: "needs-review",
+    severity_guess: "low",
+    confidence: "high",
+    summary: "The setup path is incomplete."
+  };
+  assert.equal(validateFindingSchema(nonPropertyFinding).ok, true);
+  assert.equal(validateFindingSchema({ ...nonPropertyFinding, property_ids: ["property-1", "property-1"] }).ok, false);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] })
+    ).ok,
+    true,
+    "historical reports without property provenance remain valid"
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: "unavailable"
+      })
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [
+              {
+                source_node_id: "property-specification-certora",
+                source_property_id: "certora-1"
+              }
+            ],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"],
+            fuzzer_backend: "recon"
+          }
+        ]
+      })
+    ).ok,
+    true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"]
+          }
+        ]
+      })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1", "property-1"],
+            sources: [
+              {
+                source_node_id: "property-specification-certora",
+                source_property_id: "certora-1"
+              }
+            ],
+            implementation_paths: [],
+            test_paths: []
+          }
+        ]
+      })
+    ).ok,
+    false
+  );
 });
 
 test("run state schema covers all required node states and rejects malformed state", () => {
@@ -288,6 +537,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
+  const propertiesSnapshot = readSchemaSnapshot("properties.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
@@ -300,6 +550,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
 });
 

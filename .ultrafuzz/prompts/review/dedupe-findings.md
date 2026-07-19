@@ -90,6 +90,11 @@ classification and reproducer shape in the dedupe key whenever two stateful
 records differ by classification, replayability, or repairability, including
 `blocked-unreproduced` records that still need manual replay.
 
+Preserve `property_ids` on every property-derived finding. When deduplicating
+several records into one root or family, use the stable union of their canonical
+property IDs on the kept record and relevant family variants; do not discard a
+property reference during deduplication.
+
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same
 production root cause. Save
