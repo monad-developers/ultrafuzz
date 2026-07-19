@@ -71,7 +71,7 @@ describe("target E2E workflow", () => {
     const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
       jobs: {
         "ultrafuzz-target": {
-          steps: Array<{ name?: string; uses?: string; with?: Record<string, unknown> }>;
+          steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
         };
       };
     };
@@ -83,6 +83,24 @@ describe("target E2E workflow", () => {
     expect(pnpmSetupIndex).toBeGreaterThanOrEqual(0);
     expect(nodeCacheIndex).toBeGreaterThanOrEqual(0);
     expect(pnpmSetupIndex).toBeLessThan(nodeCacheIndex);
+  });
+
+  it("keeps the Hardhat Yarn shim usable from generated worktrees", () => {
+    const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
+      jobs: {
+        "ultrafuzz-target": {
+          steps: Array<{ name?: string; run?: string }>;
+        };
+      };
+    };
+
+    const step = workflow.jobs["ultrafuzz-target"].steps.find(
+      (candidate) => candidate.name === "Preserve compatible Yarn runtime for agents"
+    );
+
+    expect(step?.run).toContain('target_yarn_cli="$GITHUB_WORKSPACE/.target-source/.yarn/releases/yarn-1.22.1.cjs"');
+    expect(step?.run).toContain('yarn_cli="__TARGET_YARN_CLI__"');
+    expect(step?.run).toContain('-e "s|__TARGET_YARN_CLI__|$target_yarn_cli|g"');
   });
 });
 

@@ -172,17 +172,24 @@ jobs:
         env:
           NODE16_BIN: ${{ steps.hardhat-runtime-path.outputs.bin }}
         run: |
+          target_yarn_cli="$GITHUB_WORKSPACE/.target-source/.yarn/releases/yarn-1.22.1.cjs"
           cat > .ci-bin/yarn <<'SH'
           #!/usr/bin/env bash
           set -euo pipefail
           yarn_cli="$PWD/.yarn/releases/yarn-1.22.1.cjs"
+          if [ ! -f "$yarn_cli" ]; then
+            yarn_cli="__TARGET_YARN_CLI__"
+          fi
           if [ ! -f "$yarn_cli" ]; then
             echo "Pinned target Yarn CLI was not found." >&2
             exit 1
           fi
           exec env PATH="__NODE16_BIN__:$PATH" "__NODE16_BIN__/node" "$yarn_cli" "$@"
           SH
-          sed -i "s|__NODE16_BIN__|$NODE16_BIN|g" .ci-bin/yarn
+          sed -i \
+            -e "s|__NODE16_BIN__|$NODE16_BIN|g" \
+            -e "s|__TARGET_YARN_CLI__|$target_yarn_cli|g" \
+            .ci-bin/yarn
           chmod +x .ci-bin/yarn
 
       - name: Verify model credential

@@ -101,6 +101,15 @@ describe("diagnostic redaction", () => {
     expect(redacted).not.toContain("github_pat_abcdefghijklmnopqrstuvwxyz");
     expect(redacted).not.toContain("alice:password");
   });
+
+  it("redacts longer overlapping sensitive values before shorter prefixes", () => {
+    const redacted = redactText("prefix-value-long", {
+      LONGER_SECRET_NAME: "prefix-value-long",
+      KEY: "prefix-value"
+    });
+
+    expect(redacted).toBe("[REDACTED_SENSITIVE_VALUE]");
+  });
 });
 
 function evidenceFixture(

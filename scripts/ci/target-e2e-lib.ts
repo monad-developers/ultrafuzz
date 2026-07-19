@@ -209,7 +209,7 @@ export function redactText(input: string, env: Record<string, string | undefined
   let output = input;
   const sensitiveEntries = Object.entries(env)
     .filter(([name]) => SENSITIVE_NAME_PATTERN.test(name))
-    .sort(([left], [right]) => right.length - left.length);
+    .sort(([, left], [, right]) => (right?.length ?? 0) - (left?.length ?? 0));
   for (const [, value] of sensitiveEntries) {
     if (value !== undefined && value.length >= 8) {
       output = output.split(value).join("[REDACTED_SENSITIVE_VALUE]");
@@ -399,7 +399,9 @@ function findArtifactFile(artifactsRoot: string, nodeId: string, fileName: strin
   const candidates = [nodeId, ...readdirSync(artifactsRoot).filter((entry) => entry.startsWith(`${nodeId}-`))];
   for (const candidate of candidates) {
     const path = join(artifactsRoot, candidate, fileName);
-    if (existsSync(path) && lstatSync(path).isFile() && !lstatSync(path).isSymbolicLink()) {
+    if (!existsSync(path)) continue;
+    const stat = lstatSync(path);
+    if (stat.isFile() && !stat.isSymbolicLink()) {
       return path;
     }
   }
