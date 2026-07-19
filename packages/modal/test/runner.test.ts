@@ -8,7 +8,7 @@ import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
 import { fingerprintModalModel } from "../src/config.js";
-import type { ModalModelSpec } from "../src/defaults.js";
+import { MODAL_BENCHMARK_SANDBOX_RESOURCES, type ModalModelSpec } from "../src/defaults.js";
 import {
   createModalLaunchState,
   markModalSandboxCreated,
@@ -38,6 +38,17 @@ const MODEL: ModalModelSpec = {
   reasoning: "high",
   auth_mode: "api-key"
 };
+
+describe("Modal benchmark capacity", () => {
+  it("reserves a high-capacity sandbox for parallel benchmark work", () => {
+    expect(MODAL_BENCHMARK_SANDBOX_RESOURCES).toEqual({
+      cpu: 16,
+      cpuLimit: 16,
+      memoryMiB: 32_768,
+      memoryLimitMiB: 65_536
+    });
+  });
+});
 
 describe("Modal image source staging", () => {
   it("archives tracked files only", () => {

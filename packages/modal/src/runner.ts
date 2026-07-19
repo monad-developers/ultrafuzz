@@ -23,6 +23,7 @@ import {
 import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
+  MODAL_BENCHMARK_SANDBOX_RESOURCES,
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_SANDBOX_TIMEOUT_MS,
   type ModalLaunchMode,
@@ -320,10 +321,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
             "-lc",
             modalWorkerEntrypointCommand(input.auth === undefined ? undefined : input.model.provider)
           ],
-          cpu: 4,
-          cpuLimit: 4,
-          memoryMiB: 12_288,
-          memoryLimitMiB: 16_384,
+          ...MODAL_BENCHMARK_SANDBOX_RESOURCES,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
           workdir: "/opt/ultrafuzz",
           env: {
