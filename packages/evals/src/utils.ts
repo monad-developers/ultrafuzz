@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   artifactContractDefinition,
+  assertRegularFileInside,
   normalizeSafeRelativePath,
   safeResolveInside,
   validateSafeId
@@ -97,23 +98,29 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
   const runRoot = path.resolve(input.runRoot);
   let graph: unknown;
   try {
-    graph = JSON.parse(fs.readFileSync(path.join(runRoot, "graph.json"), "utf8"));
+    const graphPath = safeResolveInside(runRoot, "graph.json", "run graph path");
+    assertRegularFileInside(runRoot, graphPath, "run graph path");
+    graph = JSON.parse(fs.readFileSync(graphPath, "utf8"));
   } catch {
     return { reason: "run graph is unavailable" };
   }
   if (!isTopologyV2RunGraph(graph)) {
     return { reason: "run graph does not satisfy topology v2 contract" };
   }
-  const candidates = terminalReportCandidates(runRoot, graph);
-  if (candidates.length === 1) {
+  const declarations = terminalReportDeclarations(graph);
+  if (declarations.length > 1) {
+    return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
+  }
+  if (declarations.length === 1) {
+    const candidate = terminalReportCandidate(runRoot, declarations[0]!);
+    if (candidate === undefined) {
+      return { reason: "run graph does not declare a valid ultrafuzz/report@1 output contract" };
+    }
     return {
-      path: candidates[0]!.path,
-      relativePath: candidates[0]!.relativePath,
+      path: candidate.path,
+      relativePath: candidate.relativePath,
       reason: "terminal report path came from the run graph contract"
     };
-  }
-  if (candidates.length > 1) {
-    return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
   }
   return { reason: "run graph does not declare a valid ultrafuzz/report@1 output contract" };
 }
@@ -128,37 +135,56 @@ function isTopologyV2RunGraph(graph: unknown): graph is { nodes: unknown[] } {
   );
 }
 
-function terminalReportCandidates(
-  runRoot: string,
-  graph: { nodes: unknown[] }
-): Array<{ path: string; relativePath: string }> {
-  const candidates: Array<{ path: string; relativePath: string }> = [];
+interface TerminalReportDeclaration {
+  node: Record<string, unknown>;
+  output: Record<string, unknown>;
+}
+
+function terminalReportDeclarations(graph: { nodes: unknown[] }): TerminalReportDeclaration[] {
+  const declarations: TerminalReportDeclaration[] = [];
   for (const node of graph.nodes) {
-    if (!isRecord(node) || typeof node.artifact_dir !== "string" || !Array.isArray(node.outputs)) {
+    if (!isRecord(node) || !Array.isArray(node.outputs)) {
       continue;
     }
     for (const output of node.outputs) {
-      if (
-        !isRecord(output) ||
-        output.contract !== TERMINAL_REPORT_CONTRACT ||
-        typeof output.path !== "string" ||
-        output.contract_digest !== TERMINAL_REPORT_CONTRACT_DIGEST ||
-        typeof output.primary !== "boolean"
-      ) {
-        continue;
-      }
-      try {
-        const artifactDir = normalizeSafeRelativePath(node.artifact_dir, "terminal report artifact directory");
-        const outputPath = normalizeSafeRelativePath(output.path, "terminal report output path");
-        const relativePath = path.posix.join(artifactDir, outputPath);
-        const reportPath = safeResolveInside(runRoot, relativePath, "terminal report path");
-        candidates.push({ path: reportPath, relativePath });
-      } catch {
-        // Invalid graph paths cannot be publication or scoring inputs.
+      if (isRecord(output) && output.contract === TERMINAL_REPORT_CONTRACT) {
+        declarations.push({ node, output });
       }
     }
   }
-  return candidates;
+  return declarations;
+}
+
+function terminalReportCandidate(
+  runRoot: string,
+  declaration: TerminalReportDeclaration
+): { path: string; relativePath: string } | undefined {
+  const { node, output } = declaration;
+  if (
+    typeof node.id !== "string" ||
+    typeof node.artifact_dir !== "string" ||
+    typeof output.path !== "string" ||
+    output.contract_digest !== TERMINAL_REPORT_CONTRACT_DIGEST ||
+    typeof output.primary !== "boolean"
+  ) {
+    return undefined;
+  }
+  try {
+    const nodeId = validateSafeId(node.id, "terminal report producer node ID");
+    const artifactDir = normalizeSafeRelativePath(node.artifact_dir, "terminal report artifact directory");
+    if (artifactDir !== path.posix.join("artifacts", nodeId)) {
+      return undefined;
+    }
+    const outputPath = normalizeSafeRelativePath(output.path, "terminal report output path");
+    const relativePath = path.posix.join(artifactDir, outputPath);
+    return {
+      path: safeResolveInside(runRoot, relativePath, "terminal report path"),
+      relativePath
+    };
+  } catch {
+    // Invalid graph paths cannot be publication or scoring inputs.
+    return undefined;
+  }
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {

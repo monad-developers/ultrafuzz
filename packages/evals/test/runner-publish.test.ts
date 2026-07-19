@@ -540,4 +540,48 @@ describe("eval publish (post-hoc replay)", () => {
       ]
     });
   });
+
+  it("does not publish when the graph contains a second malformed terminal report declaration", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const run = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+    };
+    const graphPath = path.join(run.ultrafuzz_run_root, "graph.json");
+    const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
+      nodes: Array<{ id: string; outputs?: Array<Record<string, unknown>> }>;
+    };
+    graph.nodes
+      .find((node) => node.id === "final-report")!
+      .outputs!.push({
+        path: "other-report.json",
+        contract: "ultrafuzz/report@1",
+        contract_digest: "0".repeat(64),
+        primary: false
+      });
+    fs.writeFileSync(graphPath, JSON.stringify(graph), "utf8");
+    let contacted = false;
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        fetchImpl: (async () => {
+          contacted = true;
+          throw new Error("must not be called");
+        }) as typeof fetch
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+
+    expect(contacted).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [
+        {
+          code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
+          contract: "ultrafuzz/report@1",
+          reason: "run graph declares more than one ultrafuzz/report@1 output"
+        }
+      ]
+    });
+  });
 });

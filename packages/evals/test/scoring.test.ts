@@ -424,6 +424,57 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("rejects a terminal report redirected away from its declared producer directory", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+      report_json_path: string;
+    };
+    const graphPath = path.join(record.ultrafuzz_run_root, "graph.json");
+    const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
+      nodes: Array<{ id: string; artifact_dir: string }>;
+    };
+    const redirectedPath = path.join(record.ultrafuzz_run_root, "artifacts", "redirected", "report.json");
+    fs.mkdirSync(path.dirname(redirectedPath), { recursive: true });
+    fs.copyFileSync(record.report_json_path, redirectedPath);
+    graph.nodes.find((node) => node.id === "final-report")!.artifact_dir = "artifacts/redirected";
+    fs.writeFileSync(graphPath, JSON.stringify(graph), "utf8");
+    let judgeCalled = false;
+
+    await expect(
+      scoreEvalRun({
+        projectRoot: fixture.projectRoot,
+        evalRunId: fixture.evalRunId,
+        llmJudge: async (input) => {
+          judgeCalled = true;
+          return input.deterministicResult;
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "EVAL_TERMINAL_REPORT_INVALID",
+      message: "run graph does not declare a valid ultrafuzz/report@1 output contract"
+    });
+    expect(judgeCalled).toBe(false);
+  });
+
+  it("rejects a terminal report declared through a symlinked run graph", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+    };
+    const graphPath = path.join(record.ultrafuzz_run_root, "graph.json");
+    const graphSourcePath = path.join(record.ultrafuzz_run_root, "graph-source.json");
+    fs.renameSync(graphPath, graphSourcePath);
+    fs.symlinkSync(graphSourcePath, graphPath);
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({
+      code: "EVAL_TERMINAL_REPORT_INVALID",
+      message: "run graph is unavailable"
+    });
+  });
+
   it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
