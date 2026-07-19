@@ -978,12 +978,20 @@ async function synchronizeTasks(input: {
       continue;
     }
     const previous = readRunState(input.layout).nodes[task.attemptId];
-    const evidence = mergeNodeWorkflowEvidence(
+    let evidence = mergeNodeWorkflowEvidence(
       steps.get(task.smithersNodeId),
       eventsByNode.get(task.smithersNodeId) ?? []
     );
     if (evidence === undefined) {
-      continue;
+      evidence = artifactProducedRecoveryEvidence({
+        layout: input.layout,
+        node,
+        task,
+        evidence: { status: "pending", workflowState: "artifact-only" }
+      });
+      if (evidence.status !== "succeeded") {
+        continue;
+      }
     }
     const recoverableEvidence = workflowHealthRecoveryEvidence(
       input.inspect,

@@ -2544,6 +2544,40 @@ test("syncRun repairs complete artifacts for a nonterminal workflow node", async
   );
 });
 
+test("syncRun repairs complete artifacts without workflow evidence for the task", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-artifact-only";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: []
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-artifact-only", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-artifact-only", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-produced");
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts/project-discovery/artifact-manifest.json")),
+    true
+  );
+});
+
 test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
