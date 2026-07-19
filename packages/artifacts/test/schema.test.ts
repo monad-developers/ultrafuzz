@@ -127,6 +127,24 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   const result = validatePropertiesSchema(deduplicated);
   assert.equal(result.ok, true);
   assert.equal(result.value?.properties[0]?.sources.length, 2);
+
+  const sourceWithExtra = {
+    ...oneSource,
+    properties: [
+      {
+        ...oneSource.properties[0]!,
+        sources: [
+          {
+            ...oneSource.properties[0]!.sources[0]!,
+            note: "extra source metadata"
+          }
+        ]
+      }
+    ]
+  };
+  const invalidSource = validatePropertiesSchema(sourceWithExtra);
+  assert.equal(invalidSource.ok, false);
+  assert.ok(invalidSource.issues.some((issue) => issue.path.endsWith(".sources[0]") && /note/u.test(issue.message)));
 });
 
 test("property implementation and campaign schemas retain canonical references", () => {
@@ -150,6 +168,29 @@ test("property implementation and campaign schemas retain canonical references",
     }).ok,
     true
   );
+});
+
+test("property implementation schema rejects duplicate canonical references", () => {
+  const duplicate = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: ["test/recon/Properties.sol"],
+        test_paths: ["test/foundry/Property1.t.sol"]
+      },
+      {
+        property_id: "property-1",
+        status: "pending",
+        implementation_paths: [],
+        test_paths: []
+      }
+    ]
+  };
+  const invalid = validateImplementedPropertiesSchema(duplicate);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.issues.some((issue) => /Duplicate implemented property ID/u.test(issue.message)));
 });
 
 test("unknown canonical property references produce a clear diagnostic", () => {
@@ -235,6 +276,28 @@ test("finding and report schemas accept non-property and historical artifacts", 
       })
     ).ok,
     true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [],
+            implementation_paths: ["test/recon/Properties.sol"],
+            test_paths: ["test/foundry/Property1.t.sol"]
+          }
+        ]
+      })
+    ).ok,
+    false
   );
 });
 

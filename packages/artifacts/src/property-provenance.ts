@@ -64,7 +64,7 @@ export interface PropertyReferenceInput {
   path: string;
 }
 
-const propertySourceSchema = z.looseObject({
+const propertySourceSchema = z.strictObject({
   source_node_id: nonEmptyString,
   source_property_id: nonEmptyString
 });
@@ -116,10 +116,24 @@ const implementedPropertySchema = z.looseObject({
   test_paths: nonEmptyStringArray
 });
 
-export const implementedPropertiesSchema = z.object({
-  schema_version: z.literal(IMPLEMENTED_PROPERTIES_SCHEMA_VERSION),
-  properties: z.array(implementedPropertySchema)
-});
+export const implementedPropertiesSchema = z
+  .object({
+    schema_version: z.literal(IMPLEMENTED_PROPERTIES_SCHEMA_VERSION),
+    properties: z.array(implementedPropertySchema)
+  })
+  .superRefine((artifact, context) => {
+    const propertyIds = new Set<string>();
+    for (const [propertyIndex, property] of artifact.properties.entries()) {
+      if (propertyIds.has(property.property_id)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate implemented property ID ${JSON.stringify(property.property_id)}`,
+          path: ["properties", propertyIndex, "property_id"]
+        });
+      }
+      propertyIds.add(property.property_id);
+    }
+  });
 
 const propertyCampaignFailureSchema = z.looseObject({
   id: nonEmptyString,
@@ -160,7 +174,7 @@ export const propertiesJsonSchema = {
             items: {
               type: "object",
               required: ["source_node_id", "source_property_id"],
-              additionalProperties: true,
+              additionalProperties: false,
               properties: {
                 source_node_id: { type: "string", minLength: 1 },
                 source_property_id: { type: "string", minLength: 1 }

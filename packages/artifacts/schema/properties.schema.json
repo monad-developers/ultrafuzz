@@ -25,7 +25,7 @@
             "items": {
               "type": "object",
               "required": ["source_node_id", "source_property_id"],
-              "additionalProperties": true,
+              "additionalProperties": false,
               "properties": {
                 "source_node_id": { "type": "string", "minLength": 1 },
                 "source_property_id": { "type": "string", "minLength": 1 }

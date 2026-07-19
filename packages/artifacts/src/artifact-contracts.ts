@@ -58,12 +58,14 @@ const terminalReportSchema = z.looseObject({
           finding_id: z.string().min(1),
           title: z.string().min(1),
           property_ids: z.array(z.string().min(1)).min(1),
-          sources: z.array(
-            z.looseObject({
-              source_node_id: z.string().min(1),
-              source_property_id: z.string().min(1)
-            })
-          ),
+          sources: z
+            .array(
+              z.looseObject({
+                source_node_id: z.string().min(1),
+                source_property_id: z.string().min(1)
+              })
+            )
+            .min(1),
           implementation_paths: z.array(z.string().min(1)),
           test_paths: z.array(z.string().min(1)),
           fuzzer_backend: z.string().min(1).optional()
