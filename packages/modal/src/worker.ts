@@ -40,6 +40,7 @@ const EVAL_REPORT_TIMEOUT_MS = 5 * 60_000;
 
 interface DurableNodeState {
   status?: string;
+  started_at?: string;
   provenance?: {
     workflow?: {
       task_id?: string;
@@ -52,6 +53,12 @@ interface DurableRunState {
   status?: string;
   nodes?: Record<string, DurableNodeState>;
 }
+
+type RecoverableNodeEntry = {
+  nodeId: string;
+  node: DurableNodeState;
+  reason: "failed" | "stale-running";
+};
 
 async function main(): Promise<void> {
   try {
@@ -412,19 +419,20 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
     if (state?.run_id === undefined || state.nodes === undefined) {
       return false;
     }
-    const failedNodes = Object.entries(state.nodes).filter(([, node]) => node.status === "failed");
-    const resetNode = failedNodes[0];
+    const recoverableNodes = recoverableNodeEntries(state);
+    const resetNode = recoverableNodes[0];
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
-      failed_node_count: failedNodes.length,
+      failed_node_count: recoverableNodes.filter((node) => node.reason === "failed").length,
+      stale_running_node_count: recoverableNodes.filter((node) => node.reason === "stale-running").length,
       workflow_status: state.status
     });
     if (resetNode !== undefined) {
-      const [nodeId, node] = resetNode;
+      const { nodeId, node, reason } = resetNode;
       await appendFile(
         LOG_PATH,
-        `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${attempt}/${RECOVERY_MAX_RESETS})\n`
+        `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${reason}; ${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
       await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
     } else {
@@ -502,9 +510,30 @@ async function waitForWorkflowTerminal(target: string): Promise<DurableRunState 
     if (isTerminalWorkflowStatus(state.status)) {
       return state;
     }
+    if (recoverableNodeEntries(state).length > 0) {
+      return { ...state, status: "failed" };
+    }
     await sleep(RECOVERY_POLL_MS);
   }
   return synchronizedRunState(target);
+}
+
+function recoverableNodeEntries(state: DurableRunState): RecoverableNodeEntry[] {
+  if (state.nodes === undefined) return [];
+  const entries: RecoverableNodeEntry[] = [];
+  for (const [nodeId, node] of Object.entries(state.nodes)) {
+    if (node.status === "failed") {
+      entries.push({ nodeId, node, reason: "failed" });
+      continue;
+    }
+    if (node.status !== "running" || node.started_at === undefined) continue;
+    const startedAt = Date.parse(node.started_at);
+    if (!Number.isFinite(startedAt)) continue;
+    const staleAfterMs = CONFIG.node_timeout_seconds * 1000 + RECOVERY_POLL_MS;
+    if (Date.now() - startedAt <= staleAfterMs) continue;
+    entries.push({ nodeId, node, reason: "stale-running" });
+  }
+  return entries;
 }
 
 function isTerminalWorkflowStatus(status: string | undefined): boolean {

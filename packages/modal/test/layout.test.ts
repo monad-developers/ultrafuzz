@@ -51,6 +51,9 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain("publish_attempt");
     expect(workerSource).toContain("report_attempt");
     expect(workerSource).toContain('child.kill("SIGKILL")');
+    expect(workerSource).toContain("recoverableNodeEntries");
+    expect(workerSource).toContain("stale_running_node_count");
+    expect(workerSource).toContain("CONFIG.node_timeout_seconds");
     expect(workerSource).toContain("configureGitSafeDirectories(target)");
     expect(workerSource).toContain('"safe.directory"');
   });
