@@ -1474,9 +1474,10 @@ function mergeNodeWorkflowEvidence(
   const eventIsTerminal = terminalStatus(fromEvents.status);
   const attempt = maxDefinedNumber(fromEvents.attempt, fromStep.attempt);
   if (!stepIsTerminal && eventIsTerminal) {
-    const eventAttemptIsNewer =
-      fromEvents.attempt !== undefined && fromStep.attempt !== undefined && fromEvents.attempt > fromStep.attempt;
-    if (!eventAttemptIsNewer) {
+    const eventAttemptIsOlder =
+      fromEvents.attempt !== undefined && fromStep.attempt !== undefined && fromEvents.attempt < fromStep.attempt;
+    const successfulEventCanFinalizeRunningStep = fromEvents.status === "succeeded" && fromStep.status === "running";
+    if (eventAttemptIsOlder || !successfulEventCanFinalizeRunningStep) {
       return {
         ...fromStep,
         ...(attempt === undefined ? {} : { attempt })

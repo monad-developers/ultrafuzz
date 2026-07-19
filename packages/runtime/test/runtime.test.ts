@@ -2394,6 +2394,40 @@ test("getRunStatus synchronizes without appending duplicate events", async () =>
   assert.equal(second.value?.events, first.value?.events);
 });
 
+test("syncRun keeps same-attempt terminal events ahead of stale running step inspection", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-terminal-event";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 5 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 5 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 5 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-terminal-event", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-terminal-event", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; retry_count?: number; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.retry_count, 4);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 5);
+});
+
 test("syncRun fails a successful workflow node that is missing required artifacts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
