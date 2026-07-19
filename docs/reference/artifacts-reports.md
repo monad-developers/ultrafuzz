@@ -241,15 +241,17 @@ and `implementation_paths` and `test_paths` arrays. The invariant campaign's
 `recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
 records caused by implemented catalog properties carry `property_ids`.
 Property-derived `findings.json` entries carry the same optional
-`property_ids`. Setup or harness findings that do not originate from a catalog
-property omit the field.
+`property_ids` and use the raw failure's ID. Setup or harness findings that do
+not originate from a catalog property omit the field.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
-properties that were not recorded with `implemented` status. Final
-`report.json` stores the joined chain in `property_provenance`, and `report.md`
-renders it under **Property provenance**. Historical artifacts without the v1
-handoffs render provenance as `unavailable` rather than failing report
-generation.
+properties that were not recorded with `implemented` status. They also reject
+raw campaign/finding reference mismatches, dangling final-report IDs, and final
+joins whose sources, implementation/test paths, or fuzzer backend differ from
+the validated upstream artifacts. Final `report.json` stores the joined chain
+in `property_provenance`, and `report.md` renders it under **Property
+provenance**. Historical artifacts without the v1 handoffs render provenance as
+`unavailable` rather than failing report generation.
 
 ## Final Report
 

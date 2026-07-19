@@ -45,34 +45,50 @@ export interface ArtifactContractValidationResult {
   value?: unknown;
 }
 
+const uniqueReportPathArraySchema = z
+  .array(z.string().min(1))
+  .refine((paths) => new Set(paths).size === paths.length, { message: "Paths must be unique" });
+const reportPropertySourcesSchema = z
+  .array(
+    z.looseObject({
+      source_node_id: z.string().min(1),
+      source_property_id: z.string().min(1)
+    })
+  )
+  .min(1)
+  .refine(
+    (sources) =>
+      new Set(sources.map((source) => `${source.source_node_id}\u0000${source.source_property_id}`)).size ===
+      sources.length,
+    { message: "Property sources must be unique" }
+  );
+const reportPropertyProvenanceSchema = z
+  .array(
+    z.looseObject({
+      finding_id: z.string().min(1),
+      title: z.string().min(1),
+      property_ids: z
+        .array(z.string().min(1))
+        .min(1)
+        .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
+          message: "Property IDs must be unique"
+        }),
+      sources: reportPropertySourcesSchema,
+      implementation_paths: uniqueReportPathArraySchema,
+      test_paths: uniqueReportPathArraySchema,
+      fuzzer_backend: z.string().min(1).optional()
+    })
+  )
+  .refine((entries) => new Set(entries.map((entry) => entry.finding_id)).size === entries.length, {
+    message: "Property provenance finding IDs must be unique"
+  });
+
 const terminalReportSchema = z.looseObject({
   schema_version: z.string().min(1),
   run_metadata: z.record(z.string(), z.unknown()),
   issues: z.array(z.unknown()),
   non_production_outcomes: z.array(z.unknown()),
-  property_provenance: z
-    .union([
-      z.literal("unavailable"),
-      z.array(
-        z.looseObject({
-          finding_id: z.string().min(1),
-          title: z.string().min(1),
-          property_ids: z.array(z.string().min(1)).min(1),
-          sources: z
-            .array(
-              z.looseObject({
-                source_node_id: z.string().min(1),
-                source_property_id: z.string().min(1)
-              })
-            )
-            .min(1),
-          implementation_paths: z.array(z.string().min(1)),
-          test_paths: z.array(z.string().min(1)),
-          fuzzer_backend: z.string().min(1).optional()
-        })
-      )
-    ])
-    .optional()
+  property_provenance: z.union([z.literal("unavailable"), reportPropertyProvenanceSchema]).optional()
 });
 
 const definitions = defineContracts([

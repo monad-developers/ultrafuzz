@@ -9,6 +9,7 @@ import {
   safeResolveInside,
   updateNodeState,
   validateArtifactContract,
+  validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
@@ -279,6 +280,9 @@ function verifyPropertyProvenanceArtifacts(
   node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
+  if (logicalId === "final-report") {
+    return verifyFinalReportPropertyReferences(layout, artifactDir);
+  }
   if (logicalId !== "stateful-invariant-implement-properties" && logicalId !== "stateful-invariant-recon-campaign") {
     return [];
   }
@@ -330,6 +334,10 @@ function verifyCampaignPropertyReferences(
   if (!campaign.ok || campaign.value === undefined) {
     return [];
   }
+  const findings = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
+  if (!findings.ok || findings.value === undefined) {
+    return [];
+  }
 
   const references: PropertyReferenceInput[] = campaign.value.failures.flatMap((failure, index) =>
     failure.property_ids === undefined
@@ -339,9 +347,12 @@ function verifyCampaignPropertyReferences(
           path: `${campaignPath}#$.failures[${index}].property_ids[${propertyIndex}]`
         }))
   );
-  references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
+  references.push(...findingPropertyReferences(findings.value, findingsPath));
 
-  const diagnostics = propertyReferenceDiagnostics(catalog, references);
+  const diagnostics = [
+    ...propertyReferenceDiagnostics(catalog, references),
+    ...campaignFindingReferenceDiagnostics(campaign.value.failures, findings.value, campaignPath, findingsPath)
+  ];
   const implementedIds = new Set(
     implementation.value.properties
       .filter((record) => record.status === "implemented")
@@ -361,6 +372,265 @@ function verifyCampaignPropertyReferences(
     }
   }
   return diagnostics;
+}
+
+function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: string): RuntimeDiagnostic[] {
+  const reportPath = path.join(artifactDir, "report.json");
+  if (!fs.existsSync(reportPath)) {
+    return [];
+  }
+  const report = readJsonFile(reportPath);
+  if (!isRecord(report) || !Array.isArray(report.property_provenance)) {
+    return [];
+  }
+
+  const catalog = readCanonicalPropertyCatalog(layout);
+  if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
+    return catalog.diagnostics;
+  }
+  const references = report.property_provenance.flatMap((entry, entryIndex) => {
+    if (!isRecord(entry) || !Array.isArray(entry.property_ids)) {
+      return [];
+    }
+    return entry.property_ids.flatMap((propertyId, propertyIndex) =>
+      typeof propertyId === "string"
+        ? [
+            {
+              propertyIds: [propertyId],
+              path: `${reportPath}#$.property_provenance[${entryIndex}].property_ids[${propertyIndex}]`
+            }
+          ]
+        : []
+    );
+  });
+  const diagnostics = propertyReferenceDiagnostics(catalog.value, references);
+  if (report.property_provenance.length === 0) {
+    return diagnostics;
+  }
+
+  const implementation = readImplementedProperties(layout);
+  if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
+    return [...diagnostics, ...implementation.diagnostics];
+  }
+  diagnostics.push(
+    ...reportPropertyJoinDiagnostics(
+      report.property_provenance,
+      catalog.value,
+      implementation.value,
+      readCampaignFuzzerBackend(layout),
+      reportPath
+    )
+  );
+  return diagnostics;
+}
+
+function reportPropertyJoinDiagnostics(
+  entries: unknown[],
+  catalog: PropertiesArtifact,
+  implementation: ImplementedPropertiesArtifact,
+  fuzzerBackend: string | undefined,
+  reportPath: string
+): RuntimeDiagnostic[] {
+  const catalogById = new Map(catalog.properties.map((property) => [property.id, property]));
+  const implementationById = new Map(implementation.properties.map((property) => [property.property_id, property]));
+  const diagnostics: RuntimeDiagnostic[] = [];
+
+  for (const [entryIndex, entry] of entries.entries()) {
+    if (!isRecord(entry) || !Array.isArray(entry.property_ids)) {
+      continue;
+    }
+    const propertyIds = stringArray(entry.property_ids);
+    if (propertyIds.some((propertyId) => !catalogById.has(propertyId))) {
+      continue;
+    }
+
+    const implementations = propertyIds.flatMap((propertyId) => {
+      const record = implementationById.get(propertyId);
+      if (record === undefined) {
+        diagnostics.push({
+          code: "PROPERTY_REPORT_IMPLEMENTATION_MISSING",
+          message: `Report provenance references property ${JSON.stringify(propertyId)} without an implementation record`,
+          severity: "error",
+          source: "property-provenance",
+          path: `${reportPath}#$.property_provenance[${entryIndex}].property_ids`
+        });
+        return [];
+      }
+      return [record];
+    });
+    if (implementations.length !== propertyIds.length) {
+      continue;
+    }
+
+    const expectedSources = propertyIds.flatMap(
+      (propertyId) => catalogById.get(propertyId)?.sources.map(propertySourceKey) ?? []
+    );
+    const actualSources = Array.isArray(entry.sources)
+      ? entry.sources.flatMap((source) => (isRecord(source) ? [propertySourceKey(source)] : []))
+      : [];
+    addReportJoinMismatch(
+      diagnostics,
+      sameStringSet(expectedSources, actualSources),
+      "PROPERTY_REPORT_SOURCES_MISMATCH",
+      "Report property sources do not match the canonical catalog",
+      `${reportPath}#$.property_provenance[${entryIndex}].sources`
+    );
+
+    addReportJoinMismatch(
+      diagnostics,
+      sameStringSet(
+        implementations.flatMap((record) => record.implementation_paths),
+        stringArray(entry.implementation_paths)
+      ),
+      "PROPERTY_REPORT_IMPLEMENTATION_PATHS_MISMATCH",
+      "Report implementation paths do not match the implementation records",
+      `${reportPath}#$.property_provenance[${entryIndex}].implementation_paths`
+    );
+
+    addReportJoinMismatch(
+      diagnostics,
+      sameStringSet(
+        implementations.flatMap((record) => record.test_paths),
+        stringArray(entry.test_paths)
+      ),
+      "PROPERTY_REPORT_TEST_PATHS_MISMATCH",
+      "Report test paths do not match the implementation records",
+      `${reportPath}#$.property_provenance[${entryIndex}].test_paths`
+    );
+
+    addReportJoinMismatch(
+      diagnostics,
+      entry.fuzzer_backend === fuzzerBackend,
+      "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH",
+      "Report fuzzer backend does not match the campaign record",
+      `${reportPath}#$.property_provenance[${entryIndex}].fuzzer_backend`
+    );
+  }
+  return diagnostics;
+}
+
+function readCampaignFuzzerBackend(layout: RunLayout): string | undefined {
+  const campaignPath = findLogicalNodeArtifact(
+    layout,
+    "stateful-invariant-recon-campaign",
+    "recon-fuzzer-results.json"
+  );
+  if (campaignPath === undefined) {
+    return undefined;
+  }
+  const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+  return result.value?.fuzzer_backend;
+}
+
+function propertySourceKey(source: { source_node_id?: unknown; source_property_id?: unknown }): string {
+  return `${String(source.source_node_id)}\u0000${String(source.source_property_id)}`;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function addReportJoinMismatch(
+  diagnostics: RuntimeDiagnostic[],
+  matches: boolean,
+  code: string,
+  message: string,
+  issuePath: string
+): void {
+  if (!matches) {
+    diagnostics.push({
+      code,
+      message,
+      severity: "error",
+      source: "property-provenance",
+      path: issuePath
+    });
+  }
+}
+
+function campaignFindingReferenceDiagnostics(
+  failures: Array<{ id: string; property_ids?: string[] }>,
+  findings: Array<Record<string, unknown>>,
+  campaignPath: string,
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const findingsById = new Map<string, Array<{ index: number; propertyIds: string[] }>>();
+  for (const [findingIndex, finding] of findings.entries()) {
+    if (typeof finding.id !== "string") {
+      continue;
+    }
+    const propertyIds = Array.isArray(finding.property_ids)
+      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
+      : [];
+    const matches = findingsById.get(finding.id) ?? [];
+    matches.push({ index: findingIndex, propertyIds });
+    findingsById.set(finding.id, matches);
+  }
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const failureIds = new Set<string>();
+  for (const [failureIndex, failure] of failures.entries()) {
+    failureIds.add(failure.id);
+    const failurePropertyIds = failure.property_ids ?? [];
+    const matchingFindings = findingsById.get(failure.id) ?? [];
+    if (
+      matchingFindings.length > 1 &&
+      (failurePropertyIds.length > 0 || matchingFindings.some((finding) => finding.propertyIds.length > 0))
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_FINDING_REFERENCE_AMBIGUOUS",
+        message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has multiple resulting findings`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${campaignPath}#$.failures[${failureIndex}].id`
+      });
+      continue;
+    }
+    const matchingFinding = matchingFindings[0];
+    if (failurePropertyIds.length > 0 && matchingFinding === undefined) {
+      diagnostics.push({
+        code: "PROPERTY_FINDING_REFERENCE_MISSING",
+        message: `Property-derived campaign failure ${JSON.stringify(failure.id)} has no resulting finding with the same ID`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${campaignPath}#$.failures[${failureIndex}].id`
+      });
+      continue;
+    }
+    if (matchingFinding !== undefined && !sameStringSet(failurePropertyIds, matchingFinding.propertyIds)) {
+      diagnostics.push({
+        code: "PROPERTY_FINDING_REFERENCE_MISMATCH",
+        message: `Campaign failure ${JSON.stringify(failure.id)} and its resulting finding must carry the same property_ids`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${matchingFinding.index}].property_ids`
+      });
+    }
+  }
+
+  for (const [findingId, matchingFindings] of findingsById) {
+    if (failureIds.has(findingId)) {
+      continue;
+    }
+    for (const finding of matchingFindings) {
+      if (finding.propertyIds.length === 0) {
+        continue;
+      }
+      diagnostics.push({
+        code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
+        message: `Property-derived finding ${JSON.stringify(findingId)} has no campaign failure with the same ID`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${findingsPath}#$[${finding.index}].id`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const rightSet = new Set(right);
+  return new Set(left).size === rightSet.size && left.every((value) => rightSet.has(value));
 }
 
 function readCanonicalPropertyCatalog(layout: RunLayout): {
@@ -470,6 +740,10 @@ function schemaDiagnostics(issues: Array<{ code: string; message: string; path: 
     source: "property-provenance",
     path: issue.path
   }));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function markNodeBlockedByDependencies(

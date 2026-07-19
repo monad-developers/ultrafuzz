@@ -70,7 +70,9 @@ Use this configured invariant testing fuzzer timeout:
      object in `findings.json`.
    - When an implemented invariant property caused the failure, copy its exact
      canonical ID from `implemented-properties.json` into a non-empty
-     `property_ids` array on both the raw failure record and finding. Omit
+     `property_ids` array on both the raw failure record and finding. Use the
+     same stable `id` for the raw failure and its resulting finding so the
+     runtime can verify that the references were preserved. Omit
      `property_ids` for setup, harness, and other failures that did not
      originate from a catalog property. Never invent or silently drop a
      property reference.

@@ -14,6 +14,22 @@ export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#
 
 const nonEmptyString = z.string().min(1);
 const nonEmptyStringArray = z.array(nonEmptyString);
+const propertyIdsSchema = z
+  .array(nonEmptyString)
+  .min(1)
+  .superRefine((propertyIds, context) => {
+    const seen = new Set<string>();
+    for (const [propertyIndex, propertyId] of propertyIds.entries()) {
+      if (seen.has(propertyId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate property ID ${JSON.stringify(propertyId)}`,
+          path: [propertyIndex]
+        });
+      }
+      seen.add(propertyId);
+    }
+  });
 
 export interface PropertySource {
   source_node_id: string;
@@ -138,14 +154,28 @@ export const implementedPropertiesSchema = z
 const propertyCampaignFailureSchema = z.looseObject({
   id: nonEmptyString,
   status: nonEmptyString,
-  property_ids: nonEmptyStringArray.min(1).optional()
+  property_ids: propertyIdsSchema.optional()
 });
 
-export const propertyCampaignSchema = z.object({
-  schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
-  fuzzer_backend: nonEmptyString.optional(),
-  failures: z.array(propertyCampaignFailureSchema)
-});
+export const propertyCampaignSchema = z
+  .object({
+    schema_version: z.literal(PROPERTY_CAMPAIGN_SCHEMA_VERSION),
+    fuzzer_backend: nonEmptyString.optional(),
+    failures: z.array(propertyCampaignFailureSchema)
+  })
+  .superRefine((artifact, context) => {
+    const failureIds = new Set<string>();
+    for (const [failureIndex, failure] of artifact.failures.entries()) {
+      if (failureIds.has(failure.id)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate campaign failure ID ${JSON.stringify(failure.id)}`,
+          path: ["failures", failureIndex, "id"]
+        });
+      }
+      failureIds.add(failure.id);
+    }
+  });
 
 export const propertiesJsonSchema = {
   $schema: "https://json-schema.org/draft/2020-12/schema",

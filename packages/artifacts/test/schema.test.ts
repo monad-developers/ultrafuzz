@@ -168,6 +168,17 @@ test("property implementation and campaign schemas retain canonical references",
     }).ok,
     true
   );
+  assert.equal(
+    validatePropertyCampaignSchema({
+      schema_version: PROPERTY_CAMPAIGN_SCHEMA_VERSION,
+      failures: [
+        { id: "failure-1", status: "reproduced", property_ids: ["property-1", "property-1"] },
+        { id: "failure-1", status: "reproduced" }
+      ]
+    }).ok,
+    false,
+    "campaign failure IDs and property references must be unambiguous"
+  );
 });
 
 test("property implementation schema rejects duplicate canonical references", () => {
@@ -228,6 +239,7 @@ test("finding and report schemas accept non-property and historical artifacts", 
     summary: "The setup path is incomplete."
   };
   assert.equal(validateFindingSchema(nonPropertyFinding).ok, true);
+  assert.equal(validateFindingSchema({ ...nonPropertyFinding, property_ids: ["property-1", "property-1"] }).ok, false);
   assert.equal(
     validateArtifactContract(
       "ultrafuzz/report@1",
@@ -293,6 +305,33 @@ test("finding and report schemas accept non-property and historical artifacts", 
             sources: [],
             implementation_paths: ["test/recon/Properties.sol"],
             test_paths: ["test/foundry/Property1.t.sol"]
+          }
+        ]
+      })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1", "property-1"],
+            sources: [
+              {
+                source_node_id: "property-specification-certora",
+                source_property_id: "certora-1"
+              }
+            ],
+            implementation_paths: [],
+            test_paths: []
           }
         ]
       })
