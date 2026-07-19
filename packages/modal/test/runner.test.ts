@@ -4,11 +4,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
+import { SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type SandboxCreateParams } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
 import { fingerprintModalModel } from "../src/config.js";
-import { MODAL_BENCHMARK_SANDBOX_RESOURCES, type ModalModelSpec } from "../src/defaults.js";
+import type { ModalModelSpec } from "../src/defaults.js";
 import {
   createModalLaunchState,
   markModalSandboxCreated,
@@ -20,6 +20,7 @@ import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } fro
 import {
   MODAL_COLLECT_RESULT_FILES,
   assertSanitizedModalCollectedFiles,
+  createModalBenchmarkSandbox,
   createTrackedSourceArchive,
   finishReservedModalLaunch,
   modalImageBuildCommand,
@@ -40,8 +41,23 @@ const MODEL: ModalModelSpec = {
 };
 
 describe("Modal benchmark capacity", () => {
-  it("reserves a high-capacity sandbox for parallel benchmark work", () => {
-    expect(MODAL_BENCHMARK_SANDBOX_RESOURCES).toEqual({
+  it("forwards the high-capacity resource profile to sandbox creation", async () => {
+    const app = {} as App;
+    const image = {} as Image;
+    const sandbox = {} as Sandbox;
+    const sandboxes = {
+      create: vi.fn(async (_app: App, _image: Image, _params?: SandboxCreateParams) => sandbox)
+    };
+
+    await expect(
+      createModalBenchmarkSandbox(sandboxes, app, image, {
+        name: "benchmark-sandbox",
+        timeoutMs: 60_000
+      })
+    ).resolves.toBe(sandbox);
+    expect(sandboxes.create).toHaveBeenCalledWith(app, image, {
+      name: "benchmark-sandbox",
+      timeoutMs: 60_000,
       cpu: 16,
       cpuLimit: 16,
       memoryMiB: 32_768,

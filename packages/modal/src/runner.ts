@@ -10,6 +10,7 @@ import {
   type App,
   type Image,
   type Sandbox,
+  type SandboxCreateParams,
   type Volume
 } from "modal";
 
@@ -314,14 +315,13 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       }
       sandbox = orphans[0];
       if (sandbox === undefined) {
-        sandbox = await input.modal.sandboxes.create(input.app, input.image, {
+        sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
           name: modalSandboxName(input.state.logical_run_id, record),
           command: [
             "bash",
             "-lc",
             modalWorkerEntrypointCommand(input.auth === undefined ? undefined : input.model.provider)
           ],
-          ...MODAL_BENCHMARK_SANDBOX_RESOURCES,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
           workdir: "/opt/ultrafuzz",
           env: {
@@ -358,6 +358,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
+}
+
+type ModalBenchmarkSandboxCreateParams = Omit<SandboxCreateParams, "cpu" | "cpuLimit" | "memoryMiB" | "memoryLimitMiB">;
+
+export function createModalBenchmarkSandbox(
+  sandboxes: Pick<ModalClient["sandboxes"], "create">,
+  app: App,
+  image: Image,
+  params: ModalBenchmarkSandboxCreateParams
+): Promise<Sandbox> {
+  return sandboxes.create(app, image, {
+    ...params,
+    ...MODAL_BENCHMARK_SANDBOX_RESOURCES
+  });
 }
 
 async function recoverExistingSandboxLaunch(
