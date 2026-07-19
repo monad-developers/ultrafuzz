@@ -32,6 +32,11 @@ const RECOVERY_POLL_MS = 60_000;
 const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
 const SCORE_RETRY_MAX_MS = 15 * 60_000;
+const EVAL_SCORE_TIMEOUT_MS = 5 * 60_000;
+const PUBLISH_RETRY_BASE_MS = 60_000;
+const PUBLISH_RETRY_MAX_MS = 5 * 60_000;
+const EVAL_PUBLISH_TIMEOUT_MS = 5 * 60_000;
+const EVAL_REPORT_TIMEOUT_MS = 5 * 60_000;
 
 interface DurableNodeState {
   status?: string;
@@ -111,26 +116,8 @@ async function main(): Promise<void> {
     }
 
     await scoreWithRetry(control, evalRunId);
-    await setStatus("publishing", { eval_run_id: evalRunId });
-    await runChecked(
-      [
-        "node",
-        CLI,
-        "eval",
-        "publish",
-        evalRunId,
-        "--project",
-        control,
-        "--provider",
-        "braintrust",
-        "--resume",
-        "--json"
-      ],
-      { label: "eval publish" }
-    );
-    await runChecked(["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"], {
-      label: "eval report"
-    });
+    await publishWithRetry(control, evalRunId);
+    await reportWithRetry(control, evalRunId);
     const scoreSummary = JSON.parse(await readFile(path.join(evalDir, "summary.json"), "utf8")) as unknown;
     await persistOutcomeArtifacts(target, control, evalRunId);
     await writeFile(
@@ -159,6 +146,42 @@ async function main(): Promise<void> {
     await setStatus("failed", { error: message.slice(0, 12_000) }).catch(() => undefined);
     throw error;
   }
+}
+
+async function publishWithRetry(control: string, evalRunId: string): Promise<void> {
+  await runCheckedWithRetry({
+    argv: [
+      "node",
+      CLI,
+      "eval",
+      "publish",
+      evalRunId,
+      "--project",
+      control,
+      "--provider",
+      "braintrust",
+      "--resume",
+      "--json"
+    ],
+    label: "eval publish",
+    stage: "publishing",
+    waitingStage: "waiting-publish",
+    attemptField: "publish_attempt",
+    evalRunId,
+    timeoutMs: EVAL_PUBLISH_TIMEOUT_MS
+  });
+}
+
+async function reportWithRetry(control: string, evalRunId: string): Promise<void> {
+  await runCheckedWithRetry({
+    argv: ["node", CLI, "eval", "report", evalRunId, "--project", control, "--json"],
+    label: "eval report",
+    stage: "reporting",
+    waitingStage: "waiting-report",
+    attemptField: "report_attempt",
+    evalRunId,
+    timeoutMs: EVAL_REPORT_TIMEOUT_MS
+  });
 }
 
 function assertWorkerInput(): void {
@@ -527,15 +550,11 @@ async function synchronizedRunState(target: string): Promise<DurableRunState | u
 }
 
 async function synchronizeWorkflowState(target: string, runId: string): Promise<void> {
-  const child = spawn(
-    "node",
-    [CLI, "status", runId, "--project", target, "--window", "30", "--json"],
-    {
-      cwd: ULTRAFUZZ_ROOT,
-      env: process.env,
-      stdio: "ignore"
-    }
-  );
+  const child = spawn("node", [CLI, "status", runId, "--project", target, "--window", "30", "--json"], {
+    cwd: ULTRAFUZZ_ROOT,
+    env: process.env,
+    stdio: "ignore"
+  });
   const exitCode = await new Promise<number>((resolve) => {
     let settled = false;
     const finish = (code: number): void => {
@@ -552,10 +571,7 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
     child.once("close", (code) => finish(code ?? 1));
   });
   if (exitCode !== 0) {
-    await appendFile(
-      LOG_PATH,
-      `${new Date().toISOString()} [workflow status sync] exit=${exitCode}\n`
-    );
+    await appendFile(LOG_PATH, `${new Date().toISOString()} [workflow status sync] exit=${exitCode}\n`);
   }
 }
 
@@ -566,19 +582,17 @@ async function scoreWithRetry(control: string, evalRunId: string): Promise<void>
     try {
       const judgeKeyEnv = CONFIG.braintrust.judge_api_key_env ?? CONFIG.braintrust.api_key_env;
       const judgeCredential = await ephemeralJudgeCredential(requiredEnv(judgeKeyEnv));
-      await runChecked(
-        ["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"],
-        {
-          label: "eval score",
-          env: {
-            ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
-            ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
-            ...(CONFIG.braintrust.judge_url === undefined
-              ? {}
-              : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
-          }
+      await runChecked(["node", CLI, "eval", "score", evalRunId, "--project", control, "--llm-judge", "--json"], {
+        label: "eval score",
+        timeoutMs: EVAL_SCORE_TIMEOUT_MS,
+        env: {
+          ULTRAFUZZ_EVAL_JUDGE_API_KEY: judgeCredential,
+          ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true",
+          ...(CONFIG.braintrust.judge_url === undefined
+            ? {}
+            : { ULTRAFUZZ_EVAL_JUDGE_URL: CONFIG.braintrust.judge_url })
         }
-      );
+      });
       return;
     } catch (error) {
       const delay = Math.min(SCORE_RETRY_MAX_MS, SCORE_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
@@ -588,6 +602,36 @@ async function scoreWithRetry(control: string, evalRunId: string): Promise<void>
       await setStatus("waiting-judge", {
         eval_run_id: evalRunId,
         score_attempt: attempt,
+        next_retry_at: retryAt
+      });
+      await sleep(delay);
+    }
+  }
+}
+
+async function runCheckedWithRetry(options: {
+  argv: string[];
+  label: string;
+  stage: string;
+  waitingStage: string;
+  attemptField: string;
+  evalRunId: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
+  for (let attempt = 1; ; attempt++) {
+    await setStatus(options.stage, { eval_run_id: options.evalRunId, [options.attemptField]: attempt });
+    try {
+      await runChecked(options.argv, { label: options.label, timeoutMs: options.timeoutMs });
+      return;
+    } catch (error) {
+      const delay = Math.min(PUBLISH_RETRY_MAX_MS, PUBLISH_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
+      if (Date.now() + delay >= deadline) throw error;
+      const retryAt = new Date(Date.now() + delay).toISOString();
+      await appendFile(LOG_PATH, `${new Date().toISOString()} [${options.label}] retry ${attempt} at ${retryAt}\n`);
+      await setStatus(options.waitingStage, {
+        eval_run_id: options.evalRunId,
+        [options.attemptField]: attempt,
         next_retry_at: retryAt
       });
       await sleep(delay);
@@ -612,7 +656,7 @@ async function durableRunState(target: string): Promise<DurableRunState | undefi
 
 async function runChecked(
   argv: string[],
-  options: { label: string; cwd?: string; env?: Record<string, string> }
+  options: { label: string; cwd?: string; env?: Record<string, string>; timeoutMs?: number }
 ): Promise<void> {
   await appendFile(LOG_PATH, `${new Date().toISOString()} [${options.label}] ${argv.join(" ")}\n`);
   const child = spawn(argv[0]!, argv.slice(1), {
@@ -623,11 +667,32 @@ async function runChecked(
   const streams = [child.stdout, child.stderr].map(async (stream) => {
     for await (const chunk of stream) await appendFile(LOG_PATH, String(chunk));
   });
+  let timedOut = false;
   const exitCode = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let killTimeout: ReturnType<typeof setTimeout> | undefined;
+    const clearTimers = (): void => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (killTimeout !== undefined) clearTimeout(killTimeout);
+    };
+    child.once("error", (error) => {
+      clearTimers();
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimers();
+      resolve(code ?? 1);
+    });
+    if (options.timeoutMs !== undefined) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimeout = setTimeout(() => child.kill("SIGKILL"), 15_000);
+      }, options.timeoutMs);
+    }
   });
   await Promise.all(streams);
+  if (timedOut) throw new Error(`${options.label} timed out after ${options.timeoutMs}ms`);
   if (exitCode !== 0) throw new Error(`${options.label} failed with exit code ${exitCode}`);
 }
 

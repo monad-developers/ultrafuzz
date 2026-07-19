@@ -44,6 +44,13 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain("WORKFLOW_STATUS_SYNC_TIMEOUT_MS");
     expect(workerSource).toContain('stdio: "ignore"');
     expect(workerSource).toContain('setStatus("waiting-judge"');
+    expect(workerSource).toContain("EVAL_SCORE_TIMEOUT_MS");
+    expect(workerSource).toContain("EVAL_PUBLISH_TIMEOUT_MS");
+    expect(workerSource).toContain("EVAL_REPORT_TIMEOUT_MS");
+    expect(workerSource).toContain("runCheckedWithRetry");
+    expect(workerSource).toContain("publish_attempt");
+    expect(workerSource).toContain("report_attempt");
+    expect(workerSource).toContain('child.kill("SIGKILL")');
     expect(workerSource).toContain("configureGitSafeDirectories(target)");
     expect(workerSource).toContain('"safe.directory"');
   });
