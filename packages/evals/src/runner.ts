@@ -66,7 +66,7 @@ export interface RunEvalSuiteInput extends PlanEvalSuiteInput {
   provider?: string;
   /** `[eval]` section of the resolved ultrafuzz.toml (provider binding + credentials env names). */
   evalProviderConfig?: EvalConfig;
-  /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry with an active provider). */
+  /** Poll runs to terminal state and stream node telemetry (default: reporting.node_telemetry). */
   watch?: boolean;
   watchTimeoutSeconds?: number;
   pollIntervalMs?: number;
@@ -109,7 +109,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {}),
     onWarning: (diagnostic) => diagnostics.push(diagnostic)
   });
-  const watch = input.watch ?? (planned.suite.reporting.node_telemetry && reporters.length > 0);
+  const watch = input.watch ?? planned.suite.reporting.node_telemetry;
   const resolvedProvenance = buildEvalRunProvenance(planned, {
     watch,
     ...(input.watchTimeoutSeconds !== undefined ? { watchTimeoutSeconds: input.watchTimeoutSeconds } : {}),
@@ -274,10 +274,12 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
     runId: input.runId,
     ...(runnerProfile?.agent !== undefined ? { agent: runnerProfile.agent } : {}),
     ...(runnerProfile?.model !== undefined ? { model: runnerProfile.model } : {}),
+    ...(runnerProfile?.reasoning !== undefined ? { reasoning: runnerProfile.reasoning } : {}),
     ...(input.suite.run.max_parallel_targets !== undefined
       ? { maxConcurrency: input.suite.run.max_parallel_targets }
       : {}),
     workflowInput: buildWorkflowInput(input.row),
+    ...benchmarkTopologyTransform(input.row),
     ...(input.env !== undefined ? { env: input.env } : {})
   });
   if (result.ok && result.value) {
@@ -293,6 +295,34 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   }
   return { ok: false, workflowIds: [], diagnostics: result.diagnostics };
 };
+
+export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_input">): {
+  topologyTransform?: { strategyLoops?: number; excludedNodeIds?: string[] };
+} {
+  if (!isRecordValue(row.workflow_input)) return {};
+  const execution = row.workflow_input.benchmark_execution;
+  if (execution === undefined) return {};
+  if (!isRecordValue(execution)) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark execution controls must be an object");
+  }
+  const strategyLoops = execution.strategy_loops;
+  const excludedNodeIds = execution.excluded_node_ids;
+  if (strategyLoops !== undefined && (!Number.isInteger(strategyLoops) || Number(strategyLoops) < 1)) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "benchmark strategy loops must be a positive integer");
+  }
+  if (
+    excludedNodeIds !== undefined &&
+    (!Array.isArray(excludedNodeIds) || excludedNodeIds.some((id) => typeof id !== "string" || id.length === 0))
+  ) {
+    throw new EvalError("EVAL_BENCHMARK_EXECUTION_INVALID", "excluded benchmark node IDs must be non-empty strings");
+  }
+  return {
+    topologyTransform: {
+      ...(strategyLoops === undefined ? {} : { strategyLoops: Number(strategyLoops) }),
+      ...(excludedNodeIds === undefined ? {} : { excludedNodeIds: [...excludedNodeIds] as string[] })
+    }
+  };
+}
 
 export interface WatchEvalRowInput {
   plan: EvalPlanValue;

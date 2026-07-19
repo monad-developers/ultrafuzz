@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { publishEvalRun } from "../src/publish.js";
-import { launchEvalRow, watchEvalRow } from "../src/runner.js";
+import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
 import { EVAL_RUN_SCHEMA_VERSION } from "../src/types.js";
 import { readJsonLines } from "../src/utils.js";
 import { RecordingReporter, testRow, testSuite, writeRunFixture } from "./helpers.js";
@@ -145,6 +145,42 @@ describe("runner", () => {
       reason: "workflow-not-terminal"
     });
     expect(terminal.efficiency.wall_time_seconds).toBeNull();
+  });
+
+  it("watches terminal rows by default even when provider reporting is disabled", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-watch-default-"));
+    const project = path.join(base, "project");
+    const groundTruthRoot = path.join(base, "gt");
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(groundTruthRoot, { recursive: true });
+    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    const suite = testSuite(groundTruthRoot);
+    const suitePath = path.join(project, "suite.yml");
+    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+
+    const result = await runEvalSuite({
+      projectRoot: project,
+      suitePath,
+      evalRunId: "eval-watch-default",
+      groundTruthRoot,
+      provider: "none",
+      launcher: async () => ({
+        ok: true,
+        runId: "run-1",
+        runRoot,
+        workflowIds: ["workflow-1"],
+        diagnostics: []
+      })
+    });
+
+    expect(result.records[0]).toMatchObject({
+      status: "launched",
+      final_status: "succeeded",
+      workflow: { status: "succeeded", terminal: true }
+    });
+    expect(readJsonLines(path.join(result.eval_run_root, "runs.jsonl"))).toHaveLength(2);
   });
 
   it("propagates candidate graph, config, and execution artifact identities into row records", async () => {

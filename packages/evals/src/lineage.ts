@@ -35,6 +35,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     .map(([id, target]) => ({ id, repo: target.repo, ...resolveTargetProvenance(target.path, target.ref) }))
     .sort((left, right) => left.id.localeCompare(right.id));
   const groundTruthSha256 = groundTruthDigests(plan.matrix);
+  const benchmarkControls = benchmarkExecutionControls(plan.matrix);
   const executionPolicyValue = {
     revision: EVAL_EXECUTION_POLICY_REVISION,
     max_parallel_targets: plan.suite.run.max_parallel_targets ?? null,
@@ -43,7 +44,8 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     heartbeat_interval_seconds: plan.suite.reporting.heartbeat_interval_seconds,
     controller_mode: controller.watch ? ("watch" as const) : ("detached" as const),
     watch_timeout_seconds: controller.watchTimeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS,
-    poll_interval_ms: controller.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS
+    poll_interval_ms: controller.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS,
+    ...(benchmarkControls.length === 0 ? {} : { benchmark_execution_fingerprint: sha256Identity(benchmarkControls) })
   };
   const executionPolicy = {
     ...executionPolicyValue,
@@ -74,6 +76,20 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
       execution_policy: executionPolicy
     }
   };
+}
+
+function benchmarkExecutionControls(matrix: EvalMatrixRow[]): unknown[] {
+  const controls = new Map<string, unknown>();
+  for (const row of matrix) {
+    const workflowInput =
+      typeof row.workflow_input === "object" && row.workflow_input !== null && !Array.isArray(row.workflow_input)
+        ? (row.workflow_input as Record<string, unknown>)
+        : {};
+    const value = workflowInput.benchmark_execution;
+    if (value === undefined) continue;
+    controls.set(stableJson(value), value);
+  }
+  return [...controls.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, value]) => value);
 }
 
 export function buildScoringProvenance(input: {

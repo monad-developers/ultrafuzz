@@ -1,0 +1,134 @@
+name: Publish Eval History
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Completed workflow run containing one scored eval artifact
+        required: true
+        type: string
+      artifact_name:
+        description: Name of the complete scored eval artifact
+        required: true
+        type: string
+      eval_run_id:
+        description: Immutable eval run ID inside the artifact
+        required: true
+        type: string
+      benchmark:
+        description: Benchmark cohort
+        required: true
+        type: choice
+        options:
+          - evmbench
+          - ultrafuzz-bench
+      lane:
+        description: Benchmark lane
+        required: true
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  actions: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-eval-history
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+
+      - name: Validate publication inputs
+        env:
+          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          PUBLICATION_ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
+        run: |
+          node -e '
+            const [artifactRunId, artifactName, evalRunId] = process.argv.slice(1);
+            if (!/^[0-9]+$/.test(artifactRunId)) throw new Error("artifact run ID must be numeric");
+            const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+            if (!safeId.test(artifactName)) throw new Error("artifact name is invalid");
+            if (!safeId.test(evalRunId)) throw new Error("eval run ID is invalid");
+          ' "$PUBLICATION_ARTIFACT_RUN_ID" "$PUBLICATION_ARTIFACT_NAME" "$PUBLICATION_EVAL_RUN_ID"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Ultrafuzz
+        run: pnpm -w build
+
+      - name: Preserve history already pending in the publication pull request
+        run: |
+          if git fetch --no-tags origin "automation/eval-history:refs/remotes/origin/automation/eval-history"; then
+            node scripts/ci/merge-pending-eval-history.mjs origin/automation/eval-history
+          fi
+
+      - name: Download complete scored generation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .ultrafuzz/evals/runs/${{ inputs.eval_run_id }}
+          run-id: ${{ inputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Append history and regenerate charts
+        env:
+          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
+        run: >-
+          node packages/cli/dist/index.js eval history "$PUBLICATION_EVAL_RUN_ID"
+          --project .
+          --benchmark "${{ inputs.benchmark }}"
+          --lane "${{ inputs.lane }}"
+          --repository "${{ github.server_url }}/${{ github.repository }}"
+          --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/$PUBLICATION_ARTIFACT_RUN_ID"
+
+      - name: Verify deterministic publication output
+        run: node packages/cli/dist/index.js eval history --project . --check
+
+      - name: Open or update the publication pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          branch: automation/eval-history
+          base: main
+          delete-branch: false
+          draft: false
+          commit-message: "Update published eval history [skip eval-history]"
+          title: "[skip eval-history] Update published eval history"
+          body: |
+            ## Summary
+
+            Append one complete scored benchmark generation and regenerate the deterministic README charts.
+
+            ## Verification
+
+            - Validated the versioned history schema and immutable lineage
+            - Regenerated all SVGs from checked-in history
+            - Confirmed a clean deterministic regeneration
+          add-paths: |
+            benchmarks/history.json
+            docs/assets/eval-history/*.svg

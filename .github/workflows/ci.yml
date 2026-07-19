@@ -47,6 +47,9 @@ jobs:
       - name: Build
         run: pnpm -w build
 
+      - name: Validate benchmark manifests and history charts
+        run: pnpm -w benchmark:check
+
       - name: Validate release
         run: pnpm -w validate:release
 

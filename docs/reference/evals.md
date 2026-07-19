@@ -145,8 +145,17 @@ ultrafuzz eval score     # grade reports against ground truth (optional --llm-ju
 ultrafuzz eval report    # show the scored variant ranking
 ultrafuzz eval compare   # diff variants or release runs with compatible lineage
 ultrafuzz eval bundle    # export privacy-safe aggregate evidence for offline analysis
+ultrafuzz eval history   # validate/render or append to public longitudinal history
 ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 ```
+
+The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
+and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
+`eval history` consumes only complete scored generations, stores aggregate
+metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
+in `benchmarks/history.json`, and renders the README SVGs without network or
+model calls. Efficiency values that are not complete remain `null` with typed
+reasons and render as unavailable.
 
 `eval publish --provider langsmith <eval-run-id>` replays the journal from
 offset 0 and reconstructs the entire node trace on a provider after the fact

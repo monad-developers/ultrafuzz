@@ -1,0 +1,24 @@
+{
+  "schema_version": "ultrafuzz.benchmark.cohort.v1",
+  "smoke_targets": ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"],
+  "targets": [
+    {
+      "id": "very-liquid-vaults-foundry",
+      "framework": "foundry",
+      "repository": "https://github.com/rheo-xyz/very-liquid-vaults",
+      "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+    },
+    {
+      "id": "venus-isolated-pools-hardhat",
+      "framework": "hardhat",
+      "repository": "https://github.com/code-423n4/2023-05-venus",
+      "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+    },
+    {
+      "id": "stableswap-ng-vyper",
+      "framework": "vyper",
+      "repository": "https://github.com/curvefi/stableswap-ng",
+      "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+    }
+  ]
+}

@@ -2,9 +2,15 @@ name: Target Repository E2E
 
 on:
   pull_request:
+    paths-ignore:
+      - benchmarks/history.json
+      - docs/assets/eval-history/**
   push:
     branches:
       - main
+    paths-ignore:
+      - benchmarks/history.json
+      - docs/assets/eval-history/**
   workflow_dispatch:
 
 permissions:

@@ -1,0 +1,74 @@
+{
+  "schema_version": "ultrafuzz.benchmark.lanes.v1",
+  "smoke": {
+    "trials_per_variant": 1,
+    "strategy_loops": 1,
+    "excluded_strategy_families": ["stateful-invariant", "differential", "dynamic-strategy"],
+    "excluded_node_ids": [
+      "differential-library-tests",
+      "stateful-invariant-setup",
+      "stateful-invariant-handlers",
+      "stateful-invariant-coverage",
+      "stateful-invariant-implement-properties",
+      "stateful-invariant-campaign",
+      "differential-oracle-planner",
+      "reference-harness-author",
+      "reference-and-lane-auditor",
+      "differential-lane-author",
+      "differential-red-triage",
+      "differential-repair-and-report-review",
+      "dynamic-strategy-generator"
+    ],
+    "model_profiles": [
+      {
+        "id": "benchmark-smoke-gpt-5-6-luna-high",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "high"
+      }
+    ]
+  },
+  "full": {
+    "trials_per_variant": 10,
+    "excluded_strategy_families": [],
+    "excluded_node_ids": [],
+    "model_profiles": [
+      {
+        "id": "benchmark-full-gpt-5-5-xhigh",
+        "agent": "CodexAgent",
+        "model": "gpt-5.5",
+        "reasoning": "xhigh"
+      },
+      {
+        "id": "benchmark-full-gpt-5-6-sol-xhigh",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-sol",
+        "reasoning": "xhigh"
+      },
+      {
+        "id": "benchmark-full-gpt-5-6-terra-xhigh",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-terra",
+        "reasoning": "xhigh"
+      },
+      {
+        "id": "benchmark-full-gpt-5-6-luna-xhigh",
+        "agent": "CodexAgent",
+        "model": "gpt-5.6-luna",
+        "reasoning": "xhigh"
+      },
+      {
+        "id": "benchmark-full-claude-fable-5-max",
+        "agent": "ClaudeAgent",
+        "model": "claude-fable-5",
+        "reasoning": "max"
+      },
+      {
+        "id": "benchmark-full-claude-opus-4-8-max",
+        "agent": "ClaudeAgent",
+        "model": "claude-opus-4-8",
+        "reasoning": "max"
+      }
+    ]
+  }
+}

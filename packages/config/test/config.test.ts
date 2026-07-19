@@ -265,6 +265,20 @@ describe("model profile and triage validation", () => {
       model: "claude-sonnet-5"
     });
     expect(pinned.value.models.profiles.default?.reasoning ?? null).toBeNull();
+
+    const benchmark = resolveConfig({ env: {} });
+    expect(benchmark.ok).toBe(true);
+    if (!benchmark.ok) return;
+    applyDefaultProfileOverrides(benchmark.value, {
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    });
+    expect(benchmark.value.models.profiles.default).toMatchObject({
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    });
   });
 
   it("fails invalid model profiles with typed diagnostics", () => {
