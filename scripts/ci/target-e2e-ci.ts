@@ -11,7 +11,19 @@ import {
   writeTargetMetadata
 } from "./target-e2e-lib.js";
 
-const FAILED_STATUSES = new Set(["failed", "cancelled", "canceled", "timed_out", "timeout", "error"]);
+const UNHEALTHY_STATUSES = new Set([
+  "blocked",
+  "cancelled",
+  "canceled",
+  "error",
+  "failed",
+  "orphaned",
+  "paused",
+  "stalled",
+  "stuck",
+  "timed-out",
+  "timeout"
+]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -52,14 +64,18 @@ function assertInspectHealthy(path: string): void {
   const workflow = isJsonObject(data.workflow) ? data.workflow : {};
   const workflowStatus = workflow.status;
   if (
-    (typeof status === "string" && FAILED_STATUSES.has(status)) ||
-    (typeof workflowStatus === "string" && FAILED_STATUSES.has(workflowStatus))
+    (typeof status === "string" && UNHEALTHY_STATUSES.has(normalizedStatus(status))) ||
+    (typeof workflowStatus === "string" && UNHEALTHY_STATUSES.has(normalizedStatus(workflowStatus)))
   ) {
     fail(
       `run is not healthy: status=${JSON.stringify(status ?? null)}, ` +
         `workflow_status=${JSON.stringify(workflowStatus ?? null)}`
     );
   }
+}
+
+function normalizedStatus(value: string): string {
+  return value.trim().toLowerCase().replaceAll("_", "-");
 }
 
 function reportAccountingMismatches(envelope: JsonObject): JsonObject[] {

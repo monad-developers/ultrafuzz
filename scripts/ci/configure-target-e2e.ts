@@ -159,6 +159,9 @@ model = "${MODEL_NAME}"
 reasoning = "${REASONING_EFFORT}"
 timeout_seconds = ${nodeTimeoutSeconds}
 
+[agents.CodexAgent]
+auth = "api-key"
+
 [permissions]
 trust_model = "skip-permissions"
 prompt_review_required = true

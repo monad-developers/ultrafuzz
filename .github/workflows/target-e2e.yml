@@ -22,6 +22,18 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate target matrix cardinality
+        run: |
+          jq -e '
+            .schema_version == "1.0" and
+            (.targets | type == "array" and length == 3) and
+            (([.targets[].id] | sort) == [
+              "stableswap-ng-vyper",
+              "venus-isolated-pools-hardhat",
+              "very-liquid-vaults-foundry"
+            ])
+          ' scripts/ci/target-e2e-manifest.json >/dev/null
+
       - name: Read target manifest
         id: matrix
         run: echo "targets=$(jq -c '.targets' scripts/ci/target-e2e-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -98,6 +110,7 @@ jobs:
             "$(git -C .target-source rev-parse HEAD)"
 
       - name: Install Foundry
+        if: matrix.target.framework == 'foundry'
         uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
 
       - name: Build Foundry target

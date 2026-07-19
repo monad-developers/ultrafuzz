@@ -4,30 +4,70 @@ import { basename, dirname, join, resolve } from "node:path";
 import { validateArtifactContract, validateFindingsSchema } from "../../packages/artifacts/dist/index.js";
 
 const MANIFEST_SCHEMA_VERSION = "1.0";
+
+export interface TargetToolchain {
+  runtime: string;
+  package_manager?: string;
+  install_command: string;
+  build_command: string;
+}
+
+interface CanonicalTarget {
+  name: string;
+  framework: "foundry" | "hardhat" | "vyper";
+  repository: string;
+  repository_slug: string;
+  revision: string;
+  toolchain: TargetToolchain;
+  known_vulnerability_references: readonly string[];
+}
+
 const CANONICAL_TARGETS = new Map(
   Object.entries({
     "very-liquid-vaults-foundry": {
+      name: "Very Liquid Vaults (Foundry)",
       framework: "foundry",
       repository: "https://github.com/rheo-xyz/very-liquid-vaults",
       repository_slug: "rheo-xyz/very-liquid-vaults",
-      revision: "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+      revision: "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec",
+      toolchain: {
+        runtime: "Foundry 1.9.0",
+        install_command: "git submodule update --init --recursive",
+        build_command: "forge build"
+      },
+      known_vulnerability_references: ["https://github.com/ObsidianAudits/2025-07-size-credit/issues/2"]
     },
     "venus-isolated-pools-hardhat": {
+      name: "Venus Isolated Pools (Hardhat)",
       framework: "hardhat",
       repository: "https://github.com/code-423n4/2023-05-venus",
       repository_slug: "code-423n4/2023-05-venus",
-      revision: "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+      revision: "9853f6f4fe906b635e214b22de9f627c6a17ba5b",
+      toolchain: {
+        runtime: "Node.js 16",
+        package_manager: "Yarn 1.22.1",
+        install_command: "node .yarn/releases/yarn-1.22.1.cjs install --frozen-lockfile",
+        build_command: "node .yarn/releases/yarn-1.22.1.cjs hardhat:compile"
+      },
+      known_vulnerability_references: ["https://code4rena.com/reports/2023-05-venus"]
     },
     "stableswap-ng-vyper": {
+      name: "StableSwap NG (Vyper)",
       framework: "vyper",
       repository: "https://github.com/curvefi/stableswap-ng",
       repository_slug: "curvefi/stableswap-ng",
-      revision: "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+      revision: "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386",
+      toolchain: {
+        runtime: "Python 3.10",
+        package_manager: "Poetry 1.5.1",
+        install_command: "poetry install --no-interaction --no-root",
+        build_command: "poetry run vyper contracts/main/CurveStableSwapNG.vy"
+      },
+      known_vulnerability_references: [
+        "https://docs.curve.finance/assets/pdf/audits/Curve%20Finance%20StableSwapNG%20Security%20Audit%20Report.pdf"
+      ]
     }
-  } satisfies Record<
-    string,
-    { framework: "foundry" | "hardhat" | "vyper"; repository: string; repository_slug: string; revision: string }
-  >)
+  } satisfies Record<string, CanonicalTarget>)
 );
 const REQUIRED_TARGET_IDS = new Set(CANONICAL_TARGETS.keys());
 const REQUIRED_FRAMEWORKS = new Set(["foundry", "hardhat", "vyper"]);
@@ -38,13 +78,6 @@ const SENSITIVE_NAME_PATTERN = /(?:auth|credential|key|password|secret|token)/iu
 const MAX_DIAGNOSTIC_BYTES = 1_000_000;
 
 type JsonObject = Record<string, unknown>;
-
-export interface TargetToolchain {
-  runtime: string;
-  package_manager?: string;
-  install_command: string;
-  build_command: string;
-}
 
 export interface TargetManifestEntry {
   id: string;
@@ -95,10 +128,6 @@ export function validateTargetManifest(value: unknown): TargetManifest {
     "target revisions"
   );
 
-  const hardhat = targets.find((target) => target.framework === "hardhat");
-  if (hardhat?.toolchain.runtime !== "Node.js 16" || hardhat.toolchain.package_manager !== "Yarn 1.22.1") {
-    throw new Error("Hardhat target must pin Node.js 16 and Yarn 1.22.1");
-  }
   return { schema_version: MANIFEST_SCHEMA_VERSION, targets };
 }
 
@@ -248,6 +277,9 @@ function validateTarget(value: unknown, index: number): TargetManifestEntry {
     throw new Error(`targets[${index}].id is not in the canonical smoke matrix`);
   }
   const name = requiredString(value.name, `targets[${index}].name`);
+  if (name !== expected.name) {
+    throw new Error(`targets[${index}].name does not match the canonical smoke matrix`);
+  }
   const framework = requiredString(value.framework, `targets[${index}].framework`);
   if (!REQUIRED_FRAMEWORKS.has(framework)) {
     throw new Error(`targets[${index}].framework is unsupported`);
@@ -293,6 +325,9 @@ function validateTarget(value: unknown, index: number): TargetManifestEntry {
     install_command: requiredString(value.toolchain.install_command, `targets[${index}].toolchain.install_command`),
     build_command: requiredString(value.toolchain.build_command, `targets[${index}].toolchain.build_command`)
   };
+  if (!sameToolchain(toolchain, expected.toolchain)) {
+    throw new Error(`targets[${index}].toolchain does not match the canonical smoke matrix`);
+  }
   if (!Array.isArray(value.known_vulnerability_references) || value.known_vulnerability_references.length === 0) {
     throw new Error(`targets[${index}] must include a public known-vulnerability reference`);
   }
@@ -306,6 +341,14 @@ function validateTarget(value: unknown, index: number): TargetManifestEntry {
     }
     return url;
   });
+  if (
+    references.length !== expected.known_vulnerability_references.length ||
+    references.some(
+      (reference, referenceIndex) => reference !== expected.known_vulnerability_references[referenceIndex]
+    )
+  ) {
+    throw new Error(`targets[${index}].known_vulnerability_references do not match the canonical smoke matrix`);
+  }
   return {
     id,
     name,
@@ -441,6 +484,15 @@ function requiredString(value: unknown, label: string): string {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function sameToolchain(left: TargetToolchain, right: TargetToolchain): boolean {
+  return (
+    left.runtime === right.runtime &&
+    left.package_manager === right.package_manager &&
+    left.install_command === right.install_command &&
+    left.build_command === right.build_command
+  );
 }
 
 function requireExactSet(values: string[], expected: Set<string>, label: string): void {

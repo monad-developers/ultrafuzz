@@ -48,6 +48,16 @@ describe("target manifest", () => {
     wrongRepository.targets[1]!.repository_slug = "example/other";
     expect(() => validateTargetManifest(wrongRepository)).toThrow("canonical smoke matrix");
   });
+
+  it("rejects canonical target metadata drift", () => {
+    const wrongToolchain = structuredClone(loadTargetManifest(manifestPath));
+    wrongToolchain.targets[0]!.toolchain.build_command = "forge test";
+    expect(() => validateTargetManifest(wrongToolchain)).toThrow("toolchain does not match");
+
+    const wrongReference = structuredClone(loadTargetManifest(manifestPath));
+    wrongReference.targets[0]!.known_vulnerability_references = ["https://example.com/unrelated"];
+    expect(() => validateTargetManifest(wrongReference)).toThrow("known_vulnerability_references do not match");
+  });
 });
 
 describe("terminal evidence extraction", () => {

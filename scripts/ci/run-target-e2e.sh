@@ -190,8 +190,19 @@ wait_for_report() {
   return 1
 }
 
+preserved_build_log=""
+if [ -n "$prepared_target_root" ] && [ -f "$evidence_root/target-build.log" ] && \
+  [ ! -L "$evidence_root/target-build.log" ]; then
+  preserved_build_log="$(mktemp)"
+  cp -- "$evidence_root/target-build.log" "$preserved_build_log"
+fi
+
 rm -rf -- "$run_root"
 mkdir -p "$work_root" "$evidence_root"
+if [ -n "$preserved_build_log" ]; then
+  cp -- "$preserved_build_log" "$evidence_root/target-build.log"
+  rm -f -- "$preserved_build_log"
+fi
 if [ -z "$prepared_target_root" ]; then
   clone_target
 fi

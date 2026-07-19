@@ -53,6 +53,7 @@ describe("production smoke topology configuration", () => {
     expect(config).toContain('default = "target-e2e"');
     expect(config).toContain('model = "gpt-5.6-luna"');
     expect(config).toContain('reasoning = "high"');
+    expect(config).toContain('[agents.CodexAgent]\nauth = "api-key"');
     expect(config).not.toContain("signal_profile");
 
     for (const node of topology.nodes) {
@@ -67,6 +68,26 @@ describe("production smoke topology configuration", () => {
 });
 
 describe("target E2E workflow", () => {
+  it("rejects an empty or incomplete dynamic matrix before expansion", () => {
+    const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
+      jobs: {
+        "target-matrix": { steps: Array<{ name?: string; run?: string }> };
+      };
+    };
+
+    const steps = workflow.jobs["target-matrix"].steps;
+    const validationIndex = steps.findIndex((step) => step.name === "Validate target matrix cardinality");
+    const readIndex = steps.findIndex((step) => step.name === "Read target manifest");
+    const validation = steps[validationIndex]?.run ?? "";
+
+    expect(validationIndex).toBeGreaterThanOrEqual(0);
+    expect(readIndex).toBeGreaterThan(validationIndex);
+    expect(validation).toContain("length == 3");
+    expect(validation).toContain('"very-liquid-vaults-foundry"');
+    expect(validation).toContain('"venus-isolated-pools-hardhat"');
+    expect(validation).toContain('"stableswap-ng-vyper"');
+  });
+
   it("installs pnpm before setup-node enables the pnpm cache", () => {
     const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
       jobs: {
@@ -83,6 +104,19 @@ describe("target E2E workflow", () => {
     expect(pnpmSetupIndex).toBeGreaterThanOrEqual(0);
     expect(nodeCacheIndex).toBeGreaterThanOrEqual(0);
     expect(pnpmSetupIndex).toBeLessThan(nodeCacheIndex);
+  });
+
+  it("installs framework toolchains only for their target", () => {
+    const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
+      jobs: {
+        "ultrafuzz-target": {
+          steps: Array<{ name?: string; if?: string }>;
+        };
+      };
+    };
+
+    const foundry = workflow.jobs["ultrafuzz-target"].steps.find((step) => step.name === "Install Foundry");
+    expect(foundry?.if).toBe("matrix.target.framework == 'foundry'");
   });
 
   it("keeps the Hardhat Yarn shim usable from generated worktrees", () => {
@@ -118,5 +152,16 @@ describe("target E2E runner", () => {
     expect(runIndex).toBeGreaterThanOrEqual(0);
     expect(syncCallIndex).toBeLessThan(validateIndex);
     expect(syncCallIndex).toBeLessThan(runIndex);
+  });
+
+  it("preserves target build diagnostics while resetting run evidence", () => {
+    const script = readFileSync(join(repoRoot, "scripts", "ci", "run-target-e2e.sh"), "utf-8");
+    const preserveIndex = script.indexOf('cp -- "$evidence_root/target-build.log" "$preserved_build_log"');
+    const resetIndex = script.indexOf('rm -rf -- "$run_root"');
+    const restoreIndex = script.indexOf('cp -- "$preserved_build_log" "$evidence_root/target-build.log"');
+
+    expect(preserveIndex).toBeGreaterThanOrEqual(0);
+    expect(resetIndex).toBeGreaterThan(preserveIndex);
+    expect(restoreIndex).toBeGreaterThan(resetIndex);
   });
 });
