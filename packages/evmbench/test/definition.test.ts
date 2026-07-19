@@ -72,6 +72,30 @@ describe("EVMBench definition", () => {
     ).rejects.toThrow("audit directory missing for synthetic-audit");
   });
 
+  it("reports missing finding documents and Docker context inputs", async () => {
+    const missingFinding = createHarnessFixture();
+    fs.rmSync(path.join(missingFinding.auditDir, "findings", "H-01.md"));
+    await expect(
+      generateEvmbenchDefinition({
+        harnessRoot: missingFinding.harnessRoot,
+        resolveTargetCommit: async () => "a".repeat(40)
+      })
+    ).rejects.toThrow("audit synthetic-audit is missing finding document H-01.md");
+
+    const missingContext = createHarnessFixture();
+    fs.appendFileSync(
+      path.join(missingContext.auditDir, "Dockerfile"),
+      "COPY hardhat.config.js $AUDIT_DIR/hardhat.config.js\n",
+      "utf8"
+    );
+    await expect(
+      generateEvmbenchDefinition({
+        harnessRoot: missingContext.harnessRoot,
+        resolveTargetCommit: async () => "a".repeat(40)
+      })
+    ).rejects.toThrow("audit synthetic-audit Docker context input is not a file: hardhat.config.js");
+  });
+
   it("pins the target checkout and permits only non-sensitive Docker context inputs", () => {
     const repository = "https://github.com/evmbench-org/synthetic-audit.git";
     const source = [

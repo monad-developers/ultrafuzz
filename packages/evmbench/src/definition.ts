@@ -269,7 +269,10 @@ async function catalogAudit(
     const finding = record(value, `${auditId} finding ${index + 1}`);
     const id = safeIdSchema.parse(finding.id);
     const findingPath = path.join(auditDir, "findings", `${id}.md`);
-    if (!fs.statSync(findingPath).isFile()) throw new Error(`audit ${auditId} is missing a finding document`);
+    const findingStat = fs.statSync(findingPath, { throwIfNoEntry: false });
+    if (findingStat === undefined || !findingStat.isFile()) {
+      throw new Error(`audit ${auditId} is missing finding document ${id}.md`);
+    }
     return { id, sha256: sha256(fs.readFileSync(findingPath)) };
   });
   assertUnique(
@@ -284,7 +287,10 @@ async function catalogAudit(
   const contextManifest = contextFiles.map((relative) => {
     const absolute = path.resolve(auditDir, relative);
     assertInside(auditDir, absolute, "audit Docker context path");
-    if (!fs.statSync(absolute).isFile()) throw new Error(`audit ${auditId} Docker context input is not a file`);
+    const contextStat = fs.statSync(absolute, { throwIfNoEntry: false });
+    if (contextStat === undefined || !contextStat.isFile()) {
+      throw new Error(`audit ${auditId} Docker context input is not a file: ${relative}`);
+    }
     return { path: relative, sha256: sha256(fs.readFileSync(absolute)) };
   });
   const pinnedDockerfile = buildPinnedAuditDockerfile({
