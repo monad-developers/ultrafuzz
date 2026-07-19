@@ -312,6 +312,26 @@ export type AnalysisAttemptHistory = z.infer<typeof analysisAttemptHistorySchema
 export type AnalysisBundleManifest = z.infer<typeof analysisBundleManifestSchema>;
 export type AnalysisBundleOmissions = z.infer<typeof analysisBundleOmissionsSchema>;
 
+const PAYLOAD_SCHEMAS = {
+  "terminal-status": analysisTerminalStatusSchema,
+  "evaluation-metrics": analysisEvaluationMetricsSchema,
+  "accounting-summary": analysisAccountingSummarySchema,
+  "attempt-history": analysisAttemptHistorySchema
+} as const;
+
+export interface AnalysisBundlePayloads {
+  "terminal-status"?: AnalysisTerminalStatus;
+  "evaluation-metrics"?: AnalysisEvaluationMetrics;
+  "accounting-summary"?: AnalysisAccountingSummary;
+  "attempt-history"?: AnalysisAttemptHistory;
+}
+
+export interface AnalysisBundleContents {
+  manifest: AnalysisBundleManifest;
+  omissions: AnalysisBundleOmissions;
+  payloads: AnalysisBundlePayloads;
+}
+
 const analysisBundleFilesJsonSchema = {
   type: "array",
   minItems: 1,
@@ -363,13 +383,6 @@ function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativ
   };
 }
 
-const PAYLOAD_SCHEMAS = {
-  "terminal-status": analysisTerminalStatusSchema,
-  "evaluation-metrics": analysisEvaluationMetricsSchema,
-  "accounting-summary": analysisAccountingSummarySchema,
-  "attempt-history": analysisAttemptHistorySchema
-} as const;
-
 const FORBIDDEN_BUNDLE_KEYS = new Set([
   "agent_output",
   "app_id",
@@ -420,12 +433,9 @@ export function writeAnalysisBundle(input: WriteAnalysisBundleInput): WriteAnaly
       omissionEntries.push({ kind, path: DATA_PATHS[kind], reason: omission ?? "data-unavailable" });
       continue;
     }
-    const parsed = PAYLOAD_SCHEMAS[kind].safeParse(candidate);
-    if (!parsed.success) {
-      throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
-    }
-    assertPolicySafeValue(parsed.data, kind);
-    serialized.set(DATA_PATHS[kind], { kind, contents: serializeJson(parsed.data) });
+    const parsed = parseAnalysisBundlePayload(kind, candidate);
+    assertPolicySafeValue(parsed, kind);
+    serialized.set(DATA_PATHS[kind], { kind, contents: serializeJson(parsed) });
   }
 
   const omissions: AnalysisBundleOmissions = {
@@ -481,6 +491,14 @@ export function writeAnalysisBundle(input: WriteAnalysisBundleInput): WriteAnaly
 }
 
 export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManifest {
+  return readAnalysisBundle(bundleRoot).manifest;
+}
+
+/**
+ * Validate and load the complete aggregate-only bundle for offline consumers.
+ * No source execution directory is consulted while reading the bundle.
+ */
+export function readAnalysisBundle(bundleRoot: string): AnalysisBundleContents {
   const root = path.resolve(bundleRoot);
   const rootStat = fs.existsSync(root) ? fs.lstatSync(root) : undefined;
   if (rootStat === undefined || !rootStat.isDirectory() || rootStat.isSymbolicLink()) {
@@ -522,6 +540,7 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
   const omissionsPath = safeResolveInside(root, ANALYSIS_BUNDLE_OMISSIONS_FILE, "analysis bundle omissions");
   const omissions = assertAnalysisBundleOmissions(readJsonBounded(omissionsPath));
   assertPolicySafeValue(omissions, "omissions");
+  const payloads: Partial<Record<AnalysisBundleDataKind, AnalysisBundlePayload>> = {};
   const omittedKinds = new Set<AnalysisBundleDataKind>();
   for (const omission of omissions.omissions) {
     if (omittedKinds.has(omission.kind) || omission.path !== DATA_PATHS[omission.kind]) {
@@ -537,14 +556,13 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
     }
     if (entry !== undefined) {
       const value = readJsonBounded(safeResolveInside(root, entry.path, "analysis bundle payload"));
-      const parsed = PAYLOAD_SCHEMAS[kind].safeParse(value);
-      if (!parsed.success) {
-        throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
-      }
-      assertPolicySafeValue(parsed.data, kind);
+      const parsed = parseAnalysisBundlePayload(kind, value);
+      assertPolicySafeValue(parsed, kind);
+      payloads[kind] = parsed;
     }
   }
-  return manifest;
+  // Each entry was parsed with the schema selected by the same kind above.
+  return { manifest, omissions, payloads: payloads as AnalysisBundlePayloads };
 }
 
 export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
@@ -575,6 +593,18 @@ function assertKnownKinds(value: object, label: string): void {
       throw new Error(`analysis bundle ${label} kind is not allowlisted: ${kind}`);
     }
   }
+}
+
+type AnalysisBundlePayload =
+  AnalysisTerminalStatus | AnalysisEvaluationMetrics | AnalysisAccountingSummary | AnalysisAttemptHistory;
+
+function parseAnalysisBundlePayload(kind: AnalysisBundleDataKind, value: unknown): AnalysisBundlePayload {
+  const schema = PAYLOAD_SCHEMAS[kind];
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
+  }
+  return parsed.data;
 }
 
 function assertPolicySafeValue(value: unknown, location: string): void {

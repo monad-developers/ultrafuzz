@@ -358,3 +358,6 @@ or sanitized derived fields only; source reports, findings, diagnostics,
 configuration, raw execution output, and execution-local identifiers are
 never copied. Bundle validation checks the schemas, strict file allowlist,
 referential integrity, checksums, and privacy policy before publication.
+Programmatic offline consumers can use `readAnalysisBundle` from
+`@ultrafuzz/artifacts` to validate and load the typed payloads and omissions
+without consulting the original execution directory.

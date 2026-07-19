@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   ANALYSIS_BUNDLE_MANIFEST_FILE,
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
+  readAnalysisBundle,
   validateAnalysisBundle,
   writeAnalysisBundle,
   type AnalysisAccountingSummary,
@@ -124,6 +125,16 @@ test("analysis bundles are deterministic, self-contained, and checksum verified"
   assert.deepEqual(firstResult.manifest, secondResult.manifest);
   assert.equal(firstResult.omissions.omissions.length, 0);
   assert.deepEqual(validateAnalysisBundle(first), firstResult.manifest);
+  assert.deepEqual(readAnalysisBundle(first), {
+    manifest: firstResult.manifest,
+    omissions: firstResult.omissions,
+    payloads: {
+      "terminal-status": payloads.terminal,
+      "evaluation-metrics": payloads.metrics,
+      "accounting-summary": payloads.accounting,
+      "attempt-history": payloads.attempts
+    }
+  });
   assert.equal(fs.statSync(first).mode & 0o777, 0o700);
   for (const entry of firstResult.manifest.files) {
     assert.equal(path.isAbsolute(entry.path), false);
