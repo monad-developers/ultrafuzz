@@ -435,6 +435,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${reason}; ${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
       await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
+      continue;
     } else {
       await appendFile(
         LOG_PATH,
