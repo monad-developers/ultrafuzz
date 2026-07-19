@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { buildEvalRunProvenance, buildScoringProvenance } from "../src/lineage.js";
+import { buildEvalRunProvenance, buildScoringProvenance, sha256Identity } from "../src/lineage.js";
 import type { EvalPlanValue } from "../src/types.js";
 import { testRow, testSuite } from "./helpers.js";
 
@@ -84,6 +84,27 @@ describe("versioned eval lineage", () => {
     expect(first.benchmark.targets[0]?.commit).toMatch(/^[0-9a-f]{40}$/u);
     expect(first.benchmark.cohort_fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/u);
     expect(first.benchmark.execution_policy.fingerprint).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    expect(first.benchmark).toMatchObject({
+      model_controls: [
+        {
+          runner_profile: "eval-runner",
+          runner: { agent: "CodexAgent", model: "gpt-5.4-mini", reasoning: "high" },
+          judge_profile: "eval-judge",
+          judge: { agent: "CodexAgent", model: "gpt-5.5", reasoning: "xhigh" }
+        }
+      ],
+      trials_per_variant: 1
+    });
+    expect(first.benchmark.cohort_fingerprint).toBe(
+      sha256Identity({
+        protocol_revision: first.benchmark.protocol_revision,
+        targets: first.benchmark.targets,
+        ground_truth_sha256: first.benchmark.ground_truth_sha256,
+        model_controls: first.benchmark.model_controls,
+        trials_per_variant: first.benchmark.trials_per_variant,
+        execution_policy_fingerprint: first.benchmark.execution_policy.fingerprint
+      })
+    );
 
     commitChange(generated.candidateRoot, "candidate v2\n", "v0.0.2");
     const nextCandidate = buildEvalRunProvenance(generated.plan, policy);

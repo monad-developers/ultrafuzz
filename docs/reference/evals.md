@@ -111,7 +111,9 @@ Every new eval run records a versioned provenance block in `eval.json`:
 - Benchmark identity includes resolved target commits and clean-checkout state,
   ground-truth digests, model controls, trial budget, and a normalized
   execution-policy fingerprint. These controls produce the deterministic
-  cohort fingerprint; tracked target modifications make it incomplete.
+  cohort fingerprint; tracked target modifications make it incomplete. New
+  artifacts also retain the normalized model controls and trial count next to
+  the fingerprint so the cohort identity can be independently recomputed.
 - Candidate-owned prompts, topology, strategies, and runtime configuration do
   not alter the cohort. Their `graph_fingerprint` and `config_fingerprint` are
   instead recorded on each `runs.jsonl` row so product changes remain visible.

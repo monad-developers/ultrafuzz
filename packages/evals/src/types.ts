@@ -153,6 +153,13 @@ export interface EvalExecutionPolicyProvenance {
   poll_interval_ms: number;
 }
 
+export interface EvalBenchmarkModelControlProvenance {
+  runner_profile: string;
+  runner: EvalModelProfile | null;
+  judge_profile: string;
+  judge: EvalModelProfile | null;
+}
+
 export interface EvalBenchmarkProvenance {
   availability: "available" | "incomplete";
   series: string;
@@ -160,6 +167,10 @@ export interface EvalBenchmarkProvenance {
   cohort_fingerprint: string;
   targets: EvalBenchmarkTargetProvenance[];
   ground_truth_sha256: Record<string, string>;
+  /** Present on newly generated artifacts; optional while reading earlier lineage artifacts. */
+  model_controls?: EvalBenchmarkModelControlProvenance[];
+  /** Present on newly generated artifacts; optional while reading earlier lineage artifacts. */
+  trials_per_variant?: number;
   execution_policy: EvalExecutionPolicyProvenance;
 }
 

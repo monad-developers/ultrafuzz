@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 
 import type {
+  EvalBenchmarkModelControlProvenance,
   EvalCandidateProvenance,
   EvalMatrixRow,
   EvalPlanValue,
@@ -49,12 +50,14 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     ...executionPolicyValue,
     fingerprint: sha256Identity(executionPolicyValue)
   };
+  const normalizedModelControls = modelControls(plan.suite, plan.matrix);
+  const trialsPerVariant = plan.suite.run.trials_per_variant;
   const cohortControls = {
     protocol_revision: EVAL_BENCHMARK_PROTOCOL_REVISION,
     targets,
     ground_truth_sha256: groundTruthSha256,
-    model_controls: modelControls(plan.suite, plan.matrix),
-    trials_per_variant: plan.suite.run.trials_per_variant,
+    model_controls: normalizedModelControls,
+    trials_per_variant: trialsPerVariant,
     execution_policy_fingerprint: executionPolicy.fingerprint
   };
   const benchmarkAvailability =
@@ -71,6 +74,8 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
       cohort_fingerprint: sha256Identity(cohortControls),
       targets,
       ground_truth_sha256: groundTruthSha256,
+      model_controls: normalizedModelControls,
+      trials_per_variant: trialsPerVariant,
       execution_policy: executionPolicy
     }
   };
@@ -147,11 +152,11 @@ export function sha256Identity(value: unknown): string {
   return `sha256:${crypto.createHash("sha256").update(stableJson(value)).digest("hex")}`;
 }
 
-function modelControls(suite: EvalSuiteSpec, matrix: EvalMatrixRow[]): unknown[] {
-  const controls = new Map<string, unknown>();
+function modelControls(suite: EvalSuiteSpec, matrix: EvalMatrixRow[]): EvalBenchmarkModelControlProvenance[] {
+  const controls = new Map<string, EvalBenchmarkModelControlProvenance>();
   for (const row of matrix) {
-    const runner = suite.model_profiles[row.runner_model_profile];
-    const judge = suite.model_profiles[row.judge_model_profile];
+    const runner = suite.model_profiles[row.runner_model_profile] ?? null;
+    const judge = suite.model_profiles[row.judge_model_profile] ?? null;
     const value = {
       runner_profile: row.runner_model_profile,
       runner,
