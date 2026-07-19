@@ -174,17 +174,6 @@ export async function pauseRun(input: PauseRunInput) {
 }
 
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
-  if (action === "fork" && input.forkFrame === undefined) {
-    return runtimeFailure<WorkflowLifecycleValue>([
-      {
-        code: "WORKFLOW_FORK_FRAME_REQUIRED",
-        message: "fork requires a checkpoint frame",
-        severity: "error",
-        source: "runtime"
-      }
-    ]);
-  }
-
   const evidence = await readLinkedWorkflowEvidence(input.projectRoot, input.runId);
   if (!evidence.ok) {
     return runtimeFailure<WorkflowLifecycleValue>(evidence.diagnostics);

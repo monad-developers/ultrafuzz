@@ -14,7 +14,6 @@ import {
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
-import { runSmithersLifecycleCommand } from "../src/smithers.js";
 
 import {
   ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
@@ -5027,10 +5026,6 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
   assert.equal(replayed.value?.submitted, true);
 
-  const missingFrame = await forkRun({ projectRoot: project, runId: run.value!.run_id, env });
-  assert.equal(missingFrame.ok, false);
-  assert.equal(missingFrame.diagnostics[0]?.code, "WORKFLOW_FORK_FRAME_REQUIRED");
-
   const forked = await forkRun({
     projectRoot: project,
     runId: run.value!.run_id,
@@ -5073,27 +5068,38 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
 });
 
-test("frameless forks resume under configured recovery supervision", async () => {
+test("frameless forks run through the product lifecycle under recovery supervision", async () => {
   const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
   const env = fakeSmithersEnv(project);
-  const workflowPath = path.join(project, "workflow.tsx");
+  const run = await startRun({ projectRoot: project, runId: "frameless-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
-  const result = await runSmithersLifecycleCommand({
-    action: "fork",
-    smithersRunId: "ultrafuzz-frameless-fork",
-    workflowPath,
-    projectRoot: project,
-    maxConcurrency: 4,
-    keepWorkspaces: false,
-    controllerLeaseSeconds: 45,
-    env
-  });
+  const forked = await forkRun({ projectRoot: project, runId: run.value!.run_id, maxConcurrency: 4, env });
 
-  assert.equal(result.workflowRunId, "ultrafuzz-lifecycle-run-forked");
-  assert.deepEqual(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").trim().split("\n"), [
-    `fork ${workflowPath} --run-id ultrafuzz-frameless-fork --format json`,
-    `up ${workflowPath} --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 4 --format json --supervise --supervise-interval 15s --supervise-stale-threshold 45s --supervise-max-concurrent 1`
-  ]);
+  assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
+  assert.equal(forked.value?.workflow_run_id, "ultrafuzz-lifecycle-run-forked");
+  assert.equal(forked.value?.submitted, true);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { run_id?: string };
+    workflow_ids?: string[];
+  };
+  assert.equal(metadata.workflow?.run_id, "ultrafuzz-lifecycle-run-forked");
+  assert.deepEqual(metadata.workflow_ids, ["ultrafuzz-lifecycle-run-forked"]);
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
+  assert.equal(state.concurrency.requested_concurrency, 4);
+  assert.equal(state.controller_lease.duration_ms, 30_000);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(
+    commands,
+    /^fork .*ultrafuzz-frameless-lifecycle-run\.tsx --run-id ultrafuzz-frameless-lifecycle-run --format json$/m
+  );
+  assert.match(
+    commands,
+    /^up .*ultrafuzz-frameless-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 4 --format json --supervise --supervise-interval 10s --supervise-stale-threshold 30s --supervise-max-concurrent 1$/m
+  );
 });
 
 test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {
