@@ -29,6 +29,7 @@ const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
 const RECOVERY_MAX_RESETS = 96;
 const RECOVERY_POLL_MS = 60_000;
+const RECOVERY_RESET_SETTLE_MS = 15 * 60_000;
 const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
 const SCORE_RETRY_MAX_MS = 15 * 60_000;
@@ -59,6 +60,7 @@ type RecoverableNodeEntry = {
   node: DurableNodeState;
   reason: "failed" | "stale-running";
 };
+type ResetCooldowns = Map<string, number>;
 
 async function main(): Promise<void> {
   try {
@@ -411,8 +413,9 @@ async function runEval(argv: string[], target: string): Promise<void> {
 }
 
 async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
-  const recentlyResetNodes = new Set<string>();
+  const resetCooldowns: ResetCooldowns = new Map();
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
+    pruneResetCooldowns(resetCooldowns);
     const state = await synchronizedRunState(target);
     if (state?.status === "succeeded") {
       return true;
@@ -421,15 +424,13 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       return false;
     }
     const recoverableNodes = recoverableNodeEntries(state);
-    const resetNode = recoverableNodes.find((entry) =>
-      resetNodeKeys(entry).every((key) => !recentlyResetNodes.has(key))
-    );
+    const resetNode = recoverableNodes.find((entry) => !resetNodeOnCooldown(entry, resetCooldowns));
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
       failed_node_count: recoverableNodes.filter((node) => node.reason === "failed").length,
       stale_running_node_count: recoverableNodes.filter((node) => node.reason === "stale-running").length,
-      recently_reset_node_count: recentlyResetNodes.size,
+      recently_reset_node_count: resetCooldownNodeCount(recoverableNodes, resetCooldowns),
       workflow_status: state.status
     });
     if (resetNode !== undefined) {
@@ -440,7 +441,13 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       );
       const resetNodes = resetNodeCandidates(nodeId, node);
       await resumeWithResetCandidates(state.run_id, target, resetNodes, attempt);
-      for (const key of resetNodeKeys(resetNode)) recentlyResetNodes.add(key);
+      const cooldownUntil = armResetCooldown(resetNode, resetCooldowns);
+      await appendFile(
+        LOG_PATH,
+        `${new Date().toISOString()} [workflow recovery] reset cooldown ${nodeId} until ${new Date(
+          cooldownUntil
+        ).toISOString()}\n`
+      );
       continue;
     } else if (recoverableNodes.length > 0) {
       await appendFile(
@@ -448,19 +455,17 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         `${new Date().toISOString()} [workflow recovery] waiting for reset propagation (${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
       await sleep(RECOVERY_POLL_MS);
-      recentlyResetNodes.clear();
     } else {
       await appendFile(
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] resuming workflow (${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
-      recentlyResetNodes.clear();
       await runChecked(["node", CLI, "resume", state.run_id, "--project", target, "--max-concurrency", "1", "--json"], {
         label: `workflow resume ${attempt}`
       });
     }
 
-    const terminal = await waitForWorkflowTerminal(target);
+    const terminal = await waitForWorkflowTerminal(target, resetCooldowns);
     if (terminal?.status === "succeeded") {
       return true;
     }
@@ -471,6 +476,30 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
 
 function resetNodeKeys(entry: RecoverableNodeEntry): string[] {
   return [...new Set([entry.nodeId, ...resetNodeCandidates(entry.nodeId, entry.node)])];
+}
+
+function armResetCooldown(entry: RecoverableNodeEntry, cooldowns: ResetCooldowns): number {
+  const cooldownUntil = Date.now() + resetSettleMs();
+  for (const key of resetNodeKeys(entry)) cooldowns.set(key, cooldownUntil);
+  return cooldownUntil;
+}
+
+function pruneResetCooldowns(cooldowns: ResetCooldowns, now = Date.now()): void {
+  for (const [key, expiresAt] of cooldowns) {
+    if (expiresAt <= now) cooldowns.delete(key);
+  }
+}
+
+function resetNodeOnCooldown(entry: RecoverableNodeEntry, cooldowns: ResetCooldowns, now = Date.now()): boolean {
+  return resetNodeKeys(entry).some((key) => (cooldowns.get(key) ?? 0) > now);
+}
+
+function resetCooldownNodeCount(entries: RecoverableNodeEntry[], cooldowns: ResetCooldowns): number {
+  return entries.filter((entry) => resetNodeOnCooldown(entry, cooldowns)).length;
+}
+
+function resetSettleMs(): number {
+  return Math.max(RECOVERY_POLL_MS * 2, Math.min(CONFIG.node_timeout_seconds * 1000, RECOVERY_RESET_SETTLE_MS));
 }
 
 async function resumeWithResetCandidates(
@@ -517,9 +546,13 @@ function resetNodeCandidates(nodeId: string, node: DurableNodeState): string[] {
   return [...new Set(candidates)];
 }
 
-async function waitForWorkflowTerminal(target: string): Promise<DurableRunState | undefined> {
+async function waitForWorkflowTerminal(
+  target: string,
+  resetCooldowns: ResetCooldowns
+): Promise<DurableRunState | undefined> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
   while (Date.now() < deadline) {
+    pruneResetCooldowns(resetCooldowns);
     const state = await synchronizedRunState(target);
     await reportProgress(target, state);
     if (state === undefined) {
@@ -529,7 +562,8 @@ async function waitForWorkflowTerminal(target: string): Promise<DurableRunState 
     if (isTerminalWorkflowStatus(state.status)) {
       return state;
     }
-    if (recoverableNodeEntries(state).length > 0) {
+    const recoverableNodes = recoverableNodeEntries(state);
+    if (recoverableNodes.some((entry) => !resetNodeOnCooldown(entry, resetCooldowns))) {
       return { ...state, status: "failed" };
     }
     await sleep(RECOVERY_POLL_MS);
