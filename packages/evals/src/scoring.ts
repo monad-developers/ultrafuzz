@@ -750,7 +750,7 @@ async function bestMatch(
         : classification === "needs-human-review"
           ? "Finding did not match known ground truth but includes concrete supporting evidence."
           : "Finding did not match ground truth and lacked concrete supporting evidence.",
-    confidence: bestScore >= threshold ? 0.75 : strongNovel ? 0.5 : 0.7,
+    confidence: bestScore >= effectiveThreshold ? 0.75 : strongNovel ? 0.5 : 0.7,
     judge_model: judgeModel,
     judge_kind: "deterministic",
     ...(row.judge_reasoning ? { reasoning_effort: row.judge_reasoning } : {}),
@@ -764,7 +764,7 @@ async function bestMatch(
       finding,
       bugs,
       deterministicResult: result,
-      threshold
+      threshold: effectiveThreshold
     });
     return {
       deterministic_match: result,

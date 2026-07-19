@@ -328,6 +328,41 @@ describe("deterministic scorer math", () => {
     expect(scored.findingScores[0]?.deterministic_match.judge_kind).toBe("deterministic");
   });
 
+  it("uses the candidate-mode threshold consistently for deterministic and optional judges", async () => {
+    const suite = testSuite("/tmp/gt");
+    let observedThreshold: number | undefined;
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "candidate-finding", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      matchMode: "candidate",
+      llmJudge: async (input) => {
+        observedThreshold = input.threshold;
+        const classification = 0.5 >= input.threshold ? "true-positive" : "false-positive";
+        return {
+          ...input.deterministicResult,
+          matched_ground_truth_bug_id: "BUG-1",
+          score: 0.5,
+          confidence: 0.5,
+          classification,
+          reason_code: classification === "true-positive" ? "judge-confirmed-match" : "weak-unmatched-finding",
+          judge_kind: "llm"
+        };
+      }
+    });
+
+    expect(observedThreshold).toBe(0.45);
+    expect(scored.findingScores[0]?.deterministic_match.classification).toBe("false-positive");
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      matched_ground_truth_bug_id: "BUG-1",
+      score: 0.5,
+      confidence: 0.5,
+      classification: "true-positive",
+      reason_code: "judge-confirmed-match"
+    });
+  });
+
   it("preserves prior scoring outputs until a rerun finishes successfully", async () => {
     const fixture = scoreRunFixture();
     const expectPriorOutputs = (): void => {
