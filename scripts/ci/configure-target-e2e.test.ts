@@ -55,3 +55,23 @@ describe("production smoke topology configuration", () => {
     expect(config).not.toContain("signal_profile");
   });
 });
+
+describe("target E2E workflow", () => {
+  it("installs pnpm before setup-node enables the pnpm cache", () => {
+    const workflow = parse(readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8")) as {
+      jobs: {
+        "ultrafuzz-target": {
+          steps: Array<{ name?: string; uses?: string; with?: Record<string, unknown> }>;
+        };
+      };
+    };
+
+    const steps = workflow.jobs["ultrafuzz-target"].steps;
+    const pnpmSetupIndex = steps.findIndex((step) => step.uses?.startsWith("pnpm/action-setup@") === true);
+    const nodeCacheIndex = steps.findIndex((step) => step.name === "Set up Node.js 22" && step.with?.cache === "pnpm");
+
+    expect(pnpmSetupIndex).toBeGreaterThanOrEqual(0);
+    expect(nodeCacheIndex).toBeGreaterThanOrEqual(0);
+    expect(pnpmSetupIndex).toBeLessThan(nodeCacheIndex);
+  });
+});
