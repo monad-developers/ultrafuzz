@@ -10,7 +10,7 @@
       "stateful-invariant-handlers",
       "stateful-invariant-coverage",
       "stateful-invariant-implement-properties",
-      "stateful-invariant-recon-campaign",
+      "stateful-invariant-campaign",
       "differential-oracle-planner",
       "reference-harness-author",
       "reference-and-lane-auditor",
