@@ -2478,6 +2478,37 @@ test("syncRun preserves artifact-verified nodes when workflow inspection regress
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-complete");
 });
 
+test("syncRun fails active nodes when the workflow runner is orphaned", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-orphaned-run";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "orphaned",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-orphaned-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-orphaned-run", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.match(state.nodes?.["project-discovery"]?.last_error ?? "", /workflow runner became unhealthy/u);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "orphaned");
+});
+
 test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

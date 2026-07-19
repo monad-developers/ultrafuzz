@@ -985,7 +985,10 @@ async function synchronizeTasks(input: {
     if (evidence === undefined) {
       continue;
     }
-    const recoverableEvidence = artifactCompleteRecoveryEvidence(evidence, previous, input.layout, task.attemptId);
+    const recoverableEvidence = workflowHealthRecoveryEvidence(
+      input.inspect,
+      artifactCompleteRecoveryEvidence(evidence, previous, input.layout, task.attemptId)
+    );
 
     const needsFinalization =
       recoverableEvidence.status === "succeeded" &&
@@ -1545,6 +1548,24 @@ function artifactCompleteRecoveryEvidence(
   };
 }
 
+function workflowHealthRecoveryEvidence(
+  inspect: WorkflowInspect,
+  evidence: NodeWorkflowEvidence
+): NodeWorkflowEvidence {
+  if (!workflowStatusIsOrphanedOrStale(inspect) || terminalStatus(evidence.status)) {
+    return evidence;
+  }
+  if (!["running", "ready"].includes(evidence.status)) {
+    return evidence;
+  }
+  return {
+    ...evidence,
+    status: "failed",
+    workflowState: inspect.runState ?? inspect.runStatus ?? evidence.workflowState,
+    error: "workflow runner became unhealthy before the node completed"
+  };
+}
+
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {
   const status = statusFromWorkflowState(step.state);
   return {
@@ -1710,6 +1731,9 @@ function finalRunStatus(
   if (workflowStatus === "failed" || statuses.some((status) => ["failed", "skipped", "invalidated"].includes(status))) {
     return "failed";
   }
+  if (workflowStatusIsOrphanedOrStale(inspect)) {
+    return "failed";
+  }
   if (
     options.evidenceComplete &&
     statuses.some((status) => ["pending", "ready", "runnable", "running"].includes(status))
@@ -1723,9 +1747,6 @@ function finalRunStatus(
       ? "succeeded"
       : "failed";
   }
-  if (["stale", "orphaned"].includes(workflowStatus)) {
-    return "failed";
-  }
   return currentStatus === "pending" ? "running" : currentStatus;
 }
 
@@ -1733,6 +1754,10 @@ function workflowSucceeded(inspect: WorkflowInspect): boolean {
   return ["succeeded", "finished", "continued", "success", "complete", "completed"].includes(
     (inspect.runState ?? inspect.runStatus ?? "").toLowerCase()
   );
+}
+
+function workflowStatusIsOrphanedOrStale(inspect: WorkflowInspect): boolean {
+  return ["stale", "orphaned"].includes((inspect.runState ?? inspect.runStatus ?? "").toLowerCase());
 }
 
 function aggregateAttemptStatuses(statuses: NodeStatus[]): NodeStatus {
