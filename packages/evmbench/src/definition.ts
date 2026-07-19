@@ -257,7 +257,10 @@ async function catalogAudit(
   const auditDir = path.join(projectRoot, "audits", auditId);
   const configPath = path.join(auditDir, "config.yaml");
   const dockerfilePath = path.join(auditDir, "Dockerfile");
-  if (!fs.statSync(auditDir).isDirectory()) throw new Error(`audit directory missing for ${auditId}`);
+  const auditStat = fs.statSync(auditDir, { throwIfNoEntry: false });
+  if (auditStat === undefined || !auditStat.isDirectory()) {
+    throw new Error(`audit directory missing for ${auditId}`);
+  }
   const config = record(parseYaml(fs.readFileSync(configPath, "utf8")), `${auditId} config`);
   if (config.id !== auditId) throw new Error(`audit config ID mismatch for ${auditId}`);
   const vulnerabilities = Array.isArray(config.vulnerabilities) ? config.vulnerabilities : [config.vulnerabilities];

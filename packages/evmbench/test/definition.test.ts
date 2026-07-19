@@ -60,6 +60,18 @@ describe("EVMBench definition", () => {
     ).rejects.toThrow("duplicate finding ID");
   });
 
+  it("reports a missing audit directory with the audit ID", async () => {
+    const fixture = createHarnessFixture();
+    fs.rmSync(fixture.auditDir, { recursive: true });
+
+    await expect(
+      generateEvmbenchDefinition({
+        harnessRoot: fixture.harnessRoot,
+        resolveTargetCommit: async () => "a".repeat(40)
+      })
+    ).rejects.toThrow("audit directory missing for synthetic-audit");
+  });
+
   it("pins the target checkout and permits only non-sensitive Docker context inputs", () => {
     const repository = "https://github.com/evmbench-org/synthetic-audit.git";
     const source = [

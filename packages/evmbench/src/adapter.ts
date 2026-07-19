@@ -41,12 +41,13 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   const wait = options.wait ?? ((milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   const now = options.now ?? Date.now;
 
-  execute(["init", "--project", auditRoot, "--json"]);
+  execute(["init", "--project", auditRoot, "--force", "--json"]);
   seedSmithersDependencies(
     auditRoot,
     path.resolve(options.dependencySeedPath ?? "/opt/ultrafuzz-smithers/node_modules")
   );
   applyEvmbenchProfile(path.join(auditRoot, "ultrafuzz.toml"), profile);
+  capEvmbenchTopologyTimeouts(path.join(auditRoot, ".ultrafuzz", "topology.yml"), profile.node_timeout_seconds);
 
   const runId = `evmbench-${profile.id}`;
   const runRoot = path.join(auditRoot, ".ultrafuzz", "runs", runId);
@@ -84,9 +85,19 @@ export async function runEvmbenchAdapter(options: AdapterOptions): Promise<{ run
   while (true) {
     const status = commandData(execute(["status", runId, "--project", auditRoot, "--json"]));
     const verdict = stringField(status, "verdict");
+    if (verdict === undefined) throw new Error(`Ultrafuzz run ${runId} returned a status without a verdict`);
     if (verdict === "done") break;
     if (verdict === "failed" || verdict === "cancelled") {
       throw new Error(`Ultrafuzz run ${runId} ended with ${verdict}; inspect the run before retrying`);
+    }
+    if (verdict === "blocked" || verdict === "paused") {
+      const reason = stringField(status, "reason");
+      throw new Error(
+        `Ultrafuzz run ${runId} cannot complete unattended while ${verdict}${reason === undefined ? "" : `: ${reason}`}`
+      );
+    }
+    if (!WAITABLE_VERDICTS.has(verdict)) {
+      throw new Error(`Ultrafuzz run ${runId} returned an unknown status verdict: ${verdict}`);
     }
     if (now() >= deadline) {
       throw new Error(`Ultrafuzz run ${runId} did not finish within the ${profile.id} profile timeout`);
@@ -126,13 +137,26 @@ export function applyEvmbenchProfile(configPath: string, profile: EvmbenchProfil
   fs.writeFileSync(configPath, config, { encoding: "utf8", mode: 0o644 });
 }
 
+export function capEvmbenchTopologyTimeouts(topologyPath: string, maximumSeconds: number): void {
+  if (!Number.isInteger(maximumSeconds) || maximumSeconds <= 0) {
+    throw new Error("EVMBench topology timeout must be a positive integer");
+  }
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  const capped = topology.replace(/^(\s*timeout_seconds:\s*)(\d+)\s*$/gmu, (_line, prefix: string, raw: string) => {
+    return `${prefix}${Math.min(Number(raw), maximumSeconds)}`;
+  });
+  fs.writeFileSync(topologyPath, capped, { encoding: "utf8", mode: 0o644 });
+}
+
 export function copyFinalMarkdown(input: { reportPath: string; submissionRoot: string }): string {
   const source = path.resolve(input.reportPath);
-  const sourceStat = fs.lstatSync(source);
+  const sourceStat = fs.lstatSync(source, { throwIfNoEntry: false });
+  if (sourceStat === undefined) throw new Error("final report does not exist");
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("final report must be a regular file");
   const markdown = fs.readFileSync(source, "utf8");
   if (markdown.trim() === "") throw new Error("final report is empty");
   fs.mkdirSync(input.submissionRoot, { recursive: true, mode: 0o755 });
+  assertDirectory(input.submissionRoot, "submission root");
   const destination = path.resolve(input.submissionRoot, "audit.md");
   assertInside(input.submissionRoot, destination, "submission report path");
   fs.writeFileSync(destination, markdown, { encoding: "utf8", mode: 0o644 });
@@ -199,7 +223,10 @@ function replaceInteger(config: string, key: string, value: number): string {
 }
 
 function assertDirectory(directory: string, label: string): void {
-  if (!fs.statSync(directory).isDirectory()) throw new Error(`${label} must be a directory`);
+  const stat = fs.lstatSync(directory, { throwIfNoEntry: false });
+  if (stat === undefined || !stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular directory`);
+  }
 }
 
 function assertInside(root: string, target: string, label: string): void {
@@ -218,3 +245,5 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
   const field = value[key];
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
+
+const WAITABLE_VERDICTS = new Set(["running-healthy", "progressing", "stalled", "waiting-quota"]);

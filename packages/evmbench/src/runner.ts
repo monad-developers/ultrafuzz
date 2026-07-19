@@ -236,7 +236,7 @@ function buildImages(input: {
     let overlayDigest: string | null = null;
     if (!input.gold) {
       const overlayImage = `${overlayRepository}:${audit.id}`;
-      if (!imageExists(overlayImage))
+      if (!imageExists(overlayImage)) {
         withTrackedBuildContext(input.repoRoot, (contextRoot) => {
           execChecked(
             "docker",
@@ -265,6 +265,7 @@ function buildImages(input: {
             contextRoot
           );
         });
+      }
       overlayDigest = inspectImageDigest(overlayImage);
     }
     images.push({ audit_id: audit.id, source_image_digest: sourceDigest, overlay_image_digest: overlayDigest });

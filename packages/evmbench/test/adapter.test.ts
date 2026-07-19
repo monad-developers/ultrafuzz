@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   applyEvmbenchProfile,
+  capEvmbenchTopologyTimeouts,
   copyFinalMarkdown,
   EVMBENCH_PROFILE_VERSION,
   runEvmbenchAdapter,
@@ -43,6 +44,30 @@ describe("EVMBench adapter", () => {
     expect(updated).toContain('auth = "subscription"');
   });
 
+  it("caps explicit topology timeouts at the named profile limit", () => {
+    const root = temporaryDirectory();
+    const topologyPath = path.join(root, "topology.yml");
+    fs.writeFileSync(
+      topologyPath,
+      [
+        "groups:",
+        "  strategies:",
+        "    defaults:",
+        "      timeout_seconds: 7200",
+        "nodes:",
+        "  - id: reference",
+        "    timeout_seconds: 300",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    capEvmbenchTopologyTimeouts(topologyPath, 900);
+
+    expect(fs.readFileSync(topologyPath, "utf8")).toContain("timeout_seconds: 900");
+    expect(fs.readFileSync(topologyPath, "utf8")).toContain("timeout_seconds: 300");
+  });
+
   it("waits for completion and copies only the non-empty final Markdown", async () => {
     const root = temporaryDirectory();
     const auditRoot = path.join(root, "audit");
@@ -51,8 +76,10 @@ describe("EVMBench adapter", () => {
     const reportPath = path.join(root, "report.md");
     const dependencySeedPath = path.join(root, "seed-node-modules");
     fs.mkdirSync(auditRoot);
+    fs.mkdirSync(path.join(auditRoot, ".ultrafuzz"));
     fs.mkdirSync(path.join(dependencySeedPath, "synthetic-package"), { recursive: true });
     fs.writeFileSync(path.join(auditRoot, "ultrafuzz.toml"), baseConfig(), "utf8");
+    fs.writeFileSync(path.join(auditRoot, ".ultrafuzz", "topology.yml"), "version: 2\n", "utf8");
     fs.writeFileSync(
       path.join(dependencySeedPath, "synthetic-package", "package.json"),
       '{"name":"synthetic-package"}\n',
@@ -61,6 +88,7 @@ describe("EVMBench adapter", () => {
     fs.writeFileSync(profilePath, JSON.stringify(profile), "utf8");
     fs.writeFileSync(reportPath, "# Synthetic report\n", "utf8");
     let statusCalls = 0;
+    const invocations: string[][] = [];
 
     await runEvmbenchAdapter({
       auditRoot,
@@ -70,6 +98,7 @@ describe("EVMBench adapter", () => {
       dependencySeedPath,
       wait: async () => undefined,
       execute: (args) => {
+        invocations.push(args);
         const command = args[0];
         if (command === "status") {
           statusCalls += 1;
@@ -81,6 +110,7 @@ describe("EVMBench adapter", () => {
     });
 
     expect(fs.readdirSync(submissionRoot)).toEqual(["audit.md"]);
+    expect(invocations).toContainEqual(["init", "--project", auditRoot, "--force", "--json"]);
     expect(fs.readFileSync(path.join(submissionRoot, "audit.md"), "utf8")).toBe("# Synthetic report\n");
     expect(
       fs.readFileSync(path.join(auditRoot, ".smithers", "node_modules", "synthetic-package", "package.json"), "utf8")
@@ -113,6 +143,56 @@ describe("EVMBench adapter", () => {
       "final report must be a regular file"
     );
   });
+
+  it("rejects a symlinked submission directory", () => {
+    const root = temporaryDirectory();
+    const reportPath = path.join(root, "report.md");
+    const outside = path.join(root, "outside");
+    const submissionRoot = path.join(root, "submission");
+    fs.writeFileSync(reportPath, "# Synthetic report\n", "utf8");
+    fs.mkdirSync(outside);
+    fs.symlinkSync(outside, submissionRoot);
+
+    expect(() => copyFinalMarkdown({ reportPath, submissionRoot })).toThrow(
+      "submission root must be a regular directory"
+    );
+    expect(fs.existsSync(path.join(outside, "audit.md"))).toBe(false);
+  });
+
+  it.each([
+    ["blocked", "waiting for approval"],
+    ["paused", "operator paused the run"]
+  ])("fails immediately when an unattended run is %s", async (verdict, reason) => {
+    const fixture = adapterFixture();
+
+    await expect(
+      runEvmbenchAdapter({
+        ...fixture,
+        wait: async () => {
+          throw new Error("adapter should not wait");
+        },
+        execute: (args) => (args[0] === "status" ? success({ verdict, reason }) : success({}))
+      })
+    ).rejects.toThrow(`cannot complete unattended while ${verdict}: ${reason}`);
+  });
+
+  it("rejects malformed and unknown status verdicts", async () => {
+    const missing = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...missing,
+        execute: (args) => (args[0] === "status" ? success({}) : success({}))
+      })
+    ).rejects.toThrow("status without a verdict");
+
+    const unknown = adapterFixture();
+    await expect(
+      runEvmbenchAdapter({
+        ...unknown,
+        execute: (args) => (args[0] === "status" ? success({ verdict: "synthetic-status" }) : success({}))
+      })
+    ).rejects.toThrow("unknown status verdict: synthetic-status");
+  });
 });
 
 function baseConfig(): string {
@@ -140,6 +220,21 @@ function baseConfig(): string {
 
 function success(data: Record<string, unknown>): unknown {
   return { ok: true, data };
+}
+
+function adapterFixture(): Omit<Parameters<typeof runEvmbenchAdapter>[0], "execute"> {
+  const root = temporaryDirectory();
+  const auditRoot = path.join(root, "audit");
+  const submissionRoot = path.join(root, "submission");
+  const profilePath = path.join(root, "profile.json");
+  const dependencySeedPath = path.join(root, "seed-node-modules");
+  fs.mkdirSync(auditRoot);
+  fs.mkdirSync(dependencySeedPath);
+  fs.mkdirSync(path.join(auditRoot, ".ultrafuzz"));
+  fs.writeFileSync(path.join(auditRoot, "ultrafuzz.toml"), baseConfig(), "utf8");
+  fs.writeFileSync(path.join(auditRoot, ".ultrafuzz", "topology.yml"), "version: 2\n", "utf8");
+  fs.writeFileSync(profilePath, JSON.stringify(profile), "utf8");
+  return { auditRoot, submissionRoot, profilePath, cliPath: "unused", dependencySeedPath };
 }
 
 function temporaryDirectory(): string {
