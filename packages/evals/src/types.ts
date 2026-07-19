@@ -6,6 +6,8 @@ export const EVAL_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.result.v1" as const;
 export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
+export type EvalClassificationReasonCode =
+  "deterministic-match" | "judge-confirmed-match" | "strong-novel-finding" | "weak-unmatched-finding";
 export type ReviewerStatus = "pending" | "accepted" | "rejected" | "needs-more-evidence";
 
 export interface EvalResult<T> {
@@ -308,6 +310,7 @@ export interface FindingJudgeResult {
   score: number;
   signals: FindingMatchSignalScores;
   classification: EvalClassification;
+  reason_code: EvalClassificationReasonCode;
   rationale: string;
   confidence: number;
   judge_model: string;

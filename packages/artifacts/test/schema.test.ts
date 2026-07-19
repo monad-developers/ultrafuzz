@@ -50,6 +50,18 @@ test("artifact contract registry validates structured, empty, and malformed outp
     validateArtifactContract(
       "ultrafuzz/report@1",
       JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [{ id: "finding-1", title: "Incomplete issue" }],
+        non_production_outcomes: []
+      })
+    ).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
         schema_version: "ultrafuzz.e2e.report.v1",
         run_metadata: {},
         issues: [],
