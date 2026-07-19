@@ -33,6 +33,8 @@ import {
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
+const RECOVERY_WORKER_STATUS_STALE_MS = 20 * 60_000;
+const RECOVERY_WORKFLOW_PROBE_TIMEOUT_MS = 3 * 60_000;
 
 export interface ModalLaunchRecord extends ModalModelSpec {
   sandbox_id: string;
@@ -82,6 +84,12 @@ export interface ModalOverseerJob {
   statePath: string;
   recoveryStatePath: string;
   recoveryImage?: string;
+}
+
+interface RecoveryWorkflowProbe {
+  status?: string;
+  workflow_status?: string;
+  verdict?: string;
 }
 
 export interface BuildModalImageInput {
@@ -454,7 +462,22 @@ async function overseeModalBenchmarkOnce(
         continue;
       }
       const originalRunning = await sandboxRunning(modal, launch.sandbox_id);
-      const recovery = await recoverySandboxRunning(modal, state.app, recoveryState, launch.slug);
+      let recovery = await recoverySandboxRunning(modal, state.app, recoveryState, launch.slug);
+      if (recovery.running && recovery.sandboxId !== undefined && recovery.attempt !== undefined) {
+        const latestRecovery = recoveryState.recoveries.find(
+          (record) =>
+            record.slug === launch.slug &&
+            record.sandbox_id === recovery.sandboxId &&
+            record.attempt === recovery.attempt
+        );
+        if (recoveryWorkerStatusProbeNeeded(persisted.status, latestRecovery?.launched_at)) {
+          const rotation = await staleRecoverySandboxNeedsRotation(modal, recovery.sandboxId, launch.remote_root);
+          if (rotation.rotate) {
+            await terminateSandboxById(modal, recovery.sandboxId);
+            recovery = { running: false, stateChanged: true };
+          }
+        }
+      }
       if (recovery.running && recovery.sandboxId !== undefined && recovery.attempt !== undefined) {
         const known = recoveryState.recoveries.some(
           (record) => record.slug === launch.slug && record.sandbox_id === recovery.sandboxId
@@ -587,6 +610,89 @@ function recoveryRetryAt(record: Pick<ModalRecoveryRecord, "attempt" | "launched
   return launchedAt + backoff;
 }
 
+export function recoveryWorkerStatusProbeNeeded(
+  status: unknown,
+  launchedAt: string | undefined,
+  nowMs = Date.now(),
+  staleMs = RECOVERY_WORKER_STATUS_STALE_MS
+): boolean {
+  const record = objectRecord(status);
+  const stage = stringField(record, "stage");
+  if (stage === "failed" || stage === "succeeded") return true;
+  const updatedAt = Date.parse(stringField(record, "updated_at") ?? "");
+  if (Number.isFinite(updatedAt)) return nowMs - updatedAt >= staleMs;
+  const launchedAtMs = Date.parse(launchedAt ?? "");
+  if (Number.isFinite(launchedAtMs)) return nowMs - launchedAtMs >= staleMs;
+  return true;
+}
+
+async function staleRecoverySandboxNeedsRotation(
+  modal: ModalClient,
+  sandboxId: string,
+  remoteRoot: string
+): Promise<{ rotate: boolean }> {
+  let sandbox: Sandbox | undefined;
+  try {
+    sandbox = await modal.sandboxes.fromId(sandboxId);
+    const exitCode = await sandbox.poll();
+    if (exitCode !== null) return { rotate: true };
+    const probe = await recoveryWorkflowProbe(sandbox, remoteRoot);
+    return { rotate: recoveryWorkflowProbeNeedsRotation(probe) };
+  } catch {
+    return { rotate: true };
+  } finally {
+    try {
+      sandbox?.detach();
+    } catch {
+      // Ignore local cleanup failures while probing remote sandbox state.
+    }
+  }
+}
+
+async function recoveryWorkflowProbe(sandbox: Sandbox, remoteRoot: string): Promise<RecoveryWorkflowProbe> {
+  const script = [
+    "set -euo pipefail",
+    `cd ${shellQuote(remoteRoot)}`,
+    String.raw`runid=$(find workspace/target/.ultrafuzz/runs -mindepth 2 -maxdepth 2 -name state.json -printf '%T@ %h\n' | sort -n | tail -n 1 | sed 's#^[^ ]* ##; s#.*/##')`,
+    String.raw`if test -z "$runid"; then printf '{"status":"missing-run"}\n'; exit 0; fi`,
+    String.raw`timeout 150 node /opt/ultrafuzz/packages/cli/dist/index.js status "$runid" --project workspace/target --window 30 --json | jq -c '{status: (.data.status // null), workflow_status: (.data.workflow_status // null), verdict: (.data.verdict // null)}'`
+  ].join("\n");
+  const processHandle = await sandbox.exec(["bash", "-lc", script], { timeoutMs: RECOVERY_WORKFLOW_PROBE_TIMEOUT_MS });
+  const stdout = drainStream(processHandle.stdout);
+  const stderr = drainStream(processHandle.stderr);
+  const returnCode = await processHandle.wait();
+  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+  if (returnCode !== 0) {
+    throw new Error(stderrText || stdoutText || `recovery workflow probe failed with exit code ${returnCode}`);
+  }
+  return JSON.parse(stdoutText) as RecoveryWorkflowProbe;
+}
+
+function recoveryWorkflowProbeNeedsRotation(probe: RecoveryWorkflowProbe): boolean {
+  const terminalStatuses = new Set(["succeeded", "failed", "timed-out", "canceled", "cancelled"]);
+  if (terminalStatuses.has(probe.status ?? "") || terminalStatuses.has(probe.workflow_status ?? "")) return true;
+  return (
+    probe.verdict === "done" ||
+    probe.verdict === "failed" ||
+    probe.verdict === "stalled" ||
+    probe.verdict === "cancelled"
+  );
+}
+
+async function terminateSandboxById(modal: ModalClient, sandboxId: string): Promise<void> {
+  let sandbox: Sandbox | undefined;
+  try {
+    sandbox = await modal.sandboxes.fromId(sandboxId);
+    await sandbox.terminate({ wait: true }).catch(() => undefined);
+  } finally {
+    try {
+      sandbox?.detach();
+    } catch {
+      // Ignore local cleanup failures after termination.
+    }
+  }
+}
+
 export async function collectModalBenchmark(input: {
   statePath: string;
   outputDir: string;
@@ -667,6 +773,21 @@ function requiredEnv(env: Record<string, string | undefined>, name: string): str
   const value = env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
   return value;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringField(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function selectModels(config: ModalBenchmarkConfig, slugs: string[] | undefined): ModalModelSpec[] {

@@ -10,7 +10,8 @@ import {
   createTrackedSourceArchive,
   modalImageBuildCommand,
   modalVolumeRelativeRoot,
-  modalWorkerEntrypointCommand
+  modalWorkerEntrypointCommand,
+  recoveryWorkerStatusProbeNeeded
 } from "../src/runner.js";
 
 describe("Modal image source staging", () => {
@@ -55,5 +56,33 @@ describe("Modal worker identity", () => {
   it("maps only /data children into the volume-relative root", () => {
     expect(modalVolumeRelativeRoot("/data/run-one/model-one")).toBe("run-one/model-one");
     expect(() => modalVolumeRelativeRoot("/outside/run-one")).toThrow("must be a child of /data");
+  });
+});
+
+describe("Modal overseer recovery health", () => {
+  it("probes a running recovery worker when its status is stale", () => {
+    const now = Date.parse("2026-07-19T23:40:00.000Z");
+
+    expect(
+      recoveryWorkerStatusProbeNeeded({ stage: "running", updated_at: "2026-07-19T23:10:00.000Z" }, undefined, now)
+    ).toBe(true);
+    expect(
+      recoveryWorkerStatusProbeNeeded({ stage: "running", updated_at: "2026-07-19T23:30:00.000Z" }, undefined, now)
+    ).toBe(false);
+  });
+
+  it("probes immediately when the worker status is terminal without a result", () => {
+    const now = Date.parse("2026-07-19T23:40:00.000Z");
+
+    expect(
+      recoveryWorkerStatusProbeNeeded({ stage: "failed", updated_at: "2026-07-19T23:39:00.000Z" }, undefined, now)
+    ).toBe(true);
+  });
+
+  it("falls back to launch age when the worker status has not appeared", () => {
+    const now = Date.parse("2026-07-19T23:40:00.000Z");
+
+    expect(recoveryWorkerStatusProbeNeeded({}, "2026-07-19T23:10:00.000Z", now)).toBe(true);
+    expect(recoveryWorkerStatusProbeNeeded({}, "2026-07-19T23:30:00.000Z", now)).toBe(false);
   });
 });
