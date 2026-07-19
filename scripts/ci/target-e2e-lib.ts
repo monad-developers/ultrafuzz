@@ -4,11 +4,32 @@ import { basename, dirname, join, resolve } from "node:path";
 import { validateArtifactContract, validateFindingsSchema } from "../../packages/artifacts/dist/index.js";
 
 const MANIFEST_SCHEMA_VERSION = "1.0";
-const REQUIRED_TARGET_IDS = new Set([
-  "very-liquid-vaults-foundry",
-  "venus-isolated-pools-hardhat",
-  "stableswap-ng-vyper"
-]);
+const CANONICAL_TARGETS = new Map(
+  Object.entries({
+    "very-liquid-vaults-foundry": {
+      framework: "foundry",
+      repository: "https://github.com/rheo-xyz/very-liquid-vaults",
+      repository_slug: "rheo-xyz/very-liquid-vaults",
+      revision: "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+    },
+    "venus-isolated-pools-hardhat": {
+      framework: "hardhat",
+      repository: "https://github.com/code-423n4/2023-05-venus",
+      repository_slug: "code-423n4/2023-05-venus",
+      revision: "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+    },
+    "stableswap-ng-vyper": {
+      framework: "vyper",
+      repository: "https://github.com/curvefi/stableswap-ng",
+      repository_slug: "curvefi/stableswap-ng",
+      revision: "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+    }
+  } satisfies Record<
+    string,
+    { framework: "foundry" | "hardhat" | "vyper"; repository: string; repository_slug: string; revision: string }
+  >)
+);
+const REQUIRED_TARGET_IDS = new Set(CANONICAL_TARGETS.keys());
 const REQUIRED_FRAMEWORKS = new Set(["foundry", "hardhat", "vyper"]);
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const REPOSITORY_PATTERN = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/u;
@@ -222,23 +243,39 @@ function validateTarget(value: unknown, index: number): TargetManifestEntry {
     throw new Error(`target manifest entry ${index} must be an object`);
   }
   const id = requiredString(value.id, `targets[${index}].id`);
+  const expected = CANONICAL_TARGETS.get(id);
+  if (expected === undefined) {
+    throw new Error(`targets[${index}].id is not in the canonical smoke matrix`);
+  }
   const name = requiredString(value.name, `targets[${index}].name`);
   const framework = requiredString(value.framework, `targets[${index}].framework`);
   if (!REQUIRED_FRAMEWORKS.has(framework)) {
     throw new Error(`targets[${index}].framework is unsupported`);
+  }
+  if (framework !== expected.framework) {
+    throw new Error(`targets[${index}].framework does not match the canonical smoke matrix`);
   }
   const repository = requiredString(value.repository, `targets[${index}].repository`);
   const repositoryMatch = REPOSITORY_PATTERN.exec(repository);
   if (repositoryMatch === null) {
     throw new Error(`targets[${index}].repository must be a canonical GitHub HTTPS URL`);
   }
+  if (repository !== expected.repository) {
+    throw new Error(`targets[${index}].repository does not match the canonical smoke matrix`);
+  }
   const repositorySlug = requiredString(value.repository_slug, `targets[${index}].repository_slug`);
   if (repositorySlug !== `${repositoryMatch[1]}/${repositoryMatch[2]}`) {
     throw new Error(`targets[${index}].repository_slug must match repository`);
   }
+  if (repositorySlug !== expected.repository_slug) {
+    throw new Error(`targets[${index}].repository_slug does not match the canonical smoke matrix`);
+  }
   const revision = requiredString(value.revision, `targets[${index}].revision`);
   if (!SHA_PATTERN.test(revision)) {
     throw new Error(`targets[${index}].revision must be a full immutable commit SHA`);
+  }
+  if (revision !== expected.revision) {
+    throw new Error(`targets[${index}].revision does not match the canonical smoke matrix`);
   }
   if (!isRecord(value.toolchain)) {
     throw new Error(`targets[${index}].toolchain must be an object`);

@@ -37,6 +37,17 @@ describe("target manifest", () => {
     incomplete.targets.pop();
     expect(() => validateTargetManifest(incomplete)).toThrow("exactly 3 targets");
   });
+
+  it("rejects canonical target repository and revision drift", () => {
+    const wrongRevision = structuredClone(loadTargetManifest(manifestPath));
+    wrongRevision.targets[0]!.revision = "0".repeat(40);
+    expect(() => validateTargetManifest(wrongRevision)).toThrow("canonical smoke matrix");
+
+    const wrongRepository = structuredClone(loadTargetManifest(manifestPath));
+    wrongRepository.targets[1]!.repository = "https://github.com/example/other";
+    wrongRepository.targets[1]!.repository_slug = "example/other";
+    expect(() => validateTargetManifest(wrongRepository)).toThrow("canonical smoke matrix");
+  });
 });
 
 describe("terminal evidence extraction", () => {
