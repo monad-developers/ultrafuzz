@@ -2735,6 +2735,7 @@ test("syncRun prices independent usage components when cache reads exceed uncach
         extra: {
           iteration: 0,
           uncachedInputTokens: 100_000,
+          inputTokens: 900_000,
           outputTokens: 10_000,
           cacheReadTokens: 200_000,
           cacheWriteTokens: 10_000,
@@ -2750,6 +2751,7 @@ test("syncRun prices independent usage components when cache reads exceed uncach
         extra: {
           iteration: 0,
           uncached_input_tokens: 7,
+          input_tokens: 700,
           outputTokens: 0,
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
