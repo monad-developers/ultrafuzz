@@ -904,6 +904,8 @@ function normalizedUsageLedgerInput(
   const payload = event.payload ?? {};
   const fields = [
     normalizedNumericUsageField(payload, "input_tokens", [
+      "uncachedInputTokens",
+      "uncached_input_tokens",
       "inputTokens",
       "input_tokens",
       "promptTokens",
