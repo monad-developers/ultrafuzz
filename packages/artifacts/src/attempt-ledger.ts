@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod/v4";
 
 import { type RunLayout } from "./run-layout.js";
-import { appendLineDurable, sha256Bytes, validateSafeId } from "./safe-paths.js";
+import { appendLineDurable, assertRegularFileInside, sha256Bytes, validateSafeId } from "./safe-paths.js";
 import { schemaErrorMessage, validateWithZod, type SchemaValidationResult } from "./schema-validation.js";
 
 export const NODE_ATTEMPT_LEDGER_SCHEMA_VERSION = "1.0" as const;
@@ -400,13 +400,19 @@ export function appendNodeAttempts(
   return results;
 }
 
-export function replayNodeAttempts(layoutOrPath: Pick<RunLayout, "attemptLedgerPath"> | string): NodeAttemptReplay {
+export function replayNodeAttempts(
+  layoutOrPath: (Pick<RunLayout, "attemptLedgerPath"> & Partial<Pick<RunLayout, "root" | "runId">>) | string
+): NodeAttemptReplay {
   const ledgerPath = typeof layoutOrPath === "string" ? layoutOrPath : layoutOrPath.attemptLedgerPath;
   if (!fs.existsSync(ledgerPath)) {
     return { entries: [], malformedEntries: 0, duplicateEntries: 0 };
   }
+  if (typeof layoutOrPath !== "string" && layoutOrPath.root !== undefined) {
+    assertRegularFileInside(layoutOrPath.root, ledgerPath, "node attempt ledger path");
+  }
+  const expectedRunId = typeof layoutOrPath === "string" ? undefined : layoutOrPath.runId;
   const entries: NodeAttemptLedgerEntry[] = [];
-  const seen = new Set<string>();
+  const byId = new Map<string, NodeAttemptLedgerEntry>();
   let malformedEntries = 0;
   let duplicateEntries = 0;
   for (const line of fs.readFileSync(ledgerPath, "utf8").split(/\r?\n/u)) {
@@ -415,11 +421,20 @@ export function replayNodeAttempts(layoutOrPath: Pick<RunLayout, "attemptLedgerP
     }
     try {
       const parsed = assertNodeAttemptLedgerEntry(JSON.parse(line) as unknown);
-      if (seen.has(parsed.attempt_id)) {
-        duplicateEntries += 1;
+      if (expectedRunId !== undefined && parsed.run_id !== expectedRunId) {
+        malformedEntries += 1;
         continue;
       }
-      seen.add(parsed.attempt_id);
+      const existing = byId.get(parsed.attempt_id);
+      if (existing !== undefined) {
+        if (isDeepStrictEqual(existing, parsed)) {
+          duplicateEntries += 1;
+        } else {
+          malformedEntries += 1;
+        }
+        continue;
+      }
+      byId.set(parsed.attempt_id, parsed);
       entries.push(parsed);
     } catch {
       malformedEntries += 1;

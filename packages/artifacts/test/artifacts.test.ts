@@ -20,6 +20,7 @@ import {
   readFindings,
   readRunState,
   replayEvents,
+  replayNodeAttempts,
   replayUsageEvents,
   safeResolveInside,
   summarizeNodeAttempts,
@@ -215,6 +216,48 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
     controller_invocations: 2
   });
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
+});
+
+test("node attempt ledger replay isolates runs and rejects conflicting immutable entries", () => {
+  const project = tempProject();
+  const firstLayout = createRunLayout({ projectRoot: project, runId: "attempt-first" });
+  const secondLayout = createRunLayout({ projectRoot: project, runId: "attempt-second" });
+  const input = {
+    nodeId: "strategy-a",
+    strategyAttemptId: "strategy-a",
+    executorRetryId: "executor-retry-1",
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1",
+    startedAt: "2026-07-18T10:00:00.000Z",
+    finishedAt: "2026-07-18T10:01:00.000Z",
+    outcome: "failed" as const,
+    inputManifestDigest: manifestDigest("generated input manifest"),
+    failureCategory: "executor-error" as const
+  };
+  appendNodeAttempt(firstLayout, input);
+  const second = appendNodeAttempt(secondLayout, input).entry;
+
+  appendLineDurable(
+    secondLayout.attemptLedgerPath,
+    fs.readFileSync(firstLayout.attemptLedgerPath, "utf8"),
+    secondLayout.root
+  );
+  appendLineDurable(secondLayout.attemptLedgerPath, JSON.stringify(second), secondLayout.root);
+  appendLineDurable(
+    secondLayout.attemptLedgerPath,
+    JSON.stringify({
+      ...second,
+      lifecycle: { ...second.lifecycle, finished_at: "2026-07-18T10:02:00.000Z" }
+    }),
+    secondLayout.root
+  );
+
+  const replay = replayNodeAttempts(secondLayout);
+  assert.equal(replay.entries.length, 1);
+  assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
+  assert.equal(replay.duplicateEntries, 1);
+  assert.equal(replay.malformedEntries, 2);
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
