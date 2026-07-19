@@ -139,6 +139,16 @@ generated-tests.json
 references/manifest.json
 ```
 
+The default `stateful-invariant-campaign` writes backend-neutral
+`campaign-plan.json`, `campaign-summary.json`, and `campaign-report.md`
+artifacts plus `echidna-results.json` and `medusa-results.json`. The plan records
+the resolved vCPU count, workers per backend, parallel or sequential execution
+mode, shared wall-clock budget, and finalization reserve. Each backend record
+keeps its command, version, timestamps, terminal status, distinct artifact
+paths, failures, reproducers, and available coverage metadata. The summary
+classifies the combined result as `complete`, `partial`, or `blocked` without
+discarding a usable backend's evidence.
+
 Required outputs are node-specific and declared with versioned contracts in
 `.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
 directory and must be safe project-local relative paths.

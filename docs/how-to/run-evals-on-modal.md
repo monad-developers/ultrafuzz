@@ -217,5 +217,5 @@ runs because its skip-permissions mode cannot run with root privileges.
 ## Toolchain image
 
 The runner image includes Foundry (`forge`, `cast`, and `anvil`), Recon,
-`recon-generate`, Echidna, Slither, and `covg-eval`. The equivalent standalone
-image definition is in `packages/modal/Dockerfile`.
+`recon-generate`, Echidna, Medusa, Slither, and `covg-eval`. The equivalent
+standalone image definition is in `packages/modal/Dockerfile`.

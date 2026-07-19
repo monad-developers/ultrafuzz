@@ -24,6 +24,7 @@ import {
   finishReservedModalLaunch,
   modalImageBuildCommand,
   modalSandboxName,
+  modalSecurityToolchainCommands,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
   readOptionalModalSandboxText,
@@ -40,6 +41,18 @@ const MODEL: ModalModelSpec = {
 };
 
 describe("Modal image source staging", () => {
+  it("installs both final invariant backends alongside the Recon coverage backend", () => {
+    const commands = modalSecurityToolchainCommands().join("\n");
+    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+
+    expect(commands).toContain("Recon-Fuzz/recon-fuzzer");
+    expect(commands).toContain("crytic/echidna");
+    expect(commands).toContain("crytic/medusa");
+    expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
+    expect(standaloneDockerfile).toContain("crytic/echidna");
+    expect(standaloneDockerfile).toContain("crytic/medusa");
+  });
+
   it("archives tracked files only", () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-archive-"));
     execFileSync("git", ["init", "--quiet"], { cwd: root });

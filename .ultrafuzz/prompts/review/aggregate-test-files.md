@@ -64,8 +64,8 @@ Stateful invariant coverage:
 Implemented invariant properties:
 {{artifact_path:stateful-invariant-implement-properties}}/generated-tests.json
 
-Recon-fuzzer invariant campaign:
-{{artifact_path:stateful-invariant-recon-campaign}}/generated-tests.json
+Invariant campaign:
+{{artifact_path:stateful-invariant-campaign}}/generated-tests.json
 
 Expand coverage:
 {{artifact_path:expand-coverage}}/generated-tests.json
