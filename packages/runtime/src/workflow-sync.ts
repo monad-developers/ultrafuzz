@@ -1567,7 +1567,7 @@ function artifactProducedRecoveryEvidence(input: {
   task: StoredWorkflowTask;
   evidence: NodeWorkflowEvidence;
 }): NodeWorkflowEvidence {
-  if (terminalStatus(input.evidence.status) || input.evidence.status === "running") {
+  if (terminalStatus(input.evidence.status)) {
     return input.evidence;
   }
   if (input.node.required_artifacts.length === 0) {
