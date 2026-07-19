@@ -1017,11 +1017,12 @@ async function synchronizeTasks(input: {
     const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
+    const startedAt = startedAtForEvidence(evidence, previous, input.control);
     const patch = {
       status: patchStatus,
       retry_count: Math.max(0, (evidence.attempt ?? previous?.retry_count ?? 1) - 1),
       timed_out: patchStatus === "timed-out",
-      ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
+      ...(startedAt ? { started_at: startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
@@ -1489,6 +1490,26 @@ function mergeNodeWorkflowEvidence(
     ...(stepIsTerminal && !eventIsTerminal ? { status: fromStep.status, workflowState: fromStep.workflowState } : {}),
     ...(attempt === undefined ? {} : { attempt })
   };
+}
+
+function startedAtForEvidence(
+  evidence: NodeWorkflowEvidence,
+  previous: NodeState | undefined,
+  control: WorkflowSynchronizationControl
+): string | undefined {
+  if (evidence.startedAt !== undefined) {
+    return evidence.startedAt;
+  }
+  if (evidence.status !== "running" || evidence.attempt === undefined) {
+    return undefined;
+  }
+  const previousAttempt =
+    numberField(recordField(previous?.provenance, "workflow"), "attempt") ??
+    (typeof previous?.retry_count === "number" ? previous.retry_count + 1 : undefined);
+  if (previousAttempt === undefined || evidence.attempt <= previousAttempt) {
+    return undefined;
+  }
+  return new Date(synchronizationClock(control)).toISOString();
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {

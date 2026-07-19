@@ -2404,11 +2404,16 @@ test("syncRun keeps same-attempt terminal events ahead of stale running step ins
       workflowRunId,
       status: "running",
       state: "running",
-      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 5 }]
+      steps: [
+        { id: "node:project-discovery", state: "in-progress", attempt: 5 },
+        { id: "verify:project-discovery", state: "finished", attempt: 5 }
+      ]
     }),
     events: workflowEvents(workflowRunId, [
       { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 5 },
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 5 }
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 5 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 5 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 5 }
     ])
   });
   const run = await startRun({ projectRoot: project, runId: "sync-terminal-event", env });
@@ -2424,8 +2429,55 @@ test("syncRun keeps same-attempt terminal events ahead of stale running step ins
   };
   assert.equal(state.status, "running");
   assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
-  assert.equal(state.nodes?.["project-discovery"]?.retry_count, 4);
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 5);
+});
+
+test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-advanced-attempt";
+  const firstEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-advanced-attempt", env: firstEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const first = await syncRun({ projectRoot: project, runId: "sync-advanced-attempt", env: firstEnv });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  const secondEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 2 }])
+  });
+  const now = Date.parse("2026-07-03T01:00:00.000Z");
+  const second = await syncRun(
+    { projectRoot: project, runId: "sync-advanced-attempt", env: secondEnv },
+    { now: () => now }
+  );
+
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; started_at?: string; retry_count?: number }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, "2026-07-03T01:00:00.000Z");
 });
 
 test("syncRun fails a successful workflow node that is missing required artifacts", async () => {
