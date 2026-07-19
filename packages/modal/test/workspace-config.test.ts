@@ -11,5 +11,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain(`[models.default]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).toContain(`[models.benchmark]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).not.toContain('model = "gpt-5.5"');
+    expect(config).toContain("max_parallel_agents = 16");
+    expect(config).toContain("max_parallel_nodes = 32");
   });
 });

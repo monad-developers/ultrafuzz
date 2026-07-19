@@ -9,6 +9,7 @@ schema fragments:
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/topology/expanded-graph`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/finding`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/findings`
+- `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/run-state`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/analysis-bundle`
 - `https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/usage-ledger`

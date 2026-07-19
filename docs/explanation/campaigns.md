@@ -44,9 +44,10 @@ The default scaffold mixes broad discovery with targeted test-generation lanes:
   boundaries.
 - Input, round-trip, workflow, time, and coverage-expansion strategies turn the
   property catalog into concrete fuzz tests.
-- Stateful invariant and differential campaigns build larger harnesses,
-  handlers, oracle plans, reference-model lanes, repair passes, and review
-  reports.
+- Stateful invariant campaigns use Recon for setup and coverage iteration, then
+  run Echidna and Medusa over the same implemented Chimera property suite for
+  final bug finding. Differential campaigns build oracle plans,
+  reference-model lanes, repair passes, and review reports.
 - Dynamic strategy generation reviews accumulated artifacts, enumerates
   target-specific candidates, and feeds selected generated tests and findings
   into review.

@@ -10,6 +10,7 @@ import {
   type App,
   type Image,
   type Sandbox,
+  type SandboxCreateParams,
   type Volume
 } from "modal";
 
@@ -23,6 +24,7 @@ import {
 import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
+  MODAL_BENCHMARK_SANDBOX_RESOURCES,
   MODAL_PRE_MODEL_RETRY_LIMIT,
   MODAL_SANDBOX_TIMEOUT_MS,
   type ModalLaunchMode,
@@ -313,17 +315,13 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       }
       sandbox = orphans[0];
       if (sandbox === undefined) {
-        sandbox = await input.modal.sandboxes.create(input.app, input.image, {
+        sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
           name: modalSandboxName(input.state.logical_run_id, record),
           command: [
             "bash",
             "-lc",
             modalWorkerEntrypointCommand(input.auth === undefined ? undefined : input.model.provider)
           ],
-          cpu: 4,
-          cpuLimit: 4,
-          memoryMiB: 12_288,
-          memoryLimitMiB: 16_384,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
           workdir: "/opt/ultrafuzz",
           env: {
@@ -360,6 +358,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
+}
+
+type ModalBenchmarkSandboxCreateParams = Omit<SandboxCreateParams, "cpu" | "cpuLimit" | "memoryMiB" | "memoryLimitMiB">;
+
+export function createModalBenchmarkSandbox(
+  sandboxes: Pick<ModalClient["sandboxes"], "create">,
+  app: App,
+  image: Image,
+  params: ModalBenchmarkSandboxCreateParams
+): Promise<Sandbox> {
+  return sandboxes.create(app, image, {
+    ...params,
+    ...MODAL_BENCHMARK_SANDBOX_RESOURCES
+  });
 }
 
 async function recoverExistingSandboxLaunch(
@@ -630,22 +642,25 @@ export async function collectModalBenchmark(input: {
 }
 
 function securityToolchainImage(modal: ModalClient): Image {
-  return modal.images
-    .fromRegistry("ubuntu:24.04")
-    .dockerfileCommands([
-      "ENV DEBIAN_FRONTEND=noninteractive",
-      "ENV PATH=/usr/local/bin:/opt/security-venv/bin:/root/.local/bin:$PATH",
-      "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libgmp10 libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils && rm -rf /var/lib/apt/lists/*",
-      "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
-      "RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@0.144.3 @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42",
-      "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
-      "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
-      "RUN curl -fsSL https://github.com/crytic/echidna/releases/download/v2.3.2/echidna-2.3.2-x86_64-linux.tar.gz -o /tmp/echidna.tar.gz && tar -xzf /tmp/echidna.tar.gz -C /usr/local/bin && rm /tmp/echidna.tar.gz",
-      "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
-      "ENV DISABLE_AUTOUPDATER=1",
-      "RUN install -d -m 0755 -o ubuntu -g ubuntu /workspace",
-      "WORKDIR /workspace"
-    ]);
+  return modal.images.fromRegistry("ubuntu:24.04").dockerfileCommands(modalSecurityToolchainCommands());
+}
+
+export function modalSecurityToolchainCommands(): string[] {
+  return [
+    "ENV DEBIAN_FRONTEND=noninteractive",
+    "ENV PATH=/usr/local/bin:/opt/security-venv/bin:/root/.local/bin:$PATH",
+    "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libgmp10 libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils && rm -rf /var/lib/apt/lists/*",
+    "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
+    "RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@0.144.3 @anthropic-ai/claude-code@2.1.207 recon-generate@0.0.42",
+    "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
+    "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
+    "RUN curl -fsSL https://github.com/crytic/echidna/releases/download/v2.3.2/echidna-2.3.2-x86_64-linux.tar.gz -o /tmp/echidna.tar.gz && tar -xzf /tmp/echidna.tar.gz -C /usr/local/bin && rm /tmp/echidna.tar.gz",
+    "RUN curl -fsSL https://github.com/crytic/medusa/releases/download/v1.5.1/medusa-linux-x64.tar.gz -o /tmp/medusa.tar.gz && tar -xzf /tmp/medusa.tar.gz -C /usr/local/bin && rm /tmp/medusa.tar.gz",
+    "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
+    "ENV DISABLE_AUTOUPDATER=1",
+    "RUN install -d -m 0755 -o ubuntu -g ubuntu /workspace",
+    "WORKDIR /workspace"
+  ];
 }
 
 export function createTrackedSourceArchive(
