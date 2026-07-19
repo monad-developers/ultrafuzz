@@ -421,9 +421,11 @@ schema. Include at least `schema_version`, `id`, `title`, `status`,
 `severity_guess`, `confidence`, and `summary`, and keep those fields consistent
 with the final rendered issue. Also include the report-specific fields
 `description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
-`family_id`, `family_variants`, `related_findings`, and a structured `strategy`
-object carrying strategy names, detection rates, and loop-attempt provenance for
-downstream analysis when those fields are available. The production issue
+`family_id`, `family_variants`, and `related_findings` when those fields are
+available. Keep the canonical `strategy` field a non-empty originating strategy
+name when one is available. Store multiple strategy names, detection rates, and
+loop-attempt provenance in a structured `strategy_provenance` object for
+downstream analysis. The production issue
 `severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
 High, Medium, or Low report vocabulary rendered in Markdown. Do not add
 alternate severity fields that preserve nonstandard upstream severity labels;
@@ -465,6 +467,8 @@ Before finishing, verify that:
 - Every `report.json` production issue satisfies the canonical normalized
   finding schema, including `schema_version`, `id`, `title`, `status`,
   `severity_guess`, `confidence`, and `summary`.
+- Every `report.json` production issue keeps canonical `strategy` as a string
+  when present and stores structured strategy details in `strategy_provenance`.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from

@@ -260,6 +260,42 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("does not mistake incidental words or empty evidence objects for supporting evidence", async () => {
+    const suite = testSuite("/tmp/gt");
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [
+        {
+          id: "finding-latest",
+          title: "Uses the latest state",
+          summary: "A possible issue without supporting details",
+          evidence: [{ kind: "trace" }]
+        },
+        {
+          id: "finding-poc",
+          title: "A distinct supported issue",
+          summary: "An unmatched issue affecting an independent code path",
+          proof_of_concept: ["Call the operation twice", "Observe the inconsistent result"]
+        },
+        {
+          id: "finding-placeholder",
+          title: "An unsupported placeholder issue",
+          summary: "An unmatched issue without concrete details",
+          proof_of_concept: "N/A"
+        }
+      ],
+      bugs: BUGS
+    });
+
+    expect(scored.rowScore).toMatchObject({ false_positives: 2, human_review_queue_count: 1 });
+    expect(scored.findingScores.map((score) => score.judge_result.reason_code)).toEqual([
+      "weak-unmatched-finding",
+      "strong-novel-finding",
+      "weak-unmatched-finding"
+    ]);
+  });
+
   it("supports a custom FindingJudge (grading never depends on a provider)", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
@@ -427,6 +463,30 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("scores canonical empty terminal reports as all missed", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      report_json_path: string;
+    };
+    fs.writeFileSync(
+      record.report_json_path,
+      JSON.stringify({ schema_version: "1.0", run_metadata: {}, issues: [], non_production_outcomes: [] }),
+      "utf8"
+    );
+
+    const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+    expect(summary.rows[0]).toMatchObject({
+      report_schema_valid: true,
+      finding_count: 0,
+      true_positives: 0,
+      false_positives: 0,
+      missed: 2,
+      human_review_queue_count: 0
+    });
+    expect(fs.readFileSync(path.join(fixture.evalRunRoot, "scores.jsonl"), "utf8")).toBe("");
+  });
+
   it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
@@ -522,11 +582,11 @@ describe("deterministic scorer math", () => {
     }> = [];
     let responseContent = JSON.stringify({
       matched_ground_truth_bug_id: "candidate-1",
-      score: 0.7,
+      score: 0.69996,
       signals: { root_cause: 1, affected_area: 0, impact: 1, evidence: 0 },
       classification: "true-positive",
       rationale: "The root cause and impact match despite incomplete localization and evidence.",
-      confidence: 0.8
+      confidence: 0.69996
     });
     const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
       requests.push({
@@ -572,6 +632,7 @@ describe("deterministic scorer math", () => {
     expect(scored.findingScores[0]?.judge_result).toMatchObject({
       matched_ground_truth_bug_id: "BUG-1",
       score: 0.7,
+      confidence: 0.7,
       classification: "true-positive",
       reason_code: "judge-confirmed-match",
       judge_kind: "llm"

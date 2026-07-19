@@ -10,6 +10,7 @@ import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance, EVAL_JUDGE_PROMPT_VERSION } from "./lineage.js";
 import {
   type EvalCompareValue,
+  type EvalClassificationReasonCode,
   type EvalFindingScore,
   type EvalMatrixRow,
   type EvalLongitudinalCompareValue,
@@ -934,12 +935,13 @@ function normalizeLlmJudgeResult(
       : undefined;
   const matchedBugId = deterministicMatchedBugId ?? judgeMatchedBugId;
   const judgeScore = roundMetric(data.score);
+  const judgeConfidence = roundMetric(data.confidence);
   const score = deterministicMatchedBugId === undefined ? judgeScore : input.deterministicResult.score;
   const judgeConfirmedMatch =
-    judgeMatchedBugId !== undefined && judgeScore >= input.threshold && data.confidence >= input.threshold;
+    judgeMatchedBugId !== undefined && judgeScore >= input.threshold && judgeConfidence >= input.threshold;
   const strongNovel = isStrongNovelFinding(input.finding);
   let classification: FindingJudgeResult["classification"];
-  let reasonCode: FindingJudgeResult["reason_code"];
+  let reasonCode: EvalClassificationReasonCode;
   if (deterministicMatchedBugId !== undefined) {
     classification = "true-positive";
     reasonCode = "deterministic-match";
@@ -965,7 +967,7 @@ function normalizeLlmJudgeResult(
     classification,
     reason_code: reasonCode,
     rationale: data.rationale,
-    confidence: roundMetric(data.confidence),
+    confidence: judgeConfidence,
     judge_model: input.row.judge_model ?? input.row.judge_model_profile,
     judge_kind: "llm",
     ...(input.row.judge_reasoning ? { reasoning_effort: input.row.judge_reasoning } : {}),
@@ -1209,11 +1211,43 @@ function isStrongNovelFinding(finding: unknown): boolean {
 }
 
 function hasEvidence(finding: unknown): boolean {
-  if (isRecord(finding) && Array.isArray(finding.evidence) && finding.evidence.length > 0) {
+  if (!isRecord(finding)) {
+    return false;
+  }
+  if (Array.isArray(finding.evidence) && finding.evidence.some(hasConcreteEvidenceEntry)) {
     return true;
   }
-  const text = searchableText(finding);
-  return ["poc", "proof", "test", "trace", "reproduction", "reproduce"].some((term) => text.includes(term));
+  return ["proof_of_concept", "poc", "proof", "reproduction", "trace"].some((key) =>
+    hasConcreteEvidenceValue(finding[key])
+  );
+}
+
+function hasConcreteEvidenceEntry(value: unknown): boolean {
+  if (typeof value === "string") {
+    return hasConcreteEvidenceText(value);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  return Object.entries(value).some(([key, entry]) => key !== "kind" && hasConcreteEvidenceValue(entry));
+}
+
+function hasConcreteEvidenceValue(value: unknown): boolean {
+  if (typeof value === "string") {
+    return hasConcreteEvidenceText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.some(hasConcreteEvidenceValue);
+  }
+  return isRecord(value) && Object.values(value).some(hasConcreteEvidenceValue);
+}
+
+function hasConcreteEvidenceText(value: string): boolean {
+  const normalized = value.trim().toLowerCase().replace(/\s+/gu, " ");
+  return (
+    normalized.length > 0 &&
+    !["n/a", "na", "none", "unknown", "not available", "not provided", "no evidence"].includes(normalized)
+  );
 }
 
 function stringField(value: unknown, key: string): string | undefined {

@@ -310,7 +310,8 @@ export interface FindingJudgeResult {
   score: number;
   signals: FindingMatchSignalScores;
   classification: EvalClassification;
-  reason_code: EvalClassificationReasonCode;
+  /** Added in judge prompt v3; historical serialized results may omit it. */
+  reason_code?: EvalClassificationReasonCode;
   rationale: string;
   confidence: number;
   judge_model: string;

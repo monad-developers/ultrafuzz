@@ -61,6 +61,8 @@ test("artifact contract registry validates structured, empty, and malformed outp
             severity_guess: "High",
             confidence: "medium",
             summary: "Input length reaches an expensive path.",
+            strategy: "invariant",
+            strategy_provenance: { names: ["invariant", "fuzz"], detection_rate: 0.5 },
             severity: "High",
             impact: "High",
             likelihood: "Medium"
