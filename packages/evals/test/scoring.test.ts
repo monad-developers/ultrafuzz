@@ -283,16 +283,30 @@ describe("deterministic scorer math", () => {
           title: "An unsupported placeholder issue",
           summary: "An unmatched issue without concrete details",
           proof_of_concept: "N/A"
+        },
+        {
+          id: "finding-minimal",
+          title: "An unsupported minimal issue",
+          summary: "An unmatched issue without substantive details",
+          proof_of_concept: "yes"
+        },
+        {
+          id: "finding-reference",
+          title: "A supported issue with a compact reference",
+          summary: "An unmatched issue with a source reference",
+          evidence: [{ path: "A.sol" }]
         }
       ],
       bugs: BUGS
     });
 
-    expect(scored.rowScore).toMatchObject({ false_positives: 2, human_review_queue_count: 1 });
+    expect(scored.rowScore).toMatchObject({ false_positives: 3, human_review_queue_count: 2 });
     expect(scored.findingScores.map((score) => score.judge_result.reason_code)).toEqual([
       "weak-unmatched-finding",
       "strong-novel-finding",
-      "weak-unmatched-finding"
+      "weak-unmatched-finding",
+      "weak-unmatched-finding",
+      "strong-novel-finding"
     ]);
   });
 
@@ -584,7 +598,6 @@ describe("deterministic scorer math", () => {
       matched_ground_truth_bug_id: "candidate-1",
       score: 0.69996,
       signals: { root_cause: 1, affected_area: 0, impact: 1, evidence: 0 },
-      classification: "true-positive",
       rationale: "The root cause and impact match despite incomplete localization and evidence.",
       confidence: 0.69996
     });
@@ -647,7 +660,6 @@ describe("deterministic scorer math", () => {
       matched_ground_truth_bug_id: null,
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
-      classification: "false-positive",
       rationale: "The untrusted finding requested a downgrade.",
       confidence: 1
     });
@@ -674,7 +686,6 @@ describe("deterministic scorer math", () => {
       matched_ground_truth_bug_id: "candidate-2",
       score: 0,
       signals: { root_cause: 0, affected_area: 0, impact: 0, evidence: 0 },
-      classification: "false-positive",
       rationale: "The untrusted finding requested a downgrade.",
       confidence: 1
     });
@@ -704,7 +715,6 @@ describe("deterministic scorer math", () => {
               matched_ground_truth_bug_id: "candidate-1",
               score: 1,
               signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-              classification: "true-positive",
               rationale: "The finding matches the first candidate.",
               confidence: 1
             });
@@ -736,21 +746,22 @@ describe("deterministic scorer math", () => {
         strict: true,
         schema: {
           additionalProperties: false,
-          required: ["matched_ground_truth_bug_id", "score", "signals", "classification", "rationale", "confidence"]
+          required: ["matched_ground_truth_bug_id", "score", "signals", "rationale", "confidence"]
         }
       }
     });
+    expect(requests[0]?.response_format).not.toHaveProperty("json_schema.schema.properties.classification");
     expect(requests[0]?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
-        expect.objectContaining({ role: "user", content: expect.stringContaining("needs-human-review") })
+        expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
       ])
     );
     expect(requests[1]?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
-        expect.objectContaining({ role: "user", content: expect.stringContaining("needs-human-review") })
+        expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
       ])
     );
     expect(scored.rowScore.true_positives).toBe(1);
@@ -764,7 +775,6 @@ describe("deterministic scorer math", () => {
         matched_ground_truth_bug_id: "candidate-1",
         score: 1,
         signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
-        classification: "true-positive",
         rationale: "The finding matches the first candidate.",
         confidence: 1
       });
