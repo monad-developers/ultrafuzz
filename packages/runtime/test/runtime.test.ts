@@ -2749,7 +2749,7 @@ test("syncRun prices independent usage components when cache reads exceed uncach
         attempt: 1,
         extra: {
           iteration: 0,
-          uncached_input_tokens: 0,
+          uncached_input_tokens: 7,
           outputTokens: 0,
           cacheReadTokens: 12,
           cacheWriteTokens: 3,
@@ -2808,13 +2808,13 @@ test("syncRun prices independent usage components when cache reads exceed uncach
       updated_at?: string;
     };
   };
-  assert.equal(metadata.accounting?.current?.tokens_used, "325,015");
-  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_015);
-  assert.equal(metadata.accounting?.current?.billable_token_total, 325_015);
+  assert.equal(metadata.accounting?.current?.tokens_used, "325,022");
+  assert.equal(metadata.accounting?.current?.inclusive_token_total, 325_022);
+  assert.equal(metadata.accounting?.current?.billable_token_total, 325_022);
   assert.equal(metadata.accounting?.current?.estimated_spend, "$1.11");
-  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.11252475);
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 1.11255975);
   assert.deepEqual(metadata.accounting?.current?.component_costs_usd, {
-    uncached_input: 0.5,
+    uncached_input: 0.500035,
     cache_read: 0.100006,
     cache_write: 0.06251875,
     output: 0.3,
@@ -2833,9 +2833,9 @@ test("syncRun prices independent usage components when cache reads exceed uncach
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
   assert.equal(metadata.accounting?.current?.priced_event_count, 2);
   assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
-  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_015);
-  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_015);
-  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.11252475);
+  assert.equal(metadata.accounting?.cumulative?.inclusive_token_total, 325_022);
+  assert.equal(metadata.accounting?.cumulative?.billable_token_total, 325_022);
+  assert.equal(metadata.accounting?.cumulative?.estimated_spend_usd, 1.11255975);
   assert.deepEqual(
     metadata.accounting?.cumulative?.component_costs_usd,
     metadata.accounting?.current?.component_costs_usd
