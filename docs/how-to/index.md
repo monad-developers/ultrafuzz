@@ -10,6 +10,7 @@ How-to guides solve specific Ultrafuzz tasks during or after a campaign.
 - [Use the Dashboard](use-dashboard.md)
 - [Run Eval Suites](run-evals.md)
 - [Run Evals on Modal](run-evals-on-modal.md)
+- [Run the Paid Target Smoke Workflow](run-target-e2e.md)
 
 For command summaries, see [CLI](../cli.md). For config fields and trust-model
 settings, see [Config](../config.md).
