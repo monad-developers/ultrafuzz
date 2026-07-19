@@ -1,0 +1,325 @@
+{
+  "schema_version": "ultrafuzz.evmbench.catalog.v1",
+  "audits": [
+    {
+      "id": "2023-07-pooltogether",
+      "repository": "https://github.com/evmbench-org/2023-07-pooltogether.git",
+      "framework": "foundry-json",
+      "target_commit": "86709c35c1d49007253f6eb4ee3bb60e4a62e9ca",
+      "audit_context_sha256": "sha256:f4c08cfd041aecc60aa2f028c272937de0ffed1faacc5ac7fd4a3caf8210abd5",
+      "ground_truth_manifest_sha256": "sha256:e0bcc1c980a1724437d36f89fa3ccdff3a213cfa1019d63ae90211baf10fdb75"
+    },
+    {
+      "id": "2023-10-nextgen",
+      "repository": "https://github.com/evmbench-org/2023-10-nextgen.git",
+      "framework": "hardhat",
+      "target_commit": "7d9b8a49c419f5f7834efe430922334062a0eb71",
+      "audit_context_sha256": "sha256:1e211d866280ca26090b1cc72016c77f1796c4a1a72e22fecf0fe08e50aedd98",
+      "ground_truth_manifest_sha256": "sha256:e2617f20f8a3dadc7018ca2c8710f0f2e3d84ceb4d5e240604ceb3e7cb400fc1"
+    },
+    {
+      "id": "2023-12-ethereumcreditguild",
+      "repository": "https://github.com/evmbench-org/2023-12-ethereumcreditguild.git",
+      "framework": "foundry-json",
+      "target_commit": "6c11cdf57258877c8ffd03742b2c04aa6e8fbf81",
+      "audit_context_sha256": "sha256:944a119645a20c2c030e8350812308022da94a435572b1410ab283856e8487de",
+      "ground_truth_manifest_sha256": "sha256:f2f4ced019e59e875d736334c9d787871ddf65faf5d723ae04a32f6cc26a92ac"
+    },
+    {
+      "id": "2024-01-canto",
+      "repository": "https://github.com/evmbench-org/2024-01-canto.git",
+      "framework": null,
+      "target_commit": "cec6952e832f05e836a96223d8e12aa7b0641c15",
+      "audit_context_sha256": "sha256:d5df531c1db385c8cdb529d5ea73eb465bc439f0f103cbf76f5abac3e2a538e4",
+      "ground_truth_manifest_sha256": "sha256:6544363cb373ec073315392b32e79db78432fc7dbda35e1e5ae2fc727d7618e9"
+    },
+    {
+      "id": "2024-01-curves",
+      "repository": "https://github.com/evmbench-org/2024-01-curves.git",
+      "framework": "hardhat",
+      "target_commit": "b4f4bf89654885871c3c4f52cf336ce8be76c7b0",
+      "audit_context_sha256": "sha256:fb491d29e79aabddd3dde63f7dc66f83eb457466cfd4aa98a779a70e14511e6b",
+      "ground_truth_manifest_sha256": "sha256:70cd11a4a705b6ebe1b545c2fe77d5fcdb798868b3ae4d2af5b0d378e10cc6a3"
+    },
+    {
+      "id": "2024-01-init-capital-invitational",
+      "repository": "https://github.com/evmbench-org/2024-01-init-capital-invitational.git",
+      "framework": null,
+      "target_commit": "decdb3d518f740c8f169e49021a82daeba413f97",
+      "audit_context_sha256": "sha256:da6b1f5a80ca6a2ee34e34e53b74b276124acdd759d8aec256a5a1d3f3197910",
+      "ground_truth_manifest_sha256": "sha256:2f88db59e8120e37a94b50839ccdc70836a8a0fff245e1f99b82798fddb249bd"
+    },
+    {
+      "id": "2024-02-althea-liquid-infrastructure",
+      "repository": "https://github.com/evmbench-org/2024-02-althea-liquid-infrastructure.git",
+      "framework": null,
+      "target_commit": "b03e8c44565a1a119e0404d306667f371af3645e",
+      "audit_context_sha256": "sha256:187d1a4666a2fe54fb1e43ba7cb8b97d1b6b8a716e47d28158c80ff430957787",
+      "ground_truth_manifest_sha256": "sha256:d9278038dd2212185da085fcd9edf759cced5bffa79624935b38be2d4c4589a5"
+    },
+    {
+      "id": "2024-01-renft",
+      "repository": "https://github.com/evmbench-org/2024-01-renft.git",
+      "framework": "foundry",
+      "target_commit": "84e3a5d5197f5cae50fa5d6030ee7eb38bd3a285",
+      "audit_context_sha256": "sha256:33a857dc76e5a30d1be2c864b21302c7d7444a9760838db0f8a22b0e36e741aa",
+      "ground_truth_manifest_sha256": "sha256:4b0ce7b9beeb09c98c5e678429828300b52f70f9ab5c0aa252cc0764e849297b"
+    },
+    {
+      "id": "2024-03-abracadabra-money",
+      "repository": "https://github.com/evmbench-org/2024-03-abracadabra-money.git",
+      "framework": "foundry",
+      "target_commit": "cdfd20164862be9b2f646a606e568acd72056a70",
+      "audit_context_sha256": "sha256:7723a5de400f43ed1923446ea985484866de32e719359616d9f090a30d154b1a",
+      "ground_truth_manifest_sha256": "sha256:b45ee4de35ae05c37ec6ab14912c20789eb4b077d8a91b6fbf543db2d83aa492"
+    },
+    {
+      "id": "2024-03-canto",
+      "repository": "https://github.com/evmbench-org/2024-03-canto.git",
+      "framework": null,
+      "target_commit": "c5855228dd2ed1977ba90f218dd08ce9f2db6fee",
+      "audit_context_sha256": "sha256:0dca7ac46f79eade3c2806169fb3f7a2f794d5f78c38d4bce1f636c2d88ca060",
+      "ground_truth_manifest_sha256": "sha256:ddf15772555a5cfea9b674ee5677ea1bf267d3ce0b82bc04966d588416b35fee"
+    },
+    {
+      "id": "2024-03-coinbase",
+      "repository": "https://github.com/evmbench-org/2024-03-coinbase.git",
+      "framework": null,
+      "target_commit": "1a86685426493906881b1d9869ada0812985eb46",
+      "audit_context_sha256": "sha256:0b9ef476f89dc4976144f29058bd8fde8526d3d8423cae76b7520973021b9a1a",
+      "ground_truth_manifest_sha256": "sha256:a388be7cf33d472993ccede12ab023b8cfddf8a6e0fed7d9e3e7e39dd6cf3ce5"
+    },
+    {
+      "id": "2024-03-gitcoin",
+      "repository": "https://github.com/evmbench-org/2024-03-gitcoin.git",
+      "framework": null,
+      "target_commit": "f289f3a6966975856102631cf37f933f17f098ec",
+      "audit_context_sha256": "sha256:8cdab09449893bf7100e59c171ed29662319356631e9c9e8ebb8742e68f92672",
+      "ground_truth_manifest_sha256": "sha256:8884ffc8c49dd4702847269df892a350b72194de1bd246952434b8ef32673154"
+    },
+    {
+      "id": "2024-03-neobase",
+      "repository": "https://github.com/evmbench-org/2024-03-neobase.git",
+      "framework": null,
+      "target_commit": "404e2f07adc1e391d5a84f42d859f5ded02a6795",
+      "audit_context_sha256": "sha256:d13db8a0160d876662854cc107054733e047c35861737bf655593347fa96ee85",
+      "ground_truth_manifest_sha256": "sha256:f286617df3732b21db7606147e0f5366e3107cc095391e9770331c8eb6f23946"
+    },
+    {
+      "id": "2024-03-taiko",
+      "repository": "https://github.com/evmbench-org/2024-03-taiko.git",
+      "framework": "foundry-json",
+      "target_commit": "5ef6e2f24f1ed72251ad02992376d7a1357263ae",
+      "audit_context_sha256": "sha256:ad844cebf4951b1a37cad5cbc3276ad5c885a7f8fea586c3e2c9a0f8a721e65c",
+      "ground_truth_manifest_sha256": "sha256:084fdc0eead5ac4584caefeab3c140a4c6f26a2d095b0f7b1b6db86d5c0b538f"
+    },
+    {
+      "id": "2024-04-noya",
+      "repository": "https://github.com/evmbench-org/2024-04-noya.git",
+      "framework": "foundry",
+      "target_commit": "e90ad062f37c51e8696832e52928b0caf2a301f8",
+      "audit_context_sha256": "sha256:97088a129f337b0cbf0bdd45f2a1f52b5b8c317430568ddb8a08430576b2ff5e",
+      "ground_truth_manifest_sha256": "sha256:1c62831795af5ee4d92cc98f0767ca88d90a4ad1e8d88279e95b753e79431d9b"
+    },
+    {
+      "id": "2024-05-arbitrum-foundation",
+      "repository": "https://github.com/evmbench-org/2024-05-arbitrum-foundation.git",
+      "framework": null,
+      "target_commit": "1ede95fe9198887481aa5824fe58eb776ff763a3",
+      "audit_context_sha256": "sha256:4dae0b0eff90369784756a1a8d80c2d7a09458a2999ea54ea90dfe40658afccf",
+      "ground_truth_manifest_sha256": "sha256:e01e25a8a581d18f87d1460c547309bfddc75fe4417bc0496af317aee0690e29"
+    },
+    {
+      "id": "2024-05-loop",
+      "repository": "https://github.com/evmbench-org/2024-05-loop.git",
+      "framework": null,
+      "target_commit": "db33816791af7e6c24c0e2e5e8f0966eaf14ef5c",
+      "audit_context_sha256": "sha256:c498bfd0c2638205234827fe188cb0d47cfbd19f6b7193d248add833284f6181",
+      "ground_truth_manifest_sha256": "sha256:ccae9546b2d58705498cf11d551d69a72de259e509ffff3ccdd77acf68e019cb"
+    },
+    {
+      "id": "2024-05-olas",
+      "repository": "https://github.com/evmbench-org/2024-05-olas.git",
+      "framework": "hardhat",
+      "target_commit": "fe32c1eb8051b4c5f0d6822eaa771673c6c124d9",
+      "audit_context_sha256": "sha256:1f5a2e9b320960d5a616d80385cee341651fa798300341d4fec4bee2fb29db09",
+      "ground_truth_manifest_sha256": "sha256:bd72269bca91c1edd6f75f6b381c6c5f9b31a0de88ae44a9205dadad94e03782"
+    },
+    {
+      "id": "2024-05-munchables",
+      "repository": "https://github.com/evmbench-org/2024-05-munchables.git",
+      "framework": null,
+      "target_commit": "418fd953e52afbeb381cd73dafce8698779ffe6d",
+      "audit_context_sha256": "sha256:257f711d1e6231908a25e72847ea47a822adc427c635cc8315aeb56c931a8437",
+      "ground_truth_manifest_sha256": "sha256:4121dc9b5ed6b17db4d48d6f3f3313eeba8196d4081ae10923ff19db306e30f2"
+    },
+    {
+      "id": "2024-06-size",
+      "repository": "https://github.com/evmbench-org/2024-06-size.git",
+      "framework": "foundry",
+      "target_commit": "5491ba30e37768c16eec865e1fed38ea024482ab",
+      "audit_context_sha256": "sha256:d4bac48e63b7bd67fc7decd7ea3f51ce3a5a85b705e9b5eee0ba82e845707df1",
+      "ground_truth_manifest_sha256": "sha256:20c397298c04b96f65ab9a06827b2f45039a6386c5e14f6e22ae44de5ca94082"
+    },
+    {
+      "id": "2024-06-thorchain",
+      "repository": "https://github.com/evmbench-org/2024-06-thorchain.git",
+      "framework": null,
+      "target_commit": "83128cf5f5e161536491850c435bf0c158efd9e5",
+      "audit_context_sha256": "sha256:2b8ad897e06850a75c06b4350e5f18423189d741fac0ef16b990ecc7f05b4e12",
+      "ground_truth_manifest_sha256": "sha256:2736be54d5d3051fdf15c09e362b0efd11fc20a9c9bc2f93362ee9237ce6b412"
+    },
+    {
+      "id": "2024-06-vultisig",
+      "repository": "https://github.com/evmbench-org/2024-06-vultisig.git",
+      "framework": null,
+      "target_commit": "607f320dd21ceaee567a937ab77847641f0614bf",
+      "audit_context_sha256": "sha256:0c6d57a95016a6c5c9b180ece238929250468ad8bba0f59960a62ccdbb4489c5",
+      "ground_truth_manifest_sha256": "sha256:5dc32f41506f9af8fddf2501770610eb0c6aed0ebfa8e7d5c713680e8c12d38f"
+    },
+    {
+      "id": "2024-07-basin",
+      "repository": "https://github.com/evmbench-org/2024-07-basin.git",
+      "framework": "foundry-json",
+      "target_commit": "0e7a22aaafb4e51ffdf36f173ee6006421b91b8d",
+      "audit_context_sha256": "sha256:eaff2b61b0d38ead7248d7d06b004c13d24d3af500e04f303ab0b169fffe8adf",
+      "ground_truth_manifest_sha256": "sha256:972f76db93964dcd1ce9eab14802e04cc47e3657252bee24f93c20560e24fb1d"
+    },
+    {
+      "id": "2024-07-benddao",
+      "repository": "https://github.com/evmbench-org/2024-07-benddao.git",
+      "framework": "foundry",
+      "target_commit": "1f700b8be57bd165bf7cc10c18afebb113f88875",
+      "audit_context_sha256": "sha256:af1edc365ae927a9dd88a14704011243fdebd39e64e97465fcf6013412d3251c",
+      "ground_truth_manifest_sha256": "sha256:a670112750e42414fc0c34f0dfec03c625f2762ca0e17caf71678c985aefcf00"
+    },
+    {
+      "id": "2024-07-munchables",
+      "repository": "https://github.com/evmbench-org/2024-07-munchables.git",
+      "framework": null,
+      "target_commit": "7bf1daacb24ebf498382586bbbd7b1c6531c92d4",
+      "audit_context_sha256": "sha256:9c94f6d6678f3930ab80781c63b5aa39224d92189126caeb3cec08575d67327c",
+      "ground_truth_manifest_sha256": "sha256:ab78f863262af6876a250e878563283f051bab83e688c9450a4e23d14e740fb6"
+    },
+    {
+      "id": "2024-07-traitforge",
+      "repository": "https://github.com/evmbench-org/2024-07-traitforge.git",
+      "framework": "hardhat",
+      "target_commit": "a02a19e1d2431eca2822ad8c1f3b1cc32c22a40b",
+      "audit_context_sha256": "sha256:f4ef6b1a5d6ff3967eca1e1cee1892b95bb70697ef3561f1e5937dfc4f6bb955",
+      "ground_truth_manifest_sha256": "sha256:a83ad7cbd4a9c06a4cf78b30c59af1f943796dbcd00656ba15f12292d70fb9dd"
+    },
+    {
+      "id": "2024-08-phi",
+      "repository": "https://github.com/evmbench-org/2024-08-phi.git",
+      "framework": "foundry",
+      "target_commit": "8682a029072fffdcce76eb9f6101b05166e7d775",
+      "audit_context_sha256": "sha256:f6406b7d6f409fda305cd7cbe3fad8e7f1b7be9a43752955e6776343460a8bdc",
+      "ground_truth_manifest_sha256": "sha256:441df2104db9526b61c47d482e5afcd66cc1256ba884c7cbb32ed52ed3a391ef"
+    },
+    {
+      "id": "2024-08-wildcat",
+      "repository": "https://github.com/evmbench-org/2024-08-wildcat.git",
+      "framework": "foundry",
+      "target_commit": "968d4dd54682e1ce8b8d69ffabd8ce869f478b20",
+      "audit_context_sha256": "sha256:2088a2747cff75d1bf41889dc91ec525237dd0070b676352e3f5b44557e6907f",
+      "ground_truth_manifest_sha256": "sha256:707e61e89a3c273ff8deb4a1d7a288ce30c518a492f5d9e4490cc9b0d19282a3"
+    },
+    {
+      "id": "2024-12-secondswap",
+      "repository": "https://github.com/evmbench-org/2024-12-secondswap.git",
+      "framework": "foundry",
+      "target_commit": "ed46da6a7992530a8d8e1ff1a2c370badfb71498",
+      "audit_context_sha256": "sha256:bf3072d11b62dbdfa541a2212d89dfcfeacfdcf028e34019bd289846717808b1",
+      "ground_truth_manifest_sha256": "sha256:4684d7e730deb178e2a3105a5d46a63a15c7be81144eb3a5b6988be667201dc4"
+    },
+    {
+      "id": "2025-01-liquid-ron",
+      "repository": "https://github.com/evmbench-org/2025-01-liquid-ron.git",
+      "framework": "foundry",
+      "target_commit": "b0df3cffce6e1a151c1c32dea8b17dd4f8932cf7",
+      "audit_context_sha256": "sha256:be49052ee5843c679b71b2a8b4fded953aba80910b79526bcaf3aba68cb392dc",
+      "ground_truth_manifest_sha256": "sha256:8362f1c25e235eccf3288b4759005200f9fe4e7a1da97cf34d4334bca15655d0"
+    },
+    {
+      "id": "2025-01-next-generation",
+      "repository": "https://github.com/evmbench-org/2025-01-next-generation.git",
+      "framework": null,
+      "target_commit": "732c066d708be442104fd24793bc3846a9e15c1c",
+      "audit_context_sha256": "sha256:0326e857ed1ae05d025c11849a2d9633828563dc954474db741931864f4b81fa",
+      "ground_truth_manifest_sha256": "sha256:566e56b7a68fdc537f11171fd387d036e249e5ee99036b2b0ee3c9cae9f76760"
+    },
+    {
+      "id": "2025-02-thorwallet",
+      "repository": "https://github.com/evmbench-org/2025-02-thorwallet.git",
+      "framework": null,
+      "target_commit": "e548fe9a0a78df18bd44ea1671c7a78f938c14fc",
+      "audit_context_sha256": "sha256:dc7480bcc3c1b5036273dec1a85e1350f87f3a6deb5d578b17eb2beb3950c637",
+      "ground_truth_manifest_sha256": "sha256:26c8a954ba67060d5e3b0e29b37f7439547a9bddf6abc8182338c2b43ffe9a35"
+    },
+    {
+      "id": "2025-04-forte",
+      "repository": "https://github.com/evmbench-org/2025-04-forte.git",
+      "framework": "foundry",
+      "target_commit": "97a6a8bc10f31961d74942ab80918bae74268bbd",
+      "audit_context_sha256": "sha256:ec593d23d08644d84cdac9e94a8616a0da5b95141830ade14170619b81861186",
+      "ground_truth_manifest_sha256": "sha256:bbc5271a2e009e172797b0a06ee7aed75e20f555e11801978e0c0215b22076cf"
+    },
+    {
+      "id": "2025-04-virtuals",
+      "repository": "https://github.com/evmbench-org/2025-04-virtuals.git",
+      "framework": "hardhat",
+      "target_commit": "2862d713957b3fe905dd2888ebf2ef6fa69313f8",
+      "audit_context_sha256": "sha256:b248b4961c9b1b6b783d4df1ba9bcb3134fed9f9d5078bac73d4445f98683d08",
+      "ground_truth_manifest_sha256": "sha256:9387afcae1e08c1827ac4cf4aebb64c6bb966464b04ae15b614f2228530f75d2"
+    },
+    {
+      "id": "2025-05-blackhole",
+      "repository": "https://github.com/evmbench-org/2025-05-blackhole.git",
+      "framework": "hardhat",
+      "target_commit": "43010991f74d22cc850c56d7e47533a01bc80dfa",
+      "audit_context_sha256": "sha256:7cd484b6eabebbbfa91b03f0d6db6ab5de1071bc928ca21aedcfabbee025dae7",
+      "ground_truth_manifest_sha256": "sha256:f129f894153aa8c1c1668618286721da6e1ac0e50153ab085ebd2f56cd691f30"
+    },
+    {
+      "id": "2025-06-panoptic",
+      "repository": "https://github.com/evmbench-org/2025-06-panoptic.git",
+      "framework": "foundry",
+      "target_commit": "fd97f7977c22e54af0cfeffc42963173b27b32ef",
+      "audit_context_sha256": "sha256:7196bc72786b18204c4dce68d6d7573d3e280db89092d3caa097e7cd475d4380",
+      "ground_truth_manifest_sha256": "sha256:065d83b2bdab07e55b687497e6ce518703a64c5d43183b1bc1d82637de25acd4"
+    },
+    {
+      "id": "2025-10-sequence",
+      "repository": "https://github.com/evmbench-org/2025-10-sequence.git",
+      "framework": null,
+      "target_commit": "70fc6ba76d8088bdf07634d2bb9555b6c4fe3a96",
+      "audit_context_sha256": "sha256:222a46eac586de2a7d25cc83db73dc4eaf709ddd3e4684ee79f563050fee620c",
+      "ground_truth_manifest_sha256": "sha256:fdf655cdd7228bfb8ccfd943ed01c075c930e7efff45de197c965f06283f5cd2"
+    },
+    {
+      "id": "2026-01-tempo-feeamm",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-feeamm.git",
+      "framework": "foundry",
+      "target_commit": "dd3ff2aa165983ea2616954cf764f811d8f28a06",
+      "audit_context_sha256": "sha256:44aaa9e8107ba8ac43082fe7512d1713ebd402de250229dec421fe0a3a753444",
+      "ground_truth_manifest_sha256": "sha256:7924b7950ba0ea0ff526045caa9c331c55032f4527dadcb4efe8075d925ee68c"
+    },
+    {
+      "id": "2026-01-tempo-mpp-streams",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-mpp-streams.git",
+      "framework": "foundry",
+      "target_commit": "4de586e9802cd47a6439529fb0e840bdc0a71867",
+      "audit_context_sha256": "sha256:3516d4522c7b1e71e4427e7785a59b7b0372b266a147b2a2d4d5214366ba24ba",
+      "ground_truth_manifest_sha256": "sha256:1701ac3cc2f80f7af729a0d2ba33adeade9122efbb903e7ff1be2b842d05a2a8"
+    },
+    {
+      "id": "2026-01-tempo-stablecoin-dex",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-stablecoin-dex.git",
+      "framework": "foundry",
+      "target_commit": "22ccd3ad6ac3e7b71b673a8e768d226cc43ad363",
+      "audit_context_sha256": "sha256:f08cfed68f524f5cd3c0441d95f0064855495462df578d1826e1aa7d89319ef6",
+      "ground_truth_manifest_sha256": "sha256:99e2e10a406e7f661b729d021182803ac97a567d3b8b9048ba81eb2b68ec8068"
+    }
+  ]
+}

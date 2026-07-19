@@ -1,0 +1,16 @@
+.git
+.agents
+.claude
+.codex-runs
+.smithers
+.ultrafuzz
+.worktrees
+.env
+.env.*
+*.key
+*.pem
+node_modules
+**/node_modules
+**/dist
+**/dist-test
+coverage

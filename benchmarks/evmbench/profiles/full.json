@@ -1,0 +1,10 @@
+{
+  "schema_version": "ultrafuzz.evmbench.profile.v1",
+  "id": "full",
+  "max_concurrency": 5,
+  "poll_interval_seconds": 30,
+  "workflow_timeout_seconds": 36000,
+  "node_timeout_seconds": 3600,
+  "model": "gpt-5.5",
+  "reasoning": "xhigh"
+}
