@@ -33,7 +33,12 @@ describe("Modal storage layout", () => {
     const runnerSource = fs.readFileSync(new URL("../src/runner.ts", import.meta.url), "utf8");
     const workerSource = fs.readFileSync(new URL("../src/worker.ts", import.meta.url), "utf8");
     expect(runnerSource).toContain("timeoutMs: MODAL_SANDBOX_TIMEOUT_MS");
-    expect(runnerSource).toContain("latestRecovery === undefined || recoveryImageChanged");
+    expect(runnerSource).toContain(
+      "latestRecovery === undefined || recoveryImageChanged || latestRecovery.image !== recoveryImage"
+    );
+    expect(runnerSource).toContain("record.image !== state.image");
+    expect(runnerSource).toContain("lease.image !== state.image");
+    expect(runnerSource).toContain("sandbox.terminate({ wait: true })");
     expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
     expect(workerSource).toMatch(/CLI,\s*"status",\s*runId/u);
     expect(workerSource).toContain("WORKFLOW_STATUS_SYNC_TIMEOUT_MS");

@@ -52,6 +52,7 @@ export interface ModalLaunchState {
 }
 
 export interface ModalRecoveryRecord extends ModalModelSpec {
+  image?: string;
   sandbox_id: string;
   volume_name: string;
   remote_root: string;
@@ -63,6 +64,7 @@ interface ModalRecoveryLease {
   slug: string;
   attempt: number;
   name: string;
+  image?: string;
   launched_at: string;
 }
 
@@ -242,13 +244,45 @@ async function stageModalSandboxInputs(
 }
 
 async function sandboxRunning(modal: ModalClient, sandboxId: string): Promise<boolean> {
+  const sandbox = await runningSandboxById(modal, sandboxId);
+  if (sandbox === undefined) return false;
+  sandbox.detach();
+  return true;
+}
+
+async function runningSandboxById(modal: ModalClient, sandboxId: string): Promise<Sandbox | undefined> {
+  let sandbox: Sandbox | undefined;
   try {
-    const sandbox = await modal.sandboxes.fromId(sandboxId);
+    sandbox = await modal.sandboxes.fromId(sandboxId);
     const exitCode = await sandbox.poll();
+    if (exitCode === null) return sandbox;
     sandbox.detach();
-    return exitCode === null;
   } catch {
-    return false;
+    try {
+      sandbox?.detach();
+    } catch {
+      // Ignore local cleanup failures while probing remote sandbox state.
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+async function runningSandboxByName(modal: ModalClient, appName: string, name: string): Promise<Sandbox | undefined> {
+  const sandbox = await namedSandbox(modal, appName, name);
+  if (sandbox === undefined) return undefined;
+  try {
+    const exitCode = await sandbox.poll();
+    if (exitCode === null) return sandbox;
+    sandbox.detach();
+    return undefined;
+  } catch {
+    try {
+      sandbox.detach();
+    } catch {
+      // Ignore local cleanup failures while probing remote sandbox state.
+    }
+    return undefined;
   }
 }
 
@@ -262,32 +296,52 @@ async function recoverySandboxRunning(
     .filter((record) => record.slug === slug)
     .sort((left, right) => right.attempt - left.attempt);
   for (const record of records) {
-    if (await sandboxRunning(modal, record.sandbox_id)) {
-      return { running: true, sandboxId: record.sandbox_id, attempt: record.attempt };
+    const sandbox = await runningSandboxById(modal, record.sandbox_id);
+    if (sandbox === undefined) continue;
+    if (record.image !== state.image) {
+      await sandbox.terminate({ wait: true }).catch(() => undefined);
+      continue;
     }
+    sandbox.detach();
+    return { running: true, sandboxId: record.sandbox_id, attempt: record.attempt };
   }
   const latestRecord = records[0];
   if (latestRecord !== undefined) {
-    const sandbox = await namedSandbox(modal, appName, recoverySandboxName(state.run_id, slug, latestRecord.attempt));
+    const sandbox = await runningSandboxByName(
+      modal,
+      appName,
+      recoverySandboxName(state.run_id, slug, latestRecord.attempt)
+    );
     if (sandbox !== undefined) {
-      const exitCode = await sandbox.poll();
-      sandbox.detach();
-      if (exitCode === null) return { running: true, sandboxId: sandbox.sandboxId, attempt: latestRecord.attempt };
+      if (latestRecord.image !== state.image) {
+        await sandbox.terminate({ wait: true }).catch(() => undefined);
+      } else {
+        sandbox.detach();
+        return { running: true, sandboxId: sandbox.sandboxId, attempt: latestRecord.attempt };
+      }
     }
   }
   let stateChanged = false;
   const pending = (state.pending_recoveries ?? []).filter((lease) => lease.slug === slug);
   for (const lease of pending.sort((left, right) => right.attempt - left.attempt)) {
-    const sandbox = await namedSandbox(modal, appName, lease.name);
+    const leaseImageChanged = lease.image !== state.image;
+    const sandbox = await runningSandboxByName(modal, appName, lease.name);
     if (sandbox !== undefined) {
-      const exitCode = await sandbox.poll();
-      sandbox.detach();
-      if (exitCode === null) {
-        return { running: true, sandboxId: sandbox.sandboxId, attempt: lease.attempt };
+      if (leaseImageChanged) {
+        await sandbox.terminate({ wait: true }).catch(() => undefined);
+        state.pending_recoveries = (state.pending_recoveries ?? []).filter((candidate) => candidate !== lease);
+        stateChanged = true;
+        continue;
       }
+      sandbox.detach();
+      return { running: true, sandboxId: sandbox.sandboxId, attempt: lease.attempt };
     }
     const launchedAt = Date.parse(lease.launched_at);
-    if (!Number.isFinite(launchedAt) || Date.now() - launchedAt >= MODAL_RECOVERY_LEASE_TIMEOUT_MS) {
+    if (
+      leaseImageChanged ||
+      !Number.isFinite(launchedAt) ||
+      Date.now() - launchedAt >= MODAL_RECOVERY_LEASE_TIMEOUT_MS
+    ) {
       state.pending_recoveries = (state.pending_recoveries ?? []).filter((candidate) => candidate !== lease);
       stateChanged = true;
     } else {
@@ -411,6 +465,7 @@ async function overseeModalBenchmarkOnce(
           );
           recoveryState.recoveries.push({
             ...model,
+            image: recoveryState.image,
             sandbox_id: recovery.sandboxId,
             volume_name: launch.volume_name,
             remote_root: launch.remote_root,
@@ -432,7 +487,9 @@ async function overseeModalBenchmarkOnce(
           .filter((record) => record.slug === launch.slug)
           .sort((left, right) => right.attempt - left.attempt)[0];
         const retryAt =
-          latestRecovery === undefined || recoveryImageChanged ? undefined : recoveryRetryAt(latestRecovery);
+          latestRecovery === undefined || recoveryImageChanged || latestRecovery.image !== recoveryImage
+            ? undefined
+            : recoveryRetryAt(latestRecovery);
         if (retryAt !== undefined && retryAt > Date.now()) {
           rows.push({ slug: launch.slug, complete: false, recovery: false, retry_at: new Date(retryAt).toISOString() });
           continue;
@@ -450,6 +507,7 @@ async function overseeModalBenchmarkOnce(
           slug: launch.slug,
           attempt,
           name,
+          image: recoveryImage,
           launched_at: new Date().toISOString()
         };
         recoveryState.pending_recoveries = [...(recoveryState.pending_recoveries ?? []), lease];
@@ -458,7 +516,11 @@ async function overseeModalBenchmarkOnce(
         try {
           sandbox = await modal.sandboxes.create(app, image, {
             name,
-            command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider, true)],
+            command: [
+              "bash",
+              "-lc",
+              modalWorkerEntrypointCommand(auth === undefined ? undefined : model.provider, true)
+            ],
             cpu: 4,
             cpuLimit: 4,
             memoryMiB: 12_288,
@@ -482,6 +544,7 @@ async function overseeModalBenchmarkOnce(
           });
           recoveryState.recoveries.push({
             ...model,
+            image: recoveryImage,
             sandbox_id: sandbox.sandboxId,
             volume_name: launch.volume_name,
             remote_root: launch.remote_root,
