@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -29,6 +29,7 @@ const REASONING_EFFORT = "high";
 interface TopologyNode {
   id: string;
   kind?: string;
+  prompt?: string;
   depends_on: string[];
   model_profiles?: string[];
 }
@@ -91,6 +92,33 @@ export function configureTargetE2e(targetRoot: string, nodeTimeoutSeconds: numbe
 
   writeFileSync(topologyPath, stringify(topology, { lineWidth: 120 }), "utf-8");
   writeFileSync(configPath, smokeConfig(nodeTimeoutSeconds), "utf-8");
+  rewriteReviewPrompts(resolve(targetRoot, ".ultrafuzz", "prompts"));
+}
+
+function rewriteReviewPrompts(promptsRoot: string): void {
+  for (const relativePath of ["review/dedupe-findings.md", "review/aggregate-test-files.md"]) {
+    const path = join(promptsRoot, relativePath);
+    if (!existsSync(path)) continue;
+
+    let content = readFileSync(path, "utf-8");
+    for (const nodeId of EXCLUDED_SMOKE_NODES) {
+      const escapedNodeId = escapeRegExp(nodeId);
+      content = content
+        .replace(new RegExp(`(?:^|\\n)[^\\n]*:\\n\\{\\{artifact_path:${escapedNodeId}\\}\\}[^\\n]*\\n`, "gu"), "\n")
+        .replace(new RegExp(`(?:^|\\n)\\{\\{artifact_handoff:${escapedNodeId}\\}\\}\\n`, "gu"), "\n");
+    }
+    content = content
+      .replace(
+        /\nAlso inspect the Dynamic strategy generator outputs before deduping:\n+(?=Then, build a stable dedupe key)/u,
+        "\n"
+      )
+      .replace(/\n{3,}/gu, "\n\n");
+    writeFileSync(path, content, "utf-8");
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function requireTopology(value: unknown): TopologyDocument {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,7 @@ describe("production smoke topology configuration", () => {
     temporaryRoots.push(targetRoot);
     mkdirSync(join(targetRoot, ".ultrafuzz"), { recursive: true });
     copyFileSync(join(repoRoot, ".ultrafuzz", "topology.yml"), join(targetRoot, ".ultrafuzz", "topology.yml"));
+    cpSync(join(repoRoot, ".ultrafuzz", "prompts"), join(targetRoot, ".ultrafuzz", "prompts"), { recursive: true });
     copyFileSync(join(repoRoot, "ultrafuzz.toml"), join(targetRoot, "ultrafuzz.toml"));
 
     configureTargetE2e(targetRoot, 900);
@@ -30,7 +31,7 @@ describe("production smoke topology configuration", () => {
     const topology = parse(readFileSync(join(targetRoot, ".ultrafuzz", "topology.yml"), "utf-8")) as {
       defaults: { strategy_loops: number };
       groups: { strategies: { defaults: { loops: number; timeout_seconds: number; model_profiles: string[] } } };
-      nodes: Array<{ id: string; depends_on: string[] }>;
+      nodes: Array<{ id: string; depends_on: string[]; prompt?: string }>;
     };
     const ids = new Set(topology.nodes.map((node) => node.id));
     expect(topology.defaults.strategy_loops).toBe(1);
@@ -53,6 +54,15 @@ describe("production smoke topology configuration", () => {
     expect(config).toContain('model = "gpt-5.6-luna"');
     expect(config).toContain('reasoning = "high"');
     expect(config).not.toContain("signal_profile");
+
+    for (const node of topology.nodes) {
+      if (node.prompt === undefined) continue;
+      const prompt = readFileSync(join(targetRoot, ".ultrafuzz", "prompts", node.prompt), "utf-8");
+      const referencedNodeIds = [...prompt.matchAll(/\{\{artifact_(?:path|handoff):([^}]+)\}\}/gu)].map(
+        (match) => match[1] as string
+      );
+      expect(referencedNodeIds.every((referenced) => ids.has(referenced))).toBe(true);
+    }
   });
 });
 
