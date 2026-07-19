@@ -416,15 +416,19 @@ Also save `{{artifact_path}}/report.json` as structured JSON for the CLI. Includ
 `schema_version`, a `run_metadata` object matching the public Run summary
 fields, a production `issues` array, and a `non_production_outcomes` array.
 
-Each production issue object must contain `title`, `description`, `severity`,
-`likelihood`, `impact`, and `proof_of_concept`, plus `family_id`,
-`family_variants`, `related_findings`, and a structured `strategy` object
-carrying strategy names, detection rates, and loop-attempt provenance for
+Each production issue object must satisfy the canonical normalized finding
+schema. Include at least `schema_version`, `id`, `title`, `status`,
+`severity_guess`, `confidence`, and `summary`, and keep those fields consistent
+with the final rendered issue. Also include the report-specific fields
+`description`, `severity`, `likelihood`, `impact`, and `proof_of_concept`, plus
+`family_id`, `family_variants`, `related_findings`, and a structured `strategy`
+object carrying strategy names, detection rates, and loop-attempt provenance for
 downstream analysis when those fields are available. The production issue
-`severity`, `impact`, and `likelihood` values must use the same High, Medium, or
-Low report vocabulary rendered in Markdown. Do not add alternate severity fields
-that preserve nonstandard upstream severity labels. The production issue
-`title` value must include the same severity-local title ID rendered in the
+`severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
+High, Medium, or Low report vocabulary rendered in Markdown. Do not add
+alternate severity fields that preserve nonstandard upstream severity labels;
+`severity_guess` must contain the normalized matrix severity. The production
+issue `title` value must include the same severity-local title ID rendered in the
 Markdown heading, for example
 `[H-01] - Selectorless fallback can refund or spend stale contract ETH`.
 
@@ -458,13 +462,16 @@ Before finishing, verify that:
 - Every production issue severity equals the Impact x Likelihood matrix result.
 - `report.json` contains `schema_version`, `run_metadata`, `issues`, and
   `non_production_outcomes`.
+- Every `report.json` production issue satisfies the canonical normalized
+  finding schema, including `schema_version`, `id`, `title`, `status`,
+  `severity_guess`, `confidence`, and `summary`.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from
   `run.json` when those metadata values are available.
 - `report.json.run_metadata.repository` matches the normalized `Repository`
   value rendered in `report.md`.
-- `report.json` production issue `severity`, `impact`, and `likelihood` fields
-  use only High, Medium, or Low.
+- `report.json` production issue `severity_guess`, `severity`, `impact`, and
+  `likelihood` fields use only High, Medium, or Low.
 - `report.json` does not contain alternate severity fields that preserve
   nonstandard upstream labels.
