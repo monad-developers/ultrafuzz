@@ -311,6 +311,8 @@ nodes:
       - path: properties.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties.json
+        contract: ultrafuzz/properties@1
   - id: boundary-tests
     kind: agentic
     prompt: strategies/boundary-tests.md
@@ -624,7 +626,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: implemented-properties.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/implemented-properties@1
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1
       - path: findings.json
@@ -643,7 +645,7 @@ nodes:
       - path: campaign-report.md
         contract: ultrafuzz/nonempty-markdown@1
       - path: recon-fuzzer-results.json
-        contract: ultrafuzz/json-object@1
+        contract: ultrafuzz/property-campaign@1
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1
       - path: findings.json

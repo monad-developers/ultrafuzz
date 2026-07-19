@@ -33,7 +33,13 @@ function plannedNode(paths: string[]): PlannedGraphNode {
           ? "ultrafuzz/generated-tests@1"
           : outputPath === "findings.json"
             ? "ultrafuzz/findings@1"
-            : "ultrafuzz/nonempty-markdown@1",
+            : outputPath === "properties.json"
+              ? "ultrafuzz/properties@1"
+              : outputPath === "implemented-properties.json"
+                ? "ultrafuzz/implemented-properties@1"
+                : outputPath === "recon-fuzzer-results.json"
+                  ? "ultrafuzz/property-campaign@1"
+                  : "ultrafuzz/nonempty-markdown@1",
       contract_digest: "a".repeat(64),
       primary: index === 0
     })),
@@ -135,6 +141,150 @@ test("artifact contracts reject malformed outputs and accept canonical empty out
   fs.writeFileSync(path.join(artifactDir, "findings.json"), "[]", "utf8");
   fs.writeFileSync(path.join(artifactDir, "notes.md"), "# No findings\n", "utf8");
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, "strategy-a").ok, true);
+});
+
+test("property implementation gate rejects an unknown canonical property reference", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-unknown",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const node = {
+    ...plannedNode(["implemented-properties.json"]),
+    id: "stateful-invariant-implement-properties",
+    logical_id: "stateful-invariant-implement-properties"
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.match(
+    result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN")?.message ?? "",
+    /property-unknown/u
+  );
+});
+
+test("campaign gate accepts non-property findings and validates property-derived failures", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-recon-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "finding-property",
+        title: "Property failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The property failed.",
+        property_ids: ["property-1"]
+      },
+      {
+        schema_version: "1.0",
+        id: "finding-setup",
+        title: "Harness setup issue",
+        status: "needs-review",
+        severity_guess: "low",
+        confidence: "high",
+        summary: "The harness setup is incomplete."
+      }
+    ])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, campaignId).ok, true);
+
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      failures: [{ id: "failure-2", status: "reproduced", property_ids: ["property-unknown"] }]
+    })
+  );
+  const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(unknown.ok, false);
+  assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
 });
 
 test("dependency gates reject reused descendants after an ancestor manifest changes", () => {

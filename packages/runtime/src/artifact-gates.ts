@@ -10,7 +10,14 @@ import {
   updateNodeState,
   validateArtifactContract,
   validateGeneratedTestManifestSchema,
+  validateImplementedPropertiesSchema,
+  validatePropertiesSchema,
+  validatePropertyCampaignSchema,
+  validatePropertyReferences,
   verifyArtifactManifestPrerequisites,
+  type ImplementedPropertiesArtifact,
+  type PropertiesArtifact,
+  type PropertyReferenceInput,
   type RunLayout,
   type RunState
 } from "@ultrafuzz/artifacts";
@@ -156,6 +163,11 @@ export function verifyRequiredArtifactsForAttempt(
     }
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
+  try {
+    diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "property-provenance", "PROPERTY_PROVENANCE_READ_FAILED"));
+  }
 
   return {
     ok: diagnostics.length === 0,
@@ -259,6 +271,203 @@ function severityArtifactForNode(
     return { kind: "final-report", file: "report.json" };
   }
   return undefined;
+}
+
+function verifyPropertyProvenanceArtifacts(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const logicalId = node.logical_id ?? node.id;
+  if (logicalId !== "stateful-invariant-implement-properties" && logicalId !== "stateful-invariant-recon-campaign") {
+    return [];
+  }
+
+  const catalog = readCanonicalPropertyCatalog(layout);
+  if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
+    return catalog.diagnostics;
+  }
+
+  if (logicalId === "stateful-invariant-implement-properties") {
+    const implementationPath = path.join(artifactDir, "implemented-properties.json");
+    if (!fs.existsSync(implementationPath)) {
+      return [];
+    }
+    const implementation = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
+    if (!implementation.ok || implementation.value === undefined) {
+      return [];
+    }
+    return propertyReferenceDiagnostics(
+      catalog.value,
+      implementation.value.properties.map((record, index) => ({
+        propertyIds: [record.property_id],
+        path: `${implementationPath}#$.properties[${index}].property_id`
+      }))
+    );
+  }
+
+  return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
+}
+
+function verifyCampaignPropertyReferences(
+  layout: RunLayout,
+  artifactDir: string,
+  catalog: PropertiesArtifact
+): RuntimeDiagnostic[] {
+  const implementation = readImplementedProperties(layout);
+  if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
+    return implementation.diagnostics;
+  }
+
+  const campaignPath = path.join(artifactDir, "recon-fuzzer-results.json");
+  const findingsPath = path.join(artifactDir, "findings.json");
+  if (!fs.existsSync(campaignPath) || !fs.existsSync(findingsPath)) {
+    return [];
+  }
+  const campaign = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+  if (!campaign.ok || campaign.value === undefined) {
+    return [];
+  }
+
+  const references: PropertyReferenceInput[] = campaign.value.failures.flatMap((failure, index) =>
+    failure.property_ids === undefined
+      ? []
+      : failure.property_ids.map((propertyId, propertyIndex) => ({
+          propertyIds: [propertyId],
+          path: `${campaignPath}#$.failures[${index}].property_ids[${propertyIndex}]`
+        }))
+  );
+  references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
+
+  const diagnostics = propertyReferenceDiagnostics(catalog, references);
+  const implementedIds = new Set(
+    implementation.value.properties
+      .filter((record) => record.status === "implemented")
+      .map((record) => record.property_id)
+  );
+  for (const reference of references) {
+    for (const propertyId of reference.propertyIds) {
+      if (catalog.properties.some((property) => property.id === propertyId) && !implementedIds.has(propertyId)) {
+        diagnostics.push({
+          code: "PROPERTY_IMPLEMENTATION_REFERENCE_INVALID",
+          message: `Canonical property ${JSON.stringify(propertyId)} was not recorded with implemented status`,
+          severity: "error",
+          source: "property-provenance",
+          path: reference.path
+        });
+      }
+    }
+  }
+  return diagnostics;
+}
+
+function readCanonicalPropertyCatalog(layout: RunLayout): {
+  value?: PropertiesArtifact;
+  diagnostics: RuntimeDiagnostic[];
+} {
+  const catalogPath = findLogicalNodeArtifact(layout, "property-specification-fanin", "properties.json");
+  if (catalogPath === undefined) {
+    return {
+      diagnostics: [
+        {
+          code: "PROPERTY_CATALOG_MISSING",
+          message: "Canonical property provenance catalog properties.json is unavailable",
+          severity: "error",
+          source: "property-provenance"
+        }
+      ]
+    };
+  }
+  const result = validatePropertiesSchema(readJsonFile(catalogPath), catalogPath);
+  return result.ok && result.value !== undefined
+    ? { value: result.value, diagnostics: [] }
+    : { diagnostics: schemaDiagnostics(result.issues) };
+}
+
+function readImplementedProperties(layout: RunLayout): {
+  value?: ImplementedPropertiesArtifact;
+  diagnostics: RuntimeDiagnostic[];
+} {
+  const implementationPath = findLogicalNodeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json"
+  );
+  if (implementationPath === undefined) {
+    return {
+      diagnostics: [
+        {
+          code: "IMPLEMENTED_PROPERTIES_MISSING",
+          message: "Implemented property provenance artifact implemented-properties.json is unavailable",
+          severity: "error",
+          source: "property-provenance"
+        }
+      ]
+    };
+  }
+  const result = validateImplementedPropertiesSchema(readJsonFile(implementationPath), implementationPath);
+  return result.ok && result.value !== undefined
+    ? { value: result.value, diagnostics: [] }
+    : { diagnostics: schemaDiagnostics(result.issues) };
+}
+
+function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileName: string): string | undefined {
+  const state = readRunState(layout);
+  const candidateIds = new Set([logicalNodeId]);
+  for (const [nodeId, nodeState] of Object.entries(state.nodes)) {
+    if (nodeState.logical_node_id === logicalNodeId) {
+      candidateIds.add(nodeId);
+    }
+  }
+  for (const nodeId of candidateIds) {
+    const candidate = path.join(getNodeArtifactDir(layout, nodeId), fileName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function findingPropertyReferences(value: unknown, artifactPath: string): PropertyReferenceInput[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((finding, findingIndex) => {
+    if (typeof finding !== "object" || finding === null || !("property_ids" in finding)) {
+      return [];
+    }
+    const propertyIds = (finding as { property_ids?: unknown }).property_ids;
+    if (!Array.isArray(propertyIds)) {
+      return [];
+    }
+    return propertyIds.flatMap((propertyId, propertyIndex) =>
+      typeof propertyId === "string"
+        ? [
+            {
+              propertyIds: [propertyId],
+              path: `${artifactPath}#$[${findingIndex}].property_ids[${propertyIndex}]`
+            }
+          ]
+        : []
+    );
+  });
+}
+
+function propertyReferenceDiagnostics(
+  catalog: PropertiesArtifact,
+  references: readonly PropertyReferenceInput[]
+): RuntimeDiagnostic[] {
+  return schemaDiagnostics(validatePropertyReferences(catalog, references));
+}
+
+function schemaDiagnostics(issues: Array<{ code: string; message: string; path: string }>): RuntimeDiagnostic[] {
+  return issues.map((issue) => ({
+    code: issue.code,
+    message: issue.message,
+    severity: "error",
+    source: "property-provenance",
+    path: issue.path
+  }));
 }
 
 export function markNodeBlockedByDependencies(

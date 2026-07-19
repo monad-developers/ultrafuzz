@@ -36,6 +36,7 @@ export const findingSchema = z.looseObject({
   affected_files: stringArray.optional(),
   affected_functions: stringArray.optional(),
   patch_refs: stringArray.optional(),
+  property_ids: stringArray.min(1).optional(),
   notes: stringArray.optional(),
   evidence: z.array(evidenceEntrySchema).optional()
 });
@@ -68,6 +69,7 @@ export const findingJsonSchema = {
     affected_files: { type: "array", items: { type: "string", minLength: 1 } },
     affected_functions: { type: "array", items: { type: "string", minLength: 1 } },
     patch_refs: { type: "array", items: { type: "string", minLength: 1 } },
+    property_ids: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
     notes: { type: "array", items: { type: "string", minLength: 1 } },
     evidence: {
       type: "array",

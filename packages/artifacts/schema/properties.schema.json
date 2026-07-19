@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties",
+  "title": "Ultrafuzz canonical property catalog",
+  "type": "object",
+  "required": ["schema_version", "properties"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "ultrafuzz.properties.v1" },
+    "properties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "category", "priority", "sources"],
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "category": { "type": "string", "minLength": 1 },
+          "priority": { "type": "string", "minLength": 1 },
+          "sources": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "required": ["source_node_id", "source_property_id"],
+              "additionalProperties": true,
+              "properties": {
+                "source_node_id": { "type": "string", "minLength": 1 },
+                "source_property_id": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -206,9 +206,12 @@
                   "enum": [
                     "ultrafuzz/findings@1",
                     "ultrafuzz/generated-tests@1",
+                    "ultrafuzz/implemented-properties@1",
                     "ultrafuzz/json-array@1",
                     "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/properties@1",
+                    "ultrafuzz/property-campaign@1",
                     "ultrafuzz/report@1",
                     "ultrafuzz/text@1"
                   ]

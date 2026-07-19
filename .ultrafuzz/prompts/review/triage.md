@@ -163,6 +163,8 @@ production-looking record to a non-production class, also include
 When a finding is classified as `false-positive`, set `status` to
 `false-positive`; otherwise leave the status visible for downstream review unless
 the upstream evidence already supports a more specific status.
+In particular, preserve `property_ids` unchanged for every property-derived
+finding.
 
 For stateful invariant records, preserve any upstream
 `stateful_failure_classification=<classification>` note exactly. Coverage-only
