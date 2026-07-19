@@ -985,9 +985,10 @@ async function synchronizeTasks(input: {
     if (evidence === undefined) {
       continue;
     }
+    const recoverableEvidence = artifactCompleteRecoveryEvidence(evidence, previous, input.layout, task.attemptId);
 
     const needsFinalization =
-      evidence.status === "succeeded" &&
+      recoverableEvidence.status === "succeeded" &&
       (previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId));
     const finalization = needsFinalization
       ? await finalizeSucceededTask({
@@ -995,16 +996,16 @@ async function synchronizeTasks(input: {
           node,
           task,
           workflowRunId: input.workflowRunId,
-          evidence,
+          evidence: recoverableEvidence,
           force: previous?.status === "succeeded",
           previous,
           nowMs: synchronizationClock(input.control),
           control: input.control
         })
       : {
-          status: evidence.status,
+          status: recoverableEvidence.status,
           diagnostics: [],
-          ...(evidence.error ? { lastError: evidence.error } : {}),
+          ...(recoverableEvidence.error ? { lastError: recoverableEvidence.error } : {}),
           provenance: {},
           events: []
         };
@@ -1017,21 +1018,21 @@ async function synchronizeTasks(input: {
     const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteAttempts.push(task.attemptId);
     taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
-    const startedAt = startedAtForEvidence(evidence, previous, input.control);
+    const startedAt = startedAtForEvidence(recoverableEvidence, previous, input.control);
     const patch = {
       status: patchStatus,
-      retry_count: Math.max(0, (evidence.attempt ?? previous?.retry_count ?? 1) - 1),
+      retry_count: Math.max(0, (recoverableEvidence.attempt ?? previous?.retry_count ?? 1) - 1),
       timed_out: patchStatus === "timed-out",
       ...startedAtPatchForStatus(patchStatus, startedAt),
-      finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
+      finished_at: finishedAtForStatus(patchStatus, previous, recoverableEvidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
         ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
           run_id: input.workflowRunId,
           task_id: task.smithersNodeId,
-          state: evidence.workflowState,
-          attempt: evidence.attempt
+          state: recoverableEvidence.workflowState,
+          attempt: recoverableEvidence.attempt
         },
         ...finalization.provenance
       }
@@ -1054,8 +1055,8 @@ async function synchronizeTasks(input: {
           workflow_run_id: input.workflowRunId,
           workflow_task_id: task.smithersNodeId,
           previous_status: previous?.status,
-          workflow_state: evidence.workflowState,
-          attempt: evidence.attempt
+          workflow_state: recoverableEvidence.workflowState,
+          attempt: recoverableEvidence.attempt
         }
       });
     }
@@ -1521,6 +1522,27 @@ function startedAtPatchForStatus(status: NodeStatus, startedAt?: string): { star
     return {};
   }
   return { started_at: undefined };
+}
+
+function artifactCompleteRecoveryEvidence(
+  evidence: NodeWorkflowEvidence,
+  previous: NodeState | undefined,
+  layout: RunLayout,
+  nodeId: string
+): NodeWorkflowEvidence {
+  if (terminalStatus(evidence.status)) {
+    return evidence;
+  }
+  const requiredArtifacts = recordField(previous?.provenance, "required_artifacts");
+  if (booleanField(requiredArtifacts, "ok") !== true || !artifactManifestExists(layout, nodeId)) {
+    return evidence;
+  }
+  return {
+    ...evidence,
+    status: "succeeded",
+    workflowState: "artifact-complete",
+    ...(previous?.finished_at === undefined ? {} : { finishedAt: previous.finished_at })
+  };
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {

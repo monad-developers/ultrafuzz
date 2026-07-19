@@ -2432,6 +2432,52 @@ test("syncRun keeps same-attempt terminal events ahead of stale running step ins
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 5);
 });
 
+test("syncRun preserves artifact-verified nodes when workflow inspection regresses them to running", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-artifact-complete-regression";
+  const firstEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "finished",
+      state: "succeeded",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-artifact-complete-regression", env: firstEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const first = await syncRun({ projectRoot: project, runId: "sync-artifact-complete-regression", env: firstEnv });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+  assert.equal(first.value?.status, "succeeded");
+
+  const secondEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const second = await syncRun({ projectRoot: project, runId: "sync-artifact-complete-regression", env: secondEnv });
+
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-complete");
+});
+
 test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
