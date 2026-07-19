@@ -1022,7 +1022,7 @@ async function synchronizeTasks(input: {
       status: patchStatus,
       retry_count: Math.max(0, (evidence.attempt ?? previous?.retry_count ?? 1) - 1),
       timed_out: patchStatus === "timed-out",
-      ...(startedAt ? { started_at: startedAt } : {}),
+      ...startedAtPatchForStatus(patchStatus, startedAt),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
       last_error: finalization.lastError,
       provenance: {
@@ -1076,6 +1076,7 @@ async function synchronizeTasks(input: {
     const patch = {
       status: aggregateStatus,
       timed_out: aggregateStatus === "timed-out",
+      ...startedAtPatchForStatus(aggregateStatus),
       finished_at: finishedAtForStatus(aggregateStatus, previous),
       last_error: undefined,
       provenance: {
@@ -1510,6 +1511,16 @@ function startedAtForEvidence(
     return undefined;
   }
   return new Date(synchronizationClock(control)).toISOString();
+}
+
+function startedAtPatchForStatus(status: NodeStatus, startedAt?: string): { started_at?: string | undefined } {
+  if (status === "running") {
+    return startedAt === undefined ? {} : { started_at: startedAt };
+  }
+  if (terminalStatus(status)) {
+    return {};
+  }
+  return { started_at: undefined };
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {

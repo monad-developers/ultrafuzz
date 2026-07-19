@@ -2480,6 +2480,50 @@ test("syncRun refreshes started_at when a running attempt advances without a sta
   assert.equal(state.nodes?.["project-discovery"]?.started_at, "2026-07-03T01:00:00.000Z");
 });
 
+test("syncRun clears started_at when a running workflow node is reset to pending", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-reset-started-at";
+  const firstEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeStarted",
+        nodeId: "node:project-discovery",
+        attempt: 1
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-reset-started-at", env: firstEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const first = await syncRun({ projectRoot: project, runId: "sync-reset-started-at", env: firstEnv });
+  assert.equal(first.ok, true, JSON.stringify(first.diagnostics));
+
+  const secondEnv = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 2 }])
+  });
+  const second = await syncRun({ projectRoot: project, runId: "sync-reset-started-at", env: secondEnv });
+
+  assert.equal(second.ok, true, JSON.stringify(second.diagnostics));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; started_at?: string; retry_count?: number }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "pending");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, undefined);
+});
+
 test("syncRun fails a successful workflow node that is missing required artifacts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
