@@ -305,7 +305,10 @@ export function assertNodeAttemptLedgerEntry(value: unknown): NodeAttemptLedgerE
 }
 
 export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, input: AppendNodeAttemptInput) {
-  const runId = validateSafeId(input.runId ?? layout.runId, "run ID");
+  const runId = validateSafeId(layout.runId, "run ID");
+  if (input.runId !== undefined && validateSafeId(input.runId, "run ID") !== runId) {
+    throw new Error(`node attempt run ID must match owning layout run ID ${runId}`);
+  }
   const nodeId = validateSafeId(input.nodeId, "node ID");
   const strategyAttemptId = normalizeDimensionId(input.strategyAttemptId, "strategy attempt ID");
   const executorRetryId = normalizeDimensionId(input.executorRetryId, "executor retry ID");

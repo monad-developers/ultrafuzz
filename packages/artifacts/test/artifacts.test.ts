@@ -218,7 +218,7 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
 });
 
-test("node attempt ledger replay isolates runs and rejects conflicting immutable entries", () => {
+test("node attempt ledger append and replay enforce run ownership and immutable entries", () => {
   const project = tempProject();
   const firstLayout = createRunLayout({ projectRoot: project, runId: "attempt-first" });
   const secondLayout = createRunLayout({ projectRoot: project, runId: "attempt-second" });
@@ -237,6 +237,13 @@ test("node attempt ledger replay isolates runs and rejects conflicting immutable
   };
   appendNodeAttempt(firstLayout, input);
   const second = appendNodeAttempt(secondLayout, input).entry;
+  const pristineSecondLedger = fs.readFileSync(secondLayout.attemptLedgerPath, "utf8");
+
+  assert.throws(
+    () => appendNodeAttempt(secondLayout, { ...input, runId: firstLayout.runId }),
+    /run ID must match owning layout/u
+  );
+  assert.equal(fs.readFileSync(secondLayout.attemptLedgerPath, "utf8"), pristineSecondLedger);
 
   appendLineDurable(
     secondLayout.attemptLedgerPath,
@@ -258,6 +265,16 @@ test("node attempt ledger replay isolates runs and rejects conflicting immutable
   assert.equal(replay.entries[0]?.run_id, secondLayout.runId);
   assert.equal(replay.duplicateEntries, 1);
   assert.equal(replay.malformedEntries, 2);
+});
+
+test("node attempt ledger replay rejects a symlinked ledger file", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "attempt-symlink" });
+  const outsideLedger = path.join(tempProject(), "attempts.jsonl");
+  fs.writeFileSync(outsideLedger, "");
+  fs.unlinkSync(layout.attemptLedgerPath);
+  fs.symlinkSync(outsideLedger, layout.attemptLedgerPath);
+
+  assert.throws(() => replayNodeAttempts(layout), /symlink/u);
 });
 
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
