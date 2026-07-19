@@ -217,6 +217,13 @@ test("analysis bundle validation rejects modified payload bytes", () => {
   const { terminal } = syntheticPayloads();
   writeAnalysisBundle({ outputDir: output, payloads: { "terminal-status": terminal } });
 
+  assert.deepEqual(readAnalysisBundle(output).payloads, { "terminal-status": terminal });
+  assert.deepEqual(readAnalysisBundle(output).omissions.omissions, [
+    { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "data-unavailable" },
+    { kind: "attempt-history", path: "data/attempt-history.json", reason: "data-unavailable" },
+    { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "data-unavailable" }
+  ]);
+
   fs.appendFileSync(path.join(output, "data", "terminal-status.json"), " ", "utf8");
   assert.throws(() => validateAnalysisBundle(output), /checksum mismatch/u);
 });
