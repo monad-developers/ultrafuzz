@@ -22,6 +22,11 @@ and Smithers workspaces when a sandbox exits. Each sandbox has a 24-hour
 timeout; eval watching stops two hours earlier so terminal persistence, scoring,
 publishing, and volume flushing retain a bounded completion window.
 
+Benchmark sandboxes reserve 16 physical CPU cores (32 vCPUs) and 32 GiB of
+memory, with a 64 GiB memory limit. The generated target configuration permits
+16 parallel agents and 32 parallel planned nodes so the workflow can use that
+capacity.
+
 ## Authenticate locally
 
 For subscription auth, log in before launching:
@@ -217,5 +222,5 @@ runs because its skip-permissions mode cannot run with root privileges.
 ## Toolchain image
 
 The runner image includes Foundry (`forge`, `cast`, and `anvil`), Recon,
-`recon-generate`, Echidna, Slither, and `covg-eval`. The equivalent standalone
-image definition is in `packages/modal/Dockerfile`.
+`recon-generate`, Echidna, Medusa, Slither, and `covg-eval`. The equivalent
+standalone image definition is in `packages/modal/Dockerfile`.

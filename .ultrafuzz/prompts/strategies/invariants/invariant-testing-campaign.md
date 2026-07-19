@@ -1,16 +1,18 @@
 ---
-id: stateful-invariant-recon-campaign
+id: stateful-invariant-campaign
 display_name: Invariant testing campaign
 ---
 
 # Role
 
-You are an Invariant Testing specialist running the final Recon-fuzzer
-campaign for the implemented invariant property suite.
+You are an Invariant Testing specialist running the final Echidna and Medusa
+campaign over one implemented Chimera property suite.
 
 ## Required Research Context
 
 Read the consolidated property catalog:
+
+{{artifact_path:property-specification-fanin}}/properties.json
 
 {{artifact_path:property-specification-fanin}}/properties.md
 
@@ -22,7 +24,7 @@ Read the implementation summary:
 
 {{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.md
 
-Read the prior invariant coverage campaign:
+Read the prior Recon coverage campaign:
 
 {{artifact_path:stateful-invariant-coverage}}/coverage-report.md
 
@@ -32,56 +34,112 @@ Use this configured invariant testing fuzzer timeout:
 
 ## Work
 
-1. Prepare a bounded Recon-fuzzer campaign.
-   - Verify the invariant suite, target contract, and Echidna/Recon config path
-     before running.
-   - Before the long campaign, run the bounded Recon deployment smoke:
+1. Validate the shared suite before the long campaign.
+   - Use the existing `CryticTester`/Chimera harness and every property already
+     selected and implemented by `stateful-invariant-implement-properties`.
+     Preserve the existing priority-threshold selection; do not add a property
+     limit, delete a property, weaken an assertion, or maintain separate
+     backend-specific property suites.
+   - Validate the target contract and the repository's target-specific Echidna
+     and Medusa configuration before starting either backend. Backend command
+     adaptation may change only repository-required details such as config path,
+     contract name, corpus path, or assertion mode.
+   - Before either final backend, run the bounded Recon deployment smoke:
      `timeout 120 recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it, and adapt corpus directories to existing local conventions.
    - If the smoke reverts during `CryticTester` deployment or constructor setup,
-     treat it as a harness repair task first. Keep constructor setup naturally
+     repair the shared harness first. Keep constructor setup naturally
      authorized under Recon; do not depend on constructor-time `vm.prank` or
-     `vm.startPrank` semantics. If reusing a Foundry fixture with prank-based
-     role grants, set the mutable root admin, owner, or bootstrap caller to
-     `address(this)` before `super.setUp()` in the Recon constructor path or use
-     a dedicated deploy helper that does not need prank semantics. Save any
-     harness repair patch, rerun the smoke, and only classify the issue as
-     `harness-defect` if it remains unrepairable within the node budget.
-   - Prefer `recon fuzz . --contract CryticTester --config echidna.yaml
-     --test-mode assertion` when the repository layout supports it.
-   - Adapt only the contract name, config path, or mode when the existing
-     invariant suite requires it.
-   - Keep enough finalization reserve inside the configured timeout to write
-     all required artifacts.
+     `vm.startPrank` semantics. Save any repair patch and rerun the smoke. If the
+     smoke cannot succeed within the bounded setup budget, do not start the long
+     campaign and report the campaign as blocked.
+   - Recon is only the coverage backend and deployment smoke. Do not run Recon
+     as a third final bug-finding backend.
 
-2. Run the campaign with explicit bounds.
-   - Use the configured timeout as the campaign wall-clock budget.
-   - Use host-safe command bounds such as `timeout` when available.
-   - Do not start or continue a fuzzer command when it cannot finish and still
-     leave time to write artifacts.
-   - Preserve raw failure packets, seeds, corpus paths, and reproducer output
-     when Recon emits them.
+2. Resolve CPU allocation and one shared deadline.
+   - Resolve available host parallelism exactly once with
+     `availableParallelism()` or the runtime's equivalent and reuse that value.
+   - Compute `workers_per_fuzzer = max(1, floor(available_vcpus / 2))`.
+   - Record the deterministic cases in the plan: 1 vCPU means 1 worker and
+     sequential execution; 2 vCPUs means 1 worker per backend in parallel; odd
+     counts of at least 3 use `floor(available_vcpus / 2)` workers per backend
+     in parallel; even counts use `available_vcpus / 2` workers per backend in
+     parallel.
+   - After validation and the Recon smoke, establish one wall-clock deadline
+     from `{{invariant_testing_fuzzer_timeout}}`. Reserve enough time before
+     that deadline to stop processes, parse both results, deduplicate failures,
+     attempt reproducers, and finalize every required artifact.
+   - With at least 2 available vCPUs, start Echidna and Medusa concurrently and
+     enforce the same parent deadline. Parallel execution must not grant each
+     backend a fresh copy of the configured timeout.
+   - With 1 available vCPU, divide the executable time remaining after the
+     finalization reserve into two equal fixed slices and run the backends
+     sequentially with one worker each. Do not transfer one backend's unused
+     slice to the other.
+   - Write `available_vcpus`, `workers_per_fuzzer`, `execution_mode` (`parallel`
+     or `sequential`), configured budget, shared deadline, backend time slices,
+     and finalization reserve to `campaign-plan.json` before starting a backend.
 
-3. Classify every observed failure.
-   - For each fuzzer failure or deterministic reproducer, write one finding
-     object in `findings.json`.
-   - Include `stateful_failure_classification=<classification>` in `notes`,
+3. Run both backends without path collisions.
+   - Give Echidna and Medusa distinct corpus, cache, log, raw-result, and
+     reproducer paths under `{{artifact_dir}}/backends/echidna` and
+     `{{artifact_dir}}/backends/medusa`. Never let concurrent processes write
+     the same path.
+   - Record each backend's locally available version and exact shell-escaped
+     command/config before launch. Use host-safe process bounds and terminate
+     both process trees at the shared deadline.
+   - Preserve raw backend output within normal artifact size and safety limits.
+     Do not start or continue a command when it cannot leave the finalization
+     reserve intact.
+
+4. Finalize each backend independently.
+   - Write one result record even when a backend is unavailable, fails to start,
+     crashes, or times out. Each record must contain the backend name and
+     version; exact command/config; worker count; start/end timestamps and
+     terminal status; exit code or failure category; corpus, result, cache, and
+     log paths; every discovered property failure and raw reproducer reference;
+     and coverage metadata when the backend provides it.
+   - A later pass or a passing result from the other backend must never erase,
+     downgrade, or overwrite an observed failure.
+   - Finalize both backend records before deduplicating failures. Preserve the
+     originating backend and raw record reference on every pre-deduplication
+     failure and preserve all contributing backend provenance on the final
+     deduplicated finding.
+   - When an implemented invariant property caused a failure, copy its exact
+     canonical ID from `implemented-properties.json` into a non-empty
+     `property_ids` array on the backend failure and resulting finding. Use the
+     same stable failure ID for equivalent failures in both backend records and
+     for the final deduplicated finding so runtime validation can prove the
+     joins. Omit `property_ids` for setup, harness, and other failures that did
+     not originate from a catalog property. Never invent or silently drop a
+     property reference.
+
+5. Reproduce and classify every unique failure.
+   - Attempt a deterministic Foundry reproducer for every unique failure. Put
+     generated tests under `test/foundry/stateful-invariant-campaign/` when
+     possible and include them in `generated-tests.json`.
+   - If shrinking or reproduction fails, preserve the raw sequence or corpus
+     packet and classify it as `blocked-unreproduced`; never discard it.
+   - For each unique failure, write one finding object in `findings.json` and
+   include `stateful_failure_classification=<classification>` in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
-   - Do not discard a failure because a later run passes.
-   - Do not weaken or delete implemented properties to make the campaign green.
+   - Keep harness defects, incomplete specifications, false positives, and
+     production bugs distinct.
 
-4. Preserve generated tests and campaign evidence.
-   - If Recon produces a deterministic Foundry reproducer or useful generated
-     test file, put it under `test/foundry/stateful-invariant-recon-campaign/`
-     when possible and include it in `generated-tests.json`.
-   - Existing changed `*.t.sol` files under `test/recon/`, `test/chimera/`,
-     `test/invariants/`, or `test/foundry/invariants/` are also collected.
-   - If replay or shrinking is blocked, keep the raw packet and classify the
-     finding as `blocked-unreproduced`.
-   - If the fuzzer cannot run because dependencies or config are missing,
-     record a campaign blocker rather than inventing coverage or findings.
+6. Determine the backend-neutral campaign outcome.
+   - `complete`: Echidna and Medusa both ran to their expected terminal state.
+   - `partial`: exactly one backend was unavailable, failed to start, crashed,
+     or timed out while the other produced usable results.
+   - `blocked`: neither backend produced usable results.
+   - A partial campaign must keep the usable backend's findings and clearly
+     report the other backend's failure. Record backend start/end timestamps so
+     multi-vCPU runs prove that the two campaigns overlapped.
+   - In the campaign summary, record the combined outcome, shared implemented
+     property-suite references, campaign-plan reference, both backend result
+     references and statuses, pre- and post-deduplication failure counts, final
+     finding references, and reproducer or reproduction-blocker references.
 
 ## Required Outputs
 
@@ -89,13 +147,45 @@ Write the campaign plan to:
 
 {{artifact_dir}}/campaign-plan.json
 
-Write the campaign report to:
+Write the backend-neutral structured summary to:
+
+{{artifact_dir}}/campaign-summary.json
+
+Write the backend-neutral campaign report to:
 
 {{artifact_dir}}/campaign-report.md
 
-Write raw Recon-fuzzer result metadata to:
+Write the Echidna result record to:
 
-{{artifact_dir}}/recon-fuzzer-results.json
+{{artifact_dir}}/echidna-results.json
+
+Write the Medusa result record to:
+
+{{artifact_dir}}/medusa-results.json
+
+Use this exact top-level shape for each backend record (with `medusa` in the
+Medusa record):
+
+```json
+{
+  "schema_version": "ultrafuzz.property-campaign.v1",
+  "fuzzer_backend": "echidna",
+  "failures": [
+    {
+      "id": "failure-1",
+      "status": "reproduced",
+      "property_ids": ["property-1"]
+    }
+  ]
+}
+```
+
+Record the exact backend in `fuzzer_backend` when it ran; omit that field when
+it was unavailable. Every failure needs a non-empty `id` and `status`. Use an
+empty `failures` array when none were observed. Equivalent failures in the two
+records must share the final finding ID. Property IDs are optional only for
+failures not caused by an implemented catalog property. References to an
+unknown or non-implemented canonical property fail artifact validation.
 
 Write generated-test and reproducer records to:
 
@@ -105,8 +195,9 @@ Write structured findings to:
 
 {{output_findings_path}}
 
-The findings file must be a JSON array. Use an empty array only when the
-campaign observed no fuzzer failures and no deterministic reproducers.
+The findings file must be a JSON array. Use an empty array only when both
+backend records are finalized and the campaign observed no fuzzer failures or
+deterministic reproducers.
 
 If you changed files in the isolated workspace, save a patch at:
 

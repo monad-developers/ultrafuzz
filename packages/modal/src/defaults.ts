@@ -12,6 +12,14 @@ export const MODAL_PRE_MODEL_RETRY_MAX_DELAY_MS = 4_000;
 export const DEFAULT_NODE_TIMEOUT_SECONDS = 2 * 60 * 60;
 export const DEFAULT_MODAL_APP = "ultrafuzz-evals";
 export const DEFAULT_MODAL_IMAGE = "ultrafuzz-security-runner:latest";
+export const MODAL_BENCHMARK_SANDBOX_RESOURCES = {
+  cpu: 16,
+  cpuLimit: 16,
+  memoryMiB: 32_768,
+  memoryLimitMiB: 65_536
+} as const;
+export const DEFAULT_MODAL_MAX_PARALLEL_AGENTS = 16;
+export const DEFAULT_MODAL_MAX_PARALLEL_NODES = 32;
 
 export type ModelProvider = "openai" | "anthropic";
 export type ModelAuthMode = "api-key" | "subscription";
