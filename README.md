@@ -54,6 +54,7 @@ local dashboard plus final report for review.
 - [CLI](docs/cli.md)
 - [Config](docs/config.md)
 - [Eval Suites](docs/reference/evals.md)
+- [EVMBench integration](benchmarks/evmbench/README.md)
 - [Schemas](docs/schemas.md)
 - [Security](docs/security.md)
 

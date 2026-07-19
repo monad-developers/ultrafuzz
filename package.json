@@ -7,6 +7,8 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
+    "benchmark:evmbench": "pnpm --filter @ultrafuzz/evmbench benchmark",
+    "benchmark:evmbench:lock": "pnpm --filter @ultrafuzz/evmbench lock",
     "build": "pnpm -r build",
     "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w build && pnpm -w validate:release",
     "docs:check": "node scripts/docs-check.mjs",
@@ -42,6 +44,7 @@
     "packages/runtime",
     "packages/evals",
     "packages/dashboard",
+    "packages/evmbench",
     "packages/cli"
   ]
 }

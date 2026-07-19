@@ -31,6 +31,64 @@ describe("prompt semantic anchors", () => {
     expect(promptCorpus).not.toContain("medusa version");
   });
 
+  it("keeps the final invariant campaign backend-neutral and dual-backend", () => {
+    const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+    const aggregate = prompt("review/aggregate-test-files.md");
+    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topologySource = readFileSync(topologyPath, "utf8");
+    const topology = YAML.parse(topologySource) as {
+      nodes: { id: string; depends_on?: string[]; outputs?: Array<{ path: string }> }[];
+    };
+    const campaignNode = topology.nodes.find((node) => node.id === "stateful-invariant-campaign");
+
+    expect(campaignNode?.outputs?.map((output) => output.path)).toEqual(
+      expect.arrayContaining([
+        "campaign-plan.json",
+        "campaign-summary.json",
+        "campaign-report.md",
+        "echidna-results.json",
+        "medusa-results.json",
+        "generated-tests.json",
+        "findings.json"
+      ])
+    );
+    expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
+      "stateful-invariant-campaign"
+    );
+    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain(
+      "stateful-invariant-campaign"
+    );
+    expect(`${topologySource}\n${aggregate}\n${dynamic}`).not.toContain("stateful-invariant-recon-campaign");
+    expect(aggregate).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+    expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
+
+    expect(campaign).toContain("Echidna and Medusa");
+    expect(campaign).toContain("one implemented Chimera property suite");
+    expect(campaign).toContain("Recon is only the coverage backend and deployment smoke");
+    expect(campaign).toContain("Preserve the existing priority-threshold selection");
+    expect(campaign).toContain("workers_per_fuzzer = max(1, floor(available_vcpus / 2))");
+    expect(campaign).toContain("1 vCPU means 1 worker");
+    expect(campaign).toContain("2 vCPUs means 1 worker per backend in parallel");
+    expect(campaign).toMatch(/odd\s+counts of at least 3/u);
+    expect(campaign).toContain("even counts use `available_vcpus / 2`");
+    expect(campaign).toContain("same parent deadline");
+    expect(campaign).toContain("two equal fixed slices");
+    expect(campaign).toContain("finalization reserve");
+    expect(campaign).toContain("backends/echidna");
+    expect(campaign).toContain("backends/medusa");
+    expect(campaign).toContain("Finalize both backend records before deduplicating failures");
+    expect(campaign).toContain("all contributing backend provenance");
+    expect(campaign).toContain("A later pass or a passing result from the other backend must never erase");
+    expect(campaign).toContain("property_ids");
+    expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
+    expect(campaign).toContain("classify it as `blocked-unreproduced`");
+    expect(campaign).toContain("`complete`: Echidna and Medusa both ran to their expected terminal state");
+    expect(campaign).toContain("`partial`: exactly one backend was unavailable");
+    expect(campaign).toContain("`blocked`: neither backend produced usable results");
+    expect(campaign).toMatch(/start\/end timestamps so\s+multi-vCPU runs prove that the two campaigns overlapped/u);
+  });
+
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
@@ -82,6 +140,10 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("High impact + Low likelihood must render as Medium");
     expect(markdown).toContain("Medium impact + Low likelihood must render as Low");
     expect(markdown).toContain("Every production issue severity equals the Impact x Likelihood matrix result");
+    expect(markdown).toContain("canonical normalized finding");
+    expect(markdown).toContain("`severity_guess`, `severity`, `impact`, and");
+    expect(markdown).toContain("canonical `strategy` field a non-empty");
+    expect(markdown).toContain("structured `strategy_provenance` object");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {

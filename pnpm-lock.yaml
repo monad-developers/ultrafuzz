@@ -148,6 +148,15 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  packages/evmbench:
+    dependencies:
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+
   packages/modal:
     dependencies:
       modal:

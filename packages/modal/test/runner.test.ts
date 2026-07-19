@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
+import { SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type SandboxCreateParams } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
 import { fingerprintModalModel } from "../src/config.js";
@@ -20,10 +20,12 @@ import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } fro
 import {
   MODAL_COLLECT_RESULT_FILES,
   assertSanitizedModalCollectedFiles,
+  createModalBenchmarkSandbox,
   createTrackedSourceArchive,
   finishReservedModalLaunch,
   modalImageBuildCommand,
   modalSandboxName,
+  modalSecurityToolchainCommands,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
   readOptionalModalSandboxText,
@@ -39,7 +41,45 @@ const MODEL: ModalModelSpec = {
   auth_mode: "api-key"
 };
 
+describe("Modal benchmark capacity", () => {
+  it("forwards the high-capacity resource profile to sandbox creation", async () => {
+    const app = {} as App;
+    const image = {} as Image;
+    const sandbox = {} as Sandbox;
+    const sandboxes = {
+      create: vi.fn(async (_app: App, _image: Image, _params?: SandboxCreateParams) => sandbox)
+    };
+
+    await expect(
+      createModalBenchmarkSandbox(sandboxes, app, image, {
+        name: "benchmark-sandbox",
+        timeoutMs: 60_000
+      })
+    ).resolves.toBe(sandbox);
+    expect(sandboxes.create).toHaveBeenCalledWith(app, image, {
+      name: "benchmark-sandbox",
+      timeoutMs: 60_000,
+      cpu: 16,
+      cpuLimit: 16,
+      memoryMiB: 32_768,
+      memoryLimitMiB: 65_536
+    });
+  });
+});
+
 describe("Modal image source staging", () => {
+  it("installs both final invariant backends alongside the Recon coverage backend", () => {
+    const commands = modalSecurityToolchainCommands().join("\n");
+    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+
+    expect(commands).toContain("Recon-Fuzz/recon-fuzzer");
+    expect(commands).toContain("crytic/echidna");
+    expect(commands).toContain("crytic/medusa");
+    expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
+    expect(standaloneDockerfile).toContain("crytic/echidna");
+    expect(standaloneDockerfile).toContain("crytic/medusa");
+  });
+
   it("archives tracked files only", () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-archive-"));
     execFileSync("git", ["init", "--quiet"], { cwd: root });
