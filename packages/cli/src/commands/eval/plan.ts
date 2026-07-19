@@ -17,6 +17,7 @@ export default class EvalPlan extends Command {
     suite: Flags.string({ summary: "Eval suite YAML path (defaults to [eval].eval_config)" }),
     provider: Flags.string({ summary: "Eval reporter provider override (braintrust | langsmith | none)" }),
     "target-root": Flags.string({ summary: "Directory containing local target checkouts, one per target id" }),
+    "ground-truth-root": Flags.string({ summary: "External directory containing benchmark ground truth" }),
     "skip-target-validation": Flags.boolean({ summary: "Skip local target git ref validation" })
   };
 
@@ -42,7 +43,11 @@ export default class EvalPlan extends Command {
         }),
         validateTargets: flags["skip-target-validation"] !== true,
         ...(flags["target-root"] !== undefined ? { targetRoot: flags["target-root"] } : {}),
-        ...(evalConfig.groundTruthRoot !== undefined ? { groundTruthRoot: evalConfig.groundTruthRoot } : {})
+        ...(flags["ground-truth-root"] !== undefined
+          ? { groundTruthRoot: flags["ground-truth-root"] }
+          : evalConfig.groundTruthRoot !== undefined
+            ? { groundTruthRoot: evalConfig.groundTruthRoot }
+            : {})
       });
       emitCommandResult(
         this,

@@ -5,6 +5,7 @@ import { diagnostic, type ConfigDiagnostic, type ResolvedConfig } from "./types.
 export interface DefaultProfileOverrides {
   agent?: string;
   model?: string;
+  reasoning?: string;
 }
 
 const MODEL_TIMEOUT_SECONDS = 86_400;
@@ -95,7 +96,7 @@ export function validProfileId(id: string): boolean {
 }
 
 export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: DefaultProfileOverrides): void {
-  if (overrides.agent === undefined && overrides.model === undefined) {
+  if (overrides.agent === undefined && overrides.model === undefined && overrides.reasoning === undefined) {
     return;
   }
   const profile = config.models.profiles[config.models.default];
@@ -116,6 +117,9 @@ export function applyDefaultProfileOverrides(config: ResolvedConfig, overrides: 
   }
   if (overrides.model !== undefined) {
     profile.model = overrides.model;
+  }
+  if (overrides.reasoning !== undefined) {
+    profile.reasoning = overrides.reasoning;
   }
 }
 

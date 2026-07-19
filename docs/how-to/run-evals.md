@@ -108,3 +108,53 @@ For configuration and architecture details, see
 [Eval Suites](../reference/evals.md), the
 [CLI reference](../reference/cli.md#eval), and
 [Configuration](../reference/configuration.md#eval).
+
+## Publish Longitudinal History
+
+The checked-in cohort and lane manifests live under `benchmarks/`. The smoke
+lane is a fixed target subset with one trial, one strategy loop, no stateful
+invariant, differential, or dynamic-strategy families, and one explicitly
+pinned model profile. The full lane uses every supported target, the configured
+trial count, the production strategy set, and an explicit set of pinned model
+profiles. The EVMbench adapter converts either lane into the normal
+`EvalSuiteSpec`; ground truth remains outside the repository.
+
+After a generation finishes and has been scored, append it and regenerate all
+six charts in one transaction:
+
+```bash
+ultrafuzz eval history <eval-run-id> \
+  --benchmark evmbench \
+  --lane smoke \
+  --repository https://github.com/monad-developers/ultrafuzz \
+  --artifact <immutable-run-artifact-reference>
+```
+
+Use `--benchmark ultrafuzz-bench` and `--lane full` for the other cohort or
+lane. Publication refuses missing rows, failed or non-terminal workflows,
+invalid reports, incomplete lineage, unpinned targets, and missing scoring
+evidence before modifying history. Repeating the same immutable eval result is
+idempotent; conflicting content for an existing result is rejected.
+
+To regenerate charts without a benchmark or model call, run:
+
+```bash
+ultrafuzz eval history
+ultrafuzz eval history --check
+```
+
+`--check` is the ordinary-CI path: it validates history and reports stale or
+missing charts without writing them. If publication fails, inspect the scored
+run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
+and available candidate, cohort, and scoring provenance. Missing timing or cost
+is allowed and renders as unavailable; it is never converted to zero.
+
+The benchmark workflow runs smoke after a successful `main` CI run, full on the
+weekly schedule, and either lane on manual dispatch. It uses a protected
+benchmark runner with clean, pinned checkouts and external ground truth under
+the documented generic runner directories. Provision all manifest target IDs
+at their exact revisions before enabling the runner label. Missing checkouts,
+revision drift, unavailable ground truth, failed model work, scoring errors, or
+partial rows fail before publication. The fixed publication branch updates one
+ready pull request; chart-only commits carry the workflow skip marker so merging
+them does not launch another benchmark generation.

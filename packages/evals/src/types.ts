@@ -151,6 +151,7 @@ export interface EvalExecutionPolicyProvenance {
   controller_mode: "watch" | "detached";
   watch_timeout_seconds: number;
   poll_interval_ms: number;
+  benchmark_execution_fingerprint?: string;
 }
 
 export interface EvalBenchmarkProvenance {

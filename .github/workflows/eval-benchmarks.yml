@@ -1,0 +1,125 @@
+name: Eval Benchmark Generation
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Benchmark lane
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-eval-history
+  cancel-in-progress: false
+
+jobs:
+  benchmark-and-publish:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      !contains(github.event.workflow_run.display_title, '[skip eval-history]'))
+    runs-on:
+      - self-hosted
+      - ultrafuzz-benchmark
+    timeout-minutes: 4320
+
+    steps:
+      - name: Check out the successful candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install and build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -w build
+
+      - name: Run and score complete benchmark generations
+        run: |
+          lane="${{ github.event_name == 'schedule' && 'full' || github.event_name == 'workflow_dispatch' && inputs.lane || 'smoke' }}"
+          candidate="$(git rev-parse --short=12 HEAD)"
+          generation="${{ github.run_id }}-${{ github.run_attempt }}"
+
+          for benchmark in evmbench ultrafuzz-bench; do
+            suite="${{ runner.temp }}/${benchmark}-${lane}.yml"
+            eval_run_id="benchmark-${benchmark}-${lane}-${candidate}-${generation}"
+            target_root="/opt/ultrafuzz-benchmark/targets/${benchmark}"
+            node scripts/ci/prepare-eval-benchmark.mjs "$benchmark" "$lane" "$suite" "$target_root"
+            node packages/cli/dist/index.js eval run \
+              --project . \
+              --suite "$suite" \
+              --eval-run-id "$eval_run_id" \
+              --target-root "$target_root" \
+              --ground-truth-root "/opt/ultrafuzz-benchmark/ground-truth/${benchmark}" \
+              --provider none
+            node packages/cli/dist/index.js eval score "$eval_run_id" --project .
+          done
+
+      - name: Append complete generations and regenerate charts
+        run: |
+          lane="${{ github.event_name == 'schedule' && 'full' || github.event_name == 'workflow_dispatch' && inputs.lane || 'smoke' }}"
+          candidate="$(git rev-parse --short=12 HEAD)"
+          generation="${{ github.run_id }}-${{ github.run_attempt }}"
+
+          for benchmark in evmbench ultrafuzz-bench; do
+            eval_run_id="benchmark-${benchmark}-${lane}-${candidate}-${generation}"
+            node packages/cli/dist/index.js eval history "$eval_run_id" \
+              --project . \
+              --benchmark "$benchmark" \
+              --lane "$lane" \
+              --repository "${{ github.server_url }}/${{ github.repository }}" \
+              --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          done
+
+          node packages/cli/dist/index.js eval history --project . --check
+
+      - name: Open or update the publication pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
+        with:
+          branch: automation/eval-history
+          base: main
+          delete-branch: false
+          draft: false
+          commit-message: "Update published eval history [skip eval-history]"
+          title: "[skip eval-history] Update published eval history"
+          body: |
+            ## Summary
+
+            Append complete scored benchmark generations and regenerate the deterministic README charts.
+
+            ## Verification
+
+            - Validated the pinned cohort and lane manifests
+            - Published only complete, successfully scored generations
+            - Regenerated and checked all SVGs from versioned history
+          add-paths: |
+            benchmarks/history.json
+            docs/assets/eval-history/*.svg

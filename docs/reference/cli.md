@@ -31,6 +31,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz eval score <id>`      | Score finished eval run reports against external ground truth.                                                 |
 | `ultrafuzz eval report <id>`     | Show the scored eval run variant ranking.                                                                      |
 | `ultrafuzz eval compare <id>`    | Compare scored eval variants against a baseline variant.                                                       |
+| `ultrafuzz eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                        |
 | `ultrafuzz eval publish <id>`    | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
 Generated workflow-engine files are implementation plumbing. The stable product
@@ -234,6 +235,7 @@ ultrafuzz eval plan \
   [--suite <suite-yaml-path>] \
   [--provider braintrust|langsmith|none] \
   [--target-root <path>] \
+  [--ground-truth-root <external-path>] \
   [--skip-target-validation] \
   [--json]
 ultrafuzz eval run \
@@ -243,6 +245,7 @@ ultrafuzz eval run \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
+  [--ground-truth-root <external-path>] \
   [--watch-timeout-seconds <seconds>] \
   [--no-watch] \
   [--json]
@@ -259,6 +262,16 @@ ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
   [--provider braintrust|langsmith] \
   [--resume] \
+  [--json]
+ultrafuzz eval history [eval-run-id] \
+  [--project <path>] \
+  [--history <history-json-path>] \
+  [--charts <svg-directory>] \
+  [--benchmark evmbench|ultrafuzz-bench] \
+  [--lane smoke|full] \
+  [--repository <public-repository-url>] \
+  [--artifact <immutable-artifact-reference>] \
+  [--check] \
   [--json]
 ```
 
@@ -302,6 +315,13 @@ reconstructs the full node trace on a provider post hoc; `--resume` continues
 from the persisted publish cursor instead. Provider credentials are only
 required at publish time, so `provider = "none"` keeps the local
 plan → run → score → report → compare loop working offline.
+
+`history` validates and regenerates deterministic public SVGs when no run ID is
+given. With a run ID, it accepts only a complete, successfully scored generation
+with immutable lineage, appends observations idempotently, and replaces history
+and charts together. Append mode also requires the benchmark, lane, public
+candidate repository, and immutable source artifact flags. `--check` compares
+the checked-in SVGs with a fresh in-memory render and performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](evals.md) for configuration, architecture, and telemetry policy

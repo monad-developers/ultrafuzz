@@ -33,7 +33,8 @@ import {
   fingerprintGraph,
   loadTopology,
   type ExpandedGraph,
-  type ExpandedNode
+  type ExpandedNode,
+  type ProjectTopology
 } from "@ultrafuzz/topology";
 
 import {
@@ -90,17 +91,21 @@ export async function planRun(input: PlanRunInput) {
   let expandedGraph: ExpandedGraph;
   let catalog: PromptCatalog;
   try {
-    const topology = loadTopology(projectRoot, { requirePromptFiles: true });
+    const topology = transformTopologyForRun(
+      loadTopology(projectRoot, { requirePromptFiles: true }),
+      input.topologyTransform
+    );
+    catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), input.topologyTransform);
     expandedGraph = expandTopology(topology, {
       projectRoot,
       runId,
       requirePromptFiles: true,
+      promptTexts: promptTextsForCatalog(catalog),
       defaultTimeoutSeconds: resolved.config.run.defaultTimeoutSeconds,
       modelProfiles: modelProfilesForTopology(resolved.config),
       defaultModelProfileId: resolved.config.models.default,
       configFingerprint: redactedConfigFingerprint
     });
-    catalog = loadPromptCatalog({ projectRoot });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_PLAN_INVALID")]);
   }
@@ -213,6 +218,75 @@ export async function planRun(input: PlanRunInput) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+export function transformPromptCatalogForRun(
+  catalog: PromptCatalog,
+  transform: PlanRunInput["topologyTransform"]
+): PromptCatalog {
+  const excluded = transform?.excludedNodeIds ?? [];
+  if (excluded.length === 0) return catalog;
+  const tokens = excluded.flatMap((id) => [`{{artifact_path:${id}}}`, `{{artifact_handoff:${id}}}`]);
+  const entries = new Map(
+    [...catalog.entries].map(([id, entry]) => {
+      const body = entry.body
+        .split("\n")
+        .filter((line) => !tokens.some((token) => line.includes(token)))
+        .join("\n");
+      return [id, { ...entry, body }];
+    })
+  );
+  return { ...catalog, entries };
+}
+
+export function promptTextsForCatalog(catalog: PromptCatalog): Record<string, string> {
+  return Object.fromEntries(
+    [...catalog.entries.values()].flatMap((entry) => [
+      [entry.id, entry.body],
+      [entry.relativePath, entry.body]
+    ])
+  );
+}
+
+export function transformTopologyForRun(
+  topology: ProjectTopology,
+  transform: PlanRunInput["topologyTransform"]
+): ProjectTopology {
+  if (transform === undefined) return topology;
+  const excluded = new Set(transform.excludedNodeIds ?? []);
+  const nodeIds = new Set(topology.nodes.map((node) => node.id));
+  for (const id of excluded) {
+    if (!nodeIds.has(id)) throw new Error(`topology transform references unknown node ${id}`);
+    const node = topology.nodes.find((candidate) => candidate.id === id);
+    if (node?.role === "start" || node?.role === "finish") {
+      throw new Error(`topology transform cannot exclude ${node.role} node ${id}`);
+    }
+  }
+  if (
+    transform.strategyLoops !== undefined &&
+    (!Number.isInteger(transform.strategyLoops) || transform.strategyLoops < 1)
+  ) {
+    throw new Error("topology transform strategy loops must be a positive integer");
+  }
+  const groups = Object.fromEntries(
+    Object.entries(topology.groups ?? {}).map(([id, group]) => [
+      id,
+      id === "strategies" && transform.strategyLoops !== undefined
+        ? { ...group, defaults: { ...group.defaults, loops: transform.strategyLoops } }
+        : group
+    ])
+  );
+  return {
+    ...topology,
+    defaults: {
+      ...topology.defaults,
+      ...(transform.strategyLoops === undefined ? {} : { strategy_loops: transform.strategyLoops })
+    },
+    groups,
+    nodes: topology.nodes
+      .filter((node) => !excluded.has(node.id))
+      .map((node) => ({ ...node, depends_on: node.depends_on.filter((dependency) => !excluded.has(dependency)) }))
+  };
 }
 
 function materializeReferenceNodesForPlan(input: {
@@ -427,7 +501,7 @@ function renderPromptsForPlan(input: {
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model });
+  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
 }
 
 function promptLogicalNodes(graph: PlannedGraph, layout: PlanRunValue["layout"]): PromptGraphNode[] {

@@ -10,6 +10,23 @@ This tool initializes a protocol repository with editable prompts and topology, 
 specialized agents, collects generated fuzz tests and findings, and serves a
 local dashboard plus final report for review.
 
+## Longitudinal Eval Results
+
+Published observations are append-only and reproducible from the
+[versioned history](benchmarks/history.json). Each point is labeled with and
+links to the candidate commit; series identify the benchmark cohort and
+smoke/full lane. The detailed history retains target, model, scoring, timing,
+cost, and completeness metadata.
+
+| Quality                                                        | Coverage                                                                                                     |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| ![Precision over time](docs/assets/eval-history/precision.svg) | ![Recall over time](docs/assets/eval-history/recall.svg)                                                     |
+| ![F1 over time](docs/assets/eval-history/f1.svg)               | ![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg) |
+
+| Efficiency                                                                 | Spend                                                |
+| -------------------------------------------------------------------------- | ---------------------------------------------------- |
+| ![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg) | ![Cost over time](docs/assets/eval-history/cost.svg) |
+
 > **Trust model:** Agents run in a trusted, skip-permissions workflow, and
 > user-editable prompts can influence what is written into a target repository.
 > Review the checked-in `.ultrafuzz/prompts/` before launching a campaign, and

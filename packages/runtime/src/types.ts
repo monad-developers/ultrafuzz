@@ -65,6 +65,7 @@ export interface ValidateProjectInput {
   env?: Record<string, string | undefined>;
   agent?: string;
   model?: string;
+  reasoning?: string;
 }
 
 export interface ValidateProjectResult {
@@ -97,7 +98,13 @@ export interface PlanRunInput extends ValidateProjectInput {
   mode?: "run" | "resume" | "replay" | "fork";
   prompt?: string;
   workflowInput?: unknown;
+  topologyTransform?: TopologyTransform;
   maxConcurrency?: number;
+}
+
+export interface TopologyTransform {
+  strategyLoops?: number;
+  excludedNodeIds?: string[];
 }
 
 export interface PlannedGraphNode {

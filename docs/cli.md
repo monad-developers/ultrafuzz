@@ -27,6 +27,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `eval score <id>`      | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
 | `eval report <id>`     | Show the scored eval run variant ranking.                                                                                 |
 | `eval compare <id>`    | Compare scored eval variants against a `--baseline` variant.                                                              |
+| `eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                                   |
 | `eval publish <id>`    | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
 
 The dashboard/API is a local operator surface over product state, not a
@@ -88,7 +89,7 @@ explicit `--copy` selections for files you have reviewed.
 
 ## Eval Commands
 
-`eval plan | run | score | report | compare | bundle | publish` drive eval suites that
+`eval plan | run | score | report | compare | bundle | history | publish` drive eval suites that
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
@@ -98,6 +99,7 @@ Common flags:
 - `--suite <suite-yaml-path>` (plan, run)
 - `--provider <name>` (plan, run, publish)
 - `--target-root <path>` (plan, run)
+- `--ground-truth-root <external-path>` (plan, run)
 - `--row <row-id>` (run, repeatable)
 - `--watch-timeout-seconds <seconds>` (run)
 - `--no-watch` (run)
@@ -106,6 +108,8 @@ Common flags:
 - `--against <eval-run-id>` (compare releases with compatible lineage)
 - `--allow-incompatible` (explicitly waive release provenance mismatches)
 - `--output <directory>` (bundle, required)
+- `--history <path>` and `--charts <directory>` (history)
+- `--check` (history validation without writes)
 - `--resume` (publish)
 
 Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See

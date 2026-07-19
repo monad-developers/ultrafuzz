@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "pnpm -r build",
+    "benchmark:check": "pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/config test && pnpm --filter @ultrafuzz/runtime test && pnpm --filter @ultrafuzz/evals test && node packages/cli/dist/index.js eval history --check --project .",
     "ci": "pnpm -w format:check && pnpm -w lint && pnpm -w build && pnpm -w validate:release",
     "docs:check": "node scripts/docs-check.mjs",
     "format": "prettier --write .",

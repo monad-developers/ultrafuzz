@@ -1,0 +1,253 @@
+{
+  "schema_version": "ultrafuzz.evmbench.cohort.v1",
+  "upstream": {
+    "repository": "https://github.com/paradigmxyz/evmbench",
+    "revision": "2d5c7ab71e7f4abd135565b41feef387d3fe8a3d",
+    "dataset_repository": "https://github.com/openai/frontier-evals",
+    "dataset_revision": "8ea5c659b5232d3c520c5ca2a018fe65dc5e1988",
+    "detect_split": "project/evmbench/splits/detect-tasks.txt"
+  },
+  "smoke_targets": ["2023-07-pooltogether", "2023-10-nextgen", "2023-12-ethereumcreditguild"],
+  "targets": [
+    {
+      "id": "2023-07-pooltogether",
+      "repository": "https://github.com/evmbench-org/2023-07-pooltogether",
+      "revision": "4240445ed3b5145be1032cf1becc9c6866046bf7",
+      "framework": "foundry-json"
+    },
+    {
+      "id": "2023-10-nextgen",
+      "repository": "https://github.com/evmbench-org/2023-10-nextgen",
+      "revision": "ba73b7d488f7d9655938dc8ec07f095870de46a0",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2023-12-ethereumcreditguild",
+      "repository": "https://github.com/evmbench-org/2023-12-ethereumcreditguild",
+      "revision": "2facb8f941da70bf075380784b3139f8e694b98a",
+      "framework": "foundry-json"
+    },
+    {
+      "id": "2024-01-canto",
+      "repository": "https://github.com/evmbench-org/2024-01-canto",
+      "revision": "cec6952e832f05e836a96223d8e12aa7b0641c15",
+      "framework": "container"
+    },
+    {
+      "id": "2024-01-curves",
+      "repository": "https://github.com/evmbench-org/2024-01-curves",
+      "revision": "79605f9208cc689e2e02b70f0f414397d6a51a51",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2024-01-init-capital-invitational",
+      "repository": "https://github.com/evmbench-org/2024-01-init-capital-invitational",
+      "revision": "decdb3d518f740c8f169e49021a82daeba413f97",
+      "framework": "container"
+    },
+    {
+      "id": "2024-02-althea-liquid-infrastructure",
+      "repository": "https://github.com/evmbench-org/2024-02-althea-liquid-infrastructure",
+      "revision": "b03e8c44565a1a119e0404d306667f371af3645e",
+      "framework": "container"
+    },
+    {
+      "id": "2024-01-renft",
+      "repository": "https://github.com/evmbench-org/2024-01-renft",
+      "revision": "25ea8199cb26dbe4d15bef6ac5b3c475961bcaf5",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-03-abracadabra-money",
+      "repository": "https://github.com/evmbench-org/2024-03-abracadabra-money",
+      "revision": "cdfd20164862be9b2f646a606e568acd72056a70",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-03-canto",
+      "repository": "https://github.com/evmbench-org/2024-03-canto",
+      "revision": "c5855228dd2ed1977ba90f218dd08ce9f2db6fee",
+      "framework": "container"
+    },
+    {
+      "id": "2024-03-coinbase",
+      "repository": "https://github.com/evmbench-org/2024-03-coinbase",
+      "revision": "1a86685426493906881b1d9869ada0812985eb46",
+      "framework": "container"
+    },
+    {
+      "id": "2024-03-gitcoin",
+      "repository": "https://github.com/evmbench-org/2024-03-gitcoin",
+      "revision": "f289f3a6966975856102631cf37f933f17f098ec",
+      "framework": "container"
+    },
+    {
+      "id": "2024-03-neobase",
+      "repository": "https://github.com/evmbench-org/2024-03-neobase",
+      "revision": "404e2f07adc1e391d5a84f42d859f5ded02a6795",
+      "framework": "container"
+    },
+    {
+      "id": "2024-03-taiko",
+      "repository": "https://github.com/evmbench-org/2024-03-taiko",
+      "revision": "2c0fd6427d7a8e0b976d2667e2cb81d89b4656a2",
+      "framework": "foundry-json"
+    },
+    {
+      "id": "2024-04-noya",
+      "repository": "https://github.com/evmbench-org/2024-04-noya",
+      "revision": "4555fb18d30d399a2c2347dea507e377f2e6977b",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-05-arbitrum-foundation",
+      "repository": "https://github.com/evmbench-org/2024-05-arbitrum-foundation",
+      "revision": "1ede95fe9198887481aa5824fe58eb776ff763a3",
+      "framework": "container"
+    },
+    {
+      "id": "2024-05-loop",
+      "repository": "https://github.com/evmbench-org/2024-05-loop",
+      "revision": "db33816791af7e6c24c0e2e5e8f0966eaf14ef5c",
+      "framework": "container"
+    },
+    {
+      "id": "2024-05-olas",
+      "repository": "https://github.com/evmbench-org/2024-05-olas",
+      "revision": "1460a1a169f29ef4dff21d45b59be733845be8fd",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2024-05-munchables",
+      "repository": "https://github.com/evmbench-org/2024-05-munchables",
+      "revision": "418fd953e52afbeb381cd73dafce8698779ffe6d",
+      "framework": "container"
+    },
+    {
+      "id": "2024-06-size",
+      "repository": "https://github.com/evmbench-org/2024-06-size",
+      "revision": "4c61f1a5d07e3a201c1990546dd8905b2d2ddf92",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-06-thorchain",
+      "repository": "https://github.com/evmbench-org/2024-06-thorchain",
+      "revision": "83128cf5f5e161536491850c435bf0c158efd9e5",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2024-06-vultisig",
+      "repository": "https://github.com/evmbench-org/2024-06-vultisig",
+      "revision": "607f320dd21ceaee567a937ab77847641f0614bf",
+      "framework": "container"
+    },
+    {
+      "id": "2024-07-basin",
+      "repository": "https://github.com/evmbench-org/2024-07-basin",
+      "revision": "4de5896d4d2f58d9eff74a6a6dd5c13b27b5bc81",
+      "framework": "foundry-json"
+    },
+    {
+      "id": "2024-07-benddao",
+      "repository": "https://github.com/evmbench-org/2024-07-benddao",
+      "revision": "117ef61967d4b318fc65170061c9577e674fffa1",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-07-munchables",
+      "repository": "https://github.com/evmbench-org/2024-07-munchables",
+      "revision": "7bf1daacb24ebf498382586bbbd7b1c6531c92d4",
+      "framework": "container"
+    },
+    {
+      "id": "2024-07-traitforge",
+      "repository": "https://github.com/evmbench-org/2024-07-traitforge",
+      "revision": "23d6fc6694dd699d6a0347e1d97bad0cb02961ea",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2024-08-phi",
+      "repository": "https://github.com/evmbench-org/2024-08-phi",
+      "revision": "c9cce9061fd19c2d80835c185cb43ba2fc82cecb",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-08-wildcat",
+      "repository": "https://github.com/evmbench-org/2024-08-wildcat",
+      "revision": "7c5d8389b2a368ce6c4fc79e50c39eac3516ea5e",
+      "framework": "foundry"
+    },
+    {
+      "id": "2024-12-secondswap",
+      "repository": "https://github.com/evmbench-org/2024-12-secondswap",
+      "revision": "1c4c7f744b4e8e0097f05242f44e332a91c61619",
+      "framework": "foundry"
+    },
+    {
+      "id": "2025-01-liquid-ron",
+      "repository": "https://github.com/evmbench-org/2025-01-liquid-ron",
+      "revision": "ddc09c9ae7e89eb1eb781ccf2f26210cc7d32ff8",
+      "framework": "foundry"
+    },
+    {
+      "id": "2025-01-next-generation",
+      "repository": "https://github.com/evmbench-org/2025-01-next-generation",
+      "revision": "732c066d708be442104fd24793bc3846a9e15c1c",
+      "framework": "container"
+    },
+    {
+      "id": "2025-02-thorwallet",
+      "repository": "https://github.com/evmbench-org/2025-02-thorwallet",
+      "revision": "e548fe9a0a78df18bd44ea1671c7a78f938c14fc",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2025-04-forte",
+      "repository": "https://github.com/evmbench-org/2025-04-forte",
+      "revision": "ce7f56c96c385d87a4be9737acea8fe9b425576a",
+      "framework": "foundry"
+    },
+    {
+      "id": "2025-04-virtuals",
+      "repository": "https://github.com/evmbench-org/2025-04-virtuals",
+      "revision": "aeda2421b216c17ff97c9782257962b488f290d7",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2025-05-blackhole",
+      "repository": "https://github.com/evmbench-org/2025-05-blackhole",
+      "revision": "9cb070f6f05b96c5bb64311943592307ae296d65",
+      "framework": "hardhat"
+    },
+    {
+      "id": "2025-06-panoptic",
+      "repository": "https://github.com/evmbench-org/2025-06-panoptic",
+      "revision": "eea2c931b1cbce1da01586e42ba298814de40d31",
+      "framework": "foundry"
+    },
+    {
+      "id": "2025-10-sequence",
+      "repository": "https://github.com/evmbench-org/2025-10-sequence",
+      "revision": "70fc6ba76d8088bdf07634d2bb9555b6c4fe3a96",
+      "framework": "foundry"
+    },
+    {
+      "id": "2026-01-tempo-feeamm",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-feeamm",
+      "revision": "14539664d53abcc4099e02adc01f12739edeef24",
+      "framework": "foundry"
+    },
+    {
+      "id": "2026-01-tempo-mpp-streams",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-mpp-streams",
+      "revision": "41962def7127946d8ab2f0e0ccb0f689f3fb79d6",
+      "framework": "foundry"
+    },
+    {
+      "id": "2026-01-tempo-stablecoin-dex",
+      "repository": "https://github.com/evmbench-org/2026-01-tempo-stablecoin-dex",
+      "revision": "f66de060ec2bf899b2a54dd1d984fff4d9f20c4e",
+      "framework": "foundry"
+    }
+  ]
+}

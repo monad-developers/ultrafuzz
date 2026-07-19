@@ -278,5 +278,5 @@ function agentRefExported(registryText: string, agentRef: string): boolean {
 }
 
 function applyAgentOverrides(config: ResolvedConfig, input: ValidateProjectInput): void {
-  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model });
+  applyDefaultProfileOverrides(config, { agent: input.agent, model: input.model, reasoning: input.reasoning });
 }
