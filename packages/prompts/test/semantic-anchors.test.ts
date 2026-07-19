@@ -64,7 +64,9 @@ describe("prompt semantic anchors", () => {
     expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
     expect(campaign).toContain("Echidna and Medusa");
+    expect(campaign).toContain("one implemented Chimera property suite");
     expect(campaign).toContain("Recon is only the coverage backend and deployment smoke");
+    expect(campaign).toContain("Preserve the existing priority-threshold selection");
     expect(campaign).toContain("workers_per_fuzzer = max(1, floor(available_vcpus / 2))");
     expect(campaign).toContain("1 vCPU means 1 worker");
     expect(campaign).toContain("2 vCPUs means 1 worker per backend in parallel");
@@ -77,11 +79,14 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("backends/medusa");
     expect(campaign).toContain("Finalize both backend records before deduplicating failures");
     expect(campaign).toContain("all contributing backend provenance");
+    expect(campaign).toContain("A later pass or a passing result from the other backend must never erase");
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
-    expect(campaign).toContain("`complete`");
-    expect(campaign).toContain("`partial`");
-    expect(campaign).toContain("`blocked`");
+    expect(campaign).toContain("classify it as `blocked-unreproduced`");
+    expect(campaign).toContain("`complete`: Echidna and Medusa both ran to their expected terminal state");
+    expect(campaign).toContain("`partial`: exactly one backend was unavailable");
+    expect(campaign).toContain("`blocked`: neither backend produced usable results");
+    expect(campaign).toMatch(/start\/end timestamps so\s+multi-vCPU runs prove that the two campaigns overlapped/u);
   });
 
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
