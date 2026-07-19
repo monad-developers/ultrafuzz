@@ -161,7 +161,11 @@ function evidenceFixture(
   };
   const findings = options.findings ?? [finding];
   const issueCount = options.issueCount ?? 1;
-  const issues = Array.from({ length: issueCount }, (_value, index) => ({ title: `Issue ${index + 1}` }));
+  const issues = Array.from({ length: issueCount }, (_value, index) => ({
+    ...finding,
+    id: `report-issue-${index + 1}`,
+    title: `Issue ${index + 1}`
+  }));
   const report = {
     schema_version: "1.0",
     run_metadata: { tokens_used: "123", estimated_spend: "$0.10" },

@@ -12,7 +12,7 @@ const EXCLUDED_SMOKE_NODES = new Set([
   "stateful-invariant-handlers",
   "stateful-invariant-coverage",
   "stateful-invariant-implement-properties",
-  "stateful-invariant-recon-campaign",
+  "stateful-invariant-campaign",
   "differential-oracle-planner",
   "reference-harness-author",
   "reference-and-lane-auditor",
@@ -96,7 +96,11 @@ export function configureTargetE2e(targetRoot: string, nodeTimeoutSeconds: numbe
 }
 
 function rewriteReviewPrompts(promptsRoot: string): void {
-  for (const relativePath of ["review/dedupe-findings.md", "review/aggregate-test-files.md"]) {
+  for (const relativePath of [
+    "review/dedupe-findings.md",
+    "review/aggregate-test-files.md",
+    "review/final-report.md"
+  ]) {
     const path = join(promptsRoot, relativePath);
     if (!existsSync(path)) continue;
 
@@ -108,6 +112,10 @@ function rewriteReviewPrompts(promptsRoot: string): void {
         .replace(new RegExp(`(?:^|\\n)\\{\\{artifact_handoff:${escapedNodeId}\\}\\}\\n`, "gu"), "\n");
     }
     content = content
+      .replace(
+        /\nUse these property provenance handoffs when they exist:\n[\s\S]*?\nreport generation\.\n/u,
+        "\nUse the canonical property catalog when it exists:\n\nCanonical property catalog:\n`{{artifact_path:property-specification-fanin}}/properties.json`\n\nTreat references to an unknown canonical property as an invalid current-run artifact. If `property_ids` lineage is absent, render Property provenance as `unavailable` and continue report generation.\n"
+      )
       .replace(
         /\nAlso inspect the Dynamic strategy generator outputs before deduping:\n+(?=Then, build a stable dedupe key)/u,
         "\n"
