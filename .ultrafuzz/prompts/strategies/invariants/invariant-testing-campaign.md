@@ -12,6 +12,8 @@ campaign over one implemented Chimera property suite.
 
 Read the consolidated property catalog:
 
+{{artifact_path:property-specification-fanin}}/properties.json
+
 {{artifact_path:property-specification-fanin}}/properties.md
 
 Read the implemented property records:
@@ -104,9 +106,14 @@ Use this configured invariant testing fuzzer timeout:
      originating backend and raw record reference on every pre-deduplication
      failure and preserve all contributing backend provenance on the final
      deduplicated finding.
-   - When implemented-property provenance is present, copy its canonical
-     `property_id` values into `property_ids` on backend failures and resulting
-     findings. Do not invent property IDs for setup or harness defects.
+   - When an implemented invariant property caused a failure, copy its exact
+     canonical ID from `implemented-properties.json` into a non-empty
+     `property_ids` array on the backend failure and resulting finding. Use the
+     same stable failure ID for equivalent failures in both backend records and
+     for the final deduplicated finding so runtime validation can prove the
+     joins. Omit `property_ids` for setup, harness, and other failures that did
+     not originate from a catalog property. Never invent or silently drop a
+     property reference.
 
 5. Reproduce and classify every unique failure.
    - Attempt a deterministic Foundry reproducer for every unique failure. Put
@@ -115,7 +122,7 @@ Use this configured invariant testing fuzzer timeout:
    - If shrinking or reproduction fails, preserve the raw sequence or corpus
      packet and classify it as `blocked-unreproduced`; never discard it.
    - For each unique failure, write one finding object in `findings.json` and
-     include `stateful_failure_classification=<classification>` in `notes`,
+   include `stateful_failure_classification=<classification>` in `notes`,
      using exactly one of `production-bug`, `harness-defect`,
      `incomplete-spec`, `false-positive`, or `blocked-unreproduced`.
    - Keep harness defects, incomplete specifications, false positives, and
@@ -155,6 +162,30 @@ Write the Echidna result record to:
 Write the Medusa result record to:
 
 {{artifact_dir}}/medusa-results.json
+
+Use this exact top-level shape for each backend record (with `medusa` in the
+Medusa record):
+
+```json
+{
+  "schema_version": "ultrafuzz.property-campaign.v1",
+  "fuzzer_backend": "echidna",
+  "failures": [
+    {
+      "id": "failure-1",
+      "status": "reproduced",
+      "property_ids": ["property-1"]
+    }
+  ]
+}
+```
+
+Record the exact backend in `fuzzer_backend` when it ran; omit that field when
+it was unavailable. Every failure needs a non-empty `id` and `status`. Use an
+empty `failures` array when none were observed. Equivalent failures in the two
+records must share the final finding ID. Property IDs are optional only for
+failures not caused by an implemented catalog property. References to an
+unknown or non-implemented canonical property fail artifact validation.
 
 Write generated-test and reproducer records to:
 

@@ -208,6 +208,63 @@ entries may include `kind`, `path`, and additional metadata; `kind` and `path`
 must be non-empty strings when present. Relative `path` values must stay inside
 safe artifact-relative paths.
 
+## Property Provenance
+
+The property specification fan-in writes both `properties.md` and a validated
+`properties.json` catalog. The structured catalog uses schema version
+`ultrafuzz.properties.v1`:
+
+```json
+{
+  "schema_version": "ultrafuzz.properties.v1",
+  "properties": [
+    {
+      "id": "property-1",
+      "description": "Accounted value remains conserved",
+      "category": "accounting",
+      "priority": "high",
+      "sources": [
+        {
+          "source_node_id": "property-specification-certora",
+          "source_property_id": "certora-1"
+        },
+        {
+          "source_node_id": "property-specification-crytic",
+          "source_property_id": "crytic-3"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`source_node_id` is the source lens's logical topology node ID, while
+`source_property_id` is the prefixed ID from that lens's table. Deduplication
+keeps one canonical property and all distinct contributing source pairs.
+Canonical IDs are stable through one run; cross-run matching is not part of
+the v1 contract.
+
+`implemented-properties.json` uses schema version
+`ultrafuzz.implemented-properties.v1`. Every record has a canonical
+`property_id`, a status (`implemented`, `pending`, `deferred`, or `blocked`),
+and `implementation_paths` and `test_paths` arrays. The invariant campaign's
+`recon-fuzzer-results.json` uses `ultrafuzz.property-campaign.v1`; failure
+records caused by implemented catalog properties carry `property_ids`.
+Property-derived `findings.json` entries carry the same optional
+`property_ids` and use the raw failure's ID. Setup or harness findings that do
+not originate from a catalog property omit the field.
+
+Runtime artifact gates reject unknown canonical IDs and campaign references to
+properties that were not recorded with `implemented` status. They validate the
+Echidna and Medusa result records independently, reject raw campaign/finding
+reference mismatches and dangling final-report IDs, and require final joins to
+match the validated sources, implementation/test paths, and complete set of
+originating fuzzer backends. Final `report.json` stores the joined chain in
+`property_provenance`, using `fuzzer_backend` for one backend or
+`fuzzer_backends` for several, and `report.md` renders it under **Property
+provenance**. Historical artifacts without the v1 handoffs render provenance as
+`unavailable` rather than failing report generation.
+
 ## Final Report
 
 Final reporting is agentic. The report command reads agent-written final report
