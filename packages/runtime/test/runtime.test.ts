@@ -2189,6 +2189,65 @@ test("syncRun preserves generated usage across checkpoint generations and replay
   );
 });
 
+test("syncRun reconciles complete zero-token events in segment and cumulative counts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const workflowRunId = "ultrafuzz-zero-token-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          checkpointGenerationId: "generation-zero",
+          inputTokens: 0,
+          outputTokens: 0
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "zero-token-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "zero-token-accounting", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+        pricing_complete?: boolean;
+      };
+      cumulative?: {
+        event_count?: number;
+        priced_event_count?: number;
+        unpriced_event_count?: number;
+      };
+    };
+  };
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+  assert.equal(metadata.accounting?.current?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.current?.unpriced_event_count, 0);
+  assert.equal(metadata.accounting?.current?.pricing_complete, true);
+  assert.equal(metadata.accounting?.cumulative?.event_count, 1);
+  assert.equal(metadata.accounting?.cumulative?.priced_event_count, 1);
+  assert.equal(metadata.accounting?.cumulative?.unpriced_event_count, 0);
+});
+
 test("syncRun keeps colliding checkpoint names separate across workflow runs", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

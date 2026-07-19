@@ -1077,9 +1077,10 @@ function accountingSummaryWithCompleteness(
     usageIncompleteReasons.push({ code: "ledger-entry-malformed" });
   }
 
-  const ignoredIncompleteEntries = entries.filter(
-    (entry) => !usageLedgerEntryHasAccountingValue(entry) && !entry.usage_complete
-  );
+  const ignoredEntries = entries.filter((entry) => !usageLedgerEntryHasAccountingValue(entry));
+  const ignoredCompleteEntries = ignoredEntries.filter((entry) => entry.usage_complete);
+  const ignoredIncompleteEntries = ignoredEntries.filter((entry) => !entry.usage_complete);
+  const pricedEventCount = base.priced_event_count + ignoredCompleteEntries.length;
   const unpricedEventCount = base.unpriced_event_count + ignoredIncompleteEntries.length + malformedEntries;
   const pricingIncompleteReasons: PricingCompletenessMarker[] = [...base.pricing_incomplete_reasons];
   pricingIncompleteReasons.push(
@@ -1104,6 +1105,7 @@ function accountingSummaryWithCompleteness(
     pricing_incomplete_reasons: uniquePricingReasons,
     partial_pricing: partialPricing,
     event_count: entries.length + malformedEntries,
+    priced_event_count: pricedEventCount,
     unpriced_event_count: unpricedEventCount,
     checkpoint_generation_id: identity.checkpointGenerationId,
     workflow_run_id: identity.workflowRunId,
