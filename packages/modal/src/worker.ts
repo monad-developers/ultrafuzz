@@ -411,6 +411,7 @@ async function runEval(argv: string[], target: string): Promise<void> {
 }
 
 async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
+  const recentlyResetNodes = new Set<string>();
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
     const state = await synchronizedRunState(target);
     if (state?.status === "succeeded") {
@@ -420,12 +421,15 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       return false;
     }
     const recoverableNodes = recoverableNodeEntries(state);
-    const resetNode = recoverableNodes[0];
+    const resetNode = recoverableNodes.find((entry) =>
+      resetNodeKeys(entry).every((key) => !recentlyResetNodes.has(key))
+    );
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
       failed_node_count: recoverableNodes.filter((node) => node.reason === "failed").length,
       stale_running_node_count: recoverableNodes.filter((node) => node.reason === "stale-running").length,
+      recently_reset_node_count: recentlyResetNodes.size,
       workflow_status: state.status
     });
     if (resetNode !== undefined) {
@@ -434,13 +438,22 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] resetting ${nodeId} (${reason}; ${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
-      await resumeWithResetCandidates(state.run_id, target, resetNodeCandidates(nodeId, node), attempt);
+      const resetNodes = resetNodeCandidates(nodeId, node);
+      await resumeWithResetCandidates(state.run_id, target, resetNodes, attempt);
+      for (const key of resetNodeKeys(resetNode)) recentlyResetNodes.add(key);
       continue;
+    } else if (recoverableNodes.length > 0) {
+      await appendFile(
+        LOG_PATH,
+        `${new Date().toISOString()} [workflow recovery] waiting for reset propagation (${attempt}/${RECOVERY_MAX_RESETS})\n`
+      );
+      recentlyResetNodes.clear();
     } else {
       await appendFile(
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] resuming workflow (${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
+      recentlyResetNodes.clear();
       await runChecked(["node", CLI, "resume", state.run_id, "--project", target, "--max-concurrency", "1", "--json"], {
         label: `workflow resume ${attempt}`
       });
@@ -453,6 +466,10 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
     if (terminal?.status !== "failed") return false;
   }
   return synchronizedRunState(target).then((state) => state?.status === "succeeded");
+}
+
+function resetNodeKeys(entry: RecoverableNodeEntry): string[] {
+  return [...new Set([entry.nodeId, ...resetNodeCandidates(entry.nodeId, entry.node)])];
 }
 
 async function resumeWithResetCandidates(

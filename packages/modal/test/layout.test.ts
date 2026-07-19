@@ -53,8 +53,12 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain('child.kill("SIGKILL")');
     expect(workerSource).toContain("recoverableNodeEntries");
     expect(workerSource).toContain("stale_running_node_count");
+    expect(workerSource).toContain("recently_reset_node_count");
+    expect(workerSource).toContain("waiting for reset propagation");
     expect(workerSource).toContain("CONFIG.node_timeout_seconds");
-    expect(workerSource).toMatch(/await resumeWithResetCandidates\([^;]+;\s+continue;/su);
+    expect(workerSource).toMatch(
+      /await resumeWithResetCandidates\([^]+?\);\s+for \(const key of resetNodeKeys\(resetNode\)\)[^]+?continue;/su
+    );
     expect(workerSource).toContain("configureGitSafeDirectories(target)");
     expect(workerSource).toContain('"safe.directory"');
   });
