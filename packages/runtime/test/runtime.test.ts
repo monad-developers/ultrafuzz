@@ -265,6 +265,15 @@ function fakeLifecycleSmithersEnv(
   };
 }
 
+function commandExists(command: string): boolean {
+  try {
+    execFileSync("sh", ["-c", `command -v ${shellQuote(command)} >/dev/null 2>&1`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function pricingCatalogDataUrl(catalog: unknown): string {
   return `data:application/json,${encodeURIComponent(JSON.stringify(catalog))}`;
 }
@@ -3600,6 +3609,73 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
     retriedCommands,
     /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
   );
+});
+
+test("resume --reset-node discards prior agent resume sessions before resetting", async (t) => {
+  if (!commandExists("bun")) {
+    t.skip("bun is required to create and inspect a Smithers sqlite store");
+  }
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-discard-resume-lifecycle-run",
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "discard-resume-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const dbPath = path.join(project, "smithers.db");
+  execFileSync("bun", [
+    "--eval",
+    `
+      import { Database } from "bun:sqlite";
+      const db = new Database(Bun.argv[1]);
+      db.exec("create table _smithers_attempts (run_id text, node_id text, iteration integer, attempt integer, state text, meta_json text)");
+      db.query("insert into _smithers_attempts values (?, ?, 0, 1, 'failed', ?)").run(
+        "ultrafuzz-discard-resume-lifecycle-run",
+        "node:project-discovery",
+        JSON.stringify({ agentEngine: "codex", agentResume: "stale-thread" })
+      );
+      db.close();
+    `,
+    dbPath
+  ]);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "discard-resume-lifecycle-run",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const meta = execFileSync(
+    "bun",
+    [
+      "--eval",
+      `
+      import { Database } from "bun:sqlite";
+      const db = new Database(Bun.argv[1], { readonly: true });
+      const row = db.query("select meta_json from _smithers_attempts where run_id = ? and node_id = ? and attempt = 1").get(
+        "ultrafuzz-discard-resume-lifecycle-run",
+        "node:project-discovery"
+      );
+      console.log(row.meta_json);
+      db.close();
+    `,
+      dbPath
+    ],
+    { encoding: "utf8" }
+  );
+  assert.equal(JSON.parse(meta).discardResumeSession, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /^timetravel /mu);
+  assert.match(commands, /^up /mu);
 });
 
 test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {

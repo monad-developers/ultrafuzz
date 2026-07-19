@@ -85,6 +85,47 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "waiting-event",
   "waiting-timer"
 ]);
+const SMITHERS_DISCARD_RESUME_SESSION_SCRIPT = String.raw`
+import { Database } from "bun:sqlite";
+
+const [dbPath, runId, nodeId] = Bun.argv.slice(1);
+if (!dbPath || !runId || !nodeId) {
+  throw new Error("expected db path, run id, and node id");
+}
+
+const db = new Database(dbPath);
+let changed = 0;
+try {
+  const rows = db
+    .query(
+      "select attempt, meta_json from _smithers_attempts where run_id = ? and node_id = ? and iteration = 0 order by attempt desc"
+    )
+    .all(runId, nodeId);
+  const update = db.query(
+    "update _smithers_attempts set meta_json = ? where run_id = ? and node_id = ? and iteration = 0 and attempt = ?"
+  );
+  for (const row of rows) {
+    let meta = {};
+    if (typeof row.meta_json === "string" && row.meta_json.length > 0) {
+      try {
+        const parsed = JSON.parse(row.meta_json);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          meta = parsed;
+        }
+      } catch {
+        meta = {};
+      }
+    }
+    if (meta.discardResumeSession === true) continue;
+    meta.discardResumeSession = true;
+    update.run(JSON.stringify(meta), runId, nodeId, row.attempt);
+    changed += 1;
+  }
+  console.log(JSON.stringify({ changed, inspected: rows.length }));
+} finally {
+  db.close();
+}
+`;
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
@@ -491,6 +532,14 @@ export async function runSmithersLifecycleCommand(input: {
         : path.join(path.dirname(input.resumeRecovery.inputPath), "reset-node-applied.json");
     let resetStderr = "";
     if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+      resetStderr = await markDiscardResumeSessionsForResetNode({
+        projectRoot: input.projectRoot,
+        smithersRunId: input.smithersRunId,
+        resetNode: input.resetNode,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
+      });
       const resetResult = await execSmithersCli({
         args: [
           "timetravel",
@@ -510,7 +559,7 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      resetStderr = resetResult.stderr;
+      resetStderr = [resetStderr, resetResult.stderr].filter((value) => value.length > 0).join("\n");
       if (resetMarkerPath !== undefined) {
         writeJsonDurable(resetMarkerPath, {
           schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
@@ -639,6 +688,36 @@ export async function runSmithersLifecycleCommand(input: {
     ...result,
     ...(input.action === "fork" ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
+}
+
+async function markDiscardResumeSessionsForResetNode(input: {
+  projectRoot: string;
+  smithersRunId: string;
+  resetNode: string;
+  env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
+  keepWorkspaces?: boolean;
+}): Promise<string> {
+  const dbPath = path.join(input.projectRoot, "smithers.db");
+  if (!fs.existsSync(dbPath)) {
+    return "";
+  }
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      "bun",
+      ["--eval", SMITHERS_DISCARD_RESUME_SESSION_SCRIPT, dbPath, input.smithersRunId, input.resetNode],
+      {
+        cwd: input.projectRoot,
+        env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
+        maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES
+      }
+    );
+    return [stdout.trim(), stderr.trim()].filter((value) => value.length > 0).join("\n");
+  } catch (error) {
+    return redactedEvidenceText(
+      `workflow reset resume-session discard skipped: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 export async function runSmithersInspectionCommand(input: {
