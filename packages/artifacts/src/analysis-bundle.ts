@@ -317,14 +317,13 @@ const PAYLOAD_SCHEMAS = {
   "evaluation-metrics": analysisEvaluationMetricsSchema,
   "accounting-summary": analysisAccountingSummarySchema,
   "attempt-history": analysisAttemptHistorySchema
-} as const;
+} as const satisfies Record<AnalysisBundleDataKind, z.ZodType>;
 
-export interface AnalysisBundlePayloads {
-  "terminal-status"?: AnalysisTerminalStatus;
-  "evaluation-metrics"?: AnalysisEvaluationMetrics;
-  "accounting-summary"?: AnalysisAccountingSummary;
-  "attempt-history"?: AnalysisAttemptHistory;
-}
+type AnalysisBundlePayload<K extends AnalysisBundleDataKind> = z.infer<(typeof PAYLOAD_SCHEMAS)[K]>;
+
+export type AnalysisBundlePayloads = {
+  [K in AnalysisBundleDataKind]?: AnalysisBundlePayload<K>;
+};
 
 export interface AnalysisBundleContents {
   manifest: AnalysisBundleManifest;
@@ -433,8 +432,7 @@ export function writeAnalysisBundle(input: WriteAnalysisBundleInput): WriteAnaly
       omissionEntries.push({ kind, path: DATA_PATHS[kind], reason: omission ?? "data-unavailable" });
       continue;
     }
-    const parsed = parseAnalysisBundlePayload(kind, candidate);
-    assertPolicySafeValue(parsed, kind);
+    const parsed = parseAnalysisBundlePayload(kind, PAYLOAD_SCHEMAS[kind], candidate);
     serialized.set(DATA_PATHS[kind], { kind, contents: serializeJson(parsed) });
   }
 
@@ -540,7 +538,7 @@ export function readAnalysisBundle(bundleRoot: string): AnalysisBundleContents {
   const omissionsPath = safeResolveInside(root, ANALYSIS_BUNDLE_OMISSIONS_FILE, "analysis bundle omissions");
   const omissions = assertAnalysisBundleOmissions(readJsonBounded(omissionsPath));
   assertPolicySafeValue(omissions, "omissions");
-  const payloads: Partial<Record<AnalysisBundleDataKind, AnalysisBundlePayload>> = {};
+  const payloads: AnalysisBundlePayloads = {};
   const omittedKinds = new Set<AnalysisBundleDataKind>();
   for (const omission of omissions.omissions) {
     if (omittedKinds.has(omission.kind) || omission.path !== DATA_PATHS[omission.kind]) {
@@ -556,13 +554,25 @@ export function readAnalysisBundle(bundleRoot: string): AnalysisBundleContents {
     }
     if (entry !== undefined) {
       const value = readJsonBounded(safeResolveInside(root, entry.path, "analysis bundle payload"));
-      const parsed = parseAnalysisBundlePayload(kind, value);
-      assertPolicySafeValue(parsed, kind);
-      payloads[kind] = parsed;
+      switch (kind) {
+        case "terminal-status":
+          payloads[kind] = parseAnalysisBundlePayload(kind, PAYLOAD_SCHEMAS[kind], value);
+          break;
+        case "evaluation-metrics":
+          payloads[kind] = parseAnalysisBundlePayload(kind, PAYLOAD_SCHEMAS[kind], value);
+          break;
+        case "accounting-summary":
+          payloads[kind] = parseAnalysisBundlePayload(kind, PAYLOAD_SCHEMAS[kind], value);
+          break;
+        case "attempt-history":
+          payloads[kind] = parseAnalysisBundlePayload(kind, PAYLOAD_SCHEMAS[kind], value);
+          break;
+        default:
+          unreachableAnalysisBundleKind(kind);
+      }
     }
   }
-  // Each entry was parsed with the schema selected by the same kind above.
-  return { manifest, omissions, payloads: payloads as AnalysisBundlePayloads };
+  return { manifest, omissions, payloads };
 }
 
 export function validateAnalysisBundleManifestSchema(value: unknown): SchemaValidationResult<AnalysisBundleManifest> {
@@ -595,16 +605,21 @@ function assertKnownKinds(value: object, label: string): void {
   }
 }
 
-type AnalysisBundlePayload =
-  AnalysisTerminalStatus | AnalysisEvaluationMetrics | AnalysisAccountingSummary | AnalysisAttemptHistory;
-
-function parseAnalysisBundlePayload(kind: AnalysisBundleDataKind, value: unknown): AnalysisBundlePayload {
-  const schema = PAYLOAD_SCHEMAS[kind];
+function parseAnalysisBundlePayload<Schema extends z.ZodType>(
+  kind: AnalysisBundleDataKind,
+  schema: Schema,
+  value: unknown
+): z.infer<Schema> {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     throw new Error(schemaErrorMessage(`analysis bundle ${kind}`, validationIssues(parsed.error)));
   }
+  assertPolicySafeValue(parsed.data, kind);
   return parsed.data;
+}
+
+function unreachableAnalysisBundleKind(kind: never): never {
+  throw new Error(`analysis bundle kind is not allowlisted: ${String(kind)}`);
 }
 
 function assertPolicySafeValue(value: unknown, location: string): void {
