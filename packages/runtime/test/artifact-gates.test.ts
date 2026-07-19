@@ -37,7 +37,7 @@ function plannedNode(paths: string[]): PlannedGraphNode {
               ? "ultrafuzz/properties@1"
               : outputPath === "implemented-properties.json"
                 ? "ultrafuzz/implemented-properties@1"
-                : outputPath === "recon-fuzzer-results.json"
+                : ["echidna-results.json", "medusa-results.json", "recon-fuzzer-results.json"].includes(outputPath)
                   ? "ultrafuzz/property-campaign@1"
                   : outputPath === "report.json"
                     ? "ultrafuzz/report@1"
@@ -454,12 +454,22 @@ test("final report gate rejects dangling property references while allowing hist
   );
   writeArtifact(
     currentLayout,
-    "stateful-invariant-recon-campaign",
-    "recon-fuzzer-results.json",
+    "stateful-invariant-campaign",
+    "echidna-results.json",
     JSON.stringify({
       schema_version: "ultrafuzz.property-campaign.v1",
-      fuzzer_backend: "recon",
-      failures: []
+      fuzzer_backend: "echidna",
+      failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    currentLayout,
+    "stateful-invariant-campaign",
+    "medusa-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "medusa",
+      failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
     })
   );
   writeArtifact(
@@ -508,7 +518,7 @@ test("final report gate rejects dangling property references while allowing hist
           sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backend: "recon"
+          fuzzer_backends: ["echidna", "medusa"]
         }
       ]
     })
@@ -537,7 +547,7 @@ test("final report gate rejects dangling property references while allowing hist
           ],
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: ["test/foundry/Property1.t.sol"],
-          fuzzer_backend: "recon"
+          fuzzer_backends: ["echidna", "medusa"]
         }
       ]
     })

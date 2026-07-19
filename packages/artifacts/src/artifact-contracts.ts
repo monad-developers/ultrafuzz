@@ -64,20 +64,31 @@ const reportPropertySourcesSchema = z
   );
 const reportPropertyProvenanceSchema = z
   .array(
-    z.looseObject({
-      finding_id: z.string().min(1),
-      title: z.string().min(1),
-      property_ids: z
-        .array(z.string().min(1))
-        .min(1)
-        .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
-          message: "Property IDs must be unique"
-        }),
-      sources: reportPropertySourcesSchema,
-      implementation_paths: uniqueReportPathArraySchema,
-      test_paths: uniqueReportPathArraySchema,
-      fuzzer_backend: z.string().min(1).optional()
-    })
+    z
+      .looseObject({
+        finding_id: z.string().min(1),
+        title: z.string().min(1),
+        property_ids: z
+          .array(z.string().min(1))
+          .min(1)
+          .refine((propertyIds) => new Set(propertyIds).size === propertyIds.length, {
+            message: "Property IDs must be unique"
+          }),
+        sources: reportPropertySourcesSchema,
+        implementation_paths: uniqueReportPathArraySchema,
+        test_paths: uniqueReportPathArraySchema,
+        fuzzer_backend: z.string().min(1).optional(),
+        fuzzer_backends: z
+          .array(z.string().min(1))
+          .min(1)
+          .refine((backends) => new Set(backends).size === backends.length, {
+            message: "Fuzzer backends must be unique"
+          })
+          .optional()
+      })
+      .refine((entry) => entry.fuzzer_backend === undefined || entry.fuzzer_backends === undefined, {
+        message: "Use fuzzer_backend or fuzzer_backends, not both"
+      })
   )
   .refine((entries) => new Set(entries.map((entry) => entry.finding_id)).size === entries.length, {
     message: "Property provenance finding IDs must be unique"

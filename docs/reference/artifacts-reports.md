@@ -139,6 +139,16 @@ generated-tests.json
 references/manifest.json
 ```
 
+The default `stateful-invariant-campaign` writes backend-neutral
+`campaign-plan.json`, `campaign-summary.json`, and `campaign-report.md`
+artifacts plus `echidna-results.json` and `medusa-results.json`. The plan records
+the resolved vCPU count, workers per backend, parallel or sequential execution
+mode, shared wall-clock budget, and finalization reserve. Each backend record
+keeps its command, version, timestamps, terminal status, distinct artifact
+paths, failures, reproducers, and available coverage metadata. The summary
+classifies the combined result as `complete`, `partial`, or `blocked` without
+discarding a usable backend's evidence.
+
 Required outputs are node-specific and declared with versioned contracts in
 `.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
 directory and must be safe project-local relative paths.
@@ -245,11 +255,13 @@ Property-derived `findings.json` entries carry the same optional
 not originate from a catalog property omit the field.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
-properties that were not recorded with `implemented` status. They also reject
-raw campaign/finding reference mismatches, dangling final-report IDs, and final
-joins whose sources, implementation/test paths, or fuzzer backend differ from
-the validated upstream artifacts. Final `report.json` stores the joined chain
-in `property_provenance`, and `report.md` renders it under **Property
+properties that were not recorded with `implemented` status. They validate the
+Echidna and Medusa result records independently, reject raw campaign/finding
+reference mismatches and dangling final-report IDs, and require final joins to
+match the validated sources, implementation/test paths, and complete set of
+originating fuzzer backends. Final `report.json` stores the joined chain in
+`property_provenance`, using `fuzzer_backend` for one backend or
+`fuzzer_backends` for several, and `report.md` renders it under **Property
 provenance**. Historical artifacts without the v1 handoffs render provenance as
 `unavailable` rather than failing report generation.
 

@@ -47,12 +47,13 @@ Canonical property catalog:
 Implemented property records:
 `{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
 
-Invariant campaign result:
-`{{artifact_path:stateful-invariant-recon-campaign}}/recon-fuzzer-results.json`
+Invariant campaign results:
+`{{artifact_path:stateful-invariant-campaign}}/echidna-results.json` and
+`{{artifact_path:stateful-invariant-campaign}}/medusa-results.json`
 
-These three files form the provenance join from a finding's `property_ids` to
+These four files form the provenance join from a finding's `property_ids` to
 its canonical properties, source lens rows, implementation/test paths, and
-recorded fuzzer backend. Treat references to an unknown canonical property as
+recorded fuzzer backends. Treat references to an unknown canonical property as
 an invalid current-run artifact. Historical or external artifacts may predate
 this contract: if any provenance handoff or `property_ids` lineage needed for
 the join is absent, render Property provenance as `unavailable` and continue
@@ -417,11 +418,11 @@ row containing:
   `properties.json`;
 - the union of `implementation_paths` and `test_paths` joined from
   `implemented-properties.json`;
-- `fuzzer_backend` when recorded in `recon-fuzzer-results.json`, otherwise
-  `unavailable`.
+- every originating backend recorded for the same stable finding ID in
+  `echidna-results.json` and `medusa-results.json`, otherwise `unavailable`.
 
 Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
-IDs`, `Implementation/test paths`, and `Fuzzer backend`. Do not add a row for a
+IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a
 finding with no `property_ids`; it is a valid non-property finding. If current
 artifacts contain no property-derived findings, write `No property-derived
 findings.` If historical lineage is absent, write `unavailable` instead of
@@ -460,10 +461,13 @@ fields, a production `issues` array, a `non_production_outcomes` array, and
 When provenance is available, `property_provenance` must be an array with one
 object per property-derived finding. Each object contains `finding_id`,
 `title`, non-empty `property_ids`, `sources` entries with `source_node_id` and
-`source_property_id`, `implementation_paths`, `test_paths`, and optional
-`fuzzer_backend`. Use stable unions when several properties contribute. Use the
-string `"unavailable"` for historical artifacts whose provenance handoffs are
-absent. Use an empty array for a current run with no property-derived findings.
+`source_property_id`, `implementation_paths`, and `test_paths`. Use
+`fuzzer_backend` when exactly one backend produced the finding, or a unique
+sorted `fuzzer_backends` array when several backends produced the same stable
+finding ID. Never emit both fields. Use stable unions when several properties
+contribute. Use the string `"unavailable"` for historical artifacts whose
+provenance handoffs are absent. Use an empty array for a current run with no
+property-derived findings.
 
 Each production issue object must contain `title`, `description`, `severity`,
 `likelihood`, `impact`, and `proof_of_concept`, plus `family_id`,

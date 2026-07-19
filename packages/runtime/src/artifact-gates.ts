@@ -325,33 +325,40 @@ function verifyCampaignPropertyReferences(
     return implementation.diagnostics;
   }
 
-  const campaignPath = path.join(artifactDir, "recon-fuzzer-results.json");
   const findingsPath = path.join(artifactDir, "findings.json");
-  if (!fs.existsSync(campaignPath) || !fs.existsSync(findingsPath)) {
+  const campaignPaths = campaignResultArtifactNames
+    .map((artifactName) => path.join(artifactDir, artifactName))
+    .filter((campaignPath) => fs.existsSync(campaignPath));
+  if (campaignPaths.length === 0 || !fs.existsSync(findingsPath)) {
     return [];
   }
-  const campaign = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
-  if (!campaign.ok || campaign.value === undefined) {
-    return [];
-  }
+  const campaigns = campaignPaths.flatMap((campaignPath) => {
+    const campaign = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+    return campaign.ok && campaign.value !== undefined ? [{ path: campaignPath, value: campaign.value }] : [];
+  });
   const findings = validateFindingsSchema(readJsonFile(findingsPath), findingsPath);
   if (!findings.ok || findings.value === undefined) {
     return [];
   }
+  const validatedFindings = findings.value;
 
-  const references: PropertyReferenceInput[] = campaign.value.failures.flatMap((failure, index) =>
-    failure.property_ids === undefined
-      ? []
-      : failure.property_ids.map((propertyId, propertyIndex) => ({
-          propertyIds: [propertyId],
-          path: `${campaignPath}#$.failures[${index}].property_ids[${propertyIndex}]`
-        }))
+  const references: PropertyReferenceInput[] = campaigns.flatMap((campaign) =>
+    campaign.value.failures.flatMap((failure, index) =>
+      failure.property_ids === undefined
+        ? []
+        : failure.property_ids.map((propertyId, propertyIndex) => ({
+            propertyIds: [propertyId],
+            path: `${campaign.path}#$.failures[${index}].property_ids[${propertyIndex}]`
+          }))
+    )
   );
-  references.push(...findingPropertyReferences(findings.value, findingsPath));
+  references.push(...findingPropertyReferences(validatedFindings, findingsPath));
 
   const diagnostics = [
     ...propertyReferenceDiagnostics(catalog, references),
-    ...campaignFindingReferenceDiagnostics(campaign.value.failures, findings.value, campaignPath, findingsPath)
+    ...campaigns.flatMap((campaign) =>
+      campaignFindingReferenceDiagnostics(campaign.value.failures, validatedFindings, campaign.path, findingsPath)
+    )
   ];
   const implementedIds = new Set(
     implementation.value.properties
@@ -417,7 +424,7 @@ function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: str
       report.property_provenance,
       catalog.value,
       implementation.value,
-      readCampaignFuzzerBackend(layout),
+      readCampaignFuzzerBackends(layout),
       reportPath
     )
   );
@@ -428,7 +435,7 @@ function reportPropertyJoinDiagnostics(
   entries: unknown[],
   catalog: PropertiesArtifact,
   implementation: ImplementedPropertiesArtifact,
-  fuzzerBackend: string | undefined,
+  fuzzerBackendsByFinding: ReadonlyMap<string, readonly string[]>,
   reportPath: string
 ): RuntimeDiagnostic[] {
   const catalogById = new Map(catalog.properties.map((property) => [property.id, property]));
@@ -498,28 +505,53 @@ function reportPropertyJoinDiagnostics(
       `${reportPath}#$.property_provenance[${entryIndex}].test_paths`
     );
 
+    const expectedBackends =
+      typeof entry.finding_id === "string" ? (fuzzerBackendsByFinding.get(entry.finding_id) ?? []) : [];
+    const actualBackends = Array.isArray(entry.fuzzer_backends)
+      ? stringArray(entry.fuzzer_backends)
+      : typeof entry.fuzzer_backend === "string"
+        ? [entry.fuzzer_backend]
+        : [];
     addReportJoinMismatch(
       diagnostics,
-      entry.fuzzer_backend === fuzzerBackend,
+      sameStringSet(expectedBackends, actualBackends),
       "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH",
-      "Report fuzzer backend does not match the campaign record",
-      `${reportPath}#$.property_provenance[${entryIndex}].fuzzer_backend`
+      "Report fuzzer backends do not match the campaign records",
+      `${reportPath}#$.property_provenance[${entryIndex}].${Array.isArray(entry.fuzzer_backends) ? "fuzzer_backends" : "fuzzer_backend"}`
     );
   }
   return diagnostics;
 }
 
-function readCampaignFuzzerBackend(layout: RunLayout): string | undefined {
-  const campaignPath = findLogicalNodeArtifact(
-    layout,
-    "stateful-invariant-recon-campaign",
-    "recon-fuzzer-results.json"
-  );
-  if (campaignPath === undefined) {
-    return undefined;
+const campaignResultArtifactNames = [
+  "echidna-results.json",
+  "medusa-results.json",
+  "recon-fuzzer-results.json"
+] as const;
+
+function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {
+  const backendsByFinding = new Map<string, Set<string>>();
+  const campaignArtifacts = [
+    ["stateful-invariant-campaign", "echidna-results.json"],
+    ["stateful-invariant-campaign", "medusa-results.json"],
+    ["stateful-invariant-recon-campaign", "recon-fuzzer-results.json"]
+  ] as const;
+  for (const [nodeId, artifactName] of campaignArtifacts) {
+    const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
+    if (campaignPath === undefined) {
+      continue;
+    }
+    const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+    if (result.value?.fuzzer_backend === undefined) {
+      continue;
+    }
+    for (const failure of result.value.failures) {
+      const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
+      backends.add(result.value.fuzzer_backend);
+      backendsByFinding.set(failure.id, backends);
+    }
   }
-  const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
-  return result.value?.fuzzer_backend;
+  return new Map([...backendsByFinding].map(([findingId, backends]) => [findingId, [...backends].sort()]));
 }
 
 function propertySourceKey(source: { source_node_id?: unknown; source_property_id?: unknown }): string {

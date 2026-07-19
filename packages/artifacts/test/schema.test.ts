@@ -282,12 +282,36 @@ test("finding and report schemas accept non-property and historical artifacts", 
             ],
             implementation_paths: ["test/recon/Properties.sol"],
             test_paths: ["test/foundry/Property1.t.sol"],
-            fuzzer_backend: "recon"
+            fuzzer_backends: ["echidna", "medusa"]
           }
         ]
       })
     ).ok,
     true
+  );
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/report@1",
+      JSON.stringify({
+        schema_version: "1.0",
+        run_metadata: {},
+        issues: [],
+        non_production_outcomes: [],
+        property_provenance: [
+          {
+            finding_id: "finding-property",
+            title: "Property failure",
+            property_ids: ["property-1"],
+            sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+            implementation_paths: [],
+            test_paths: [],
+            fuzzer_backend: "echidna",
+            fuzzer_backends: ["echidna", "medusa"]
+          }
+        ]
+      })
+    ).ok,
+    false
   );
   assert.equal(
     validateArtifactContract(
