@@ -193,6 +193,74 @@ test("property implementation gate rejects an unknown canonical property referen
   );
 });
 
+test("property implementation gate rejects an unknown finding property reference", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-implementation-finding" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  const nodeId = "stateful-invariant-implement-properties";
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    nodeId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "finding-property",
+        title: "Property failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The property failed.",
+        property_ids: ["property-unknown"]
+      }
+    ])
+  );
+  const node = {
+    ...plannedNode(["implemented-properties.json", "findings.json"]),
+    id: nodeId,
+    logical_id: nodeId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+  assert.match(
+    result.diagnostics.find((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN")?.path ?? "",
+    /findings\.json/u
+  );
+});
+
 test("campaign gate accepts non-property findings and validates property-derived failures", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-campaign" });
   writeArtifact(

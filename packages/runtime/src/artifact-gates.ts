@@ -297,13 +297,15 @@ function verifyPropertyProvenanceArtifacts(
     if (!implementation.ok || implementation.value === undefined) {
       return [];
     }
-    return propertyReferenceDiagnostics(
-      catalog.value,
-      implementation.value.properties.map((record, index) => ({
-        propertyIds: [record.property_id],
-        path: `${implementationPath}#$.properties[${index}].property_id`
-      }))
-    );
+    const references: PropertyReferenceInput[] = implementation.value.properties.map((record, index) => ({
+      propertyIds: [record.property_id],
+      path: `${implementationPath}#$.properties[${index}].property_id`
+    }));
+    const findingsPath = path.join(artifactDir, "findings.json");
+    if (fs.existsSync(findingsPath)) {
+      references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
+    }
+    return propertyReferenceDiagnostics(catalog.value, references);
   }
 
   return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
