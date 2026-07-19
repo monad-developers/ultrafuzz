@@ -365,6 +365,23 @@ describe("deterministic scorer math", () => {
     expect(judgeCalled).toBe(false);
   });
 
+  it("rejects a recorded terminal report when the run graph contract is unavailable", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+      report_json_path: string;
+    };
+    expect(fs.existsSync(record.report_json_path)).toBe(true);
+    fs.rmSync(path.join(record.ultrafuzz_run_root, "graph.json"));
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({
+      code: "EVAL_TERMINAL_REPORT_INVALID",
+      message: "run graph is unavailable"
+    });
+  });
+
   it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");

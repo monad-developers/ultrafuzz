@@ -491,4 +491,41 @@ describe("eval publish (post-hoc replay)", () => {
       diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@1" }]
     });
   });
+
+  it("does not publish a recorded terminal report without a graph contract", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const runsPath = path.join(evalRunRoot, "runs.jsonl");
+    const run = JSON.parse(fs.readFileSync(runsPath, "utf8")) as {
+      ultrafuzz_run_root: string;
+      report_json_path?: string;
+    };
+    run.report_json_path = path.join(run.ultrafuzz_run_root, "artifacts", "final-report", "report.json");
+    fs.writeFileSync(runsPath, `${JSON.stringify(run)}\n`, "utf8");
+    expect(fs.existsSync(run.report_json_path)).toBe(true);
+    fs.rmSync(path.join(run.ultrafuzz_run_root, "graph.json"));
+    let contacted = false;
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        fetchImpl: (async () => {
+          contacted = true;
+          throw new Error("must not be called");
+        }) as typeof fetch
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+
+    expect(contacted).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [
+        {
+          code: "TERMINAL_REPORT_NOT_PUBLISHABLE",
+          contract: "ultrafuzz/report@1",
+          reason: "run graph is unavailable"
+        }
+      ]
+    });
+  });
 });

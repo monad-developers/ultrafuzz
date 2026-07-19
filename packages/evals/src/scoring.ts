@@ -159,9 +159,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     const reportResolution = resolveTerminalReportPath({
-      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path }),
-      fallbackPath: defaultReportPath(row)
+      ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root })
     });
     if (reportResolution.path === undefined) {
       throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
@@ -538,13 +536,6 @@ function markdownValue(value: string | number | null): string {
 
 function completenessValue(value: EvalRowScore["efficiency"]["runtime"]): string {
   return value.reason === null ? value.status : `${value.status} (${value.reason})`;
-}
-
-function defaultReportPath(row: EvalMatrixRow): string {
-  if (row.target.path === undefined) {
-    return `missing-target-path/${row.run_id}/report.json`;
-  }
-  return path.join(row.target.path, ".ultrafuzz", "runs", row.run_id, "artifacts", "final-report", "report.json");
 }
 
 function resolveJudge(

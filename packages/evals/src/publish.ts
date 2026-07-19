@@ -184,8 +184,7 @@ function assertPublishableTerminalReports(
     const state = runRoot === undefined ? undefined : readJsonSafe(path.join(runRoot, "state.json"));
     const status = isRecord(state) && typeof state.status === "string" ? state.status : record?.final_status;
     const reportResolution = resolveTerminalReportPath({
-      ...(runRoot === undefined ? {} : { runRoot }),
-      ...(record?.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
+      ...(runRoot === undefined ? {} : { runRoot })
     });
     const reportPath = reportResolution.path;
     const reportExists = reportPath !== undefined && fs.existsSync(reportPath) && fs.lstatSync(reportPath).isFile();
