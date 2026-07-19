@@ -4,9 +4,13 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { artifactContractDefinition } from "@ultrafuzz/artifacts";
+
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
 import { testRow, testSuite, writeRunFixture } from "./helpers.js";
+
+const REPORT_CONTRACT_DIGEST = artifactContractDefinition("ultrafuzz/report@1").digest;
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -84,11 +88,21 @@ function scoreRunFixture(): {
   fs.writeFileSync(
     path.join(runRoot, "graph.json"),
     JSON.stringify({
+      schema_version: "1.0",
+      graph_version: "2",
+      topology_version: 2,
       nodes: [
         {
           id: "final-report",
           artifact_dir: "artifacts/final-report",
-          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: true }]
+          outputs: [
+            {
+              path: "report.json",
+              contract: "ultrafuzz/report@1",
+              contract_digest: REPORT_CONTRACT_DIGEST,
+              primary: true
+            }
+          ]
         }
       ]
     }),
@@ -382,6 +396,34 @@ describe("deterministic scorer math", () => {
     });
   });
 
+  it("rejects a terminal report when the run graph is not topology v2", async () => {
+    const fixture = scoreRunFixture();
+    const record = JSON.parse(fs.readFileSync(path.join(fixture.evalRunRoot, "runs.jsonl"), "utf8")) as {
+      ultrafuzz_run_root: string;
+      report_json_path: string;
+    };
+    fs.writeFileSync(
+      path.join(record.ultrafuzz_run_root, "graph.json"),
+      JSON.stringify({
+        nodes: [
+          {
+            id: "final-report",
+            artifact_dir: "artifacts/final-report",
+            outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: true }]
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({
+      code: "EVAL_TERMINAL_REPORT_INVALID",
+      message: "run graph does not satisfy topology v2 contract"
+    });
+  });
+
   it("scores the topology-declared terminal report path when eval metadata omits it", async () => {
     const fixture = scoreRunFixture();
     const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
@@ -396,11 +438,21 @@ describe("deterministic scorer math", () => {
     fs.writeFileSync(
       path.join(runRoot, "graph.json"),
       JSON.stringify({
+        schema_version: "1.0",
+        graph_version: "2",
+        topology_version: 2,
         nodes: [
           {
             id: "terminal",
             artifact_dir: "artifacts/terminal",
-            outputs: [{ path: "custom-report.json", contract: "ultrafuzz/report@1", primary: true }]
+            outputs: [
+              {
+                path: "custom-report.json",
+                contract: "ultrafuzz/report@1",
+                contract_digest: REPORT_CONTRACT_DIGEST,
+                primary: true
+              }
+            ]
           }
         ]
       }),

@@ -3,7 +3,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { safeResolveInside, validateSafeId } from "@ultrafuzz/artifacts";
+import {
+  artifactContractDefinition,
+  normalizeSafeRelativePath,
+  safeResolveInside,
+  validateSafeId
+} from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { EVAL_RESULT_SCHEMA_VERSION, type EvalResult } from "./types.js";
@@ -81,6 +86,9 @@ export interface TerminalReportPathResolution {
   reason: string;
 }
 
+const TERMINAL_REPORT_CONTRACT = "ultrafuzz/report@1";
+const TERMINAL_REPORT_CONTRACT_DIGEST = artifactContractDefinition(TERMINAL_REPORT_CONTRACT).digest;
+
 export function resolveTerminalReportPath(input: { runRoot?: string }): TerminalReportPathResolution {
   if (input.runRoot === undefined) {
     return { reason: "terminal report run root is unavailable" };
@@ -93,6 +101,9 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
   } catch {
     return { reason: "run graph is unavailable" };
   }
+  if (!isTopologyV2RunGraph(graph)) {
+    return { reason: "run graph does not satisfy topology v2 contract" };
+  }
   const candidates = terminalReportCandidates(runRoot, graph);
   if (candidates.length === 1) {
     return {
@@ -104,32 +115,50 @@ export function resolveTerminalReportPath(input: { runRoot?: string }): Terminal
   if (candidates.length > 1) {
     return { reason: "run graph declares more than one ultrafuzz/report@1 output" };
   }
-  return { reason: "run graph does not declare ultrafuzz/report@1" };
+  return { reason: "run graph does not declare a valid ultrafuzz/report@1 output contract" };
 }
 
-function terminalReportCandidates(runRoot: string, graph: unknown): Array<{ path: string; relativePath: string }> {
-  if (!isRecord(graph) || !Array.isArray(graph.nodes)) {
-    return [];
-  }
-  const candidates = new Map<string, { path: string; relativePath: string }>();
+function isTopologyV2RunGraph(graph: unknown): graph is { nodes: unknown[] } {
+  return (
+    isRecord(graph) &&
+    graph.schema_version === "1.0" &&
+    graph.graph_version === "2" &&
+    graph.topology_version === 2 &&
+    Array.isArray(graph.nodes)
+  );
+}
+
+function terminalReportCandidates(
+  runRoot: string,
+  graph: { nodes: unknown[] }
+): Array<{ path: string; relativePath: string }> {
+  const candidates: Array<{ path: string; relativePath: string }> = [];
   for (const node of graph.nodes) {
     if (!isRecord(node) || typeof node.artifact_dir !== "string" || !Array.isArray(node.outputs)) {
       continue;
     }
     for (const output of node.outputs) {
-      if (!isRecord(output) || output.contract !== "ultrafuzz/report@1" || typeof output.path !== "string") {
+      if (
+        !isRecord(output) ||
+        output.contract !== TERMINAL_REPORT_CONTRACT ||
+        typeof output.path !== "string" ||
+        output.contract_digest !== TERMINAL_REPORT_CONTRACT_DIGEST ||
+        typeof output.primary !== "boolean"
+      ) {
         continue;
       }
       try {
-        const relativePath = path.posix.join(node.artifact_dir.replaceAll(path.sep, "/"), output.path);
+        const artifactDir = normalizeSafeRelativePath(node.artifact_dir, "terminal report artifact directory");
+        const outputPath = normalizeSafeRelativePath(output.path, "terminal report output path");
+        const relativePath = path.posix.join(artifactDir, outputPath);
         const reportPath = safeResolveInside(runRoot, relativePath, "terminal report path");
-        candidates.set(reportPath, { path: reportPath, relativePath });
+        candidates.push({ path: reportPath, relativePath });
       } catch {
         // Invalid graph paths cannot be publication or scoring inputs.
       }
     }
   }
-  return [...candidates.values()];
+  return candidates;
 }
 
 export function assertExternalPath(projectRoot: string, candidate: string, label: string): void {

@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { artifactContractDefinition } from "@ultrafuzz/artifacts";
+
 import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, watchEvalRow } from "../src/runner.js";
@@ -14,6 +16,7 @@ import { RecordingReporter, testRow, testSuite, writeRunFixture } from "./helper
 
 const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:05:00.000Z";
+const REPORT_CONTRACT_DIGEST = artifactContractDefinition("ultrafuzz/report@1").digest;
 
 function terminalRunFixture(runRoot: string): void {
   writeRunFixture({
@@ -49,6 +52,8 @@ function terminalRunFixture(runRoot: string): void {
     },
     graph: {
       schema_version: "1.0",
+      graph_version: "2",
+      topology_version: 2,
       groups: { setup: {} },
       nodes: [
         { id: "setup-1", logical_id: "setup-1", kind: "agentic", depends_on: [] },
@@ -58,7 +63,14 @@ function terminalRunFixture(runRoot: string): void {
           kind: "agentic",
           depends_on: ["setup-1"],
           artifact_dir: "artifacts/final-report",
-          outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: false }]
+          outputs: [
+            {
+              path: "report.json",
+              contract: "ultrafuzz/report@1",
+              contract_digest: REPORT_CONTRACT_DIGEST,
+              primary: false
+            }
+          ]
         }
       ]
     },
