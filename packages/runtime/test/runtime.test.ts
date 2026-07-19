@@ -14,6 +14,7 @@ import {
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
+import { runSmithersLifecycleCommand } from "../src/smithers.js";
 
 import {
   ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
@@ -5070,6 +5071,29 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
   );
+});
+
+test("frameless forks resume under configured recovery supervision", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  const workflowPath = path.join(project, "workflow.tsx");
+
+  const result = await runSmithersLifecycleCommand({
+    action: "fork",
+    smithersRunId: "ultrafuzz-frameless-fork",
+    workflowPath,
+    projectRoot: project,
+    maxConcurrency: 4,
+    keepWorkspaces: false,
+    controllerLeaseSeconds: 45,
+    env
+  });
+
+  assert.equal(result.workflowRunId, "ultrafuzz-lifecycle-run-forked");
+  assert.deepEqual(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").trim().split("\n"), [
+    `fork ${workflowPath} --run-id ultrafuzz-frameless-fork --format json`,
+    `up ${workflowPath} --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 4 --format json --supervise --supervise-interval 15s --supervise-stale-threshold 45s --supervise-max-concurrent 1`
+  ]);
 });
 
 test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {

@@ -587,14 +587,13 @@ export async function runSmithersLifecycleCommand(input: {
     };
   }
 
-  if (input.action === "fork" && input.forkFrame !== undefined) {
+  if (input.action === "fork") {
     const forkCommand = [
       "fork",
       input.workflowPath,
       "--run-id",
       input.smithersRunId,
-      "--frame",
-      String(input.forkFrame),
+      ...(input.forkFrame === undefined ? [] : ["--frame", String(input.forkFrame)]),
       ...(input.resetNode === undefined ? [] : ["--reset-node", input.resetNode]),
       ...(input.label === undefined ? [] : ["--label", input.label]),
       "--format",
@@ -655,9 +654,7 @@ export async function runSmithersLifecycleCommand(input: {
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
-      : input.action === "fork"
-        ? [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--run", "--format", "json"]
-        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json"];
+      : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json"];
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
@@ -665,10 +662,7 @@ export async function runSmithersLifecycleCommand(input: {
     environmentVariableNames: input.environmentVariableNames,
     keepWorkspaces: input.keepWorkspaces
   });
-  return {
-    ...result,
-    ...(input.action === "fork" ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
-  };
+  return result;
 }
 
 export async function runSmithersInspectionCommand(input: {
