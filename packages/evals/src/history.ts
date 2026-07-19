@@ -800,14 +800,15 @@ function installHistoryPublication(
   const stagedCharts = path.join(transaction, "charts");
   const historyBackup = path.join(transaction, "history.backup");
   const chartsBackup = path.join(transaction, "charts.backup");
-  fs.mkdirSync(stagedCharts, { recursive: true });
-  fs.writeFileSync(stagedHistory, `${JSON.stringify(history, null, 2)}\n`, "utf8");
-  for (const [file, contents] of charts) fs.writeFileSync(path.join(stagedCharts, file), contents, "utf8");
   let historyBackedUp = false;
   let chartsBackedUp = false;
   let historyInstalled = false;
   let chartsInstalled = false;
   try {
+    fs.mkdirSync(stagedCharts, { recursive: true });
+    fs.writeFileSync(stagedHistory, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+    for (const [file, contents] of charts) fs.writeFileSync(path.join(stagedCharts, file), contents, "utf8");
+
     if (fs.existsSync(historyPath)) {
       fs.renameSync(historyPath, historyBackup);
       historyBackedUp = true;
