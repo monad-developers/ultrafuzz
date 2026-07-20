@@ -5386,6 +5386,22 @@ test("resume keeps an already-running linked workflow attached without launching
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /inspect ultrafuzz-active-lifecycle-run --format json/u);
   assert.doesNotMatch(commands, /^up /mu);
+
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const forced = await resumeRun({
+    projectRoot: project,
+    runId: "active-lifecycle-run",
+    maxConcurrency: 8,
+    force: true,
+    env
+  });
+  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
+  assert.equal(forced.value?.submitted, true);
+  const forcedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(
+    forcedCommands,
+    /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --format json/u
+  );
 });
 
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {

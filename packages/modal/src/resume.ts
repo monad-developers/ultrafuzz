@@ -42,7 +42,7 @@ export interface ModalResumeCheckpointCounts {
 }
 
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
-  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--json"];
+  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--json"];
 }
 
 export function modalDurableRunNeedsResume(

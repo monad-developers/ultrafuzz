@@ -458,6 +458,7 @@ export async function runSmithersLifecycleCommand(input: {
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
+  force?: boolean;
   label?: string;
   resumeRecovery?: {
     runRoot: string;
@@ -528,7 +529,7 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined) {
+    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
@@ -683,6 +684,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--run-id",
           input.smithersRunId,
+          ...(input.force === true ? ["--force"] : []),
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--format",
