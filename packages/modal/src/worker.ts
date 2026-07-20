@@ -1018,41 +1018,69 @@ async function runChecked(
   options: { label: string; cwd?: string; env?: Record<string, string>; timeoutMs?: number }
 ): Promise<void> {
   await appendFile(LOG_PATH, `${new Date().toISOString()} [${options.label}] ${argv.join(" ")}\n`);
-  const child = spawn(argv[0]!, argv.slice(1), {
-    cwd: options.cwd ?? ULTRAFUZZ_ROOT,
-    env: { ...process.env, ...options.env },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  const streams = [child.stdout, child.stderr].map(async (stream) => {
-    for await (const chunk of stream) await appendFile(LOG_PATH, String(chunk));
-  });
-  let timedOut = false;
-  const exitCode = await new Promise<number>((resolve, reject) => {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let killTimeout: ReturnType<typeof setTimeout> | undefined;
-    const clearTimers = (): void => {
-      if (timeout !== undefined) clearTimeout(timeout);
-      if (killTimeout !== undefined) clearTimeout(killTimeout);
-    };
-    child.once("error", (error) => {
-      clearTimers();
-      reject(error);
+  const outputPaths = commandOutputPaths(options.label);
+  const stdoutFile = await open(outputPaths.stdout, "w");
+  const stderrFile = await open(outputPaths.stderr, "w");
+  try {
+    const child = spawn(argv[0]!, argv.slice(1), {
+      cwd: options.cwd ?? ULTRAFUZZ_ROOT,
+      env: { ...process.env, ...options.env },
+      detached: true,
+      stdio: ["ignore", stdoutFile.fd, stderrFile.fd]
     });
-    child.once("close", (code) => {
-      clearTimers();
-      resolve(code ?? 1);
+    await Promise.all([stdoutFile.close(), stderrFile.close()]);
+    let timedOut = false;
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const clearTimers = (): void => {
+        if (timeout !== undefined) clearTimeout(timeout);
+      };
+      child.once("error", (error) => {
+        clearTimers();
+        reject(error);
+      });
+      child.once("exit", (code) => {
+        clearTimers();
+        resolve(code ?? 1);
+      });
+      if (options.timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          terminateProcessGroup(child);
+          resolve(124);
+        }, options.timeoutMs);
+      }
     });
-    if (options.timeoutMs !== undefined) {
-      timeout = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-        killTimeout = setTimeout(() => child.kill("SIGKILL"), 15_000);
-      }, options.timeoutMs);
-    }
-  });
-  await Promise.all(streams);
-  if (timedOut) throw new Error(`${options.label} timed out after ${options.timeoutMs}ms`);
-  if (exitCode !== 0) throw new Error(`${options.label} failed with exit code ${exitCode}`);
+    await appendCommandOutput(outputPaths);
+    if (timedOut) throw new Error(`${options.label} timed out after ${options.timeoutMs}ms`);
+    if (exitCode !== 0) throw new Error(`${options.label} failed with exit code ${exitCode}`);
+  } finally {
+    await stdoutFile.close().catch(() => undefined);
+    await stderrFile.close().catch(() => undefined);
+    await Promise.all([rm(outputPaths.stdout, { force: true }), rm(outputPaths.stderr, { force: true })]).catch(
+      () => undefined
+    );
+  }
+}
+
+function commandOutputPaths(label: string): { stdout: string; stderr: string } {
+  const safeLabel = label.replace(/[^A-Za-z0-9._-]+/gu, "-").replace(/^-|-$/gu, "");
+  const token = `${safeLabel.slice(0, 48) || "command"}-${process.pid}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  return {
+    stdout: path.join(DATA_ROOT, `${token}.stdout.log`),
+    stderr: path.join(DATA_ROOT, `${token}.stderr.log`)
+  };
+}
+
+async function appendCommandOutput(paths: { stdout: string; stderr: string }): Promise<void> {
+  const [stdout, stderr] = await Promise.all([
+    readFile(paths.stdout, "utf8").catch(() => ""),
+    readFile(paths.stderr, "utf8").catch(() => "")
+  ]);
+  if (stdout.length > 0) await appendFile(LOG_PATH, stdout);
+  if (stderr.length > 0) await appendFile(LOG_PATH, stderr);
 }
 
 async function setStatus(stage: string, extra: Record<string, unknown> = {}): Promise<void> {
