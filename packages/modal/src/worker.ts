@@ -13,7 +13,7 @@ import {
   runBenchmarkExecutionOnce,
   type TerminalDisposition
 } from "./terminal-disposition.js";
-import { terminalDurableRunNeedsMoreWorkflowPolling } from "./worker-recovery.js";
+import { staleRunningResetGraceActive, terminalDurableRunNeedsMoreWorkflowPolling } from "./worker-recovery.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -439,6 +439,7 @@ async function runEval(argv: string[], target: string): Promise<void> {
 async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
   const resetCooldowns: ResetCooldowns = new Map();
   const resetHistory = await readResetHistory();
+  let staleRunningGraceUntil = 0;
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
     pruneResetCooldowns(resetCooldowns);
     const state = await synchronizedRunState(target);
@@ -449,8 +450,13 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       return false;
     }
     const recoverableNodes = recoverableNodeEntries(state);
-    const resetNode = recoverableNodes.find((entry) => resetNodeActionable(entry, resetCooldowns, resetHistory));
+    const resetNode = recoverableNodes.find((entry) =>
+      resetNodeActionable(entry, resetCooldowns, resetHistory, staleRunningGraceUntil)
+    );
     const cooldownBlockedNodes = recoverableNodes.filter((entry) => resetNodeOnCooldown(entry, resetCooldowns));
+    const graceBlockedNodes = recoverableNodes.filter((entry) =>
+      staleRunningResetGraceActive(entry.reason, staleRunningGraceUntil)
+    );
     const historySkippedNodes = recoverableNodes.filter((entry) =>
       artifactCompleteResetAlreadyAttempted(entry, resetHistory)
     );
@@ -463,6 +469,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         (node) => node.reason === "artifact-complete-workflow-failed"
       ).length,
       recently_reset_node_count: cooldownBlockedNodes.length,
+      stale_running_grace_node_count: graceBlockedNodes.length,
       reset_history_skipped_node_count: historySkippedNodes.length,
       workflow_status: state.status
     });
@@ -474,6 +481,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       );
       const resetNodes = resetNodeCandidates(nodeId, node);
       await resumeWithResetCandidates(state.run_id, target, resetNodes, attempt);
+      staleRunningGraceUntil = Math.max(staleRunningGraceUntil, Date.now() + resetSettleMs());
       await recordResetHistory(resetHistory, resetNode);
       const cooldownUntil = armResetCooldown(resetNode, resetCooldowns);
       await appendFile(
@@ -483,7 +491,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         ).toISOString()}\n`
       );
       continue;
-    } else if (cooldownBlockedNodes.length > 0) {
+    } else if (cooldownBlockedNodes.length > 0 || graceBlockedNodes.length > 0) {
       await appendFile(
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] waiting for reset propagation (${attempt}/${RECOVERY_MAX_RESETS})\n`
@@ -500,9 +508,10 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
           label: `workflow resume ${attempt}`
         }
       );
+      staleRunningGraceUntil = Math.max(staleRunningGraceUntil, Date.now() + resetSettleMs());
     }
 
-    const terminal = await waitForWorkflowTerminal(target, resetCooldowns, resetHistory);
+    const terminal = await waitForWorkflowTerminal(target, resetCooldowns, resetHistory, () => staleRunningGraceUntil);
     if (terminal?.status === "succeeded" || workflowArtifactsComplete(terminal)) {
       return true;
     }
@@ -584,7 +593,8 @@ function resetNodeCandidates(nodeId: string, node: DurableNodeState): string[] {
 async function waitForWorkflowTerminal(
   target: string,
   resetCooldowns: ResetCooldowns,
-  resetHistory: ResetHistory
+  resetHistory: ResetHistory,
+  staleRunningGraceUntil: () => number = () => 0
 ): Promise<DurableRunState | undefined> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
   while (Date.now() < deadline) {
@@ -600,7 +610,7 @@ async function waitForWorkflowTerminal(
     }
     const recoverableNodes = recoverableNodeEntries(state);
     const actionableRecoverableNodes = recoverableNodes.filter((entry) =>
-      resetNodeActionable(entry, resetCooldowns, resetHistory)
+      resetNodeActionable(entry, resetCooldowns, resetHistory, staleRunningGraceUntil())
     );
     if (isTerminalWorkflowStatus(state.status)) {
       const onlySkippedOrCoolingRecoverableNodes =
@@ -622,8 +632,17 @@ async function waitForWorkflowTerminal(
   return synchronizedRunState(target);
 }
 
-function resetNodeActionable(entry: RecoverableNodeEntry, cooldowns: ResetCooldowns, history: ResetHistory): boolean {
-  return !resetNodeOnCooldown(entry, cooldowns) && !artifactCompleteResetAlreadyAttempted(entry, history);
+function resetNodeActionable(
+  entry: RecoverableNodeEntry,
+  cooldowns: ResetCooldowns,
+  history: ResetHistory,
+  staleRunningGraceUntil = 0
+): boolean {
+  return (
+    !staleRunningResetGraceActive(entry.reason, staleRunningGraceUntil) &&
+    !resetNodeOnCooldown(entry, cooldowns) &&
+    !artifactCompleteResetAlreadyAttempted(entry, history)
+  );
 }
 
 function artifactCompleteResetAlreadyAttempted(entry: RecoverableNodeEntry, history: ResetHistory): boolean {
@@ -779,7 +798,14 @@ async function reportProgress(target: string, knownState?: DurableRunState): Pro
     const status = node.status ?? "unknown";
     counts[status] = (counts[status] ?? 0) + 1;
   }
-  await setStatus("running", { run_status: state.status, node_counts: counts });
+  await setStatus("running", {
+    run_status: state.status,
+    node_counts: counts,
+    ...(state.sync_status === undefined ? {} : { sync_status: state.sync_status }),
+    ...(state.workflow_status === undefined ? {} : { workflow_status: state.workflow_status }),
+    ...(state.workflow_state === undefined ? {} : { workflow_state: state.workflow_state }),
+    ...(state.workflow_verdict === undefined ? {} : { workflow_verdict: state.workflow_verdict })
+  });
 }
 
 async function synchronizedRunState(target: string): Promise<DurableRunState | undefined> {

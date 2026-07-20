@@ -24,6 +24,14 @@ const ACTIVE_WORKFLOW_STATUSES = new Set([
 const ACTIVE_WORKFLOW_VERDICTS = new Set(["running-healthy", "progressing"]);
 const UNFINISHED_DURABLE_NODE_STATUSES = new Set(["pending", "ready", "running"]);
 
+export function staleRunningResetGraceActive(
+  reason: string | undefined,
+  staleRunningGraceUntilMs: number,
+  nowMs = Date.now()
+): boolean {
+  return reason === "stale-running" && staleRunningGraceUntilMs > nowMs;
+}
+
 export function terminalDurableRunNeedsMoreWorkflowPolling(
   state: WorkerRecoveryRunState,
   recoverableNodeCount: number

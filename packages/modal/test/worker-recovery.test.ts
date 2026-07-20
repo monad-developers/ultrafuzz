@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { terminalDurableRunNeedsMoreWorkflowPolling } from "../src/worker-recovery.js";
+import { staleRunningResetGraceActive, terminalDurableRunNeedsMoreWorkflowPolling } from "../src/worker-recovery.js";
 
 describe("Modal worker recovery state", () => {
+  it("blocks stale-running resets during the post-resume grace window only", () => {
+    expect(staleRunningResetGraceActive("stale-running", 2_000, 1_000)).toBe(true);
+    expect(staleRunningResetGraceActive("stale-running", 1_000, 2_000)).toBe(false);
+    expect(staleRunningResetGraceActive("failed", 2_000, 1_000)).toBe(false);
+  });
+
   it("keeps polling a failed durable run while the workflow is still progressing", () => {
     expect(
       terminalDurableRunNeedsMoreWorkflowPolling(
