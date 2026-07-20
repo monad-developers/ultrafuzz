@@ -20,8 +20,10 @@ import {
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
   materializeBakedCandidate,
+  type PublicEvalDiagnosticsBuildError,
   publicBenchmarkWorkRoot,
   publicBundleSources,
+  publicEvalRunId,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   writePublicBundleAtomic
@@ -246,6 +248,24 @@ it("preserves the eval run failure when no diagnostic can be built", async () =>
   ).rejects.toBe(runFailure);
 });
 
+it("classifies an otherwise-untyped diagnostics build failure without exposing its detail", async () => {
+  const privateFailure = new Error("private schema detail");
+  await expect(
+    runAndCheckpointPublicEvalDiagnostics({
+      runEval: async () => undefined,
+      buildDiagnostics: () => {
+        throw privateFailure;
+      },
+      persistDiagnostics: async () => undefined,
+      flush: async () => undefined
+    })
+  ).rejects.toMatchObject({
+    name: "PublicEvalDiagnosticsBuildError",
+    message: "public eval diagnostics could not be built",
+    cause: privateFailure
+  } satisfies Partial<PublicEvalDiagnosticsBuildError>);
+});
+
 it("materializes the private candidate from the image with exact clean Git provenance", async () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-candidate-"));
   const source = path.join(root, "source");
@@ -440,7 +460,7 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     model: model.model,
     reasoning: model.reasoning,
     candidate_commit: config.public_benchmark.candidate_commit,
-    eval_run_id: `${config.run_id}-${model.slug}`,
+    eval_run_id: publicEvalRunId(config.run_id, model.slug),
     lineage: {
       logical_run_id: lineage.logical_run_id,
       generation: lineage.generation,
@@ -473,6 +493,91 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
       lineage
     )
   ).toThrow(/attempt ID lineage/u);
+});
+
+it("bounds composed public eval run IDs without losing model identity or bundle lineage", () => {
+  const runId = `public-${"r".repeat(121)}`;
+  const firstModelSlug = `benchmark-smoke-${"m".repeat(105)}-first`;
+  const secondModelSlug = `benchmark-smoke-${"m".repeat(104)}-second`;
+  const firstEvalRunId = publicEvalRunId(runId, firstModelSlug);
+  const secondEvalRunId = publicEvalRunId(runId, secondModelSlug);
+
+  expect(firstEvalRunId.length).toBeLessThanOrEqual(128);
+  expect(publicEvalRunId(runId, firstModelSlug)).toBe(firstEvalRunId);
+  expect(secondEvalRunId.length).toBeLessThanOrEqual(128);
+  expect(secondEvalRunId).not.toBe(firstEvalRunId);
+
+  const model: ModalModelSpec = {
+    slug: firstModelSlug,
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "low",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: runId,
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: {
+      project: "fixture",
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_credential_ttl_seconds: 57_600
+    },
+    node_timeout_seconds: 900,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      experiment: "candidate",
+      excluded_node_ids: [],
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const lineage: ModalWorkerLineage = {
+    schema_version: "ultrafuzz.modal.worker-lineage.v1",
+    logical_run_id: config.run_id,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-one",
+    workspace_mode: "fresh",
+    fingerprints: {
+      config: "b".repeat(64),
+      source: "c".repeat(64),
+      image: "d".repeat(64)
+    },
+    model_fingerprint: "e".repeat(64)
+  };
+  const bundle = {
+    benchmark: config.public_benchmark.benchmark,
+    lane: config.public_benchmark.lane,
+    experiment: config.public_benchmark.experiment,
+    model_slug: model.slug,
+    model: model.model,
+    reasoning: model.reasoning,
+    candidate_commit: config.public_benchmark.candidate_commit,
+    eval_run_id: firstEvalRunId,
+    lineage: {
+      logical_run_id: lineage.logical_run_id,
+      generation: lineage.generation,
+      attempt: lineage.attempt,
+      attempt_id: lineage.attempt_id,
+      config_fingerprint: lineage.fingerprints.config,
+      source_fingerprint: lineage.fingerprints.source,
+      image_fingerprint: lineage.fingerprints.image,
+      model_fingerprint: lineage.model_fingerprint
+    }
+  } as PublicBenchmarkBundle;
+
+  expect(() => assertPublicWorkerBundleLineage(bundle, config, model, lineage)).not.toThrow();
+  expect(() =>
+    assertPublicWorkerBundleLineage({ ...bundle, eval_run_id: secondEvalRunId }, config, model, lineage)
+  ).toThrow(/eval run/u);
 });
 
 it("atomically seals a public bundle with private permissions", async () => {

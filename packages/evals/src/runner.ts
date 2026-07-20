@@ -27,11 +27,11 @@ import {
 import {
   EvalError,
   appendJsonLine,
+  boundedEvalId,
   diagnosticFromError,
   evalRunRoot,
   generateEvalRunId,
-  resolveTerminalReportPath,
-  safeEvalId
+  resolveTerminalReportPath
 } from "./utils.js";
 
 export interface RowLaunchValue {
@@ -203,7 +203,9 @@ export async function launchEvalRow(input: LaunchEvalRowInput): Promise<EvalRunR
   if (runnerProfile === undefined) {
     throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", `missing runner model profile ${input.row.runner_model_profile}`);
   }
-  const runId = safeEvalId([input.evalRunId, input.row.run_id]);
+  // Smithers prefixes runtime IDs with `ultrafuzz-`; keep the resulting ID at
+  // or below its 128-character limit while retaining row uniqueness.
+  const runId = boundedEvalId([input.evalRunId, input.row.run_id], 118);
   const recordBase = {
     schema_version: EVAL_RUN_SCHEMA_VERSION,
     eval_run_id: input.evalRunId,

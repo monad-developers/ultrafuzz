@@ -78,6 +78,38 @@ function terminalRunFixture(runRoot: string): void {
 }
 
 describe("runner", () => {
+  it("generates stable distinct bounded child run IDs for rows with the same long prefix", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-ids-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const commonRunIdPrefix = `benchmark-${"r".repeat(108)}`;
+    const rowA = testRow(suite, { run_id: `${commonRunIdPrefix}-a` });
+    const rowB = testRow(suite, { run_id: `${commonRunIdPrefix}-b` });
+    const launchedRunIds: string[] = [];
+    const launcher = async (input: { runId: string }) => {
+      launchedRunIds.push(input.runId);
+      return { ok: false, workflowIds: [], diagnostics: [] };
+    };
+    const launch = async (row: typeof rowA) =>
+      launchEvalRow({
+        projectRoot: base,
+        suitePath: "suite.yml",
+        evalRunId: `eval-${"e".repeat(113)}`,
+        row,
+        suite,
+        launcher
+      });
+
+    await launch(rowA);
+    await launch(rowB);
+    await launch(rowA);
+
+    expect(launchedRunIds[0]).toHaveLength(118);
+    expect(`ultrafuzz-${launchedRunIds[0]}`).toHaveLength(128);
+    expect(launchedRunIds[0]).not.toBe(launchedRunIds[1]);
+    expect(launchedRunIds[0]).toBe(launchedRunIds[2]);
+    expect(launchedRunIds.every((runId) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(runId))).toBe(true);
+  });
+
   it("records failed launches in runs.jsonl with diagnostics", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-"));
     const suite = testSuite(path.join(base, "gt"));

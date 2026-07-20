@@ -20,6 +20,7 @@ import {
   assertSanitizedModalCollectedFiles,
   type ModalCollectedLineage
 } from "../src/runner.js";
+import { publicEvalRunId } from "../src/public-worker.js";
 
 const MODEL: ModalModelSpec = {
   slug: "benchmark-smoke-claude-sonnet-5-low",
@@ -102,6 +103,88 @@ describe("public post-eval diagnostics", () => {
     expect(serialized).not.toContain(fixture.runRoot);
     expect(serialized).not.toContain("secret diagnostic message");
     expect(serialized).not.toContain("details");
+  });
+
+  it("accepts the runtime-prefixed workflow ID emitted for a maximum-length eval child run", () => {
+    const fixture = evalFixture();
+    const workflowId = `ultrafuzz-${"r".repeat(128)}`;
+    fixture.runSummary.records[0]!.workflow_ids = [workflowId];
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(workflowId).toHaveLength(138);
+    expect(diagnostics.rows[0]?.workflow_ids).toEqual([workflowId]);
+    expect(diagnostics.summary.scoring_ready).toBe(true);
+
+    fixture.runSummary.records[0]!.workflow_ids = [`workflow-${"r".repeat(248)}`];
+    expect(() =>
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: fixture.runSummary
+      })
+    ).toThrow();
+  });
+
+  it("reads a production-length workflow ID from the durable run summary", () => {
+    const fixture = evalFixture();
+    const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-long-workflow-"));
+    const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
+    const workflowId = `ultrafuzz-${"r".repeat(128)}`;
+    fixture.runSummary.records[0]!.workflow_ids = [workflowId];
+    fs.mkdirSync(evalRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
+    fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
+
+    const diagnostics = createPublicEvalDiagnosticsFromRun({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      controlRoot,
+      evalRunId: fixture.evalRunId
+    });
+
+    expect(diagnostics.rows[0]?.workflow_ids).toEqual([workflowId]);
+    expect(diagnostics.summary.scoring_ready).toBe(true);
+  });
+
+  it("validates hash-bounded public eval IDs composed from maximum-length inputs", () => {
+    const fixture = evalFixture();
+    const runId = `public-${"r".repeat(121)}`;
+    const model = { ...MODEL, slug: `benchmark-${"m".repeat(118)}` };
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      run_id: runId,
+      models: [model],
+      public_benchmark: { ...CONFIG.public_benchmark, runner_model_profile: model.slug }
+    };
+    const lineage: ModalWorkerLineage = { ...LINEAGE, logical_run_id: runId };
+    fixture.matrix[0]!.variant_id = model.slug;
+    fixture.runSummary.records[0]!.variant_id = model.slug;
+    const evalRunId = publicEvalRunId(runId, model.slug);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config,
+      model,
+      lineage,
+      evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(evalRunId.length).toBeLessThanOrEqual(128);
+    expect(diagnostics.eval_run_id).toBe(evalRunId);
+    expect(parsePublicEvalDiagnostics(diagnostics)).toEqual(diagnostics);
   });
 
   it("fails closed before scoring for a watched row without a terminal report", () => {

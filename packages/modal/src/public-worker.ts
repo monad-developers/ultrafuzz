@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  boundedEvalId,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   resolveTerminalReportPath,
@@ -42,6 +43,15 @@ const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
 const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
 
+export class PublicEvalDiagnosticsBuildError extends Error {
+  override readonly name = "PublicEvalDiagnosticsBuildError";
+
+  constructor(cause: unknown) {
+    super("public eval diagnostics could not be built", { cause });
+  }
+}
+const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
+
 export async function runPublicBenchmarkWorker(input: {
   config: PublicModalBenchmarkConfig;
   model: ModalModelSpec;
@@ -73,7 +83,12 @@ export async function runPublicBenchmarkWorker(input: {
     writer,
     snapshot: () => Promise.resolve(emptyWorkerCheckpoint()),
     flush: flushFilesystem,
-    diagnosticCodeForError: (error) => (input.isCheckpointIncompatible(error) ? "checkpoint-incompatible" : undefined),
+    diagnosticCodeForError: (error) =>
+      input.isCheckpointIncompatible(error)
+        ? "checkpoint-incompatible"
+        : error instanceof PublicEvalDiagnosticsBuildError
+          ? "public-eval-diagnostics-invalid"
+          : undefined,
     run: async () => {
       await input.preflight({
         workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath, diagnosticsPath],
@@ -219,6 +234,10 @@ export function publicBenchmarkWorkRoot(dataRoot: string): string {
   return workRoot;
 }
 
+export function publicEvalRunId(runId: string, modelSlug: string): string {
+  return boundedEvalId([runId, modelSlug], PUBLIC_EVAL_RUN_ID_MAX_LENGTH);
+}
+
 export async function checkpointPublicModelWorkStart(
   writer: WorkerResultWriter,
   markStarted: () => void,
@@ -246,7 +265,7 @@ export async function runAndCheckpointPublicEvalDiagnostics(input: {
     diagnostics = input.buildDiagnostics();
   } catch (error) {
     if (runError !== undefined) throw runError;
-    throw error;
+    throw new PublicEvalDiagnosticsBuildError(error);
   }
   await input.persistDiagnostics(diagnostics);
   await input.flush();
@@ -268,7 +287,7 @@ export function assertPublicWorkerBundleLineage(
     bundle.model === model.model ? undefined : "model",
     bundle.reasoning === model.reasoning ? undefined : "reasoning",
     bundle.candidate_commit === scope.candidate_commit ? undefined : "candidate commit",
-    bundle.eval_run_id === `${config.run_id}-${model.slug}` ? undefined : "eval run",
+    bundle.eval_run_id === publicEvalRunId(config.run_id, model.slug) ? undefined : "eval run",
     bundle.lineage.logical_run_id === lineage.logical_run_id ? undefined : "logical run lineage",
     bundle.lineage.generation === lineage.generation ? undefined : "generation lineage",
     bundle.lineage.attempt === lineage.attempt ? undefined : "attempt lineage",
@@ -406,7 +425,7 @@ async function preparePublicBenchmark(
     }
   }
   await writeFile(suitePath, stringify(suite, { lineWidth: 120 }), { mode: 0o600 });
-  const evalRunId = `${config.run_id}-${model.slug}`;
+  const evalRunId = publicEvalRunId(config.run_id, model.slug);
   await runCommand(
     [
       "node",

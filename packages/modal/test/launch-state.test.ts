@@ -374,6 +374,20 @@ describe("Modal runner status", () => {
       parseModalWorkerStatus(
         workerResult({
           model_work_started: true,
+          exit_category: "sandbox-exited",
+          diagnostic_code: "public-eval-diagnostics-invalid"
+        })
+      )
+    ).toMatchObject({
+      category: "permanent-operational-failure",
+      model_work_started: true,
+      retryable: false,
+      error_code: "public-eval-diagnostics-invalid"
+    });
+    expect(
+      parseModalWorkerStatus(
+        workerResult({
+          model_work_started: true,
           exit_category: "authentication-failure",
           diagnostic_code: "authentication-failure"
         })

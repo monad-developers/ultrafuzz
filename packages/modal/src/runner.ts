@@ -15,6 +15,8 @@ import {
   type Volume
 } from "modal";
 
+import { boundedEvalId } from "@ultrafuzz/evals";
+
 import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
 import {
   fingerprintModalConfigFile,
@@ -862,7 +864,7 @@ export function assertPublicBenchmarkBundleLineage(input: {
     bundle.model_slug === launch.slug ? undefined : "model slug",
     bundle.model === launch.model ? undefined : "model",
     bundle.reasoning === launch.reasoning ? undefined : "reasoning",
-    bundle.eval_run_id === `${config.run_id}-${launch.slug}` ? undefined : "eval run",
+    bundle.eval_run_id === boundedEvalId([config.run_id, launch.slug], 128) ? undefined : "eval run",
     bundle.lineage.logical_run_id === state.logical_run_id ? undefined : "bundle logical run lineage",
     bundle.lineage.generation === state.generation ? undefined : "bundle generation lineage",
     bundle.lineage.attempt === launch.attempt ? undefined : "bundle attempt lineage",
@@ -1365,7 +1367,9 @@ export function assertPublicEvalDiagnosticsLineage(
     diagnostics.model === complete.model ? undefined : "model",
     diagnostics.reasoning === complete.reasoning ? undefined : "reasoning",
     diagnostics.candidate_commit === complete.candidate_commit ? undefined : "candidate commit",
-    diagnostics.eval_run_id === `${complete.logical_run_id}-${complete.model_slug}` ? undefined : "eval run",
+    diagnostics.eval_run_id === boundedEvalId([complete.logical_run_id!, complete.model_slug!], 128)
+      ? undefined
+      : "eval run",
     diagnostics.lineage.config_fingerprint === complete.config_fingerprint ? undefined : "configuration fingerprint",
     diagnostics.lineage.source_fingerprint === complete.source_fingerprint ? undefined : "source fingerprint",
     diagnostics.lineage.image_fingerprint === complete.image_fingerprint ? undefined : "image fingerprint",

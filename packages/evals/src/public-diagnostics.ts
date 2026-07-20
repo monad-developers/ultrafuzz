@@ -1,11 +1,17 @@
 import { z } from "zod/v4";
 
+import { boundedEvalId } from "./utils.js";
+
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
 export const PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v1" as const;
 export const MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES = 1024 * 1024;
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+// Runtime workflow IDs prefix an otherwise-safe 128-character run ID with
+// `ultrafuzz-` (and may add lifecycle suffixes). They are opaque identifiers,
+// not artifact/path components, so retain a separate bounded contract.
+const workflowId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u);
 const fingerprint = z.string().regex(/^[0-9a-f]{64}$/u);
 const workflowStatus = z.enum([
   "pending",
@@ -58,7 +64,7 @@ const rowSchema = z.strictObject({
   workflow_terminal: z.boolean(),
   terminal_disposition: terminalDisposition,
   terminal_report_present: z.boolean(),
-  workflow_ids: z.array(safeId).max(32),
+  workflow_ids: z.array(workflowId).max(32),
   diagnostic_codes: z.array(safeId).max(64),
   scoring_ready: z.boolean(),
   reason_codes: z.array(reasonCode).max(reasonCode.options.length)
@@ -100,7 +106,7 @@ export type PublicEvalDiagnosticsReasonCode = z.infer<typeof reasonCode>;
 
 export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostics {
   const parsed = diagnosticsSchema.parse(value);
-  if (parsed.eval_run_id !== `${parsed.lineage.logical_run_id}-${parsed.model_slug}`) {
+  if (parsed.eval_run_id !== boundedEvalId([parsed.lineage.logical_run_id, parsed.model_slug], 128)) {
     throw new Error("public eval diagnostics eval run does not match its lineage");
   }
   const rowIds = new Set(parsed.rows.map((row) => row.row_id));

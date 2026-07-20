@@ -33,6 +33,7 @@ export type { PublicEvalDiagnostics } from "@ultrafuzz/evals";
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+const workflowId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u);
 const workflowStatus = z.enum([
   "pending",
   "running",
@@ -70,7 +71,7 @@ const recordInputSchema = z.looseObject({
   trial_id: safeId,
   status: z.enum(["launched", "failed", "missing"]),
   final_status: z.unknown().optional(),
-  workflow_ids: z.array(safeId).max(32),
+  workflow_ids: z.array(workflowId).max(32),
   workflow: workflowInputSchema.optional(),
   diagnostics: z.array(diagnosticInputSchema).max(64),
   ultrafuzz_run_root: z.string().optional(),
