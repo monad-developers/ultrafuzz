@@ -1,6 +1,8 @@
 Score the finding with this rubric:
 Return exactly one JSON object with matched_ground_truth_bug_id (a candidate label string or null), score, signals, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.
 
+Apply the same-fix/invariant test before scoring a candidate. Differences in entrypoint, trigger, setup sequence, data carrier, exact PoC implementation, or proposed micro-localization do not defeat a match when the canonical fix would likely prevent the candidate, the security outcome is compatible, and both findings reach the same vulnerable mechanism, sink, or violated invariant. Explain those three signals in the rationale when returning a match. Partial textual resemblance alone is not duplicate evidence.
+
 - 0.0: no meaningful match
 - 0.4: weak signal in the same area
 - 0.7: same root cause and impact, but incomplete localization or evidence

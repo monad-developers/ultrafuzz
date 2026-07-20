@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildAdjudicatorPrompt, buildAdjudicatorRetryPrompt } from "../src/evaluator/adjudicator-prompt.js";
+import {
+  EVAL_JUDGE_PROMPT_VERSION,
+  buildAdjudicatorPrompt,
+  buildAdjudicatorRetryPrompt
+} from "../src/evaluator/adjudicator-prompt.js";
 import type { FindingJudgeInput, FindingJudgeResult } from "../src/types.js";
 import { testRow, testSuite } from "./helpers.js";
 
@@ -15,7 +19,7 @@ function judgeInput(): FindingJudgeInput {
     confidence: 0.5,
     judge_model: "deterministic-v1",
     judge_kind: "deterministic",
-    prompt_version: "ultrafuzz-eval-judge-v4-panel",
+    prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     timestamp: "2026-07-20T00:00:00.000Z"
   };
   return {
@@ -42,6 +46,18 @@ describe("adjudicator prompt assets", () => {
     expect(messages[1]?.content).toContain('"matched_ground_truth_bug_id": "candidate-1"');
     expect(messages[1]?.content).toContain('"summary": "Literal replacement syntax: $&"');
     expect(messages[1]?.content).not.toContain("BUG-1");
+  });
+
+  it("defines duplicate equivalence with the same-fix, mechanism, and outcome safeguards", () => {
+    const messages = buildAdjudicatorPrompt(judgeInput());
+    const rendered = messages.map((message) => message.content).join("\n");
+
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v5-same-fix");
+    expect(rendered).toContain("canonical fix would likely prevent the candidate");
+    expect(rendered).toContain("same vulnerable mechanism, sink, or violated invariant");
+    expect(rendered).toContain("security outcome is compatible");
+    expect(rendered).toContain("entrypoint, trigger, setup sequence, data carrier");
+    expect(rendered).toContain("Partial textual resemblance");
   });
 
   it("renders schema-retry instructions from MDX without rewriting response text", () => {
