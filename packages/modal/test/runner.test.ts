@@ -4,32 +4,53 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type SandboxCreateParams } from "modal";
+import {
+  SandboxFilesystemNotFoundError,
+  type App,
+  type FileInfo,
+  type Image,
+  type Sandbox,
+  type SandboxCreateParams
+} from "modal";
 import { describe, expect, it, vi } from "vitest";
 
-import { fingerprintModalModel } from "../src/config.js";
+import { fingerprintModalModel, isPublicModalBenchmarkConfig, parseModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
 import {
   createModalLaunchState,
   markModalSandboxCreated,
+  modalLaunchTags,
   readModalLaunchState,
   reserveModalLaunchAttempt,
   writeModalLaunchState
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } from "../src/layout.js";
+import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import {
   MODAL_COLLECT_RESULT_FILES,
+  ModalTerminationError,
+  assertPublicBenchmarkBundleDiagnosticsMatch,
+  assertPublicBenchmarkBundleLineage,
   assertSanitizedModalCollectedFiles,
+  classifyModalLaunchFailure,
   createModalBenchmarkSandbox,
+  createExactCandidateSourceArchive,
   createTrackedSourceArchive,
   finishReservedModalLaunch,
+  hasExactPublicDiagnosticCollectionConfig,
+  launchModalBenchmark,
+  modalImageBuildTags,
   modalImageBuildCommand,
   modalSandboxName,
   modalSecurityToolchainCommands,
+  modalTerminationScopesForConfig,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
   readOptionalModalSandboxText,
-  replaceSanitizedModalCollectedFiles
+  replaceSanitizedModalCollectedFiles,
+  selectModalCollectedEvidence,
+  terminateModalBenchmarkSandboxes,
+  terminateModalBenchmarkTagScopes
 } from "../src/runner.js";
 
 const MODEL: ModalModelSpec = {
@@ -67,6 +88,235 @@ describe("Modal benchmark capacity", () => {
   });
 });
 
+describe("Modal benchmark termination", () => {
+  it("terminates an exact newer attempt once and ignores broader or mismatched tags", async () => {
+    const { state, record } = terminationState();
+    const exact = fakeTerminationSandbox("sandbox-exact", {
+      ...modalLaunchTags(state, record),
+      attempt: "2",
+      attempt_id: "newer-attempt"
+    });
+    const broader = fakeTerminationSandbox("sandbox-broader", {
+      purpose: "ultrafuzz-eval",
+      logical_run: state.logical_run_id,
+      generation: String(state.generation),
+      model_slug: record.slug,
+      attempt: "3",
+      attempt_id: "broader-attempt"
+    });
+    const mismatched = fakeTerminationSandbox("sandbox-mismatch", {
+      ...modalLaunchTags(state, record),
+      attempt: "4",
+      attempt_id: "mismatched-attempt",
+      source_fingerprint: "d".repeat(64)
+    });
+    const stopped = fakeTerminationSandbox(
+      "sandbox-stopped",
+      {
+        ...modalLaunchTags(state, record),
+        attempt: "5",
+        attempt_id: "stopped-attempt"
+      },
+      0
+    );
+    const sandboxes = fakeTerminationService([exact, exact, broader, mismatched, stopped]);
+
+    await expect(terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes })).resolves.toEqual({
+      scopes: 1,
+      discovered: 4,
+      matched: 2,
+      ignored: 2,
+      live: 1,
+      already_stopped: 1,
+      terminated: 1,
+      failures: 0
+    });
+
+    expect(sandboxes.list).toHaveBeenCalledWith({
+      appId: "app-id",
+      tags: {
+        purpose: "ultrafuzz-eval",
+        logical_run: state.logical_run_id,
+        generation: String(state.generation),
+        model_slug: record.slug,
+        config_fingerprint: state.fingerprints.config,
+        source_fingerprint: state.fingerprints.source,
+        image_fingerprint: state.fingerprints.image,
+        model_fingerprint: record.model_fingerprint
+      }
+    });
+    expect(exact.terminate).toHaveBeenCalledTimes(1);
+    expect(stopped.terminate).not.toHaveBeenCalled();
+    expect(broader.poll).not.toHaveBeenCalled();
+    expect(broader.terminate).not.toHaveBeenCalled();
+    expect(mismatched.poll).not.toHaveBeenCalled();
+    expect(mismatched.terminate).not.toHaveBeenCalled();
+  });
+
+  it("attempts every exact termination before reporting aggregate failures", async () => {
+    const { state, record } = terminationState();
+    const failed = fakeTerminationSandbox("sandbox-failed", {
+      ...modalLaunchTags(state, record),
+      attempt: "2",
+      attempt_id: "failed-attempt"
+    });
+    failed.terminate.mockRejectedValueOnce(new Error("termination unavailable"));
+    const succeeded = fakeTerminationSandbox("sandbox-succeeded", {
+      ...modalLaunchTags(state, record),
+      attempt: "3",
+      attempt_id: "succeeded-attempt"
+    });
+    const sandboxes = fakeTerminationService([failed, succeeded]);
+
+    let failure: unknown;
+    try {
+      await terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failed.terminate).toHaveBeenCalledTimes(1);
+    expect(succeeded.terminate).toHaveBeenCalledTimes(1);
+    expect(failure).toBeInstanceOf(ModalTerminationError);
+    expect((failure as ModalTerminationError).counts).toEqual({
+      scopes: 1,
+      discovered: 2,
+      matched: 2,
+      ignored: 0,
+      live: 2,
+      already_stopped: 0,
+      terminated: 1,
+      failures: 1
+    });
+    expect((failure as Error).message).not.toMatch(/sandbox-failed|sandbox-succeeded/u);
+  });
+
+  it("uses stable config lineage to terminate every valid generation and reject malformed candidates", async () => {
+    const config = parseModalBenchmarkConfig({
+      schema_version: "ultrafuzz.modal.benchmark.v1",
+      run_id: "immutable-run",
+      target: { repo: "https://github.com/example/target", ref: "main" },
+      ground_truth: {
+        repo: "https://github.com/example/ground-truth",
+        ref: "main",
+        file: "findings.yml"
+      },
+      braintrust: { project: "termination-test" },
+      models: [MODEL]
+    });
+    const scopes = modalTerminationScopesForConfig(config, {
+      config: "a".repeat(64),
+      source: "b".repeat(64)
+    });
+    const exactGenerationOne = fakeTerminationSandbox("generation-one", {
+      ...scopes[0]!.tags,
+      generation: "1",
+      attempt: "1",
+      attempt_id: "attempt-one",
+      image_fingerprint: "c".repeat(64)
+    });
+    const exactGenerationTwo = fakeTerminationSandbox("generation-two", {
+      ...scopes[0]!.tags,
+      generation: "2",
+      attempt: "3",
+      attempt_id: "attempt-three",
+      image_fingerprint: "d".repeat(64)
+    });
+    const invalidGeneration = fakeTerminationSandbox("invalid-generation", {
+      ...scopes[0]!.tags,
+      generation: "0",
+      attempt: "4",
+      attempt_id: "invalid-generation",
+      image_fingerprint: "d".repeat(64)
+    });
+    const mismatched = fakeTerminationSandbox("mismatched", {
+      ...scopes[0]!.tags,
+      generation: "3",
+      attempt: "5",
+      attempt_id: "mismatched",
+      image_fingerprint: "e".repeat(64),
+      source_fingerprint: "f".repeat(64)
+    });
+    const sandboxes = fakeTerminationService([exactGenerationOne, exactGenerationTwo, invalidGeneration, mismatched]);
+
+    await expect(terminateModalBenchmarkTagScopes({ scopes, appId: "app-id", sandboxes })).resolves.toEqual({
+      scopes: 1,
+      discovered: 4,
+      matched: 2,
+      ignored: 2,
+      live: 2,
+      already_stopped: 0,
+      terminated: 2,
+      failures: 0
+    });
+    expect(exactGenerationOne.terminate).toHaveBeenCalledTimes(1);
+    expect(exactGenerationTwo.terminate).toHaveBeenCalledTimes(1);
+    expect(invalidGeneration.terminate).not.toHaveBeenCalled();
+    expect(mismatched.terminate).not.toHaveBeenCalled();
+  });
+
+  it("uses direct IDs from attempt history and rejects an empty state as unconfirmed", async () => {
+    const { state, record } = terminationState();
+    markModalSandboxCreated(record, "historical-sandbox");
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: record.volume_name,
+      remoteRoot: record.remote_root,
+      workspaceMode: "fresh",
+      attemptId: "replacement-attempt"
+    });
+    const historical = fakeTerminationSandbox("historical-sandbox", modalLaunchTags(state, record));
+    const sandboxes = fakeTerminationService([historical], []);
+
+    await expect(terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes })).resolves.toMatchObject({
+      scopes: 1,
+      discovered: 1,
+      matched: 1,
+      terminated: 1,
+      failures: 0
+    });
+    expect(sandboxes.fromId).toHaveBeenCalledWith("historical-sandbox");
+
+    const empty = createModalLaunchState({
+      logicalRunId: "empty-run",
+      generation: 1,
+      generationMode: "fresh",
+      app: "app-placeholder",
+      image: "image-placeholder",
+      imageId: "image-id-placeholder",
+      timeoutMs: 60_000,
+      sourceRevision: "revision-placeholder",
+      fingerprints: { config: "a".repeat(64), source: "b".repeat(64), image: "c".repeat(64) }
+    });
+    await expect(
+      terminateModalBenchmarkSandboxes({ state: empty, appId: "app-id", sandboxes: fakeTerminationService([]) })
+    ).rejects.toMatchObject({ counts: { scopes: 0, failures: 1 } });
+  });
+
+  it("uses exact workflow-scoped tags for cancellable image staging", async () => {
+    const tags = modalImageBuildTags({
+      buildScope: "12345-2",
+      imageName: "ufz-runner-candidate",
+      sourceFingerprint: "a".repeat(64)
+    });
+    const exact = fakeTerminationSandbox("exact-build", tags);
+    const other = fakeTerminationSandbox("other-build", { ...tags, build_scope: "12345-3" });
+    const sandboxes = fakeTerminationService([exact, other]);
+
+    await expect(
+      terminateModalBenchmarkTagScopes({
+        scopes: [{ kind: "image-build", tags }],
+        appId: "app-id",
+        sandboxes
+      })
+    ).resolves.toMatchObject({ matched: 1, ignored: 1, terminated: 1, failures: 0 });
+    expect(exact.terminate).toHaveBeenCalledTimes(1);
+    expect(other.terminate).not.toHaveBeenCalled();
+  });
+});
+
 describe("Modal image source staging", () => {
   it("installs both final invariant backends alongside the Recon coverage backend", () => {
     const commands = modalSecurityToolchainCommands().join("\n");
@@ -98,12 +348,179 @@ describe("Modal image source staging", () => {
     expect(entries).not.toContain("untracked.txt");
     expect(entries).not.toContain(".private/benchmark.json");
   });
+
+  it("bakes a clean shallow Git checkout at the exact candidate commit", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-candidate-"));
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "ultrafuzz@example.invalid"], { cwd: root });
+    fs.writeFileSync(path.join(root, ".gitignore"), "private.txt\n", "utf8");
+    fs.writeFileSync(path.join(root, "tracked.txt"), "tracked\n", "utf8");
+    fs.writeFileSync(path.join(root, "private.txt"), "private\n", "utf8");
+    execFileSync("git", ["add", ".gitignore", "tracked.txt"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    const archive = path.join(root, "candidate.tgz");
+    const extracted = path.join(root, "extracted");
+
+    createExactCandidateSourceArchive(root, archive);
+    fs.mkdirSync(extracted);
+    execFileSync("tar", ["-xzf", archive, "-C", extracted]);
+
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: extracted, encoding: "utf8" }).trim()).toBe(revision);
+    expect(
+      execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+        cwd: extracted,
+        encoding: "utf8"
+      })
+    ).toBe("");
+    expect(fs.existsSync(path.join(extracted, ".git/shallow"))).toBe(true);
+    expect(fs.existsSync(path.join(extracted, "tracked.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(extracted, "private.txt"))).toBe(false);
+
+    const generated = createExactCandidateSourceArchive(root);
+    const generatedRoot = path.dirname(generated.path);
+    expect(fs.statSync(generated.path).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(generatedRoot).mode & 0o777).toBe(0o700);
+    generated.cleanup();
+    expect(fs.existsSync(generatedRoot)).toBe(false);
+
+    const failedArchive = path.join(root, "failed.tgz");
+    expect(() =>
+      createExactCandidateSourceArchive(root, failedArchive, {
+        createTar: () => {
+          throw new Error("injected tar failure");
+        }
+      })
+    ).toThrow(/injected tar failure/u);
+    expect(fs.existsSync(failedArchive)).toBe(false);
+
+    const preexistingArchive = path.join(root, "preexisting.tgz");
+    fs.writeFileSync(preexistingArchive, "keep me\n", "utf8");
+    expect(() => createExactCandidateSourceArchive(root, preexistingArchive)).toThrow();
+    expect(fs.readFileSync(preexistingArchive, "utf8")).toBe("keep me\n");
+
+    fs.writeFileSync(path.join(root, "tracked.txt"), "dirty\n", "utf8");
+    expect(() => createExactCandidateSourceArchive(root, path.join(root, "dirty.tgz"))).toThrow(/tracked changes/u);
+  });
+
+  it("rejects a public configuration for a different candidate before contacting Modal", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-candidate-mismatch-"));
+    const configPath = path.join(root, "benchmark.json");
+    fs.writeFileSync(configPath, `${JSON.stringify(publicCollectionLineage().config)}\n`);
+
+    await expect(launchModalBenchmark({ configPath, repoRoot: path.resolve("../.."), env: {} })).rejects.toThrow(
+      /exact local Git HEAD/u
+    );
+  });
 });
 
 describe("Modal result collection", () => {
   it("collects only sanitized status, terminal result, and generic worker log files", () => {
-    expect(MODAL_COLLECT_RESULT_FILES).toEqual(["status.json", "worker.log", "result.json"]);
+    expect(MODAL_COLLECT_RESULT_FILES).toEqual([
+      "status.json",
+      "worker.log",
+      "result.json",
+      "public-eval-diagnostics.json"
+    ]);
     expect(MODAL_COLLECT_RESULT_FILES).not.toContain("failure-details.json");
+  });
+
+  it("rejects a stale public collection config before accepting its bundle", () => {
+    const lineage = publicCollectionLineage();
+
+    expect(() => assertPublicBenchmarkBundleLineage(lineage)).not.toThrow();
+    expect(() => assertPublicBenchmarkBundleLineage({ ...lineage, configFingerprint: "f".repeat(64) })).toThrow(
+      /configuration fingerprint/u
+    );
+    expect(() =>
+      assertPublicBenchmarkBundleLineage({
+        ...lineage,
+        state: { ...lineage.state, source_revision: "e".repeat(40) }
+      })
+    ).toThrow(/candidate source revision/u);
+  });
+
+  it("retains public diagnostics only for the exact launch config and model", () => {
+    const lineage = publicCollectionLineage();
+    const input = {
+      config: lineage.config,
+      configFingerprint: lineage.configFingerprint,
+      configuredModel: MODEL,
+      state: lineage.state,
+      launch: { ...lineage.launch, generation: lineage.state.generation }
+    };
+
+    expect(hasExactPublicDiagnosticCollectionConfig(input)).toBe(true);
+    expect(hasExactPublicDiagnosticCollectionConfig({ ...input, configFingerprint: "f".repeat(64) })).toBe(false);
+    expect(
+      hasExactPublicDiagnosticCollectionConfig({
+        ...input,
+        configuredModel: { ...MODEL, provider: "anthropic" }
+      })
+    ).toBe(false);
+    expect(
+      hasExactPublicDiagnosticCollectionConfig({
+        ...input,
+        state: { ...lineage.state, source_revision: "f".repeat(40) }
+      })
+    ).toBe(false);
+  });
+
+  it("rejects every tampered public bundle lineage field", () => {
+    const lineage = publicCollectionLineage();
+    const cases: Array<[string, Partial<typeof lineage.bundle>]> = [
+      ["candidate commit", { candidate_commit: "e".repeat(40) }],
+      ["benchmark", { benchmark: "ultrafuzz-bench" }],
+      ["lane", { lane: "full" }],
+      ["model slug", { model_slug: "other-model" }],
+      ["model", { model: "other-model" }],
+      ["reasoning", { reasoning: "low" }],
+      ["eval run", { eval_run_id: "stale-eval-run" }]
+    ];
+
+    for (const [diagnostic, override] of cases) {
+      expect(() =>
+        assertPublicBenchmarkBundleLineage({
+          ...lineage,
+          bundle: { ...lineage.bundle, ...override }
+        })
+      ).toThrow(new RegExp(diagnostic, "u"));
+    }
+    for (const [diagnostic, override] of [
+      ["bundle logical run lineage", { logical_run_id: "other-run" }],
+      ["bundle generation lineage", { generation: 2 }],
+      ["bundle attempt lineage", { attempt: 2 }],
+      ["bundle attempt ID lineage", { attempt_id: "other-attempt" }],
+      ["bundle configuration lineage", { config_fingerprint: "e".repeat(64) }],
+      ["bundle source lineage", { source_fingerprint: "e".repeat(64) }],
+      ["bundle image lineage", { image_fingerprint: "e".repeat(64) }],
+      ["bundle model lineage", { model_fingerprint: "e".repeat(64) }]
+    ] as const) {
+      expect(() =>
+        assertPublicBenchmarkBundleLineage({
+          ...lineage,
+          bundle: { ...lineage.bundle, lineage: { ...lineage.bundle.lineage, ...override } }
+        })
+      ).toThrow(new RegExp(diagnostic, "u"));
+    }
+  });
+
+  it("binds the bundled diagnostics to the exact collected attempt sidecar", () => {
+    const diagnostics = '{"attempt_id":"attempt-2"}\n';
+    const bundle = {
+      files: [
+        {
+          path: "eval/public-eval-diagnostics.json",
+          contents_base64: Buffer.from(diagnostics, "utf8").toString("base64")
+        }
+      ]
+    } as unknown as Parameters<typeof assertPublicBenchmarkBundleDiagnosticsMatch>[0];
+
+    expect(() => assertPublicBenchmarkBundleDiagnosticsMatch(bundle, diagnostics)).not.toThrow();
+    expect(() => assertPublicBenchmarkBundleDiagnosticsMatch(bundle, '{"attempt_id":"attempt-3"}\n')).toThrow(
+      /exact collected attempt/u
+    );
   });
 
   it("accepts only exact-attempt aggregate contracts and generic lifecycle logs", () => {
@@ -145,6 +562,30 @@ describe("Modal result collection", () => {
     ).toThrow(/unsanitized Modal worker log/u);
   });
 
+  it("omits diagnostics unless an exact config supplies every injected secret value", () => {
+    const files = {
+      "status.json": "status",
+      "public-eval-diagnostics.json": "diagnostics"
+    };
+    expect(selectModalCollectedEvidence(files, undefined, undefined, {}).files).toEqual({
+      "status.json": "status"
+    });
+
+    const config = publicCollectionLineage().config;
+    expect(selectModalCollectedEvidence(files, config, config.models[0], {}).files).toEqual({
+      "status.json": "status"
+    });
+    expect(selectModalCollectedEvidence(files, config, undefined, { OPENAI_API_KEY: "opaque-secret" }).files).toEqual({
+      "status.json": "status"
+    });
+
+    const selected = selectModalCollectedEvidence(files, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(selected.files).toBe(files);
+    expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
+  });
+
   it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-collect-"));
     const output = path.join(root, "model-one");
@@ -180,7 +621,93 @@ describe("Modal result collection", () => {
   });
 });
 
+function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundleLineage>[0] {
+  const candidateCommit = "d".repeat(40);
+  const configFingerprint = "a".repeat(64);
+  const config = parseModalBenchmarkConfig({
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "public-eval",
+    image_name: "public-image",
+    braintrust: { project: "public-evals", api_key_env: "BRAINTRUST_API_KEY" },
+    public_benchmark: {
+      benchmark: "evmbench",
+      lane: "smoke",
+      runner_model_profile: MODEL.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: candidateCommit,
+      max_runtime_seconds: 3600
+    },
+    node_timeout_seconds: 900,
+    loops: 1,
+    models: [MODEL]
+  });
+  if (!isPublicModalBenchmarkConfig(config)) throw new Error("expected a public benchmark config");
+  return {
+    bundle: {
+      benchmark: "evmbench",
+      lane: "smoke",
+      model_slug: MODEL.slug,
+      model: MODEL.model,
+      reasoning: MODEL.reasoning,
+      candidate_commit: candidateCommit,
+      eval_run_id: `${config.run_id}-${MODEL.slug}`,
+      lineage: {
+        logical_run_id: config.run_id,
+        generation: 1,
+        attempt: 1,
+        attempt_id: "attempt-1",
+        config_fingerprint: configFingerprint,
+        source_fingerprint: "b".repeat(64),
+        image_fingerprint: "c".repeat(64),
+        model_fingerprint: fingerprintModalModel(MODEL)
+      }
+    },
+    config,
+    configFingerprint,
+    state: {
+      logical_run_id: config.run_id,
+      generation: 1,
+      source_revision: candidateCommit,
+      image: config.image_name,
+      fingerprints: {
+        config: configFingerprint,
+        source: "b".repeat(64),
+        image: "c".repeat(64)
+      }
+    },
+    launch: {
+      slug: MODEL.slug,
+      model: MODEL.model,
+      reasoning: MODEL.reasoning,
+      attempt: 1,
+      attempt_id: "attempt-1",
+      model_fingerprint: fingerprintModalModel(MODEL)
+    }
+  };
+}
+
 describe("Modal worker identity", () => {
+  it("fails closed when non-resumable model work may have crossed the readiness boundary", () => {
+    const transient = new Error("injected transient failure");
+    transient.name = "TimeoutError";
+
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: false, postModelRecovery: "stop" })).toBe(
+      "transient-operational-failure"
+    );
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: true, postModelRecovery: "relaunch" })).toBe(
+      "transient-operational-failure"
+    );
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: true, postModelRecovery: "stop" })).toBe(
+      "permanent-operational-failure"
+    );
+    expect(
+      classifyModalLaunchFailure(new Error("injected permanent failure"), {
+        modelMayHaveStarted: false,
+        postModelRecovery: "stop"
+      })
+    ).toBe("permanent-operational-failure");
+  });
+
   it("makes the compiled source tree readable by the non-root worker", () => {
     expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
   });
@@ -285,6 +812,32 @@ describe("Modal worker identity", () => {
     ).rejects.toBe(failure);
   });
 
+  it("rejects an oversized remote public result before reading and rechecks the returned byte length", async () => {
+    const oversizedRead = vi.fn(async () => "must not be read");
+    await expect(
+      readOptionalModalSandboxText(
+        {
+          stat: vi.fn(async () => remoteFileInfo(MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES + 1)),
+          readText: oversizedRead
+        },
+        "/data/public-results.json",
+        MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
+      )
+    ).rejects.toThrow(/exceeds the size limit/u);
+    expect(oversizedRead).not.toHaveBeenCalled();
+
+    await expect(
+      readOptionalModalSandboxText(
+        {
+          stat: vi.fn(async () => remoteFileInfo(4)),
+          readText: vi.fn(async () => "grown")
+        },
+        "/data/public-results.json",
+        4
+      )
+    ).rejects.toThrow(/exceeds the size limit/u);
+  });
+
   it("gives each generation attempt a bounded unique sandbox name", () => {
     const first = modalSandboxName("logical-run", {
       slug: "model-one",
@@ -314,4 +867,70 @@ function emptyReadableStream(): ReadableStream<string> {
       controller.close();
     }
   });
+}
+
+function remoteFileInfo(size: number): FileInfo {
+  return {
+    name: "public-results.json",
+    path: "/data/public-results.json",
+    type: "file",
+    size,
+    mode: 0o600,
+    permissions: "rw-------",
+    owner: "ubuntu",
+    group: "ubuntu",
+    modifiedTime: 0,
+    symlinkTarget: null
+  };
+}
+
+function terminationState() {
+  const state = createModalLaunchState({
+    logicalRunId: "logical-run",
+    generation: 1,
+    generationMode: "fresh",
+    app: "app-placeholder",
+    image: "image-placeholder",
+    imageId: "image-id-placeholder",
+    timeoutMs: 60_000,
+    sourceRevision: "revision-placeholder",
+    fingerprints: { config: "a".repeat(64), source: "b".repeat(64), image: "c".repeat(64) }
+  });
+  const record = reserveModalLaunchAttempt({
+    state,
+    model: MODEL,
+    modelFingerprint: fingerprintModalModel(MODEL),
+    volumeName: "volume-placeholder",
+    remoteRoot: "/data/logical-run/model-one",
+    workspaceMode: "fresh",
+    attemptId: "original-attempt"
+  });
+  return { state, record };
+}
+
+function fakeTerminationSandbox(sandboxId: string, tags: Record<string, string>, exitCode: number | null = null) {
+  return {
+    sandboxId,
+    getTags: vi.fn(async () => tags),
+    poll: vi.fn(async () => exitCode),
+    terminate: vi.fn(async (_params: { wait: true }) => 0),
+    detach: vi.fn()
+  };
+}
+
+function fakeTerminationService(sandboxes: Array<ReturnType<typeof fakeTerminationSandbox>>, listed = sandboxes) {
+  return {
+    fromId: vi.fn(async (sandboxId: string) => {
+      const sandbox = sandboxes.find((candidate) => candidate.sandboxId === sandboxId);
+      if (sandbox === undefined) throw new Error(`unknown sandbox fixture: ${sandboxId}`);
+      return sandbox;
+    }),
+    list: vi.fn((_params: { appId: string; tags: Record<string, string> }) => listedSandboxes(listed))
+  };
+}
+
+async function* listedSandboxes(
+  sandboxes: Array<ReturnType<typeof fakeTerminationSandbox>>
+): AsyncGenerator<ReturnType<typeof fakeTerminationSandbox>, void, unknown> {
+  for (const sandbox of sandboxes) yield sandbox;
 }

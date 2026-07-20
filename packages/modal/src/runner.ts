@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,12 +16,16 @@ import {
   type Volume
 } from "modal";
 
+import { boundedEvalId } from "@ultrafuzz/evals";
+
 import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
 import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
+  isPublicModalBenchmarkConfig,
   loadModalBenchmarkConfig,
-  type ModalBenchmarkConfig
+  type ModalBenchmarkConfig,
+  type PublicModalBenchmarkConfig
 } from "./config.js";
 import {
   DEFAULT_MODAL_APP,
@@ -45,6 +51,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalWorkerLineage,
+  parseModalLaunchState,
   parseModalWorkerResult,
   parseCompatibleModalLaunchState,
   readModalLaunchState,
@@ -52,9 +59,11 @@ import {
   withModalLaunchStateLock,
   writeModalLaunchState,
   type ModalAttemptProvenance,
+  type ModalLaunchFailureCategory,
   type ModalLaunchRecord,
   type ModalLaunchState,
   type ModalLineageFingerprints,
+  type ModalPostModelRecovery,
   type ModalSandboxState
 } from "./launch-state.js";
 import {
@@ -68,20 +77,91 @@ import {
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "./layout.js";
+import {
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
+  parsePublicBenchmarkBundle,
+  type PublicBenchmarkBundle
+} from "./public-bundle.js";
+import {
+  assertPublicEvalDiagnosticsContainsNoSecrets,
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+  parsePublicEvalDiagnostics,
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  type PublicEvalDiagnostics
+} from "./public-eval-diagnostics.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
 const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
+const MODAL_ATTEMPT_TAG = /^[1-9][0-9]*$/u;
+const MODAL_GENERATION_TAG = /^[1-9][0-9]*$/u;
+const MODAL_ATTEMPT_ID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MODAL_BUILD_SCOPE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
-export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
+export const MODAL_COLLECT_RESULT_FILES = [
+  "status.json",
+  "worker.log",
+  "result.json",
+  PUBLIC_EVAL_DIAGNOSTICS_FILE
+] as const;
+export const MODAL_PUBLIC_RESULT_FILE = "public-results.json" as const;
+
+export interface ModalCollectedLineage {
+  generation: number;
+  attempt: number;
+  logical_run_id?: string;
+  attempt_id?: string;
+  model_slug?: string;
+  model?: string;
+  reasoning?: string;
+  candidate_commit?: string;
+  config_fingerprint?: string;
+  source_fingerprint?: string;
+  image_fingerprint?: string;
+  model_fingerprint?: string;
+}
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
+
+export interface ModalTerminationCounts {
+  scopes: number;
+  discovered: number;
+  matched: number;
+  ignored: number;
+  live: number;
+  already_stopped: number;
+  terminated: number;
+  failures: number;
+}
+
+export interface ModalTerminationSandbox {
+  readonly sandboxId: string;
+  getTags(): Promise<Record<string, string>>;
+  poll(): Promise<number | null>;
+  terminate(params: { wait: true }): Promise<number>;
+  detach(): void;
+}
+
+export interface ModalTerminationSandboxService {
+  fromId(sandboxId: string): Promise<ModalTerminationSandbox>;
+  list(params: { appId: string; tags: Record<string, string> }): AsyncIterable<ModalTerminationSandbox>;
+}
+
+export class ModalTerminationError extends Error {
+  override readonly name = "ModalTerminationError";
+
+  constructor(readonly counts: ModalTerminationCounts) {
+    super(`Modal termination could not confirm ${counts.failures} operation(s)`);
+  }
+}
 
 export interface BuildModalImageInput {
   appName?: string;
   imageName?: string;
+  buildScope?: string;
   repoRoot?: string;
   env?: Record<string, string | undefined>;
 }
@@ -92,6 +172,11 @@ export async function buildModalImage(
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const appName = input.appName ?? DEFAULT_MODAL_APP;
   const imageName = input.imageName ?? DEFAULT_MODAL_IMAGE;
+  const buildScope = input.buildScope;
+  if (buildScope !== undefined && !MODAL_BUILD_SCOPE_TAG.test(buildScope)) {
+    throw new Error("Modal image build scope must be a bounded safe ID");
+  }
+  const sourceFingerprint = fingerprintTrackedSource(repoRoot);
   const modal = modalClient(input.env);
   try {
     const app = await modal.apps.fromName(appName, { createIfMissing: true });
@@ -105,15 +190,22 @@ export async function buildModalImage(
       memoryLimitMiB: 12_288,
       timeoutMs: 2 * 60 * 60 * 1000,
       workdir: "/workspace",
-      tags: { purpose: "ultrafuzz-image-stage" }
+      tags:
+        buildScope === undefined
+          ? { purpose: "ultrafuzz-image-stage" }
+          : modalImageBuildTags({ buildScope, imageName, sourceFingerprint })
     });
     try {
-      const archive = createTrackedSourceArchive(repoRoot);
-      await stage.filesystem.copyFromLocal(archive, "/tmp/ultrafuzz-source.tgz");
-      await runChecked(stage, ["bash", "-lc", modalImageBuildCommand()]);
-      const image = await stage.snapshotFilesystem({ timeoutMs: 10 * 60 * 1000, ttlMs: null });
-      await image.publish(imageName);
-      return { imageId: image.imageId, imageName };
+      const archive = createExactCandidateSourceArchive(repoRoot);
+      try {
+        await stage.filesystem.copyFromLocal(archive.path, "/tmp/ultrafuzz-source.tgz");
+        await runChecked(stage, ["bash", "-lc", modalImageBuildCommand()]);
+        const image = await stage.snapshotFilesystem({ timeoutMs: 10 * 60 * 1000, ttlMs: null });
+        await image.publish(imageName);
+        return { imageId: image.imageId, imageName };
+      } finally {
+        archive.cleanup();
+      }
     } finally {
       await stage.terminate({ wait: true });
     }
@@ -133,6 +225,10 @@ export async function launchModalBenchmark(input: {
   const configPath = path.resolve(input.configPath);
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
+  const candidateRevision = sourceRevision(repoRoot).toLowerCase();
+  if (isPublicModalBenchmarkConfig(config) && candidateRevision !== config.public_benchmark.candidate_commit) {
+    throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
+  }
   const selected = selectModels(config, input.modelSlugs);
   const statePath = path.resolve(input.statePath ?? defaultStatePath(config.run_id));
   const mode = input.mode ?? "resume";
@@ -170,7 +266,7 @@ export async function launchModalBenchmark(input: {
           image: config.image_name,
           imageId: image.imageId,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
-          sourceRevision: sourceRevision(repoRoot),
+          sourceRevision: candidateRevision,
           fingerprints
         });
         await writeModalLaunchState(statePath, state);
@@ -192,7 +288,7 @@ export async function launchModalBenchmark(input: {
           image: config.image_name,
           imageId: image.imageId,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
-          sourceRevision: sourceRevision(repoRoot),
+          sourceRevision: candidateRevision,
           fingerprints,
           attemptHistory: history
         });
@@ -209,7 +305,7 @@ export async function launchModalBenchmark(input: {
       }
 
       for (const entry of prepared) {
-        await launchOrResumeModel({ modal, app, image, configPath, statePath, state, ...entry });
+        await launchOrResumeModel({ modal, app, image, config, configPath, statePath, state, ...entry });
       }
       return state;
     });
@@ -222,6 +318,7 @@ interface LaunchModelInput {
   modal: ModalClient;
   app: App;
   image: Image;
+  config: ModalBenchmarkConfig;
   configPath: string;
   statePath: string;
   state: ModalLaunchState;
@@ -282,6 +379,8 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
       attempt: record.attempt,
+      postModelRecovery: configuredPostModelRecovery(input.config),
+      modelWorkMayHaveStarted: record.launched_at !== undefined,
       ...(workerStatus === undefined ? {} : { workerStatus }),
       ...(record.phase === "failed" && record.failure_category !== undefined
         ? { launchFailure: record.failure_category }
@@ -302,7 +401,8 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       modelFingerprint,
       volumeName,
       remoteRoot,
-      workspaceMode: input.state.generation_mode
+      workspaceMode: input.state.generation_mode,
+      postModelRecovery: configuredPostModelRecovery(input.config)
     });
     await writeModalLaunchState(input.statePath, input.state);
 
@@ -345,7 +445,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     } catch (error) {
       const modelMayHaveStarted = record.phase === "launched";
       const terminationConfirmed = sandbox === undefined ? true : await terminateModalSandbox(sandbox);
-      const category = isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
+      const category = classifyModalLaunchFailure(error, {
+        modelMayHaveStarted,
+        postModelRecovery: configuredPostModelRecovery(input.config)
+      });
       markModalLaunchFailed(record, category);
       await writeModalLaunchState(input.statePath, input.state);
       if (!terminationConfirmed) {
@@ -358,6 +461,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
+}
+
+function configuredPostModelRecovery(config: ModalBenchmarkConfig): ModalPostModelRecovery {
+  return isPublicModalBenchmarkConfig(config) ? "stop" : "relaunch";
+}
+
+export function classifyModalLaunchFailure(
+  error: unknown,
+  input: { modelMayHaveStarted: boolean; postModelRecovery: ModalPostModelRecovery }
+): ModalLaunchFailureCategory {
+  if (input.modelMayHaveStarted && input.postModelRecovery === "stop") {
+    return "permanent-operational-failure";
+  }
+  return isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
 }
 
 type ModalBenchmarkSandboxCreateParams = Omit<SandboxCreateParams, "cpu" | "cpuLimit" | "memoryMiB" | "memoryLimitMiB">;
@@ -386,7 +503,10 @@ async function recoverExistingSandboxLaunch(
     const terminationConfirmed = await terminateModalSandbox(sandbox);
     markModalLaunchFailed(
       record,
-      isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure"
+      classifyModalLaunchFailure(error, {
+        modelMayHaveStarted,
+        postModelRecovery: configuredPostModelRecovery(input.config)
+      })
     );
     await writeModalLaunchState(input.statePath, input.state);
     if (!terminationConfirmed) {
@@ -491,6 +611,94 @@ async function taggedLaunches(
   return matches;
 }
 
+interface ModalTerminationScope {
+  kind: "eval" | "image-build";
+  tags: Record<string, string>;
+}
+
+function modalTerminationScopes(state: ModalLaunchState): ModalTerminationScope[] {
+  const scopes = new Map<string, ModalTerminationScope>();
+  const add = (
+    record: Pick<ModalLaunchRecord, "slug" | "generation" | "model_fingerprint">,
+    fingerprints: ModalLineageFingerprints
+  ): void => {
+    const scope: ModalTerminationScope = {
+      kind: "eval",
+      tags: {
+        purpose: "ultrafuzz-eval",
+        logical_run: state.logical_run_id,
+        generation: String(record.generation),
+        model_slug: record.slug,
+        config_fingerprint: fingerprints.config,
+        source_fingerprint: fingerprints.source,
+        image_fingerprint: fingerprints.image,
+        model_fingerprint: record.model_fingerprint
+      }
+    };
+    const key = JSON.stringify(Object.entries(scope.tags).sort(([left], [right]) => left.localeCompare(right)));
+    if (!scopes.has(key)) scopes.set(key, scope);
+  };
+  for (const record of state.launches) add(record, state.fingerprints);
+  for (const record of state.attempt_history) add(record, record.fingerprints);
+  return [...scopes.values()];
+}
+
+export function modalTerminationScopesForConfig(
+  config: ModalBenchmarkConfig,
+  fingerprints: Pick<ModalLineageFingerprints, "config" | "source">
+): ModalTerminationScope[] {
+  return config.models.map((model) => ({
+    kind: "eval",
+    tags: {
+      purpose: "ultrafuzz-eval",
+      logical_run: config.run_id,
+      model_slug: model.slug,
+      config_fingerprint: fingerprints.config,
+      source_fingerprint: fingerprints.source,
+      model_fingerprint: fingerprintModalModel(model)
+    }
+  }));
+}
+
+export function modalImageBuildTags(input: {
+  buildScope: string;
+  imageName: string;
+  sourceFingerprint: string;
+}): Record<string, string> {
+  if (!MODAL_BUILD_SCOPE_TAG.test(input.buildScope))
+    throw new Error("Modal image build scope must be a bounded safe ID");
+  if (!MODAL_FINGERPRINT_TAG.test(input.sourceFingerprint)) throw new Error("Modal source fingerprint is invalid");
+  return {
+    purpose: "ultrafuzz-image-stage",
+    build_scope: input.buildScope,
+    image_name_fingerprint: createHash("sha256").update(input.imageName).digest("hex"),
+    source_fingerprint: input.sourceFingerprint
+  };
+}
+
+function isExactModalTerminationCandidate(tags: Record<string, string>, scope: ModalTerminationScope): boolean {
+  if (!hasExactModalLaunchTags(tags, scope.tags)) return false;
+  if (scope.kind === "image-build") return true;
+  if (
+    !MODAL_GENERATION_TAG.test(tags.generation ?? "") ||
+    !MODAL_ATTEMPT_TAG.test(tags.attempt ?? "") ||
+    !MODAL_ATTEMPT_ID_TAG.test(tags.attempt_id ?? "") ||
+    !MODAL_FINGERPRINT_TAG.test(tags.image_fingerprint ?? "")
+  ) {
+    return false;
+  }
+  return Number.isSafeInteger(Number(tags.generation)) && Number.isSafeInteger(Number(tags.attempt));
+}
+
+function detachQuietly(sandbox: Pick<ModalTerminationSandbox, "detach">): void {
+  try {
+    sandbox.detach();
+  } catch {
+    // Detaching only releases local client resources and must not interrupt the
+    // remaining exact-lineage termination attempts.
+  }
+}
+
 async function assertNoLiveGeneration(modal: ModalClient, app: App, state: ModalLaunchState): Promise<void> {
   for (const record of state.launches) {
     const probe = await probeModalSandbox(modal, record.sandbox_id);
@@ -546,7 +754,7 @@ function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineage
 }
 
 export function modalImageBuildCommand(): string {
-  return "rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar -xzf /tmp/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
@@ -597,6 +805,8 @@ export async function modalBenchmarkStatus(input: {
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
         attempt: launch.attempt,
+        postModelRecovery: launch.post_model_recovery ?? "relaunch",
+        modelWorkMayHaveStarted: launch.launched_at !== undefined,
         ...(workerStatus === undefined ? {} : { workerStatus }),
         ...(launch.phase === "failed" && launch.failure_category !== undefined
           ? { launchFailure: launch.failure_category }
@@ -620,24 +830,406 @@ export async function modalBenchmarkStatus(input: {
   }
 }
 
+export async function terminateModalBenchmark(input: {
+  statePath: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const modal = modalClient(input.env);
+  try {
+    const { state, app } = await requiredCurrentLaunchStateForTermination(input.statePath, modal);
+    return await terminateModalBenchmarkSandboxes({
+      state,
+      appId: app.appId,
+      sandboxes: modal.sandboxes
+    });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalBenchmarkConfig(input: {
+  configPath: string;
+  repoRoot?: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const configPath = path.resolve(input.configPath);
+  const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
+  const config = loadModalBenchmarkConfig(configPath);
+  const revision = sourceRevision(repoRoot).toLowerCase();
+  if (isPublicModalBenchmarkConfig(config) && revision !== config.public_benchmark.candidate_commit) {
+    throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
+  }
+  const scopes = modalTerminationScopesForConfig(config, {
+    config: fingerprintModalConfigFile(configPath),
+    source: fingerprintTrackedSource(repoRoot)
+  });
+  const modal = modalClient(input.env);
+  try {
+    let app: App;
+    try {
+      app = await modal.apps.fromName(config.app_name, { createIfMissing: false });
+    } catch (error) {
+      if (error instanceof NotFoundError) return emptyModalTerminationCounts(scopes.length);
+      throw error;
+    }
+    return await terminateModalBenchmarkTagScopes({ scopes, appId: app.appId, sandboxes: modal.sandboxes });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalImageBuild(input: {
+  imageName: string;
+  buildScope: string;
+  appName?: string;
+  repoRoot?: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
+  const scopes: ModalTerminationScope[] = [
+    {
+      kind: "image-build",
+      tags: modalImageBuildTags({
+        buildScope: input.buildScope,
+        imageName: input.imageName,
+        sourceFingerprint: fingerprintTrackedSource(repoRoot)
+      })
+    }
+  ];
+  const modal = modalClient(input.env);
+  try {
+    let app: App;
+    try {
+      app = await modal.apps.fromName(input.appName ?? DEFAULT_MODAL_APP, { createIfMissing: false });
+    } catch (error) {
+      if (error instanceof NotFoundError) return emptyModalTerminationCounts(scopes.length);
+      throw error;
+    }
+    return await terminateModalBenchmarkTagScopes({ scopes, appId: app.appId, sandboxes: modal.sandboxes });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalBenchmarkSandboxes(input: {
+  state: ModalLaunchState;
+  appId: string;
+  sandboxes: ModalTerminationSandboxService;
+}): Promise<ModalTerminationCounts> {
+  const state = parseModalLaunchState(input.state);
+  const scopes = modalTerminationScopes(state);
+  const knownSandboxIds = [...state.launches, ...state.attempt_history].flatMap((record) =>
+    record.sandbox_id === undefined ? [] : [record.sandbox_id]
+  );
+  return terminateModalBenchmarkTagScopes({ ...input, scopes, knownSandboxIds });
+}
+
+export async function terminateModalBenchmarkTagScopes(input: {
+  scopes: ModalTerminationScope[];
+  knownSandboxIds?: string[];
+  appId: string;
+  sandboxes: ModalTerminationSandboxService;
+}): Promise<ModalTerminationCounts> {
+  const counts = emptyModalTerminationCounts(input.scopes.length);
+  if (input.scopes.length === 0) {
+    counts.failures = 1;
+    throw new ModalTerminationError(counts);
+  }
+  const knownSandboxIds = new Set(input.knownSandboxIds ?? []);
+  const candidates = new Map<string, ModalTerminationSandbox>();
+  for (const sandboxId of knownSandboxIds) {
+    try {
+      candidates.set(sandboxId, await input.sandboxes.fromId(sandboxId));
+    } catch (error) {
+      if (error instanceof NotFoundError) counts.already_stopped += 1;
+      else counts.failures += 1;
+    }
+  }
+  for (const scope of input.scopes) {
+    try {
+      for await (const sandbox of input.sandboxes.list({ appId: input.appId, tags: scope.tags })) {
+        if (typeof sandbox.sandboxId !== "string" || sandbox.sandboxId.trim() === "") {
+          counts.failures += 1;
+          detachQuietly(sandbox);
+          continue;
+        }
+        const previous = candidates.get(sandbox.sandboxId);
+        if (previous === undefined) candidates.set(sandbox.sandboxId, sandbox);
+        else if (previous !== sandbox) detachQuietly(sandbox);
+      }
+    } catch {
+      counts.failures += 1;
+    }
+  }
+  counts.discovered = candidates.size;
+
+  for (const sandbox of candidates.values()) {
+    let tags: Record<string, string>;
+    try {
+      tags = await sandbox.getTags();
+    } catch {
+      counts.failures += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    if (!input.scopes.some((scope) => isExactModalTerminationCandidate(tags, scope))) {
+      counts.ignored += 1;
+      if (knownSandboxIds.has(sandbox.sandboxId)) counts.failures += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    counts.matched += 1;
+
+    let exitCode: number | null;
+    try {
+      exitCode = await sandbox.poll();
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        counts.already_stopped += 1;
+      } else {
+        counts.failures += 1;
+      }
+      detachQuietly(sandbox);
+      continue;
+    }
+    if (exitCode !== null) {
+      counts.already_stopped += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    counts.live += 1;
+    try {
+      await sandbox.terminate({ wait: true });
+      counts.terminated += 1;
+    } catch (error) {
+      if (error instanceof NotFoundError) counts.already_stopped += 1;
+      else counts.failures += 1;
+      detachQuietly(sandbox);
+    }
+  }
+
+  if (counts.failures > 0) throw new ModalTerminationError(counts);
+  return counts;
+}
+
+function emptyModalTerminationCounts(scopes: number): ModalTerminationCounts {
+  return {
+    scopes,
+    discovered: 0,
+    matched: 0,
+    ignored: 0,
+    live: 0,
+    already_stopped: 0,
+    terminated: 0,
+    failures: 0
+  };
+}
+
 export async function collectModalBenchmark(input: {
   statePath: string;
   outputDir: string;
+  configPath?: string;
+  includePublicResults?: boolean;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
+  const collectionConfig = input.configPath === undefined ? undefined : loadModalBenchmarkConfig(input.configPath);
+  const collectionConfigFingerprint =
+    input.configPath === undefined ? undefined : fingerprintModalConfigFile(input.configPath);
+  let publicCollection: { config: PublicModalBenchmarkConfig; configFingerprint: string } | undefined;
+  if (input.includePublicResults === true) {
+    if (collectionConfig === undefined || input.configPath === undefined) {
+      throw new Error("public benchmark collection requires the original --config file");
+    }
+    if (!isPublicModalBenchmarkConfig(collectionConfig)) {
+      throw new Error("public benchmark collection requires a public benchmark config");
+    }
+    publicCollection = {
+      config: collectionConfig,
+      configFingerprint: collectionConfigFingerprint!
+    };
+  }
   const modal = modalClient(input.env);
   try {
     const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
     for (const launch of state.launches) {
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
-        ...MODAL_COLLECT_RESULT_FILES
+        ...MODAL_COLLECT_RESULT_FILES,
+        ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
       ]);
       const output = path.resolve(input.outputDir, launch.slug);
-      await replaceSanitizedModalCollectedFiles(output, files, launch);
+      const configuredModel = collectionConfig?.models.find((model) => model.slug === launch.slug);
+      const collectionEnv = input.env ?? process.env;
+      const exactDiagnosticConfig =
+        collectionConfig !== undefined &&
+        collectionConfigFingerprint !== undefined &&
+        configuredModel !== undefined &&
+        hasExactPublicDiagnosticCollectionConfig({
+          config: collectionConfig,
+          configFingerprint: collectionConfigFingerprint,
+          configuredModel,
+          state,
+          launch
+        })
+          ? { config: collectionConfig, model: configuredModel }
+          : undefined;
+      const selectedEvidence = selectModalCollectedEvidence(
+        files,
+        exactDiagnosticConfig?.config,
+        exactDiagnosticConfig?.model,
+        collectionEnv
+      );
+      await replaceSanitizedModalCollectedFiles(
+        output,
+        selectedEvidence.files,
+        {
+          generation: launch.generation,
+          attempt: launch.attempt,
+          logical_run_id: state.logical_run_id,
+          attempt_id: launch.attempt_id,
+          model_slug: launch.slug,
+          model: launch.model,
+          reasoning: launch.reasoning,
+          candidate_commit: state.source_revision,
+          config_fingerprint: state.fingerprints.config,
+          source_fingerprint: state.fingerprints.source,
+          image_fingerprint: state.fingerprints.image,
+          model_fingerprint: launch.model_fingerprint
+        },
+        selectedEvidence.forbiddenSecretValues
+      );
+      const persistedStatus = latestPersistedWorkerStatus(files, launch);
+      if (
+        collectionConfig !== undefined &&
+        isPublicModalBenchmarkConfig(collectionConfig) &&
+        persistedStatus?.model_work_started === true &&
+        selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
+      ) {
+        throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
+      }
+      if (input.includePublicResults === true) {
+        const contents = files[MODAL_PUBLIC_RESULT_FILE];
+        if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
+        if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
+        const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
+          requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
+          requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+        ]);
+        assertPublicBenchmarkBundleLineage({
+          bundle,
+          config: publicCollection!.config,
+          configFingerprint: publicCollection!.configFingerprint,
+          state,
+          launch
+        });
+        const collectedDiagnostics = selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
+        if (collectedDiagnostics === undefined) {
+          throw new Error(`public benchmark diagnostics are not ready for ${launch.slug}`);
+        }
+        assertPublicBenchmarkBundleDiagnosticsMatch(bundle, collectedDiagnostics);
+        await writeCollectedPublicBundle(output, contents);
+      }
     }
   } finally {
     modal.close();
+  }
+}
+
+export function hasExactPublicDiagnosticCollectionConfig(input: {
+  config: ModalBenchmarkConfig;
+  configFingerprint: string;
+  configuredModel: ModalModelSpec;
+  state: Pick<ModalLaunchState, "logical_run_id" | "generation" | "source_revision" | "image" | "fingerprints">;
+  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "generation" | "model_fingerprint">;
+}): boolean {
+  if (!isPublicModalBenchmarkConfig(input.config)) return false;
+  const scope = input.config.public_benchmark;
+  return (
+    input.config.run_id === input.state.logical_run_id &&
+    input.config.image_name === input.state.image &&
+    input.configFingerprint === input.state.fingerprints.config &&
+    scope.candidate_commit === input.state.source_revision &&
+    scope.runner_model_profile === input.launch.slug &&
+    input.launch.generation === input.state.generation &&
+    input.configuredModel.slug === input.launch.slug &&
+    input.configuredModel.model === input.launch.model &&
+    input.configuredModel.reasoning === input.launch.reasoning &&
+    fingerprintModalModel(input.configuredModel) === input.launch.model_fingerprint
+  );
+}
+
+export function assertPublicBenchmarkBundleLineage(input: {
+  bundle: Pick<
+    PublicBenchmarkBundle,
+    "benchmark" | "lane" | "model_slug" | "model" | "reasoning" | "candidate_commit" | "eval_run_id" | "lineage"
+  >;
+  config: PublicModalBenchmarkConfig;
+  configFingerprint: string;
+  state: Pick<ModalLaunchState, "logical_run_id" | "generation" | "source_revision" | "image" | "fingerprints">;
+  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "attempt" | "attempt_id" | "model_fingerprint">;
+}): void {
+  const { bundle, config, configFingerprint, state, launch } = input;
+  const scope = config.public_benchmark;
+  const configuredModel = config.models.find((model) => model.slug === launch.slug);
+  const mismatches = [
+    config.run_id === state.logical_run_id ? undefined : "logical run",
+    config.image_name === state.image ? undefined : "image",
+    configFingerprint === state.fingerprints.config ? undefined : "configuration fingerprint",
+    scope.candidate_commit === state.source_revision ? undefined : "candidate source revision",
+    scope.runner_model_profile === launch.slug ? undefined : "runner model profile",
+    configuredModel !== undefined && fingerprintModalModel(configuredModel) === launch.model_fingerprint
+      ? undefined
+      : "configured model fingerprint",
+    bundle.candidate_commit === scope.candidate_commit ? undefined : "candidate commit",
+    bundle.benchmark === scope.benchmark ? undefined : "benchmark",
+    bundle.lane === scope.lane ? undefined : "lane",
+    bundle.model_slug === launch.slug ? undefined : "model slug",
+    bundle.model === launch.model ? undefined : "model",
+    bundle.reasoning === launch.reasoning ? undefined : "reasoning",
+    bundle.eval_run_id === boundedEvalId([config.run_id, launch.slug], 128) ? undefined : "eval run",
+    bundle.lineage.logical_run_id === state.logical_run_id ? undefined : "bundle logical run lineage",
+    bundle.lineage.generation === state.generation ? undefined : "bundle generation lineage",
+    bundle.lineage.attempt === launch.attempt ? undefined : "bundle attempt lineage",
+    bundle.lineage.attempt_id === launch.attempt_id ? undefined : "bundle attempt ID lineage",
+    bundle.lineage.config_fingerprint === state.fingerprints.config ? undefined : "bundle configuration lineage",
+    bundle.lineage.source_fingerprint === state.fingerprints.source ? undefined : "bundle source lineage",
+    bundle.lineage.image_fingerprint === state.fingerprints.image ? undefined : "bundle image lineage",
+    bundle.lineage.model_fingerprint === launch.model_fingerprint ? undefined : "bundle model lineage"
+  ].filter((value): value is string => value !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public benchmark result lineage does not match ${launch.slug}: ${mismatches.join(", ")}`);
+  }
+}
+
+export function assertPublicBenchmarkBundleDiagnosticsMatch(
+  bundle: PublicBenchmarkBundle,
+  collectedDiagnostics: string
+): void {
+  const bundlePath = `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`;
+  const embedded = bundle.files.find((file) => file.path === bundlePath);
+  if (embedded === undefined) throw new Error(`public benchmark result is missing ${bundlePath}`);
+  const embeddedContents = Buffer.from(embedded.contents_base64, "base64").toString("utf8");
+  if (embeddedContents !== collectedDiagnostics) {
+    throw new Error("public benchmark result diagnostics do not match the exact collected attempt");
+  }
+}
+
+async function writeCollectedPublicBundle(output: string, contents: string): Promise<void> {
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  const staging = await mkdtemp(path.join(output, ".public-collect-"));
+  try {
+    const staged = path.join(staging, MODAL_PUBLIC_RESULT_FILE);
+    const handle = await open(staged, "wx", 0o600);
+    try {
+      await handle.writeFile(contents, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(staged, path.join(output, MODAL_PUBLIC_RESULT_FILE));
+    await syncDirectory(output);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
   }
 }
 
@@ -675,6 +1267,84 @@ export function createTrackedSourceArchive(
   return archive;
 }
 
+/**
+ * Create a self-contained, shallow Git checkout for the exact candidate HEAD.
+ * The worker extracts this immutable archive instead of cloning the candidate
+ * repository, which may be private. Keeping the shallow .git directory makes
+ * eval provenance resolve to the original 40-character commit with a clean
+ * worktree.
+ */
+export function createExactCandidateSourceArchive(
+  repoRoot: string,
+  requestedArchive?: string,
+  options: { createTar?: (archive: string, checkout: string) => void } = {}
+): { path: string; cleanup: () => void } {
+  const revision = sourceRevision(repoRoot).toLowerCase();
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    throw new Error(`Modal candidate source does not have an exact Git revision: ${repoRoot}`);
+  }
+  const trackedChanges = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+  if (trackedChanges.trim() !== "") {
+    throw new Error("Modal candidate source has tracked changes; commit them before building the image");
+  }
+
+  const outputRoot =
+    requestedArchive === undefined ? mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-source-")) : undefined;
+  if (outputRoot !== undefined) chmodSync(outputRoot, 0o700);
+  const archive = path.resolve(requestedArchive ?? path.join(outputRoot!, "candidate.tgz"));
+  let staging: string | undefined;
+  let archiveCreated = false;
+  let complete = false;
+  try {
+    const descriptor = openSync(archive, "wx", 0o600);
+    archiveCreated = true;
+    closeSync(descriptor);
+    chmodSync(archive, 0o600);
+    staging = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-candidate-stage-"));
+    chmodSync(staging, 0o700);
+    const checkout = path.join(staging, "checkout");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    execFileSync("git", ["fetch", "--quiet", "--depth", "1", "--no-tags", repoRoot, revision], {
+      cwd: checkout
+    });
+    execFileSync("git", ["checkout", "--quiet", "--detach", revision], { cwd: checkout });
+    rmSync(path.join(checkout, ".git", "FETCH_HEAD"), { force: true });
+    const archivedRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkout, encoding: "utf8" })
+      .trim()
+      .toLowerCase();
+    const archivedChanges = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+      cwd: checkout,
+      encoding: "utf8"
+    });
+    if (archivedRevision !== revision || archivedChanges.trim() !== "") {
+      throw new Error("failed to construct an exact clean Modal candidate source archive");
+    }
+    if (options.createTar === undefined) {
+      execFileSync("tar", ["-czf", archive, "-C", checkout, "."]);
+    } else {
+      options.createTar(archive, checkout);
+    }
+    chmodSync(archive, 0o600);
+    complete = true;
+    return {
+      path: archive,
+      cleanup: () => {
+        if (outputRoot === undefined) rmSync(archive, { force: true });
+        else rmSync(outputRoot, { recursive: true, force: true });
+      }
+    };
+  } finally {
+    if (staging !== undefined) rmSync(staging, { recursive: true, force: true });
+    if (!complete) {
+      if (archiveCreated) rmSync(archive, { force: true });
+      if (outputRoot !== undefined) rmSync(outputRoot, { recursive: true, force: true });
+    }
+  }
+}
+
 function modalClient(env: Record<string, string | undefined> = process.env): ModalClient {
   return new ModalClient({
     tokenId: requiredEnv(env, "MODAL_TOKEN_ID"),
@@ -687,10 +1357,30 @@ function secretValues(
   model: ModalModelSpec,
   env: Record<string, string | undefined>
 ): Record<string, string> {
-  const names = new Set([config.braintrust.api_key_env]);
-  if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
-  if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
+  const names = secretEnvNames(config, model);
   return Object.fromEntries([...names].map((name) => [name, requiredEnv(env, name)]));
+}
+
+function availableSecretValues(
+  config: ModalBenchmarkConfig,
+  model: ModalModelSpec,
+  env: Record<string, string | undefined>
+): string[] {
+  return [...secretEnvNames(config, model)]
+    .map((name) => env[name])
+    .filter((value): value is string => value !== undefined && value !== "");
+}
+
+function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
+  const names = new Set<string>();
+  if (isPublicModalBenchmarkConfig(config)) {
+    names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
+  } else {
+    names.add(config.braintrust.api_key_env);
+    if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
+  }
+  if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
+  return names;
 }
 
 function requiredEnv(env: Record<string, string | undefined>, name: string): string {
@@ -749,6 +1439,25 @@ async function requiredLaunchStateForInspection(
   return { state, app, image };
 }
 
+async function requiredCurrentLaunchStateForTermination(
+  statePath: string,
+  modal: ModalClient
+): Promise<{ state: ModalLaunchState; app: App }> {
+  const absolute = path.resolve(statePath);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
+    }
+    throw error;
+  }
+  const state = parseModalLaunchState(raw);
+  const app = await modal.apps.fromName(state.app, { createIfMissing: false });
+  return { state, app };
+}
+
 function launchStateMetadata(value: unknown): { app: string; image: string } {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Modal launch state is invalid");
@@ -804,7 +1513,7 @@ async function readVolumeFiles(
   const inspector = await modal.sandboxes.create(app, image, {
     command: ["sleep", "300"],
     cpu: 0.5,
-    memoryMiB: 512,
+    memoryMiB: 2048,
     timeoutMs: 5 * 60 * 1000,
     volumes: { "/data": volume.withMountOptions({ readOnly: true }) },
     tags: { purpose: "ultrafuzz-inspector" }
@@ -812,7 +1521,15 @@ async function readVolumeFiles(
   try {
     const files: Record<string, string> = {};
     for (const name of names) {
-      const contents = await readOptionalModalSandboxText(inspector.filesystem, path.posix.join(root, name));
+      const contents = await readOptionalModalSandboxText(
+        inspector.filesystem,
+        path.posix.join(root, name),
+        name === MODAL_PUBLIC_RESULT_FILE
+          ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
+          : name === PUBLIC_EVAL_DIAGNOSTICS_FILE
+            ? MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES
+            : undefined
+      );
       if (contents !== undefined) files[name] = contents;
     }
     return files;
@@ -822,11 +1539,26 @@ async function readVolumeFiles(
 }
 
 export async function readOptionalModalSandboxText(
-  filesystem: Pick<Sandbox["filesystem"], "readText">,
-  filePath: string
+  filesystem: Pick<Sandbox["filesystem"], "readText"> & Partial<Pick<Sandbox["filesystem"], "stat">>,
+  filePath: string,
+  maxBytes?: number
 ): Promise<string | undefined> {
   try {
-    return await filesystem.readText(filePath);
+    if (maxBytes !== undefined) {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+        throw new Error("remote text byte limit must be non-negative");
+      if (filesystem.stat === undefined) throw new Error("bounded remote text reads require file metadata");
+      const metadata = await filesystem.stat(filePath);
+      if (metadata.type !== "file") throw new Error(`remote result is not a regular file: ${filePath}`);
+      if (!Number.isSafeInteger(metadata.size) || metadata.size < 0 || metadata.size > maxBytes) {
+        throw new Error(`remote result exceeds the size limit: ${filePath}`);
+      }
+    }
+    const contents = await filesystem.readText(filePath);
+    if (maxBytes !== undefined && Buffer.byteLength(contents, "utf8") > maxBytes) {
+      throw new Error(`remote result exceeds the size limit: ${filePath}`);
+    }
+    return contents;
   } catch (error) {
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
     throw error;
@@ -853,7 +1585,8 @@ function latestPersistedWorkerStatus(
 
 export function assertSanitizedModalCollectedFiles(
   files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+  launch: ModalCollectedLineage,
+  forbiddenSecretValues: readonly string[] = []
 ): void {
   for (const name of ["status.json", "result.json"] as const) {
     const contents = files[name];
@@ -867,14 +1600,48 @@ export function assertSanitizedModalCollectedFiles(
   if (log !== undefined && !isGenericWorkerLifecycleLog(log)) {
     throw new Error("refusing to collect an unsanitized Modal worker log");
   }
+  const diagnosticsContents = files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
+  if (diagnosticsContents !== undefined) {
+    let diagnostics: PublicEvalDiagnostics;
+    try {
+      diagnostics = parsePublicEvalDiagnostics(JSON.parse(diagnosticsContents) as unknown);
+      assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, forbiddenSecretValues);
+    } catch (error) {
+      throw new Error("refusing to collect unsanitized public eval diagnostics", { cause: error });
+    }
+    assertPublicEvalDiagnosticsLineage(diagnostics, launch);
+  }
+}
+
+export function selectModalCollectedEvidence(
+  files: Readonly<Record<string, string>>,
+  config: ModalBenchmarkConfig | undefined,
+  configuredModel: ModalModelSpec | undefined,
+  env: Record<string, string | undefined>
+): { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } {
+  if (files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined) {
+    return { files, forbiddenSecretValues: [] };
+  }
+  if (config === undefined || configuredModel === undefined) {
+    const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
+    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+  }
+  const names = [...secretEnvNames(config, configuredModel)];
+  const forbiddenSecretValues = availableSecretValues(config, configuredModel, env);
+  if (forbiddenSecretValues.length !== names.length) {
+    const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
+    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+  }
+  return { files, forbiddenSecretValues };
 }
 
 export async function replaceSanitizedModalCollectedFiles(
   output: string,
   files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+  launch: ModalCollectedLineage,
+  forbiddenSecretValues: readonly string[] = []
 ): Promise<void> {
-  assertSanitizedModalCollectedFiles(files, launch);
+  assertSanitizedModalCollectedFiles(files, launch, forbiddenSecretValues);
   await mkdir(output, { recursive: true, mode: 0o700 });
   await chmod(output, 0o700);
   const staging = await mkdtemp(path.join(output, ".collect-"));
@@ -910,6 +1677,47 @@ export async function replaceSanitizedModalCollectedFiles(
     await syncDirectory(output);
   } finally {
     await rm(staging, { recursive: true, force: true });
+  }
+}
+
+export function assertPublicEvalDiagnosticsLineage(
+  diagnostics: PublicEvalDiagnostics,
+  expected: ModalCollectedLineage
+): void {
+  const complete = {
+    logical_run_id: expected.logical_run_id,
+    attempt_id: expected.attempt_id,
+    model_slug: expected.model_slug,
+    model: expected.model,
+    reasoning: expected.reasoning,
+    candidate_commit: expected.candidate_commit,
+    config_fingerprint: expected.config_fingerprint,
+    source_fingerprint: expected.source_fingerprint,
+    image_fingerprint: expected.image_fingerprint,
+    model_fingerprint: expected.model_fingerprint
+  };
+  if (Object.values(complete).some((value) => value === undefined)) {
+    throw new Error("public eval diagnostics collection requires complete launch lineage");
+  }
+  const mismatches = [
+    diagnostics.lineage.logical_run_id === complete.logical_run_id ? undefined : "logical run",
+    diagnostics.lineage.generation === expected.generation ? undefined : "generation",
+    diagnostics.lineage.attempt === expected.attempt ? undefined : "attempt",
+    diagnostics.lineage.attempt_id === complete.attempt_id ? undefined : "attempt ID",
+    diagnostics.model_slug === complete.model_slug ? undefined : "model slug",
+    diagnostics.model === complete.model ? undefined : "model",
+    diagnostics.reasoning === complete.reasoning ? undefined : "reasoning",
+    diagnostics.candidate_commit === complete.candidate_commit ? undefined : "candidate commit",
+    diagnostics.eval_run_id === boundedEvalId([complete.logical_run_id!, complete.model_slug!], 128)
+      ? undefined
+      : "eval run",
+    diagnostics.lineage.config_fingerprint === complete.config_fingerprint ? undefined : "configuration fingerprint",
+    diagnostics.lineage.source_fingerprint === complete.source_fingerprint ? undefined : "source fingerprint",
+    diagnostics.lineage.image_fingerprint === complete.image_fingerprint ? undefined : "image fingerprint",
+    diagnostics.lineage.model_fingerprint === complete.model_fingerprint ? undefined : "model fingerprint"
+  ].filter((value): value is string => value !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public eval diagnostics lineage does not match: ${mismatches.join(", ")}`);
   }
 }
 

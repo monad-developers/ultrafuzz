@@ -25,7 +25,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@ultrafuzz/artifacts": "workspace:*",
+    "@ultrafuzz/evals": "workspace:*",
+    "@ultrafuzz/security": "workspace:*",
     "modal": "0.9.0",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }
 }

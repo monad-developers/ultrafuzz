@@ -79,6 +79,84 @@ For judges that require short-lived credentials, configure an HTTPS
 `braintrust.judge_credential_endpoint`. The worker requests a model-scoped
 credential in memory immediately before scoring and never persists it.
 
+## Run the public benchmark workflow
+
+The checked-in GitHub workflow uses Actions only to build the candidate and as a
+control and collection plane; all benchmark and model compute runs on Modal.
+Every non-deletion push to a branch in this repository launches the paid smoke
+for the exact pushed commit, including pushes to branches whose pull requests
+are still drafts. Fork pull-request events do not run this workflow. Repository
+write access that is allowed to receive Actions secrets is therefore inside the
+benchmark credential and cost trust boundary; protect that access and enforce
+scoped provider credentials and hard provider/Modal budgets. A newer commit on
+the same branch cancels its older smoke workflow. Each run installs and builds
+the exact candidate commit before building its immutable Modal image.
+
+Cancellation is latest-wins only within one branch. A separate recovery
+workflow uses tooling from the trusted default branch, treats the exact
+candidate checkout only as fingerprinted data, and semantically validates the
+incomplete attempt's immutable pre-compute plan before giving termination code
+Modal credentials. It recovers failed, timed-out, and cancelled generations.
+Runs on different branches and independent full dispatches may overlap, so
+provider and Modal budgets remain the hard aggregate cost boundary.
+
+The smoke has exactly three targets: one Foundry target, one Hardhat target, and
+one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
+and explicitly disables invariant tests, differential tests, and dynamic
+strategies. Repository variables `BENCHMARK_SMOKE_OPENAI_MODEL` and
+`BENCHMARK_SMOKE_OPENAI_REASONING` can override that smoke runner without
+changing its single OpenAI/Codex provider or its target and topology limits.
+
+A manual `workflow_dispatch` runs the full lane instead. It evaluates every
+checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
+`high` by default. Dispatch inputs `openai_model`, `openai_reasoning`,
+`anthropic_model`, and `anthropic_reasoning` provide explicit overrides. The
+full lane retains the production strategy set, including invariant,
+differential, and dynamic strategies, with all three disable flags set to
+`false`. Push events can never select this lane.
+
+Both lanes use the standard Modal benchmark resources described above. Every
+target row has a 3,600-second model-work watchdog. The smoke admits two rows at
+a time; the full lane admits 20, keeping each checked-in cohort to two row
+waves. Both modes use eight-way workflow concurrency so full rows can progress
+through the complete production topology without serializing their agent work.
+Scoring remains independent of the runner and always uses GPT-5.6 Sol at
+`xhigh`.
+
+`trials_per_variant` defaults to `1` when it is omitted, and both checked-in
+lanes resolve to one trial. Increase it only deliberately: benchmark work and
+cost multiply across every selected target, runner model, and trial.
+
+Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
+Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY`;
+automatic smoke runs do not. Public rows score from their local artifacts and
+do not require a Braintrust reporting key. Modal receives only the provider
+credential needed by a pair plus the OpenAI judge credential. It never receives
+a GitHub token.
+
+The worker verifies the exact candidate and target commits, obtains EVMBench
+labels from the pinned public Frontier Evals revision, and uses the versioned
+public Ultrafuzz-bench labels. Public target reports and normalized findings are
+packed with SHA-256 and path validation and uploaded with 30-day retention. No
+partial generation updates history: the trusted publisher verifies that the
+exact producer attempt's launch and collection jobs both succeeded, and every
+configured pair must finish and score before publication. Branch results remain
+keyed to the exact pushed commit.
+
+The compare-and-swap publisher validates the generation with the benchmark
+policy from the exact candidate checkout, appends observations keyed to that
+candidate commit, regenerates the charts, and updates the
+`automation/eval-history` pull request. It retries a changed remote publication
+tip and commits with `[ci skip]`, so chart-only publication does not start a new
+benchmark run.
+
+Set the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
+token that can create pull requests when organization policy prevents
+`github.token` from doing so. Without that secret, publication falls back to
+`github.token`. If policy still blocks PR creation, the workflow succeeds with
+a warning, preserves the complete publication on `automation/eval-history`,
+and adds a compare-and-open link to the job summary for manual completion.
+
 ## Build and launch
 
 ```bash
@@ -148,6 +226,13 @@ pnpm exec ultrafuzz-modal collect \
   --output .ultrafuzz/modal/results
 ```
 
+Private collection remains aggregate-only. The public workflow opts into the
+larger allowlisted result contract with `--public-results --config <path>`, then
+validates and extracts it with `unpack-public`. Public collection requires the
+exact config used at launch and accepts a bundle only when its candidate,
+benchmark, lane, model, reasoning, and eval-run lineage all match that config
+and the launch state. Private collection does not require a config.
+
 Launch-state files written by the earlier Modal runner are upgraded in place on
 the next guarded resume after the current config, source, and image identity are
 captured for hardened lineage checks. Unversioned durable workspaces are not
@@ -182,11 +267,36 @@ generation, launch generation and attempt, whether model work started, node
 counts, checkpoint age and digest, exit category, runtime, aggregate usage,
 pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
-artifacts. `collect` copies only `status.json`, `result.json`, and the generic
-worker lifecycle log; investigate sensitive run data on the private volume under
-the repository's normal access controls. Collection validates each contract and
+artifacts. By default, `collect` copies `status.json`, `result.json`, the generic
+worker lifecycle log, and an allowlisted `public-eval-diagnostics.json` when a
+public worker reached the post-eval gate. The diagnostic contains only row
+identities, terminal states, report-presence flags, diagnostic codes, exact
+launch lineage, and a bounded failed-node projection (node ID, status, timeout
+flag, and allowlisted failure category or code). It never contains messages,
+paths, findings, or provider output.
+This lets failed Actions runs publish useful lifecycle evidence without
+repeating paid model work. Investigate arbitrary sensitive run data on the
+private volume under the repository's normal access controls. Collection validates each contract and
 generic log line before writing locally and refuses pre-hardening or malformed
 volume artifacts.
+
+Public EVMBench and Ultrafuzz-bench targets use a separate explicit contract.
+For those old open-source projects, `collect --public-results --config <path>`
+additionally copies the scored eval generation plus `report.md`, `report.json`,
+and `findings.normalized.json`. It also embeds the exact
+`public-eval-diagnostics.json` sidecar under `eval/`, so report-backed genuine
+task failures remain verifiable when the generation is published to history.
+The bundle validates a fixed path allowlist, byte limits, canonical base64,
+unique paths, sizes, SHA-256 hashes, exact launch and diagnostic lineage,
+score-ready lifecycle evidence, complete per-row report files, and the absence
+of generic or exact injected secrets before any file is extracted or uploaded.
+
+This public mode assumes the pinned benchmark repositories are trusted inputs.
+Its hashes and lineage checks detect corruption, stale results, and accidental
+raw-secret publication; they are not a cryptographic attestation boundary
+against benchmark or model code deliberately encoding a credential. Do not use
+`--public-results` for untrusted targets. Keep those results on the private
+volume and use the ordinary sanitized aggregate collection path instead.
 
 ## Run the opt-in real-Modal smoke
 

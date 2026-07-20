@@ -27,6 +27,34 @@ const TERMINAL_CATEGORIES = [
 ] as const;
 
 describe("sanitized worker result contracts", () => {
+  it("persists only the allowlisted public diagnostics failure code in both terminal files", async () => {
+    const harness = await terminalHarness();
+    const privateCause = new Error("private schema detail");
+    const failure = new Error("public eval diagnostics could not be built", { cause: privateCause });
+
+    await expect(
+      runWithTerminalPersistence({
+        ...harness.input,
+        diagnosticCodeForError: () => "public-eval-diagnostics-invalid",
+        run: async () => {
+          throw failure;
+        }
+      })
+    ).rejects.toBe(failure);
+
+    const status = fs.readFileSync(harness.statusPath, "utf8");
+    const result = fs.readFileSync(harness.resultPath, "utf8");
+    expect(harness.flush).toHaveBeenCalledTimes(1);
+    expect(status).toBe(result);
+    expect(JSON.parse(result)).toMatchObject({
+      result_type: "terminal",
+      exit_category: "sandbox-exited",
+      diagnostic_code: "public-eval-diagnostics-invalid"
+    });
+    expect(result).not.toContain(privateCause.message);
+    expect(result).not.toContain(failure.message);
+  });
+
   it("publishes the complete stable operational taxonomy", () => {
     expect(OPERATIONAL_DISPOSITION_CATEGORIES).toEqual([
       "live",

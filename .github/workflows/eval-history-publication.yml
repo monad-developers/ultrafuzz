@@ -1,6 +1,11 @@
 name: Publish Eval History
 
 on:
+  workflow_run:
+    workflows:
+      - Modal Eval Benchmarks
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       artifact_run_id:
@@ -35,20 +40,256 @@ permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: publish-eval-history
-  cancel-in-progress: false
-
 jobs:
-  publish:
+  qualify_modal_benchmark:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      eligible: ${{ steps.qualify.outputs.eligible }}
+      candidate_commit: ${{ steps.qualify.outputs.candidate_commit }}
+      benchmark_mode: ${{ steps.qualify.outputs.benchmark_mode }}
+
+    steps:
+      - name: Check out trusted main qualification tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Qualify the exact completed producer attempt
+        id: qualify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          jobs_path="$RUNNER_TEMP/modal-benchmark-producer-jobs.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$jobs_path"
+          node scripts/ci/qualify-modal-benchmark-publication.mjs \
+            "$GITHUB_EVENT_PATH" \
+            "$jobs_path" \
+            "$GITHUB_OUTPUT" \
+            "$GITHUB_REPOSITORY"
+
+  publish_modal_benchmark:
+    needs: qualify_modal_benchmark
+    if: needs.qualify_modal_benchmark.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BENCHMARK_MODE: ${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}
+      CANDIDATE_COMMIT: ${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}
+      PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+      PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+      PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+
+    steps:
+      - name: Check out trusted main publication tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install and build trusted main
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -w build
+
+      - name: Download exact benchmark control metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/trusted-modal-publication/control
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Download exact public benchmark results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: public-benchmark-results-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/trusted-modal-publication/results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate and publish the atomic Modal benchmark generation
+        env:
+          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control
+          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/results
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
+          PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
+          PUBLICATION_POLICY_ROOT: ${{ runner.temp }}/eval-history-benchmark-policy
+          PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
+        run: |
+          git fetch --no-tags origin "$CANDIDATE_COMMIT"
+          git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$CANDIDATE_COMMIT"
+          trap 'git worktree remove --force "$PUBLICATION_POLICY_ROOT"' EXIT
+          node scripts/ci/prepare-eval-history-publication.mjs automatic \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            "$BENCHMARK_CONTROL" \
+            "$BENCHMARK_RESULTS" \
+            "$PUBLICATION_POLICY_ROOT" \
+            "$CANDIDATE_COMMIT" \
+            "$PUBLICATION_REPOSITORY" \
+            "$PRODUCER_RUN_ID" \
+            "$PRODUCER_RUN_ATTEMPT" \
+            "$BENCHMARK_MODE" \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_PLAN"
+          mkdir "$PUBLICATION_UNPACKED"
+          while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
+            metadata="$(node packages/modal/dist/cli.js unpack-public \
+              --bundle "$BENCHMARK_RESULTS/$bundle_path" \
+              --output "$PUBLICATION_UNPACKED/$unpack_path")"
+            jq -e \
+              --arg eval_run_id "$eval_run_id" \
+              --arg benchmark "$benchmark" \
+              --arg lane "$lane" \
+              --arg model_slug "$model_slug" \
+              --arg candidate_commit "$CANDIDATE_COMMIT" \
+              '.eval_run_id == $eval_run_id and
+               .benchmark == $benchmark and
+               .lane == $lane and
+               .model_slug == $model_slug and
+               .candidate_commit == $candidate_commit' \
+              <<< "$metadata" > /dev/null
+          done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
+            "$PUBLICATION_PLAN")
+          node scripts/ci/publish-eval-history-cas.mjs \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_UNPACKED" \
+            "$PUBLICATION_POLICY_ROOT"
+          git worktree remove --force "$PUBLICATION_POLICY_ROOT"
+          trap - EXIT
+
+  open_publication_pr:
+    needs:
+      - publish_modal_benchmark
+      - publish_manual
+    if: >-
+      always() &&
+      (needs.publish_modal_benchmark.result == 'success' || needs.publish_manual.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out trusted main publication tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Open the publication pull request when needed
+        env:
+          GH_TOKEN: ${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}
+        run: |
+          compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...automation%2Feval-history?expand=1"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git ls-remote --exit-code --heads origin refs/heads/automation/eval-history > /dev/null; then
+            echo "No pending eval-history publication branch is needed"
+            exit 0
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/automation/eval-history:refs/remotes/origin/automation/eval-history"
+          node scripts/ci/publish-eval-history-cas.mjs verify-target
+          open_prs="$(gh pr list \
+            --state open \
+            --base main \
+            --head automation/eval-history \
+            --json number \
+            --jq 'length')"
+          if git diff --quiet \
+            origin/main \
+            origin/automation/eval-history \
+            -- \
+            benchmarks/history.json \
+            docs/assets/eval-history; then
+            pending_publication=false
+          else
+            diff_status=$?
+            if [ "$diff_status" -ne 1 ]; then
+              echo "Unable to compare the eval-history publication trees" >&2
+              exit "$diff_status"
+            fi
+            pending_publication=true
+          fi
+          if [ "$open_prs" -eq 0 ] && [ "$pending_publication" = true ]; then
+            if gh pr create \
+              --base main \
+              --head automation/eval-history \
+              --title "[ci skip] Update published eval history" \
+              --body $'## Summary\n\nAppend complete scored benchmark generations and regenerate the deterministic README charts.\n\n## Verification\n\n- Validated versioned history and immutable lineage\n- Consumed Modal artifacts only through trusted default-branch publication tooling\n- Retried remote-tip races without dropping generations\n- Regenerated and checked all SVG charts'; then
+              exit 0
+            fi
+            open_prs="$(gh pr list \
+              --state open \
+              --base main \
+              --head automation/eval-history \
+              --json number \
+              --jq 'length')"
+            if [ "$open_prs" -eq 0 ]; then
+              echo "::warning title=Eval-history PR not opened::Automatic pull-request creation is unavailable. The publication branch remains pushed; use the job summary link."
+              {
+                echo "### Eval-history publication is waiting for a pull request"
+                echo
+                echo "The complete generation remains preserved on automation/eval-history."
+                echo
+                echo "[Compare and open the publication pull request]($compare_url)"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Another publisher opened the eval-history pull request"
+          fi
+
+  publish_manual:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Check out main
+      - name: Check out trusted main publication tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
 
       - name: Validate publication inputs
         env:
@@ -64,71 +305,62 @@ jobs:
             if (!safeId.test(evalRunId)) throw new Error("eval run ID is invalid");
           ' "$PUBLICATION_ARTIFACT_RUN_ID" "$PUBLICATION_ARTIFACT_NAME" "$PUBLICATION_EVAL_RUN_ID"
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with:
-          version: 11.1.1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Ultrafuzz
-        run: pnpm -w build
-
-      - name: Preserve history already pending in the publication pull request
+      - name: Install and build trusted main
         run: |
-          if git fetch --no-tags origin "automation/eval-history:refs/remotes/origin/automation/eval-history"; then
-            node scripts/ci/merge-pending-eval-history.mjs origin/automation/eval-history
-          fi
+          pnpm install --frozen-lockfile
+          pnpm -w build
 
       - name: Download complete scored generation
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.artifact_name }}
-          path: .ultrafuzz/evals/runs/${{ inputs.eval_run_id }}
+          path: ${{ runner.temp }}/manual-eval-publication-input/${{ inputs.eval_run_id }}
           run-id: ${{ inputs.artifact_run_id }}
           github-token: ${{ github.token }}
 
-      - name: Append history and regenerate charts
+      - name: Publish with remote-tip compare-and-swap retries
         env:
+          PUBLICATION_INPUT_ROOT: ${{ runner.temp }}/manual-eval-publication-input
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
+          PUBLICATION_POLICY_ROOT: ${{ runner.temp }}/eval-history-benchmark-policy
           PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
           PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
-        run: >-
-          node packages/cli/dist/index.js eval history "$PUBLICATION_EVAL_RUN_ID"
-          --project .
-          --benchmark "${{ inputs.benchmark }}"
-          --lane "${{ inputs.lane }}"
-          --repository "${{ github.server_url }}/${{ github.repository }}"
-          --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/$PUBLICATION_ARTIFACT_RUN_ID"
-
-      - name: Verify deterministic publication output
-        run: node packages/cli/dist/index.js eval history --project . --check
-
-      - name: Open or update the publication pull request
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
-        with:
-          branch: automation/eval-history
-          base: main
-          delete-branch: false
-          draft: false
-          commit-message: "Update published eval history [skip eval-history]"
-          title: "[skip eval-history] Update published eval history"
-          body: |
-            ## Summary
-
-            Append one complete scored benchmark generation and regenerate the deterministic README charts.
-
-            ## Verification
-
-            - Validated the versioned history schema and immutable lineage
-            - Regenerated all SVGs from checked-in history
-            - Confirmed a clean deterministic regeneration
-          add-paths: |
-            benchmarks/history.json
-            docs/assets/eval-history/*.svg
+          PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          candidate_commit="$(jq -er '.provenance.candidate.commit' \
+            "$PUBLICATION_INPUT_ROOT/$PUBLICATION_EVAL_RUN_ID/eval.json")"
+          if ! [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Artifact candidate commit must be a full lowercase SHA" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$candidate_commit"
+          git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$candidate_commit"
+          trap 'git worktree remove --force "$PUBLICATION_POLICY_ROOT"' EXIT
+          node scripts/ci/prepare-eval-history-publication.mjs policy \
+            "$PUBLICATION_POLICY_ROOT" \
+            "$candidate_commit" \
+            "${{ inputs.benchmark }}"
+          node -e '
+            const fs = require("node:fs");
+            const [file, repository, artifactRunId, evalRunId, benchmark, lane, candidateCommit] = process.argv.slice(1);
+            fs.writeFileSync(file, JSON.stringify({
+              schema_version: "ultrafuzz.eval-history-publication-generation.v1",
+              candidate_commit: candidateCommit,
+              candidate_repository_url: repository,
+              source_artifact: repository + "/actions/runs/" + artifactRunId,
+              runs: [{ eval_run_id: evalRunId, benchmark, lane, input_path: evalRunId }]
+            }, null, 2) + "\n", { mode: 0o600 });
+          ' \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_REPOSITORY" \
+            "$PUBLICATION_ARTIFACT_RUN_ID" \
+            "$PUBLICATION_EVAL_RUN_ID" \
+            "${{ inputs.benchmark }}" \
+            "${{ inputs.lane }}" \
+            "$candidate_commit"
+          node scripts/ci/publish-eval-history-cas.mjs \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_INPUT_ROOT" \
+            "$PUBLICATION_POLICY_ROOT"
+          git worktree remove --force "$PUBLICATION_POLICY_ROOT"
+          trap - EXIT

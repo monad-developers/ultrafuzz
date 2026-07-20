@@ -34,7 +34,8 @@ export const WORKER_DIAGNOSTIC_CODES = [
   "sandbox-exited",
   "dependency-unreachable",
   "genuine-evaluation-failure",
-  "checkpoint-incompatible"
+  "checkpoint-incompatible",
+  "public-eval-diagnostics-invalid"
 ] as const;
 
 export type WorkerDiagnosticCode = (typeof WORKER_DIAGNOSTIC_CODES)[number];

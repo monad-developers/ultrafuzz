@@ -18,6 +18,10 @@ import {
 
 export const EVENT_SCHEMA_VERSION = "1.0";
 export const DEFAULT_EVENT_REPLAY_LIMIT = 10_000;
+const MAX_EVENT_INDEX_FILENAME_LENGTH = 128;
+const EVENT_INDEX_EXTENSION = ".jsonl";
+const EVENT_INDEX_DIRECT_MAX_ID_LENGTH = MAX_EVENT_INDEX_FILENAME_LENGTH - EVENT_INDEX_EXTENSION.length;
+const EVENT_INDEX_LONG_DIRECTORY = "sha256";
 
 export interface EventRecord {
   schema_version: string;
@@ -172,21 +176,60 @@ export function readEventQueryFacade(layout: RunLayout): unknown {
   return readJsonFile(path.join(layout.eventsIndexDir, "query-inputs.json"));
 }
 
+export function createEventQueryFacadeInputs(layout: RunLayout): unknown {
+  return {
+    schema_version: EVENT_SCHEMA_VERSION,
+    run_id: layout.runId,
+    append_log: path.relative(layout.root, layout.eventsPath).split(path.sep).join("/"),
+    index_root: path.relative(layout.root, layout.eventsIndexDir).split(path.sep).join("/"),
+    indexes: ["run", "node", "type", "status", "timestamp"],
+    filters: {
+      run_id: "events.index/run/<run-id>.jsonl",
+      node_id: "events.index/node/<node-id>.jsonl",
+      event_type: "events.index/type/<event-type>.jsonl",
+      status: "events.index/status/<status>.jsonl",
+      timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
+    },
+    long_filters: {
+      run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
+      node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
+      event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
+      status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
+    },
+    index_key_encoding: {
+      version: "1",
+      direct_max_id_length: EVENT_INDEX_DIRECT_MAX_ID_LENGTH,
+      direct_id_path: "<dimension>/<id>.jsonl",
+      long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
+      digest: "sha256",
+      hash_input_encoding: "utf8",
+      digest_encoding: "hex"
+    }
+  };
+}
+
 export function redactValue(value: unknown): unknown {
   return redactSecretsInValue(value);
 }
 
 function appendEventIndexes(layout: RunLayout, record: EventRecord): void {
   const serialized = JSON.stringify(record);
-  appendIndexLine(layout, ["run", `${record.run_id}.jsonl`], serialized);
-  appendIndexLine(layout, ["type", `${record.event_type}.jsonl`], serialized);
-  appendIndexLine(layout, ["timestamp", `${record.timestamp.slice(0, 10)}.jsonl`], serialized);
+  appendIndexLine(layout, ["run", ...eventIndexPath(record.run_id)], serialized);
+  appendIndexLine(layout, ["type", ...eventIndexPath(record.event_type)], serialized);
+  appendIndexLine(layout, ["timestamp", ...eventIndexPath(record.timestamp.slice(0, 10))], serialized);
   if (record.node_id !== undefined) {
-    appendIndexLine(layout, ["node", `${record.node_id}.jsonl`], serialized);
+    appendIndexLine(layout, ["node", ...eventIndexPath(record.node_id)], serialized);
   }
   if (record.status !== undefined) {
-    appendIndexLine(layout, ["status", `${record.status}.jsonl`], serialized);
+    appendIndexLine(layout, ["status", ...eventIndexPath(record.status)], serialized);
   }
+}
+
+function eventIndexPath(value: string): string[] {
+  const direct = `${value}${EVENT_INDEX_EXTENSION}`;
+  if (direct.length <= MAX_EVENT_INDEX_FILENAME_LENGTH) return [direct];
+  const digest = crypto.createHash("sha256").update(value, "utf8").digest("hex");
+  return [EVENT_INDEX_LONG_DIRECTORY, `${digest}${EVENT_INDEX_EXTENSION}`];
 }
 
 function appendIndexLine(layout: RunLayout, segments: string[], line: string): void {
@@ -196,19 +239,6 @@ function appendIndexLine(layout: RunLayout, segments: string[], line: string): v
 }
 
 function writeQueryFacadeInputs(layout: RunLayout): void {
-  const value = {
-    schema_version: EVENT_SCHEMA_VERSION,
-    run_id: layout.runId,
-    append_log: path.relative(layout.root, layout.eventsPath).split(path.sep).join("/"),
-    index_root: path.relative(layout.root, layout.eventsIndexDir).split(path.sep).join("/"),
-    filters: {
-      run_id: "events.index/run/<run-id>.jsonl",
-      node_id: "events.index/node/<node-id>.jsonl",
-      event_type: "events.index/type/<event-type>.jsonl",
-      status: "events.index/status/<status>.jsonl",
-      timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
-    }
-  };
   const pathInIndex = safeResolveInside(layout.eventsIndexDir, "query-inputs.json", "event query facade");
-  writeJsonDurable(pathInIndex, value);
+  writeJsonDurable(pathInIndex, createEventQueryFacadeInputs(layout));
 }

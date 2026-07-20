@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { createEventQueryFacadeInputs } from "./events.js";
 import { createInitialRunState, type NodeStateInput, type RunState, writeRunState } from "./state.js";
 import {
   assertNoSymlinkComponents,
@@ -145,13 +146,7 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
   );
   writeJsonIfNeeded(
     path.join(layout.eventsIndexDir, "query-inputs.json"),
-    {
-      schema_version: RUN_LAYOUT_SCHEMA_VERSION,
-      run_id: runId,
-      append_log: "events.jsonl",
-      indexes: ["run", "node", "type", "status", "timestamp"],
-      filters: ["run_id", "node_id", "event_type", "status", "timestamp"]
-    },
+    createEventQueryFacadeInputs(layout),
     input.overwrite ?? false
   );
 

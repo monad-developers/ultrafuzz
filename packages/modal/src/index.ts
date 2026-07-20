@@ -3,6 +3,8 @@ export * from "./config.js";
 export * from "./defaults.js";
 export * from "./layout.js";
 export * from "./launch-state.js";
+export * from "./public-bundle.js";
+export * from "./public-eval-diagnostics.js";
 export * from "./runner.js";
 export * from "./resume.js";
 export * from "./smoke-modal.js";

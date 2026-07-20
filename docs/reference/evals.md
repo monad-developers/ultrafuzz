@@ -151,11 +151,33 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
+The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
+Ultrafuzz-bench targets and pins GPT-5.6 Luna `high`. Its lane definition sets
+`strategy_loops: 1` and explicitly disables invariant tests, differential
+tests, and dynamic strategies; the adapter derives their exact production node
+exclusions. The full lane selects every checked-in EVMBench target, pins
+GPT-5.6 Luna `high` plus Claude Sonnet 5 `high`, sets the same one strategy loop,
+and explicitly leaves all three disable flags off so the complete topology is
+included. Both default to one trial per variant and use GPT-5.6 Sol `xhigh` as
+an independent judge. Public Modal pairs contain one runner variant. Repository
+variables may override the smoke OpenAI model and reasoning level, while full
+workflow dispatch inputs may override either runner. These overrides retain
+the lane's fixed provider count, target selection, and topology. Publication
+validates every pair as an exact projection of the candidate commit's trusted
+lane policy before merging its observations.
 `eval history` consumes only complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or
 model calls. Efficiency values that are not complete remain `null` with typed
 reasons and render as unavailable.
+
+EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
+The Modal publication bundle therefore includes the scored generation and the
+allowlisted report and normalized-finding files. It also carries the strict
+post-eval diagnostic that certifies each scoreable terminal outcome; history
+accepts a failed workflow only when that evidence identifies a report-backed
+genuine task failure. Bundle path, size, and SHA-256 checks are distinct from
+the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
 `eval publish --provider langsmith <eval-run-id>` replays the journal from
 offset 0 and reconstructs the entire node trace on a provider after the fact

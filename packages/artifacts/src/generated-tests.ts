@@ -6,6 +6,8 @@ import { z } from "zod/v4";
 import { normalizeArtifactProvenance, type ArtifactProvenance } from "./manifests.js";
 import { getNodeArtifactDir, type RunLayout } from "./run-layout.js";
 import {
+  ArtifactPathError,
+  assertRegularFileInside,
   ensureSafeDirectory,
   normalizeSafeRelativePath,
   prepareSafeFilePath,
@@ -21,6 +23,8 @@ export const GENERATED_TESTS_DIR = "generated-tests";
 export const GENERATED_TESTS_MANIFEST = "generated-tests.json";
 export const GENERATED_TESTS_JSON_SCHEMA_ID =
   "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/generated-tests" as const;
+export const GENERATED_TEST_MANIFEST_PATH_PATTERN =
+  "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])" as const;
 
 export interface GeneratedTestInput {
   path: string;
@@ -51,6 +55,7 @@ export interface GeneratedTestManifest {
 
 const nonEmptyString = z.string().min(1);
 const nonNegativeInteger = z.number().int().nonnegative();
+const generatedTestManifestPathPattern = new RegExp(GENERATED_TEST_MANIFEST_PATH_PATTERN, "u");
 
 const artifactProvenanceSchema = z.looseObject({
   producer_node_id: nonEmptyString.optional(),
@@ -112,7 +117,7 @@ export const generatedTestsJsonSchema = {
         required: ["path"],
         additionalProperties: true,
         properties: {
-          path: { type: "string", pattern: "^generated-tests\\/.+" },
+          path: { type: "string", pattern: GENERATED_TEST_MANIFEST_PATH_PATTERN },
           size_bytes: { type: "integer", minimum: 0 },
           sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
           provenance: {
@@ -210,15 +215,7 @@ export function readGeneratedTestManifest(layout: RunLayout, nodeId: string): Ge
 }
 
 function isSafeGeneratedTestManifestPath(value: string): boolean {
-  if (!value.startsWith(`${GENERATED_TESTS_DIR}/`)) {
-    return false;
-  }
-  try {
-    normalizeSafeRelativePath(stripGeneratedTestsPrefix(value), "generated test manifest path");
-    return true;
-  } catch {
-    return false;
-  }
+  return generatedTestManifestPathPattern.test(value);
 }
 
 function writeGeneratedTestEntry(
@@ -227,16 +224,20 @@ function writeGeneratedTestEntry(
   manifestProvenance: ArtifactProvenance
 ): GeneratedTestEntry {
   const safeRelativeTestPath = normalizeSafeRelativePath(stripGeneratedTestsPrefix(input.path), "generated test path");
-  const absolutePath = prepareSafeFilePath(path.join(nodeDir, GENERATED_TESTS_DIR), safeRelativeTestPath);
+  const generatedTestsRoot = path.join(nodeDir, GENERATED_TESTS_DIR);
+  const absolutePath = prepareSafeFilePath(generatedTestsRoot, safeRelativeTestPath);
+  assertGeneratedTestDestinationIsNotSymlink(absolutePath);
   if (input.content !== undefined) {
     writeFileDurable(absolutePath, input.content);
   }
-  if (!fs.existsSync(absolutePath)) {
-    throw new Error(`generated test file is missing: ${absolutePath}`);
+  assertRegularFileInside(generatedTestsRoot, absolutePath, "generated test file");
+  const fileStats = fs.lstatSync(absolutePath);
+  if (fileStats.size === 0) {
+    throw new Error(`generated test file must be non-empty: ${absolutePath}`);
   }
   const entry: GeneratedTestEntry = {
     path: `${GENERATED_TESTS_DIR}/${safeRelativeTestPath}`,
-    size_bytes: fs.statSync(absolutePath).size,
+    size_bytes: fileStats.size,
     sha256: sha256File(absolutePath),
     provenance: normalizeArtifactProvenance(
       { runId: manifestProvenance.run_id ?? "" },
@@ -257,6 +258,21 @@ function writeGeneratedTestEntry(
     entry.description = input.description;
   }
   return entry;
+}
+
+function assertGeneratedTestDestinationIsNotSymlink(filePath: string): void {
+  let fileStats: fs.Stats;
+  try {
+    fileStats = fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  if (fileStats.isSymbolicLink()) {
+    throw new ArtifactPathError("symlink-escape", `generated test file cannot be a symlink: ${filePath}`);
+  }
 }
 
 function stripGeneratedTestsPrefix(value: string): string {
