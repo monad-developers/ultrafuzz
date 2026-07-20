@@ -215,7 +215,7 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string }
+  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timetravelLines?: string[] }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
@@ -238,6 +238,10 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
+      "    ;;",
+      "  timetravel)",
+      ...(input.timetravelLines ?? []),
+      "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  up)",
       '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
@@ -4003,11 +4007,15 @@ test("resume --reset-node discards prior agent resume sessions before resetting"
       status: "failed",
       state: "failed",
       steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
-    })
+    }),
+    timetravelLines: [
+      '    bun --eval \'import { Database } from "bun:sqlite"; const db = new Database(Bun.env.SMITHERS_FAKE_DB); db.query("insert into _smithers_attempts values (?, ?, 0, 2, ?, ?)").run("ultrafuzz-discard-resume-lifecycle-run", "node:project-discovery", "failed", JSON.stringify({discardResumeSession:true,agentResume:"post-reset-thread",resumedFromSession:"post-reset-thread",resumedFromConversation:true,lastHeartbeat:{agentResume:"post-reset-thread",resumedFromSession:"post-reset-thread",resumedFromConversation:true}})); db.close();\''
+    ]
   });
   const run = await startRun({ projectRoot: project, runId: "discard-resume-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const dbPath = path.join(project, "smithers.db");
+  env.SMITHERS_FAKE_DB = dbPath;
   execFileSync("bun", [
     "--eval",
     `
@@ -4018,11 +4026,17 @@ test("resume --reset-node discards prior agent resume sessions before resetting"
         "ultrafuzz-discard-resume-lifecycle-run",
         "node:project-discovery",
         JSON.stringify({
+          discardResumeSession: true,
           agentEngine: "codex",
           agentResume: "stale-thread",
           resumedFromSession: "stale-thread",
           resumedFromConversation: true,
-          lastHeartbeat: { agentEngine: "codex", agentResume: "stale-thread" }
+          lastHeartbeat: {
+            agentEngine: "codex",
+            agentResume: "stale-thread",
+            resumedFromSession: "stale-thread",
+            resumedFromConversation: true
+          }
         })
       );
       db.close();
@@ -4039,30 +4053,34 @@ test("resume --reset-node discards prior agent resume sessions before resetting"
   });
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  const meta = execFileSync(
+  const metas = execFileSync(
     "bun",
     [
       "--eval",
       `
       import { Database } from "bun:sqlite";
       const db = new Database(Bun.argv[1], { readonly: true });
-      const row = db.query("select meta_json from _smithers_attempts where run_id = ? and node_id = ? and attempt = 1").get(
+      const rows = db.query("select attempt, meta_json from _smithers_attempts where run_id = ? and node_id = ? order by attempt").all(
         "ultrafuzz-discard-resume-lifecycle-run",
         "node:project-discovery"
       );
-      console.log(row.meta_json);
+      console.log(JSON.stringify(rows));
       db.close();
     `,
       dbPath
     ],
     { encoding: "utf8" }
   );
-  const parsedMeta = JSON.parse(meta);
-  assert.equal(parsedMeta.discardResumeSession, true);
-  assert.equal(parsedMeta.agentResume, undefined);
-  assert.equal(parsedMeta.resumedFromSession, undefined);
-  assert.equal(parsedMeta.resumedFromConversation, undefined);
-  assert.equal(parsedMeta.lastHeartbeat.agentResume, undefined);
+  for (const row of JSON.parse(metas) as Array<{ attempt: number; meta_json: string }>) {
+    const parsedMeta = JSON.parse(row.meta_json);
+    assert.equal(parsedMeta.discardResumeSession, true, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.agentResume, undefined, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.resumedFromSession, undefined, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.resumedFromConversation, undefined, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.lastHeartbeat.agentResume, undefined, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.lastHeartbeat.resumedFromSession, undefined, `attempt ${row.attempt}`);
+    assert.equal(parsedMeta.lastHeartbeat.resumedFromConversation, undefined, `attempt ${row.attempt}`);
+  }
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /^timetravel /mu);
   assert.match(commands, /^up /mu);

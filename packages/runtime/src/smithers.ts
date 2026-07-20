@@ -116,14 +116,17 @@ try {
         meta = {};
       }
     }
-    if (meta.discardResumeSession === true) continue;
+    const before = JSON.stringify(meta);
     meta.discardResumeSession = true;
     delete meta.agentResume;
     delete meta.resumedFromSession;
     delete meta.resumedFromConversation;
     if (meta.lastHeartbeat && typeof meta.lastHeartbeat === "object" && !Array.isArray(meta.lastHeartbeat)) {
       delete meta.lastHeartbeat.agentResume;
+      delete meta.lastHeartbeat.resumedFromSession;
+      delete meta.lastHeartbeat.resumedFromConversation;
     }
+    if (JSON.stringify(meta) === before) continue;
     update.run(JSON.stringify(meta), runId, nodeId, row.attempt);
     changed += 1;
   }
@@ -567,6 +570,19 @@ export async function runSmithersLifecycleCommand(input: {
         keepWorkspaces: input.keepWorkspaces
       });
       resetStderr = [resetStderr, resetResult.stderr].filter((value) => value.length > 0).join("\n");
+      resetStderr = [
+        resetStderr,
+        await markDiscardResumeSessionsForResetNode({
+          projectRoot: input.projectRoot,
+          smithersRunId: input.smithersRunId,
+          resetNode: input.resetNode,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        })
+      ]
+        .filter((value) => value.length > 0)
+        .join("\n");
       if (resetMarkerPath !== undefined) {
         writeJsonDurable(resetMarkerPath, {
           schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
