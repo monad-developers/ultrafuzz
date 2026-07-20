@@ -46,6 +46,8 @@ describe("Modal storage layout", () => {
     expect(workerSource).toContain('stdio: ["ignore", stdoutFile.fd, stderrFile.fd]');
     expect(workerSource).toContain("terminateProcessGroup(child)");
     expect(workerSource).toContain("workflowSyncSummary");
+    expect(workerSource).toContain("workflowSyncNodes");
+    expect(workerSource).toContain("runningDetailMs");
     expect(workerSource).toContain("terminalDurableRunNeedsMoreWorkflowPolling");
     expect(workerSource).toContain('setStatus("waiting-judge"');
     expect(workerSource).toContain("EVAL_SCORE_TIMEOUT_MS");

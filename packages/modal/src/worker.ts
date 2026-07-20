@@ -64,6 +64,7 @@ interface WorkflowSyncSummary {
   sync_status?: string;
   workflow_status?: string;
   workflow_verdict?: string;
+  nodes?: Record<string, DurableNodeState>;
 }
 
 type RecoverableNodeEntry = {
@@ -774,7 +775,11 @@ async function synchronizedRunState(target: string): Promise<DurableRunState | u
   const workflowSummary = await synchronizeWorkflowState(target, state.run_id);
   const durable = await durableRunState(target);
   if (durable === undefined || workflowSummary === undefined) return durable;
-  return { ...durable, ...workflowSummary };
+  return {
+    ...durable,
+    ...workflowSummary,
+    nodes: { ...(durable.nodes ?? {}), ...(workflowSummary.nodes ?? {}) }
+  };
 }
 
 async function synchronizeWorkflowState(target: string, runId: string): Promise<WorkflowSyncSummary | undefined> {
@@ -852,8 +857,60 @@ function workflowSyncSummary(stdout: string): WorkflowSyncSummary | undefined {
     ...(stringField(data, "workflow_status") === undefined
       ? {}
       : { workflow_status: stringField(data, "workflow_status") }),
-    ...(stringField(data, "verdict") === undefined ? {} : { workflow_verdict: stringField(data, "verdict") })
+    ...(stringField(data, "verdict") === undefined ? {} : { workflow_verdict: stringField(data, "verdict") }),
+    nodes: workflowSyncNodes(data)
   };
+}
+
+function workflowSyncNodes(data: Record<string, unknown>): Record<string, DurableNodeState> {
+  const nodes: Record<string, DurableNodeState> = {};
+  const bottlenecks = arrayField(data, "gating") ?? arrayField(data, "bottleneck") ?? [];
+  for (const bottleneck of bottlenecks) {
+    if (typeof bottleneck !== "object" || bottleneck === null || Array.isArray(bottleneck)) continue;
+    const record = bottleneck as Record<string, unknown>;
+    const nodeId = stringField(record, "node_id") ?? stringField(record, "nodeId");
+    if (nodeId === undefined) continue;
+    const state = stringField(record, "state");
+    const detail = stringField(record, "detail");
+    if (state === "failed") {
+      nodes[nodeId] = { status: "failed", provenance: { workflow: { task_id: nodeId } } };
+      continue;
+    }
+    const runningMs = runningDetailMs(detail);
+    if (state === "in-progress" && runningMs !== undefined) {
+      nodes[nodeId] = {
+        status: "running",
+        started_at: new Date(Date.now() - runningMs).toISOString(),
+        provenance: { workflow: { task_id: nodeId } }
+      };
+    }
+  }
+  return nodes;
+}
+
+function arrayField(value: Record<string, unknown>, key: string): unknown[] | undefined {
+  const field = value[key];
+  return Array.isArray(field) ? field : undefined;
+}
+
+function runningDetailMs(detail: string | undefined): number | undefined {
+  if (detail === undefined) return undefined;
+  const running = detail.match(/^running\s+(.+)$/iu);
+  if (running?.[1] === undefined) return undefined;
+  let total = 0;
+  const units = running[1].matchAll(
+    /(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)\b/giu
+  );
+  for (const match of units) {
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount)) continue;
+    const unit = match[2]?.toLowerCase();
+    if (unit === undefined) continue;
+    if (unit.startsWith("h")) total += amount * 60 * 60 * 1000;
+    else if (unit.startsWith("m")) total += amount * 60 * 1000;
+    else total += amount * 1000;
+  }
+  return total > 0 ? total : undefined;
 }
 
 function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
