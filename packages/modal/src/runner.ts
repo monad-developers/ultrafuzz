@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,8 +19,10 @@ import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from
 import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
+  isPublicModalBenchmarkConfig,
   loadModalBenchmarkConfig,
-  type ModalBenchmarkConfig
+  type ModalBenchmarkConfig,
+  type PublicModalBenchmarkConfig
 } from "./config.js";
 import {
   DEFAULT_MODAL_APP,
@@ -68,6 +71,11 @@ import {
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "./layout.js";
+import {
+  MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
+  parsePublicBenchmarkBundle,
+  type PublicBenchmarkBundle
+} from "./public-bundle.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
@@ -76,6 +84,7 @@ const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
 const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
+export const MODAL_PUBLIC_RESULT_FILE = "public-results.json" as const;
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
 
@@ -108,12 +117,16 @@ export async function buildModalImage(
       tags: { purpose: "ultrafuzz-image-stage" }
     });
     try {
-      const archive = createTrackedSourceArchive(repoRoot);
-      await stage.filesystem.copyFromLocal(archive, "/tmp/ultrafuzz-source.tgz");
-      await runChecked(stage, ["bash", "-lc", modalImageBuildCommand()]);
-      const image = await stage.snapshotFilesystem({ timeoutMs: 10 * 60 * 1000, ttlMs: null });
-      await image.publish(imageName);
-      return { imageId: image.imageId, imageName };
+      const archive = createExactCandidateSourceArchive(repoRoot);
+      try {
+        await stage.filesystem.copyFromLocal(archive.path, "/tmp/ultrafuzz-source.tgz");
+        await runChecked(stage, ["bash", "-lc", modalImageBuildCommand()]);
+        const image = await stage.snapshotFilesystem({ timeoutMs: 10 * 60 * 1000, ttlMs: null });
+        await image.publish(imageName);
+        return { imageId: image.imageId, imageName };
+      } finally {
+        archive.cleanup();
+      }
     } finally {
       await stage.terminate({ wait: true });
     }
@@ -133,6 +146,10 @@ export async function launchModalBenchmark(input: {
   const configPath = path.resolve(input.configPath);
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const config = loadModalBenchmarkConfig(configPath);
+  const candidateRevision = sourceRevision(repoRoot).toLowerCase();
+  if (isPublicModalBenchmarkConfig(config) && candidateRevision !== config.public_benchmark.candidate_commit) {
+    throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
+  }
   const selected = selectModels(config, input.modelSlugs);
   const statePath = path.resolve(input.statePath ?? defaultStatePath(config.run_id));
   const mode = input.mode ?? "resume";
@@ -170,7 +187,7 @@ export async function launchModalBenchmark(input: {
           image: config.image_name,
           imageId: image.imageId,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
-          sourceRevision: sourceRevision(repoRoot),
+          sourceRevision: candidateRevision,
           fingerprints
         });
         await writeModalLaunchState(statePath, state);
@@ -192,7 +209,7 @@ export async function launchModalBenchmark(input: {
           image: config.image_name,
           imageId: image.imageId,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
-          sourceRevision: sourceRevision(repoRoot),
+          sourceRevision: candidateRevision,
           fingerprints,
           attemptHistory: history
         });
@@ -546,7 +563,7 @@ function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineage
 }
 
 export function modalImageBuildCommand(): string {
-  return "rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar -xzf /tmp/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
@@ -623,21 +640,128 @@ export async function modalBenchmarkStatus(input: {
 export async function collectModalBenchmark(input: {
   statePath: string;
   outputDir: string;
+  configPath?: string;
+  includePublicResults?: boolean;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
+  let publicCollection: { config: PublicModalBenchmarkConfig; configFingerprint: string } | undefined;
+  if (input.includePublicResults === true) {
+    if (input.configPath === undefined) {
+      throw new Error("public benchmark collection requires the original --config file");
+    }
+    const config = loadModalBenchmarkConfig(input.configPath);
+    if (!isPublicModalBenchmarkConfig(config)) {
+      throw new Error("public benchmark collection requires a public benchmark config");
+    }
+    publicCollection = {
+      config,
+      configFingerprint: fingerprintModalConfigFile(input.configPath)
+    };
+  }
   const modal = modalClient(input.env);
   try {
     const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
     for (const launch of state.launches) {
       const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
       const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
-        ...MODAL_COLLECT_RESULT_FILES
+        ...MODAL_COLLECT_RESULT_FILES,
+        ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
       ]);
       const output = path.resolve(input.outputDir, launch.slug);
+      let publicContents: string | undefined;
+      if (input.includePublicResults === true) {
+        const contents = files[MODAL_PUBLIC_RESULT_FILE];
+        if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
+        const configuredModel = publicCollection!.config.models.find((model) => model.slug === launch.slug);
+        if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
+        const collectionEnv = input.env ?? process.env;
+        const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
+          requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
+          requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+        ]);
+        assertPublicBenchmarkBundleLineage({
+          bundle,
+          config: publicCollection!.config,
+          configFingerprint: publicCollection!.configFingerprint,
+          state,
+          launch
+        });
+        publicContents = contents;
+      }
       await replaceSanitizedModalCollectedFiles(output, files, launch);
+      if (publicContents !== undefined) await writeCollectedPublicBundle(output, publicContents);
     }
   } finally {
     modal.close();
+  }
+}
+
+export function assertPublicBenchmarkBundleLineage(input: {
+  bundle: Pick<
+    PublicBenchmarkBundle,
+    | "benchmark"
+    | "lane"
+    | "experiment"
+    | "model_slug"
+    | "model"
+    | "reasoning"
+    | "candidate_commit"
+    | "eval_run_id"
+    | "lineage"
+  >;
+  config: PublicModalBenchmarkConfig;
+  configFingerprint: string;
+  state: Pick<ModalLaunchState, "logical_run_id" | "generation" | "source_revision" | "image" | "fingerprints">;
+  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "model_fingerprint">;
+}): void {
+  const { bundle, config, configFingerprint, state, launch } = input;
+  const scope = config.public_benchmark;
+  const configuredModel = config.models.find((model) => model.slug === launch.slug);
+  const mismatches = [
+    config.run_id === state.logical_run_id ? undefined : "logical run",
+    config.image_name === state.image ? undefined : "image",
+    configFingerprint === state.fingerprints.config ? undefined : "configuration fingerprint",
+    scope.candidate_commit === state.source_revision ? undefined : "candidate source revision",
+    scope.runner_model_profile === launch.slug ? undefined : "runner model profile",
+    configuredModel !== undefined && fingerprintModalModel(configuredModel) === launch.model_fingerprint
+      ? undefined
+      : "configured model fingerprint",
+    bundle.candidate_commit === scope.candidate_commit ? undefined : "candidate commit",
+    bundle.benchmark === scope.benchmark ? undefined : "benchmark",
+    bundle.lane === scope.lane ? undefined : "lane",
+    bundle.experiment === scope.experiment ? undefined : "experiment",
+    bundle.model_slug === launch.slug ? undefined : "model slug",
+    bundle.model === launch.model ? undefined : "model",
+    bundle.reasoning === launch.reasoning ? undefined : "reasoning",
+    bundle.eval_run_id === `${config.run_id}-${launch.slug}` ? undefined : "eval run",
+    bundle.lineage.logical_run_id === state.logical_run_id ? undefined : "bundle logical run lineage",
+    bundle.lineage.generation === state.generation ? undefined : "bundle generation lineage",
+    bundle.lineage.config_fingerprint === state.fingerprints.config ? undefined : "bundle configuration lineage",
+    bundle.lineage.source_fingerprint === state.fingerprints.source ? undefined : "bundle source lineage",
+    bundle.lineage.image_fingerprint === state.fingerprints.image ? undefined : "bundle image lineage",
+    bundle.lineage.model_fingerprint === launch.model_fingerprint ? undefined : "bundle model lineage"
+  ].filter((value): value is string => value !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public benchmark result lineage does not match ${launch.slug}: ${mismatches.join(", ")}`);
+  }
+}
+
+async function writeCollectedPublicBundle(output: string, contents: string): Promise<void> {
+  await mkdir(output, { recursive: true, mode: 0o700 });
+  const staging = await mkdtemp(path.join(output, ".public-collect-"));
+  try {
+    const staged = path.join(staging, MODAL_PUBLIC_RESULT_FILE);
+    const handle = await open(staged, "wx", 0o600);
+    try {
+      await handle.writeFile(contents, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(staged, path.join(output, MODAL_PUBLIC_RESULT_FILE));
+    await syncDirectory(output);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
   }
 }
 
@@ -675,6 +799,84 @@ export function createTrackedSourceArchive(
   return archive;
 }
 
+/**
+ * Create a self-contained, shallow Git checkout for the exact candidate HEAD.
+ * The worker extracts this immutable archive instead of cloning the candidate
+ * repository, which may be private. Keeping the shallow .git directory makes
+ * eval provenance resolve to the original 40-character commit with a clean
+ * worktree.
+ */
+export function createExactCandidateSourceArchive(
+  repoRoot: string,
+  requestedArchive?: string,
+  options: { createTar?: (archive: string, checkout: string) => void } = {}
+): { path: string; cleanup: () => void } {
+  const revision = sourceRevision(repoRoot).toLowerCase();
+  if (!/^[0-9a-f]{40}$/u.test(revision)) {
+    throw new Error(`Modal candidate source does not have an exact Git revision: ${repoRoot}`);
+  }
+  const trackedChanges = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+    cwd: repoRoot,
+    encoding: "utf8"
+  });
+  if (trackedChanges.trim() !== "") {
+    throw new Error("Modal candidate source has tracked changes; commit them before building the image");
+  }
+
+  const outputRoot =
+    requestedArchive === undefined ? mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-source-")) : undefined;
+  if (outputRoot !== undefined) chmodSync(outputRoot, 0o700);
+  const archive = path.resolve(requestedArchive ?? path.join(outputRoot!, "candidate.tgz"));
+  let staging: string | undefined;
+  let archiveCreated = false;
+  let complete = false;
+  try {
+    const descriptor = openSync(archive, "wx", 0o600);
+    archiveCreated = true;
+    closeSync(descriptor);
+    chmodSync(archive, 0o600);
+    staging = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-candidate-stage-"));
+    chmodSync(staging, 0o700);
+    const checkout = path.join(staging, "checkout");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    execFileSync("git", ["fetch", "--quiet", "--depth", "1", "--no-tags", repoRoot, revision], {
+      cwd: checkout
+    });
+    execFileSync("git", ["checkout", "--quiet", "--detach", revision], { cwd: checkout });
+    rmSync(path.join(checkout, ".git", "FETCH_HEAD"), { force: true });
+    const archivedRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: checkout, encoding: "utf8" })
+      .trim()
+      .toLowerCase();
+    const archivedChanges = execFileSync("git", ["status", "--porcelain", "--untracked-files=no"], {
+      cwd: checkout,
+      encoding: "utf8"
+    });
+    if (archivedRevision !== revision || archivedChanges.trim() !== "") {
+      throw new Error("failed to construct an exact clean Modal candidate source archive");
+    }
+    if (options.createTar === undefined) {
+      execFileSync("tar", ["-czf", archive, "-C", checkout, "."]);
+    } else {
+      options.createTar(archive, checkout);
+    }
+    chmodSync(archive, 0o600);
+    complete = true;
+    return {
+      path: archive,
+      cleanup: () => {
+        if (outputRoot === undefined) rmSync(archive, { force: true });
+        else rmSync(outputRoot, { recursive: true, force: true });
+      }
+    };
+  } finally {
+    if (staging !== undefined) rmSync(staging, { recursive: true, force: true });
+    if (!complete) {
+      if (archiveCreated) rmSync(archive, { force: true });
+      if (outputRoot !== undefined) rmSync(outputRoot, { recursive: true, force: true });
+    }
+  }
+}
+
 function modalClient(env: Record<string, string | undefined> = process.env): ModalClient {
   return new ModalClient({
     tokenId: requiredEnv(env, "MODAL_TOKEN_ID"),
@@ -687,8 +889,13 @@ function secretValues(
   model: ModalModelSpec,
   env: Record<string, string | undefined>
 ): Record<string, string> {
-  const names = new Set([config.braintrust.api_key_env]);
-  if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
+  const names = new Set<string>();
+  if (isPublicModalBenchmarkConfig(config)) {
+    names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
+  } else {
+    names.add(config.braintrust.api_key_env);
+    if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
+  }
   if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
   return Object.fromEntries([...names].map((name) => [name, requiredEnv(env, name)]));
 }
@@ -804,7 +1011,7 @@ async function readVolumeFiles(
   const inspector = await modal.sandboxes.create(app, image, {
     command: ["sleep", "300"],
     cpu: 0.5,
-    memoryMiB: 512,
+    memoryMiB: 2048,
     timeoutMs: 5 * 60 * 1000,
     volumes: { "/data": volume.withMountOptions({ readOnly: true }) },
     tags: { purpose: "ultrafuzz-inspector" }
@@ -812,7 +1019,11 @@ async function readVolumeFiles(
   try {
     const files: Record<string, string> = {};
     for (const name of names) {
-      const contents = await readOptionalModalSandboxText(inspector.filesystem, path.posix.join(root, name));
+      const contents = await readOptionalModalSandboxText(
+        inspector.filesystem,
+        path.posix.join(root, name),
+        name === MODAL_PUBLIC_RESULT_FILE ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES : undefined
+      );
       if (contents !== undefined) files[name] = contents;
     }
     return files;
@@ -822,11 +1033,26 @@ async function readVolumeFiles(
 }
 
 export async function readOptionalModalSandboxText(
-  filesystem: Pick<Sandbox["filesystem"], "readText">,
-  filePath: string
+  filesystem: Pick<Sandbox["filesystem"], "readText"> & Partial<Pick<Sandbox["filesystem"], "stat">>,
+  filePath: string,
+  maxBytes?: number
 ): Promise<string | undefined> {
   try {
-    return await filesystem.readText(filePath);
+    if (maxBytes !== undefined) {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0)
+        throw new Error("remote text byte limit must be non-negative");
+      if (filesystem.stat === undefined) throw new Error("bounded remote text reads require file metadata");
+      const metadata = await filesystem.stat(filePath);
+      if (metadata.type !== "file") throw new Error(`remote result is not a regular file: ${filePath}`);
+      if (!Number.isSafeInteger(metadata.size) || metadata.size < 0 || metadata.size > maxBytes) {
+        throw new Error(`remote result exceeds the size limit: ${filePath}`);
+      }
+    }
+    const contents = await filesystem.readText(filePath);
+    if (maxBytes !== undefined && Buffer.byteLength(contents, "utf8") > maxBytes) {
+      throw new Error(`remote result exceeds the size limit: ${filePath}`);
+    }
+    return contents;
   } catch (error) {
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
     throw error;

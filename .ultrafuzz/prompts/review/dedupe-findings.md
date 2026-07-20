@@ -50,6 +50,14 @@ Dynamic findings:
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
+Kaden strategy plan: {{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json
+
+Kaden findings: {{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json
+
+Kaden generated-test manifest: {{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json
+
+Kaden provenance rule ({{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json): Preserve `kaden_reference_path`, the leaf `strategy`, and contributing leaf strategy ids on kept findings, duplicates, and family variants; the umbrella reference is not a reason to merge distinct signature root causes.
+
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 
 When several proven findings share the same production root cause but exercise

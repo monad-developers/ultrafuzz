@@ -1,0 +1,56 @@
+source:
+  url: https://code4rena.com/reports/2023-05-venus
+  retrieved_sha256: 82613207395c9a7839f3717d897c01945ba490522640ec296fe6984adbd7913e
+  note: Public Code4rena report; Low, non-critical, and gas-only observations are excluded.
+bugs:
+  - id: H-01
+    severity: high
+    title: Incorrect blocksPerYear constant in WhitepaperInterestRateModel
+  - id: M-01
+    severity: medium
+    title: Malicious actor can win an auction unfavorably to the protocol by block stuffing
+  - id: M-02
+    severity: medium
+    title: It is possible to borrow, redeem, transfer tokens and exit markets with outdated collateral prices and borrow interest
+  - id: M-03
+    severity: medium
+    title: liquidateAccount will fail if the transaction is not included in the current block
+  - id: M-04
+    severity: medium
+    title: _ensureMaxLoops causes liquidateAccount to fail in certain conditions
+  - id: M-05
+    severity: medium
+    title: Bad debt in PoolLens.getPoolBadDebt is not calculated correctly in USD
+  - id: M-06
+    severity: medium
+    title: Potential unjust liquidation after exiting market
+  - id: M-07
+    severity: medium
+    title: Denial of service prevents refunding the previous Shortfall bid and lets a malicious bidder win
+  - id: M-08
+    severity: medium
+    title: Borrower can deny liquidation by frontrunning it and repaying one wei of debt
+  - id: M-09
+    severity: medium
+    title: Shortfall may transfer an incorrect amount of tokens to the highest bidder
+  - id: M-10
+    severity: medium
+    title: Exchange rate can be manipulated
+  - id: M-11
+    severity: medium
+    title: RiskFund.swapPoolsAsset omits a user-supplied deadline and may revert
+  - id: M-12
+    severity: medium
+    title: Utilization rate computation is incorrect
+  - id: M-13
+    severity: medium
+    title: Comptroller.healAccount does not distribute rewards for a healed borrower
+  - id: M-14
+    severity: medium
+    title: placeBid permits participation in auctions that have been modified
+  - id: M-15
+    severity: medium
+    title: Borrow rate calculation can make VToken.accrueInterest revert and deny major functionality
+  - id: M-16
+    severity: medium
+    title: calculateBorrowerReward and calculateSupplierReward sometimes return incorrect results

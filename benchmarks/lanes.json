@@ -25,8 +25,20 @@
         "agent": "CodexAgent",
         "model": "gpt-5.6-luna",
         "reasoning": "high"
+      },
+      {
+        "id": "benchmark-smoke-claude-sonnet-5-high",
+        "agent": "ClaudeAgent",
+        "model": "claude-sonnet-5",
+        "reasoning": "high"
       }
-    ]
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
   },
   "full": {
     "trials_per_variant": 10,
@@ -34,41 +46,23 @@
     "excluded_node_ids": [],
     "model_profiles": [
       {
-        "id": "benchmark-full-gpt-5-5-xhigh",
-        "agent": "CodexAgent",
-        "model": "gpt-5.5",
-        "reasoning": "xhigh"
-      },
-      {
-        "id": "benchmark-full-gpt-5-6-sol-xhigh",
-        "agent": "CodexAgent",
-        "model": "gpt-5.6-sol",
-        "reasoning": "xhigh"
-      },
-      {
-        "id": "benchmark-full-gpt-5-6-terra-xhigh",
-        "agent": "CodexAgent",
-        "model": "gpt-5.6-terra",
-        "reasoning": "xhigh"
-      },
-      {
-        "id": "benchmark-full-gpt-5-6-luna-xhigh",
+        "id": "benchmark-full-gpt-5-6-luna-high",
         "agent": "CodexAgent",
         "model": "gpt-5.6-luna",
-        "reasoning": "xhigh"
+        "reasoning": "high"
       },
       {
-        "id": "benchmark-full-claude-fable-5-max",
+        "id": "benchmark-full-claude-sonnet-5-high",
         "agent": "ClaudeAgent",
-        "model": "claude-fable-5",
-        "reasoning": "max"
-      },
-      {
-        "id": "benchmark-full-claude-opus-4-8-max",
-        "agent": "ClaudeAgent",
-        "model": "claude-opus-4-8",
-        "reasoning": "max"
+        "model": "claude-sonnet-5",
+        "reasoning": "high"
       }
-    ]
+    ],
+    "judge_profile": {
+      "id": "benchmark-judge-gpt-5-6-sol-xhigh",
+      "agent": "CodexAgent",
+      "model": "gpt-5.6-sol",
+      "reasoning": "xhigh"
+    }
   }
 }

@@ -541,7 +541,14 @@ export function assertPublicBenchmarkGeneration(
     path.join(projectRoot, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
   );
   const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "lanes.json"));
-  const expected = adaptBenchmarkManifestToEvalSuite({ benchmark, lane, cohort, lanes });
+  const actualRunnerProfiles = [...new Set(suite.variants.map((variant) => variant.runner_model_profile))];
+  const expected = adaptBenchmarkManifestToEvalSuite({
+    benchmark,
+    lane,
+    cohort,
+    lanes,
+    ...(actualRunnerProfiles.length === 1 ? { runnerModelProfileId: actualRunnerProfiles[0] } : {})
+  });
   if (stableStringify(publicSuiteScope(suite)) !== stableStringify(publicSuiteScope(expected))) {
     throw new EvalError(
       "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
@@ -709,7 +716,10 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     const key = [
       observation.benchmark,
       observation.lane,
+      observation.model,
+      observation.reasoning_effort,
       observation.cohort_fingerprint,
+      observation.execution_policy_fingerprint,
       observation.run_timestamp,
       observation.candidate_commit
     ].join("\u0000");
@@ -719,7 +729,14 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     .map((group) => {
       const first = group[0]!;
       return {
-        series: `${first.benchmark} ${first.lane} ${first.cohort_fingerprint.replace(/^sha256:/u, "").slice(0, 8)}`,
+        series: [
+          first.benchmark,
+          first.lane,
+          first.model,
+          first.reasoning_effort,
+          `cohort-${shortFingerprint(first.cohort_fingerprint)}`,
+          `policy-${shortFingerprint(first.execution_policy_fingerprint)}`
+        ].join(" "),
         timestamp: first.run_timestamp,
         commit: first.candidate_commit,
         repositoryUrl: first.candidate_repository_url,
@@ -732,6 +749,10 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
         compareText(left.timestamp, right.timestamp) ||
         compareText(left.commit, right.commit)
     );
+}
+
+function shortFingerprint(value: string): string {
+  return value.replace(/^sha256:/u, "").slice(0, 8);
 }
 
 function aggregateChartMetric(observations: EvalHistoryObservation[], metric: ChartMetric): number | null {

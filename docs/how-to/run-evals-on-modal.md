@@ -79,6 +79,58 @@ For judges that require short-lived credentials, configure an HTTPS
 `braintrust.judge_credential_endpoint`. The worker requests a model-scoped
 credential in memory immediately before scoring and never persists it.
 
+## Run the public post-main matrix
+
+The checked-in GitHub workflow uses Actions only as a control plane. Every push
+to `main` installs and builds the candidate, then builds an immutable Modal
+image named for that commit and launches four independent sandboxes:
+
+- GPT-5.6 Luna at `high` on EVMBench;
+- Claude Sonnet 5 at `high` on EVMBench;
+- GPT-5.6 Luna at `high` on Ultrafuzz-bench; and
+- Claude Sonnet 5 at `high` on Ultrafuzz-bench.
+
+Every pair has a 3,600-second model-work budget. Scoring is independent of the
+runner and always uses GPT-5.6 Sol at `xhigh`. The ordinary main-push lane uses
+the pinned smoke cohorts and caps every explicit topology node timeout to the
+configured 900-second node budget, including the Kaden coordinator. The public Modal launcher rejects the unchunked full
+cohorts before creating any sandbox: their matrix cannot fit the bounded
+control-plane deadline. Run full suites through the generic eval path only after
+splitting them into independently recoverable chunks.
+
+Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, and `BRAINTRUST_API_KEY` as Actions secrets. Modal receives
+only the provider credential needed by a pair plus the judge credential. It
+never receives a GitHub token.
+
+The worker clones the exact candidate and target commits, obtains EVMBench
+labels from the pinned public Frontier Evals revision, and uses the versioned
+public Ultrafuzz-bench labels. Public target reports and normalized findings are
+packed with SHA-256 and path validation. Actions uploads the four bundles with
+30-day retention. No partial generation updates history: all four pairs must
+finish and score before the workflow regenerates charts and updates the
+`automation/eval-history` pull request with a `[ci skip]` commit.
+
+Set the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
+token that can create pull requests when organization policy prevents
+`github.token` from doing so. Without that secret, publication falls back to
+`github.token`. If policy still blocks PR creation, the workflow succeeds with
+a warning, preserves the complete publication on `automation/eval-history`,
+and adds a compare-and-open link to the job summary for manual completion.
+
+For a controlled issue #55 measurement, dispatch the workflow with
+`paired-kadenzipfel`. It launches eight detached pairs: candidate and
+`without-kadenzipfel` for each model × benchmark pair. The latter removes only
+the pinned Kaden reference and its coordinator, on top of the ordinary smoke
+exclusions. The workflow validates the paired lineage and includes
+`kadenzipfel-ablation-comparison.json` and `.md` with quality, token, and cost
+deltas in the same public artifact; ablation rows are intentionally excluded
+from longitudinal history.
+
+The comparison's token and cost fields come from the Ultrafuzz runner ledger.
+Braintrust tracks the independent judge calls and Modal tracks sandbox spend;
+all three are correlated offline by the immutable generation and eval-run IDs.
+
 ## Build and launch
 
 ```bash
@@ -148,6 +200,13 @@ pnpm exec ultrafuzz-modal collect \
   --output .ultrafuzz/modal/results
 ```
 
+Private collection remains aggregate-only. The public workflow opts into the
+larger allowlisted result contract with `--public-results --config <path>`, then
+validates and extracts it with `unpack-public`. Public collection requires the
+exact config used at launch and accepts a bundle only when its candidate,
+benchmark, lane, experiment, model, reasoning, and eval-run lineage all match
+that config and the launch state. Private collection does not require a config.
+
 Launch-state files written by the earlier Modal runner are upgraded in place on
 the next guarded resume after the current config, source, and image identity are
 captured for hardened lineage checks. Unversioned durable workspaces are not
@@ -182,11 +241,26 @@ generation, launch generation and attempt, whether model work started, node
 counts, checkpoint age and digest, exit category, runtime, aggregate usage,
 pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
-artifacts. `collect` copies only `status.json`, `result.json`, and the generic
+artifacts. By default, `collect` copies only `status.json`, `result.json`, and the generic
 worker lifecycle log; investigate sensitive run data on the private volume under
 the repository's normal access controls. Collection validates each contract and
 generic log line before writing locally and refuses pre-hardening or malformed
 volume artifacts.
+
+Public EVMBench and Ultrafuzz-bench targets use a separate explicit contract.
+For those old open-source projects, `collect --public-results --config <path>`
+additionally copies the scored eval generation plus `report.md`, `report.json`,
+and `findings.normalized.json`. The bundle validates a fixed path allowlist,
+byte limits, canonical base64, unique paths, sizes, SHA-256 hashes, exact launch
+lineage, complete per-row report files, and the absence of generic or exact
+injected secrets before any file is extracted or uploaded.
+
+This public mode assumes the pinned benchmark repositories are trusted inputs.
+Its hashes and lineage checks detect corruption, stale results, and accidental
+raw-secret publication; they are not a cryptographic attestation boundary
+against benchmark or model code deliberately encoding a credential. Do not use
+`--public-results` for untrusted targets. Keep those results on the private
+volume and use the ordinary sanitized aggregate collection path instead.
 
 ## Run the opt-in real-Modal smoke
 

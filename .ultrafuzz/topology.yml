@@ -189,6 +189,19 @@ nodes:
         primary: true
       - path: references/manifest.json
         contract: ultrafuzz/json-object@1
+  - id: reference-vulnerabilities-kadenzipfel
+    kind: reference
+    reference: vulnerabilities.kadenzipfel
+    group: references
+    depends_on:
+      - __start__
+    timeout_seconds: 300
+    outputs:
+      - path: references/kadenzipfel-vulnerabilities.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+      - path: references/manifest.json
+        contract: ultrafuzz/json-object@1
   - id: property-specification-certora
     kind: agentic
     prompt: properties/certora-thinking-lens.md
@@ -739,6 +752,24 @@ nodes:
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1
     loops: 1
+  - id: kadenzipfel-vulnerability-strategies
+    kind: agentic
+    prompt: strategies/kadenzipfel-vulnerability-strategies.md
+    group: strategies
+    depends_on:
+      - property-specification-fanin
+      - reference-vulnerabilities-kadenzipfel
+    outputs:
+      - path: strategy-plan.json
+        contract: ultrafuzz/json-object@1
+        primary: true
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+      - path: provenance.json
+        contract: ultrafuzz/json-object@1
+    loops: 1
   - id: dynamic-strategy-generator
     kind: agentic
     prompt: strategies/dynamic-strategy-generator.md
@@ -775,6 +806,7 @@ nodes:
       - differential-lane-author
       - differential-red-triage
       - differential-repair-and-report-review
+      - kadenzipfel-vulnerability-strategies
     outputs:
       - path: strategy-plan.json
         contract: ultrafuzz/json-object@1
@@ -828,6 +860,7 @@ nodes:
       - differential-lane-author
       - differential-red-triage
       - differential-repair-and-report-review
+      - kadenzipfel-vulnerability-strategies
       - dynamic-strategy-generator
     outputs:
       - path: deduped-findings.json

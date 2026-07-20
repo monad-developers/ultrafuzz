@@ -112,6 +112,8 @@ Lifecycle view boundaries:
 Dynamic strategy generator:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
+Kaden vulnerability strategies: {{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json
+
 Use only files reported by strategy-owned generated-test manifests. Read every
 manifest listed above, including empty manifests. Treat each manifest's
 `generated_tests` array as the source of truth and ignore any non-canonical file

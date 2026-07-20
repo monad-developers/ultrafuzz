@@ -153,10 +153,7 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const reviewQueuePath = path.join(root, "review", "new-findings.jsonl");
   const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
   const llmJudge = resolveJudge(input.llmJudge, input.env);
-  const rowScores: EvalRowScore[] = [];
-  const findingScores: EvalFindingScore[] = [];
-  const reviewQueue: HumanReviewQueueItem[] = [];
-  for (const row of matrix) {
+  const scoredRows = await mapLimitStable(matrix, suite.run.max_parallel_runs ?? 1, async (row) => {
     const record = recordsByRow.get(row.id);
     const reportResolution = resolveTerminalReportPath({
       ...(record?.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
@@ -166,13 +163,18 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     if (reportResolution.path === undefined) {
       throw new EvalError("EVAL_TERMINAL_REPORT_INVALID", reportResolution.reason, { row_id: row.id });
     }
-    const scored = await scoreRow({
+    return scoreRow({
       suite,
       row,
       record,
       llmJudge,
       reportPath: reportResolution.path
     });
+  });
+  const rowScores: EvalRowScore[] = [];
+  const findingScores: EvalFindingScore[] = [];
+  const reviewQueue: HumanReviewQueueItem[] = [];
+  for (const scored of scoredRows) {
     rowScores.push(scored.rowScore);
     findingScores.push(...scored.findingScores);
     reviewQueue.push(...scored.reviewQueue);
@@ -205,6 +207,26 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     { filePath: summaryMarkdownPath, contents: renderSummaryMarkdown(summary) }
   ]);
   return summary;
+}
+
+async function mapLimitStable<T, U>(values: T[], limit: number, worker: (value: T) => Promise<U>): Promise<U[]> {
+  const results: U[] = [];
+  let next = 0;
+  let firstError: unknown;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), values.length) }, async () => {
+    while (next < values.length && firstError === undefined) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = await worker(values[index]!);
+      } catch (error) {
+        firstError = error;
+      }
+    }
+  });
+  await Promise.all(workers);
+  if (firstError !== undefined) throw firstError;
+  return results;
 }
 
 interface ScoringOutputFile {

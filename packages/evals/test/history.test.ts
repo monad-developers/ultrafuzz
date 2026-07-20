@@ -332,6 +332,23 @@ describe("longitudinal eval history", () => {
 
     expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, matrix)).not.toThrow();
 
+    const singleRunnerSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "evmbench",
+      lane: "smoke",
+      cohort,
+      lanes,
+      runnerModelProfileId: "benchmark-smoke-claude-sonnet-5-high"
+    });
+    expect(() =>
+      assertPublicBenchmarkGeneration(
+        REPOSITORY_ROOT,
+        "evmbench",
+        "smoke",
+        singleRunnerSuite,
+        publicMatrix(singleRunnerSuite)
+      )
+    ).not.toThrow();
+
     const duplicate = [...matrix];
     duplicate[duplicate.length - 1] = matrix[0]!;
     expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, duplicate)).toThrowError(
@@ -356,8 +373,31 @@ describe("longitudinal eval history", () => {
     expect(first).toEqual(second);
     expect(first.get("precision.svg")).toContain(`https://github.com/monad-developers/ultrafuzz/commit/${CANDIDATE}`);
     expect(first.get("precision.svg")).toContain(CANDIDATE.slice(0, 7));
+    expect(first.get("precision.svg")).toContain("gpt-5.6-luna high");
+    expect(first.get("precision.svg")).toContain("cohort-aaaaaaaa");
+    expect(first.get("precision.svg")).toContain("policy-dddddddd");
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
+  });
+
+  it("keeps changed cohorts and execution policies in separate chart series", () => {
+    const svg = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({ id: "first-series" }),
+          observation({
+            id: "second-series",
+            candidate_commit: "3333333333333333333333333333333333333333",
+            cohort_fingerprint: `sha256:${"c".repeat(64)}`,
+            execution_policy_fingerprint: `sha256:${"e".repeat(64)}`
+          })
+        ]
+      })
+    ).get("precision.svg")!;
+
+    expect(svg).toContain("cohort-aaaaaaaa policy-dddddddd");
+    expect(svg).toContain("cohort-cccccccc policy-eeeeeeee");
   });
 
   it("labels the globally earliest and latest dates across series", () => {

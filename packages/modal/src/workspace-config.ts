@@ -1,3 +1,5 @@
+import fs from "node:fs";
+
 import {
   DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
   DEFAULT_MODAL_MAX_PARALLEL_NODES,
@@ -53,6 +55,18 @@ panel_size = 4
 [eval]
 provider = "none"
 `;
+}
+
+export function capModalTargetTopologyTimeouts(topologyPath: string, maximumSeconds: number): void {
+  if (!Number.isInteger(maximumSeconds) || maximumSeconds <= 0) {
+    throw new Error("Modal target topology timeout must be a positive integer");
+  }
+  const topology = fs.readFileSync(topologyPath, "utf8");
+  const capped = topology.replace(
+    /^([\t ]*timeout_seconds:[\t ]*)(\d+)[\t ]*$/gmu,
+    (_line, prefix: string, raw: string) => `${prefix}${Math.min(Number(raw), maximumSeconds)}`
+  );
+  fs.writeFileSync(topologyPath, capped, "utf8");
 }
 
 function modelProfileToml(model: ModalModelSpec): string {

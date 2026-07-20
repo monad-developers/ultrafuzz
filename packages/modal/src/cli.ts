@@ -3,10 +3,11 @@
 import path from "node:path";
 
 import type { ModalLaunchMode, ModelProvider } from "./defaults.js";
+import { extractPublicBenchmarkBundle, readPublicBenchmarkBundle } from "./public-bundle.js";
 import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|collect|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--provider openai|anthropic]";
+  "usage: ultrafuzz-modal <build|launch|status|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -49,10 +50,27 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "collect") {
+    const includePublicResults = argv.includes("--public-results");
     await collectModalBenchmark({
       statePath: requiredOption(argv, "--state"),
-      outputDir: path.resolve(option(argv, "--output") ?? ".ultrafuzz/modal/results")
+      outputDir: path.resolve(option(argv, "--output") ?? ".ultrafuzz/modal/results"),
+      includePublicResults,
+      ...(includePublicResults ? { configPath: requiredOption(argv, "--config") } : {})
     });
+    return;
+  }
+  if (command === "unpack-public") {
+    const bundle = readPublicBenchmarkBundle(requiredOption(argv, "--bundle"));
+    extractPublicBenchmarkBundle(bundle, path.resolve(requiredOption(argv, "--output")));
+    console.log(
+      JSON.stringify({
+        benchmark: bundle.benchmark,
+        lane: bundle.lane,
+        model_slug: bundle.model_slug,
+        candidate_commit: bundle.candidate_commit,
+        eval_run_id: bundle.eval_run_id
+      })
+    );
     return;
   }
   throw new Error(usage);

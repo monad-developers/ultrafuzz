@@ -46,12 +46,32 @@ const modelSchema = z
     "model provider and agent do not match"
   );
 
-const benchmarkConfigSchema = z
+const commonBenchmarkConfig = {
+  schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
+  run_id: safeId,
+  app_name: z.string().min(1).max(128).default(DEFAULT_MODAL_APP),
+  image_name: z.string().min(1).max(256).default(DEFAULT_MODAL_IMAGE),
+  braintrust: z
+    .object({
+      project: z.string().min(1).max(256),
+      api_key_env: envName.default("BRAINTRUST_API_KEY"),
+      judge_api_key_env: envName.optional(),
+      judge_url: httpsUrl.optional(),
+      judge_credential_endpoint: httpsUrl.optional(),
+      judge_credential_ttl_seconds: z.number().int().min(60).max(86_400).default(57_600)
+    })
+    .strict(),
+  node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
+  loops: z.literal(1).default(1),
+  models: z
+    .array(modelSchema)
+    .min(1)
+    .default(() => DEFAULT_BENCHMARK_MODELS.map((model) => ({ ...model })))
+} as const;
+
+const privateBenchmarkConfigSchema = z
   .object({
-    schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
-    run_id: safeId,
-    app_name: z.string().min(1).max(128).default(DEFAULT_MODAL_APP),
-    image_name: z.string().min(1).max(256).default(DEFAULT_MODAL_IMAGE),
+    ...commonBenchmarkConfig,
     target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
     ground_truth: z
       .object({
@@ -61,29 +81,49 @@ const benchmarkConfigSchema = z
         format: z.enum(["ultrafuzz", "audit-markdown"]).default("ultrafuzz"),
         expected_findings: z.number().int().positive().max(10_000).optional()
       })
-      .strict(),
-    braintrust: z
-      .object({
-        project: z.string().min(1).max(256),
-        api_key_env: envName.default("BRAINTRUST_API_KEY"),
-        judge_api_key_env: envName.optional(),
-        judge_url: httpsUrl.optional(),
-        judge_credential_endpoint: httpsUrl.optional(),
-        judge_credential_ttl_seconds: z.number().int().min(60).max(86_400).default(57_600)
-      })
-      .strict(),
-    node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
-    loops: z.literal(1).default(1),
-    models: z
-      .array(modelSchema)
-      .min(1)
-      .default(() => DEFAULT_BENCHMARK_MODELS.map((model) => ({ ...model })))
+      .strict()
   })
   .strict();
 
-export type ModalBenchmarkConfig = Omit<z.infer<typeof benchmarkConfigSchema>, "models"> & {
-  models: ModalModelSpec[];
-};
+const publicBenchmarkConfigSchema = z
+  .object({
+    ...commonBenchmarkConfig,
+    public_benchmark: z
+      .object({
+        benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
+        lane: z.enum(["smoke", "full"]).default("smoke"),
+        runner_model_profile: safeId,
+        experiment: z.enum(["candidate", "without-kadenzipfel"]).default("candidate"),
+        excluded_node_ids: z.array(safeId).max(128).default([]),
+        candidate_repository: httpsUrl,
+        candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
+        max_runtime_seconds: z.number().int().min(300).max(7_200).default(3_600)
+      })
+      .strict()
+      .superRefine((scope, context) => {
+        const kadenExclusions = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
+        const expected = scope.experiment === "candidate" ? [] : kadenExclusions;
+        if (JSON.stringify(scope.excluded_node_ids) !== JSON.stringify(expected)) {
+          context.addIssue({
+            code: "custom",
+            path: ["excluded_node_ids"],
+            message: `${scope.experiment} must use its exact checked-in node exclusion set`
+          });
+        }
+      })
+  })
+  .strict();
+
+const benchmarkConfigSchema = z.union([privateBenchmarkConfigSchema, publicBenchmarkConfigSchema]);
+
+export type ModalBenchmarkConfig = z.infer<typeof benchmarkConfigSchema> & { models: ModalModelSpec[] };
+
+export type PublicModalBenchmarkConfig = Extract<ModalBenchmarkConfig, { public_benchmark: unknown }>;
+export type PrivateModalBenchmarkConfig = Extract<ModalBenchmarkConfig, { target: unknown }>;
+
+export function isPublicModalBenchmarkConfig(config: ModalBenchmarkConfig): config is PublicModalBenchmarkConfig {
+  return "public_benchmark" in config;
+}
 
 export function parseModalBenchmarkConfig(value: unknown): ModalBenchmarkConfig {
   const parsed = benchmarkConfigSchema.parse(value);

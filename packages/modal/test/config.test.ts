@@ -80,8 +80,60 @@ describe("Modal benchmark config", () => {
       }
     });
 
-    expect(config.ground_truth.expected_findings).toBe(2);
+    expect("ground_truth" in config && config.ground_truth.expected_findings).toBe(2);
     expect(config.braintrust.judge_credential_ttl_seconds).toBe(57_600);
+  });
+
+  it("accepts only the strict public benchmark shape and its one-hour default", () => {
+    const config = parseModalBenchmarkConfig({
+      schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
+      run_id: "public-main-a1b2c3",
+      public_benchmark: {
+        benchmark: "evmbench",
+        runner_model_profile: "benchmark-smoke-gpt-5-6-luna-high",
+        candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+        candidate_commit: "a".repeat(40)
+      },
+      braintrust: { project: "ultrafuzz-public-benchmarks", judge_api_key_env: "OPENAI_API_KEY" },
+      models: [
+        {
+          slug: "benchmark-smoke-gpt-5-6-luna-high",
+          model: "gpt-5.6-luna",
+          provider: "openai",
+          agent: "CodexAgent",
+          reasoning: "high",
+          auth_mode: "api-key"
+        }
+      ]
+    });
+
+    expect("public_benchmark" in config && config.public_benchmark.max_runtime_seconds).toBe(3_600);
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...config,
+        target: { repo: "https://example.invalid/target.git", ref: "main" }
+      })
+    ).toThrow();
+    if (!("public_benchmark" in config)) throw new Error("expected a public benchmark config");
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...config,
+        public_benchmark: {
+          ...config.public_benchmark,
+          excluded_node_ids: ["kadenzipfel-vulnerability-strategies"]
+        }
+      })
+    ).toThrow(/exact checked-in node exclusion set/u);
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...config,
+        public_benchmark: {
+          ...config.public_benchmark,
+          experiment: "without-kadenzipfel",
+          excluded_node_ids: ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"]
+        }
+      })
+    ).not.toThrow();
   });
 
   it("fingerprints exact configuration bytes and every model field", () => {

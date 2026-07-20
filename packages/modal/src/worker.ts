@@ -1,23 +1,9 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
-import {
-  access,
-  appendFile,
-  copyFile,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  unlink,
-  writeFile
-} from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { fingerprintModalConfigFile, fingerprintModalModel, loadModalBenchmarkConfig } from "./config.js";
+import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
 import { parseModalWorkerLineage } from "./launch-state.js";
@@ -51,6 +37,12 @@ import {
   WorkerResultWriter
 } from "./worker-result.js";
 import { modalTargetToml } from "./workspace-config.js";
+import { runPublicBenchmarkWorker } from "./public-worker.js";
+import {
+  assertWorkerInputLineage,
+  CheckpointIncompatibleError,
+  ensurePersistentWorkerLineage
+} from "./worker-lineage.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
 const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
@@ -68,6 +60,12 @@ const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
 let modelWorkStarted = false;
+
+function privateConfig(): PrivateModalBenchmarkConfig {
+  if (isPublicModalBenchmarkConfig(CONFIG))
+    throw new CheckpointIncompatibleError("expected a private benchmark config");
+  return CONFIG;
+}
 
 async function main(): Promise<void> {
   await mkdir(DATA_ROOT, { recursive: true });
@@ -88,8 +86,27 @@ async function main(): Promise<void> {
     diagnosticCodeForError: (error) =>
       error instanceof CheckpointIncompatibleError ? "checkpoint-incompatible" : undefined,
     run: async () => {
-      assertWorkerInput();
-      await ensurePersistentLineage();
+      assertWorkerInputLineage({
+        config: CONFIG,
+        configPath: REMOTE_CONFIG_PATH,
+        runId: RUN_ID,
+        model: MODEL,
+        lineage: LINEAGE
+      });
+      await ensurePersistentWorkerLineage({
+        lineagePath: LINEAGE_PATH,
+        lineage: LINEAGE,
+        workspaceEvidencePaths: [WORK_ROOT, PREPARING_ROOT],
+        freshCleanupPaths: [
+          WORK_ROOT,
+          PREPARING_ROOT,
+          STATUS_PATH,
+          RESULT_PATH,
+          LOG_PATH,
+          path.join(DATA_ROOT, "failure-details.json"),
+          path.join(DATA_ROOT, "outcome")
+        ]
+      });
       await writeFile(LOG_PATH, "", { mode: 0o600 });
       await appendGenericLog("worker-started");
       await writer.writePartial(emptyWorkerCheckpoint());
@@ -176,73 +193,6 @@ async function main(): Promise<void> {
       return terminalDisposition?.kind === "genuine-task-failures" ? "genuine-evaluation-failure" : "finished";
     }
   });
-}
-
-function assertWorkerInput(): void {
-  if (CONFIG.run_id !== RUN_ID) throw new CheckpointIncompatibleError("run id does not match runtime config");
-  if (LINEAGE.logical_run_id !== RUN_ID) {
-    throw new CheckpointIncompatibleError("logical run does not match worker lineage");
-  }
-  if (LINEAGE.fingerprints.config !== fingerprintModalConfigFile(REMOTE_CONFIG_PATH)) {
-    throw new CheckpointIncompatibleError("configuration fingerprint does not match worker lineage");
-  }
-  const configured = CONFIG.models.find((candidate) => candidate.slug === MODEL.slug);
-  if (configured === undefined || JSON.stringify(configured) !== JSON.stringify(MODEL)) {
-    throw new CheckpointIncompatibleError("model does not match runtime config");
-  }
-  if (LINEAGE.model_fingerprint !== fingerprintModalModel(MODEL)) {
-    throw new CheckpointIncompatibleError("model fingerprint does not match worker lineage");
-  }
-}
-
-async function ensurePersistentLineage(): Promise<void> {
-  let persisted: ReturnType<typeof parseModalWorkerLineage> | undefined;
-  try {
-    persisted = parseModalWorkerLineage(JSON.parse(await readFile(LINEAGE_PATH, "utf8")) as unknown);
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-      throw new CheckpointIncompatibleError("persisted lineage record is invalid");
-    }
-  }
-
-  if (persisted !== undefined && samePersistentLineage(persisted, LINEAGE)) return;
-  if (persisted !== undefined) {
-    if (LINEAGE.workspace_mode !== "fresh" || LINEAGE.generation <= persisted.generation) {
-      throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
-    }
-    await clearFreshGeneration();
-    await writeJsonAtomic(LINEAGE_PATH, LINEAGE);
-    return;
-  }
-
-  const existingWorkspace = (await readdirIfExists(WORK_ROOT)).length > 0;
-  if (existingWorkspace && LINEAGE.workspace_mode !== "fresh") {
-    throw new CheckpointIncompatibleError("unversioned persistent workspace cannot be resumed");
-  }
-  if (LINEAGE.workspace_mode === "fresh") await clearFreshGeneration();
-  await writeJsonAtomic(LINEAGE_PATH, LINEAGE);
-}
-
-function samePersistentLineage(
-  left: ReturnType<typeof parseModalWorkerLineage>,
-  right: ReturnType<typeof parseModalWorkerLineage>
-): boolean {
-  return (
-    left.logical_run_id === right.logical_run_id &&
-    left.generation === right.generation &&
-    left.fingerprints.config === right.fingerprints.config &&
-    left.fingerprints.source === right.fingerprints.source &&
-    left.fingerprints.image === right.fingerprints.image &&
-    left.model_fingerprint === right.model_fingerprint
-  );
-}
-
-async function clearFreshGeneration(): Promise<void> {
-  await rm(WORK_ROOT, { recursive: true, force: true });
-  await rm(PREPARING_ROOT, { recursive: true, force: true });
-  for (const entry of ["status.json", "result.json", "worker.log", "failure-details.json", "outcome"] as const) {
-    await rm(path.join(DATA_ROOT, entry), { recursive: true, force: true });
-  }
 }
 
 async function hasExistingEvalWorkspace(): Promise<boolean> {
@@ -333,8 +283,9 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
     try {
       await mkdir(stagingControl, { recursive: true, mode: 0o700 });
       await mkdir(stagingGroundTruth, { recursive: true, mode: 0o700 });
-      await cloneAtRef(CONFIG.target.repo, CONFIG.target.ref, stagingTarget, "target");
-      await cloneAtRef(CONFIG.ground_truth.repo, CONFIG.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
+      const config = privateConfig();
+      await cloneAtRef(config.target.repo, config.target.ref, stagingTarget, "target");
+      await cloneAtRef(config.ground_truth.repo, config.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
       await runChecked(["node", CLI, "init", "--project", stagingTarget, "--force", "--json"], {
         label: "target init"
       });
@@ -343,7 +294,7 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       });
       await configureTarget(stagingTarget);
       await materializeGroundTruth(
-        path.join(stagingGroundTruthRepo, CONFIG.ground_truth.file),
+        path.join(stagingGroundTruthRepo, config.ground_truth.file),
         path.join(stagingGroundTruth, "findings.yml")
       );
       await configureControl(stagingControl, target, groundTruth);
@@ -369,13 +320,14 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
 }
 
 async function materializeGroundTruth(source: string, destination: string): Promise<void> {
-  if (CONFIG.ground_truth.format === "ultrafuzz") {
+  const config = privateConfig();
+  if (config.ground_truth.format === "ultrafuzz") {
     await copyFile(source, destination);
     return;
   }
   const converted = convertAuditMarkdownGroundTruth(
     await readFile(source, "utf8"),
-    CONFIG.ground_truth.expected_findings
+    config.ground_truth.expected_findings
   );
   await writeFile(destination, `${JSON.stringify(converted, null, 2)}\n`, { mode: 0o600 });
 }
@@ -478,8 +430,8 @@ model_profiles:
 
 targets:
   - id: target
-    repo: ${yamlString(CONFIG.target.repo)}
-    ref: ${yamlString(CONFIG.target.ref)}
+    repo: ${yamlString(privateConfig().target.repo)}
+    ref: ${yamlString(privateConfig().target.ref)}
     path: ${yamlString(target)}
     sensitivity: private
     ground_truth: findings.yml
@@ -634,33 +586,6 @@ function requiredEnv(name: string, category: OperationalFailureCategory = "sandb
   return value;
 }
 
-async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  await mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, filePath);
-    const directory = await open(path.dirname(filePath), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await unlink(temporary).catch(() => undefined);
-  }
-}
-
-class CheckpointIncompatibleError extends Error {
-  override readonly name = "CheckpointIncompatibleError";
-}
-
 async function readdirIfExists(directoryPath: string): Promise<string[]> {
   try {
     return await readdir(directoryPath);
@@ -687,7 +612,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-void main().catch(() => {
+void (
+  isPublicModalBenchmarkConfig(CONFIG)
+    ? runPublicBenchmarkWorker({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        dataRoot: DATA_ROOT,
+        preflight: async (context) => {
+          assertWorkerInputLineage({
+            config: CONFIG,
+            configPath: REMOTE_CONFIG_PATH,
+            runId: RUN_ID,
+            model: MODEL,
+            lineage: LINEAGE
+          });
+          await ensurePersistentWorkerLineage({ lineagePath: LINEAGE_PATH, lineage: LINEAGE, ...context });
+        },
+        isCheckpointIncompatible: (error) => error instanceof CheckpointIncompatibleError,
+        checkpointIncompatibleError: (message) => new CheckpointIncompatibleError(message)
+      })
+    : main()
+).catch(() => {
   console.error("worker terminated");
   process.exitCode = 1;
 });

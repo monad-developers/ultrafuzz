@@ -85,3 +85,74 @@ test("the checked-in smoke manifest produces a valid filtered production topolog
   assert.equal(validation.effectiveLoopCounts["boundary-tests"], 1);
   assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
 });
+
+test("the Kaden coordinator and its pinned reference can be ablated together", () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const excludedNodeIds = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
+  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
+    excludedNodeIds
+  });
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
+    excludedNodeIds
+  });
+  const validation = validateTopology(transformed, {
+    projectRoot: repositoryRoot,
+    requirePromptFiles: true,
+    promptTexts: promptTextsForCatalog(prompts)
+  });
+  const nodeIds = new Set(validation.topology.nodes.map((node) => node.id));
+
+  assert.ok(excludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.ok(
+    validation.topology.nodes.every((node) =>
+      node.depends_on.every((dependency) => !excludedNodeIds.includes(dependency))
+    )
+  );
+  assert.ok(
+    [...prompts.entries.values()].every(
+      (entry) =>
+        !entry.body.includes("{{artifact_path:kadenzipfel-vulnerability-strategies}}") &&
+        !entry.body.includes("{{artifact_handoff:reference-vulnerabilities-kadenzipfel}}")
+    )
+  );
+  for (const promptId of ["dynamic-strategy-generator", "dedupe-findings", "aggregate-test-files"]) {
+    assert.doesNotMatch(prompts.entries.get(promptId)?.body ?? "", /Kaden/u);
+  }
+});
+
+test("the smoke lane and Kaden ablation exclusions compose into a valid run", () => {
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+  const lanes = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "benchmarks", "lanes.json"), "utf8")) as {
+    smoke: { strategy_loops: number; excluded_node_ids: string[] };
+  };
+  const kadenNodeIds = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
+  const excludedNodeIds = [...new Set([...lanes.smoke.excluded_node_ids, ...kadenNodeIds])];
+  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
+    strategyLoops: lanes.smoke.strategy_loops,
+    excludedNodeIds
+  });
+  const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
+    strategyLoops: lanes.smoke.strategy_loops,
+    excludedNodeIds
+  });
+  const validation = validateTopology(transformed, {
+    projectRoot: repositoryRoot,
+    requirePromptFiles: true,
+    promptTexts: promptTextsForCatalog(prompts)
+  });
+  const nodeIds = new Set(validation.topology.nodes.map((node) => node.id));
+
+  assert.ok(excludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.ok(
+    validation.topology.nodes.every((node) =>
+      node.depends_on.every((dependency) => !excludedNodeIds.includes(dependency))
+    )
+  );
+  assert.ok(
+    [...prompts.entries.values()].every(
+      (entry) =>
+        !entry.body.includes("{{artifact_path:kadenzipfel-vulnerability-strategies}}") &&
+        !entry.body.includes("{{artifact_handoff:reference-vulnerabilities-kadenzipfel}}")
+    )
+  );
+});

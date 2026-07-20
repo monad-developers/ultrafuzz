@@ -88,6 +88,11 @@ artifact directory. The primary artifact is normalized Markdown headed with the
 reference ID, repo, commit, and resolved timestamp. Non-Markdown source files
 are included as fenced code blocks.
 
+When one catalog entry pins multiple paths, the normalized Markdown contains a
+source-path heading for every file in catalog order. This lets a coordinator
+such as `kadenzipfel-vulnerability-strategies` enumerate a pinned corpus while
+the cache still fetches and verifies the shared repository revision once.
+
 Every reference node must also write:
 
 ```text

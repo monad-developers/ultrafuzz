@@ -89,6 +89,74 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toMatch(/start\/end timestamps so\s+multi-vCPU runs prove that the two campaigns overlapped/u);
   });
 
+  it("coordinates the complete pinned Kaden corpus with relevance and reportability gates", () => {
+    const kaden = prompt("strategies/kadenzipfel-vulnerability-strategies.md");
+    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
+    const dedupe = prompt("review/dedupe-findings.md");
+    const aggregate = prompt("review/aggregate-test-files.md");
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{
+        id: string;
+        kind: string;
+        reference?: string;
+        depends_on?: string[];
+        loops?: number;
+        outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
+      }>;
+    };
+    const referenceNode = topology.nodes.find((node) => node.id === "reference-vulnerabilities-kadenzipfel");
+    const strategyNode = topology.nodes.find((node) => node.id === "kadenzipfel-vulnerability-strategies");
+
+    expect(referenceNode).toMatchObject({
+      kind: "reference",
+      reference: "vulnerabilities.kadenzipfel",
+      depends_on: ["__start__"]
+    });
+    expect(referenceNode?.outputs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "references/kadenzipfel-vulnerabilities.md", primary: true }),
+        expect.objectContaining({ path: "references/manifest.json" })
+      ])
+    );
+    expect(strategyNode).toMatchObject({
+      kind: "agentic",
+      loops: 1,
+      depends_on: ["property-specification-fanin", "reference-vulnerabilities-kadenzipfel"]
+    });
+    expect(strategyNode?.outputs?.map((output) => [output.path, output.contract])).toEqual(
+      expect.arrayContaining([
+        ["strategy-plan.json", "ultrafuzz/json-object@1"],
+        ["generated-tests.json", "ultrafuzz/generated-tests@1"],
+        ["findings.json", "ultrafuzz/findings@1"],
+        ["provenance.json", "ultrafuzz/json-object@1"]
+      ])
+    );
+    expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
+      "kadenzipfel-vulnerability-strategies"
+    );
+    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain(
+      "kadenzipfel-vulnerability-strategies"
+    );
+
+    expect(kaden).toContain("exactly 38 Markdown source");
+    expect(kaden).toMatch(/Create exactly one\s+stable record per source path/u);
+    expect(kaden).toContain("`applicable`");
+    expect(kaden).toContain("`skipped-not-present`");
+    expect(kaden).toContain("`umbrella`");
+    expect(kaden).toContain("For each `applicable` leaf record, start one focused max-reasoning sub-agent");
+    expect(kaden).toContain("references/unsecure-signatures.md");
+    expect(kaden).toContain("non-informational impact");
+    expect(kaden).toContain("Keep purely informational or static-hygiene observations in the strategy plan");
+    expect(kaden).toContain("kaden_reference_path");
+    expect(kaden).toContain("Use `generated_tests` as the only test-file list");
+    expect(dynamic).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json");
+    expect(dynamic).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json");
+    expect(dedupe).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json");
+    expect(dedupe).toContain("Preserve `kaden_reference_path`");
+    expect(aggregate).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json");
+  });
+
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");

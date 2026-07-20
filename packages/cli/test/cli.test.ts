@@ -524,9 +524,13 @@ test("references status is restored and reports offline cache state", async () =
     assert.equal(body.command, "references status");
     assert.equal(body.ok, false);
     const data = body.data as { references?: Array<{ id: string; ok: boolean }> };
-    assert.equal(data.references?.length, 9);
+    assert.equal(data.references?.length, 10);
     assert.equal(
       data.references?.some((reference) => reference.id === "properties.certora-thinking"),
+      true
+    );
+    assert.equal(
+      data.references?.some((reference) => reference.id === "vulnerabilities.kadenzipfel"),
       true
     );
     assert.equal(

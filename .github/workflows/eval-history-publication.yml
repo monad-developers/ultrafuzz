@@ -35,12 +35,9 @@ permissions:
   contents: write
   pull-requests: write
 
-concurrency:
-  group: publish-eval-history
-  cancel-in-progress: false
-
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -49,6 +46,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Validate publication inputs
         env:
@@ -81,54 +79,99 @@ jobs:
       - name: Build Ultrafuzz
         run: pnpm -w build
 
-      - name: Preserve history already pending in the publication pull request
-        run: |
-          if git fetch --no-tags origin "automation/eval-history:refs/remotes/origin/automation/eval-history"; then
-            node scripts/ci/merge-pending-eval-history.mjs origin/automation/eval-history
-          fi
-
       - name: Download complete scored generation
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.artifact_name }}
-          path: .ultrafuzz/evals/runs/${{ inputs.eval_run_id }}
+          path: ${{ github.workspace }}/ci-publication-input/${{ inputs.eval_run_id }}
           run-id: ${{ inputs.artifact_run_id }}
           github-token: ${{ github.token }}
 
-      - name: Append history and regenerate charts
+      - name: Publish with remote-tip compare-and-swap retries
         env:
+          PUBLICATION_INPUT_ROOT: ${{ github.workspace }}/ci-publication-input
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
           PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
           PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
-        run: >-
-          node packages/cli/dist/index.js eval history "$PUBLICATION_EVAL_RUN_ID"
-          --project .
-          --benchmark "${{ inputs.benchmark }}"
-          --lane "${{ inputs.lane }}"
-          --repository "${{ github.server_url }}/${{ github.repository }}"
-          --artifact "${{ github.server_url }}/${{ github.repository }}/actions/runs/$PUBLICATION_ARTIFACT_RUN_ID"
+          PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const [file, repository, artifactRunId, evalRunId, benchmark, lane] = process.argv.slice(1);
+            fs.writeFileSync(file, JSON.stringify({
+              schema_version: "ultrafuzz.eval-history-publication-generation.v1",
+              candidate_repository_url: repository,
+              source_artifact: repository + "/actions/runs/" + artifactRunId,
+              runs: [{ eval_run_id: evalRunId, benchmark, lane, input_path: evalRunId }]
+            }, null, 2) + "\n", { mode: 0o600 });
+          ' \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_REPOSITORY" \
+            "$PUBLICATION_ARTIFACT_RUN_ID" \
+            "$PUBLICATION_EVAL_RUN_ID" \
+            "${{ inputs.benchmark }}" \
+            "${{ inputs.lane }}"
+          node scripts/ci/publish-eval-history-cas.mjs \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_INPUT_ROOT"
 
-      - name: Verify deterministic publication output
-        run: node packages/cli/dist/index.js eval history --project . --check
-
-      - name: Open or update the publication pull request
-        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8
-        with:
-          branch: automation/eval-history
-          base: main
-          delete-branch: false
-          draft: false
-          commit-message: "Update published eval history [skip eval-history]"
-          title: "[skip eval-history] Update published eval history"
-          body: |
-            ## Summary
-
-            Append one complete scored benchmark generation and regenerate the deterministic README charts.
-
-            ## Verification
-
-            - Validated the versioned history schema and immutable lineage
-            - Regenerated all SVGs from checked-in history
-            - Confirmed a clean deterministic regeneration
-          add-paths: |
-            benchmarks/history.json
-            docs/assets/eval-history/*.svg
+      - name: Open the publication pull request when needed
+        env:
+          GH_TOKEN: ${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}
+        run: |
+          compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...automation%2Feval-history?expand=1"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git ls-remote --exit-code --heads origin refs/heads/automation/eval-history > /dev/null; then
+            echo "No pending eval-history publication branch is needed"
+            exit 0
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/automation/eval-history:refs/remotes/origin/automation/eval-history"
+          open_prs="$(gh pr list \
+            --state open \
+            --base main \
+            --head automation/eval-history \
+            --json number \
+            --jq 'length')"
+          if git diff --quiet \
+            origin/main \
+            origin/automation/eval-history \
+            -- \
+            benchmarks/history.json \
+            docs/assets/eval-history; then
+            pending_publication=false
+          else
+            diff_status=$?
+            if [ "$diff_status" -ne 1 ]; then
+              echo "Unable to compare the eval-history publication trees" >&2
+              exit "$diff_status"
+            fi
+            pending_publication=true
+          fi
+          if [ "$open_prs" -eq 0 ] && [ "$pending_publication" = true ]; then
+            if gh pr create \
+              --base main \
+              --head automation/eval-history \
+              --title "[ci skip] Update published eval history" \
+              --body $'## Summary\n\nAppend complete scored benchmark generations and regenerate the deterministic README charts.\n\n## Verification\n\n- Validated versioned history and immutable lineage\n- Retried remote-tip races without dropping generations\n- Regenerated and checked all SVG charts'; then
+              exit 0
+            fi
+            open_prs="$(gh pr list \
+              --state open \
+              --base main \
+              --head automation/eval-history \
+              --json number \
+              --jq 'length')"
+            if [ "$open_prs" -eq 0 ]; then
+              echo "::warning title=Eval-history PR not opened::Automatic pull-request creation is unavailable. The publication branch remains pushed; use the job summary link."
+              {
+                echo "### Eval-history publication is waiting for a pull request"
+                echo
+                echo "The complete generation remains preserved on \`automation/eval-history\`."
+                echo
+                echo "[Compare and open the publication pull request]($compare_url)"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Another publisher opened the eval-history pull request"
+          fi

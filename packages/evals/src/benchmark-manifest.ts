@@ -50,6 +50,7 @@ export interface BenchmarkLaneManifest {
   excluded_strategy_families: string[];
   excluded_node_ids: string[];
   model_profiles: BenchmarkModelProfileManifest[];
+  judge_profile: BenchmarkModelProfileManifest;
 }
 
 export interface BenchmarkLanesManifest {
@@ -100,7 +101,8 @@ const laneSchema = z.strictObject({
   strategy_loops: z.number().int().positive().optional(),
   excluded_strategy_families: z.array(safeId),
   excluded_node_ids: z.array(safeId),
-  model_profiles: z.array(modelProfileSchema).min(1)
+  model_profiles: z.array(modelProfileSchema).min(1),
+  judge_profile: modelProfileSchema
 });
 const lanesSchema = z.strictObject({
   schema_version: z.literal(BENCHMARK_LANES_SCHEMA_VERSION),
@@ -133,6 +135,17 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
     "full model profile",
     filePath
   );
+  for (const [laneName, lane] of [
+    ["smoke", manifest.smoke],
+    ["full", manifest.full]
+  ] as const) {
+    assertUnique(
+      [...lane.model_profiles.map((profile) => profile.id), lane.judge_profile.id],
+      `${laneName} runner and judge profile`,
+      filePath
+    );
+    assertFixedBenchmarkProfiles(laneName, lane);
+  }
   const requiredExclusions = ["stateful-invariant", "differential", "dynamic-strategy"];
   if (
     manifest.smoke.trials_per_variant !== 1 ||
@@ -143,10 +156,6 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
       "EVAL_BENCHMARK_MANIFEST_INVALID",
       "smoke lane must use one trial, one strategy loop, and exclude invariant, differential, and dynamic strategies"
     );
-  }
-  const smokeProfile = manifest.smoke.model_profiles;
-  if (smokeProfile.length !== 1 || smokeProfile[0]?.model !== "gpt-5.6-luna" || smokeProfile[0]?.reasoning !== "high") {
-    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "smoke lane must use the pinned gpt-5.6-luna high profile");
   }
   if (manifest.full.excluded_strategy_families.length > 0) {
     throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "full lane must include every strategy family");
@@ -159,6 +168,38 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
   }
   assertUnique(manifest.smoke.excluded_node_ids, "excluded smoke node", filePath);
   return manifest;
+}
+
+function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: BenchmarkLaneManifest): void {
+  const expectedRunners: BenchmarkModelProfileManifest[] = [
+    {
+      id: `benchmark-${laneName}-gpt-5-6-luna-high`,
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna",
+      reasoning: "high"
+    },
+    {
+      id: `benchmark-${laneName}-claude-sonnet-5-high`,
+      agent: "ClaudeAgent",
+      model: "claude-sonnet-5",
+      reasoning: "high"
+    }
+  ];
+  const expectedJudge: BenchmarkModelProfileManifest = {
+    id: "benchmark-judge-gpt-5-6-sol-xhigh",
+    agent: "CodexAgent",
+    model: "gpt-5.6-sol",
+    reasoning: "xhigh"
+  };
+  if (
+    JSON.stringify(lane.model_profiles) !== JSON.stringify(expectedRunners) ||
+    JSON.stringify(lane.judge_profile) !== JSON.stringify(expectedJudge)
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_MANIFEST_INVALID",
+      `${laneName} lane must use exactly gpt-5.6-luna high and claude-sonnet-5 high runners with the gpt-5.6-sol xhigh judge`
+    );
+  }
 }
 
 function assertCohortIntegrity(manifest: BenchmarkCohortManifest, filePath: string): void {
@@ -203,6 +244,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   lane: "smoke" | "full";
   cohort: BenchmarkCohortManifest;
   lanes: BenchmarkLanesManifest;
+  runnerModelProfileId?: string;
 }): EvalSuiteSpec {
   if (input.benchmark === "evmbench" && input.cohort.schema_version !== EVMBENCH_COHORT_SCHEMA_VERSION) {
     throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "evmbench requires the pinned EVMbench cohort manifest");
@@ -218,13 +260,23 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     input.lane === "smoke"
       ? input.cohort.smoke_targets.map((id) => input.cohort.targets.find((target) => target.id === id)!)
       : input.cohort.targets;
+  const selectedRunnerProfiles =
+    input.runnerModelProfileId === undefined
+      ? lane.model_profiles
+      : lane.model_profiles.filter((profile) => profile.id === input.runnerModelProfileId);
+  if (selectedRunnerProfiles.length === 0) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
+      `runner model profile ${input.runnerModelProfileId} is not part of the ${input.lane} benchmark lane`
+    );
+  }
   const profiles = Object.fromEntries(
-    lane.model_profiles.map((profile) => [
+    [...selectedRunnerProfiles, lane.judge_profile].map((profile) => [
       profile.id,
       { agent: profile.agent, model: profile.model, reasoning: profile.reasoning }
     ])
   );
-  const judgeProfile = lane.model_profiles[0]!;
+  const judgeProfile = lane.judge_profile;
   return {
     schema_version: EVAL_SPEC_SCHEMA_VERSION,
     suite: `${input.benchmark}-${input.lane}`,
@@ -233,10 +285,10 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       id: target.id,
       repo: target.repository,
       ref: target.revision,
-      sensitivity: "private",
+      sensitivity: "public",
       ground_truth: `${target.id}.yml`
     })),
-    variants: lane.model_profiles.map((profile) => ({
+    variants: selectedRunnerProfiles.map((profile) => ({
       id: profile.id,
       runner_model_profile: profile.id,
       judge_model_profile: judgeProfile.id,
@@ -255,9 +307,11 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       }
     })),
     run: {
-      runner_model_profile: lane.model_profiles[0]!.id,
+      runner_model_profile: selectedRunnerProfiles[0]!.id,
       judge_model_profile: judgeProfile.id,
-      trials_per_variant: lane.trials_per_variant
+      trials_per_variant: lane.trials_per_variant,
+      max_parallel_targets: 8,
+      max_parallel_runs: Math.min(3, selectedTargets.length)
     },
     metrics: {
       primary: ["precision", "recall", "f1_score"],
@@ -269,7 +323,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       heartbeat_interval_seconds: 60,
       experiment_prefix: `${input.benchmark}-${input.lane}`,
       artifacts: {
-        mode: "manifest-only",
+        mode: "upload",
         include: ["report.md", "report.json", "findings.normalized.json"],
         max_file_bytes: 5_000_000,
         mode_explicit: true

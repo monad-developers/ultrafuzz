@@ -113,11 +113,13 @@ For configuration and architecture details, see
 
 The checked-in cohort and lane manifests live under `benchmarks/`. The smoke
 lane is a fixed target subset with one trial, one strategy loop, no stateful
-invariant, differential, or dynamic-strategy families, and one explicitly
-pinned model profile. The full lane uses every supported target, the configured
-trial count, the production strategy set, and an explicit set of pinned model
-profiles. The EVMbench adapter converts either lane into the normal
-`EvalSuiteSpec`; ground truth remains outside the repository.
+invariant, differential, or dynamic-strategy families, and exactly two runner
+profiles: GPT-5.6 Luna `high` and Claude Sonnet 5 `high`. Both use the separate
+GPT-5.6 Sol `xhigh` judge. The full lane uses every supported target, the
+configured trial count, the production strategy set, and the same pinned model
+and judge identities. The EVMbench adapter converts either lane into the normal
+`EvalSuiteSpec` and can project one runner for an isolated Modal pair while
+retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
 six charts in one transaction:
@@ -152,14 +154,32 @@ run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
 and available candidate, cohort, and scoring provenance. Missing timing or cost
 is allowed and renders as unavailable; it is never converted to zero.
 
-The benchmark workflow runs smoke after a successful `main` CI run, full on the
-weekly schedule, and either lane on manual dispatch. It uses a protected
-benchmark runner with clean, pinned checkouts and external ground truth under
-the documented generic runner directories. Provision all manifest target IDs
-at their exact revisions before enabling the runner label. Missing checkouts,
-revision drift, unavailable ground truth, failed model work, scoring errors, or
-partial rows fail before publication. The fixed publication branch updates one
-ready pull request. Before each update, pending observations are merged with the
-current base history so a later run cannot replace an unmerged generation.
-Chart-only merges are classified from their changed paths and do not allocate a
-benchmark runner, with the workflow skip marker retained as an additional signal.
+Every push to `main` launches the four smoke pairs as detached Modal work, then
+restores their state in a separate collection job. Candidate installation and
+build happen before any Modal launch, so a broken push fails without allocating
+the benchmark matrix. A manual `paired-kadenzipfel` dispatch runs the exact candidate
+and Kaden-free topology and writes JSON and Markdown deltas into the public
+artifact. There is no self-hosted benchmark runner or weekly full run. Each pair
+is capped at one hour of model work and publishes an ordinary 30-day Actions
+artifact because the two benchmark cohorts are old public projects. Missing
+credentials, revision drift, unavailable ground truth, failed model work,
+scoring errors, or partial pairs fail before publication. Every publisher
+updates one fixed ready pull request and rebuilds from the latest
+remote publication tip and uses a normal fast-forward push; a lost race is
+retried with the new tip. This compare-and-swap loop retains every complete
+generation without relying on a GitHub concurrency queue, which can discard a
+pending job. The publication commit uses `[ci skip]`, preventing a chart-only
+merge from recursively allocating another benchmark matrix.
+
+When organization policy disables pull-request creation by `github.token`, set
+the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
+credential that can create pull requests. If it is absent or PR creation is
+still blocked, the pushed `automation/eval-history` branch remains intact and
+the successful job emits a warning plus a manual compare/PR link in its
+summary; no complete scored generation is discarded.
+
+The eval summary and comparison record Ultrafuzz runner tokens and runner cost
+with explicit completeness. Judge usage in Braintrust and sandbox spend in
+Modal remain separate provider-side records keyed by the immutable run IDs; use
+those three sources together for the offline frequency/cost review rather than
+treating the runner ledger as total spend.

@@ -48,7 +48,7 @@ jobs:
     name: Ultrafuzz target (${{ matrix.target.name }})
     needs: target-matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -211,82 +211,27 @@ jobs:
             .ci-bin/yarn
           chmod +x .ci-bin/yarn
 
-      - name: Verify model credential
+      - name: Run bounded target submission smoke
+        id: bounded-submission
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::The paid target smoke workflow requires its model credential."
-            exit 1
-          fi
-          echo "::add-mask::${OPENAI_API_KEY}"
-
-      - name: Install Codex sandbox dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apparmor-profiles apparmor-utils bubblewrap
-          if [ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]; then
-            sudo install -m 0644 \
-              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-              /etc/apparmor.d/bwrap-userns-restrict
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict || true
-          fi
-          bwrap --version
-
-      - name: Install Codex CLI
-        run: |
-          if ! command -v codex >/dev/null 2>&1; then
-            npm install -g @openai/codex@0.144.3
-          fi
-          codex --version
-
-      - name: Authenticate Codex CLI
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
-
-      - name: Verify Codex workspace-write sandbox
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp"' EXIT
-          git -C "$tmp" init -q
-
-          set +e
-          printf 'Write exactly ok to sandbox-probe.txt in the current directory. Do not edit any other file.\n' \
-            | timeout 180 codex exec \
-                --sandbox workspace-write \
-                -c approval_policy=never \
-                --cd "$tmp" \
-                --json \
-                - > "$tmp/codex-probe.jsonl" 2> "$tmp/codex-probe.stderr.log"
-          status=$?
-          set -e
-          bun scripts/ci/target-e2e-ci.ts redact "$tmp/codex-probe.jsonl"
-          bun scripts/ci/target-e2e-ci.ts redact "$tmp/codex-probe.stderr.log"
-
-          if [ "$status" -ne 0 ]; then
-            sed -n '1,200p' "$tmp/codex-probe.stderr.log" >&2 || true
-            sed -n '1,200p' "$tmp/codex-probe.jsonl" || true
-            exit "$status"
-          fi
-          test "$(tr -d '\r\n' < "$tmp/sandbox-probe.txt" 2>/dev/null)" = "ok"
-
-      - name: Run target repository E2E
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ULTRAFUZZ_BIN: ${{ github.workspace }}/.ci-bin/ultrafuzz
+          ULTRAFUZZ_E2E_MODE: submission
         run: bash scripts/ci/run-target-e2e.sh "${{ matrix.target.id }}" "$GITHUB_WORKSPACE/.target-source"
 
-      - name: Add report to job summary
+      - name: Summarize bounded submission smoke
         if: always()
         run: |
-          report="$(find .codex-runs/e2e-targets -path '*/evidence/report.md' -type f -print -quit 2>/dev/null || true)"
-          if [ -n "$report" ]; then
-            cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          evidence=".codex-runs/e2e-targets/${{ matrix.target.id }}/evidence"
+          if [ "${{ steps.bounded-submission.outcome }}" = "success" ] && \
+            [ -s "$evidence/fake-smithers-invocation.json" ]; then
+            {
+              echo "### Bounded target submission passed"
+              echo
+              echo "Validated the pinned target through init, compile, validate, and workflow-runner submission."
+              echo "No live agents were run and no finding report was produced."
+            } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Target smoke did not produce a final report." >> "$GITHUB_STEP_SUMMARY"
+            echo "Bounded target submission did not complete." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload E2E evidence

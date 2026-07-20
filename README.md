@@ -14,9 +14,10 @@ local dashboard plus final report for review.
 
 Published observations are append-only and reproducible from the
 [versioned history](benchmarks/history.json). Each point is labeled with and
-links to the candidate commit; series identify the benchmark cohort and
-smoke/full lane. The detailed history retains target, model, scoring, timing,
-cost, execution-policy, and completeness metadata.
+links to the candidate commit; series identify the benchmark, smoke/full lane,
+runner model, reasoning level, cohort fingerprint, and execution-policy
+fingerprint. The detailed history retains target,
+model, scoring, timing, cost, execution-policy, and completeness metadata.
 
 | Quality                                                        | Coverage                                                                                                     |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
