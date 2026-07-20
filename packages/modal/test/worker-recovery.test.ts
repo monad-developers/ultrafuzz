@@ -20,6 +20,24 @@ describe("Modal worker recovery state", () => {
     ).toBe(true);
   });
 
+  it("keeps polling when the status summary is running even if the lower-level workflow is failed", () => {
+    expect(
+      terminalDurableRunNeedsMoreWorkflowPolling(
+        {
+          status: "failed",
+          sync_status: "running",
+          workflow_status: "failed",
+          workflow_verdict: "failed",
+          nodes: {
+            complete: { status: "succeeded" },
+            next: { status: "pending" }
+          }
+        },
+        0
+      )
+    ).toBe(true);
+  });
+
   it("stops waiting when failed durable nodes need recovery", () => {
     expect(
       terminalDurableRunNeedsMoreWorkflowPolling(

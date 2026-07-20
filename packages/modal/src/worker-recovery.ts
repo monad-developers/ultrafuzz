@@ -4,6 +4,7 @@ export interface WorkerRecoveryNodeState {
 
 export interface WorkerRecoveryRunState {
   status?: string;
+  sync_status?: string;
   workflow_status?: string;
   workflow_verdict?: string;
   nodes?: Record<string, WorkerRecoveryNodeState>;
@@ -37,7 +38,9 @@ export function terminalDurableRunNeedsMoreWorkflowPolling(
   }
   const workflowStatus = state.workflow_status?.toLowerCase();
   const workflowVerdict = state.workflow_verdict?.toLowerCase();
+  const syncStatus = state.sync_status?.toLowerCase();
   return (
+    (syncStatus !== undefined && ACTIVE_WORKFLOW_STATUSES.has(syncStatus)) ||
     (workflowStatus !== undefined && ACTIVE_WORKFLOW_STATUSES.has(workflowStatus)) ||
     (workflowVerdict !== undefined && ACTIVE_WORKFLOW_VERDICTS.has(workflowVerdict))
   );
