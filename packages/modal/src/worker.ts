@@ -13,6 +13,7 @@ import {
   runBenchmarkExecutionOnce,
   type TerminalDisposition
 } from "./terminal-disposition.js";
+import { terminalDurableRunNeedsMoreWorkflowPolling } from "./worker-recovery.js";
 import { modalTargetToml } from "./workspace-config.js";
 
 const CLI = "/opt/ultrafuzz/packages/cli/dist/index.js";
@@ -52,7 +53,13 @@ interface DurableNodeState {
 interface DurableRunState {
   run_id?: string;
   status?: string;
+  workflow_status?: string;
+  workflow_verdict?: string;
   nodes?: Record<string, DurableNodeState>;
+}
+interface WorkflowSyncSummary {
+  workflow_status?: string;
+  workflow_verdict?: string;
 }
 
 type RecoverableNodeEntry = {
@@ -564,10 +571,14 @@ async function waitForWorkflowTerminal(
     if (workflowArtifactsComplete(state)) {
       return { ...state, status: "succeeded" };
     }
+    const recoverableNodes = recoverableNodeEntries(state);
     if (isTerminalWorkflowStatus(state.status)) {
+      if (terminalDurableRunNeedsMoreWorkflowPolling(state, recoverableNodes.length)) {
+        await sleep(RECOVERY_POLL_MS);
+        continue;
+      }
       return state;
     }
-    const recoverableNodes = recoverableNodeEntries(state);
     if (recoverableNodes.some((entry) => !resetNodeOnCooldown(entry, resetCooldowns))) {
       return { ...state, status: "failed" };
     }
@@ -639,16 +650,20 @@ async function reportProgress(target: string, knownState?: DurableRunState): Pro
 async function synchronizedRunState(target: string): Promise<DurableRunState | undefined> {
   const state = await durableRunState(target);
   if (state?.run_id === undefined) return state;
-  await synchronizeWorkflowState(target, state.run_id);
-  return durableRunState(target);
+  const workflowSummary = await synchronizeWorkflowState(target, state.run_id);
+  const durable = await durableRunState(target);
+  if (durable === undefined || workflowSummary === undefined) return durable;
+  return { ...durable, ...workflowSummary };
 }
 
-async function synchronizeWorkflowState(target: string, runId: string): Promise<void> {
+async function synchronizeWorkflowState(target: string, runId: string): Promise<WorkflowSyncSummary | undefined> {
   const child = spawn("node", [CLI, "status", runId, "--project", target, "--window", "30", "--json"], {
     cwd: ULTRAFUZZ_ROOT,
     env: process.env,
-    stdio: "ignore"
+    stdio: ["ignore", "pipe", "pipe"]
   });
+  const stdout = readLimitedStream(child.stdout);
+  const stderr = readLimitedStream(child.stderr);
   const exitCode = await new Promise<number>((resolve) => {
     let settled = false;
     const finish = (code: number): void => {
@@ -664,9 +679,59 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
     child.once("error", () => finish(1));
     child.once("close", (code) => finish(code ?? 1));
   });
+  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
   if (exitCode !== 0) {
-    await appendFile(LOG_PATH, `${new Date().toISOString()} [workflow status sync] exit=${exitCode}\n`);
+    await appendFile(
+      LOG_PATH,
+      `${new Date().toISOString()} [workflow status sync] exit=${exitCode} ${stderrText.slice(0, 1000)}\n`
+    );
+    return undefined;
   }
+  return workflowSyncSummary(stdoutText);
+}
+
+function readLimitedStream(stream: NodeJS.ReadableStream | null): Promise<string> {
+  if (stream === null) return Promise.resolve("");
+  return new Promise((resolve) => {
+    let text = "";
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk: string) => {
+      if (text.length >= 2_000_000) return;
+      text += chunk.slice(0, Math.max(0, 2_000_000 - text.length));
+    });
+    stream.once("end", () => resolve(text));
+    stream.once("error", () => resolve(text));
+  });
+}
+
+function workflowSyncSummary(stdout: string): WorkflowSyncSummary | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  const data = recordField(parsed, "data");
+  if (data === undefined) return undefined;
+  return {
+    ...(stringField(data, "workflow_status") === undefined
+      ? {}
+      : { workflow_status: stringField(data, "workflow_status") }),
+    ...(stringField(data, "verdict") === undefined ? {} : { workflow_verdict: stringField(data, "verdict") })
+  };
+}
+
+function recordField(value: unknown, key: string): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "object" && field !== null && !Array.isArray(field)
+    ? (field as Record<string, unknown>)
+    : undefined;
+}
+
+function stringField(value: Record<string, unknown>, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" && field.trim() !== "" ? field : undefined;
 }
 
 async function scoreWithRetry(control: string, evalRunId: string): Promise<void> {
