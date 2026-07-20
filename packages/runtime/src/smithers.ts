@@ -118,6 +118,12 @@ try {
     }
     if (meta.discardResumeSession === true) continue;
     meta.discardResumeSession = true;
+    delete meta.agentResume;
+    delete meta.resumedFromSession;
+    delete meta.resumedFromConversation;
+    if (meta.lastHeartbeat && typeof meta.lastHeartbeat === "object" && !Array.isArray(meta.lastHeartbeat)) {
+      delete meta.lastHeartbeat.agentResume;
+    }
     update.run(JSON.stringify(meta), runId, nodeId, row.attempt);
     changed += 1;
   }

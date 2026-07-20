@@ -3945,7 +3945,13 @@ test("resume --reset-node discards prior agent resume sessions before resetting"
       db.query("insert into _smithers_attempts values (?, ?, 0, 1, 'failed', ?)").run(
         "ultrafuzz-discard-resume-lifecycle-run",
         "node:project-discovery",
-        JSON.stringify({ agentEngine: "codex", agentResume: "stale-thread" })
+        JSON.stringify({
+          agentEngine: "codex",
+          agentResume: "stale-thread",
+          resumedFromSession: "stale-thread",
+          resumedFromConversation: true,
+          lastHeartbeat: { agentEngine: "codex", agentResume: "stale-thread" }
+        })
       );
       db.close();
     `,
@@ -3979,7 +3985,12 @@ test("resume --reset-node discards prior agent resume sessions before resetting"
     ],
     { encoding: "utf8" }
   );
-  assert.equal(JSON.parse(meta).discardResumeSession, true);
+  const parsedMeta = JSON.parse(meta);
+  assert.equal(parsedMeta.discardResumeSession, true);
+  assert.equal(parsedMeta.agentResume, undefined);
+  assert.equal(parsedMeta.resumedFromSession, undefined);
+  assert.equal(parsedMeta.resumedFromConversation, undefined);
+  assert.equal(parsedMeta.lastHeartbeat.agentResume, undefined);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /^timetravel /mu);
   assert.match(commands, /^up /mu);
