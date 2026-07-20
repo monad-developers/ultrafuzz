@@ -51,34 +51,33 @@ describe("adjudicator prompt assets", () => {
     );
   });
 
-  it("defines candidate-first canonical-family containment across partial and close proofs", () => {
+  it("defines candidate-first semantic canonical-family containment", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v7-canonical-family-containment");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v8-semantic-boundary-family");
     expect(rendered).toContain("Analyze the candidate finding's demonstrated behavior first");
-    expect(rendered).toContain(
-      "concrete manifestation, path variant, partial description, subcase, or close proof of concept"
-    );
-    expect(rendered).toContain("broader mechanism or violated-guarantee family");
-    expect(rendered).toContain("with a compatible impact family");
-    expect(rendered).toContain("Exact narrative, entrypoint, setup, trigger, carrier, localization, exploit sequence");
+    expect(rendered).toContain("domain boundary or admitted-state family");
+    expect(rendered).toContain("same externally observable violated guarantee");
+    expect(rendered).toContain("compatible impact");
+    expect(rendered).toContain("Infer the canonical scope from the catalog issue as a whole");
+    expect(rendered).toContain("not automatically an exhaustive scope definition");
+    expect(rendered).toContain("unless the catalog language expressly narrows the issue to that mechanism");
   });
 
-  it("treats different local fixes as evidence and requires concrete scope incompatibility", () => {
+  it("does not confuse implementation paths with semantic scope incompatibility", () => {
     const rendered = buildAdjudicatorPrompt(judgeInput())
       .map((message) => message.content)
       .join("\n");
 
-    expect(rendered).toContain("distinct local remediation is evidence to consider, but it is not a veto");
-    expect(rendered).toContain("umbrella canonical issue can contain a candidate");
+    expect(rendered).toContain("low-level failing operation, internal mechanism, entrypoint, proof, localization");
+    expect(rendered).toContain("separately useful local fix is not by itself scope incompatibility");
+    expect(rendered).toContain("materially different domain boundary or admitted-state family");
+    expect(rendered).toContain("materially different externally observable guarantee");
     expect(rendered).toContain(
-      "materially different mechanism or violated guarantee outside the canonical issue's scope"
+      "canonical family can be fully resolved while the candidate remains independently possible"
     );
-    expect(rendered).toContain(
-      "canonical issue could be fully addressed while the candidate behavior remains independently possible"
-    );
-    expect(rendered).toContain("Similar words, components, or symptoms alone are insufficient for a match");
+    expect(rendered).toContain("shared component, or a shared symptom or impact alone are insufficient");
   });
 
   it("includes synthetic positive and negative calibration boundaries", () => {
@@ -86,10 +85,11 @@ describe("adjudicator prompt assets", () => {
       .map((message) => message.content)
       .join("\n");
 
-    expect(rendered).toContain("token-hook path is a partial, close proof of concept");
-    expect(rendered).toContain("alternate entrypoint and only one loss scenario is a concrete subcase");
-    expect(rendered).toContain("authorization-key collision is outside a canonical accounting-rounding issue");
-    expect(rendered).toContain('shared words such as "callback,"');
+    expect(rendered).toContain("batch-finalization operation instead of the catalog's withdrawal proof path");
+    expect(rendered).toContain("alternate entrypoint and a different low-level conversion instruction");
+    expect(rendered).toContain("authorization-identity collision is outside a canonical accounting-conversion issue");
+    expect(rendered).toContain("supported actions execute atomically");
+    expect(rendered).toContain("correctly rejects an unauthorized caller");
   });
 
   it("renders schema-retry instructions from MDX without rewriting response text", () => {

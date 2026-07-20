@@ -332,7 +332,7 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v7-canonical-family-containment",
+        prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
@@ -378,7 +378,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v7-canonical-family-containment",
+        prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -602,7 +602,7 @@ describe("deterministic scorer math", () => {
         availability: "historical-unavailable",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v7-canonical-family-containment",
+          judge_prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
           judge_models: ["gpt-5.5"],
           judge_panel: { total: 1, quorum: 1 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
@@ -1023,7 +1023,7 @@ describe("deterministic scorer math", () => {
     expect(scored.findingScores[0]?.judge_result.panel?.member_votes).toHaveLength(3);
     expect(
       scored.findingScores[0]?.judge_result.panel?.member_votes.every(
-        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v7-canonical-family-containment"
+        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v8-semantic-boundary-family"
       )
     ).toBe(true);
   });
