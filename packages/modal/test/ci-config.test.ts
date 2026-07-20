@@ -493,11 +493,10 @@ describe("public Modal benchmark configuration", () => {
       >;
     };
     const cleanup = workflow.jobs.cleanup_incomplete_run!;
-    expect(cleanup.if).toContain("always()");
+    expect(cleanup.if).toContain("!cancelled()");
     expect(cleanup.if).toContain("needs.launch.result == 'failure'");
-    expect(cleanup.if).toContain("needs.launch.result == 'cancelled'");
     expect(cleanup.if).toContain("needs.collect.result == 'failure'");
-    expect(cleanup.if).toContain("needs.collect.result == 'cancelled'");
+    expect(cleanup.if).not.toContain("always()");
     expect(cleanup.if).not.toContain("github.event_name");
     expect(cleanup.needs).toEqual(["launch", "collect"]);
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
@@ -828,8 +827,9 @@ describe("public Modal benchmark configuration", () => {
     expect(launchScript).not.toContain("exit 1");
     expect(launch["timeout-minutes"]).toBeGreaterThanOrEqual(180);
 
-    expect(collect.if).toContain("always()");
+    expect(collect.if).toContain("!cancelled()");
     expect(collect.if).toContain("needs.launch.result != 'skipped'");
+    expect(collect.if).not.toContain("always()");
     expect(collect["timeout-minutes"]).toBe(360);
     expect(step("Restore detached launch state")["continue-on-error"]).toBe(true);
     expect(step("Discover recoverable launch control").if).toBe("always()");

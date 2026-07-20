@@ -128,7 +128,7 @@ export function publishEvalHistoryGeneration(input) {
           commit = createPublicationCommit(worktree, base.oid);
           createdCommit = true;
         }
-        const needsPush = createdCommit || (base.targetExists && base.targetOid !== commit);
+        const needsPush = createdCommit;
 
         if (!needsPush) {
           const latest = refreshRemoteBase(repositoryRoot);
@@ -136,7 +136,7 @@ export function publishEvalHistoryGeneration(input) {
             reportRetry(attempt, "a remote tip advanced during an idempotent rebuild");
             continue;
           }
-          return publicationResult(generation, latest.oid, attempt, false);
+          return publicationResult(generation, latest.targetOid ?? latest.oid, attempt, false);
         }
 
         const push = run("git", ["push", "origin", `HEAD:${TARGET_REF}`], { cwd: worktree });

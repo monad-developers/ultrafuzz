@@ -184,7 +184,7 @@ jobs:
   collect:
     needs: launch
     if: >-
-      always() &&
+      !cancelled() &&
       needs.launch.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -586,9 +586,8 @@ jobs:
       - launch
       - collect
     if: >-
-      always() &&
-      (needs.launch.result == 'failure' || needs.launch.result == 'cancelled' ||
-      needs.collect.result == 'failure' || needs.collect.result == 'cancelled')
+      !cancelled() &&
+      (needs.launch.result == 'failure' || needs.collect.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 75
 

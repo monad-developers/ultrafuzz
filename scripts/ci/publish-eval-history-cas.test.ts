@@ -129,6 +129,35 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(targetAfter);
   }, 30_000);
 
+  it("does not repoint an already-merged publication branch during an idempotent retry", async () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
+
+    await invokePublisher(fixture.checkoutA, generation, inputRoot);
+    const retainedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    git(fixture.seed, ["fetch", "origin", `+${TARGET_REF}:refs/remotes/origin/automation/eval-history`]);
+    git(fixture.seed, [
+      "merge",
+      "--no-ff",
+      "origin/automation/eval-history",
+      "-m",
+      "Merge published history [ci skip]"
+    ]);
+    writeFile(path.join(fixture.seed, "main-only.txt"), "advance main without a skip directive\n");
+    git(fixture.seed, ["add", "main-only.txt"]);
+    git(fixture.seed, ["commit", "-m", "Advance main independently"]);
+    git(fixture.seed, ["push", "origin", "main"]);
+
+    const retried = await invokePublisher(fixture.checkoutA, generation, inputRoot);
+
+    expect(retried).toMatchObject({ published: false, attempts: 1, commit: retainedTarget });
+    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(retainedTarget);
+    expect(git(fixture.bare, ["rev-parse", "refs/heads/main"]).trim()).not.toBe(retainedTarget);
+  }, 30_000);
+
   it("rejects an ahead publication branch containing paths outside the publication allowlist", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
