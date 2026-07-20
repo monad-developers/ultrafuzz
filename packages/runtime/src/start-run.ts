@@ -227,6 +227,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       maxConcurrency: requestedConcurrency,
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
+      force: input.force,
       label: input.label,
       resumeRecovery:
         action === "resume"

@@ -46,6 +46,7 @@ describe("Modal durable evaluation resume", () => {
       "durable-run-one",
       "--project",
       "/workspace/target",
+      "--force",
       "--json"
     ]);
   });
