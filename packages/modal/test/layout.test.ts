@@ -42,8 +42,9 @@ describe("Modal storage layout", () => {
     expect(workerSource).toMatch(/"--watch-timeout-seconds",\s*String\(EVAL_WATCH_TIMEOUT_SECONDS\)/u);
     expect(workerSource).toMatch(/CLI,\s*"status",\s*runId/u);
     expect(workerSource).toContain("WORKFLOW_STATUS_SYNC_TIMEOUT_MS");
-    expect(workerSource).toContain('stdio: ["ignore", "pipe", "pipe"]');
-    expect(workerSource).toContain("readLimitedStream");
+    expect(workerSource).toContain("workflow-status-sync.stdout.json");
+    expect(workerSource).toContain('stdio: ["ignore", stdoutFile.fd, stderrFile.fd]');
+    expect(workerSource).toContain("terminateProcessGroup(child)");
     expect(workerSource).toContain("workflowSyncSummary");
     expect(workerSource).toContain("terminalDurableRunNeedsMoreWorkflowPolling");
     expect(workerSource).toContain('setStatus("waiting-judge"');

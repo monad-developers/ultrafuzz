@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { access, appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { loadModalBenchmarkConfig } from "./config.js";
@@ -33,7 +33,6 @@ const RECOVERY_MAX_RESETS = 96;
 const RECOVERY_POLL_MS = 60_000;
 const RECOVERY_RESET_SETTLE_MS = 15 * 60_000;
 const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
-const WORKFLOW_STATUS_SYNC_STREAM_DRAIN_MS = 5_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
 const SCORE_RETRY_MAX_MS = 15 * 60_000;
 const EVAL_SCORE_TIMEOUT_MS = 5 * 60_000;
@@ -779,14 +778,17 @@ async function synchronizedRunState(target: string): Promise<DurableRunState | u
 }
 
 async function synchronizeWorkflowState(target: string, runId: string): Promise<WorkflowSyncSummary | undefined> {
+  const stdoutPath = path.join(DATA_ROOT, "workflow-status-sync.stdout.json");
+  const stderrPath = path.join(DATA_ROOT, "workflow-status-sync.stderr.log");
+  const stdoutFile = await open(stdoutPath, "w");
+  const stderrFile = await open(stderrPath, "w");
   const child = spawn("node", [CLI, "status", runId, "--project", target, "--window", "30", "--json"], {
     cwd: ULTRAFUZZ_ROOT,
     env: process.env,
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", stdoutFile.fd, stderrFile.fd]
   });
-  const stdout = readLimitedStream(child.stdout);
-  const stderr = readLimitedStream(child.stderr);
+  await Promise.all([stdoutFile.close(), stderrFile.close()]);
   const exitCode = await new Promise<number>((resolve) => {
     let settled = false;
     const finish = (code: number): void => {
@@ -802,10 +804,9 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
     child.once("error", () => finish(1));
     child.once("exit", (code) => finish(code ?? 1));
   });
-  const [stdoutText, stderrText] = await Promise.race([
-    Promise.all([stdout, stderr]),
-    sleep(WORKFLOW_STATUS_SYNC_STREAM_DRAIN_MS).then(() => ["", ""] as const)
-  ]);
+  const stdoutText = await readFile(stdoutPath, "utf8").catch(() => "");
+  const stderrText = await readFile(stderrPath, "utf8").catch(() => "");
+  await Promise.all([rm(stdoutPath, { force: true }), rm(stderrPath, { force: true })]).catch(() => undefined);
   if (exitCode !== 0) {
     await appendFile(
       LOG_PATH,
@@ -835,27 +836,6 @@ function terminateProcessGroup(child: ReturnType<typeof spawn>): void {
     }
   }, 15_000);
   killTimer.unref();
-}
-
-function readLimitedStream(stream: NodeJS.ReadableStream | null): Promise<string> {
-  if (stream === null) return Promise.resolve("");
-  return new Promise((resolve) => {
-    let text = "";
-    let settled = false;
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      resolve(text);
-    };
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk: string) => {
-      if (text.length >= 2_000_000) return;
-      text += chunk.slice(0, Math.max(0, 2_000_000 - text.length));
-    });
-    stream.once("end", finish);
-    stream.once("close", finish);
-    stream.once("error", finish);
-  });
 }
 
 function workflowSyncSummary(stdout: string): WorkflowSyncSummary | undefined {
