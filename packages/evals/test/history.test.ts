@@ -263,7 +263,7 @@ describe("longitudinal eval history", () => {
       executed_case_count: 10,
       graded_case_count: 10,
       target_publication: {
-        ...observation().target_publication,
+        ...observation().target_publication!,
         executed_case_count: 10,
         graded_case_count: 10
       }
