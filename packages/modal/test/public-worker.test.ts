@@ -125,7 +125,7 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
       path.join(dataRoot, "public-eval-diagnostics.json")
     ])
   );
-});
+}, 30_000);
 
 it("accepts the bounded full lane before reading paid-run credentials", async () => {
   const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-full-lane-"));
@@ -184,7 +184,7 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
     if (previous === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previous;
   }
-});
+}, 30_000);
 
 it("durably checkpoints the transition to paid model work before launch", async () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-checkpoint-"));

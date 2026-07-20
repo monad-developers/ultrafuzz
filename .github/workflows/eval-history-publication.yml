@@ -60,6 +60,11 @@ jobs:
           ref: main
           persist-credentials: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Qualify the exact completed producer attempt
         id: qualify
         env:
@@ -196,6 +201,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Open the publication pull request when needed
         env:
           GH_TOKEN: ${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}
@@ -271,6 +281,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Validate publication inputs
         env:
           PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
@@ -284,16 +304,6 @@ jobs:
             if (!safeId.test(artifactName)) throw new Error("artifact name is invalid");
             if (!safeId.test(evalRunId)) throw new Error("eval run ID is invalid");
           ' "$PUBLICATION_ARTIFACT_RUN_ID" "$PUBLICATION_ARTIFACT_NAME" "$PUBLICATION_EVAL_RUN_ID"
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with:
-          version: 11.1.1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
 
       - name: Install and build trusted main
         run: |

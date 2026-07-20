@@ -713,6 +713,14 @@ describe("public Modal benchmark configuration", () => {
       contents: "write",
       "pull-requests": "write"
     });
+    for (const [jobName, job] of Object.entries(publication.jobs)) {
+      const firstNodeInvocation = job.steps.findIndex((step) => /(^|\s)node(?:\s|$)/u.test(step.run ?? ""));
+      if (firstNodeInvocation === -1) continue;
+      const setupNode = job.steps.findIndex((step) => step.uses?.startsWith("actions/setup-node@"));
+      expect(setupNode, `${jobName} must pin Node.js before invoking node`).toBeGreaterThanOrEqual(0);
+      expect(setupNode, `${jobName} must pin Node.js before invoking node`).toBeLessThan(firstNodeInvocation);
+      expect(job.steps[setupNode]?.with?.["node-version"], `${jobName} Node.js version`).toBe(24);
+    }
     const qualifier = publication.jobs.qualify_modal_benchmark!;
     expect(qualifier.if).toBe("github.event_name == 'workflow_run'");
     expect(qualifier.permissions).toEqual({ actions: "read", contents: "read" });
