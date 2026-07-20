@@ -856,9 +856,9 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
       LOG_PATH,
       `${new Date().toISOString()} [workflow status sync] exit=${exitCode} ${stderrText.slice(0, 1000)}\n`
     );
-    return undefined;
+    return { sync_status: "status-unavailable" };
   }
-  return workflowSyncSummary(stdoutText);
+  return workflowSyncSummary(stdoutText) ?? { sync_status: "status-unavailable" };
 }
 
 function terminateProcessGroup(child: ReturnType<typeof spawn>): void {

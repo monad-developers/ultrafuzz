@@ -44,6 +44,22 @@ describe("Modal worker recovery state", () => {
     ).toBe(true);
   });
 
+  it("keeps polling when workflow status probing is temporarily unavailable", () => {
+    expect(
+      terminalDurableRunNeedsMoreWorkflowPolling(
+        {
+          status: "failed",
+          sync_status: "status-unavailable",
+          nodes: {
+            complete: { status: "succeeded" },
+            next: { status: "pending" }
+          }
+        },
+        0
+      )
+    ).toBe(true);
+  });
+
   it("stops polling when the lower-level workflow owner is stale", () => {
     expect(
       terminalDurableRunNeedsMoreWorkflowPolling(

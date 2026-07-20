@@ -16,6 +16,7 @@ const ACTIVE_WORKFLOW_STATUSES = new Set([
   "in-progress",
   "started",
   "retrying",
+  "status-unavailable",
   "queued",
   "waiting-approval",
   "waiting-event",
