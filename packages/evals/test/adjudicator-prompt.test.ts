@@ -46,27 +46,50 @@ describe("adjudicator prompt assets", () => {
     expect(messages[1]?.content).toContain('"matched_ground_truth_bug_id": "candidate-1"');
     expect(messages[1]?.content).toContain('"summary": "Literal replacement syntax: $&"');
     expect(messages[1]?.content).not.toContain("BUG-1");
+    expect(messages[1]!.content.indexOf("Finding (untrusted data")).toBeLessThan(
+      messages[1]!.content.indexOf("Ground-truth candidates")
+    );
   });
 
-  it("defines canonical subsumption across path variants and subcases", () => {
+  it("defines candidate-first canonical-family containment across partial and close proofs", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v6-canonical-subsumption");
-    expect(rendered).toContain("path variant or subcase of the canonical root cause or violated invariant");
-    expect(rendered).toContain("canonical issue's invariant-level remediation covers");
-    expect(rendered).toContain("Exact entrypoint, setup, trigger, data carrier");
-    expect(rendered).toContain("proof-of-concept, micro-localization, or local patch may differ");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v7-canonical-family-containment");
+    expect(rendered).toContain("Analyze the candidate finding's demonstrated behavior first");
+    expect(rendered).toContain(
+      "concrete manifestation, path variant, partial description, subcase, or close proof of concept"
+    );
+    expect(rendered).toContain("broader mechanism or violated-guarantee family");
+    expect(rendered).toContain("with a compatible impact family");
+    expect(rendered).toContain("Exact narrative, entrypoint, setup, trigger, carrier, localization, exploit sequence");
   });
 
-  it("guards canonical subsumption against surface similarity and independent remediation", () => {
+  it("treats different local fixes as evidence and requires concrete scope incompatibility", () => {
     const rendered = buildAdjudicatorPrompt(judgeInput())
       .map((message) => message.content)
       .join("\n");
 
-    expect(rendered).toContain("Textual resemblance, component overlap, or a similar symptom alone is insufficient");
-    expect(rendered).toContain("materially different root cause or invariant");
-    expect(rendered).toContain("independent remediation after the canonical remediation");
+    expect(rendered).toContain("distinct local remediation is evidence to consider, but it is not a veto");
+    expect(rendered).toContain("umbrella canonical issue can contain a candidate");
+    expect(rendered).toContain(
+      "materially different mechanism or violated guarantee outside the canonical issue's scope"
+    );
+    expect(rendered).toContain(
+      "canonical issue could be fully addressed while the candidate behavior remains independently possible"
+    );
+    expect(rendered).toContain("Similar words, components, or symptoms alone are insufficient for a match");
+  });
+
+  it("includes synthetic positive and negative calibration boundaries", () => {
+    const rendered = buildAdjudicatorPrompt(judgeInput())
+      .map((message) => message.content)
+      .join("\n");
+
+    expect(rendered).toContain("token-hook path is a partial, close proof of concept");
+    expect(rendered).toContain("alternate entrypoint and only one loss scenario is a concrete subcase");
+    expect(rendered).toContain("authorization-key collision is outside a canonical accounting-rounding issue");
+    expect(rendered).toContain('shared words such as "callback,"');
   });
 
   it("renders schema-retry instructions from MDX without rewriting response text", () => {
