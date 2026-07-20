@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ultrafuzz Release"
+  short_description: "Publish verified Ultrafuzz GitHub releases"
+  default_prompt: "Use $ultrafuzz-release-skill to prepare concise release notes and publish a verified Ultrafuzz GitHub release."
