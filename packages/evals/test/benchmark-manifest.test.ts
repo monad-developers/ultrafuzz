@@ -79,7 +79,7 @@ describe("public benchmark manifests", () => {
     });
   });
 
-  it("accepts one explicit full runner override while keeping smoke canonical and retaining the fixed judge", () => {
+  it("accepts explicit runner overrides while keeping provider boundaries and the fixed judge", () => {
     const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const runnerModelProfileOverride = {
@@ -152,6 +152,31 @@ describe("public benchmark manifests", () => {
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
 
     const smokeCohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    const smokeOverride = {
+      id: "workflow-smoke-gpt-5-6-luna-202607-medium",
+      agent: "CodexAgent" as const,
+      model: "gpt-5.6-luna-202607",
+      reasoning: "medium"
+    };
+    const smokeSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort: smokeCohort,
+      lanes,
+      runnerModelProfileOverride: smokeOverride
+    });
+    expect(smokeSuite.variants).toEqual([
+      expect.objectContaining({
+        id: smokeOverride.id,
+        runner_model_profile: smokeOverride.id,
+        judge_model_profile: "benchmark-judge-gpt-5-6-sol-xhigh"
+      })
+    ]);
+    expect(smokeSuite.model_profiles[smokeOverride.id]).toEqual({
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna-202607",
+      reasoning: "medium"
+    });
     expect(() =>
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "ultrafuzz-bench",

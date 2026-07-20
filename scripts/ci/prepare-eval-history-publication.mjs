@@ -416,7 +416,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   assertUnique(usedModelSlugs, expectedModelSlug, "derived benchmark model slug");
   const scope = config.public_benchmark;
   const mismatches = [
+    config.schema_version === "ultrafuzz.modal.benchmark.v1" ? undefined : "schema version",
     config.run_id === expectedRunId ? undefined : "run ID",
+    config.app_name === "ultrafuzz-evals" ? undefined : "app name",
     config.image_name === `ufz-runner-${context.candidateCommit}` ? undefined : "image name",
     config.node_timeout_seconds === 1800 ? undefined : "node timeout",
     config.loops === 1 ? undefined : "strategy loops",
@@ -434,9 +436,6 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     model.slug === expectedModelSlug ? undefined : "derived model slug",
     model.provider === pair.provider ? undefined : "model provider",
     model.agent === expectedAgent ? undefined : "model agent",
-    context.mode !== "smoke" || (model.model === "gpt-5.6-luna" && model.reasoning === "high")
-      ? undefined
-      : "canonical smoke model",
     model.auth_mode === "api-key" ? undefined : "model authentication mode"
   ].filter((entry) => entry !== undefined);
   if (mismatches.length > 0) {

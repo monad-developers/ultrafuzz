@@ -29,7 +29,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(validateAutomaticPublicationManifest(smokeManifest(), context)).toEqual(smokeManifest());
   });
 
-  it("rejects a noncanonical smoke runner before unpacking producer bundles", () => {
+  it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
     const modelSlug = "benchmark-smoke-gpt-5-6-luna-202607-high";
     const pair = {
       ...smokeManifest().pairs[0]!,
@@ -46,7 +46,9 @@ describe("trusted automatic eval-history publication handoff", () => {
       auth_mode: "api-key"
     };
     const config = {
+      schema_version: "ultrafuzz.modal.benchmark.v1",
       run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
+      app_name: "ultrafuzz-evals",
       image_name: `ufz-runner-${"a".repeat(40)}`,
       node_timeout_seconds: 1800,
       loops: 1,
@@ -65,7 +67,7 @@ describe("trusted automatic eval-history publication handoff", () => {
         max_runtime_seconds: 3600
       }
     };
-    expect(() =>
+    expect(
       validateAutomaticPairConfig(
         config,
         model,
@@ -77,7 +79,7 @@ describe("trusted automatic eval-history publication handoff", () => {
         },
         new Set()
       )
-    ).toThrow(/canonical smoke model/u);
+    ).toBeUndefined();
   });
 
   it("rejects untrusted identity, topology, provider, and path mutations", () => {

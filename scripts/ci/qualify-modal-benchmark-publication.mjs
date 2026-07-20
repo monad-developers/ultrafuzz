@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
-const SUPPORTED_EVENTS = new Set(["pull_request", "push", "workflow_dispatch"]);
+const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, repository) {
   const event = record(eventValue);
@@ -18,10 +18,6 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
   ) {
     return ineligible("the completed run is not an eligible trusted benchmark producer");
   }
-  if (eventName === "push" && workflowRun.head_branch !== "main") {
-    return ineligible("automatic push benchmarks are restricted to main");
-  }
-
   const jobs = jobRecords(jobsValue);
   for (const requiredJob of ["launch", "collect"]) {
     const matching = jobs.filter((job) => job.name === requiredJob);

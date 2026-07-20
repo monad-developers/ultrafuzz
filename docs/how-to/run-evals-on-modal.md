@@ -81,18 +81,31 @@ credential in memory immediately before scoring and never persists it.
 
 ## Run the public benchmark workflow
 
-The checked-in GitHub workflow uses Actions only as a control plane. It launches
-the paid smoke for commits on `main` and for head commits of trusted, non-draft
-pull requests. Draft pull requests allocate no Modal work; the
-`ready_for_review` event launches their current head commit. A newer commit on
-the same pull request or branch cancels its older smoke workflow. Each eligible
-run installs and builds the exact candidate commit before building its immutable
-Modal image.
+The checked-in GitHub workflow uses Actions only to build the candidate and as a
+control and collection plane; all benchmark and model compute runs on Modal.
+Every non-deletion push to a branch in this repository launches the paid smoke
+for the exact pushed commit, including pushes to branches whose pull requests
+are still drafts. Fork pull-request events do not run this workflow. Repository
+write access that is allowed to receive Actions secrets is therefore inside the
+benchmark credential and cost trust boundary; protect that access and enforce
+scoped provider credentials and hard provider/Modal budgets. A newer commit on
+the same branch cancels its older smoke workflow. Each run installs and builds
+the exact candidate commit before building its immutable Modal image.
+
+Cancellation is latest-wins only within one branch. A separate recovery
+workflow uses tooling from the trusted default branch, treats the exact
+candidate checkout only as fingerprinted data, and semantically validates the
+incomplete attempt's immutable pre-compute plan before giving termination code
+Modal credentials. It recovers failed, timed-out, and cancelled generations.
+Runs on different branches and independent full dispatches may overlap, so
+provider and Modal budgets remain the hard aggregate cost boundary.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
-one Vyper target. It runs only GPT-5.6 Luna at `high`, uses one strategy loop,
+one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
 and explicitly disables invariant tests, differential tests, and dynamic
-strategies.
+strategies. Repository variables `BENCHMARK_SMOKE_OPENAI_MODEL` and
+`BENCHMARK_SMOKE_OPENAI_REASONING` can override that smoke runner without
+changing its single OpenAI/Codex provider or its target and topology limits.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
 checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
@@ -100,7 +113,7 @@ checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
 `anthropic_model`, and `anthropic_reasoning` provide explicit overrides. The
 full lane retains the production strategy set, including invariant,
 differential, and dynamic strategies, with all three disable flags set to
-`false`. Push and pull-request events can never select this lane.
+`false`. Push events can never select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Every
 target row has a 3,600-second model-work watchdog. The smoke admits two rows at
@@ -127,8 +140,8 @@ public Ultrafuzz-bench labels. Public target reports and normalized findings are
 packed with SHA-256 and path validation and uploaded with 30-day retention. No
 partial generation updates history: the trusted publisher verifies that the
 exact producer attempt's launch and collection jobs both succeeded, and every
-configured pair must finish and score before publication. Pull-request results
-remain keyed to the PR head commit rather than GitHub's synthetic merge commit.
+configured pair must finish and score before publication. Branch results remain
+keyed to the exact pushed commit.
 
 The compare-and-swap publisher validates the generation with the benchmark
 policy from the exact candidate checkout, appends observations keyed to that

@@ -3,13 +3,7 @@ name: Modal Eval Benchmarks
 on:
   push:
     branches:
-      - main
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
+      - "**"
   workflow_dispatch:
     inputs:
       openai_model:
@@ -35,22 +29,21 @@ on:
 
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
-  BENCHMARK_CANDIDATE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   launch:
     if: >-
-      github.event_name == 'workflow_dispatch' || github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository)
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.event.deleted == false)
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
@@ -100,8 +93,8 @@ jobs:
 
       - name: Prepare the exact model by benchmark matrix
         env:
-          BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || 'gpt-5.6-luna' }}
-          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || 'high' }}
+          BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || vars.BENCHMARK_SMOKE_OPENAI_MODEL || 'gpt-5.6-luna' }}
+          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || vars.BENCHMARK_SMOKE_OPENAI_REASONING || 'high' }}
           BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
         run: |
@@ -597,10 +590,84 @@ jobs:
       (needs.launch.result == 'failure' || needs.launch.result == 'cancelled' ||
       needs.collect.result == 'failure' || needs.collect.result == 'cancelled')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
 
     steps:
+      - name: Discover the exact pre-compute benchmark plan
+        id: incomplete_plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLAN_ARTIFACT_NAME: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+        run: |
+          artifact_index="$RUNNER_TEMP/incomplete-modal-artifacts.json"
+          job_index="$RUNNER_TEMP/incomplete-modal-jobs.json"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            > "$artifact_index"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$job_index"
+          plan_count="$(jq --arg name "$PLAN_ARTIFACT_NAME" \
+            '[.artifacts[] | select(.name == $name)] | length' \
+            "$artifact_index")"
+          if [ "$plan_count" -eq 0 ]; then
+            total_job_count="$(jq '.jobs | length' "$job_index")"
+            launch_job_count="$(jq '[.jobs[] | select(.name == "launch")] | length' "$job_index")"
+            if [ "$launch_job_count" -gt 1 ]; then
+              echo "Expected at most one launch job, found $launch_job_count" >&2
+              exit 1
+            fi
+            if [ "$launch_job_count" -eq 0 ]; then
+              if [ "$total_job_count" -ne 0 ]; then
+                echo "The source attempt has jobs but no canonical launch-job evidence." >&2
+                exit 1
+              fi
+            else
+              launch_step_count="$(jq '[.jobs[] | select(.name == "launch") | .steps[]?] | length' "$job_index")"
+              if [ "$launch_step_count" -eq 0 ]; then
+                if ! jq -e '.jobs[] | select(.name == "launch" and .conclusion == "cancelled")' \
+                  "$job_index" > /dev/null; then
+                  echo "The launch job has no auditable step evidence." >&2
+                  exit 1
+                fi
+              else
+                plan_step_count="$(jq '[.jobs[] | select(.name == "launch") | .steps[]? | select(.name == "Persist immutable benchmark plan before starting Modal compute")] | length' "$job_index")"
+                build_step_count="$(jq '[.jobs[] | select(.name == "launch") | .steps[]? | select(.name == "Build an immutable Modal image for the candidate")] | length' "$job_index")"
+                launch_step_count="$(jq '[.jobs[] | select(.name == "launch") | .steps[]? | select(.name == "Launch detached Modal benchmark sandboxes")] | length' "$job_index")"
+                if [ "$plan_step_count" -ne 1 ] || [ "$build_step_count" -ne 1 ] || [ "$launch_step_count" -ne 1 ]; then
+                  echo "The launch job is missing canonical pre-compute step evidence." >&2
+                  exit 1
+                fi
+                plan_upload_succeeded="$(jq '[.jobs[] | select(.name == "launch") | .steps[]? | select(.name == "Persist immutable benchmark plan before starting Modal compute" and .conclusion == "success")] | length' "$job_index")"
+                compute_may_have_started="$(jq '[.jobs[] | select(.name == "launch") | .steps[]? | select((.name == "Build an immutable Modal image for the candidate" or .name == "Launch detached Modal benchmark sandboxes") and .conclusion != "skipped")] | length' "$job_index")"
+                if [ "$plan_upload_succeeded" -ne 0 ] || [ "$compute_may_have_started" -ne 0 ]; then
+                  echo "The immutable plan is missing even though Modal compute may have started." >&2
+                  exit 1
+                fi
+              fi
+            fi
+            echo "No immutable plan exists and the exact attempt never reached a Modal compute step."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          elif [ "$plan_count" -eq 1 ]; then
+            if ! jq -e --arg name "$PLAN_ARTIFACT_NAME" \
+              '.artifacts[] | select(.name == $name and .expired == false)' \
+              "$artifact_index" > /dev/null; then
+              echo "The exact immutable plan exists but is no longer downloadable." >&2
+              exit 1
+            fi
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Expected at most one exact immutable plan, found $plan_count" >&2
+            exit 1
+          fi
+
       - name: Check out the exact incomplete benchmark candidate
+        if: steps.incomplete_plan.outputs.available == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
@@ -608,23 +675,26 @@ jobs:
           persist-credentials: false
 
       - name: Set up pnpm
+        if: steps.incomplete_plan.outputs.available == 'true'
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
         with:
           version: 11.1.1
 
       - name: Set up Node.js
+        if: steps.incomplete_plan.outputs.available == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
 
       - name: Install and build the incomplete candidate
+        if: steps.incomplete_plan.outputs.available == 'true'
         run: |
           pnpm install --frozen-lockfile
           pnpm -w build
 
       - name: Restore the immutable pre-compute benchmark plan
         id: restore_incomplete_plan
-        continue-on-error: true
+        if: steps.incomplete_plan.outputs.available == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -634,6 +704,7 @@ jobs:
 
       - name: Restore any persisted launch IDs
         id: restore_incomplete_launch
+        if: steps.incomplete_plan.outputs.available == 'true'
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -643,7 +714,8 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Validate incomplete-run cleanup paths
-        if: always() && steps.restore_incomplete_plan.outcome == 'success'
+        id: validate_incomplete_plan
+        if: steps.incomplete_plan.outputs.available == 'true'
         env:
           BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
           CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
@@ -652,70 +724,16 @@ jobs:
           EXPECTED_MODE: ${{ env.BENCHMARK_MODE }}
           EXPECTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          node --input-type=module - "$BENCHMARK_PLAN/manifest.json" "$CLEANUP_PAIR_LIST" <<'NODE'
-          import fs from "node:fs";
-          import path from "node:path";
-
-          const [manifestPath, outputPath] = process.argv.slice(2);
-          const root = path.dirname(manifestPath);
-          const boundedRegularFile = (filePath, label) => {
-            const stat = fs.lstatSync(filePath);
-            if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > 1024 * 1024) {
-              throw new Error(`${label} must be a bounded regular file`);
-            }
-          };
-          boundedRegularFile(manifestPath, "incomplete benchmark manifest");
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          if (typeof manifest !== "object" || manifest === null || !Array.isArray(manifest.pairs)) {
-            throw new Error("incomplete benchmark manifest is invalid");
-          }
-          if (
-            manifest.candidate_commit !== process.env.EXPECTED_CANDIDATE ||
-            manifest.repository !== process.env.EXPECTED_REPOSITORY ||
-            manifest.generation !== process.env.EXPECTED_GENERATION ||
-            manifest.mode !== process.env.EXPECTED_MODE
-          ) {
-            throw new Error("incomplete benchmark manifest identity is invalid");
-          }
-          const expectedPairs = manifest.mode === "smoke" ? 1 : manifest.mode === "full" ? 2 : 0;
-          if (manifest.pairs.length !== expectedPairs) {
-            throw new Error("incomplete benchmark manifest has an invalid pair count");
-          }
-          const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-          if (!safeId.test(manifest.image_name)) throw new Error("incomplete benchmark image name is invalid");
-          const configs = [];
-          const states = [];
-          const rows = [];
-          for (const [index, value] of manifest.pairs.entries()) {
-            if (typeof value !== "object" || value === null || Array.isArray(value)) {
-              throw new Error(`incomplete benchmark pair ${index} is invalid`);
-            }
-            const { pair, config_path: configPath, state_path: statePath } = value;
-            if (
-              !safeId.test(pair) ||
-              !safeId.test(configPath) ||
-              !safeId.test(statePath) ||
-              path.basename(configPath) !== configPath ||
-              path.basename(statePath) !== statePath
-            ) {
-              throw new Error(`incomplete benchmark pair ${index} has an unsafe control path`);
-            }
-            if (configPath !== `${pair}.json` || statePath !== `${pair}.state.json`) {
-              throw new Error(`incomplete benchmark pair ${index} paths do not match its pair ID`);
-            }
-            if (configs.includes(configPath) || states.includes(statePath)) {
-              throw new Error(`incomplete benchmark pair ${index} duplicates a control path`);
-            }
-            boundedRegularFile(path.join(root, configPath), `incomplete benchmark config ${index}`);
-            configs.push(configPath);
-            states.push(statePath);
-            rows.push(`${configPath}\t${statePath}`);
-          }
-          fs.writeFileSync(outputPath, `${rows.join("\n")}\n`, { flag: "wx", mode: 0o600 });
-          NODE
+          node scripts/ci/prepare-modal-benchmark-cleanup.mjs \
+            "$BENCHMARK_PLAN/manifest.json" \
+            "$CLEANUP_PAIR_LIST" \
+            "$EXPECTED_CANDIDATE" \
+            "$EXPECTED_REPOSITORY" \
+            "$EXPECTED_GENERATION" \
+            "$EXPECTED_MODE"
 
       - name: Terminate every exact incomplete-run sandbox
-        if: always() && steps.restore_incomplete_plan.outcome == 'success'
+        if: always() && steps.validate_incomplete_plan.outcome == 'success'
         env:
           BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
           BENCHMARK_STATE: ${{ runner.temp }}/incomplete-modal-benchmark-state
@@ -725,51 +743,10 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          termination_failed=false
-          terminate_scope() {
-            local label="$1"
-            shift
-            if ! timeout --signal=TERM --kill-after=30s 5m node packages/modal/dist/cli.js "$@"; then
-              echo "::warning title=Modal cleanup uncertainty::Could not confirm termination for $label."
-              termination_failed=true
-            fi
-          }
-
-          if [ "$STATE_AVAILABLE" = true ]; then
-            while IFS=$'\t' read -r _config state; do
-              [ -n "$state" ] || continue
-              state_path="$BENCHMARK_STATE/$state"
-              if [ -f "$state_path" ] && [ ! -L "$state_path" ] && \
-                jq -e '((.launches | type == "array" and length > 0) or (.attempt_history | type == "array" and length > 0))' \
-                  "$state_path" > /dev/null 2>&1; then
-                terminate_scope "persisted state $state" terminate --state "$state_path"
-              fi
-            done < "$CLEANUP_PAIR_LIST"
-          fi
-
-          image_name="$(jq -er '.image_name' "$BENCHMARK_PLAN/manifest.json")"
-          for pass in 1 2; do
-            terminate_scope "image build pass $pass" terminate-build \
-              --image "$image_name" \
-              --build-scope "$BUILD_SCOPE" \
-              --repo-root .
-            while IFS=$'\t' read -r config _state; do
-              [ -n "$config" ] || continue
-              terminate_scope "eval config $config pass $pass" terminate \
-                --config "$BENCHMARK_PLAN/$config" \
-                --repo-root .
-            done < "$CLEANUP_PAIR_LIST"
-            if [ "$pass" -eq 1 ]; then
-              sleep 20
-            fi
-          done
-
-          if [ "$termination_failed" = true ]; then
-            exit 1
-          fi
-
-      - name: Fail when the immutable cleanup plan was not preserved
-        if: always() && steps.restore_incomplete_plan.outcome != 'success'
-        run: |
-          echo "The pre-compute Modal plan could not be restored; sandbox termination cannot be confirmed." >&2
-          exit 1
+          bash scripts/ci/terminate-modal-benchmark.sh \
+            "$BENCHMARK_PLAN" \
+            "$BENCHMARK_STATE" \
+            "$CLEANUP_PAIR_LIST" \
+            "$BUILD_SCOPE" \
+            "$STATE_AVAILABLE" \
+            "$GITHUB_WORKSPACE"

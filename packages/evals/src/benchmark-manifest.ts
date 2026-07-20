@@ -367,13 +367,10 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       );
     }
     runnerModelProfileOverride = parsedOverride.data;
-    if (
-      input.lane === "smoke" &&
-      JSON.stringify(runnerModelProfileOverride) !== JSON.stringify(lane.model_profiles[0])
-    ) {
+    if (input.lane === "smoke" && runnerModelProfileOverride.agent !== "CodexAgent") {
       throw new EvalError(
         "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
-        "smoke runner override must remain the canonical gpt-5.6-luna high profile"
+        "smoke runner override must remain an explicit CodexAgent profile"
       );
     }
   }

@@ -172,18 +172,32 @@ run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
 and available candidate, cohort, and scoring provenance. Missing timing or cost
 is allowed and renders as unavailable; it is never converted to zero.
 
-Commits on `main` and head commits of trusted, non-draft pull requests launch
-the real three-target Ultrafuzz-bench smoke as detached Modal work, then restore
-its state in a separate collection job. Draft pull requests skip paid work;
-marking one ready for review launches its current head. A newer commit on the
-same pull request or branch cancels the older smoke. GPT-5.6 Luna `high` is the
-only smoke runner. Candidate installation and build happen before any Modal
-launch, so a broken commit fails without allocating the benchmark matrix.
+Every non-deletion push to a branch in this repository launches the real
+three-target Ultrafuzz-bench smoke as detached Modal work, including pushes to
+branches whose pull requests are still drafts. Fork pull-request events do not
+run the workflow. Repository write access that is allowed to receive Actions
+secrets is inside the benchmark credential and cost trust boundary, so push
+access, provider credentials, and provider/Modal budgets must be tightly scoped.
+A newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high`
+is the default smoke runner; repository variables
+`BENCHMARK_SMOKE_OPENAI_MODEL` and `BENCHMARK_SMOKE_OPENAI_REASONING` can
+override its model and reasoning while retaining the single OpenAI/Codex lane.
+Candidate installation and build happen before any Modal launch, so a broken
+commit fails without allocating the benchmark matrix. GitHub Actions still
+performs the build, control, and collection work; benchmark and model compute
+itself runs only on Modal.
+
+Cancellation is latest-wins only within one branch. A recovery workflow runs
+only trusted default-branch tooling, uses the exact candidate checkout as data
+for its source fingerprint, and validates the preserved plan before terminating
+an exact failed, timed-out, or cancelled Modal generation. Different branches
+and independent full dispatches can still overlap, so enforce provider and
+Modal budgets across all concurrent runs.
 
 A manual workflow dispatch launches the full EVMBench cohort instead, with
 GPT-5.6 Luna `high` and Claude Sonnet 5 `high` by default. Its model and
 reasoning inputs can override both runners. Full runs only through that manual
-dispatch; pushes and pull-request events always select smoke. Both modes retain
+dispatch; pushes always select smoke. Both modes retain
 the standard Modal CPU and memory allocation, give each target row a
 3,600-second watchdog, and publish ordinary 30-day Actions artifacts. Missing
 credentials, revision drift, unavailable ground truth, failed model work,
