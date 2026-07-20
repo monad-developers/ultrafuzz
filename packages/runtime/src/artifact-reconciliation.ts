@@ -144,7 +144,7 @@ async function copyRegularFileExclusive(
   let temporary: string | undefined;
   let anchoredDestination: string | undefined;
   let temporaryIdentity: FileIdentity | undefined;
-  let linked = false;
+  let publishedIdentity: FileIdentity | undefined;
   try {
     reconciliationCheckpoint(control);
     sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -237,20 +237,18 @@ async function copyRegularFileExclusive(
     reconciliationCheckpoint(control);
 
     try {
-      reconciliationCheckpoint(control);
-      fs.linkSync(temporary, anchoredDestination);
-      linked = true;
-      reconciliationCheckpoint(control);
+      publishedIdentity = publishTemporaryArtifact(temporary, anchoredDestination);
     } catch (error) {
       if (isAlreadyExistsError(error)) {
         return false;
       }
       throw error;
     }
+    reconciliationCheckpoint(control);
     destinationFd = fs.openSync(anchoredDestination, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     validateOpenedDescriptorInside(artifactDir, destinationFd, "reconciled artifact destination");
     const destinationStat = fs.fstatSync(destinationFd, { bigint: true });
-    if (!sameFileIdentity(temporaryIdentity, destinationStat)) {
+    if (!sameFileIdentity(publishedIdentity, destinationStat)) {
       throw new Error("reconciled artifact destination changed during publication");
     }
     if ((await hashOpenFile(destinationFd, control)) !== digest.digest("hex")) {
@@ -269,8 +267,8 @@ async function copyRegularFileExclusive(
     reconciliationCheckpoint(control);
     return true;
   } catch (error) {
-    if (linked && anchoredDestination !== undefined && temporaryIdentity !== undefined) {
-      if (!unlinkIfOwned(anchoredDestination, temporaryIdentity)) {
+    if (anchoredDestination !== undefined && publishedIdentity !== undefined) {
+      if (!unlinkIfOwned(anchoredDestination, publishedIdentity)) {
         throw new Error("failed to remove an incomplete reconciled artifact", { cause: error });
       }
     }
@@ -296,6 +294,30 @@ async function copyRegularFileExclusive(
       }
     }
   }
+}
+
+function publishTemporaryArtifact(temporary: string, destination: string): FileIdentity {
+  try {
+    fs.linkSync(temporary, destination);
+    return fileIdentity(fs.statSync(destination, { bigint: true }));
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      throw error;
+    }
+    if (!isHardLinkUnsupportedError(error)) {
+      throw error;
+    }
+  }
+
+  try {
+    fs.copyFileSync(temporary, destination, fs.constants.COPYFILE_EXCL);
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      throw error;
+    }
+    throw error;
+  }
+  return fileIdentity(fs.statSync(destination, { bigint: true }));
 }
 
 interface FileIdentity {
@@ -401,6 +423,10 @@ function unlinkIfOwned(filePath: string, identity: FileIdentity): boolean {
 
 function isAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+function isHardLinkUnsupportedError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EXDEV");
 }
 
 function isBenignCleanupError(error: unknown): boolean {

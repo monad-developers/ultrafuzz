@@ -61,6 +61,40 @@ test("reconciles only the exact task-owned mirrored artifact path", async () => 
   assert.equal(fs.readFileSync(path.join(fixture.artifactDir, "reports", "output.json"), "utf8"), "canonical bytes\n");
 });
 
+test("falls back to exclusive copy when descriptor hard-link publication is unsupported", async () => {
+  const fixture = setup(["output.json"]);
+  writeFile(fixture.mirrorDir, "output.json", "canonical bytes\n");
+  const originalLinkSync = fs.linkSync;
+  let hardLinkBlocked = false;
+
+  fs.linkSync = ((existingPath, newPath) => {
+    if (String(existingPath).includes(".output.json.reconcile-") && String(newPath).endsWith("/output.json")) {
+      hardLinkBlocked = true;
+      const error = new Error("hard links are not supported for this descriptor path") as NodeJS.ErrnoException;
+      error.code = "EPERM";
+      throw error;
+    }
+    return originalLinkSync(existingPath, newPath);
+  }) as typeof fs.linkSync;
+  try {
+    const result = await reconcileRequiredArtifactsFromWorkspace({
+      layout: fixture.layout,
+      node: fixture.node,
+      attemptId: "strategy-a"
+    });
+
+    assert.equal(hardLinkBlocked, true);
+    assert.deepEqual(result.materialized, ["output.json"]);
+    assert.equal(fs.readFileSync(path.join(fixture.artifactDir, "output.json"), "utf8"), "canonical bytes\n");
+    assert.equal(
+      fs.readdirSync(fixture.artifactDir).some((entry) => entry.includes(".reconcile-")),
+      false
+    );
+  } finally {
+    fs.linkSync = originalLinkSync;
+  }
+});
+
 test("ignores same-suffix files outside the exact mirrored artifact path", async () => {
   const fixture = setup(["output.json"]);
   writeFile(fixture.workspaceDir, "elsewhere/output.json", "decoy\n");
