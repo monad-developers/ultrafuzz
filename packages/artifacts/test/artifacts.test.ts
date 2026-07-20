@@ -17,6 +17,7 @@ import {
   manifestDigest,
   queryNodeAttempts,
   queryEvents,
+  readEventQueryFacade,
   readFindings,
   readRunState,
   replayEvents,
@@ -351,6 +352,98 @@ test("events append to JSONL, redact secrets, replay, and expose query indexes",
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
 });
 
+test("event indexes encode long IDs in a collision-free hash namespace", () => {
+  const maximumRunId = "r".repeat(128);
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
+  const facadeBeforeAppend = readEventQueryFacade(layout);
+  const secondMaximumRunId = `${"r".repeat(127)}s`;
+  const directBoundaryRunId = "d".repeat(122);
+  const longBoundaryEventType = "e".repeat(123);
+  const maximumEventType = "t".repeat(128);
+  const maximumNodeId = "n".repeat(128);
+  const maximumStatus = "s".repeat(128);
+  const legacyCollisionRunId = `${maximumRunId.slice(0, 97)}-${crypto
+    .createHash("sha256")
+    .update(maximumRunId, "utf8")
+    .digest("hex")
+    .slice(0, 24)}`;
+  assert.equal(legacyCollisionRunId.length, 122);
+
+  appendEvent(layout, {
+    eventType: maximumEventType,
+    nodeId: maximumNodeId,
+    status: maximumStatus,
+    payload: { id: "maximum" }
+  });
+  appendEvent(layout, {
+    runId: secondMaximumRunId,
+    eventType: longBoundaryEventType,
+    nodeId: "direct-node",
+    status: "direct-status",
+    payload: { id: "second-maximum" }
+  });
+  appendEvent(layout, {
+    runId: legacyCollisionRunId,
+    eventType: "direct-event",
+    payload: { id: "legacy-collision" }
+  });
+  appendEvent(layout, {
+    runId: directBoundaryRunId,
+    eventType: "boundary-event",
+    payload: { id: "direct-boundary" }
+  });
+
+  const hashedIndexPath = (dimension: string, value: string): string =>
+    path.join(
+      layout.eventsIndexDir,
+      dimension,
+      "sha256",
+      `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
+    );
+  const maximumRunIndex = hashedIndexPath("run", maximumRunId);
+  const secondMaximumRunIndex = hashedIndexPath("run", secondMaximumRunId);
+  assert.equal(fs.existsSync(maximumRunIndex), true);
+  assert.equal(fs.existsSync(secondMaximumRunIndex), true);
+  assert.notEqual(maximumRunIndex, secondMaximumRunIndex);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${legacyCollisionRunId}.jsonl`)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${directBoundaryRunId}.jsonl`)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("type", longBoundaryEventType)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("type", maximumEventType)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("status", maximumStatus)), true);
+
+  const maximumRecord = JSON.parse(fs.readFileSync(maximumRunIndex, "utf8")) as { run_id: string };
+  assert.equal(maximumRecord.run_id, maximumRunId);
+  const facadeAfterAppend = readEventQueryFacade(layout) as {
+    filters?: unknown;
+    long_filters?: unknown;
+    index_key_encoding?: unknown;
+  };
+  assert.deepEqual(facadeAfterAppend, facadeBeforeAppend);
+  assert.deepEqual(facadeAfterAppend.filters, {
+    run_id: "events.index/run/<run-id>.jsonl",
+    node_id: "events.index/node/<node-id>.jsonl",
+    event_type: "events.index/type/<event-type>.jsonl",
+    status: "events.index/status/<status>.jsonl",
+    timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
+  });
+  assert.deepEqual(facadeAfterAppend.long_filters, {
+    run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
+    node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
+    event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
+    status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
+  });
+  assert.deepEqual(facadeAfterAppend.index_key_encoding, {
+    version: "1",
+    direct_max_id_length: 122,
+    direct_id_path: "<dimension>/<id>.jsonl",
+    long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
+    digest: "sha256",
+    hash_input_encoding: "utf8",
+    digest_encoding: "hex"
+  });
+});
+
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifacts-events-"));
   const layout = createRunLayout({ outputRoot: path.join(root, "runs"), runId: "run-redaction" });
@@ -683,4 +776,81 @@ test("generated-test manifests persist explicit generated files with provenance"
     fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests", "Invariant.t.sol")),
     true
   );
+});
+
+test("generated-test manifest writer rejects zero-byte companion files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-empty-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Empty.t.sol", content: "" }]
+      }),
+    /generated test file must be non-empty/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects final symlinks without touching outside files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-symlinked-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const outsideDir = tempProject();
+  const outsideFile = path.join(outsideDir, "Outside.t.sol");
+  fs.writeFileSync(outsideFile, "outside sentinel\n");
+  const symlinkPath = path.join(generatedTestsDir, "Linked.t.sol");
+  fs.symlinkSync(outsideFile, symlinkPath);
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Linked.t.sol", content: "replacement\n" }]
+      }),
+    /symlink/u
+  );
+  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(outsideFile, "utf8"), "outside sentinel\n");
+  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects broken final symlinks before writing content", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-broken-symlink-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const missingOutsideFile = path.join(tempProject(), "Missing.t.sol");
+  const symlinkPath = path.join(generatedTestsDir, "Broken.t.sol");
+  fs.symlinkSync(missingOutsideFile, symlinkPath);
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Broken.t.sol", content: "replacement\n" }]
+      }),
+    /symlink/u
+  );
+  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(missingOutsideFile), false);
+});
+
+test("generated-test manifest writer rejects paths outside the generated-tests root", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-outside-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/../../Outside.t.sol", content: "outside\n" }]
+      }),
+    /cannot traverse outside/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "Outside.t.sol")), false);
 });

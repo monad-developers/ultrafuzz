@@ -16,6 +16,9 @@ export interface ModalResumeWorkspace {
 export interface ModalResumeRunState {
   run_id: string;
   status?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
   nodes?: Record<string, { status?: string }>;
 }
 
@@ -99,17 +102,42 @@ export async function repairModalEvalRunRecord(
   if (rowIds.size !== 1) throw new Error("evaluation run has ambiguous linked rows");
   const record = linked[linked.length - 1]!;
   const finalStatus = state.status;
+  const currentWorkflow =
+    typeof record.workflow === "object" && record.workflow !== null && !Array.isArray(record.workflow)
+      ? (record.workflow as Record<string, unknown>)
+      : undefined;
+  const finishedAt =
+    timestamp(state.finished_at) ??
+    timestamp(currentWorkflow?.finished_at) ??
+    timestamp(record.finished_at) ??
+    new Date().toISOString();
+  const workflow = {
+    status: finalStatus,
+    terminal: true,
+    started_at:
+      timestamp(currentWorkflow?.started_at) ?? timestamp(state.started_at) ?? timestamp(state.created_at) ?? null,
+    finished_at: finishedAt
+  };
   const updated =
-    record.final_status === finalStatus
+    record.final_status === finalStatus &&
+    currentWorkflow?.status === workflow.status &&
+    currentWorkflow?.terminal === workflow.terminal &&
+    currentWorkflow?.started_at === workflow.started_at &&
+    currentWorkflow?.finished_at === workflow.finished_at
       ? record
-      : { ...record, final_status: finalStatus, finished_at: new Date().toISOString() };
+      : { ...record, final_status: finalStatus, workflow, finished_at: finishedAt };
   if (updated !== record) await appendLineDurable(recordsPath, `${JSON.stringify(updated)}\n`);
   await writeJsonAtomic(path.join(evalDir, "run-summary.json"), {
     eval_run_id: workspace.evalRunId,
     launched: 1,
     failed: 0,
+    incomplete: 0,
     records: [updated]
   });
+}
+
+function timestamp(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" && Number.isFinite(Date.parse(value)) ? value : undefined;
 }
 
 async function readRecords(filePath: string): Promise<Array<Record<string, unknown>>> {

@@ -5,7 +5,9 @@ display_name: Aggregate test files
 
 # Aggregate test files
 
-Your job is to collect generated Foundry `.t.sol` files from isolated strategy attempts and copy them deterministically into this node's isolated workspace.
+Your job is to collect canonical generated-test companions from isolated
+strategy attempts and copy them deterministically into this node's isolated
+workspace using the target's existing Foundry, Hardhat, or Vyper test layout.
 
 The original target repository root is:
 {{repo_path}}
@@ -31,6 +33,12 @@ Dedupe report:
 
 Severity-classified findings:
 {{artifact_path:severity-classification}}/severity-classified-findings.json
+
+Project discovery:
+{{artifact_path:project-discovery}}/setup/project-discovery.md
+
+Base test setup (when rendered):
+{{artifact_path:base-test-setup}}/setup/base-test-setup.md
 
 Strategy generated-test manifests:
 
@@ -116,12 +124,38 @@ Use only files reported by strategy-owned generated-test manifests. Read every
 manifest listed above, including empty manifests. Treat each manifest's
 `generated_tests` array as the source of truth and ignore any non-canonical file
 list arrays. Do not rely on the current working tree or a strategy workspace
-scan as a substitute for a missing manifest entry. Preserve attribution by
-strategy id, attempt index, source artifact path, source relative path, and
-destination path. Copy under
-`{{workspace_path}}/test/foundry/<strategy>/attempt-<n>/` or the configured
-aggregation destination under `{{workspace_path}}`, using deterministic suffixes
-when names collide.
+scan as a substitute for a missing manifest entry.
+
+For each `generated_tests` entry, accept the exact byte-for-byte companion only
+when its `path` is a normalized relative POSIX path beginning with
+`generated-tests/`, contains no empty, `.` or `..` segment or backslash, and
+resolves to a regular file inside the source node's artifact directory. Reject
+absolute paths, path escapes, and every symlink even when its target remains
+inside the artifact directory. Record rejected entries in `skipped_files`;
+never search for or substitute another file with the same basename.
+
+Determine the destination from the entry's `framework` and `language`, checked
+against project discovery, base setup, and the target's checked-in test
+configuration. Accept framework-native test extensions: Foundry `.t.sol`;
+Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`; and Vyper projects'
+existing native Python test `.py` files. Infer a missing framework only when the
+extension and discovered test stack identify it unambiguously; otherwise skip
+the entry with a reason. Do not introduce a new framework or test root.
+
+Copy Foundry tests under the configured Foundry aggregation destination (for
+example `test/foundry/<strategy>/attempt-<n>/`). Copy Hardhat tests under the
+repository's existing JavaScript or TypeScript test root and Vyper tests under
+its existing pytest, Ape, Brownie, or other native test root, in both cases
+using `ultrafuzz/<strategy>/attempt-<n>/` below that root. Keep every destination
+under `{{workspace_path}}`. Preserve the companion's relative tail when safe
+and use a stable source-derived suffix when two entries would otherwise collide;
+never overwrite one entry with another.
+
+Preserve attribution by strategy id, source node id, attempt index, source
+manifest path, source artifact path, source relative path, and destination path.
+Also preserve every manifest entry's `language`, `framework`, `description`,
+and `provenance` fields without rewriting them. Do not copy unknown manifest
+entry fields into `aggregation.json`.
 
 Do not merge, rewrite, or "fix" generated test logic during aggregation. The
 isolated workspace may receive unstaged generated test files, but the git index
@@ -138,9 +172,9 @@ Save the aggregation manifest to {{artifact_path}}/aggregation.json as JSON with
 
 - `schema_version`: `"1.0"`
 - `source_generated_tests`: total number of manifest `generated_tests` entries considered
-- `copied_generated_tests`: number of `.t.sol` test files copied into the workspace
+- `copied_generated_tests`: number of framework-native test files copied into the workspace
 - `source_support_files`: total number of manifest `support_files` entries considered, or `0`
-- `copied_support_files`: number of helper `.sol` support files copied into the workspace, or `0`
-- `files`: array of copied `.t.sol` test records with `strategy`, `node_id`, `attempt_index`, `source_manifest_path`, `source_artifact_path`, `source_relative_path`, `destination_path`, `destination_relative_path`, and `bytes`
-- `support_files`: array of copied helper `.sol` records with the same fields as `files`, or `[]`
+- `copied_support_files`: number of explicitly manifested native support files copied into the workspace, or `0`
+- `files`: array of copied native test records with `strategy`, `node_id`, `attempt_index`, `source_manifest_path`, `source_artifact_path`, `source_relative_path`, `destination_path`, `destination_relative_path`, `bytes`, and preserved `language`, `framework`, `description`, and `provenance` fields when present
+- `support_files`: array of explicitly manifested native support-file records with the same attribution, path-safety, framework, and provenance fields as `files`, or `[]`
 - `skipped_files`: array of skipped file records with `reason`, or `[]`

@@ -52,13 +52,43 @@ export function assertSafeEvalId(value: string, label: string): string {
 }
 
 export function safeEvalId(parts: string[]): string {
-  const normalized = parts
+  const normalized = normalizeEvalId(parts).slice(0, 128);
+  return assertSafeEvalId(normalized.length > 0 ? normalized : "eval", "eval ID");
+}
+
+/**
+ * Build a safe eval ID without losing uniqueness when a composed ID exceeds its
+ * caller-defined bound. Short IDs remain readable and unchanged; long IDs keep
+ * a readable prefix plus a deterministic hash of the complete normalized ID.
+ */
+export function boundedEvalId(parts: string[], maxLength: number): string {
+  if (!Number.isSafeInteger(maxLength) || maxLength < 1 || maxLength > 128) {
+    throw new EvalError("EVAL_ID_INVALID", "eval ID max length must be an integer from 1 through 128", {
+      maxLength
+    });
+  }
+
+  const normalized = normalizeEvalId(parts);
+  const candidate = normalized.length > 0 ? normalized : "eval";
+  if (candidate.length <= maxLength) {
+    return assertSafeEvalId(candidate, "eval ID");
+  }
+
+  const digest = crypto.createHash("sha256").update(candidate).digest("hex");
+  const hashLength = 16;
+  const bounded =
+    maxLength <= hashLength + 1
+      ? digest.slice(0, maxLength)
+      : `${candidate.slice(0, maxLength - hashLength - 1)}-${digest.slice(0, hashLength)}`;
+  return assertSafeEvalId(bounded, "eval ID");
+}
+
+function normalizeEvalId(parts: string[]): string {
+  return parts
     .join("-")
     .replace(/[^A-Za-z0-9._-]+/gu, "-")
     .replace(/^[._-]+/u, "")
-    .replace(/[._-]+$/u, "")
-    .slice(0, 128);
-  return assertSafeEvalId(normalized.length > 0 ? normalized : "eval", "eval ID");
+    .replace(/[._-]+$/u, "");
 }
 
 export function generateEvalRunId(suite: string): string {

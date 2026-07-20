@@ -159,9 +159,21 @@ importers:
 
   packages/modal:
     dependencies:
+      '@ultrafuzz/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@ultrafuzz/evals':
+        specifier: workspace:*
+        version: link:../evals
+      '@ultrafuzz/security':
+        specifier: workspace:*
+        version: link:../security
       modal:
         specifier: 0.9.0
         version: 0.9.0
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3

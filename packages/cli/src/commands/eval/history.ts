@@ -28,6 +28,9 @@ export default class EvalHistory extends Command {
     lane: Flags.string({ options: ["smoke", "full"], summary: "Benchmark lane" }),
     repository: Flags.string({ summary: "Public candidate repository URL" }),
     artifact: Flags.string({ summary: "Immutable source eval artifact reference" }),
+    "benchmark-policy-root": Flags.string({
+      summary: "Candidate checkout whose benchmark manifests define the published run"
+    }),
     check: Flags.boolean({ summary: "Validate history and fail when checked-in charts are stale" })
   };
 
@@ -49,6 +52,9 @@ export default class EvalHistory extends Command {
         }
         const result = publishEvalRunToHistory({
           projectRoot: root,
+          ...(flags["benchmark-policy-root"] === undefined
+            ? {}
+            : { benchmarkPolicyRoot: path.resolve(flags["benchmark-policy-root"]) }),
           evalRunId: args.evalRunId,
           benchmark: flags.benchmark as EvalHistoryBenchmark,
           lane: flags.lane as EvalHistoryLane,

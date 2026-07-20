@@ -114,7 +114,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/generated-tests@1",
     format: "json",
     description:
-      "A generated-test manifest with schema_version, run_id, node_id, and generated_tests. generated_tests is the only test-file list; every entry path is relative to the node artifact directory and must name a generated file that exists.",
+      "A generated-test manifest with schema_version, run_id, node_id, and generated_tests. generated_tests is the only test-file list. Every entry path must be a safe forward-slash path with the generated-tests/<file> prefix; mirror the named non-empty regular file at that exact path beneath the node artifact directory.",
     validEmptyExample: '{"schema_version":"1.0","run_id":"<run-id>","node_id":"<node-id>","generated_tests":[]}'
   },
   {

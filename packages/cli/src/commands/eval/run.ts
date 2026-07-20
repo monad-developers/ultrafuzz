@@ -60,10 +60,10 @@ export default class EvalRun extends Command {
         this,
         "eval run",
         {
-          ok: result.failed === 0,
+          ok: result.failed === 0 && result.incomplete === 0,
           command: "eval run",
           data: result,
-          text: `Eval run: ${result.eval_run_id}\nLaunched: ${result.launched}\nFailed: ${result.failed}\nRoot: ${result.eval_run_root}\n`,
+          text: `Eval run: ${result.eval_run_id}\nLaunched: ${result.launched}\nFailed: ${result.failed}\nIncomplete: ${result.incomplete}\nRoot: ${result.eval_run_root}\n`,
           diagnostics: [
             ...diagnostics,
             ...result.diagnostics,

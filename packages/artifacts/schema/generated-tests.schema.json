@@ -26,7 +26,7 @@
         "properties": {
           "path": {
             "type": "string",
-            "pattern": "^generated-tests\\/.+"
+            "pattern": "^generated-tests/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9._-]{0,127})*(?![\\s\\S])"
           },
           "size_bytes": {
             "type": "integer",

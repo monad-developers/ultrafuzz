@@ -1,3 +1,4 @@
+import { lstatSync, readFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -167,6 +168,23 @@ export async function inspectTerminalDisposition(projectRoot: string): Promise<T
       await readFile(path.join(candidate.runRoot, "smithers", "tasks.json"), "utf8")
     ) as unknown;
     return classifyTerminalDisposition(candidate.state, manifest);
+  } catch {
+    return operationalFailure();
+  }
+}
+
+export function inspectTerminalDispositionAtRunRoot(runRoot: string): TerminalDisposition {
+  try {
+    const statePath = path.join(runRoot, "state.json");
+    const manifestPath = path.join(runRoot, "smithers", "tasks.json");
+    for (const filePath of [statePath, manifestPath]) {
+      const stat = lstatSync(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return operationalFailure();
+    }
+    return classifyTerminalDisposition(
+      JSON.parse(readFileSync(statePath, "utf8")) as unknown,
+      JSON.parse(readFileSync(manifestPath, "utf8")) as unknown
+    );
   } catch {
     return operationalFailure();
   }

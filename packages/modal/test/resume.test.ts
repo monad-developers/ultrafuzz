@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import { locateModalResumeWorkspace, modalDurableResumeCommand, repairModalEvalRunRecord } from "../src/resume.js";
 
+const T0 = "2026-07-19T00:00:00.000Z";
+const T1 = "2026-07-19T00:01:00.000Z";
+const T2 = "2026-07-19T00:02:00.000Z";
+
 function fixture() {
   const workRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-resume-"));
   const target = path.join(workRoot, "target");
@@ -21,7 +25,8 @@ function fixture() {
       row_id: "row-one",
       ultrafuzz_run_id: "durable-run-one",
       status: "launched",
-      final_status: "launched"
+      final_status: "launched",
+      workflow: { status: "running", terminal: false, started_at: T0, finished_at: null }
     })}\n`
   );
   return { workRoot, target, control, evalRunId, evalDir };
@@ -58,21 +63,47 @@ describe("Modal durable evaluation resume", () => {
   it("finalizes succeeded and genuine task outcomes without resetting completed nodes", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    await repairModalEvalRunRecord(workspace, { run_id: "durable-run-one", status: "succeeded" }, undefined);
+    await repairModalEvalRunRecord(
+      workspace,
+      { run_id: "durable-run-one", status: "succeeded", started_at: T0, finished_at: T1 },
+      undefined
+    );
     let summary = JSON.parse(fs.readFileSync(path.join(value.evalDir, "run-summary.json"), "utf8")) as {
-      records: Array<{ final_status: string }>;
+      incomplete: number;
+      records: Array<{
+        final_status: string;
+        workflow?: { status?: string; terminal?: boolean; started_at?: string | null; finished_at?: string | null };
+      }>;
     };
     expect(summary.records[0]?.final_status).toBe("succeeded");
+    expect(summary.records[0]?.workflow).toEqual({
+      status: "succeeded",
+      terminal: true,
+      started_at: T0,
+      finished_at: T1
+    });
+    expect(summary.incomplete).toBe(0);
 
     await repairModalEvalRunRecord(
       workspace,
-      { run_id: "durable-run-one", status: "failed" },
+      { run_id: "durable-run-one", status: "failed", finished_at: T2 },
       { kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 }
     );
     summary = JSON.parse(fs.readFileSync(path.join(value.evalDir, "run-summary.json"), "utf8")) as {
-      records: Array<{ final_status: string }>;
+      incomplete: number;
+      records: Array<{
+        final_status: string;
+        workflow?: { status?: string; terminal?: boolean; started_at?: string | null; finished_at?: string | null };
+      }>;
     };
     expect(summary.records[0]?.final_status).toBe("failed");
+    expect(summary.records[0]?.workflow).toEqual({
+      status: "failed",
+      terminal: true,
+      started_at: T0,
+      finished_at: T2
+    });
+    expect(summary.incomplete).toBe(0);
   });
 
   it("fails closed for operational terminal states and unrelated runs", async () => {

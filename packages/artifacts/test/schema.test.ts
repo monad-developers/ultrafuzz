@@ -464,7 +464,7 @@ test("run state schema covers all required node states and rejects malformed sta
   assert.ok(invalidWait.issues.some((issue) => issue.path.endsWith(".wait_since")));
 });
 
-test("generated test manifest schema accepts canonical manifests and rejects legacy test_files", () => {
+test("generated test manifest runtime and exported schemas enforce the same safe companion paths", () => {
   const manifest = {
     schema_version: GENERATED_TESTS_SCHEMA_VERSION,
     run_id: "run-1",
@@ -491,6 +491,41 @@ test("generated test manifest schema accepts canonical manifests and rejects leg
 
   assert.equal(invalid.ok, false);
   assert.ok(invalid.issues.some((issue) => issue.path === "$.generated_tests"));
+
+  const exportedPathPattern = new RegExp(
+    generatedTestsJsonSchema.properties.generated_tests.items.properties.path.pattern,
+    "u"
+  );
+  const cases = [
+    { path: "generated-tests/Invariant.t.sol", ok: true },
+    { path: "generated-tests/nested/Invariant_2.t.sol", ok: true },
+    { path: `generated-tests/${"a".repeat(128)}`, ok: true },
+    { path: `generated-tests/${"a".repeat(129)}`, ok: false },
+    { path: "tests/Invariant.t.sol", ok: false },
+    { path: "../Invariant.t.sol", ok: false },
+    { path: "generated-tests/../../Invariant.t.sol", ok: false },
+    { path: "generated-tests/sub/../Invariant.t.sol", ok: false },
+    { path: "generated-tests/./Invariant.t.sol", ok: false },
+    { path: "generated-tests//Invariant.t.sol", ok: false },
+    { path: "generated-tests/nested\\Invariant.t.sol", ok: false },
+    { path: "generated-tests/Invariant.t.sol\n", ok: false },
+    { path: "generated-tests:Invariant.t.sol", ok: false }
+  ];
+  for (const candidate of cases) {
+    const value = structuredClone(manifest);
+    value.generated_tests[0]!.path = candidate.path;
+    assert.equal(validateGeneratedTestManifestSchema(value).ok, candidate.ok, candidate.path);
+    assert.equal(exportedPathPattern.test(candidate.path), candidate.ok, candidate.path);
+  }
+});
+
+test("generated test contract documents its exact safe companion-file layout", () => {
+  const definition = artifactContractDefinition("ultrafuzz/generated-tests@1");
+
+  assert.match(definition.description, /safe forward-slash path/u);
+  assert.match(definition.description, /generated-tests\/<file> prefix/u);
+  assert.match(definition.description, /exact path beneath the node artifact directory/u);
+  assert.match(definition.description, /non-empty regular file/u);
 });
 
 test("analysis bundle manifest schema rejects unversioned and non-allowlisted entries", () => {
@@ -607,8 +642,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
-  assert.equal(generatedTestsSnapshot.$id, generatedTestsJsonSchema.$id);
-  assert.deepEqual(generatedTestsSnapshot.required, generatedTestsJsonSchema.required);
+  assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -62,18 +61,30 @@ test("an empty topology transform preserves the production topology object", () 
   assert.equal(transformTopologyForRun(source, { excludedNodeIds: [] }), source);
 });
 
-test("the checked-in smoke manifest produces a valid filtered production topology", () => {
+test("the exact smoke exclusions produce a valid filtered production topology", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
-  const lanes = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "benchmarks", "lanes.json"), "utf8")) as {
-    smoke: { strategy_loops: number; excluded_node_ids: string[] };
-  };
+  const smokeExcludedNodeIds = [
+    "stateful-invariant-setup",
+    "stateful-invariant-handlers",
+    "stateful-invariant-coverage",
+    "stateful-invariant-implement-properties",
+    "stateful-invariant-campaign",
+    "differential-library-tests",
+    "differential-oracle-planner",
+    "reference-harness-author",
+    "reference-and-lane-auditor",
+    "differential-lane-author",
+    "differential-red-triage",
+    "differential-repair-and-report-review",
+    "dynamic-strategy-generator"
+  ];
   const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
-    strategyLoops: lanes.smoke.strategy_loops,
-    excludedNodeIds: lanes.smoke.excluded_node_ids
+    strategyLoops: 1,
+    excludedNodeIds: smokeExcludedNodeIds
   });
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
-    strategyLoops: lanes.smoke.strategy_loops,
-    excludedNodeIds: lanes.smoke.excluded_node_ids
+    strategyLoops: 1,
+    excludedNodeIds: smokeExcludedNodeIds
   });
   const validation = validateTopology(transformed, {
     projectRoot: repositoryRoot,
@@ -81,7 +92,7 @@ test("the checked-in smoke manifest produces a valid filtered production topolog
     promptTexts: promptTextsForCatalog(prompts)
   });
   const nodeIds = new Set(transformed.nodes.map((node) => node.id));
-  assert.ok(lanes.smoke.excluded_node_ids.every((id) => !nodeIds.has(id)));
+  assert.ok(smokeExcludedNodeIds.every((id) => !nodeIds.has(id)));
   assert.equal(validation.effectiveLoopCounts["boundary-tests"], 1);
   assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
 });

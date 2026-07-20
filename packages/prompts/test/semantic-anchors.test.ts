@@ -122,6 +122,82 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("keeps admin/config tests target-native and mirrors canonical generated-test companions", () => {
+    const admin = prompt("strategies/admin-config-boundaries.md");
+
+    expect(admin).toContain("focused target-native tests");
+    expect(admin).toContain("Base test setup (when rendered):");
+    expect(admin).not.toContain("Base Foundry setup:");
+    expect(admin).toContain("For Foundry targets, write `.t.sol`");
+    expect(admin).toMatch(/For\s+Hardhat targets, use the existing JavaScript or TypeScript test location/u);
+    expect(admin).toMatch(/For Vyper targets, use the existing pytest, Ape,\s+Brownie/u);
+    expect(admin).toContain("Keep every generated test");
+    expect(admin).toContain("inside `{{workspace_path}}`");
+    expect(admin).toMatch(/Do not introduce Foundry into a Hardhat or Vyper\s+target/u);
+    expect(admin).toMatch(/Do not install or fetch\s+missing tools or dependencies/u);
+    expect(admin).toContain("{{artifact_dir}}/generated-tests/GeneratedTest.ext");
+    expect(admin).toContain("`generated-tests/<relative-file>` path");
+    expect(admin).toContain("{{artifact_dir}}/generated-tests.json");
+    expect(admin).toContain("Never list the workspace");
+  });
+
+  it("validates deduped native reproducers without hydrating isolated workspaces", () => {
+    const dedupe = prompt("review/dedupe-findings.md");
+
+    expect(dedupe).toContain("{{artifact_path:project-discovery}}/setup/project-discovery.md");
+    expect(dedupe).toContain("{{artifact_path:base-test-setup}}/setup/base-test-setup.md");
+    expect(dedupe).toContain("For Foundry");
+    expect(dedupe).toContain("For Hardhat");
+    expect(dedupe).toContain("For Vyper");
+    expect(dedupe).toContain("For mixed repositories");
+    expect(dedupe).toMatch(/manifest\s+`framework` and `language`/u);
+    expect(dedupe).toContain("Strategy workspaces are isolated from this node");
+    expect(dedupe).toContain("copy only its exact byte-for-byte canonical");
+    expect(dedupe).toContain("under the existing native test root in\n`{{workspace_path}}`");
+    expect(dedupe).toContain("normalized relative POSIX");
+    expect(dedupe).toContain("every symlink even when its\ntarget remains inside the artifact directory");
+    expect(dedupe).toContain("Never search a strategy workspace");
+    expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
+    expect(dedupe).not.toContain("restore project-pinned dependencies first");
+    expect(dedupe).not.toContain("Dependency hydration used only");
+  });
+
+  it("aggregates canonical generated-test companions into framework-native roots", () => {
+    const aggregate = prompt("review/aggregate-test-files.md");
+
+    expect(aggregate).toContain("canonical generated-test companions");
+    expect(aggregate).toContain("`generated_tests` array as the source of truth");
+    expect(aggregate).toContain("exact byte-for-byte companion");
+    expect(aggregate).toContain("normalized relative POSIX");
+    expect(aggregate).toContain("every symlink even when its target remains\ninside the artifact directory");
+    expect(aggregate).toContain("Foundry `.t.sol`");
+    expect(aggregate).toContain("Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`");
+    expect(aggregate).toContain("existing native Python test `.py` files");
+    expect(aggregate).toContain("repository's existing JavaScript or TypeScript test root");
+    expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
+    expect(aggregate).toContain("never overwrite one entry with another");
+    expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
+    expect(aggregate).not.toContain("source_manifest_entry");
+    expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
+  });
+
+  it("embeds one self-contained reproducer in the target's native language", () => {
+    const report = prompt("review/final-report.md");
+
+    expect(report).toContain("generated target-native reproducers belong in the normal issue");
+    expect(report).toContain("exact canonical `generated-tests/<relative-file>` companion");
+    expect(report).toContain("exactly one fenced code\nblock");
+    expect(report).toContain("minimized self-contained target-native reproducer");
+    expect(report).toContain("`solidity` for Foundry `.t.sol`");
+    expect(report).toContain("`javascript` or `typescript` for Hardhat");
+    expect(report).toContain("`python` (or `vyper`");
+    expect(report).toContain("Never translate a JavaScript, TypeScript");
+    expect(report).toContain("report must be self-sufficient");
+    expect(report).toContain("Stop and report an invalid\nupstream artifact");
+    expect(report).not.toContain("generated Solidity PoCs");
+    expect(report).not.toContain("minimized self-contained Foundry reproducer");
+  });
+
   it("keeps the severity matrix and reportability gates in the classifier prompt", () => {
     const markdown = prompt("review/severity-classification.md");
 

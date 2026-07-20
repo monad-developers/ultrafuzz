@@ -78,6 +78,38 @@ function terminalRunFixture(runRoot: string): void {
 }
 
 describe("runner", () => {
+  it("generates stable distinct bounded child run IDs for rows with the same long prefix", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-ids-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const commonRunIdPrefix = `benchmark-${"r".repeat(108)}`;
+    const rowA = testRow(suite, { run_id: `${commonRunIdPrefix}-a` });
+    const rowB = testRow(suite, { run_id: `${commonRunIdPrefix}-b` });
+    const launchedRunIds: string[] = [];
+    const launcher = async (input: { runId: string }) => {
+      launchedRunIds.push(input.runId);
+      return { ok: false, workflowIds: [], diagnostics: [] };
+    };
+    const launch = async (row: typeof rowA) =>
+      launchEvalRow({
+        projectRoot: base,
+        suitePath: "suite.yml",
+        evalRunId: `eval-${"e".repeat(113)}`,
+        row,
+        suite,
+        launcher
+      });
+
+    await launch(rowA);
+    await launch(rowB);
+    await launch(rowA);
+
+    expect(launchedRunIds[0]).toHaveLength(118);
+    expect(`ultrafuzz-${launchedRunIds[0]}`).toHaveLength(128);
+    expect(launchedRunIds[0]).not.toBe(launchedRunIds[1]);
+    expect(launchedRunIds[0]).toBe(launchedRunIds[2]);
+    expect(launchedRunIds.every((runId) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(runId))).toBe(true);
+  });
+
   it("records failed launches in runs.jsonl with diagnostics", async () => {
     const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-runner-"));
     const suite = testSuite(path.join(base, "gt"));
@@ -180,7 +212,102 @@ describe("runner", () => {
       final_status: "succeeded",
       workflow: { status: "succeeded", terminal: true }
     });
+    expect(result.incomplete).toBe(0);
     expect(readJsonLines(path.join(result.eval_run_root, "runs.jsonl"))).toHaveLength(2);
+  });
+
+  it("counts a watched row as incomplete when it misses the watch deadline", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-run-watch-timeout-"));
+    const project = path.join(base, "project");
+    const groundTruthRoot = path.join(base, "gt");
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(groundTruthRoot, { recursive: true });
+    fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+    const suite = testSuite(groundTruthRoot);
+    const suitePath = path.join(project, "suite.yml");
+    fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      state: {
+        schema_version: "1.0",
+        run_id: "run-1",
+        status: "running",
+        created_at: T0,
+        started_at: T0,
+        nodes: {}
+      }
+    });
+
+    const result = await runEvalSuite({
+      projectRoot: project,
+      suitePath,
+      evalRunId: "eval-watch-timeout",
+      groundTruthRoot,
+      provider: "none",
+      watchTimeoutSeconds: 0,
+      launcher: async () => ({
+        ok: true,
+        runId: "run-1",
+        runRoot,
+        workflowIds: ["workflow-1"],
+        diagnostics: []
+      })
+    });
+
+    expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
+    expect(result.records[0]).toMatchObject({
+      final_status: "timed-out",
+      workflow: { status: "running", terminal: false }
+    });
+  });
+
+  it("counts terminal timeout and cancellation outcomes as incomplete", async () => {
+    for (const status of ["timed-out", "canceled"] as const) {
+      const base = mkdtempSync(path.join(tmpdir(), `ufz-evals-run-${status}-`));
+      const project = path.join(base, "project");
+      const groundTruthRoot = path.join(base, "gt");
+      fs.mkdirSync(project, { recursive: true });
+      fs.mkdirSync(groundTruthRoot, { recursive: true });
+      fs.writeFileSync(path.join(groundTruthRoot, "target-a.yml"), "bugs: []\n", "utf8");
+      const suite = testSuite(groundTruthRoot);
+      const suitePath = path.join(project, "suite.yml");
+      fs.writeFileSync(suitePath, JSON.stringify(suite), "utf8");
+      const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+      writeRunFixture({
+        runRoot,
+        state: {
+          schema_version: "1.0",
+          run_id: "run-1",
+          status,
+          created_at: T0,
+          started_at: T0,
+          finished_at: T1,
+          nodes: {}
+        }
+      });
+
+      const result = await runEvalSuite({
+        projectRoot: project,
+        suitePath,
+        evalRunId: `eval-${status}`,
+        groundTruthRoot,
+        provider: "none",
+        launcher: async () => ({
+          ok: true,
+          runId: "run-1",
+          runRoot,
+          workflowIds: ["workflow-1"],
+          diagnostics: []
+        })
+      });
+
+      expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
+      expect(result.records[0]).toMatchObject({
+        final_status: status,
+        workflow: { status, terminal: true }
+      });
+    }
   });
 
   it("propagates candidate graph, config, and execution artifact identities into row records", async () => {
@@ -347,6 +474,55 @@ describe("runner", () => {
       "node-artifacts",
       "node-finished"
     ]);
+  });
+
+  it("records a typed incomplete outcome when the watch deadline expires", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-timeout-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    writeRunFixture({
+      runRoot,
+      events: [],
+      state: {
+        schema_version: "1.0",
+        run_id: "run-1",
+        status: "running",
+        created_at: T0,
+        started_at: T0,
+        nodes: {}
+      }
+    });
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: {
+        schema_version: EVAL_RUN_SCHEMA_VERSION,
+        eval_run_id: "eval-1",
+        row_id: row.id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        ultrafuzz_run_id: "run-1",
+        ultrafuzz_run_root: runRoot,
+        status: "launched",
+        workflow_ids: ["wf-1"],
+        diagnostics: []
+      },
+      reporters: [],
+      evalRunRoot: path.join(base, "eval-run"),
+      sync: async () => undefined,
+      pollIntervalMs: 1,
+      timeoutSeconds: 0
+    });
+
+    expect(watched.record).toMatchObject({
+      final_status: "timed-out",
+      workflow: { status: "running", terminal: false }
+    });
+    expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
+    expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
   });
 });
 

@@ -936,6 +936,7 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
     tasks: Array<{ attemptId: string; dependencySmithersNodeIds: string[] }>;
   };
   assert.equal("layers" in smithersTasks, false);
+  assert.equal(workflowSource.match(/"runtimeContext":/gu)?.length, smithersTasks.tasks.length);
   assert.deepEqual(
     smithersTasks.tasks.find((task) => task.attemptId === "project-discovery__model_0__attempt_0")
       ?.dependencySmithersNodeIds,
@@ -1043,6 +1044,41 @@ nodes:
   assert.equal(task?.heartbeatTimeoutMs, 1_200_000);
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const expectedRuntimeContext = [
+    "## Topology Runtime Context",
+    "",
+    "- Timeout: 1200 seconds total.",
+    "- Finalization reserve: 200 seconds.",
+    "- Working budget before finalization: 1000 seconds.",
+    "- Stop starting new delegated or tool work when the finalization reserve begins.",
+    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs."
+  ].join("\n");
+  assert.equal(
+    workflowSource.includes(`"runtimeContext": ${JSON.stringify(expectedRuntimeContext)}`),
+    true,
+    workflowSource
+  );
+  assert.match(workflowSource, /\$\{task\.runtimeContext\}\\n\\n\$\{operatorPrompt\}/u);
+});
+
+test("topology runtime context keeps a bounded finalization reserve", async () => {
+  const { topologyRuntimeContextForTimeout } = await import("../src/smithers.js");
+  const cases = [
+    { timeoutMs: 1_000, timeoutSeconds: 1, reserveSeconds: 1, workingSeconds: 0 },
+    { timeoutMs: 2_000, timeoutSeconds: 2, reserveSeconds: 1, workingSeconds: 1 },
+    { timeoutMs: 12_000, timeoutSeconds: 12, reserveSeconds: 2, workingSeconds: 10 },
+    { timeoutMs: 7_200_000, timeoutSeconds: 7200, reserveSeconds: 300, workingSeconds: 6900 }
+  ];
+  for (const entry of cases) {
+    const context = topologyRuntimeContextForTimeout(entry.timeoutMs);
+    assert.match(context, new RegExp(`- Timeout: ${entry.timeoutSeconds} seconds total\\.`, "u"));
+    assert.match(context, new RegExp(`- Finalization reserve: ${entry.reserveSeconds} seconds\\.`, "u"));
+    assert.match(context, new RegExp(`- Working budget before finalization: ${entry.workingSeconds} seconds\\.`, "u"));
+    if (entry.timeoutSeconds > 1) {
+      assert.ok(entry.workingSeconds > 0);
+    }
+  }
 });
 
 test("startRun --agent does not carry the previous agent's model onto the new agent", async () => {

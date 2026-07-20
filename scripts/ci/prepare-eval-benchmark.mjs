@@ -9,9 +9,11 @@ import {
 } from "../../packages/evals/dist/index.js";
 import { stringify } from "yaml";
 
-const [benchmark, lane, output, targetRoot] = process.argv.slice(2);
+const [benchmark, lane, output, targetRoot, runnerModelProfileId] = process.argv.slice(2);
 if ((benchmark !== "evmbench" && benchmark !== "ultrafuzz-bench") || (lane !== "smoke" && lane !== "full")) {
-  throw new Error("usage: prepare-eval-benchmark.mjs <evmbench|ultrafuzz-bench> <smoke|full> <output>");
+  throw new Error(
+    "usage: prepare-eval-benchmark.mjs <evmbench|ultrafuzz-bench> <smoke|full> <output> [target-root] [runner-model-profile-id]"
+  );
 }
 if (!output) throw new Error("benchmark suite output path is required");
 
@@ -20,7 +22,13 @@ const cohort = loadBenchmarkCohortManifest(
   path.join(root, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
 );
 const lanes = loadBenchmarkLanesManifest(path.join(root, "benchmarks", "lanes.json"));
-const suite = adaptBenchmarkManifestToEvalSuite({ benchmark, lane, cohort, lanes });
+const suite = adaptBenchmarkManifestToEvalSuite({
+  benchmark,
+  lane,
+  cohort,
+  lanes,
+  ...(runnerModelProfileId === undefined ? {} : { runnerModelProfileId })
+});
 fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
 fs.writeFileSync(path.resolve(output), stringify(suite, { lineWidth: 120 }), "utf8");
 

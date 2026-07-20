@@ -15,26 +15,75 @@ required JSON shapes (`deduped-findings.json`, `findings.json`, and
 If those shapes are valid and the files do not clearly contradict the required
 schema, treat them as the materialized dedupe result for this node, refresh only
 missing required files, and finish. Do not rebuild the dedupe from scratch,
-rerun Forge, edit generated tests, or perform optional post-write validation
+rerun native tests, edit generated tests, or perform optional post-write validation
 unless one of those files is missing, invalid, or clearly contradicts the
 required schema.
 
-Run Forge tests and count failing tests. If Foundry dependencies are missing,
-restore project-pinned dependencies first, such as
-`git submodule update --init --recursive lib/forge-std` when `.gitmodules`
-contains that path. Do not run `forge install` or rewrite `foundry.lock` when a
-pinned dependency path already exists.
+Read the project-discovery and base-test handoffs before validation so the
+repository's checked-in test framework and native test root determine the
+runner:
 
-Run `forge --version` as a separate Bash call before any Forge invocation. If
-`forge` is available in `PATH`, run focused tests with direct `forge` commands
-while preserving the original command's environment variables, flags, match
-selectors, and test-root semantics. Do not add inline environment assignment
-prefixes to focused test commands; commands should start with `forge` so backend
-allowlists match them. Do not use command substitution, shell conditionals,
-absolute binary paths, or host-global searches to resolve Foundry. If `forge`
-is unavailable in `PATH`, record validation as blocked by tool availability and
-do not classify
-`forge: command not found` as a failing test count.
+Project discovery:
+{{artifact_path:project-discovery}}/setup/project-discovery.md
+
+Base test setup (when rendered):
+{{artifact_path:base-test-setup}}/setup/base-test-setup.md
+
+Validate only focused generated tests or reproducers that contribute to the
+dedupe result. Dispatch each validation through the existing framework recorded
+by project discovery, the base setup, and the generated-test manifest:
+
+- For Foundry, run `forge --version` as a separate Bash call, then direct
+  focused `forge` commands that preserve the original environment variables,
+  flags, match selectors, and test-root semantics.
+- For Hardhat, use only the repository's existing package-manager script or
+  already-installed local Hardhat executable and its existing JavaScript or
+  TypeScript test root. Do not use `npx` or introduce a Foundry harness.
+- For Vyper, use only the existing checked-in pytest, Ape, Brownie, or other
+  native runner command and test root recorded by the handoffs.
+
+Strategy workspaces are isolated from this node. Never assume a generated test
+already exists in the dedupe workspace and never validate a stale same-named
+workspace file. Before focused validation, read the strategy-owned
+`generated-tests.json` entry and copy only its exact byte-for-byte canonical
+companion into a deterministic path under the existing native test root in
+`{{workspace_path}}`: use
+`ultrafuzz/dedupe/<source-node-id>/attempt-<n>/<safe-relative-tail>` below that
+root. Do not write to `{{repo_path}}`, stage the copied file, introduce a new
+test root, or overwrite another companion; use a stable source-derived suffix
+for a deterministic collision.
+
+Accept a companion only when the manifest `path` is a normalized relative POSIX
+path beginning with `generated-tests/`, contains no empty, `.` or `..` segment
+or backslash, and resolves to a regular file inside that source node's artifact
+directory. Reject absolute paths, path escapes, and every symlink even when its
+target remains inside the artifact directory. Never search a strategy workspace,
+the dedupe workspace, sibling runs, or the host for a missing companion. If the
+canonical companion or an existing native destination root is unavailable,
+record focused validation as blocked. Require the companion extension to match
+the selected existing framework: `.t.sol` for Foundry; `.js`, `.cjs`, `.mjs`,
+`.ts`, `.cts`, or `.mts` for Hardhat; and `.py` for a Vyper project's native
+Python harness.
+
+For mixed repositories, dispatch each generated test according to its manifest
+`framework` and `language`, confirmed against the checked-in configuration;
+never coerce every test through one runner. If those fields are absent, infer a
+runner only from an unambiguous native extension plus the discovered existing
+test stack. Otherwise record validation as blocked instead of guessing.
+
+Never install, fetch, restore, or update dependencies during dedupe. This
+includes `forge install`, `git submodule update`, `npm install`, `pnpm install`,
+`yarn install`, `bun install`, `pip install`, and tool bootstrap commands. Do
+not rewrite lockfiles or dependency-vendor directories. If a required runner or
+pinned dependency is unavailable locally, record that validation as blocked by
+tool availability; do not count runner or dependency failure as a target test
+failure.
+
+For every native runner, use direct focused commands. Do not use command
+substitution, shell conditionals, absolute binary paths, host-global searches,
+or inline environment-assignment prefixes. Preserve the original command's
+environment, selectors, and test-root semantics, count actual failing tests,
+and keep framework-specific blocked and failing results distinct.
 
 Also inspect the Dynamic strategy generator outputs before deduping:
 
@@ -49,6 +98,10 @@ Dynamic findings:
 
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
+
+Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
+
+Admin/config generated-test manifest: {{artifact_path:admin-config-boundaries}}/generated-tests.json
 
 Then, build a stable dedupe key from the affected contract or library, function or workflow, property/oracle, normalized title, root cause hypothesis, and reproduction shape. Keep the clearest finding with the best evidence and reproducibility. Record every duplicate with its original id, kept id, title, and dedupe key.
 
@@ -129,6 +182,6 @@ After writing the required artifacts, run only a small number of direct JSON
 shape checks, then stop. Do not spend the finalization reserve on broad
 re-verification once the required artifacts are present and parseable.
 
-Make sure compilation is passing but do not fix any failing tests. Dependency
-hydration used only to run verification is not a target workspace change; do
-not include lockfile or dependency-vendor drift in the reported artifacts.
+Record the focused native compilation or test result, but do not fix failing
+tests or edit production code. Do not mutate the target workspace's dependency
+state during verification.
