@@ -44,9 +44,12 @@ Publish only after the user explicitly asks to publish.
 4. Verify release readiness.
    - Resolve `origin/main` to the exact target commit and confirm the intended
      pull requests are merged into it.
-   - Confirm CI for that commit succeeded. Run `pnpm install
-     --frozen-lockfile` and `pnpm -w run ci` locally when release readiness
-     needs local verification.
+   - Require all remote CI checks for that exact commit to complete
+     successfully before publishing. Use `gh run list --commit "$TARGET_SHA"`
+     and inspect any incomplete or failed run; do not treat missing results as
+     success.
+   - Run `pnpm install --frozen-lockfile` and `pnpm -w run ci` locally when
+     release readiness also needs local verification.
    - Show the user the version, target commit, and exact notes before publishing
      unless the user already approved those exact values.
 
@@ -59,8 +62,10 @@ Publish only after the user explicitly asks to publish.
 
 6. Verify publication.
    - Read the release back from GitHub and confirm `isDraft` and `isPrerelease`
-     are both false, the target/tag is correct, and the body matches the
-     reviewed notes.
+     are both false, `targetCommitish` identifies the intended target, and the
+     body matches the reviewed notes.
+   - Fetch the published tag, peel it to its commit, and require that commit SHA
+     to equal the exact target SHA resolved in step 4.
    - Report the release URL and any discrepancy.
 
 ## Safety Checks
