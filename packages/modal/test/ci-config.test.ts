@@ -15,6 +15,13 @@ import {
   publicBenchmarkMaxParallelWorkflowNodes
 } from "../src/public-worker.js";
 
+interface BenchmarkTarget {
+  id: string;
+  repository: string;
+  revision: string;
+  framework: string;
+}
+
 describe("public Modal benchmark configuration", () => {
   it("creates the exact three-target OpenAI smoke benchmark with bounded row and control budgets", () => {
     const workspace = path.resolve("../..");
@@ -34,6 +41,8 @@ describe("public Modal benchmark configuration", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
       mode: string;
       benchmark: string;
+      execution: { mode: string; dry_run: boolean };
+      targets: BenchmarkTarget[];
       pairs: Array<{ benchmark: string; model_slug: string; provider: string; config_path: string }>;
       image_name: string;
       matrix_rows_per_pair: number;
@@ -48,6 +57,15 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.mode).toBe("smoke");
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("ultrafuzz-bench");
+    expect(manifest.execution).toEqual({ mode: "modal", dry_run: false });
+    const cohort = JSON.parse(fs.readFileSync(path.join(workspace, "benchmarks/ultrafuzz-bench.json"), "utf8")) as {
+      smoke_targets: string[];
+      targets: BenchmarkTarget[];
+    };
+    const expectedTargets = cohort.smoke_targets.map((id) => cohort.targets.find((target) => target.id === id));
+    expect(manifest.targets).toEqual(expectedTargets);
+    expect(manifest.targets).toHaveLength(3);
+    expect(new Set(manifest.targets.map((target) => target.id)).size).toBe(3);
     expect(manifest.pairs).toHaveLength(1);
     expect(manifest.pairs[0]).toEqual(
       expect.objectContaining({
@@ -77,7 +95,12 @@ describe("public Modal benchmark configuration", () => {
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
         node_timeout_seconds: number;
-        public_benchmark: { benchmark: string; lane: string; max_runtime_seconds: number };
+        public_benchmark: {
+          benchmark: string;
+          lane: string;
+          targets: BenchmarkTarget[];
+          max_runtime_seconds: number;
+        };
         braintrust: { judge_api_key_env: string; judge_url?: string };
         models: Array<{ model: string; provider: string; agent: string; reasoning: string }>;
       };
@@ -85,6 +108,7 @@ describe("public Modal benchmark configuration", () => {
       expect(config.public_benchmark).toEqual(
         expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 3600 })
       );
+      expect(config.public_benchmark.targets).toEqual(manifest.targets);
       expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
       expect(config.braintrust.judge_url).toBe("https://api.openai.com/v1/chat/completions");
       expect(config.models).toEqual([
@@ -116,6 +140,8 @@ describe("public Modal benchmark configuration", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
       mode: string;
       benchmark: string;
+      execution: { mode: string; dry_run: boolean };
+      targets: BenchmarkTarget[];
       matrix_rows_per_pair: number;
       pairs: Array<{ pair: string; benchmark: string; provider: string; model_slug: string; config_path: string }>;
       control_timeout_seconds: number;
@@ -129,6 +155,12 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.mode).toBe("full");
     expect(manifest).not.toHaveProperty("experiment");
     expect(manifest.benchmark).toBe("evmbench");
+    expect(manifest.execution).toEqual({ mode: "modal", dry_run: false });
+    const cohort = JSON.parse(fs.readFileSync(path.join(workspace, "benchmarks/evmbench-detect.json"), "utf8")) as {
+      targets: BenchmarkTarget[];
+    };
+    expect(manifest.targets).toEqual(cohort.targets);
+    expect(new Set(manifest.targets.map((target) => target.id)).size).toBe(40);
     expect(manifest.matrix_rows_per_pair).toBe(40);
     expect(manifest.pairs).toHaveLength(2);
     expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench"]));
@@ -159,12 +191,18 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.concurrency.max_live_judge_rows).toBe(2 * liveRows);
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
-        public_benchmark: { benchmark: string; lane: string; max_runtime_seconds: number };
+        public_benchmark: {
+          benchmark: string;
+          lane: string;
+          targets: BenchmarkTarget[];
+          max_runtime_seconds: number;
+        };
         models: Array<{ provider: string; model: string; reasoning: string }>;
       };
       expect(config.public_benchmark).toEqual(
         expect.objectContaining({ benchmark: "evmbench", lane: "full", max_runtime_seconds: 3600 })
       );
+      expect(config.public_benchmark.targets).toEqual(manifest.targets);
       expect(config.models).toEqual([
         expect.objectContaining(
           pair.provider === "openai"
@@ -375,6 +413,8 @@ describe("public Modal benchmark configuration", () => {
     }
 
     expect(workflowText).toContain("node packages/modal/dist/cli.js launch");
+    expect(workflowText).toContain("Validate Modal benchmark launch guardrails");
+    expect(workflowText).toContain("validate-modal-benchmark-launch.mjs");
     expect(workflowText).toContain("Launch detached Modal benchmark sandboxes");
     expect(workflowText).toContain("actions/download-artifact@");
     expect(workflowText).toContain("--public-results");
@@ -507,8 +547,11 @@ describe("public Modal benchmark configuration", () => {
     const buildIndex = launch.steps.findIndex(
       (step) => step.name === "Build an immutable Modal image for the candidate"
     );
+    const guardIndex = launch.steps.findIndex((step) => step.name === "Validate Modal benchmark launch guardrails");
     const launchIndex = launch.steps.findIndex((step) => step.name === "Launch detached Modal benchmark sandboxes");
     expect(planUploadIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(planUploadIndex);
     expect(planUploadIndex).toBeLessThan(buildIndex);
     expect(buildIndex).toBeLessThan(launchIndex);
     expect(launch.steps[planUploadIndex]?.with?.name).toContain("${{ github.run_id }}-${{ github.run_attempt }}");

@@ -52,8 +52,49 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v2");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v3");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
+    expect(bundle).toMatchObject({
+      status: "succeeded",
+      executed_case_count: 2,
+      graded_case_count: 2,
+      targets: [
+        {
+          id: "target-1",
+          repository: "https://github.com/example/benchmark-target",
+          revision: "1".repeat(40),
+          framework: "foundry",
+          status: "succeeded",
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_location: {
+            bundle_path: "public-results.json",
+            report_paths: [
+              "reports/target-a-runner-trial-1/report.md",
+              "reports/target-a-runner-trial-1/report.json",
+              "reports/target-a-runner-trial-1/findings.normalized.json"
+            ]
+          }
+        },
+        {
+          id: "target-2",
+          repository: "https://github.com/example/benchmark-target",
+          revision: "1".repeat(40),
+          framework: "hardhat",
+          status: "succeeded",
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_location: {
+            bundle_path: "public-results.json",
+            report_paths: [
+              "reports/target-b-runner-trial-1/report.md",
+              "reports/target-b-runner-trial-1/report.json",
+              "reports/target-b-runner-trial-1/findings.normalized.json"
+            ]
+          }
+        }
+      ]
+    });
     extractPublicBenchmarkBundle(bundle, output);
     expect(
       JSON.parse(fs.readFileSync(path.join(output, "eval", "public-eval-diagnostics.json"), "utf8"))
@@ -133,6 +174,36 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("requires complete positive result metadata for executed and graded cases", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-counts-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+
+    const missing = structuredClone(bundle) as Record<string, unknown>;
+    delete missing.targets;
+    expect(() => parsePublicBenchmarkBundle(missing)).toThrow();
+    const missingExecuted = structuredClone(bundle) as Record<string, unknown>;
+    delete missingExecuted.executed_case_count;
+    expect(() => parsePublicBenchmarkBundle(missingExecuted)).toThrow();
+
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, executed_case_count: 0 })).toThrow(/executed case count/u);
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, graded_case_count: 0 })).toThrow(/graded case count/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target, index) => (index === 0 ? { ...target, executed_case_count: 0 } : target))
+      })
+    ).toThrow(/target target-1 executed case count/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target, index) => (index === 0 ? { ...target, graded_case_count: 0 } : target))
+      })
+    ).toThrow(/target target-1 graded case count/u);
   });
 
   it("requires ready diagnostics bound to the exact bundle lineage and matrix", () => {
@@ -237,13 +308,23 @@ describe("public Modal benchmark bundles", () => {
           id: "target-a-runner-trial-1",
           target_id: "target-a",
           variant_id: TEST_MODEL_SLUG,
-          trial_id: "trial-1"
+          trial_id: "trial-1",
+          target: {
+            id: "target-a",
+            repo: "https://github.com/example/benchmark-target",
+            ref: "1".repeat(40)
+          }
         },
         {
           id: "target-a-runner-trial-1",
           target_id: "target-a",
           variant_id: TEST_MODEL_SLUG,
-          trial_id: "trial-1"
+          trial_id: "trial-1",
+          target: {
+            id: "target-a",
+            repo: "https://github.com/example/benchmark-target",
+            ref: "1".repeat(40)
+          }
         }
       ])}\n`
     );
@@ -497,6 +578,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
 function realisticMatrix(rowIds: string[]) {
   return rowIds.map((id, index) => {
     const targetId = `target-${index + 1}`;
+    const framework = index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper";
     return {
       id,
       target_id: targetId,
@@ -511,6 +593,9 @@ function realisticMatrix(rowIds: string[]) {
         ground_truth_path: `/ground-truth/${targetId}.yml`
       },
       variant: { id: TEST_MODEL_SLUG, prompt_overlay_paths: [] },
+      workflow_input: {
+        target_frameworks: { [targetId]: framework }
+      },
       runner_model_profile: TEST_MODEL_SLUG,
       runner_model: TEST_MODEL,
       runner_reasoning: TEST_REASONING,

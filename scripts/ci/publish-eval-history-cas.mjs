@@ -47,7 +47,12 @@ export function parseEvalHistoryPublicationGeneration(value) {
   const ids = new Set();
   const inputPaths = new Set();
   const runs = generation.runs.map((value, index) => {
-    const run = strictRecord(value, `publication run ${index}`, ["eval_run_id", "benchmark", "lane", "input_path"]);
+    const run = strictRecord(
+      value,
+      `publication run ${index}`,
+      ["eval_run_id", "benchmark", "lane", "input_path"],
+      ["status", "target_ids", "executed_case_count", "graded_case_count", "publication_url"]
+    );
     const evalRunId = safeId(run.eval_run_id, `publication run ${index} eval_run_id`);
     if (ids.has(evalRunId)) throw new Error(`publication generation repeats eval run ${evalRunId}`);
     ids.add(evalRunId);
@@ -60,11 +65,38 @@ export function parseEvalHistoryPublicationGeneration(value) {
     const inputPath = canonicalRelativePath(run.input_path, `publication run ${evalRunId} input_path`);
     if (inputPaths.has(inputPath)) throw new Error(`publication generation repeats input path ${inputPath}`);
     inputPaths.add(inputPath);
+    const targetIds = run.target_ids === undefined ? undefined : targetIdsForPublicationRun(run.target_ids, evalRunId);
+    const status = run.status === undefined ? undefined : publicationStatus(run.status, evalRunId);
+    const executedCaseCount =
+      run.executed_case_count === undefined
+        ? undefined
+        : positiveSafeInteger(run.executed_case_count, `publication run ${evalRunId} executed_case_count`);
+    const gradedCaseCount =
+      run.graded_case_count === undefined
+        ? undefined
+        : positiveSafeInteger(run.graded_case_count, `publication run ${evalRunId} graded_case_count`);
+    if (
+      executedCaseCount !== undefined &&
+      gradedCaseCount !== undefined &&
+      (gradedCaseCount > executedCaseCount ||
+        (targetIds !== undefined && (targetIds.length > executedCaseCount || targetIds.length > gradedCaseCount)))
+    ) {
+      throw new Error(`publication run ${evalRunId} case counts do not cover its target set`);
+    }
+    const publicationUrl =
+      run.publication_url === undefined
+        ? sourceArtifact
+        : canonicalGitHubActionsPublicationUrl(run.publication_url, candidateRepositoryUrl, sourceArtifact);
     return {
       eval_run_id: evalRunId,
       benchmark: run.benchmark,
       lane: run.lane,
-      input_path: inputPath
+      input_path: inputPath,
+      ...(status === undefined ? {} : { status }),
+      ...(targetIds === undefined ? {} : { target_ids: targetIds }),
+      ...(executedCaseCount === undefined ? {} : { executed_case_count: executedCaseCount }),
+      ...(gradedCaseCount === undefined ? {} : { graded_case_count: gradedCaseCount }),
+      publication_url: publicationUrl
     };
   });
   return {
@@ -218,6 +250,8 @@ function appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyR
         generation.candidate_repository_url,
         "--artifact",
         generation.source_artifact,
+        "--publication-url",
+        run.publication_url,
         "--benchmark-policy-root",
         benchmarkPolicyRoot
       ],
@@ -539,6 +573,21 @@ function canonicalGitHubActionsRunUrl(value, repositoryUrl) {
   return text;
 }
 
+function canonicalGitHubActionsPublicationUrl(value, repositoryUrl, sourceArtifact) {
+  const text = requiredString(value, "publication_url");
+  const escapedRepository = repositoryUrl.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const escapedRun = sourceArtifact.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  if (
+    !new RegExp(
+      `^(?:${escapedRun}|${escapedRun}/artifacts|${escapedRepository}/actions/runs/[1-9][0-9]*/artifacts)$`,
+      "u"
+    ).test(text)
+  ) {
+    throw new Error("publication_url must be a canonical GitHub Actions run or artifact URL");
+  }
+  return text;
+}
+
 function canonicalRelativePath(value, label) {
   const text = requiredString(value, label);
   if (text.length > 512 || text.includes("\\") || path.posix.isAbsolute(text) || path.win32.isAbsolute(text)) {
@@ -549,6 +598,33 @@ function canonicalRelativePath(value, label) {
     throw new Error(`${label} must contain only safe path segments`);
   }
   return parts.join("/");
+}
+
+function targetIdsForPublicationRun(value, evalRunId) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 2_048) {
+    throw new Error(`publication run ${evalRunId} target_ids must be a non-empty array`);
+  }
+  const seen = new Set();
+  return value.map((entry, index) => {
+    const id = safeId(entry, `publication run ${evalRunId} target_ids ${index}`);
+    if (seen.has(id)) throw new Error(`publication run ${evalRunId} repeats target ${id}`);
+    seen.add(id);
+    return id;
+  });
+}
+
+function positiveSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function publicationStatus(value, evalRunId) {
+  if (value !== "succeeded" && value !== "genuine-task-failures") {
+    throw new Error(`publication run ${evalRunId} status is invalid`);
+  }
+  return value;
 }
 
 function historyRecord(value, label) {
@@ -582,10 +658,10 @@ function stableValue(value) {
   );
 }
 
-function strictRecord(value, label, keys) {
+function strictRecord(value, label, keys, optionalKeys = []) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error(`${label} must be an object`);
-  const allowed = new Set(keys);
+  const allowed = new Set([...keys, ...optionalKeys]);
   const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
   if (unexpected.length > 0) throw new Error(`${label} contains unexpected fields: ${unexpected.join(", ")}`);
   for (const key of keys) {

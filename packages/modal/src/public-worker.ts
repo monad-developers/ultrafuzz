@@ -15,6 +15,7 @@ import {
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   resolveTerminalReportPath,
+  type BenchmarkCohortManifest,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
@@ -426,12 +427,14 @@ async function preparePublicBenchmark(
       scope.benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json"
     )
   );
+  const selectedTargetIds = publicBenchmarkConfiguredTargetIds(config, cohort);
   const lanes = loadBenchmarkLanesManifest(path.join(controlRoot, "benchmarks", "lanes.json"));
   const baseSuite = adaptBenchmarkManifestToEvalSuite({
     benchmark: scope.benchmark,
     lane: scope.lane,
     cohort,
     lanes,
+    ...(selectedTargetIds === undefined ? {} : { selectedTargetIds }),
     runnerModelProfileOverride: {
       id: model.slug,
       agent: model.agent,
@@ -520,6 +523,37 @@ async function preparePublicBenchmark(
     matrixRows: suite.targets.length * suite.variants.length * suite.run.trials_per_variant,
     maxParallelRuns: suite.run.max_parallel_runs ?? 1
   };
+}
+
+function publicBenchmarkConfiguredTargetIds(
+  config: PublicModalBenchmarkConfig,
+  cohort: BenchmarkCohortManifest
+): string[] | undefined {
+  const configured = config.public_benchmark.targets;
+  if (configured === undefined) return undefined;
+  const selectedIds =
+    config.public_benchmark.lane === "smoke" ? cohort.smoke_targets : cohort.targets.map((target) => target.id);
+  const cohortTargets = new Map(cohort.targets.map((target) => [target.id, target]));
+  const seen = new Set<string>();
+  for (const target of configured) {
+    if (seen.has(target.id)) throw new Error(`public benchmark config contains duplicate target ${target.id}`);
+    seen.add(target.id);
+    const expected = cohortTargets.get(target.id);
+    if (expected === undefined) {
+      throw new Error(`public benchmark config target ${target.id} is absent from the checked-in benchmark cohort`);
+    }
+    if (
+      target.repository !== expected.repository ||
+      target.revision !== expected.revision ||
+      target.framework !== expected.framework
+    ) {
+      throw new Error(`public benchmark config target ${target.id} does not match the checked-in benchmark cohort`);
+    }
+  }
+  if (JSON.stringify(configured.map((target) => target.id)) !== JSON.stringify(selectedIds)) {
+    throw new Error("public benchmark config target list does not match the checked-in benchmark lane selection");
+  }
+  return configured.map((target) => target.id);
 }
 
 export async function materializeBakedCandidate(

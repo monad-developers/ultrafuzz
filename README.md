@@ -25,7 +25,6 @@ local dashboard plus final report for review.
 | -------------------------------------------------------------------------- | ---------------------------------------------------- |
 | ![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg) | ![Cost over time](docs/assets/eval-history/cost.svg) |
 
-
 ## Operator Flow
 
 1. `ultrafuzz init --project <project>`

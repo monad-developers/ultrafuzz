@@ -322,6 +322,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   lanes: BenchmarkLanesManifest;
   runnerModelProfileId?: string;
   runnerModelProfileOverride?: BenchmarkModelProfileManifest;
+  selectedTargetIds?: string[];
 }): EvalSuiteSpec {
   if (
     (input.lane === "smoke" && input.benchmark !== "ultrafuzz-bench") ||
@@ -343,10 +344,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   }
   const lane = input.lanes[input.lane];
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
-  const selectedTargets =
-    input.lane === "smoke"
-      ? input.cohort.smoke_targets.map((id) => input.cohort.targets.find((target) => target.id === id)!)
-      : input.cohort.targets;
+  const selectedTargets = resolveBenchmarkTargets(input);
   if (input.runnerModelProfileId !== undefined && input.runnerModelProfileOverride !== undefined) {
     throw new EvalError(
       "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
@@ -441,4 +439,23 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       }
     }
   };
+}
+
+function resolveBenchmarkTargets(input: {
+  lane: "smoke" | "full";
+  cohort: BenchmarkCohortManifest;
+  selectedTargetIds?: string[];
+}): BenchmarkTargetManifest[] {
+  const ids =
+    input.selectedTargetIds ??
+    (input.lane === "smoke" ? input.cohort.smoke_targets : input.cohort.targets.map((target) => target.id));
+  assertUnique(ids, "selected target", "benchmark suite input");
+  const targetsById = new Map(input.cohort.targets.map((target) => [target.id, target]));
+  return ids.map((id) => {
+    const target = targetsById.get(id);
+    if (target === undefined) {
+      throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `selected benchmark target ${id} is absent from cohort`);
+    }
+    return target;
+  });
 }

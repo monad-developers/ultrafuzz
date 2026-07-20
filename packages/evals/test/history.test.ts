@@ -30,6 +30,7 @@ const TARGET_REVISION = "2222222222222222222222222222222222222222";
 const FINGERPRINT = `sha256:${"a".repeat(64)}`;
 const EXECUTION_POLICY_FINGERPRINT = `sha256:${"d".repeat(64)}`;
 const SCORING_FINGERPRINT = `sha256:${"b".repeat(64)}`;
+const PUBLICATION_URL = "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts";
 
 function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHistoryObservation {
   return {
@@ -37,6 +38,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     id: "run-1:target-a:baseline:benchmark-smoke",
     benchmark: "evmbench",
     lane: "smoke",
+    status: "succeeded",
     target: "target-a",
     variant: "baseline",
     trial_count: 1,
@@ -58,6 +60,25 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     wall_clock_completeness: { status: "complete", reasons: [] },
     cost_usd: 1.25,
     cost_completeness: { status: "complete", reasons: [] },
+    executed_case_count: 1,
+    graded_case_count: 1,
+    publication_url: PUBLICATION_URL,
+    target_publication: {
+      target: "target-a",
+      repository: "https://example.com/target-a",
+      revision: TARGET_REVISION,
+      status: "succeeded",
+      executed_case_count: 1,
+      graded_case_count: 1,
+      publication_location: {
+        bundle_path: "public-results.json",
+        report_paths: [
+          "reports/target-a-baseline-trial-1/report.md",
+          "reports/target-a-baseline-trial-1/report.json",
+          "reports/target-a-baseline-trial-1/findings.normalized.json"
+        ]
+      }
+    },
     source_eval_run_id: "run-1",
     source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/1",
     ...overrides
@@ -237,7 +258,16 @@ describe("longitudinal eval history", () => {
   });
 
   it("preserves historical multi-trial observations without applying current lane defaults", () => {
-    const historical = observation({ trial_count: 10 });
+    const historical = observation({
+      trial_count: 10,
+      executed_case_count: 10,
+      graded_case_count: 10,
+      target_publication: {
+        ...observation().target_publication,
+        executed_case_count: 10,
+        graded_case_count: 10
+      }
+    });
     const parsed = parseEvalHistory({
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
       observations: [historical]
@@ -313,6 +343,7 @@ describe("longitudinal eval history", () => {
       runTimestamp: "2026-07-19T00:00:00Z",
       candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
       sourceArtifact: "artifact-1",
+      publicationUrl: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts",
       suite,
       matrix: [first, second],
       summary: summary(rows),
@@ -323,13 +354,36 @@ describe("longitudinal eval history", () => {
     });
     expect(observations).toHaveLength(1);
     expect(observations[0]).toMatchObject({
+      status: "succeeded",
       trial_count: 2,
       precision: 0.75,
       recall: 0.75,
       f1: 0.75,
       cumulative_unique_true_positives: 2,
       wall_clock_seconds: 100,
-      cost_usd: 0.75
+      cost_usd: 0.75,
+      executed_case_count: 2,
+      graded_case_count: 2,
+      publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts",
+      target_publication: {
+        target: "target-a",
+        repository: "https://example.com/target-a",
+        revision: TARGET_REVISION,
+        status: "succeeded",
+        executed_case_count: 2,
+        graded_case_count: 2,
+        publication_location: {
+          bundle_path: "public-results.json",
+          report_paths: [
+            "reports/target-a-baseline-trial-1/report.md",
+            "reports/target-a-baseline-trial-1/report.json",
+            "reports/target-a-baseline-trial-1/findings.normalized.json",
+            "reports/target-a-baseline-trial-2/report.md",
+            "reports/target-a-baseline-trial-2/report.json",
+            "reports/target-a-baseline-trial-2/findings.normalized.json"
+          ]
+        }
+      }
     });
 
     const incompatible = summary(rows);
@@ -341,6 +395,7 @@ describe("longitudinal eval history", () => {
         runTimestamp: "2026-07-19T00:00:00Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
         suite,
         matrix: [first, second],
         summary: incompatible,
@@ -365,6 +420,7 @@ describe("longitudinal eval history", () => {
         runTimestamp: "2026-07-19T00:00:00Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
         suite,
         matrix: [first, second],
         summary: summary(rows),
@@ -383,6 +439,7 @@ describe("longitudinal eval history", () => {
         runTimestamp: "2026-07-19T00:00:00Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
         suite,
         matrix: [first, second],
         summary: summary(rows),
@@ -392,7 +449,7 @@ describe("longitudinal eval history", () => {
         ]),
         publicEvalDiagnostics: genuineFailureDiagnostics
       })
-    ).toHaveLength(1);
+    ).toMatchObject([{ status: "genuine-task-failures", target_publication: { status: "genuine-task-failures" } }]);
     expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",
@@ -400,6 +457,7 @@ describe("longitudinal eval history", () => {
         runTimestamp: "2026-07-19T00:00:00Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
         suite,
         matrix: [first, second],
         summary: summary([rowScore(first.id), rowScore(second.id, { trial_id: "trial-2" })]),
@@ -419,6 +477,7 @@ describe("longitudinal eval history", () => {
         runTimestamp: "2026-07-19T00:00:00Z",
         candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
         sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
         suite,
         matrix: [first, second],
         summary: inconsistentIdentity,

@@ -271,6 +271,7 @@ ultrafuzz eval history [eval-run-id] \
   [--lane smoke|full] \
   [--repository <public-repository-url>] \
   [--artifact <immutable-artifact-reference>] \
+  [--publication-url <validated-result-url>] \
   [--check] \
   [--json]
 ```

@@ -109,6 +109,7 @@ Common flags:
 - `--allow-incompatible` (explicitly waive release provenance mismatches)
 - `--output <directory>` (bundle, required)
 - `--history <path>` and `--charts <directory>` (history)
+- `--publication-url <url>` (history source bundle location)
 - `--check` (history validation without writes)
 - `--resume` (publish)
 

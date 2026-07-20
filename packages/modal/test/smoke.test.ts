@@ -110,6 +110,9 @@ describe("dedicated cloud command", () => {
     expect(cliSource).not.toMatch(/^import .*smoke-modal/mu);
     expect(packageJson.scripts.test).toBe("vitest run");
     expect(packageJson.scripts.smoke).toContain("dist/cli.js smoke");
+    expect(packageJson.scripts.typecheck).toBe(
+      "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
+    );
     expect(packageJson.scripts.test).not.toContain("smoke");
     expect(smokeSources.every((source) => !source.includes("process.env"))).toBe(true);
   });

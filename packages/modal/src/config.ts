@@ -16,6 +16,7 @@ import {
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const gitRef = z.string().min(1).max(256);
 const gitUrl = z.string().url().max(2048);
+const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const relativeFile = z
   .string()
   .min(1)
@@ -45,6 +46,15 @@ const modelSchema = z
       (model.provider === "anthropic" && model.agent === "ClaudeAgent"),
     "model provider and agent do not match"
   );
+
+const publicBenchmarkTargetSchema = z
+  .object({
+    id: safeId,
+    repository: httpsUrl,
+    revision: fullSha,
+    framework: safeId
+  })
+  .strict();
 
 const commonBenchmarkConfig = {
   schema_version: z.literal(MODAL_BENCHMARK_SCHEMA_VERSION),
@@ -94,7 +104,8 @@ const publicBenchmarkConfigSchema = z
         lane: z.enum(["smoke", "full"]).default("smoke"),
         runner_model_profile: safeId,
         candidate_repository: httpsUrl,
-        candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
+        candidate_commit: fullSha,
+        targets: z.array(publicBenchmarkTargetSchema).min(1).max(2_048).optional(),
         max_runtime_seconds: z.number().int().min(300).max(7_200).default(3_600)
       })
       .strict()

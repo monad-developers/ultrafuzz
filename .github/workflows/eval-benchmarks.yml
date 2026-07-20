@@ -124,6 +124,13 @@ jobs:
             "$BENCHMARK_CONTROL" \
             "$BENCHMARK_MODE"
 
+      - name: Validate Modal benchmark launch guardrails
+        run: |
+          node scripts/ci/validate-modal-benchmark-launch.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            . \
+            "$BENCHMARK_MODE"
+
       - name: Persist immutable benchmark plan before starting Modal compute
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

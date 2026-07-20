@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  assertPublicBenchmarkBundleMatrixScope,
   readAutomaticPublicationManifest,
+  summarizePublicBenchmarkBundlePublication,
   validateAutomaticPublicationManifest,
   validateAutomaticPairConfig,
   validateBenchmarkPolicyFiles
@@ -26,7 +28,7 @@ afterEach(() => {
 
 describe("trusted automatic eval-history publication handoff", () => {
   it("accepts only the exact event-bound smoke manifest", () => {
-    expect(validateAutomaticPublicationManifest(smokeManifest(), context)).toEqual(smokeManifest());
+    expect(validateAutomaticPublicationManifest(smokeManifest(), smokeContext())).toEqual(smokeManifest());
   });
 
   it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
@@ -64,6 +66,7 @@ describe("trusted automatic eval-history publication handoff", () => {
         runner_model_profile: modelSlug,
         candidate_repository: context.repository,
         candidate_commit: context.candidateCommit,
+        targets: smokeTargets(),
         max_runtime_seconds: 3600
       }
     };
@@ -75,7 +78,8 @@ describe("trusted automatic eval-history publication handoff", () => {
         {
           ...context,
           generation: "12345-2",
-          benchmark: "ultrafuzz-bench"
+          benchmark: "ultrafuzz-bench",
+          targets: smokeTargets()
         },
         new Set()
       )
@@ -90,7 +94,12 @@ describe("trusted automatic eval-history publication handoff", () => {
       ["generation", (manifest) => (manifest.generation = "12345-1")],
       ["mode", (manifest) => (manifest.mode = "full")],
       ["benchmark", (manifest) => (manifest.benchmark = "evmbench")],
+      ["execution mode", (manifest) => (manifest.execution.mode = "local")],
+      ["dry run", (manifest) => (manifest.execution.dry_run = true)],
       ["image", (manifest) => (manifest.image_name = "ufz-runner-other")],
+      ["target count", (manifest) => manifest.targets.pop()],
+      ["target duplicate", (manifest) => (manifest.targets[1] = manifest.targets[0]!)],
+      ["target repository", (manifest) => (manifest.targets[0]!.repository = "https://example.com/other")],
       ["matrix row count", (manifest) => (manifest.matrix_rows_per_pair = 4)],
       ["pair provider", (manifest) => (manifest.pairs[0]!.provider = "anthropic")],
       ["pair field", (manifest) => Object.assign(manifest.pairs[0]!, { extra: true })],
@@ -104,12 +113,12 @@ describe("trusted automatic eval-history publication handoff", () => {
     for (const [label, mutate] of cases) {
       const manifest = smokeManifest();
       mutate(manifest);
-      expect(() => validateAutomaticPublicationManifest(manifest, context), label).toThrow();
+      expect(() => validateAutomaticPublicationManifest(manifest, smokeContext()), label).toThrow();
     }
   });
 
   it("requires the exact full provider set, ordering, and unique control paths", () => {
-    const fullContext = { ...context, mode: "full" as const };
+    const fullContext = fullPublicationContext();
     expect(
       validateAutomaticPublicationManifest(fullManifest(), fullContext).pairs.map((pair) => pair.provider)
     ).toEqual(["openai", "anthropic"]);
@@ -134,23 +143,105 @@ describe("trusted automatic eval-history publication handoff", () => {
     manifest.control_timeout_seconds = 21_000;
     expect(
       validateAutomaticPublicationManifest(manifest, {
-        ...context,
+        ...smokeContext(),
         targetCount: 3,
         trialsPerVariant: 2
       })
     ).toEqual(manifest);
 
     const changedCohort = fullManifest();
+    changedCohort.targets.push({
+      id: "target-41",
+      repository: "https://github.com/example/target-41",
+      revision: "b".repeat(40),
+      framework: "foundry"
+    });
     changedCohort.matrix_rows_per_pair = 41;
     changedCohort.control_timeout_seconds = 21_000;
     expect(
       validateAutomaticPublicationManifest(changedCohort, {
         ...context,
         mode: "full",
+        targets: changedCohort.targets,
         targetCount: 41,
         trialsPerVariant: 1
       })
     ).toEqual(changedCohort);
+  });
+
+  it("rejects public bundles that omit a trusted target even when the row count still matches", () => {
+    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
+    const modelSlug = smokeManifest().pairs[0]!.model_slug;
+    const pair = smokeManifest().pairs[0]!.pair;
+    const expected = {
+      matrixRowsPerPair: 3,
+      targetIds,
+      trialsPerVariant: 1,
+      modelSlug
+    };
+
+    expect(() =>
+      assertPublicBenchmarkBundleMatrixScope(bundleWithMatrix(matrixRows(targetIds, modelSlug)), expected, pair)
+    ).not.toThrow();
+    expect(() =>
+      assertPublicBenchmarkBundleMatrixScope(
+        bundleWithMatrix(matrixRows([targetIds[0]!, targetIds[1]!, targetIds[1]!], modelSlug)),
+        expected,
+        pair
+      )
+    ).toThrow(/missing target result\(s\).*stableswap-ng-vyper/u);
+    expect(() =>
+      assertPublicBenchmarkBundleMatrixScope(
+        bundleWithMatrix(matrixRows([targetIds[0]!, targetIds[1]!], modelSlug)),
+        expected,
+        pair
+      )
+    ).toThrow(/row count 2 does not match expected 3/u);
+  });
+
+  it("summarizes only complete scored public bundles for automatic history ingestion", () => {
+    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
+    const modelSlug = smokeManifest().pairs[0]!.model_slug;
+    const pair = smokeManifest().pairs[0]!.pair;
+    const expected = {
+      matrixRowsPerPair: 3,
+      targetIds,
+      trialsPerVariant: 1,
+      modelSlug,
+      evalRunId: "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high"
+    };
+    const publicationUrl = "https://github.com/monad-developers/ultrafuzz/actions/runs/12345/artifacts";
+
+    expect(
+      summarizePublicBenchmarkBundlePublication(
+        completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId),
+        expected,
+        pair,
+        publicationUrl
+      )
+    ).toEqual({
+      status: "succeeded",
+      target_ids: targetIds,
+      executed_case_count: 3,
+      graded_case_count: 3,
+      publication_url: publicationUrl
+    });
+    expect(() =>
+      summarizePublicBenchmarkBundlePublication(
+        completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId, { launched: 0 }),
+        expected,
+        pair,
+        publicationUrl
+      )
+    ).toThrow(/executed case count/u);
+    expect(() =>
+      summarizePublicBenchmarkBundlePublication(
+        completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId, {}, { rows: [] }),
+        expected,
+        pair,
+        publicationUrl
+      )
+    ).toThrow(/graded case count/u);
   });
 
   it("rejects symlinked and oversized producer manifests before parsing", () => {
@@ -159,11 +250,11 @@ describe("trusted automatic eval-history publication handoff", () => {
     fs.writeFileSync(target, `${JSON.stringify(smokeManifest())}\n`);
     const symlink = path.join(root, "manifest-link.json");
     fs.symlinkSync(target, symlink);
-    expect(() => readAutomaticPublicationManifest(symlink, context)).toThrow();
+    expect(() => readAutomaticPublicationManifest(symlink, smokeContext())).toThrow();
 
     const oversized = path.join(root, "oversized.json");
     fs.writeFileSync(oversized, " ".repeat(1024 * 1024 + 1));
-    expect(() => readAutomaticPublicationManifest(oversized, context)).toThrow();
+    expect(() => readAutomaticPublicationManifest(oversized, smokeContext())).toThrow();
   });
 
   it("rejects a clean candidate policy commit whose selected manifest is a symlink", () => {
@@ -201,6 +292,14 @@ describe("trusted automatic eval-history publication handoff", () => {
   });
 });
 
+function smokeContext() {
+  return { ...context, targets: smokeTargets() };
+}
+
+function fullPublicationContext() {
+  return { ...context, mode: "full" as const, targets: fullTargets() };
+}
+
 function smokeManifest() {
   const modelSlug = "benchmark-smoke-gpt-5-6-luna-high";
   const pair = `ultrafuzz-bench-${modelSlug}`;
@@ -210,7 +309,9 @@ function smokeManifest() {
     generation: "12345-2",
     mode: "smoke",
     benchmark: "ultrafuzz-bench",
+    execution: { mode: "modal", dry_run: false },
     image_name: `ufz-runner-${"a".repeat(40)}`,
+    targets: smokeTargets(),
     matrix_rows_per_pair: 3,
     control_timeout_seconds: 14_700,
     concurrency: {
@@ -257,7 +358,9 @@ function fullManifest() {
     generation: "12345-2",
     mode: "full",
     benchmark: "evmbench",
+    execution: { mode: "modal", dry_run: false },
     image_name: `ufz-runner-${"a".repeat(40)}`,
+    targets: fullTargets(),
     matrix_rows_per_pair: 40,
     control_timeout_seconds: 14_700,
     concurrency: {
@@ -268,6 +371,141 @@ function fullManifest() {
     },
     pairs
   };
+}
+
+function smokeTargets() {
+  return [
+    {
+      id: "very-liquid-vaults-foundry",
+      repository: "https://github.com/benchmark-targets/very-liquid-vaults",
+      revision: "1".repeat(40),
+      framework: "foundry"
+    },
+    {
+      id: "venus-isolated-pools-hardhat",
+      repository: "https://github.com/benchmark-targets/venus-isolated-pools",
+      revision: "2".repeat(40),
+      framework: "hardhat"
+    },
+    {
+      id: "stableswap-ng-vyper",
+      repository: "https://github.com/benchmark-targets/stableswap-ng",
+      revision: "3".repeat(40),
+      framework: "vyper"
+    }
+  ];
+}
+
+function fullTargets() {
+  return Array.from({ length: 40 }, (_value, index) => ({
+    id: `evmbench-target-${String(index + 1).padStart(2, "0")}`,
+    repository: "https://github.com/benchmark-targets/evmbench-target",
+    revision: `${String(index % 10).repeat(40)}`,
+    framework: "foundry"
+  }));
+}
+
+function bundleWithMatrix(matrix: Array<Record<string, string>>) {
+  return {
+    files: [
+      {
+        path: "eval/matrix.json",
+        contents_base64: Buffer.from(`${JSON.stringify(matrix)}\n`, "utf8").toString("base64")
+      }
+    ]
+  };
+}
+
+function completeHistoryBundle(
+  matrix: Array<Record<string, string>>,
+  evalRunId: string,
+  diagnosticsSummaryOverrides: Record<string, unknown> = {},
+  scoreSummaryOverrides: Record<string, unknown> = {}
+) {
+  const diagnosticsRows = matrix.map((row, index) => ({
+    row_id: row.id,
+    target_id: row.target_id,
+    variant_id: row.variant_id,
+    trial_id: row.trial_id,
+    run_status: "launched",
+    final_status: "succeeded",
+    workflow_status: "succeeded",
+    workflow_terminal: true,
+    terminal_disposition: "clean",
+    terminal_report_present: true,
+    workflow_ids: [`workflow-${index + 1}`],
+    diagnostic_codes: [],
+    failed_nodes: [],
+    scoring_ready: true,
+    reason_codes: []
+  }));
+  const diagnostics = {
+    eval_run_id: evalRunId,
+    summary: {
+      planned: matrix.length,
+      launched: matrix.length,
+      launch_failed: 0,
+      run_records_missing: 0,
+      workflow_succeeded: matrix.length,
+      workflow_failed: 0,
+      workflow_nonterminal: 0,
+      genuine_task_failure_rows: 0,
+      terminal_reports_present: matrix.length,
+      scoring_ready: true,
+      ...diagnosticsSummaryOverrides
+    },
+    rows: diagnosticsRows
+  };
+  const scoreSummary = {
+    eval_run_id: evalRunId,
+    rows: matrix.map((row) => ({ row_id: row.id })),
+    ...scoreSummaryOverrides
+  };
+  return {
+    status: "succeeded",
+    executed_case_count: matrix.length,
+    graded_case_count: matrix.length,
+    targets: matrix.map((row, index) => ({
+      id: row.target_id,
+      repository: `https://github.com/benchmark-targets/${row.target_id}`,
+      revision: String(index + 1).repeat(40),
+      framework: index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper",
+      status: "succeeded",
+      executed_case_count: 1,
+      graded_case_count: 1,
+      publication_location: {
+        bundle_path: "public-results.json",
+        report_paths: [
+          `reports/${row.id}/report.md`,
+          `reports/${row.id}/report.json`,
+          `reports/${row.id}/findings.normalized.json`
+        ]
+      }
+    })),
+    files: [
+      {
+        path: "eval/matrix.json",
+        contents_base64: Buffer.from(`${JSON.stringify(matrix)}\n`, "utf8").toString("base64")
+      },
+      {
+        path: "eval/public-eval-diagnostics.json",
+        contents_base64: Buffer.from(`${JSON.stringify(diagnostics)}\n`, "utf8").toString("base64")
+      },
+      {
+        path: "eval/summary.json",
+        contents_base64: Buffer.from(`${JSON.stringify(scoreSummary)}\n`, "utf8").toString("base64")
+      }
+    ]
+  };
+}
+
+function matrixRows(targetIds: string[], modelSlug: string): Array<Record<string, string>> {
+  return targetIds.map((targetId, index) => ({
+    id: `${targetId}-row-${index + 1}`,
+    target_id: targetId,
+    variant_id: modelSlug,
+    trial_id: "trial-1"
+  }));
 }
 
 function temporaryRoot(prefix: string): string {

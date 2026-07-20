@@ -76,7 +76,9 @@ interface CleanupManifest {
   generation: string;
   mode: string;
   benchmark: string;
+  execution: { mode: string; dry_run: boolean };
   image_name: string;
+  targets: Array<{ id: string; repository: string; revision: string; framework: string }>;
   matrix_rows_per_pair: number;
   control_timeout_seconds: number;
   concurrency: {
@@ -111,6 +113,7 @@ interface CleanupConfig {
     runner_model_profile: string;
     candidate_repository: string;
     candidate_commit: string;
+    targets?: Array<{ id: string; repository: string; revision: string; framework: string }>;
     max_runtime_seconds: number;
   };
   models: Array<{
@@ -134,7 +137,9 @@ function cleanupFixture() {
     generation: "12345-2",
     mode: "smoke",
     benchmark: "ultrafuzz-bench",
+    execution: { mode: "modal", dry_run: false },
     image_name: `ufz-runner-${candidate}`,
+    targets: cleanupTargets(),
     matrix_rows_per_pair: 3,
     control_timeout_seconds: 14_700,
     concurrency: {
@@ -177,6 +182,7 @@ function cleanupFixture() {
       runner_model_profile: modelSlug,
       candidate_repository: repository,
       candidate_commit: candidate,
+      targets: cleanupTargets(),
       max_runtime_seconds: 3600
     },
     models: [
@@ -204,4 +210,27 @@ function cleanupFixture() {
       expectedMode: "smoke"
     }
   };
+}
+
+function cleanupTargets() {
+  return [
+    {
+      id: "very-liquid-vaults-foundry",
+      repository: "https://github.com/rheo-xyz/very-liquid-vaults",
+      revision: "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec",
+      framework: "foundry"
+    },
+    {
+      id: "venus-isolated-pools-hardhat",
+      repository: "https://github.com/code-423n4/2023-05-venus",
+      revision: "9853f6f4fe906b635e214b22de9f627c6a17ba5b",
+      framework: "hardhat"
+    },
+    {
+      id: "stableswap-ng-vyper",
+      repository: "https://github.com/curvefi/stableswap-ng",
+      revision: "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386",
+      framework: "vyper"
+    }
+  ];
 }

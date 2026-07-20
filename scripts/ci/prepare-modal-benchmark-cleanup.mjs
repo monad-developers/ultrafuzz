@@ -77,7 +77,8 @@ export function prepareModalBenchmarkCleanup(input) {
         repository: input.expectedRepository,
         generation: input.expectedGeneration,
         mode: input.expectedMode,
-        benchmark: manifest.benchmark
+        benchmark: manifest.benchmark,
+        targets: manifest.targets
       },
       modelSlugs
     );
