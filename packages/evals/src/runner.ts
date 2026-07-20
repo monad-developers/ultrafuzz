@@ -168,10 +168,20 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
 
   const launched = records.filter((record) => record.status === "launched").length;
   const failed = records.length - launched;
+  const incomplete = watch
+    ? records.filter(
+        (record) =>
+          record.status === "launched" &&
+          (record.workflow?.terminal !== true ||
+            record.workflow.status === "timed-out" ||
+            record.workflow.status === "canceled")
+      ).length
+    : 0;
   writeJsonDurable(path.join(root, "run-summary.json"), {
     eval_run_id: evalRunId,
     launched,
     failed,
+    incomplete,
     records
   });
   return {
@@ -181,6 +191,7 @@ export async function runEvalSuite(input: RunEvalSuiteInput): Promise<EvalRunVal
     matrix_path: path.join(root, "matrix.json"),
     launched,
     failed,
+    incomplete,
     records,
     diagnostics
   };
@@ -415,8 +426,18 @@ export async function watchEvalRow(
   const finalDrain = await pump.drain();
   diagnostics.push(...finalDrain.warnings);
   state = readStateSafe(runRoot);
+  const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
+  const timeoutDiagnostic: RuntimeDiagnostic | undefined = watchTimedOut
+    ? {
+        code: "EVAL_ROW_WATCH_TIMEOUT",
+        message: `eval row ${input.row.id} did not reach a terminal state before the watch deadline`,
+        severity: "error",
+        source: "evals"
+      }
+    : undefined;
+  if (timeoutDiagnostic !== undefined) diagnostics.push(timeoutDiagnostic);
   const result: EvalRowResult = {
-    status: rowStatus(state),
+    status: watchTimedOut ? "timed-out" : rowStatus(state),
     ...(input.record.ultrafuzz_run_id !== undefined ? { runId: input.record.ultrafuzz_run_id } : {}),
     runRoot,
     ...(state?.started_at !== undefined ? { startedAt: state.started_at } : {}),
@@ -434,7 +455,8 @@ export async function watchEvalRow(
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: result.status,
-    workflow: evalWorkflowLifecycle(state)
+    workflow: evalWorkflowLifecycle(state),
+    ...(timeoutDiagnostic === undefined ? {} : { diagnostics: [...input.record.diagnostics, timeoutDiagnostic] })
   };
   appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {

@@ -51,11 +51,16 @@ async function main(): Promise<void> {
   }
   if (command === "collect") {
     const includePublicResults = argv.includes("--public-results");
+    const configPath = option(argv, "--config");
     await collectModalBenchmark({
       statePath: requiredOption(argv, "--state"),
       outputDir: path.resolve(option(argv, "--output") ?? ".ultrafuzz/modal/results"),
       includePublicResults,
-      ...(includePublicResults ? { configPath: requiredOption(argv, "--config") } : {})
+      ...(configPath === undefined
+        ? includePublicResults
+          ? { configPath: requiredOption(argv, "--config") }
+          : {}
+        : { configPath })
     });
     return;
   }

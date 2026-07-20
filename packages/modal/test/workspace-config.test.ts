@@ -22,11 +22,11 @@ describe("Modal target model profiles", () => {
   it("uses the staged API key for a public Claude benchmark target", () => {
     const config = modalTargetToml(
       {
-        slug: "benchmark-smoke-claude-sonnet-5-high",
+        slug: "benchmark-smoke-claude-sonnet-5-low",
         model: "claude-sonnet-5",
         provider: "anthropic",
         agent: "ClaudeAgent",
-        reasoning: "high",
+        reasoning: "low",
         auth_mode: "api-key"
       },
       900

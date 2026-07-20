@@ -78,6 +78,13 @@ import {
   parsePublicBenchmarkBundle,
   type PublicBenchmarkBundle
 } from "./public-bundle.js";
+import {
+  assertPublicEvalDiagnosticsContainsNoSecrets,
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+  parsePublicEvalDiagnostics,
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  type PublicEvalDiagnostics
+} from "./public-eval-diagnostics.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
@@ -85,8 +92,28 @@ const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
 const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
-export const MODAL_COLLECT_RESULT_FILES = ["status.json", "worker.log", "result.json"] as const;
+export const MODAL_COLLECT_RESULT_FILES = [
+  "status.json",
+  "worker.log",
+  "result.json",
+  PUBLIC_EVAL_DIAGNOSTICS_FILE
+] as const;
 export const MODAL_PUBLIC_RESULT_FILE = "public-results.json" as const;
+
+export interface ModalCollectedLineage {
+  generation: number;
+  attempt: number;
+  logical_run_id?: string;
+  attempt_id?: string;
+  model_slug?: string;
+  model?: string;
+  reasoning?: string;
+  candidate_commit?: string;
+  config_fingerprint?: string;
+  source_fingerprint?: string;
+  image_fingerprint?: string;
+  model_fingerprint?: string;
+}
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
 
@@ -672,18 +699,20 @@ export async function collectModalBenchmark(input: {
   includePublicResults?: boolean;
   env?: Record<string, string | undefined>;
 }): Promise<void> {
+  const collectionConfig = input.configPath === undefined ? undefined : loadModalBenchmarkConfig(input.configPath);
+  const collectionConfigFingerprint =
+    input.configPath === undefined ? undefined : fingerprintModalConfigFile(input.configPath);
   let publicCollection: { config: PublicModalBenchmarkConfig; configFingerprint: string } | undefined;
   if (input.includePublicResults === true) {
-    if (input.configPath === undefined) {
+    if (collectionConfig === undefined || input.configPath === undefined) {
       throw new Error("public benchmark collection requires the original --config file");
     }
-    const config = loadModalBenchmarkConfig(input.configPath);
-    if (!isPublicModalBenchmarkConfig(config)) {
+    if (!isPublicModalBenchmarkConfig(collectionConfig)) {
       throw new Error("public benchmark collection requires a public benchmark config");
     }
     publicCollection = {
-      config,
-      configFingerprint: fingerprintModalConfigFile(input.configPath)
+      config: collectionConfig,
+      configFingerprint: collectionConfigFingerprint!
     };
   }
   const modal = modalClient(input.env);
@@ -696,13 +725,59 @@ export async function collectModalBenchmark(input: {
         ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
       ]);
       const output = path.resolve(input.outputDir, launch.slug);
-      let publicContents: string | undefined;
+      const configuredModel = collectionConfig?.models.find((model) => model.slug === launch.slug);
+      const collectionEnv = input.env ?? process.env;
+      const exactDiagnosticConfig =
+        collectionConfig !== undefined &&
+        collectionConfigFingerprint !== undefined &&
+        configuredModel !== undefined &&
+        hasExactPublicDiagnosticCollectionConfig({
+          config: collectionConfig,
+          configFingerprint: collectionConfigFingerprint,
+          configuredModel,
+          state,
+          launch
+        })
+          ? { config: collectionConfig, model: configuredModel }
+          : undefined;
+      const selectedEvidence = selectModalCollectedEvidence(
+        files,
+        exactDiagnosticConfig?.config,
+        exactDiagnosticConfig?.model,
+        collectionEnv
+      );
+      await replaceSanitizedModalCollectedFiles(
+        output,
+        selectedEvidence.files,
+        {
+          generation: launch.generation,
+          attempt: launch.attempt,
+          logical_run_id: state.logical_run_id,
+          attempt_id: launch.attempt_id,
+          model_slug: launch.slug,
+          model: launch.model,
+          reasoning: launch.reasoning,
+          candidate_commit: state.source_revision,
+          config_fingerprint: state.fingerprints.config,
+          source_fingerprint: state.fingerprints.source,
+          image_fingerprint: state.fingerprints.image,
+          model_fingerprint: launch.model_fingerprint
+        },
+        selectedEvidence.forbiddenSecretValues
+      );
+      const persistedStatus = latestPersistedWorkerStatus(files, launch);
+      if (
+        collectionConfig !== undefined &&
+        isPublicModalBenchmarkConfig(collectionConfig) &&
+        persistedStatus?.model_work_started === true &&
+        selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
+      ) {
+        throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
+      }
       if (input.includePublicResults === true) {
         const contents = files[MODAL_PUBLIC_RESULT_FILE];
         if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
-        const configuredModel = publicCollection!.config.models.find((model) => model.slug === launch.slug);
         if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
-        const collectionEnv = input.env ?? process.env;
         const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
           requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
           requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
@@ -714,14 +789,40 @@ export async function collectModalBenchmark(input: {
           state,
           launch
         });
-        publicContents = contents;
+        const collectedDiagnostics = selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
+        if (collectedDiagnostics === undefined) {
+          throw new Error(`public benchmark diagnostics are not ready for ${launch.slug}`);
+        }
+        assertPublicBenchmarkBundleDiagnosticsMatch(bundle, collectedDiagnostics);
+        await writeCollectedPublicBundle(output, contents);
       }
-      await replaceSanitizedModalCollectedFiles(output, files, launch);
-      if (publicContents !== undefined) await writeCollectedPublicBundle(output, publicContents);
     }
   } finally {
     modal.close();
   }
+}
+
+export function hasExactPublicDiagnosticCollectionConfig(input: {
+  config: ModalBenchmarkConfig;
+  configFingerprint: string;
+  configuredModel: ModalModelSpec;
+  state: Pick<ModalLaunchState, "logical_run_id" | "generation" | "source_revision" | "image" | "fingerprints">;
+  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "generation" | "model_fingerprint">;
+}): boolean {
+  if (!isPublicModalBenchmarkConfig(input.config)) return false;
+  const scope = input.config.public_benchmark;
+  return (
+    input.config.run_id === input.state.logical_run_id &&
+    input.config.image_name === input.state.image &&
+    input.configFingerprint === input.state.fingerprints.config &&
+    scope.candidate_commit === input.state.source_revision &&
+    scope.runner_model_profile === input.launch.slug &&
+    input.launch.generation === input.state.generation &&
+    input.configuredModel.slug === input.launch.slug &&
+    input.configuredModel.model === input.launch.model &&
+    input.configuredModel.reasoning === input.launch.reasoning &&
+    fingerprintModalModel(input.configuredModel) === input.launch.model_fingerprint
+  );
 }
 
 export function assertPublicBenchmarkBundleLineage(input: {
@@ -740,7 +841,7 @@ export function assertPublicBenchmarkBundleLineage(input: {
   config: PublicModalBenchmarkConfig;
   configFingerprint: string;
   state: Pick<ModalLaunchState, "logical_run_id" | "generation" | "source_revision" | "image" | "fingerprints">;
-  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "model_fingerprint">;
+  launch: Pick<ModalLaunchRecord, "slug" | "model" | "reasoning" | "attempt" | "attempt_id" | "model_fingerprint">;
 }): void {
   const { bundle, config, configFingerprint, state, launch } = input;
   const scope = config.public_benchmark;
@@ -764,6 +865,8 @@ export function assertPublicBenchmarkBundleLineage(input: {
     bundle.eval_run_id === `${config.run_id}-${launch.slug}` ? undefined : "eval run",
     bundle.lineage.logical_run_id === state.logical_run_id ? undefined : "bundle logical run lineage",
     bundle.lineage.generation === state.generation ? undefined : "bundle generation lineage",
+    bundle.lineage.attempt === launch.attempt ? undefined : "bundle attempt lineage",
+    bundle.lineage.attempt_id === launch.attempt_id ? undefined : "bundle attempt ID lineage",
     bundle.lineage.config_fingerprint === state.fingerprints.config ? undefined : "bundle configuration lineage",
     bundle.lineage.source_fingerprint === state.fingerprints.source ? undefined : "bundle source lineage",
     bundle.lineage.image_fingerprint === state.fingerprints.image ? undefined : "bundle image lineage",
@@ -771,6 +874,19 @@ export function assertPublicBenchmarkBundleLineage(input: {
   ].filter((value): value is string => value !== undefined);
   if (mismatches.length > 0) {
     throw new Error(`public benchmark result lineage does not match ${launch.slug}: ${mismatches.join(", ")}`);
+  }
+}
+
+export function assertPublicBenchmarkBundleDiagnosticsMatch(
+  bundle: PublicBenchmarkBundle,
+  collectedDiagnostics: string
+): void {
+  const bundlePath = `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`;
+  const embedded = bundle.files.find((file) => file.path === bundlePath);
+  if (embedded === undefined) throw new Error(`public benchmark result is missing ${bundlePath}`);
+  const embeddedContents = Buffer.from(embedded.contents_base64, "base64").toString("utf8");
+  if (embeddedContents !== collectedDiagnostics) {
+    throw new Error("public benchmark result diagnostics do not match the exact collected attempt");
   }
 }
 
@@ -917,6 +1033,21 @@ function secretValues(
   model: ModalModelSpec,
   env: Record<string, string | undefined>
 ): Record<string, string> {
+  const names = secretEnvNames(config, model);
+  return Object.fromEntries([...names].map((name) => [name, requiredEnv(env, name)]));
+}
+
+function availableSecretValues(
+  config: ModalBenchmarkConfig,
+  model: ModalModelSpec,
+  env: Record<string, string | undefined>
+): string[] {
+  return [...secretEnvNames(config, model)]
+    .map((name) => env[name])
+    .filter((value): value is string => value !== undefined && value !== "");
+}
+
+function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
   const names = new Set<string>();
   if (isPublicModalBenchmarkConfig(config)) {
     names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
@@ -925,7 +1056,7 @@ function secretValues(
     if (config.braintrust.judge_api_key_env !== undefined) names.add(config.braintrust.judge_api_key_env);
   }
   if (model.auth_mode === "api-key") names.add(runnerApiKeyEnv(model.provider));
-  return Object.fromEntries([...names].map((name) => [name, requiredEnv(env, name)]));
+  return names;
 }
 
 function requiredEnv(env: Record<string, string | undefined>, name: string): string {
@@ -1050,7 +1181,11 @@ async function readVolumeFiles(
       const contents = await readOptionalModalSandboxText(
         inspector.filesystem,
         path.posix.join(root, name),
-        name === MODAL_PUBLIC_RESULT_FILE ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES : undefined
+        name === MODAL_PUBLIC_RESULT_FILE
+          ? MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES
+          : name === PUBLIC_EVAL_DIAGNOSTICS_FILE
+            ? MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES
+            : undefined
       );
       if (contents !== undefined) files[name] = contents;
     }
@@ -1107,7 +1242,8 @@ function latestPersistedWorkerStatus(
 
 export function assertSanitizedModalCollectedFiles(
   files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+  launch: ModalCollectedLineage,
+  forbiddenSecretValues: readonly string[] = []
 ): void {
   for (const name of ["status.json", "result.json"] as const) {
     const contents = files[name];
@@ -1121,14 +1257,48 @@ export function assertSanitizedModalCollectedFiles(
   if (log !== undefined && !isGenericWorkerLifecycleLog(log)) {
     throw new Error("refusing to collect an unsanitized Modal worker log");
   }
+  const diagnosticsContents = files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
+  if (diagnosticsContents !== undefined) {
+    let diagnostics: PublicEvalDiagnostics;
+    try {
+      diagnostics = parsePublicEvalDiagnostics(JSON.parse(diagnosticsContents) as unknown);
+      assertPublicEvalDiagnosticsContainsNoSecrets(diagnostics, forbiddenSecretValues);
+    } catch (error) {
+      throw new Error("refusing to collect unsanitized public eval diagnostics", { cause: error });
+    }
+    assertPublicEvalDiagnosticsLineage(diagnostics, launch);
+  }
+}
+
+export function selectModalCollectedEvidence(
+  files: Readonly<Record<string, string>>,
+  config: ModalBenchmarkConfig | undefined,
+  configuredModel: ModalModelSpec | undefined,
+  env: Record<string, string | undefined>
+): { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } {
+  if (files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined) {
+    return { files, forbiddenSecretValues: [] };
+  }
+  if (config === undefined || configuredModel === undefined) {
+    const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
+    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+  }
+  const names = [...secretEnvNames(config, configuredModel)];
+  const forbiddenSecretValues = availableSecretValues(config, configuredModel, env);
+  if (forbiddenSecretValues.length !== names.length) {
+    const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
+    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+  }
+  return { files, forbiddenSecretValues };
 }
 
 export async function replaceSanitizedModalCollectedFiles(
   output: string,
   files: Readonly<Record<string, string>>,
-  launch: Pick<ModalLaunchRecord, "generation" | "attempt">
+  launch: ModalCollectedLineage,
+  forbiddenSecretValues: readonly string[] = []
 ): Promise<void> {
-  assertSanitizedModalCollectedFiles(files, launch);
+  assertSanitizedModalCollectedFiles(files, launch, forbiddenSecretValues);
   await mkdir(output, { recursive: true, mode: 0o700 });
   await chmod(output, 0o700);
   const staging = await mkdtemp(path.join(output, ".collect-"));
@@ -1164,6 +1334,45 @@ export async function replaceSanitizedModalCollectedFiles(
     await syncDirectory(output);
   } finally {
     await rm(staging, { recursive: true, force: true });
+  }
+}
+
+export function assertPublicEvalDiagnosticsLineage(
+  diagnostics: PublicEvalDiagnostics,
+  expected: ModalCollectedLineage
+): void {
+  const complete = {
+    logical_run_id: expected.logical_run_id,
+    attempt_id: expected.attempt_id,
+    model_slug: expected.model_slug,
+    model: expected.model,
+    reasoning: expected.reasoning,
+    candidate_commit: expected.candidate_commit,
+    config_fingerprint: expected.config_fingerprint,
+    source_fingerprint: expected.source_fingerprint,
+    image_fingerprint: expected.image_fingerprint,
+    model_fingerprint: expected.model_fingerprint
+  };
+  if (Object.values(complete).some((value) => value === undefined)) {
+    throw new Error("public eval diagnostics collection requires complete launch lineage");
+  }
+  const mismatches = [
+    diagnostics.lineage.logical_run_id === complete.logical_run_id ? undefined : "logical run",
+    diagnostics.lineage.generation === expected.generation ? undefined : "generation",
+    diagnostics.lineage.attempt === expected.attempt ? undefined : "attempt",
+    diagnostics.lineage.attempt_id === complete.attempt_id ? undefined : "attempt ID",
+    diagnostics.model_slug === complete.model_slug ? undefined : "model slug",
+    diagnostics.model === complete.model ? undefined : "model",
+    diagnostics.reasoning === complete.reasoning ? undefined : "reasoning",
+    diagnostics.candidate_commit === complete.candidate_commit ? undefined : "candidate commit",
+    diagnostics.eval_run_id === `${complete.logical_run_id}-${complete.model_slug}` ? undefined : "eval run",
+    diagnostics.lineage.config_fingerprint === complete.config_fingerprint ? undefined : "configuration fingerprint",
+    diagnostics.lineage.source_fingerprint === complete.source_fingerprint ? undefined : "source fingerprint",
+    diagnostics.lineage.image_fingerprint === complete.image_fingerprint ? undefined : "image fingerprint",
+    diagnostics.lineage.model_fingerprint === complete.model_fingerprint ? undefined : "model fingerprint"
+  ].filter((value): value is string => value !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public eval diagnostics lineage does not match: ${mismatches.join(", ")}`);
   }
 }
 

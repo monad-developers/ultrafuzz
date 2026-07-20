@@ -25,6 +25,13 @@ import {
   type PublicBenchmarkBundle,
   type PublicBenchmarkBundleSource
 } from "./public-bundle.js";
+import {
+  createPublicEvalDiagnosticsFromRun,
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  publicEvalRecordTerminalDisposition,
+  type PublicEvalDiagnostics,
+  writePublicEvalDiagnosticsAtomic
+} from "./public-eval-diagnostics.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
@@ -48,6 +55,7 @@ export async function runPublicBenchmarkWorker(input: {
   const statusPath = path.join(input.dataRoot, "status.json");
   const resultPath = path.join(input.dataRoot, "result.json");
   const bundlePath = path.join(input.dataRoot, PUBLIC_BUNDLE_FILE);
+  const diagnosticsPath = path.join(input.dataRoot, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   const legacyPersistentWorkRoot = path.join(input.dataRoot, "public-workspace");
   const workRoot = publicBenchmarkWorkRoot(input.dataRoot);
   let modelWorkStarted = false;
@@ -68,11 +76,12 @@ export async function runPublicBenchmarkWorker(input: {
     diagnosticCodeForError: (error) => (input.isCheckpointIncompatible(error) ? "checkpoint-incompatible" : undefined),
     run: async () => {
       await input.preflight({
-        workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath],
+        workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath, diagnosticsPath],
         freshCleanupPaths: [
           workRoot,
           legacyPersistentWorkRoot,
           bundlePath,
+          diagnosticsPath,
           statusPath,
           resultPath,
           logPath,
@@ -107,35 +116,55 @@ export async function runPublicBenchmarkWorker(input: {
         },
         flushFilesystem
       );
-      await runCommand(
-        [
-          "node",
-          CLI,
-          "eval",
-          "run",
-          "--project",
-          prepared.controlRoot,
-          "--suite",
-          prepared.suitePath,
-          "--eval-run-id",
-          prepared.evalRunId,
-          "--target-root",
-          prepared.targetsRoot,
-          "--ground-truth-root",
-          prepared.groundTruthRoot,
-          "--provider",
-          "none",
-          "--watch-timeout-seconds",
-          String(input.config.public_benchmark.max_runtime_seconds),
-          "--json"
-        ],
-        {
-          cwd: prepared.controlRoot,
-          logPath,
-          timeoutMs: (input.config.public_benchmark.max_runtime_seconds + 300) * 1000,
-          timeoutCategory: "model-work-timeout"
-        }
-      );
+      const checkpoint = await runAndCheckpointPublicEvalDiagnostics({
+        runEval: () =>
+          runCommand(
+            [
+              "node",
+              CLI,
+              "eval",
+              "run",
+              "--project",
+              prepared.controlRoot,
+              "--suite",
+              prepared.suitePath,
+              "--eval-run-id",
+              prepared.evalRunId,
+              "--target-root",
+              prepared.targetsRoot,
+              "--ground-truth-root",
+              prepared.groundTruthRoot,
+              "--provider",
+              "none",
+              "--watch-timeout-seconds",
+              String(input.config.public_benchmark.max_runtime_seconds),
+              "--json"
+            ],
+            {
+              cwd: prepared.controlRoot,
+              logPath,
+              timeoutMs: (input.config.public_benchmark.max_runtime_seconds + 300) * 1000,
+              timeoutCategory: "model-work-timeout"
+            }
+          ).then(() => undefined),
+        buildDiagnostics: () =>
+          createPublicEvalDiagnosticsFromRun({
+            config: input.config,
+            model: input.model,
+            lineage: input.lineage,
+            controlRoot: prepared.controlRoot,
+            evalRunId: prepared.evalRunId,
+            forbiddenSecretValues
+          }),
+        persistDiagnostics: (diagnostics) => writePublicEvalDiagnosticsAtomic(diagnosticsPath, diagnostics),
+        flush: flushFilesystem
+      });
+      if (!checkpoint.diagnostics.summary.scoring_ready) {
+        throw new OperationalDispositionError("unreachable", {
+          cause: checkpoint.runError ?? new Error("public-eval-not-ready-for-scoring")
+        });
+      }
+      if (checkpoint.runError !== undefined) throw checkpoint.runError;
       const judgeKeyEnv = input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY";
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
@@ -165,7 +194,10 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
-        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId),
+        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
+          root: input.dataRoot,
+          source: diagnosticsPath
+        }),
         forbiddenSecretValues
       });
       await writePublicBundleAtomic(bundlePath, bundle);
@@ -197,6 +229,30 @@ export async function checkpointPublicModelWorkStart(
   await flush();
 }
 
+export async function runAndCheckpointPublicEvalDiagnostics(input: {
+  runEval: () => Promise<void>;
+  buildDiagnostics: () => PublicEvalDiagnostics;
+  persistDiagnostics: (diagnostics: PublicEvalDiagnostics) => Promise<void>;
+  flush: () => Promise<void>;
+}): Promise<{ diagnostics: PublicEvalDiagnostics; runError?: unknown }> {
+  let runError: unknown;
+  try {
+    await input.runEval();
+  } catch (error) {
+    runError = error;
+  }
+  let diagnostics: PublicEvalDiagnostics;
+  try {
+    diagnostics = input.buildDiagnostics();
+  } catch (error) {
+    if (runError !== undefined) throw runError;
+    throw error;
+  }
+  await input.persistDiagnostics(diagnostics);
+  await input.flush();
+  return { diagnostics, ...(runError === undefined ? {} : { runError }) };
+}
+
 export function assertPublicWorkerBundleLineage(
   bundle: PublicBenchmarkBundle,
   config: PublicModalBenchmarkConfig,
@@ -215,6 +271,8 @@ export function assertPublicWorkerBundleLineage(
     bundle.eval_run_id === `${config.run_id}-${model.slug}` ? undefined : "eval run",
     bundle.lineage.logical_run_id === lineage.logical_run_id ? undefined : "logical run lineage",
     bundle.lineage.generation === lineage.generation ? undefined : "generation lineage",
+    bundle.lineage.attempt === lineage.attempt ? undefined : "attempt lineage",
+    bundle.lineage.attempt_id === lineage.attempt_id ? undefined : "attempt ID lineage",
     bundle.lineage.config_fingerprint === lineage.fingerprints.config ? undefined : "configuration lineage",
     bundle.lineage.source_fingerprint === lineage.fingerprints.source ? undefined : "source lineage",
     bundle.lineage.image_fingerprint === lineage.fingerprints.image ? undefined : "image lineage",
@@ -249,12 +307,15 @@ export async function writePublicBundleAtomic(filePath: string, bundle: PublicBe
 
 function assertPublicWorkerInput(config: PublicModalBenchmarkConfig, model: ModalModelSpec): void {
   const scope = config.public_benchmark;
+  if (scope.lane !== "smoke") {
+    throw new Error("public benchmark worker supports only the bounded smoke lane");
+  }
   if (scope.runner_model_profile !== model.slug) {
     throw new Error("public benchmark runner profile must equal the selected Modal model slug");
   }
   const expected = model.slug.includes("claude-sonnet-5")
-    ? { agent: "ClaudeAgent", model: "claude-sonnet-5", reasoning: "high", auth_mode: "api-key" }
-    : { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high", auth_mode: "api-key" };
+    ? { agent: "ClaudeAgent", model: "claude-sonnet-5", reasoning: "low", auth_mode: "api-key" }
+    : { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "low", auth_mode: "api-key" };
   if (
     model.agent !== expected.agent ||
     model.model !== expected.model ||
@@ -486,7 +547,11 @@ async function cloneAtCommit(
   if (head !== commit.toLowerCase()) throw new Error(`checkout revision mismatch for ${repository}`);
 }
 
-export function publicBundleSources(controlRoot: string, evalRunId: string): PublicBenchmarkBundleSource[] {
+export function publicBundleSources(
+  controlRoot: string,
+  evalRunId: string,
+  diagnostics: { root: string; source: string }
+): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
     "eval.json",
@@ -501,6 +566,7 @@ export function publicBundleSources(controlRoot: string, evalRunId: string): Pub
     const source = path.join(evalRoot, relative);
     return fs.existsSync(source) ? [{ path: `eval/${relative}`, root: evalRoot, source }] : [];
   });
+  sources.push({ path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`, ...diagnostics });
   const records = fs
     .readFileSync(path.join(evalRoot, "runs.jsonl"), "utf8")
     .split(/\r?\n/u)
@@ -522,8 +588,15 @@ export function publicBundleSources(controlRoot: string, evalRunId: string): Pub
   }
   for (const row of matrix as Array<{ id: string }>) {
     const record = finalRecordsByRow.get(row.id);
-    if (record === undefined || record.final_status !== "succeeded") {
-      throw new Error(`public benchmark row is not terminally successful: ${row.id}`);
+    const scoreable =
+      record !== undefined &&
+      record.workflow?.terminal === true &&
+      ((record.final_status === "succeeded" && record.workflow.status === "succeeded") ||
+        (record.final_status === "failed" &&
+          record.workflow.status === "failed" &&
+          publicEvalRecordTerminalDisposition(record) === "genuine-task-failures"));
+    if (!scoreable) {
+      throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
     const report = resolveTerminalReportPath({
       ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),

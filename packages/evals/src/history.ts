@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import { z } from "zod/v4";
 
 import {
@@ -17,6 +18,11 @@ import {
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
+import {
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  parsePublicEvalDiagnostics
+} from "./public-diagnostics.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
@@ -213,6 +219,7 @@ export interface EvalHistoryGenerationInput {
   matrix: EvalMatrixRow[];
   summary: EvalScoreSummary;
   matchedGroundTruthByRow: ReadonlyMap<string, ReadonlySet<string>>;
+  publicEvalDiagnostics?: unknown;
 }
 
 export function createEvalHistoryObservations(input: EvalHistoryGenerationInput): EvalHistoryObservation[] {
@@ -232,12 +239,18 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       "eval generation does not have exactly one score per row"
     );
   }
+  const verifiedGenuineTaskFailures = verifiedGenuineTaskFailureRows(input, provenance.candidate.commit, summaryRows);
   for (const row of input.matrix) {
     const score = summaryRows.get(row.id);
     if (score === undefined || !score.report_schema_valid) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} is missing a valid score`);
     }
-    if (!score.lifecycle.workflow.terminal || score.lifecycle.workflow.status !== "succeeded") {
+    const successful = score.lifecycle.workflow.terminal && score.lifecycle.workflow.status === "succeeded";
+    const verifiedTaskFailure =
+      score.lifecycle.workflow.terminal &&
+      score.lifecycle.workflow.status === "failed" &&
+      verifiedGenuineTaskFailures.has(row.id);
+    if (!successful && !verifiedTaskFailure) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} did not finish successfully`);
     }
     if (score.target_id !== row.target_id || score.variant_id !== row.variant_id || score.trial_id !== row.trial_id) {
@@ -334,6 +347,101 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         source_artifact: input.sourceArtifact
       } satisfies EvalHistoryObservation;
     });
+}
+
+function verifiedGenuineTaskFailureRows(
+  input: EvalHistoryGenerationInput,
+  candidateCommit: string,
+  summaryRows: ReadonlyMap<string, EvalScoreSummary["rows"][number]>
+): Set<string> {
+  if (input.publicEvalDiagnostics === undefined) return new Set();
+  let diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>;
+  try {
+    diagnostics = parsePublicEvalDiagnostics(input.publicEvalDiagnostics);
+  } catch (error) {
+    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "public eval diagnostics are invalid", {
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+  const metadataMismatches = [
+    diagnostics.benchmark === input.benchmark ? undefined : "benchmark",
+    diagnostics.lane === input.lane ? undefined : "lane",
+    diagnostics.eval_run_id === input.summary.eval_run_id ? undefined : "eval run",
+    diagnostics.candidate_commit === candidateCommit ? undefined : "candidate commit"
+  ].filter((value): value is string => value !== undefined);
+  if (metadataMismatches.length > 0) {
+    throw new EvalError(
+      "EVAL_HISTORY_GENERATION_INCOMPLETE",
+      `public eval diagnostics do not match ${metadataMismatches.join(", ")}`
+    );
+  }
+  if (!diagnostics.summary.scoring_ready || diagnostics.rows.length !== input.matrix.length) {
+    throw new EvalError(
+      "EVAL_HISTORY_GENERATION_INCOMPLETE",
+      "public eval diagnostics are not complete and ready for the exact matrix"
+    );
+  }
+
+  const matrixRows = new Map(input.matrix.map((row) => [row.id, row]));
+  if (matrixRows.size !== input.matrix.length) {
+    throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval matrix contains duplicate rows");
+  }
+  const genuineTaskFailures = new Set<string>();
+  for (const diagnostic of diagnostics.rows) {
+    const row = matrixRows.get(diagnostic.row_id);
+    const score = summaryRows.get(diagnostic.row_id);
+    if (
+      row === undefined ||
+      score === undefined ||
+      diagnostic.target_id !== row.target_id ||
+      diagnostic.variant_id !== row.variant_id ||
+      diagnostic.trial_id !== row.trial_id
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `public eval diagnostics row does not match the matrix: ${diagnostic.row_id}`
+      );
+    }
+    if (
+      diagnostics.model_slug !== row.runner_model_profile ||
+      diagnostics.model !== row.runner_model ||
+      diagnostics.reasoning !== row.runner_reasoning
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `public eval diagnostics model does not match row ${diagnostic.row_id}`
+      );
+    }
+    if (
+      diagnostic.run_status !== "launched" ||
+      score.lifecycle.launcher.status !== "succeeded" ||
+      diagnostic.workflow_status !== score.lifecycle.workflow.status ||
+      diagnostic.workflow_terminal !== score.lifecycle.workflow.terminal ||
+      !diagnostic.workflow_terminal ||
+      !diagnostic.terminal_report_present ||
+      diagnostic.workflow_ids.length === 0 ||
+      !diagnostic.scoring_ready ||
+      diagnostic.reason_codes.length > 0
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `public eval diagnostics lifecycle does not match scoreable row ${diagnostic.row_id}`
+      );
+    }
+    const succeeded = diagnostic.final_status === "succeeded" && diagnostic.workflow_status === "succeeded";
+    const genuineTaskFailure =
+      diagnostic.final_status === "failed" &&
+      diagnostic.workflow_status === "failed" &&
+      diagnostic.terminal_disposition === "genuine-task-failures";
+    if (!succeeded && !genuineTaskFailure) {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `public eval diagnostics outcome is not publishable for row ${diagnostic.row_id}`
+      );
+    }
+    if (genuineTaskFailure) genuineTaskFailures.add(diagnostic.row_id);
+  }
+  return genuineTaskFailures;
 }
 
 function assertGenerationLineage(
@@ -495,6 +603,7 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const summary = jsonFile<EvalScoreSummary>(path.join(root, "summary.json"));
   const scores = readJsonLines<EvalFindingScore>(path.join(root, "scores.jsonl"));
+  const publicEvalDiagnostics = readOptionalPublicEvalDiagnostics(root);
   if (manifest.eval_run_id !== input.evalRunId || summary.eval_run_id !== input.evalRunId) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval artifact IDs do not match the requested run");
   }
@@ -516,7 +625,8 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
     suite: manifest.suite,
     matrix,
     summary,
-    matchedGroundTruthByRow: matches
+    matchedGroundTruthByRow: matches,
+    ...(publicEvalDiagnostics === undefined ? {} : { publicEvalDiagnostics })
   });
   const current = readEvalHistory(input.historyPath);
   const history = mergeEvalHistory(current, observations);
@@ -528,6 +638,35 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
     appended,
     chartPaths: [...charts.keys()].map((file) => path.join(input.chartsDirectory, file))
   };
+}
+
+function readOptionalPublicEvalDiagnostics(root: string): unknown | undefined {
+  const filePath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  if (fs.lstatSync(filePath, { throwIfNoEntry: false }) === undefined) return undefined;
+  assertRegularFileInside(root, filePath, "public eval diagnostics");
+  const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const nonBlocking = (fs.constants as typeof fs.constants & { O_NONBLOCK?: number }).O_NONBLOCK ?? 0;
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (
+      !stat.isFile() ||
+      !Number.isSafeInteger(stat.size) ||
+      stat.size < 0 ||
+      stat.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES
+    ) {
+      throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "public eval diagnostics exceed the size limit");
+    }
+    try {
+      return JSON.parse(fs.readFileSync(descriptor, "utf8")) as unknown;
+    } catch (error) {
+      throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "failed to read public eval diagnostics", {
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 export function assertPublicBenchmarkGeneration(

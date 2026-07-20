@@ -279,6 +279,7 @@ export interface EvalRunValue {
   matrix_path: string;
   launched: number;
   failed: number;
+  incomplete: number;
   records: EvalRunRecord[];
   report_url?: string;
   diagnostics: RuntimeDiagnostic[];

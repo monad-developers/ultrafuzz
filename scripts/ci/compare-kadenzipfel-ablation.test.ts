@@ -4,13 +4,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { createPublicBenchmarkBundle, readPublicBenchmarkBundle } from "../../packages/modal/src/public-bundle.ts";
+import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../../packages/modal/src/public-eval-diagnostics.ts";
 import {
   compareKadenzipfelAblation,
   KADEN_ABLATION_JSON,
   KADEN_ABLATION_MARKDOWN
 } from "./compare-kadenzipfel-ablation.mjs";
 
-const RUNNER_SLUG = "benchmark-smoke-gpt-5-6-luna-high";
+const RUNNER_SLUG = "benchmark-smoke-gpt-5-6-luna-low";
 const CANDIDATE_COMMIT = "a".repeat(40);
 const SCORING_FINGERPRINT = `sha256:${"b".repeat(64)}`;
 const temporaryRoots: string[] = [];
@@ -283,7 +284,17 @@ function writeBundle(
   overrides: { candidateCommit?: string; model?: string } = {}
 ): string {
   const candidateCommit = overrides.candidateCommit ?? CANDIDATE_COMMIT;
-  const evalRunId = `${entry.pair}-run`;
+  const model = overrides.model ?? "gpt-5.6-luna";
+  const logicalRunId = entry.pair;
+  const evalRunId = `${logicalRunId}-${entry.model_slug}`;
+  const lineage = {
+    logical_run_id: logicalRunId,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-1",
+    fingerprints: { config: "1".repeat(64), source: "2".repeat(64), image: "3".repeat(64) },
+    model_fingerprint: "4".repeat(64)
+  };
   const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kaden-bundle-source-"));
   temporaryRoots.push(sourceRoot);
   const summary = {
@@ -323,17 +334,78 @@ function writeBundle(
     "matrix.json",
     "runs.jsonl",
     "run-summary.json",
+    "public-eval-diagnostics.json",
     "scores.jsonl",
     "summary.json",
     "summary.md"
   ].map((name) => {
     const source = path.join(sourceRoot, name);
+    const diagnostics = {
+      schema_version: PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+      stage: "post-eval-pre-score",
+      benchmark: entry.benchmark,
+      lane: entry.lane,
+      experiment: entry.experiment,
+      model_slug: entry.model_slug,
+      model,
+      reasoning: "low",
+      candidate_commit: candidateCommit,
+      eval_run_id: evalRunId,
+      created_at: "2026-07-19T00:00:00.000Z",
+      lineage: {
+        logical_run_id: lineage.logical_run_id,
+        generation: lineage.generation,
+        attempt: lineage.attempt,
+        attempt_id: lineage.attempt_id,
+        config_fingerprint: lineage.fingerprints.config,
+        source_fingerprint: lineage.fingerprints.source,
+        image_fingerprint: lineage.fingerprints.image,
+        model_fingerprint: lineage.model_fingerprint
+      },
+      summary: {
+        planned: summary.rows.length,
+        launched: summary.rows.length,
+        launch_failed: 0,
+        run_records_missing: 0,
+        workflow_succeeded: summary.rows.length,
+        workflow_failed: 0,
+        workflow_nonterminal: 0,
+        genuine_task_failure_rows: 0,
+        terminal_reports_present: summary.rows.length,
+        scoring_ready: true
+      },
+      rows: summary.rows.map((row, index) => ({
+        row_id: row.row_id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        run_status: "launched",
+        final_status: "succeeded",
+        workflow_status: "succeeded",
+        workflow_terminal: true,
+        terminal_disposition: "clean",
+        terminal_report_present: true,
+        workflow_ids: [`workflow-${index + 1}`],
+        diagnostic_codes: [],
+        scoring_ready: true,
+        reason_codes: []
+      }))
+    };
     const contents =
       name === "summary.json"
         ? `${JSON.stringify(summary)}\n`
         : name === "matrix.json"
-          ? `${JSON.stringify(summary.rows.map((row) => ({ id: row.row_id })))}\n`
-          : `${name}\n`;
+          ? `${JSON.stringify(
+              summary.rows.map((row) => ({
+                id: row.row_id,
+                target_id: row.target_id,
+                variant_id: row.variant_id,
+                trial_id: row.trial_id
+              }))
+            )}\n`
+          : name === "public-eval-diagnostics.json"
+            ? `${JSON.stringify(diagnostics)}\n`
+            : `${name}\n`;
     fs.writeFileSync(source, contents);
     return { path: `eval/${name}`, root: sourceRoot, source };
   });
@@ -354,16 +426,11 @@ function writeBundle(
     lane: entry.lane,
     modelSlug: entry.model_slug,
     experiment: entry.experiment,
-    model: overrides.model ?? "gpt-5.6-luna",
-    reasoning: "high",
+    model,
+    reasoning: "low",
     candidateCommit,
     evalRunId,
-    lineage: {
-      logical_run_id: `fixture-${entry.model_slug}`,
-      generation: 1,
-      fingerprints: { config: "1".repeat(64), source: "2".repeat(64), image: "3".repeat(64) },
-      model_fingerprint: "4".repeat(64)
-    },
+    lineage,
     files: required,
     createdAt: "2026-07-19T00:00:00.000Z"
   });

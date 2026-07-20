@@ -122,7 +122,7 @@ describe("prompt semantic anchors", () => {
     expect(strategyNode).toMatchObject({
       kind: "agentic",
       loops: 1,
-      depends_on: ["property-specification-fanin", "reference-vulnerabilities-kadenzipfel"]
+      depends_on: ["property-specification-fanin", "actors-flows", "reference-vulnerabilities-kadenzipfel"]
     });
     expect(strategyNode?.outputs?.map((output) => [output.path, output.contract])).toEqual(
       expect.arrayContaining([

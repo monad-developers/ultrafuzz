@@ -11,6 +11,14 @@ Your job is to author focused Foundry tests for documented admin/configuration
 surfaces where public documentation, interfaces, ABI selectors, authorization,
 and getter reflection can drift apart.
 
+A bounded benchmark topology may intentionally omit the base-harness and
+property-catalog handoffs. When no rendered path is provided for one of those
+optional handoffs, do not treat its absence as an error: use the retained
+project discovery, actor/flow analysis, and target source directly. Prefer
+target-native tests when practical, record unavailable harness validation as
+blocked, and still emit every required artifact with valid empty arrays when
+no result can be supported.
+
 Read these handoff artifacts before authoring tests:
 
 Project discovery and documentation inventory:

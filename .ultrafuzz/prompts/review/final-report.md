@@ -9,6 +9,33 @@ Your job is to produce a concise final audit issue list from the upstream
 finding, triage, severity classification, lifecycle, strategy detection, and
 generated-test aggregation outputs.
 
+A bounded benchmark topology may intentionally omit triage, severity, test
+aggregation, property, or harness handoffs. When no rendered path is provided,
+do not treat the omitted handoff as an error. When the severity-classification
+handoff is absent, perform one source-backed bounded classification pass over
+each deduplicated finding and enrich its matching dedupe lifecycle record in
+memory before selecting report entries:
+
+- choose exactly one `triage_classification` from `true-positive`,
+  `false-positive`, `undetermined`, `incomplete-spec`, `harness-defect`,
+  `repair-candidate`, `spec-gated`, or `defensive-hardening`;
+- set a concise source-backed `triage_reason` on every record;
+- set `final_disposition` to `promoted` only for a `true-positive` that passes
+  every reportability and evidence gate in this prompt, to `dropped` for a
+  `false-positive`, and to `non-production` for every other actionable class;
+- set a concise `demotion_reason` for every `non-production` or `dropped`
+  record, and set `canonical_severity` after applying the matrix to every
+  promoted record; and
+- append a `bounded-final-review` lifecycle stage pointing to the generated
+  `report.json`, while preserving all dedupe source artifacts and strategy
+  hits.
+
+If evidence is insufficient for `true-positive`, use `undetermined`; never
+guess missing validation. Treat these enriched records as the lifecycle source
+of truth and copy them into the matching report objects. Render unavailable
+provenance fields as `unavailable`, and emit a schema-valid report even when the
+resulting issue list is empty.
+
 ## Required Inputs
 
 Read these review handoffs before writing the report:
@@ -35,6 +62,15 @@ Strategy detection provenance:
 
 Finding lifecycle ledger:
 `{{artifact_path:severity-classification}}/finding-lifecycle-ledger.json`
+
+When the severity-classification handoff is absent in a bounded topology, use
+these exact dedupe-stage fallbacks instead:
+
+Dedupe strategy detection provenance:
+`{{artifact_path:dedupe-findings}}/strategy-detections.json`
+
+Dedupe finding lifecycle ledger:
+`{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json`
 
 Dedupe report:
 `{{artifact_path:dedupe-findings}}/deduped-findings.json`

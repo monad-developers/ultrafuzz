@@ -113,9 +113,10 @@ For configuration and architecture details, see
 
 The checked-in cohort and lane manifests live under `benchmarks/`. The smoke
 lane is a fixed target subset with one trial, one strategy loop, no stateful
-invariant, differential, or dynamic-strategy families, and exactly two runner
-profiles: GPT-5.6 Luna `high` and Claude Sonnet 5 `high`. Both use the separate
-GPT-5.6 Sol `xhigh` judge. The full lane uses every supported target, the
+invariant, differential, or dynamic-strategy families, a bounded
+project/actor → admin-plus-Kaden → dedupe → report critical path, and exactly
+two runner profiles: GPT-5.6 Luna `low` and Claude Sonnet 5 `low`. Both use the
+separate GPT-5.6 Sol `xhigh` judge. The full lane keeps the runners at `high` and uses every supported target, the
 configured trial count, the production strategy set, and the same pinned model
 and judge identities. The EVMbench adapter converts either lane into the normal
 `EvalSuiteSpec` and can project one runner for an isolated Modal pair while

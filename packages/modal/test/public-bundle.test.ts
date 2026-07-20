@@ -7,18 +7,39 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
+  PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
   createPublicBenchmarkBundle,
   extractPublicBenchmarkBundle,
   parsePublicBenchmarkBundle,
   readPublicBenchmarkBundle
 } from "../src/public-bundle.js";
+import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-eval-diagnostics.js";
 
 const TEST_LINEAGE = {
   logical_run_id: "fixture-run",
   generation: 1,
+  attempt: 1,
+  attempt_id: "attempt-1",
   fingerprints: { config: "1".repeat(64), source: "2".repeat(64), image: "3".repeat(64) },
   model_fingerprint: "4".repeat(64)
 };
+const TEST_MODEL_SLUG = "gpt-5-6-luna";
+const TEST_MODEL = "gpt-5.6-luna";
+const TEST_REASONING = "high";
+const TEST_CANDIDATE = "a".repeat(40);
+const TEST_CREATED_AT = "2026-07-19T00:00:00.000Z";
+const TEST_EVAL_RUN_ID = `${TEST_LINEAGE.logical_run_id}-${TEST_MODEL_SLUG}`;
+const TEST_BUNDLE_METADATA = {
+  benchmark: "evmbench",
+  lane: "smoke",
+  modelSlug: TEST_MODEL_SLUG,
+  model: TEST_MODEL,
+  reasoning: TEST_REASONING,
+  candidateCommit: TEST_CANDIDATE,
+  evalRunId: TEST_EVAL_RUN_ID,
+  lineage: TEST_LINEAGE,
+  createdAt: TEST_CREATED_AT
+} as const;
 
 describe("public Modal benchmark bundles", () => {
   it("hashes, validates, and extracts the scored generation and public reports", () => {
@@ -27,19 +48,16 @@ describe("public Modal benchmark bundles", () => {
     const files = completePublicSources(root, rowIds);
 
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "a".repeat(40),
-      evalRunId: "eval-1",
-      lineage: TEST_LINEAGE,
-      createdAt: "2026-07-19T00:00:00.000Z",
+      ...TEST_BUNDLE_METADATA,
       files
     });
     const output = path.join(root, "output");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v2");
+    expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
     extractPublicBenchmarkBundle(bundle, output);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(output, "eval", "public-eval-diagnostics.json"), "utf8"))
+    ).toMatchObject({ summary: { scoring_ready: true } });
     for (const rowId of rowIds) {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.json"), "utf8")).toContain("issues");
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
@@ -50,14 +68,7 @@ describe("public Modal benchmark bundles", () => {
   it("rejects traversal, duplicate paths, and tampered contents", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "ultrafuzz-bench",
-      lane: "smoke",
-      modelSlug: "claude-sonnet-5",
-      model: "claude-sonnet-5",
-      reasoning: "high",
-      candidateCommit: "b".repeat(40),
-      evalRunId: "eval-2",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
     expect(() => parsePublicBenchmarkBundle({ ...bundle, files: [...bundle.files, bundle.files[0]] })).toThrow(
@@ -82,14 +93,7 @@ describe("public Modal benchmark bundles", () => {
   it("bounds encoded file payloads and rejects an oversized local bundle before reading it", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-size-"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "9".repeat(40),
-      evalRunId: "eval-size-bounds",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
     const maxFileBase64Characters = 4 * Math.ceil((5 * 1024 * 1024) / 3);
@@ -117,14 +121,7 @@ describe("public Modal benchmark bundles", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-rows-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "e".repeat(40),
-      evalRunId: "eval-row-coverage",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, rowIds)
     });
 
@@ -138,17 +135,75 @@ describe("public Modal benchmark bundles", () => {
     }
   });
 
+  it("requires ready diagnostics bound to the exact bundle lineage and matrix", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-diagnostics-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+    const diagnosticsPath = "eval/public-eval-diagnostics.json";
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        files: bundle.files.filter((file) => file.path !== diagnosticsPath)
+      })
+    ).toThrow(/missing eval\/public-eval-diagnostics\.json/u);
+
+    const diagnostics = JSON.parse(bundleFileText(bundle, diagnosticsPath)) as Record<string, unknown>;
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(
+          bundle,
+          diagnosticsPath,
+          `${JSON.stringify({ ...diagnostics, candidate_commit: "b".repeat(40) })}\n`
+        )
+      )
+    ).toThrow(/diagnostics do not match candidate commit/u);
+
+    const rows = diagnostics.rows as Array<Record<string, unknown>>;
+    const notReady = {
+      ...diagnostics,
+      summary: {
+        ...(diagnostics.summary as Record<string, unknown>),
+        workflow_succeeded: 0,
+        workflow_nonterminal: 1,
+        terminal_reports_present: 0,
+        scoring_ready: false
+      },
+      rows: [
+        {
+          ...rows[0],
+          final_status: "launched",
+          workflow_status: "running",
+          workflow_terminal: false,
+          terminal_report_present: false,
+          scoring_ready: false,
+          reason_codes: [
+            "workflow-nonterminal",
+            "workflow-not-scoreable",
+            "final-status-not-scoreable",
+            "terminal-report-missing"
+          ]
+        }
+      ]
+    };
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, diagnosticsPath, `${JSON.stringify(notReady)}\n`))
+    ).toThrow(/not ready for scoring/u);
+
+    const wrongRow = {
+      ...diagnostics,
+      rows: [{ ...rows[0], target_id: "different-target" }]
+    };
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, diagnosticsPath, `${JSON.stringify(wrongRow)}\n`))
+    ).toThrow(/diagnostics row does not match the matrix/u);
+  });
+
   it("rejects reports whose row directory is absent from the embedded matrix", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-unexpected-row-"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "f".repeat(40),
-      evalRunId: "eval-unexpected-row",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
     const report = bundle.files.find((file) => file.path.endsWith("/report.md"));
@@ -168,21 +223,30 @@ describe("public Modal benchmark bundles", () => {
     const matrix = files.find((file) => file.path === "eval/matrix.json");
     if (matrix === undefined) throw new Error("missing matrix fixture");
     const input = {
-      benchmark: "evmbench" as const,
-      lane: "smoke" as const,
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "1".repeat(40),
-      evalRunId: "eval-invalid-matrix",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files
     };
 
     fs.writeFileSync(matrix.source, '[{"id":"../not-safe"}]\n');
     expect(() => createPublicBenchmarkBundle(input)).toThrow(/invalid ID/u);
 
-    fs.writeFileSync(matrix.source, '[{"id":"target-a-runner-trial-1"},{"id":"target-a-runner-trial-1"}]\n');
+    fs.writeFileSync(
+      matrix.source,
+      `${JSON.stringify([
+        {
+          id: "target-a-runner-trial-1",
+          target_id: "target-a",
+          variant_id: TEST_MODEL_SLUG,
+          trial_id: "trial-1"
+        },
+        {
+          id: "target-a-runner-trial-1",
+          target_id: "target-a",
+          variant_id: TEST_MODEL_SLUG,
+          trial_id: "trial-1"
+        }
+      ])}\n`
+    );
     expect(() => createPublicBenchmarkBundle(input)).toThrow(/repeats row ID/u);
   });
 
@@ -216,14 +280,7 @@ describe("public Modal benchmark bundles", () => {
     fs.writeFileSync(path.join(outside, "sentinel.txt"), "unchanged\n");
     fs.symlinkSync(outside, path.join(output, "eval"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "2".repeat(40),
-      evalRunId: "eval-output-intermediate-symlink",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
@@ -240,14 +297,7 @@ describe("public Modal benchmark bundles", () => {
     fs.writeFileSync(outside, "outside remains unchanged\n");
     fs.symlinkSync(outside, path.join(output, "eval", "eval.json"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "3".repeat(40),
-      evalRunId: "eval-output-final-symlink",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
@@ -262,14 +312,7 @@ describe("public Modal benchmark bundles", () => {
     fs.symlinkSync(outside, redirectedParent);
     const output = path.join(redirectedParent, "nested", "output");
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "5".repeat(40),
-      evalRunId: "eval-output-parent-symlink",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
@@ -283,21 +326,14 @@ describe("public Modal benchmark bundles", () => {
     fs.mkdirSync(path.join(output, "old"), { recursive: true });
     fs.writeFileSync(path.join(output, "old", "stale.txt"), "remove me\n");
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "ultrafuzz-bench",
-      lane: "smoke",
-      modelSlug: "claude-sonnet-5",
-      model: "claude-sonnet-5",
-      reasoning: "high",
-      candidateCommit: "4".repeat(40),
-      evalRunId: "eval-output-replacement",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
 
     extractPublicBenchmarkBundle(bundle, output);
 
     expect(fs.existsSync(path.join(output, "old"))).toBe(false);
-    expect(fs.readFileSync(path.join(output, "eval", "eval.json"), "utf8")).toContain("fixture-eval");
+    expect(fs.readFileSync(path.join(output, "eval", "eval.json"), "utf8")).toContain(TEST_EVAL_RUN_ID);
   });
 
   it("fails closed when a public source contains generic or exact injected secrets", () => {
@@ -328,14 +364,7 @@ describe("public Modal benchmark bundles", () => {
   it("reapplies generic and exact secret checks to a self-consistent remote bundle", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-remote-secret-"));
     const bundle = createPublicBenchmarkBundle({
-      benchmark: "evmbench",
-      lane: "smoke",
-      modelSlug: "gpt-5-6-luna",
-      model: "gpt-5.6-luna",
-      reasoning: "high",
-      candidateCommit: "5".repeat(40),
-      evalRunId: "eval-remote-secret",
-      lineage: TEST_LINEAGE,
+      ...TEST_BUNDLE_METADATA,
       files: completePublicSources(root, ["target-a-runner-trial-1"])
     });
     const reportPath = "reports/target-a-runner-trial-1/report.md";
@@ -371,16 +400,75 @@ function replaceBundleContents(
   };
 }
 
+function bundleFileText(bundle: ReturnType<typeof createPublicBenchmarkBundle>, bundlePath: string): string {
+  const file = bundle.files.find((entry) => entry.path === bundlePath);
+  if (file === undefined) throw new Error(`missing bundle fixture ${bundlePath}`);
+  return Buffer.from(file.contents_base64, "base64").toString("utf8");
+}
+
 function completePublicSources(root: string, rowIds: string[]): Array<{ path: string; root: string; source: string }> {
   const evalRoot = path.join(root, "eval-source");
+  const matrix = realisticMatrix(rowIds);
+  const diagnostics = {
+    schema_version: PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+    stage: "post-eval-pre-score",
+    benchmark: TEST_BUNDLE_METADATA.benchmark,
+    lane: TEST_BUNDLE_METADATA.lane,
+    experiment: "candidate",
+    model_slug: TEST_MODEL_SLUG,
+    model: TEST_MODEL,
+    reasoning: TEST_REASONING,
+    candidate_commit: TEST_CANDIDATE,
+    eval_run_id: TEST_EVAL_RUN_ID,
+    created_at: TEST_CREATED_AT,
+    lineage: {
+      logical_run_id: TEST_LINEAGE.logical_run_id,
+      generation: TEST_LINEAGE.generation,
+      attempt: TEST_LINEAGE.attempt,
+      attempt_id: TEST_LINEAGE.attempt_id,
+      config_fingerprint: TEST_LINEAGE.fingerprints.config,
+      source_fingerprint: TEST_LINEAGE.fingerprints.source,
+      image_fingerprint: TEST_LINEAGE.fingerprints.image,
+      model_fingerprint: TEST_LINEAGE.model_fingerprint
+    },
+    summary: {
+      planned: rowIds.length,
+      launched: rowIds.length,
+      launch_failed: 0,
+      run_records_missing: 0,
+      workflow_succeeded: rowIds.length,
+      workflow_failed: 0,
+      workflow_nonterminal: 0,
+      genuine_task_failure_rows: 0,
+      terminal_reports_present: rowIds.length,
+      scoring_ready: true
+    },
+    rows: matrix.map((row, index) => ({
+      row_id: row.id,
+      target_id: row.target_id,
+      variant_id: row.variant_id,
+      trial_id: row.trial_id,
+      run_status: "launched",
+      final_status: "succeeded",
+      workflow_status: "succeeded",
+      workflow_terminal: true,
+      terminal_disposition: "clean",
+      terminal_report_present: true,
+      workflow_ids: [`workflow-${index + 1}`],
+      diagnostic_codes: [],
+      scoring_ready: true,
+      reason_codes: []
+    }))
+  };
   const evalContents = new Map<string, string>([
-    ["eval.json", `${JSON.stringify({ eval_run_id: "fixture-eval" }, null, 2)}\n`],
-    ["matrix.json", `${JSON.stringify(realisticMatrix(rowIds), null, 2)}\n`],
+    ["eval.json", `${JSON.stringify({ eval_run_id: TEST_EVAL_RUN_ID }, null, 2)}\n`],
+    ["matrix.json", `${JSON.stringify(matrix, null, 2)}\n`],
     [
       "runs.jsonl",
       `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, final_status: "succeeded" })).join("\n")}\n`
     ],
     ["run-summary.json", `${JSON.stringify({ succeeded: rowIds.length }, null, 2)}\n`],
+    ["public-eval-diagnostics.json", `${JSON.stringify(diagnostics, null, 2)}\n`],
     ["scores.jsonl", `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, score: 1 })).join("\n")}\n`],
     ["summary.json", `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId })) }, null, 2)}\n`],
     ["summary.md", "# Eval summary\n"]
@@ -406,13 +494,13 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
   return sources;
 }
 
-function realisticMatrix(rowIds: string[]): unknown[] {
+function realisticMatrix(rowIds: string[]) {
   return rowIds.map((id, index) => {
     const targetId = `target-${index + 1}`;
     return {
       id,
       target_id: targetId,
-      variant_id: "runner",
+      variant_id: TEST_MODEL_SLUG,
       trial_id: "trial-1",
       run_id: `fixture-${id}`,
       target: {
@@ -422,8 +510,10 @@ function realisticMatrix(rowIds: string[]): unknown[] {
         ground_truth: `${targetId}.yml`,
         ground_truth_path: `/ground-truth/${targetId}.yml`
       },
-      variant: { id: "runner", prompt_overlay_paths: [] },
-      runner_model_profile: "gpt-5-6-luna",
+      variant: { id: TEST_MODEL_SLUG, prompt_overlay_paths: [] },
+      runner_model_profile: TEST_MODEL_SLUG,
+      runner_model: TEST_MODEL,
+      runner_reasoning: TEST_REASONING,
       judge_model_profile: "gpt-5-6-sol"
     };
   });

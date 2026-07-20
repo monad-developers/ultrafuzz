@@ -423,6 +423,7 @@ nodes:
     group: strategies
     depends_on:
       - property-specification-fanin
+      - actors-flows
     outputs:
       - path: admin-config-boundary-matrix.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -758,6 +759,7 @@ nodes:
     group: strategies
     depends_on:
       - property-specification-fanin
+      - actors-flows
       - reference-vulnerabilities-kadenzipfel
     outputs:
       - path: strategy-plan.json
@@ -912,6 +914,7 @@ nodes:
     group: review
     depends_on:
       - aggregate-test-files
+      - dedupe-findings
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1

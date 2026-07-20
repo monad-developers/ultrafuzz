@@ -90,18 +90,18 @@ describe("Modal benchmark config", () => {
       run_id: "public-main-a1b2c3",
       public_benchmark: {
         benchmark: "evmbench",
-        runner_model_profile: "benchmark-smoke-gpt-5-6-luna-high",
+        runner_model_profile: "benchmark-smoke-gpt-5-6-luna-low",
         candidate_repository: "https://github.com/monad-developers/ultrafuzz",
         candidate_commit: "a".repeat(40)
       },
       braintrust: { project: "ultrafuzz-public-benchmarks", judge_api_key_env: "OPENAI_API_KEY" },
       models: [
         {
-          slug: "benchmark-smoke-gpt-5-6-luna-high",
+          slug: "benchmark-smoke-gpt-5-6-luna-low",
           model: "gpt-5.6-luna",
           provider: "openai",
           agent: "CodexAgent",
-          reasoning: "high",
+          reasoning: "low",
           auth_mode: "api-key"
         }
       ]

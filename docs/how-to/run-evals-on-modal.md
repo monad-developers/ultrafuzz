@@ -85,14 +85,17 @@ The checked-in GitHub workflow uses Actions only as a control plane. Every push
 to `main` installs and builds the candidate, then builds an immutable Modal
 image named for that commit and launches four independent sandboxes:
 
-- GPT-5.6 Luna at `high` on EVMBench;
-- Claude Sonnet 5 at `high` on EVMBench;
-- GPT-5.6 Luna at `high` on Ultrafuzz-bench; and
-- Claude Sonnet 5 at `high` on Ultrafuzz-bench.
+- GPT-5.6 Luna at `low` on EVMBench;
+- Claude Sonnet 5 at `low` on EVMBench;
+- GPT-5.6 Luna at `low` on Ultrafuzz-bench; and
+- Claude Sonnet 5 at `low` on Ultrafuzz-bench.
 
 Every pair has a 3,600-second model-work budget. Scoring is independent of the
-runner and always uses GPT-5.6 Sol at `xhigh`. The ordinary main-push lane uses
-the pinned smoke cohorts and caps every explicit topology node timeout to the
+runner and always uses GPT-5.6 Sol at `xhigh`. To fit that measured budget, the
+smoke topology retains project and actor discovery, one independent
+admin/config finding lane, the Kaden coordinator, deduplication, and the final
+report. Other production stages remain in the `full` lane. The smoke runner
+uses `low` reasoning and caps every explicit topology node timeout to the
 configured 1,800-second node budget, including the Kaden coordinator. The public
 Modal launcher rejects the unchunked full cohorts before creating any sandbox:
 their matrix cannot fit the bounded control-plane deadline. Run full suites
@@ -242,19 +245,27 @@ generation, launch generation and attempt, whether model work started, node
 counts, checkpoint age and digest, exit category, runtime, aggregate usage,
 pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
-artifacts. By default, `collect` copies only `status.json`, `result.json`, and the generic
-worker lifecycle log; investigate sensitive run data on the private volume under
-the repository's normal access controls. Collection validates each contract and
+artifacts. By default, `collect` copies `status.json`, `result.json`, the generic
+worker lifecycle log, and an allowlisted `public-eval-diagnostics.json` when a
+public worker reached the post-eval gate. The diagnostic contains only row
+identities, terminal states, report-presence flags, diagnostic codes, and exact
+launch lineage; it never contains messages, paths, findings, or provider output.
+This lets failed Actions runs publish useful lifecycle evidence without
+repeating paid model work. Investigate arbitrary sensitive run data on the
+private volume under the repository's normal access controls. Collection validates each contract and
 generic log line before writing locally and refuses pre-hardening or malformed
 volume artifacts.
 
 Public EVMBench and Ultrafuzz-bench targets use a separate explicit contract.
 For those old open-source projects, `collect --public-results --config <path>`
 additionally copies the scored eval generation plus `report.md`, `report.json`,
-and `findings.normalized.json`. The bundle validates a fixed path allowlist,
-byte limits, canonical base64, unique paths, sizes, SHA-256 hashes, exact launch
-lineage, complete per-row report files, and the absence of generic or exact
-injected secrets before any file is extracted or uploaded.
+and `findings.normalized.json`. It also embeds the exact
+`public-eval-diagnostics.json` sidecar under `eval/`, so report-backed genuine
+task failures remain verifiable when the generation is published to history.
+The bundle validates a fixed path allowlist, byte limits, canonical base64,
+unique paths, sizes, SHA-256 hashes, exact launch and diagnostic lineage,
+score-ready lifecycle evidence, complete per-row report files, and the absence
+of generic or exact injected secrets before any file is extracted or uploaded.
 
 This public mode assumes the pinned benchmark repositories are trusted inputs.
 Its hashes and lineage checks detect corruption, stale results, and accidental

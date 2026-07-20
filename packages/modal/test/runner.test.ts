@@ -27,13 +27,15 @@ import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } fro
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import {
   MODAL_COLLECT_RESULT_FILES,
-  assertSanitizedModalCollectedFiles,
+  assertPublicBenchmarkBundleDiagnosticsMatch,
   assertPublicBenchmarkBundleLineage,
+  assertSanitizedModalCollectedFiles,
   classifyModalLaunchFailure,
   createModalBenchmarkSandbox,
   createExactCandidateSourceArchive,
   createTrackedSourceArchive,
   finishReservedModalLaunch,
+  hasExactPublicDiagnosticCollectionConfig,
   launchModalBenchmark,
   modalImageBuildCommand,
   modalSandboxName,
@@ -41,7 +43,8 @@ import {
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
   readOptionalModalSandboxText,
-  replaceSanitizedModalCollectedFiles
+  replaceSanitizedModalCollectedFiles,
+  selectModalCollectedEvidence
 } from "../src/runner.js";
 
 const MODEL: ModalModelSpec = {
@@ -179,7 +182,12 @@ describe("Modal image source staging", () => {
 
 describe("Modal result collection", () => {
   it("collects only sanitized status, terminal result, and generic worker log files", () => {
-    expect(MODAL_COLLECT_RESULT_FILES).toEqual(["status.json", "worker.log", "result.json"]);
+    expect(MODAL_COLLECT_RESULT_FILES).toEqual([
+      "status.json",
+      "worker.log",
+      "result.json",
+      "public-eval-diagnostics.json"
+    ]);
     expect(MODAL_COLLECT_RESULT_FILES).not.toContain("failure-details.json");
   });
 
@@ -196,6 +204,32 @@ describe("Modal result collection", () => {
         state: { ...lineage.state, source_revision: "e".repeat(40) }
       })
     ).toThrow(/candidate source revision/u);
+  });
+
+  it("retains public diagnostics only for the exact launch config and model", () => {
+    const lineage = publicCollectionLineage();
+    const input = {
+      config: lineage.config,
+      configFingerprint: lineage.configFingerprint,
+      configuredModel: MODEL,
+      state: lineage.state,
+      launch: { ...lineage.launch, generation: lineage.state.generation }
+    };
+
+    expect(hasExactPublicDiagnosticCollectionConfig(input)).toBe(true);
+    expect(hasExactPublicDiagnosticCollectionConfig({ ...input, configFingerprint: "f".repeat(64) })).toBe(false);
+    expect(
+      hasExactPublicDiagnosticCollectionConfig({
+        ...input,
+        configuredModel: { ...MODEL, provider: "anthropic" }
+      })
+    ).toBe(false);
+    expect(
+      hasExactPublicDiagnosticCollectionConfig({
+        ...input,
+        state: { ...lineage.state, source_revision: "f".repeat(40) }
+      })
+    ).toBe(false);
   });
 
   it("rejects every tampered public bundle lineage field", () => {
@@ -222,6 +256,8 @@ describe("Modal result collection", () => {
     for (const [diagnostic, override] of [
       ["bundle logical run lineage", { logical_run_id: "other-run" }],
       ["bundle generation lineage", { generation: 2 }],
+      ["bundle attempt lineage", { attempt: 2 }],
+      ["bundle attempt ID lineage", { attempt_id: "other-attempt" }],
       ["bundle configuration lineage", { config_fingerprint: "e".repeat(64) }],
       ["bundle source lineage", { source_fingerprint: "e".repeat(64) }],
       ["bundle image lineage", { image_fingerprint: "e".repeat(64) }],
@@ -234,6 +270,23 @@ describe("Modal result collection", () => {
         })
       ).toThrow(new RegExp(diagnostic, "u"));
     }
+  });
+
+  it("binds the bundled diagnostics to the exact collected attempt sidecar", () => {
+    const diagnostics = '{"attempt_id":"attempt-2"}\n';
+    const bundle = {
+      files: [
+        {
+          path: "eval/public-eval-diagnostics.json",
+          contents_base64: Buffer.from(diagnostics, "utf8").toString("base64")
+        }
+      ]
+    } as unknown as Parameters<typeof assertPublicBenchmarkBundleDiagnosticsMatch>[0];
+
+    expect(() => assertPublicBenchmarkBundleDiagnosticsMatch(bundle, diagnostics)).not.toThrow();
+    expect(() => assertPublicBenchmarkBundleDiagnosticsMatch(bundle, '{"attempt_id":"attempt-3"}\n')).toThrow(
+      /exact collected attempt/u
+    );
   });
 
   it("accepts only exact-attempt aggregate contracts and generic lifecycle logs", () => {
@@ -273,6 +326,30 @@ describe("Modal result collection", () => {
     expect(() =>
       assertSanitizedModalCollectedFiles({ ...files, "worker.log": "unexpected detail\n" }, context)
     ).toThrow(/unsanitized Modal worker log/u);
+  });
+
+  it("omits diagnostics unless an exact config supplies every injected secret value", () => {
+    const files = {
+      "status.json": "status",
+      "public-eval-diagnostics.json": "diagnostics"
+    };
+    expect(selectModalCollectedEvidence(files, undefined, undefined, {}).files).toEqual({
+      "status.json": "status"
+    });
+
+    const config = publicCollectionLineage().config;
+    expect(selectModalCollectedEvidence(files, config, config.models[0], {}).files).toEqual({
+      "status.json": "status"
+    });
+    expect(selectModalCollectedEvidence(files, config, undefined, { OPENAI_API_KEY: "opaque-secret" }).files).toEqual({
+      "status.json": "status"
+    });
+
+    const selected = selectModalCollectedEvidence(files, config, config.models[0], {
+      OPENAI_API_KEY: "opaque-secret"
+    });
+    expect(selected.files).toBe(files);
+    expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
   });
 
   it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
@@ -346,6 +423,8 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
       lineage: {
         logical_run_id: config.run_id,
         generation: 1,
+        attempt: 1,
+        attempt_id: "attempt-1",
         config_fingerprint: configFingerprint,
         source_fingerprint: "b".repeat(64),
         image_fingerprint: "c".repeat(64),
@@ -369,6 +448,8 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
       slug: MODEL.slug,
       model: MODEL.model,
       reasoning: MODEL.reasoning,
+      attempt: 1,
+      attempt_id: "attempt-1",
       model_fingerprint: fingerprintModalModel(MODEL)
     }
   };

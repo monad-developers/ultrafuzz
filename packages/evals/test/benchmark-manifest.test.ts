@@ -35,15 +35,15 @@ describe("public benchmark manifests", () => {
     expect(suite.targets.every((target) => target.sensitivity === "public")).toBe(true);
     expect(suite.run.trials_per_variant).toBe(1);
     expect(suite.model_profiles).toEqual({
-      "benchmark-smoke-gpt-5-6-luna-high": {
+      "benchmark-smoke-gpt-5-6-luna-low": {
         agent: "CodexAgent",
         model: "gpt-5.6-luna",
-        reasoning: "high"
+        reasoning: "low"
       },
-      "benchmark-smoke-claude-sonnet-5-high": {
+      "benchmark-smoke-claude-sonnet-5-low": {
         agent: "ClaudeAgent",
         model: "claude-sonnet-5",
-        reasoning: "high"
+        reasoning: "low"
       },
       "benchmark-judge-gpt-5-6-sol-xhigh": {
         agent: "CodexAgent",
@@ -52,8 +52,8 @@ describe("public benchmark manifests", () => {
       }
     });
     expect(suite.variants.map((variant) => variant.runner_model_profile)).toEqual([
-      "benchmark-smoke-gpt-5-6-luna-high",
-      "benchmark-smoke-claude-sonnet-5-high"
+      "benchmark-smoke-gpt-5-6-luna-low",
+      "benchmark-smoke-claude-sonnet-5-low"
     ]);
     expect(suite.variants.every((variant) => variant.judge_model_profile === "benchmark-judge-gpt-5-6-sol-xhigh")).toBe(
       true
@@ -86,7 +86,7 @@ describe("public benchmark manifests", () => {
   it("selects exactly one runner profile for a Modal pair while retaining the fixed judge", () => {
     const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
-    const runnerModelProfileId = "benchmark-smoke-claude-sonnet-5-high";
+    const runnerModelProfileId = "benchmark-smoke-claude-sonnet-5-low";
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "evmbench",
       lane: "smoke",

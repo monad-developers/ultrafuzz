@@ -50,6 +50,10 @@ Dynamic findings:
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
+Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
+
+Admin/config generated-test manifest: {{artifact_path:admin-config-boundaries}}/generated-tests.json
+
 Kaden strategy plan: {{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json
 
 Kaden findings: {{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json

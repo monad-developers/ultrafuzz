@@ -403,6 +403,20 @@ jobs:
           while IFS=$'\t' read -r config state pair; do
             outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
             if [ ! -f "$outcome_file" ] || ! jq -e '.terminal_status == "succeeded"' "$outcome_file" > /dev/null; then
+              diagnostic_exit=0
+              timeout --signal=TERM --kill-after=30s 5m \
+                node packages/modal/dist/cli.js collect \
+                --config "$BENCHMARK_CONTROL/$config" \
+                --state "$BENCHMARK_CONTROL/$state" \
+                --output "$BENCHMARK_RESULTS/$pair" || diagnostic_exit=$?
+              if [ -f "$outcome_file" ]; then
+                if [ "$diagnostic_exit" -eq 0 ]; then
+                  jq '.diagnostic_collection_status = "succeeded"' "$outcome_file" > "$outcome_file.tmp"
+                else
+                  jq '.diagnostic_collection_status = "failed"' "$outcome_file" > "$outcome_file.tmp"
+                fi
+                mv "$outcome_file.tmp" "$outcome_file"
+              fi
               continue
             fi
             collection_exit=0
@@ -416,14 +430,24 @@ jobs:
               jq '.collection_status = "succeeded"' "$outcome_file" > "$outcome_file.tmp"
               mv "$outcome_file.tmp" "$outcome_file"
             else
-              rm -rf "${BENCHMARK_RESULTS:?}/$pair"
+              diagnostic_exit=0
+              timeout --signal=TERM --kill-after=30s 5m \
+                node packages/modal/dist/cli.js collect \
+                --config "$BENCHMARK_CONTROL/$config" \
+                --state "$BENCHMARK_CONTROL/$state" \
+                --output "$BENCHMARK_RESULTS/$pair" || diagnostic_exit=$?
+              diagnostic_status=failed
+              if [ "$diagnostic_exit" -eq 0 ]; then
+                diagnostic_status=succeeded
+              fi
               collection_category=collection-failed
               if [ "$collection_exit" -eq 124 ] || [ "$collection_exit" -eq 137 ]; then
                 collection_category=collection-timeout
               fi
               jq \
                 --arg category "$collection_category" \
-                '.terminal_status = "failed" | .collection_status = "failed" | .category = $category' \
+                --arg diagnostic_status "$diagnostic_status" \
+                '.terminal_status = "failed" | .collection_status = "failed" | .diagnostic_collection_status = $diagnostic_status | .category = $category' \
                 "$outcome_file" > "$outcome_file.tmp"
               mv "$outcome_file.tmp" "$outcome_file"
             fi

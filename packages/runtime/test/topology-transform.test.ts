@@ -82,14 +82,43 @@ test("the checked-in smoke manifest produces a valid filtered production topolog
   });
   const nodeIds = new Set(transformed.nodes.map((node) => node.id));
   assert.ok(lanes.smoke.excluded_node_ids.every((id) => !nodeIds.has(id)));
-  assert.equal(validation.effectiveLoopCounts["boundary-tests"], 1);
-  assert.equal(validation.effectiveLoopCounts["encode-decode"], 1);
+  assert.deepEqual(
+    [...nodeIds],
+    [
+      "__start__",
+      "__finish__",
+      "project-discovery",
+      "actors-flows",
+      "reference-vulnerabilities-kadenzipfel",
+      "admin-config-boundaries",
+      "kadenzipfel-vulnerability-strategies",
+      "dedupe-findings",
+      "final-report"
+    ]
+  );
+  assert.equal(validation.effectiveLoopCounts["admin-config-boundaries"], 1);
+  assert.equal(validation.effectiveLoopCounts["kadenzipfel-vulnerability-strategies"], 1);
+  assert.deepEqual(transformed.nodes.find((node) => node.id === "admin-config-boundaries")?.depends_on, [
+    "actors-flows"
+  ]);
+  assert.deepEqual(transformed.nodes.find((node) => node.id === "kadenzipfel-vulnerability-strategies")?.depends_on, [
+    "actors-flows",
+    "reference-vulnerabilities-kadenzipfel"
+  ]);
+  assert.deepEqual(transformed.nodes.find((node) => node.id === "final-report")?.depends_on, ["dedupe-findings"]);
+  const finalReportPrompt = prompts.entries.get("final-report")?.body ?? "";
+  assert.match(finalReportPrompt, /\{\{artifact_path:dedupe-findings\}\}\/strategy-detections\.json/u);
+  assert.match(finalReportPrompt, /\{\{artifact_path:dedupe-findings\}\}\/finding-lifecycle-ledger\.json/u);
+  assert.match(finalReportPrompt, /bounded-final-review/u);
+  assert.match(finalReportPrompt, /final_disposition/u);
+  assert.doesNotMatch(finalReportPrompt, /\{\{artifact_path:severity-classification\}\}/u);
 });
 
 test("the Kaden coordinator and its pinned reference can be ablated together", () => {
   const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
   const excludedNodeIds = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
-  const transformed = transformTopologyForRun(loadTopology(repositoryRoot, { requirePromptFiles: true }), {
+  const source = loadTopology(repositoryRoot, { requirePromptFiles: true });
+  const transformed = transformTopologyForRun(source, {
     excludedNodeIds
   });
   const prompts = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot: repositoryRoot }), {
@@ -103,6 +132,10 @@ test("the Kaden coordinator and its pinned reference can be ablated together", (
   const nodeIds = new Set(validation.topology.nodes.map((node) => node.id));
 
   assert.ok(excludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.deepEqual(
+    [...nodeIds],
+    source.nodes.map((node) => node.id).filter((id) => !excludedNodeIds.includes(id))
+  );
   assert.ok(
     validation.topology.nodes.every((node) =>
       node.depends_on.every((dependency) => !excludedNodeIds.includes(dependency))
@@ -143,6 +176,18 @@ test("the smoke lane and Kaden ablation exclusions compose into a valid run", ()
   const nodeIds = new Set(validation.topology.nodes.map((node) => node.id));
 
   assert.ok(excludedNodeIds.every((id) => !nodeIds.has(id)));
+  assert.deepEqual(
+    [...nodeIds],
+    [
+      "__start__",
+      "__finish__",
+      "project-discovery",
+      "actors-flows",
+      "admin-config-boundaries",
+      "dedupe-findings",
+      "final-report"
+    ]
+  );
   assert.ok(
     validation.topology.nodes.every((node) =>
       node.depends_on.every((dependency) => !excludedNodeIds.includes(dependency))

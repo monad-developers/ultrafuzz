@@ -26,19 +26,19 @@ const imageName = `ufz-runner-${candidateCommit}`;
 const profilePrefix = `benchmark-${lane}`;
 const models = [
   {
-    slug: `${profilePrefix}-gpt-5-6-luna-high`,
+    slug: `${profilePrefix}-gpt-5-6-luna-low`,
     model: "gpt-5.6-luna",
     provider: "openai",
     agent: "CodexAgent",
-    reasoning: "high",
+    reasoning: "low",
     auth_mode: "api-key"
   },
   {
-    slug: `${profilePrefix}-claude-sonnet-5-high`,
+    slug: `${profilePrefix}-claude-sonnet-5-low`,
     model: "claude-sonnet-5",
     provider: "anthropic",
     agent: "ClaudeAgent",
-    reasoning: "high",
+    reasoning: "low",
     auth_mode: "api-key"
   }
 ];

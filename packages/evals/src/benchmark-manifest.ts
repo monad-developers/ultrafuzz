@@ -171,18 +171,19 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
 }
 
 function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: BenchmarkLaneManifest): void {
+  const runnerReasoning = laneName === "smoke" ? "low" : "high";
   const expectedRunners: BenchmarkModelProfileManifest[] = [
     {
-      id: `benchmark-${laneName}-gpt-5-6-luna-high`,
+      id: `benchmark-${laneName}-gpt-5-6-luna-${runnerReasoning}`,
       agent: "CodexAgent",
       model: "gpt-5.6-luna",
-      reasoning: "high"
+      reasoning: runnerReasoning
     },
     {
-      id: `benchmark-${laneName}-claude-sonnet-5-high`,
+      id: `benchmark-${laneName}-claude-sonnet-5-${runnerReasoning}`,
       agent: "ClaudeAgent",
       model: "claude-sonnet-5",
-      reasoning: "high"
+      reasoning: runnerReasoning
     }
   ];
   const expectedJudge: BenchmarkModelProfileManifest = {
@@ -197,7 +198,7 @@ function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: Benchmar
   ) {
     throw new EvalError(
       "EVAL_BENCHMARK_MANIFEST_INVALID",
-      `${laneName} lane must use exactly gpt-5.6-luna high and claude-sonnet-5 high runners with the gpt-5.6-sol xhigh judge`
+      `${laneName} lane must use exactly gpt-5.6-luna ${runnerReasoning} and claude-sonnet-5 ${runnerReasoning} runners with the gpt-5.6-sol xhigh judge`
     );
   }
 }

@@ -151,8 +151,9 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
-Both lanes pin GPT-5.6 Luna `high` and Claude Sonnet 5 `high` as runners and
-GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs may contain one
+The bounded smoke lane pins GPT-5.6 Luna `low` and Claude Sonnet 5 `low`; the
+full lane pins the same runners at `high`. Both use GPT-5.6 Sol `xhigh` as an
+independent judge. Public Modal pairs may contain one
 runner variant, but publication validates that it is an exact projection of the
 checked-in matrix before merging its observations.
 `eval history` consumes only complete scored generations, stores aggregate
@@ -163,9 +164,11 @@ reasons and render as unavailable.
 
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the
-allowlisted report and normalized-finding files. Bundle path, size, and SHA-256
-checks are distinct from the aggregate-only `eval bundle` privacy contract used
-for arbitrary targets.
+allowlisted report and normalized-finding files. It also carries the strict
+post-eval diagnostic that certifies each scoreable terminal outcome; history
+accepts a failed workflow only when that evidence identifies a report-backed
+genuine task failure. Bundle path, size, and SHA-256 checks are distinct from
+the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
 `eval publish --provider langsmith <eval-run-id>` replays the journal from
 offset 0 and reconstructs the entire node trace on a provider after the fact

@@ -14,6 +14,7 @@ import {
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
+import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
   applyBenchmarkExperiment,
   assertPublicWorkerBundleLineage,
@@ -21,6 +22,7 @@ import {
   materializeBakedCandidate,
   publicBenchmarkWorkRoot,
   publicBundleSources,
+  runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
@@ -42,11 +44,11 @@ it("keeps high-fanout public benchmark work off the persistent Modal volume", ()
 it("recognizes and cleans the legacy persistent public workspace without treating local work as durable", async () => {
   const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-preflight-"));
   const model: ModalModelSpec = {
-    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    slug: "benchmark-smoke-gpt-5-6-luna-low",
     model: "gpt-5.6-luna",
     provider: "openai",
     agent: "CodexAgent",
-    reasoning: "high",
+    reasoning: "low",
     auth_mode: "api-key"
   };
   const config = {
@@ -99,11 +101,74 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
 
   const localWorkRoot = publicBenchmarkWorkRoot(dataRoot);
   const legacyWorkRoot = path.join(dataRoot, "public-workspace");
-  expect(captured?.workspaceEvidencePaths).toEqual([legacyWorkRoot, path.join(dataRoot, "public-results.json")]);
+  expect(captured?.workspaceEvidencePaths).toEqual([
+    legacyWorkRoot,
+    path.join(dataRoot, "public-results.json"),
+    path.join(dataRoot, "public-eval-diagnostics.json")
+  ]);
   expect(captured?.workspaceEvidencePaths).not.toContain(localWorkRoot);
   expect(captured?.freshCleanupPaths).toEqual(
-    expect.arrayContaining([localWorkRoot, legacyWorkRoot, path.join(dataRoot, "public-results.json")])
+    expect.arrayContaining([
+      localWorkRoot,
+      legacyWorkRoot,
+      path.join(dataRoot, "public-results.json"),
+      path.join(dataRoot, "public-eval-diagnostics.json")
+    ])
   );
+});
+
+it("rejects the unbounded full lane before reading paid-run credentials", async () => {
+  const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-full-lane-"));
+  const model: ModalModelSpec = {
+    slug: "benchmark-full-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "public-full-lane",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "full",
+      experiment: "candidate",
+      excluded_node_ids: [],
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const lineage: ModalWorkerLineage = {
+    schema_version: "ultrafuzz.modal.worker-lineage.v1",
+    logical_run_id: config.run_id,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-one",
+    workspace_mode: "fresh",
+    fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+    model_fingerprint: "e".repeat(64)
+  };
+
+  await expect(
+    runPublicBenchmarkWorker({
+      config,
+      model,
+      lineage,
+      dataRoot,
+      preflight: async () => undefined,
+      isCheckpointIncompatible: () => false,
+      checkpointIncompatibleError: (message) => new Error(message)
+    })
+  ).rejects.toThrow(/only the bounded smoke lane/u);
 });
 
 it("durably checkpoints the transition to paid model work before launch", async () => {
@@ -136,6 +201,49 @@ it("durably checkpoints the transition to paid model work before launch", async 
     attempt: 3,
     model_work_started: true
   });
+});
+
+it("checkpoints diagnostics even when eval run exits nonzero", async () => {
+  const failure = new Error("eval run reported an incomplete row");
+  const diagnostics = { summary: { scoring_ready: false } } as PublicEvalDiagnostics;
+  const order: string[] = [];
+
+  const result = await runAndCheckpointPublicEvalDiagnostics({
+    runEval: async () => {
+      order.push("run");
+      throw failure;
+    },
+    buildDiagnostics: () => {
+      order.push("build");
+      return diagnostics;
+    },
+    persistDiagnostics: async (value) => {
+      expect(value).toBe(diagnostics);
+      order.push("persist");
+    },
+    flush: async () => {
+      order.push("flush");
+    }
+  });
+
+  expect(result).toEqual({ diagnostics, runError: failure });
+  expect(order).toEqual(["run", "build", "persist", "flush"]);
+});
+
+it("preserves the eval run failure when no diagnostic can be built", async () => {
+  const runFailure = new Error("model-work-timeout");
+  await expect(
+    runAndCheckpointPublicEvalDiagnostics({
+      runEval: async () => {
+        throw runFailure;
+      },
+      buildDiagnostics: () => {
+        throw new Error("matrix is unavailable");
+      },
+      persistDiagnostics: async () => undefined,
+      flush: async () => undefined
+    })
+  ).rejects.toBe(runFailure);
 });
 
 it("materializes the private candidate from the image with exact clean Git provenance", async () => {
@@ -185,7 +293,7 @@ it("merges the smoke and Kaden exclusions exactly once for a public experiment",
     lane: "smoke",
     cohort,
     lanes,
-    runnerModelProfileId: "benchmark-smoke-gpt-5-6-luna-high"
+    runnerModelProfileId: "benchmark-smoke-gpt-5-6-luna-low"
   });
   const kadenNodeIds = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
   const suite = applyBenchmarkExperiment(baseSuite, "without-kadenzipfel", [
@@ -229,34 +337,61 @@ it("publishes only the final journal record for each benchmark row", () => {
     ultrafuzz_run_id: "target-run",
     ultrafuzz_run_root: runRoot,
     report_json_path: reportPath,
-    status: "launched"
+    status: "launched",
+    workflow: { status: "succeeded", terminal: true }
   };
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify(record)}\n${JSON.stringify({ ...record, final_status: "succeeded" })}\n`
   );
   fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: record.row_id }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+  const diagnostics = { root, source: diagnosticsPath };
 
-  const reportSources = publicBundleSources(controlRoot, evalRunId).filter((source) =>
-    source.path.startsWith("reports/")
-  );
+  const sources = publicBundleSources(controlRoot, evalRunId, diagnostics);
+  expect(sources).toContainEqual({
+    path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`,
+    root,
+    source: diagnosticsPath
+  });
+  const reportSources = sources.filter((source) => source.path.startsWith("reports/"));
   expect(reportSources.map((source) => source.path)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
     "reports/target-a-runner-trial-1/report.md",
     "reports/target-a-runner-trial-1/findings.normalized.json"
   ]);
 
+  writeGenuineTaskFailureFixture(runRoot);
+  fs.appendFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({
+      ...record,
+      final_status: "failed",
+      workflow: { status: "failed", terminal: true }
+    })}\n`
+  );
+  expect(
+    publicBundleSources(controlRoot, evalRunId, diagnostics)
+      .filter((source) => source.path.startsWith("reports/"))
+      .map((source) => source.path)
+  ).toEqual([
+    "reports/target-a-runner-trial-1/report.json",
+    "reports/target-a-runner-trial-1/report.md",
+    "reports/target-a-runner-trial-1/findings.normalized.json"
+  ]);
+
   fs.rmSync(path.join(reportRoot, "report.md"));
-  expect(() => publicBundleSources(controlRoot, evalRunId)).toThrow(/missing report\.md/u);
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
   const model: ModalModelSpec = {
-    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    slug: "benchmark-smoke-gpt-5-6-luna-low",
     model: "gpt-5.6-luna",
     provider: "openai",
     agent: "CodexAgent",
-    reasoning: "high",
+    reasoning: "low",
     auth_mode: "api-key"
   };
   const config: PublicModalBenchmarkConfig = {
@@ -309,6 +444,8 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     lineage: {
       logical_run_id: lineage.logical_run_id,
       generation: lineage.generation,
+      attempt: lineage.attempt,
+      attempt_id: lineage.attempt_id,
       config_fingerprint: lineage.fingerprints.config,
       source_fingerprint: lineage.fingerprints.source,
       image_fingerprint: lineage.fingerprints.image,
@@ -328,6 +465,14 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
       lineage
     )
   ).toThrow(/source lineage/u);
+  expect(() =>
+    assertPublicWorkerBundleLineage(
+      { ...bundle, lineage: { ...bundle.lineage, attempt_id: "stale-attempt" } },
+      config,
+      model,
+      lineage
+    )
+  ).toThrow(/attempt ID lineage/u);
 });
 
 it("atomically seals a public bundle with private permissions", async () => {
@@ -344,4 +489,37 @@ it("atomically seals a public bundle with private permissions", async () => {
 
 function execGit(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function writeGenuineTaskFailureFixture(runRoot: string): void {
+  const attemptId = "task-one";
+  fs.writeFileSync(
+    path.join(runRoot, "state.json"),
+    `${JSON.stringify({
+      nodes: {
+        [attemptId]: {
+          node_id: attemptId,
+          status: "failed",
+          timed_out: false,
+          finished_at: "2026-07-20T00:00:00.000Z",
+          last_error: "task output did not pass final validation",
+          provenance: {
+            workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
+            required_artifacts: { ok: true, missing: [] },
+            terminal_disposition: {
+              schema_version: "ultrafuzz.terminal-disposition.v1",
+              kind: "task-output-validation-failure"
+            }
+          }
+        }
+      }
+    })}\n`
+  );
+  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
+  fs.writeFileSync(
+    path.join(runRoot, "smithers", "tasks.json"),
+    `${JSON.stringify({
+      tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
+    })}\n`
+  );
 }

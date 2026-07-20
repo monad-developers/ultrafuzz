@@ -3,12 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { assertRegularFileInside } from "@ultrafuzz/artifacts";
+import {
+  MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  parsePublicEvalDiagnostics
+} from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
 
-export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v1" as const;
+export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v2" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -39,6 +44,8 @@ const bundleFileSchema = z.strictObject({
 const bundleLineageSchema = z.strictObject({
   logical_run_id: safeId,
   generation: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  attempt_id: safeId,
   config_fingerprint: sha256,
   source_fingerprint: sha256,
   image_fingerprint: sha256,
@@ -79,7 +86,10 @@ export function createPublicBenchmarkBundle(input: {
   reasoning: string;
   candidateCommit: string;
   evalRunId: string;
-  lineage: Pick<ModalWorkerLineage, "logical_run_id" | "generation" | "fingerprints" | "model_fingerprint">;
+  lineage: Pick<
+    ModalWorkerLineage,
+    "logical_run_id" | "generation" | "attempt" | "attempt_id" | "fingerprints" | "model_fingerprint"
+  >;
   files: PublicBenchmarkBundleSource[];
   forbiddenSecretValues?: readonly string[];
   createdAt?: string;
@@ -112,6 +122,8 @@ export function createPublicBenchmarkBundle(input: {
       lineage: {
         logical_run_id: input.lineage.logical_run_id,
         generation: input.lineage.generation,
+        attempt: input.lineage.attempt,
+        attempt_id: input.lineage.attempt_id,
         config_fingerprint: input.lineage.fingerprints.config,
         source_fingerprint: input.lineage.fingerprints.source,
         image_fingerprint: input.lineage.fingerprints.image,
@@ -203,6 +215,7 @@ export function parsePublicBenchmarkBundle(
     "eval/matrix.json",
     "eval/runs.jsonl",
     "eval/run-summary.json",
+    `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`,
     "eval/scores.jsonl",
     "eval/summary.json",
     "eval/summary.md"
@@ -211,15 +224,37 @@ export function parsePublicBenchmarkBundle(
   }
   const matrixContents = contentsByPath.get("eval/matrix.json");
   if (matrixContents === undefined) throw new Error("public benchmark bundle is missing eval/matrix.json");
-  const matrixRowIds = parseMatrixRowIds(matrixContents);
+  const matrixRows = parseMatrixRows(matrixContents);
+  const diagnosticsPath = `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`;
+  const diagnosticsContents = contentsByPath.get(diagnosticsPath);
+  if (diagnosticsContents === undefined) throw new Error(`public benchmark bundle is missing ${diagnosticsPath}`);
+  const diagnostics = parseBundleDiagnostics(diagnosticsContents);
+  assertBundleDiagnosticsLineage(parsed, diagnostics);
+  if (!diagnostics.summary.scoring_ready) {
+    throw new Error("public benchmark bundle diagnostics are not ready for scoring");
+  }
+  if (diagnostics.rows.length !== matrixRows.size) {
+    throw new Error("public benchmark bundle diagnostics row set does not match the matrix");
+  }
+  for (const diagnostic of diagnostics.rows) {
+    const matrixRow = matrixRows.get(diagnostic.row_id);
+    if (
+      matrixRow === undefined ||
+      matrixRow.target_id !== diagnostic.target_id ||
+      matrixRow.variant_id !== diagnostic.variant_id ||
+      matrixRow.trial_id !== diagnostic.trial_id
+    ) {
+      throw new Error(`public benchmark bundle diagnostics row does not match the matrix: ${diagnostic.row_id}`);
+    }
+  }
   for (const bundlePath of paths) {
     if (!bundlePath.startsWith("reports/")) continue;
     const rowId = bundlePath.split("/")[1];
-    if (rowId === undefined || !matrixRowIds.has(rowId)) {
+    if (rowId === undefined || !matrixRows.has(rowId)) {
       throw new Error(`public benchmark bundle contains a report for an unexpected matrix row: ${bundlePath}`);
     }
   }
-  for (const rowId of matrixRowIds) {
+  for (const rowId of matrixRows.keys()) {
     for (const reportFile of PUBLIC_REPORT_FILES) {
       const required = `reports/${rowId}/${reportFile}`;
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
@@ -228,7 +263,14 @@ export function parsePublicBenchmarkBundle(
   return parsed;
 }
 
-function parseMatrixRowIds(contents: Buffer): Set<string> {
+interface PublicBundleMatrixRow {
+  id: string;
+  target_id: string;
+  variant_id: string;
+  trial_id: string;
+}
+
+function parseMatrixRows(contents: Buffer): Map<string, PublicBundleMatrixRow> {
   let value: unknown;
   try {
     value = JSON.parse(contents.toString("utf8")) as unknown;
@@ -238,17 +280,73 @@ function parseMatrixRowIds(contents: Buffer): Set<string> {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error("public benchmark bundle eval/matrix.json must be a non-empty array");
   }
-  const rowIds = new Set<string>();
+  const rows = new Map<string, PublicBundleMatrixRow>();
   for (const [index, row] of value.entries()) {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
       throw new Error(`public benchmark bundle matrix row ${index} must be an object`);
     }
-    const result = safeId.safeParse((row as Record<string, unknown>).id);
-    if (!result.success) throw new Error(`public benchmark bundle matrix row ${index} has an invalid ID`);
-    if (rowIds.has(result.data)) throw new Error(`public benchmark bundle matrix repeats row ID ${result.data}`);
-    rowIds.add(result.data);
+    const input = row as Record<string, unknown>;
+    const id = safeId.safeParse(input.id);
+    if (!id.success) throw new Error(`public benchmark bundle matrix row ${index} has an invalid ID`);
+    const targetId = safeId.safeParse(input.target_id);
+    const variantId = safeId.safeParse(input.variant_id);
+    const trialId = safeId.safeParse(input.trial_id);
+    if (!targetId.success || !variantId.success || !trialId.success) {
+      throw new Error(`public benchmark bundle matrix row ${index} has an invalid identity`);
+    }
+    if (rows.has(id.data)) throw new Error(`public benchmark bundle matrix repeats row ID ${id.data}`);
+    rows.set(id.data, {
+      id: id.data,
+      target_id: targetId.data,
+      variant_id: variantId.data,
+      trial_id: trialId.data
+    });
   }
-  return rowIds;
+  return rows;
+}
+
+function parseBundleDiagnostics(contents: Buffer): ReturnType<typeof parsePublicEvalDiagnostics> {
+  if (contents.byteLength > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) {
+    throw new Error("public benchmark bundle diagnostics exceed the size limit");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(contents.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("public benchmark bundle diagnostics are not valid JSON", { cause: error });
+  }
+  try {
+    return parsePublicEvalDiagnostics(value);
+  } catch (error) {
+    throw new Error("public benchmark bundle diagnostics are invalid", { cause: error });
+  }
+}
+
+function assertBundleDiagnosticsLineage(
+  bundle: PublicBenchmarkBundle,
+  diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>
+): void {
+  const mismatches = [
+    diagnostics.benchmark === bundle.benchmark ? undefined : "benchmark",
+    diagnostics.lane === bundle.lane ? undefined : "lane",
+    diagnostics.experiment === bundle.experiment ? undefined : "experiment",
+    diagnostics.model_slug === bundle.model_slug ? undefined : "model slug",
+    diagnostics.model === bundle.model ? undefined : "model",
+    diagnostics.reasoning === bundle.reasoning ? undefined : "reasoning",
+    diagnostics.candidate_commit === bundle.candidate_commit ? undefined : "candidate commit",
+    diagnostics.eval_run_id === bundle.eval_run_id ? undefined : "eval run",
+    diagnostics.lineage.logical_run_id === bundle.lineage.logical_run_id ? undefined : "logical run lineage",
+    diagnostics.lineage.generation === bundle.lineage.generation ? undefined : "generation lineage",
+    diagnostics.lineage.attempt === bundle.lineage.attempt ? undefined : "attempt lineage",
+    diagnostics.lineage.attempt_id === bundle.lineage.attempt_id ? undefined : "attempt ID lineage",
+    diagnostics.lineage.config_fingerprint === bundle.lineage.config_fingerprint ? undefined : "configuration lineage",
+    diagnostics.lineage.source_fingerprint === bundle.lineage.source_fingerprint ? undefined : "source lineage",
+    diagnostics.lineage.image_fingerprint === bundle.lineage.image_fingerprint ? undefined : "image lineage",
+    diagnostics.lineage.model_fingerprint === bundle.lineage.model_fingerprint ? undefined : "model lineage"
+  ].filter((value): value is string => value !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public benchmark bundle diagnostics do not match ${mismatches.join(", ")}`);
+  }
 }
 
 export function readPublicBenchmarkBundle(
@@ -462,6 +560,7 @@ function isAllowedBundlePath(value: string): boolean {
     "eval/matrix.json",
     "eval/runs.jsonl",
     "eval/run-summary.json",
+    `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`,
     "eval/scores.jsonl",
     "eval/summary.json",
     "eval/summary.md",

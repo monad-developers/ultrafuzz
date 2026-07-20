@@ -29,7 +29,7 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.pairs).toHaveLength(4);
     expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench", "ultrafuzz-bench"]));
     expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
-      new Set(["benchmark-smoke-gpt-5-6-luna-high", "benchmark-smoke-claude-sonnet-5-high"])
+      new Set(["benchmark-smoke-gpt-5-6-luna-low", "benchmark-smoke-claude-sonnet-5-low"])
     );
     expect(manifest.image_name).toBe(`ufz-runner-${"a".repeat(40)}`);
     for (const pair of manifest.pairs) {
@@ -37,11 +37,13 @@ describe("public Modal benchmark configuration", () => {
         node_timeout_seconds: number;
         public_benchmark: { max_runtime_seconds: number };
         braintrust: { judge_api_key_env: string; judge_url?: string };
+        models: Array<{ reasoning: string }>;
       };
       expect(config.node_timeout_seconds).toBe(1800);
       expect(config.public_benchmark.max_runtime_seconds).toBe(3600);
       expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
       expect(config.braintrust.judge_url).toBe("https://api.openai.com/v1/chat/completions");
+      expect(config.models).toEqual([expect.objectContaining({ reasoning: "low" })]);
     }
   });
 
@@ -323,8 +325,12 @@ describe("public Modal benchmark configuration", () => {
     expect(collectScript).toContain("timeout --signal=TERM --kill-after=30s 5m");
     expect(collectScript).toContain("node packages/modal/dist/cli.js collect");
     expect(collectScript).toContain('--config "$BENCHMARK_CONTROL/$config"');
+    expect(collectScript).toContain('--state "$BENCHMARK_CONTROL/$state"');
+    expect(collectScript).toContain('diagnostic_collection_status = "succeeded"');
+    expect(collectScript).toContain('diagnostic_collection_status = "failed"');
     expect(collectScript).toContain('collection_status = "failed"');
     expect(collectScript).toContain("collection-timeout");
+    expect(collectScript).not.toContain("rm -rf");
 
     const resultUpload = step("Upload public benchmark reports and findings");
     const diagnosticsUpload = step("Upload launch state and failure diagnostics");
