@@ -12,6 +12,7 @@ export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexA
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
+    sandbox: "workspace-write",
     skipGitRepoCheck: true,
     ...codexAuthOptions()
   });

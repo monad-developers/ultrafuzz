@@ -719,6 +719,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /addDir:\s*options\.addDir/);
+  assert.match(codexAgentText, /sandbox:\s*"workspace-write"/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
