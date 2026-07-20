@@ -6,7 +6,7 @@ import type { FindingJudgeInput, FindingJudgeResult, GroundTruthBug } from "../t
  * Versioned adjudicator instructions. Bump this whenever any prompt content,
  * candidate aliasing, truncation, or structured-output contract changes.
  */
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v5-same-fix";
+export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v6-canonical-subsumption";
 
 const SYSTEM_PROMPT = loadPrompt("adjudicator-system.mdx");
 const USER_PROMPT = loadPrompt("adjudicator-user.mdx");

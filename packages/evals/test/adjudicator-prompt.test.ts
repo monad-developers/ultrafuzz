@@ -48,16 +48,25 @@ describe("adjudicator prompt assets", () => {
     expect(messages[1]?.content).not.toContain("BUG-1");
   });
 
-  it("defines duplicate equivalence with the same-fix, mechanism, and outcome safeguards", () => {
+  it("defines canonical subsumption across path variants and subcases", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v5-same-fix");
-    expect(rendered).toContain("canonical fix would likely prevent the candidate");
-    expect(rendered).toContain("same vulnerable mechanism, sink, or violated invariant");
-    expect(rendered).toContain("security outcome is compatible");
-    expect(rendered).toContain("entrypoint, trigger, setup sequence, data carrier");
-    expect(rendered).toContain("Partial textual resemblance");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v6-canonical-subsumption");
+    expect(rendered).toContain("path variant or subcase of the canonical root cause or violated invariant");
+    expect(rendered).toContain("canonical issue's invariant-level remediation covers");
+    expect(rendered).toContain("Exact entrypoint, setup, trigger, data carrier");
+    expect(rendered).toContain("proof-of-concept, micro-localization, or local patch may differ");
+  });
+
+  it("guards canonical subsumption against surface similarity and independent remediation", () => {
+    const rendered = buildAdjudicatorPrompt(judgeInput())
+      .map((message) => message.content)
+      .join("\n");
+
+    expect(rendered).toContain("Textual resemblance, component overlap, or a similar symptom alone is insufficient");
+    expect(rendered).toContain("materially different root cause or invariant");
+    expect(rendered).toContain("independent remediation after the canonical remediation");
   });
 
   it("renders schema-retry instructions from MDX without rewriting response text", () => {

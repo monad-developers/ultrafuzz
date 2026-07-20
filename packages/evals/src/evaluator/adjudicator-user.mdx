@@ -1,7 +1,7 @@
 Score the finding with this rubric:
 Return exactly one JSON object with matched_ground_truth_bug_id (a candidate label string or null), score, signals, rationale, and confidence. Every numeric field (score, signals.root_cause, signals.affected_area, signals.impact, signals.evidence, and confidence) must be a JSON number from 0.0 through 1.0.
 
-Apply the same-fix/invariant test before scoring a candidate. Differences in entrypoint, trigger, setup sequence, data carrier, exact PoC implementation, or proposed micro-localization do not defeat a match when the canonical fix would likely prevent the candidate, the security outcome is compatible, and both findings reach the same vulnerable mechanism, sink, or violated invariant. Explain those three signals in the rationale when returning a match. Partial textual resemblance alone is not duplicate evidence.
+Apply the canonical-subsumption test before scoring a candidate. A duplicate exists when the candidate is a path variant or subcase of the canonical root cause or violated invariant and the canonical issue's invariant-level remediation covers it. Exact entrypoint, setup, trigger, data carrier, proof-of-concept, micro-localization, or local patch may differ. Explain the shared root cause or invariant, compatible security outcome, and why no independent remediation remains when returning a match. Textual resemblance, component overlap, or a similar symptom alone is insufficient. A materially different root cause or invariant that would still require independent remediation after the canonical remediation is a nonmatch.
 
 - 0.0: no meaningful match
 - 0.4: weak signal in the same area
