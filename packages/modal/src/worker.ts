@@ -696,13 +696,20 @@ function readLimitedStream(stream: NodeJS.ReadableStream | null): Promise<string
   if (stream === null) return Promise.resolve("");
   return new Promise((resolve) => {
     let text = "";
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve(text);
+    };
     stream.setEncoding("utf8");
     stream.on("data", (chunk: string) => {
       if (text.length >= 2_000_000) return;
       text += chunk.slice(0, Math.max(0, 2_000_000 - text.length));
     });
-    stream.once("end", () => resolve(text));
-    stream.once("error", () => resolve(text));
+    stream.once("end", finish);
+    stream.once("close", finish);
+    stream.once("error", finish);
   });
 }
 
