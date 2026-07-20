@@ -594,14 +594,22 @@ async function waitForWorkflowTerminal(
       return { ...state, status: "succeeded" };
     }
     const recoverableNodes = recoverableNodeEntries(state);
+    const actionableRecoverableNodes = recoverableNodes.filter((entry) =>
+      resetNodeActionable(entry, resetCooldowns, resetHistory)
+    );
     if (isTerminalWorkflowStatus(state.status)) {
-      if (terminalDurableRunNeedsMoreWorkflowPolling(state, recoverableNodes.length)) {
+      const onlySkippedOrCoolingRecoverableNodes =
+        recoverableNodes.length > 0 && actionableRecoverableNodes.length === 0;
+      if (
+        onlySkippedOrCoolingRecoverableNodes ||
+        terminalDurableRunNeedsMoreWorkflowPolling(state, actionableRecoverableNodes.length)
+      ) {
         await sleep(RECOVERY_POLL_MS);
         continue;
       }
       return state;
     }
-    if (recoverableNodes.some((entry) => resetNodeActionable(entry, resetCooldowns, resetHistory))) {
+    if (actionableRecoverableNodes.length > 0) {
       return { ...state, status: "failed" };
     }
     await sleep(RECOVERY_POLL_MS);
