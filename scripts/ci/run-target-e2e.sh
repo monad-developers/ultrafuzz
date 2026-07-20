@@ -241,7 +241,8 @@ assert_cli_ok "$evidence_root/validate.json" "validate"
 
 run_status=0
 if [ "$e2e_mode" = "submission" ]; then
-  fake_runner="$run_root/fake-bin/smithers"
+  fake_runner="$(cd "$run_root" && pwd -P)/fake-bin/smithers"
+  fake_runner_log="$(cd "$evidence_root" && pwd -P)/fake-smithers-invocation.json"
   mkdir -p "$(dirname "$fake_runner")"
   install -m 0755 "$fake_runner_source" "$fake_runner"
   run_cli_json "$evidence_root/run.json" "$evidence_root/run.stderr.log" \

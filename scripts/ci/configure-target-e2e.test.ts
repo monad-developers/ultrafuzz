@@ -198,6 +198,8 @@ describe("target E2E runner", () => {
     expect(script).toContain("env -u OPENAI_API_KEY");
     expect(script).toContain('SMITHERS_BIN="$fake_runner"');
     expect(script).toContain('SMITHERS_FAKE_LOG="$fake_runner_log"');
+    expect(script).toContain('fake_runner="$(cd "$run_root" && pwd -P)/fake-bin/smithers"');
+    expect(script).toContain('fake_runner_log="$(cd "$evidence_root" && pwd -P)/fake-smithers-invocation.json"');
     expect(script).toContain('if [ "$e2e_mode" = "submission" ]; then');
     expect(script).toContain("assert-run-submission");
     expect(script).toContain("wait_for_report");
