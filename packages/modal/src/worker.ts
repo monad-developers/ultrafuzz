@@ -27,6 +27,7 @@ const DATA_ROOT = resolvePersistentRemoteRoot(REMOTE_DATA_ROOT, RESOLVED_VOLUME_
 const WORK_ROOT = path.join(DATA_ROOT, "workspace");
 const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
+const RESET_HISTORY_PATH = path.join(DATA_ROOT, "recovery-reset-history.json");
 const RESUME_EXISTING = process.env.ULTRAFUZZ_MODAL_RESUME_EXISTING === "1";
 const RECOVERY_MAX_RESETS = 96;
 const RECOVERY_POLL_MS = 60_000;
@@ -71,6 +72,16 @@ type RecoverableNodeEntry = {
   reason: "failed" | "stale-running" | "artifact-complete-workflow-failed";
 };
 type ResetCooldowns = Map<string, number>;
+interface ResetHistory {
+  schema_version: "ultrafuzz.modal.recovery-reset-history.v1";
+  records: ResetHistoryRecord[];
+}
+interface ResetHistoryRecord {
+  node_id: string;
+  reason: RecoverableNodeEntry["reason"];
+  reset_node_keys: string[];
+  attempted_at: string;
+}
 
 async function main(): Promise<void> {
   try {
@@ -424,6 +435,7 @@ async function runEval(argv: string[], target: string): Promise<void> {
 
 async function recoverWorkflow(target: string, evalRunId: string): Promise<boolean> {
   const resetCooldowns: ResetCooldowns = new Map();
+  const resetHistory = await readResetHistory();
   for (let attempt = 1; attempt <= RECOVERY_MAX_RESETS; attempt++) {
     pruneResetCooldowns(resetCooldowns);
     const state = await synchronizedRunState(target);
@@ -434,7 +446,11 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       return false;
     }
     const recoverableNodes = recoverableNodeEntries(state);
-    const resetNode = recoverableNodes.find((entry) => !resetNodeOnCooldown(entry, resetCooldowns));
+    const resetNode = recoverableNodes.find((entry) => resetNodeActionable(entry, resetCooldowns, resetHistory));
+    const cooldownBlockedNodes = recoverableNodes.filter((entry) => resetNodeOnCooldown(entry, resetCooldowns));
+    const historySkippedNodes = recoverableNodes.filter((entry) =>
+      artifactCompleteResetAlreadyAttempted(entry, resetHistory)
+    );
     await setStatus("recovering", {
       eval_run_id: evalRunId,
       recovery_attempt: attempt,
@@ -443,7 +459,8 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       artifact_complete_failed_node_count: recoverableNodes.filter(
         (node) => node.reason === "artifact-complete-workflow-failed"
       ).length,
-      recently_reset_node_count: resetCooldownNodeCount(recoverableNodes, resetCooldowns),
+      recently_reset_node_count: cooldownBlockedNodes.length,
+      reset_history_skipped_node_count: historySkippedNodes.length,
       workflow_status: state.status
     });
     if (resetNode !== undefined) {
@@ -454,6 +471,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       );
       const resetNodes = resetNodeCandidates(nodeId, node);
       await resumeWithResetCandidates(state.run_id, target, resetNodes, attempt);
+      await recordResetHistory(resetHistory, resetNode);
       const cooldownUntil = armResetCooldown(resetNode, resetCooldowns);
       await appendFile(
         LOG_PATH,
@@ -462,7 +480,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         ).toISOString()}\n`
       );
       continue;
-    } else if (recoverableNodes.length > 0) {
+    } else if (cooldownBlockedNodes.length > 0) {
       await appendFile(
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] waiting for reset propagation (${attempt}/${RECOVERY_MAX_RESETS})\n`
@@ -478,7 +496,7 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       });
     }
 
-    const terminal = await waitForWorkflowTerminal(target, resetCooldowns);
+    const terminal = await waitForWorkflowTerminal(target, resetCooldowns, resetHistory);
     if (terminal?.status === "succeeded" || workflowArtifactsComplete(terminal)) {
       return true;
     }
@@ -507,10 +525,6 @@ function pruneResetCooldowns(cooldowns: ResetCooldowns, now = Date.now()): void 
 
 function resetNodeOnCooldown(entry: RecoverableNodeEntry, cooldowns: ResetCooldowns, now = Date.now()): boolean {
   return resetNodeKeys(entry).some((key) => (cooldowns.get(key) ?? 0) > now);
-}
-
-function resetCooldownNodeCount(entries: RecoverableNodeEntry[], cooldowns: ResetCooldowns): number {
-  return entries.filter((entry) => resetNodeOnCooldown(entry, cooldowns)).length;
 }
 
 function resetSettleMs(): number {
@@ -563,7 +577,8 @@ function resetNodeCandidates(nodeId: string, node: DurableNodeState): string[] {
 
 async function waitForWorkflowTerminal(
   target: string,
-  resetCooldowns: ResetCooldowns
+  resetCooldowns: ResetCooldowns,
+  resetHistory: ResetHistory
 ): Promise<DurableRunState | undefined> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
   while (Date.now() < deadline) {
@@ -585,12 +600,102 @@ async function waitForWorkflowTerminal(
       }
       return state;
     }
-    if (recoverableNodes.some((entry) => !resetNodeOnCooldown(entry, resetCooldowns))) {
+    if (recoverableNodes.some((entry) => resetNodeActionable(entry, resetCooldowns, resetHistory))) {
       return { ...state, status: "failed" };
     }
     await sleep(RECOVERY_POLL_MS);
   }
   return synchronizedRunState(target);
+}
+
+function resetNodeActionable(entry: RecoverableNodeEntry, cooldowns: ResetCooldowns, history: ResetHistory): boolean {
+  return !resetNodeOnCooldown(entry, cooldowns) && !artifactCompleteResetAlreadyAttempted(entry, history);
+}
+
+function artifactCompleteResetAlreadyAttempted(entry: RecoverableNodeEntry, history: ResetHistory): boolean {
+  if (entry.reason !== "artifact-complete-workflow-failed") return false;
+  const keys = new Set(resetNodeKeys(entry));
+  return history.records.some(
+    (record) => record.reason === entry.reason && record.reset_node_keys.some((key) => keys.has(key))
+  );
+}
+
+async function readResetHistory(): Promise<ResetHistory> {
+  const empty: ResetHistory = { schema_version: "ultrafuzz.modal.recovery-reset-history.v1", records: [] };
+  try {
+    const parsed = JSON.parse(await readFile(RESET_HISTORY_PATH, "utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return empty;
+    const record = parsed as Record<string, unknown>;
+    if (record.schema_version !== empty.schema_version || !Array.isArray(record.records)) return empty;
+    const records = record.records.flatMap((entry): ResetHistoryRecord[] => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+      const value = entry as Record<string, unknown>;
+      const nodeId = typeof value.node_id === "string" ? value.node_id : undefined;
+      const reason = typeof value.reason === "string" ? value.reason : undefined;
+      const attemptedAt = typeof value.attempted_at === "string" ? value.attempted_at : undefined;
+      const keys = Array.isArray(value.reset_node_keys)
+        ? value.reset_node_keys.filter((key): key is string => typeof key === "string" && key.trim() !== "")
+        : [];
+      if (
+        nodeId === undefined ||
+        attemptedAt === undefined ||
+        !["failed", "stale-running", "artifact-complete-workflow-failed"].includes(reason ?? "") ||
+        keys.length === 0
+      ) {
+        return [];
+      }
+      return [
+        {
+          node_id: nodeId,
+          reason: reason as RecoverableNodeEntry["reason"],
+          reset_node_keys: keys,
+          attempted_at: attemptedAt
+        }
+      ];
+    });
+    return { ...empty, records };
+  } catch {
+    return resetHistoryFromWorkerLog(empty);
+  }
+}
+
+async function resetHistoryFromWorkerLog(empty: ResetHistory): Promise<ResetHistory> {
+  const log = await readFile(LOG_PATH, "utf8").catch(() => "");
+  const records: ResetHistoryRecord[] = [];
+  const pattern =
+    /^(?<attempted_at>\S+) \[workflow recovery\] resetting (?<node_id>\S+) \((?<reason>artifact-complete-workflow-failed);/gmu;
+  for (const match of log.matchAll(pattern)) {
+    const nodeId = match.groups?.node_id;
+    const attemptedAt = match.groups?.attempted_at;
+    if (nodeId === undefined || attemptedAt === undefined) continue;
+    const resetNodeKeys = nodeId.startsWith("node:")
+      ? [nodeId, nodeId.slice("node:".length)]
+      : [nodeId, `node:${nodeId}`];
+    records.push({
+      node_id: nodeId,
+      reason: "artifact-complete-workflow-failed",
+      reset_node_keys: [...new Set(resetNodeKeys)],
+      attempted_at: attemptedAt
+    });
+  }
+  return { ...empty, records };
+}
+
+async function recordResetHistory(history: ResetHistory, entry: RecoverableNodeEntry): Promise<void> {
+  const reset_node_keys = resetNodeKeys(entry);
+  history.records = [
+    ...history.records.filter(
+      (record) =>
+        !(record.reason === entry.reason && record.reset_node_keys.some((key) => reset_node_keys.includes(key)))
+    ),
+    {
+      node_id: entry.nodeId,
+      reason: entry.reason,
+      reset_node_keys,
+      attempted_at: new Date().toISOString()
+    }
+  ];
+  await writeFile(RESET_HISTORY_PATH, `${JSON.stringify(history, null, 2)}\n`, { mode: 0o600 });
 }
 
 function recoverableNodeEntries(state: DurableRunState): RecoverableNodeEntry[] {
