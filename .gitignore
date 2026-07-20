@@ -1,5 +1,9 @@
 .worktrees/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/ultrafuzz-release-skill/
+!.agents/skills/ultrafuzz-release-skill/**
 .claude/
 .codex-runs/
 .smithers/
