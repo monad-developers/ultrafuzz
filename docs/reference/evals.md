@@ -168,7 +168,8 @@ Grading never depends on a provider: scores are computed locally
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
 
-Suites may opt into an independent judge panel at the suite root:
+Configure an independent judge panel at the root of the eval suite YAML selected
+by `--suite` or `[eval].eval_config`:
 
 ```yaml
 judge_panel:

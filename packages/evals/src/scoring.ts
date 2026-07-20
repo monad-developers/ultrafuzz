@@ -7,9 +7,9 @@ import { z } from "zod/v4";
 
 import { summarizeEvalTerminal } from "./efficiency.js";
 import {
-  ADJUDICATOR_OUTPUT_CONTRACT,
   ADJUDICATOR_RESPONSE_FORMAT,
   buildAdjudicatorPrompt,
+  buildAdjudicatorRetryPrompt,
   canonicalBugIdForAdjudicatorAlias,
   EVAL_JUDGE_PROMPT_VERSION
 } from "./evaluator/adjudicator-prompt.js";
@@ -817,9 +817,7 @@ export function gatewayLlmJudge(
                 : [
                     {
                       role: "user" as const,
-                      content:
-                        `The previous response did not match the required JSON schema. ${ADJUDICATOR_OUTPUT_CONTRACT} Return one corrected JSON object only. ` +
-                        `Previous response: ${invalidContent.slice(0, 4000)}`
+                      content: buildAdjudicatorRetryPrompt(invalidContent)
                     }
                   ])
             ],
