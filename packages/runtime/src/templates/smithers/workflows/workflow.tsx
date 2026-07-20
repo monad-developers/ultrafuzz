@@ -13,7 +13,7 @@ import { z } from "zod/v4";
 // .smithers/agents/ directory this workflow needs.
 import * as projectAgents from "../agents/index.ts";
 
-const { validateArtifactContract } = await import(__ULTRAFUZZ_ARTIFACTS_MODULE__);
+const { assertRegularFileInside, validateArtifactContract } = await import(__ULTRAFUZZ_ARTIFACTS_MODULE__);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -87,6 +87,7 @@ function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
   try {
+    assertRegularFileInside(artifactDir, artifactPath, failureMessage);
     const resolvedPath = realpathSync(artifactPath);
     if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
       throw new Error(failureMessage);
@@ -95,6 +96,19 @@ function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, f
   } catch {
     throw new Error(failureMessage);
   }
+}
+
+function resolveNonEmptyRegularArtifactFile(
+  artifactDir: string,
+  artifactPath: string,
+  missingFailureMessage: string,
+  emptyFailureMessage: string
+): string {
+  const resolvedPath = resolveRegularArtifactFile(artifactDir, artifactPath, missingFailureMessage);
+  if (statSync(resolvedPath).size === 0) {
+    throw new Error(emptyFailureMessage);
+  }
+  return resolvedPath;
 }
 
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
@@ -144,10 +158,11 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
     }
-    resolveRegularArtifactFile(
+    resolveNonEmptyRegularArtifactFile(
       artifactDir,
       artifactPath,
-      `artifact-contract failure: generated test file is missing ${relativePath}`
+      `artifact-contract failure: generated test file is missing ${relativePath}`,
+      `artifact-contract failure: generated test file is empty ${relativePath}`
     );
   }
 }
@@ -180,7 +195,7 @@ export default smithers((ctx) => {
                 retryPolicy={task.retryPolicy}
                 metadata={task.metadata}
               >
-                {`${untrustedContentBoundary}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`}
+                {`${untrustedContentBoundary}\n\n${task.runtimeContext}\n\n${operatorPrompt}${promptForTask(task, inputTask)}`}
               </Task>
               <Task
                 id={task.verifierId}

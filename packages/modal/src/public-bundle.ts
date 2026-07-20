@@ -57,7 +57,6 @@ const bundleSchema = z.strictObject({
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
   model_slug: safeId,
-  experiment: safeId,
   model: z.string().min(1).max(256),
   reasoning: z.string().min(1).max(64),
   judge_model: z.literal("gpt-5.6-sol"),
@@ -81,7 +80,6 @@ export function createPublicBenchmarkBundle(input: {
   benchmark: PublicBenchmarkBundle["benchmark"];
   lane: PublicBenchmarkBundle["lane"];
   modelSlug: string;
-  experiment?: string;
   model: string;
   reasoning: string;
   candidateCommit: string;
@@ -112,7 +110,6 @@ export function createPublicBenchmarkBundle(input: {
       benchmark: input.benchmark,
       lane: input.lane,
       model_slug: input.modelSlug,
-      experiment: input.experiment ?? "candidate",
       model: input.model,
       reasoning: input.reasoning,
       judge_model: "gpt-5.6-sol",
@@ -329,7 +326,6 @@ function assertBundleDiagnosticsLineage(
   const mismatches = [
     diagnostics.benchmark === bundle.benchmark ? undefined : "benchmark",
     diagnostics.lane === bundle.lane ? undefined : "lane",
-    diagnostics.experiment === bundle.experiment ? undefined : "experiment",
     diagnostics.model_slug === bundle.model_slug ? undefined : "model slug",
     diagnostics.model === bundle.model ? undefined : "model",
     diagnostics.reasoning === bundle.reasoning ? undefined : "reasoning",

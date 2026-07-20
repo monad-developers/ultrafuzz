@@ -777,3 +777,80 @@ test("generated-test manifests persist explicit generated files with provenance"
     true
   );
 });
+
+test("generated-test manifest writer rejects zero-byte companion files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-empty-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Empty.t.sol", content: "" }]
+      }),
+    /generated test file must be non-empty/u
+  );
+  assert.equal(fs.existsSync(path.join(getNodeArtifactDir(layout, "strategy-a"), "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects final symlinks without touching outside files", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-symlinked-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const outsideDir = tempProject();
+  const outsideFile = path.join(outsideDir, "Outside.t.sol");
+  fs.writeFileSync(outsideFile, "outside sentinel\n");
+  const symlinkPath = path.join(generatedTestsDir, "Linked.t.sol");
+  fs.symlinkSync(outsideFile, symlinkPath);
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Linked.t.sol", content: "replacement\n" }]
+      }),
+    /symlink/u
+  );
+  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+  assert.equal(fs.readFileSync(outsideFile, "utf8"), "outside sentinel\n");
+  assert.equal(fs.existsSync(path.join(nodeDir, "generated-tests.json")), false);
+});
+
+test("generated-test manifest writer rejects broken final symlinks before writing content", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-broken-symlink-generated-test" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  const generatedTestsDir = path.join(nodeDir, "generated-tests");
+  fs.mkdirSync(generatedTestsDir, { recursive: true });
+  const missingOutsideFile = path.join(tempProject(), "Missing.t.sol");
+  const symlinkPath = path.join(generatedTestsDir, "Broken.t.sol");
+  fs.symlinkSync(missingOutsideFile, symlinkPath);
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/Broken.t.sol", content: "replacement\n" }]
+      }),
+    /symlink/u
+  );
+  assert.equal(fs.lstatSync(symlinkPath).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(missingOutsideFile), false);
+});
+
+test("generated-test manifest writer rejects paths outside the generated-tests root", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-outside-generated-test" });
+
+  assert.throws(
+    () =>
+      writeGeneratedTestManifest({
+        layout,
+        nodeId: "strategy-a",
+        tests: [{ path: "generated-tests/../../Outside.t.sol", content: "outside\n" }]
+      }),
+    /cannot traverse outside/u
+  );
+  assert.equal(fs.existsSync(path.join(layout.artifactsDir, "Outside.t.sol")), false);
+});

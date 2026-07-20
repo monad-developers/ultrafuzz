@@ -93,26 +93,22 @@ const publicBenchmarkConfigSchema = z
         benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
         lane: z.enum(["smoke", "full"]).default("smoke"),
         runner_model_profile: safeId,
-        experiment: z.enum(["candidate", "without-kadenzipfel"]).default("candidate"),
-        excluded_node_ids: z.array(safeId).max(128).default([]),
         candidate_repository: httpsUrl,
         candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
         max_runtime_seconds: z.number().int().min(300).max(7_200).default(3_600)
       })
       .strict()
-      .superRefine((scope, context) => {
-        const kadenExclusions = ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"];
-        const expected = scope.experiment === "candidate" ? [] : kadenExclusions;
-        if (JSON.stringify(scope.excluded_node_ids) !== JSON.stringify(expected)) {
-          context.addIssue({
-            code: "custom",
-            path: ["excluded_node_ids"],
-            message: `${scope.experiment} must use its exact checked-in node exclusion set`
-          });
-        }
-      })
   })
-  .strict();
+  .strict()
+  .superRefine((config, context) => {
+    if (config.models.length !== 1 || config.models[0]?.slug !== config.public_benchmark.runner_model_profile) {
+      context.addIssue({
+        code: "custom",
+        path: ["models"],
+        message: "public benchmarks must configure exactly their selected runner model profile"
+      });
+    }
+  });
 
 const benchmarkConfigSchema = z.union([privateBenchmarkConfigSchema, publicBenchmarkConfigSchema]);
 

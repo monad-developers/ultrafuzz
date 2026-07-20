@@ -183,6 +183,7 @@ function publicDiagnostics(matrix: EvalMatrixRow[], genuineFailureRows: Readonly
       terminal_report_present: true,
       workflow_ids: [`workflow-${index + 1}`],
       diagnostic_codes: [],
+      failed_nodes: [],
       scoring_ready: true,
       reason_codes: []
     };
@@ -192,7 +193,6 @@ function publicDiagnostics(matrix: EvalMatrixRow[], genuineFailureRows: Readonly
     stage: "post-eval-pre-score",
     benchmark: "evmbench",
     lane: "smoke",
-    experiment: "candidate",
     model_slug: first.runner_model_profile,
     model: first.runner_model,
     reasoning: first.runner_reasoning,
@@ -234,6 +234,16 @@ describe("longitudinal eval history", () => {
     expect(() => mergeEvalHistory(once, [{ ...first, precision: 0.5 }])).toThrowError(
       expect.objectContaining({ code: "EVAL_HISTORY_CONFLICT" })
     );
+  });
+
+  it("preserves historical multi-trial observations without applying current lane defaults", () => {
+    const historical = observation({ trial_count: 10 });
+    const parsed = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [historical]
+    });
+    expect(parsed.observations).toEqual([historical]);
+    expect(parsed.observations[0]?.trial_count).toBe(10);
   });
 
   it("rejects malformed history and inconsistent completeness", () => {
@@ -433,7 +443,12 @@ describe("longitudinal eval history", () => {
       lane: "smoke",
       cohort,
       lanes,
-      runnerModelProfileId: "benchmark-smoke-claude-sonnet-5-low"
+      runnerModelProfileOverride: {
+        id: "workflow-smoke-claude-sonnet-5-high",
+        agent: "ClaudeAgent",
+        model: "claude-sonnet-5",
+        reasoning: "high"
+      }
     });
     expect(() =>
       assertPublicBenchmarkGeneration(
@@ -444,6 +459,18 @@ describe("longitudinal eval history", () => {
         publicMatrix(singleRunnerSuite)
       )
     ).not.toThrow();
+
+    const wrongJudgeSuite = structuredClone(singleRunnerSuite);
+    wrongJudgeSuite.model_profiles[wrongJudgeSuite.run.judge_model_profile]!.model = "gpt-5.6-luna";
+    expect(() =>
+      assertPublicBenchmarkGeneration(
+        REPOSITORY_ROOT,
+        "evmbench",
+        "smoke",
+        wrongJudgeSuite,
+        publicMatrix(wrongJudgeSuite)
+      )
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" }));
 
     const duplicate = [...matrix];
     duplicate[duplicate.length - 1] = matrix[0]!;

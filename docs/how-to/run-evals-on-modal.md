@@ -79,41 +79,59 @@ For judges that require short-lived credentials, configure an HTTPS
 `braintrust.judge_credential_endpoint`. The worker requests a model-scoped
 credential in memory immediately before scoring and never persists it.
 
-## Run the public post-main matrix
+## Run the public benchmark workflow
 
 The checked-in GitHub workflow uses Actions only as a control plane. Every push
-to `main` installs and builds the candidate, then builds an immutable Modal
-image named for that commit and launches four independent sandboxes:
+on every branch installs and builds the exact candidate commit, builds an
+immutable Modal image for that commit, and launches the real Ultrafuzz-bench
+smoke. A newer push on the same branch cancels its older smoke workflow.
 
-- GPT-5.6 Luna at `low` on EVMBench;
-- Claude Sonnet 5 at `low` on EVMBench;
-- GPT-5.6 Luna at `low` on Ultrafuzz-bench; and
-- Claude Sonnet 5 at `low` on Ultrafuzz-bench.
+The smoke has exactly three targets: one Foundry target, one Hardhat target, and
+one Vyper target. It runs GPT-5.6 Luna at `high` by default. Repository variables
+`BENCHMARK_SMOKE_OPENAI_MODEL` and `BENCHMARK_SMOKE_OPENAI_REASONING` can
+override that runner without changing the checked-in lane manifest. The smoke
+uses one strategy loop and excludes the stateful-invariant and differential
+families.
 
-Every pair has a 3,600-second model-work budget. Scoring is independent of the
-runner and always uses GPT-5.6 Sol at `xhigh`. To fit that measured budget, the
-smoke topology retains project and actor discovery, one independent
-admin/config finding lane, the Kaden coordinator, deduplication, and the final
-report. Other production stages remain in the `full` lane. The smoke runner
-uses `low` reasoning and caps every explicit topology node timeout to the
-configured 1,800-second node budget, including the Kaden coordinator. The public
-Modal launcher rejects the unchunked full cohorts before creating any sandbox:
-their matrix cannot fit the bounded control-plane deadline. Run full suites
-through the generic eval path only after splitting them into independently
-recoverable chunks.
+A manual `workflow_dispatch` runs the full lane instead. It evaluates every
+checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
+`high` by default. Dispatch inputs `openai_model`, `openai_reasoning`,
+`anthropic_model`, and `anthropic_reasoning` provide explicit overrides. The
+full lane retains the production strategy set, including invariant,
+differential, and dynamic strategies.
 
-Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, and `BRAINTRUST_API_KEY` as Actions secrets. Modal receives
-only the provider credential needed by a pair plus the judge credential. It
-never receives a GitHub token.
+Both lanes use the standard Modal benchmark resources described above. Every
+target row has a 3,600-second model-work watchdog. The smoke admits two rows at
+a time; the full lane admits 20, keeping each checked-in cohort to two row
+waves. Both modes use eight-way workflow concurrency so full rows can progress
+through the complete production topology without serializing their agent work.
+Scoring remains independent of the runner and always uses GPT-5.6 Sol at
+`xhigh`.
 
-The worker clones the exact candidate and target commits, obtains EVMBench
+`trials_per_variant` defaults to `1` when it is omitted, and both checked-in
+lanes resolve to one trial. Increase it only deliberately: benchmark work and
+cost multiply across every selected target, runner model, and trial.
+
+Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
+Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY`; push
+smoke runs do not. Public rows score from their local artifacts and do not
+require a Braintrust reporting key. Modal receives only the provider credential
+needed by a pair plus the OpenAI judge credential. It never receives a GitHub
+token.
+
+The worker verifies the exact candidate and target commits, obtains EVMBench
 labels from the pinned public Frontier Evals revision, and uses the versioned
 public Ultrafuzz-bench labels. Public target reports and normalized findings are
-packed with SHA-256 and path validation. Actions uploads the four bundles with
-30-day retention. No partial generation updates history: all four pairs must
-finish and score before the workflow regenerates charts and updates the
-`automation/eval-history` pull request with a `[ci skip]` commit.
+packed with SHA-256 and path validation and uploaded with 30-day retention. No
+partial generation updates history: every configured pair must finish and score
+before publication.
+
+The compare-and-swap publisher validates the generation with the benchmark
+policy from the exact candidate checkout, appends observations keyed to that
+candidate commit, regenerates the charts, and updates the
+`automation/eval-history` pull request. It retries a changed remote publication
+tip and commits with `[ci skip]`, so chart-only publication does not start a new
+benchmark run.
 
 Set the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
 token that can create pull requests when organization policy prevents
@@ -121,19 +139,6 @@ token that can create pull requests when organization policy prevents
 `github.token`. If policy still blocks PR creation, the workflow succeeds with
 a warning, preserves the complete publication on `automation/eval-history`,
 and adds a compare-and-open link to the job summary for manual completion.
-
-For a controlled issue #55 measurement, dispatch the workflow with
-`paired-kadenzipfel`. It launches eight detached pairs: candidate and
-`without-kadenzipfel` for each model × benchmark pair. The latter removes only
-the pinned Kaden reference and its coordinator, on top of the ordinary smoke
-exclusions. The workflow validates the paired lineage and includes
-`kadenzipfel-ablation-comparison.json` and `.md` with quality, token, and cost
-deltas in the same public artifact; ablation rows are intentionally excluded
-from longitudinal history.
-
-The comparison's token and cost fields come from the Ultrafuzz runner ledger.
-Braintrust tracks the independent judge calls and Modal tracks sandbox spend;
-all three are correlated offline by the immutable generation and eval-run IDs.
 
 ## Build and launch
 
@@ -208,8 +213,8 @@ Private collection remains aggregate-only. The public workflow opts into the
 larger allowlisted result contract with `--public-results --config <path>`, then
 validates and extracts it with `unpack-public`. Public collection requires the
 exact config used at launch and accepts a bundle only when its candidate,
-benchmark, lane, experiment, model, reasoning, and eval-run lineage all match
-that config and the launch state. Private collection does not require a config.
+benchmark, lane, model, reasoning, and eval-run lineage all match that config
+and the launch state. Private collection does not require a config.
 
 Launch-state files written by the earlier Modal runner are upgraded in place on
 the next guarded resume after the current config, source, and image identity are
@@ -248,8 +253,10 @@ source text, prompts, findings, provider output, exception text, or raw
 artifacts. By default, `collect` copies `status.json`, `result.json`, the generic
 worker lifecycle log, and an allowlisted `public-eval-diagnostics.json` when a
 public worker reached the post-eval gate. The diagnostic contains only row
-identities, terminal states, report-presence flags, diagnostic codes, and exact
-launch lineage; it never contains messages, paths, findings, or provider output.
+identities, terminal states, report-presence flags, diagnostic codes, exact
+launch lineage, and a bounded failed-node projection (node ID, status, timeout
+flag, and allowlisted failure category or code). It never contains messages,
+paths, findings, or provider output.
 This lets failed Actions runs publish useful lifecycle evidence without
 repeating paid model work. Investigate arbitrary sensitive run data on the
 private volume under the repository's normal access controls. Collection validates each contract and

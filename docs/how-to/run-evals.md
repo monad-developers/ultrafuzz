@@ -40,6 +40,12 @@ matrix without launching anything. Local target checkouts are expected under
 pass `--skip-target-validation` to skip the ref check. An unknown provider or
 missing provider profile fails here, before any run is launched.
 
+Ordinary eval YAML requires an explicit `trials_per_variant`. The public
+benchmark lane manifests under `benchmarks/` default it to `1` when omitted.
+Those lanes support an explicit larger value, but use it deliberately: row
+count, model usage, and cost multiply across every target, runner-model
+variant, and trial.
+
 ## Launch The Runs
 
 ```bash
@@ -104,6 +110,11 @@ For sensitive targets, the suite's `reporting.artifacts` policy defaults to
 `manifest-only`: providers see the DAG, timings, and file names/hashes while
 payloads stay on disk.
 
+The pinned Ultrafuzz-bench and EVMBench targets are public open-source benchmark
+fixtures. Their Modal lane explicitly publishes the allowlisted `report.md`,
+`report.json`, and normalized findings payloads as ordinary public artifacts;
+the sensitive-target default does not apply to those benchmark bundles.
+
 For configuration and architecture details, see
 [Eval Suites](../reference/evals.md), the
 [CLI reference](../reference/cli.md#eval), and
@@ -112,29 +123,28 @@ For configuration and architecture details, see
 ## Publish Longitudinal History
 
 The checked-in cohort and lane manifests live under `benchmarks/`. The smoke
-lane is a fixed target subset with one trial, one strategy loop, no stateful
-invariant, differential, or dynamic-strategy families, a bounded
-project/actor → admin-plus-Kaden → dedupe → report critical path, and exactly
-two runner profiles: GPT-5.6 Luna `low` and Claude Sonnet 5 `low`. Both use the
-separate GPT-5.6 Sol `xhigh` judge. The full lane keeps the runners at `high` and uses every supported target, the
-configured trial count, the production strategy set, and the same pinned model
-and judge identities. The EVMbench adapter converts either lane into the normal
-`EvalSuiteSpec` and can project one runner for an isolated Modal pair while
-retaining the fixed judge.
+lane selects the three Ultrafuzz-bench targets, covering Foundry, Hardhat, and
+Vyper. It uses one strategy loop, excludes stateful-invariant and differential
+work, and runs GPT-5.6 Luna at `high`. The full lane uses
+every checked-in EVMBench target, keeps the production strategy set, and runs
+GPT-5.6 Luna at `high` plus Claude Sonnet 5 at `high`. Both lanes default to one
+trial per variant and use the separate GPT-5.6 Sol `xhigh` judge. The benchmark
+adapter converts either lane into the normal `EvalSuiteSpec` and can project one
+runner for an isolated Modal pair while retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
 six charts in one transaction:
 
 ```bash
 ultrafuzz eval history <eval-run-id> \
-  --benchmark evmbench \
+  --benchmark ultrafuzz-bench \
   --lane smoke \
   --repository https://github.com/monad-developers/ultrafuzz \
   --artifact <immutable-run-artifact-reference>
 ```
 
-Use `--benchmark ultrafuzz-bench` and `--lane full` for the other cohort or
-lane. Publication refuses missing rows, failed or non-terminal workflows,
+Use `--benchmark evmbench` and `--lane full` for the full cohort. Publication
+refuses missing rows, failed or non-terminal workflows,
 invalid reports, a matrix that differs from the exact public target/variant/trial
 scope, incomplete or inconsistent lineage, unpinned targets, and missing scoring
 evidence before modifying history. Repeating the same immutable eval result is
@@ -155,22 +165,30 @@ run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
 and available candidate, cohort, and scoring provenance. Missing timing or cost
 is allowed and renders as unavailable; it is never converted to zero.
 
-Every push to `main` launches the four smoke pairs as detached Modal work, then
-restores their state in a separate collection job. Candidate installation and
+Every push on every branch launches the real three-target Ultrafuzz-bench smoke
+as detached Modal work, then restores its state in a separate collection job. A
+newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high` is
+the default runner; repository variables `BENCHMARK_SMOKE_OPENAI_MODEL` and
+`BENCHMARK_SMOKE_OPENAI_REASONING` can override it. Candidate installation and
 build happen before any Modal launch, so a broken push fails without allocating
-the benchmark matrix. A manual `paired-kadenzipfel` dispatch runs the exact candidate
-and Kaden-free topology and writes JSON and Markdown deltas into the public
-artifact. There is no self-hosted benchmark runner or weekly full run. Each pair
-is capped at one hour of model work and publishes an ordinary 30-day Actions
-artifact because the two benchmark cohorts are old public projects. Missing
-credentials, revision drift, unavailable ground truth, failed model work,
-scoring errors, or partial pairs fail before publication. Every publisher
-updates one fixed ready pull request and rebuilds from the latest
-remote publication tip and uses a normal fast-forward push; a lost race is
-retried with the new tip. This compare-and-swap loop retains every complete
-generation without relying on a GitHub concurrency queue, which can discard a
-pending job. The publication commit uses `[ci skip]`, preventing a chart-only
-merge from recursively allocating another benchmark matrix.
+the benchmark matrix.
+
+A manual workflow dispatch launches the full EVMBench cohort instead, with
+GPT-5.6 Luna `high` and Claude Sonnet 5 `high` by default. Its model and
+reasoning inputs can override both runners. Both modes retain the standard
+Modal CPU and memory allocation, give each target row a 3,600-second watchdog,
+and publish ordinary 30-day Actions artifacts. Missing credentials, revision
+drift, unavailable ground truth, failed model work, scoring errors, or an
+incomplete configured matrix fail before publication.
+
+Every publisher updates one fixed pull request from the latest remote
+publication tip and uses a normal fast-forward push; a lost race is retried
+with the new tip. The exact candidate checkout supplies the benchmark policy,
+and observations and regenerated charts stay keyed to that candidate commit.
+This compare-and-swap loop retains every complete generation without relying
+on a GitHub concurrency queue, which can discard a pending job. The publication
+commit uses `[ci skip]`, preventing a chart-only merge from recursively
+allocating another benchmark matrix.
 
 When organization policy disables pull-request creation by `github.token`, set
 the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped

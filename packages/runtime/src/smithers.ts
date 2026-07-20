@@ -1316,6 +1316,22 @@ function defaultModelProfile(config: ResolvedConfig): ResolvedConfig["models"]["
   return config.models.profiles[config.models.default] ?? Object.values(config.models.profiles)[0]!;
 }
 
+export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const maximumReserveSeconds = timeoutSeconds > 1 ? timeoutSeconds - 1 : 1;
+  const finalizationReserveSeconds = Math.min(maximumReserveSeconds, 300, Math.max(1, Math.floor(timeoutSeconds / 6)));
+  const workingBudgetSeconds = Math.max(0, timeoutSeconds - finalizationReserveSeconds);
+  return [
+    "## Topology Runtime Context",
+    "",
+    `- Timeout: ${timeoutSeconds} seconds total.`,
+    `- Finalization reserve: ${finalizationReserveSeconds} seconds.`,
+    `- Working budget before finalization: ${workingBudgetSeconds} seconds.`,
+    "- Stop starting new delegated or tool work when the finalization reserve begins.",
+    "- During the reserve, write and validate every required artifact, marking unfinished work blocked instead of omitting outputs."
+  ].join("\n");
+}
+
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
@@ -1331,6 +1347,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       artifactDir: task.artifactDir,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
+      runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,

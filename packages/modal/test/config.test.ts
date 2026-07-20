@@ -90,18 +90,18 @@ describe("Modal benchmark config", () => {
       run_id: "public-main-a1b2c3",
       public_benchmark: {
         benchmark: "evmbench",
-        runner_model_profile: "benchmark-smoke-gpt-5-6-luna-low",
+        runner_model_profile: "benchmark-smoke-gpt-5-6-luna-high",
         candidate_repository: "https://github.com/monad-developers/ultrafuzz",
         candidate_commit: "a".repeat(40)
       },
       braintrust: { project: "ultrafuzz-public-benchmarks", judge_api_key_env: "OPENAI_API_KEY" },
       models: [
         {
-          slug: "benchmark-smoke-gpt-5-6-luna-low",
+          slug: "benchmark-smoke-gpt-5-6-luna-high",
           model: "gpt-5.6-luna",
           provider: "openai",
           agent: "CodexAgent",
-          reasoning: "low",
+          reasoning: "high",
           auth_mode: "api-key"
         }
       ]
@@ -120,20 +120,16 @@ describe("Modal benchmark config", () => {
         ...config,
         public_benchmark: {
           ...config.public_benchmark,
-          excluded_node_ids: ["kadenzipfel-vulnerability-strategies"]
+          excluded_node_ids: ["unexpected-node"]
         }
       })
-    ).toThrow(/exact checked-in node exclusion set/u);
+    ).toThrow();
     expect(() =>
       parseModalBenchmarkConfig({
         ...config,
-        public_benchmark: {
-          ...config.public_benchmark,
-          experiment: "without-kadenzipfel",
-          excluded_node_ids: ["reference-vulnerabilities-kadenzipfel", "kadenzipfel-vulnerability-strategies"]
-        }
+        models: [{ ...config.models[0]!, slug: "different-profile" }]
       })
-    ).not.toThrow();
+    ).toThrow(/selected runner model profile/u);
   });
 
   it("fingerprints exact configuration bytes and every model field", () => {

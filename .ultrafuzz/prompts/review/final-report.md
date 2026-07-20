@@ -46,8 +46,9 @@ Aggregation manifest:
 `aggregation.json` is a JSON object, not a top-level array. It contains copied
 generated test metadata under `files` and may contain support-file metadata
 under `support_files`. Use `files[]` when matching generated or copied test
-destinations. Do not iterate over the whole object as an array because that will
-walk scalar summary fields.
+destinations. Preserve and use each record's `language`, `framework`,
+and `provenance` when present. Do not iterate over the whole object as an array
+because that will walk scalar summary fields.
 
 Severity-classified findings:
 `{{artifact_path:severity-classification}}/severity-classified-findings.json`
@@ -100,7 +101,7 @@ Use these setup handoffs:
 Project discovery:
 `{{artifact_path:project-discovery}}/setup/project-discovery.md`
 
-Foundry setup:
+Foundry setup (when rendered):
 `{{artifact_path:setup-foundry}}/setup/setup-foundry.md`
 
 Base test setup:
@@ -187,7 +188,8 @@ the production issue list.
 
 For stateful invariant records, preserve every upstream finding whose `notes`
 contain `stateful_failure_classification=<classification>`. Production-bug
-records with generated Solidity PoCs belong in the normal issue list. Preserve
+records with generated target-native reproducers belong in the normal issue
+list. Preserve
 stateful `harness-defect` and `incomplete-spec` records through the
 non-production actionable outcomes appendix and `report.json`
 `non_production_outcomes` when their triage classification is actionable.
@@ -311,7 +313,7 @@ issue index table when production issues exist:
 
 The report contains <total issue count> issues, with severity distribution <high count> high, <medium count> medium, and <low count> low.
 
-Ultrafuzz is an automated Solidity fuzzing campaign assistant. Issues below are machine-generated findings that must be manually validated. This report is not a security review and does not guarantee the protocol is secure.
+Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues below are machine-generated findings that must be manually validated. This report is not a security review and does not guarantee the protocol is secure.
 
 ## Run summary
 
@@ -346,10 +348,9 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 2. Depositor performs the public redeem action after the accounting state diverges.
 3. Depositor observes claimable funds remain locked after the redeem action completes.
 
-```solidity
-// Minimized self-contained Foundry reproducer.
-// Include all imports, mocks, harnesses, constants, setup, and helpers needed
-// to compile and run the relevant test.
+```typescript
+// Example only: replace this with the minimized target-native reproducer,
+// including the imports, fixtures, setup, and helpers needed to run it.
 ```
 
 #### Family variants
@@ -402,20 +403,27 @@ record that matches the same source artifact path, source relative path,
 strategy, and attempt index as the finding. If the aggregation manifest is
 missing that exact source test, or if same-path generated tests differ across
 attempts and a copied destination would be ambiguous, read the source artifact's
-`generated-tests/.../*.t.sol` file instead of the flattened copy.
+exact canonical `generated-tests/<relative-file>` companion instead of a
+flattened copy. Do not replace an unavailable native companion with a similarly
+named file from another attempt or framework.
 
-For each production issue with a generated Solidity test, include exactly one
-Solidity code block with an opening fence exactly equal to ```` ```solidity ````.
-The code block must be a minimized self-contained Foundry reproducer, not a
-pointer to a file and not an unedited full generated test suite. Include every
-import, mock, harness, constant, `setUp`, and helper needed for the relevant
-test function or functions to compile and run in the target Foundry project.
-Remove unrelated generated test functions, unused helpers, exploratory
-assertions, logging-only code, and comments that do not help reproduce the
-issue. Keep multiple test functions only when they are all necessary to prove
-the same production issue. Stop and report an invalid upstream artifact if no
-relevant generated test source, scenario, or self-contained reproducer source is
-available for a production issue.
+For each production issue with a generated test, include exactly one fenced code
+block containing a minimized self-contained target-native reproducer, not a
+pointer to a file and not an unedited full generated test suite. Select the
+language fence from the canonical companion and aggregation metadata: use
+`solidity` for Foundry `.t.sol`, `javascript` or `typescript` for Hardhat, and
+`python` (or `vyper` only when the reproducer itself is Vyper source) for a
+Vyper project's native harness. Never translate a JavaScript, TypeScript,
+Python, or Vyper reproducer into Solidity merely for the report.
+
+Include every import, mock, fixture, harness, constant, setup step, and helper
+needed for the relevant test function or functions to run in the target's
+existing framework. Remove unrelated generated test functions, unused helpers,
+exploratory assertions, logging-only code, and comments that do not help
+reproduce the issue. Keep multiple test functions only when they are all
+necessary to prove the same production issue. Stop and report an invalid
+upstream artifact if no relevant generated test source, executable scenario, or
+self-contained reproducer source is available for a production issue.
 
 Do not write local file paths, artifact-relative paths, generated test paths,
 Markdown links, or permalink labels in the human-readable issue body. The
@@ -423,9 +431,9 @@ report must be self-sufficient when `report.md` is sent by itself.
 
 If the upstream finding has `family_variants`, keep one issue entry for the
 shared production root cause and add a `#### Family variants` subheading inside
-the Proof of Concept section after the primary Solidity PoC code block. List
-variants as concise bullets with each variant title and summary only. Omit the
-subheading when there are no family variants.
+the Proof of Concept section after the primary native reproducer or execution
+trace. List variants as concise bullets with each variant title and summary
+only. Omit the subheading when there are no family variants.
 
 ## Strategy Section
 
@@ -544,8 +552,8 @@ Before finishing, verify that:
   actor-role language and do not contain placeholder tokens, anonymous variable
   labels, or copied generated-test boilerplate.
 - Production issues include `### Proof of Concept`.
-- Production issues with generated Solidity PoCs include a fenced `solidity`
-  code block inline in the report.
+- Production issues with generated tests include exactly one inline fenced code
+  block whose language matches the target-native reproducer.
 - Production issues include a `### Strategy` detection-rate table.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,

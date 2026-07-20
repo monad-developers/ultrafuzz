@@ -77,12 +77,6 @@ Implemented invariant properties:
 Invariant campaign:
 {{artifact_path:stateful-invariant-campaign}}/generated-tests.json
 
-Kaden vulnerability strategy plan: {{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json
-
-Kaden vulnerability findings: {{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json
-
-Kaden vulnerability generated tests: {{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json
-
 Expand coverage:
 {{artifact_path:expand-coverage}}/generated-tests.json
 
@@ -129,8 +123,6 @@ Also inspect current findings artifacts from the same strategies when deciding
 what is already covered. Use `findings.json` from each relevant strategy
 artifact directory. Treat missing useful evidence as a reason to record lower
 confidence, not as permission to invent behavior.
-
-Kaden coverage rule ({{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json): Treat every plan record, including `skipped-not-present` and `umbrella`, as prior current-run coverage evidence; do not spend a dynamic slot on the same vulnerability lens unless later target evidence establishes a materially different, testable opportunity.
 
 ## Context boundary
 

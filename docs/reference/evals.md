@@ -151,11 +151,14 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
-The bounded smoke lane pins GPT-5.6 Luna `low` and Claude Sonnet 5 `low`; the
-full lane pins the same runners at `high`. Both use GPT-5.6 Sol `xhigh` as an
-independent judge. Public Modal pairs may contain one
-runner variant, but publication validates that it is an exact projection of the
-checked-in matrix before merging its observations.
+The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
+Ultrafuzz-bench targets and pins GPT-5.6 Luna `high`. The full lane selects every
+checked-in EVMBench target and pins GPT-5.6 Luna `high` plus Claude Sonnet 5
+`high`. Both default to one trial per variant and use GPT-5.6 Sol `xhigh` as an
+independent judge. Public Modal pairs may contain one runner variant, including
+an explicit workflow model override, but publication validates that it is an
+exact projection of the candidate commit's checked-in matrix before merging its
+observations.
 `eval history` consumes only complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or

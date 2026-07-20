@@ -4,10 +4,19 @@ import path from "node:path";
 
 import type { ModalLaunchMode, ModelProvider } from "./defaults.js";
 import { extractPublicBenchmarkBundle, readPublicBenchmarkBundle } from "./public-bundle.js";
-import { buildModalImage, collectModalBenchmark, launchModalBenchmark, modalBenchmarkStatus } from "./runner.js";
+import {
+  buildModalImage,
+  collectModalBenchmark,
+  launchModalBenchmark,
+  ModalTerminationError,
+  modalBenchmarkStatus,
+  terminateModalBenchmark,
+  terminateModalBenchmarkConfig,
+  terminateModalImageBuild
+} from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
+  "usage: ultrafuzz-modal <build|launch|status|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -27,6 +36,7 @@ async function main(): Promise<void> {
     const result = await buildModalImage({
       appName: option(argv, "--app"),
       imageName: option(argv, "--image"),
+      buildScope: option(argv, "--build-scope"),
       repoRoot: option(argv, "--repo-root")
     });
     console.log(JSON.stringify(result, null, 2));
@@ -47,6 +57,44 @@ async function main(): Promise<void> {
   if (command === "status") {
     const rows = await modalBenchmarkStatus({ statePath: requiredOption(argv, "--state") });
     console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (command === "terminate") {
+    try {
+      const statePath = option(argv, "--state");
+      const configPath = option(argv, "--config");
+      if ((statePath === undefined) === (configPath === undefined)) {
+        throw new Error("terminate requires exactly one of --state or --config");
+      }
+      const counts =
+        statePath === undefined
+          ? await terminateModalBenchmarkConfig({
+              configPath: configPath!,
+              repoRoot: option(argv, "--repo-root")
+            })
+          : await terminateModalBenchmark({ statePath });
+      console.log(JSON.stringify(counts));
+    } catch (error) {
+      if (!(error instanceof ModalTerminationError)) throw error;
+      console.log(JSON.stringify(error.counts));
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (command === "terminate-build") {
+    try {
+      const counts = await terminateModalImageBuild({
+        appName: option(argv, "--app"),
+        imageName: requiredOption(argv, "--image"),
+        buildScope: requiredOption(argv, "--build-scope"),
+        repoRoot: option(argv, "--repo-root")
+      });
+      console.log(JSON.stringify(counts));
+    } catch (error) {
+      if (!(error instanceof ModalTerminationError)) throw error;
+      console.log(JSON.stringify(error.counts));
+      process.exitCode = 1;
+    }
     return;
   }
   if (command === "collect") {

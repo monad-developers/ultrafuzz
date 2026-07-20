@@ -5,14 +5,20 @@ import path from "node:path";
 
 import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 import {
+  MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW,
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
+  PUBLIC_EVAL_FAILED_NODE_STATUSES,
+  PUBLIC_EVAL_FAILURE_CATEGORIES,
+  PUBLIC_EVAL_FAILURE_CODES,
   PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+  comparePublicEvalDiagnosticIds,
   parsePublicEvalDiagnostics,
   publicEvalDiagnosticsReadinessReasonCodes,
   resolveTerminalReportPath,
   summarizePublicEvalDiagnosticsRows,
   type EvalRunRecord,
   type PublicEvalDiagnostics,
+  type PublicEvalFailedNode,
   type PublicEvalDiagnosticsRow
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
@@ -78,6 +84,16 @@ const recordInputSchema = z.looseObject({
   report_json_path: z.string().optional()
 });
 const runSummaryInputSchema = z.looseObject({ records: z.array(recordInputSchema).min(1).max(MAX_ROWS) });
+const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
+const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
+const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
+const failedNodeInputSchema = z.looseObject({
+  node_id: safeId,
+  status: failedNodeStatus,
+  timed_out: z.boolean(),
+  provenance: z.unknown().optional()
+});
+const runStateInputSchema = z.looseObject({ nodes: z.record(z.string(), z.unknown()) });
 
 export function createPublicEvalDiagnosticsFromRun(input: {
   config: PublicModalBenchmarkConfig;
@@ -170,6 +186,7 @@ export function createPublicEvalDiagnostics(input: {
       terminal_report_present: terminalReportPresent,
       workflow_ids: [...new Set(record.workflow_ids)].sort(),
       diagnostic_codes: diagnosticCodes,
+      failed_nodes: publicEvalFailedNodes(record as unknown as EvalRunRecord),
       scoring_ready: reasons.length === 0,
       reason_codes: reasons
     };
@@ -180,7 +197,6 @@ export function createPublicEvalDiagnostics(input: {
     stage: "post-eval-pre-score",
     benchmark: input.config.public_benchmark.benchmark,
     lane: input.config.public_benchmark.lane,
-    experiment: input.config.public_benchmark.experiment,
     model_slug: input.model.slug,
     model: input.model.model,
     reasoning: input.model.reasoning,
@@ -273,6 +289,48 @@ function hasTerminalReport(record: EvalRunRecord): boolean {
   } catch {
     return false;
   }
+}
+
+function publicEvalFailedNodes(record: Pick<EvalRunRecord, "ultrafuzz_run_root">): PublicEvalFailedNode[] {
+  if (record.ultrafuzz_run_root === undefined) return [];
+  try {
+    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
+    assertRegularFileInside(record.ultrafuzz_run_root, statePath, "public eval run state");
+    const stat = fs.statSync(statePath);
+    if (stat.size > MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES) return [];
+    const state = runStateInputSchema.parse(JSON.parse(fs.readFileSync(statePath, "utf8")) as unknown);
+    const failedNodes: PublicEvalFailedNode[] = [];
+    for (const [nodeId, value] of Object.entries(state.nodes)) {
+      const parsed = failedNodeInputSchema.safeParse(value);
+      if (!parsed.success || parsed.data.node_id !== nodeId) continue;
+      const provenance = recordValue(parsed.data.provenance);
+      const failure = recordValue(provenance?.failure);
+      const disposition = recordValue(provenance?.terminal_disposition);
+      const category = failureCategory.safeParse(failure?.category);
+      const code = failureCode.safeParse(
+        disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined
+      );
+      failedNodes.push({
+        node_id: parsed.data.node_id,
+        status: parsed.data.status,
+        timed_out: parsed.data.timed_out,
+        ...(category.success ? { failure_category: category.data } : {}),
+        ...(code.success ? { failure_code: code.data } : {})
+      });
+    }
+    return failedNodes
+      .filter((node) => node.timed_out === (node.status === "timed-out"))
+      .sort((left, right) => comparePublicEvalDiagnosticIds(left.node_id, right.node_id))
+      .slice(0, MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW);
+  } catch {
+    return [];
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function readBoundedJson(filePath: string, root: string, label: string): unknown {

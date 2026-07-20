@@ -48,11 +48,6 @@ The default scaffold mixes broad discovery with targeted test-generation lanes:
   run Echidna and Medusa over the same implemented Chimera property suite for
   final bug finding. Differential campaigns build oracle plans,
   reference-model lanes, repair passes, and review reports.
-- The Kaden vulnerability coordinator turns a pinned 38-document vulnerability
-  corpus into one target-specific plan record per reference. It gates each leaf
-  on repository evidence before spawning focused workers, treats the broad
-  signature document as an umbrella, and keeps informational hygiene signals
-  out of findings unless concrete production impact is demonstrated.
 - Dynamic strategy generation reviews accumulated artifacts, enumerates
   target-specific candidates, and feeds selected generated tests and findings
   into review.

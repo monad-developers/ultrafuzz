@@ -3,40 +3,52 @@ name: Modal Eval Benchmarks
 on:
   push:
     branches:
-      - main
+      - "**"
   workflow_dispatch:
     inputs:
-      experiment:
-        description: Strategy topology used for a manual benchmark
+      openai_model:
+        description: OpenAI runner model for the full EVMBench run
         required: true
-        default: candidate
-        type: choice
-        options:
-          - candidate
-          - without-kadenzipfel
-          - paired-kadenzipfel
+        default: gpt-5.6-luna
+        type: string
+      openai_reasoning:
+        description: OpenAI runner reasoning effort for the full EVMBench run
+        required: true
+        default: high
+        type: string
+      anthropic_model:
+        description: Anthropic runner model for the full EVMBench run
+        required: true
+        default: claude-sonnet-5
+        type: string
+      anthropic_reasoning:
+        description: Anthropic runner reasoning effort for the full EVMBench run
+        required: true
+        default: high
+        type: string
+
+env:
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.sha }}
-  cancel-in-progress: false
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   launch:
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
       BENCHMARK_CONTROL: ${{ github.workspace }}/ci-modal/benchmark-control
-      BENCHMARK_EXPERIMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment || 'candidate' }}
 
     steps:
-      - name: Check out the exact main candidate
+      - name: Check out the exact benchmark candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
@@ -64,10 +76,13 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
-          for name in MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY ANTHROPIC_API_KEY BRAINTRUST_API_KEY; do
+          required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
+          if [ "$BENCHMARK_MODE" = full ]; then
+            required+=(ANTHROPIC_API_KEY)
+          fi
+          for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
               echo "Required benchmark secret is missing: $name" >&2
               exit 1
@@ -75,16 +90,46 @@ jobs:
           done
 
       - name: Prepare the exact model by benchmark matrix
+        env:
+          BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || vars.BENCHMARK_SMOKE_OPENAI_MODEL || 'gpt-5.6-luna' }}
+          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || vars.BENCHMARK_SMOKE_OPENAI_REASONING || 'high' }}
+          BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
+          BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
+          if [ "$BENCHMARK_MODE" = smoke ]; then
+            BENCHMARK_MODELS_JSON="$(jq -cn \
+              --arg model "$BENCHMARK_OPENAI_MODEL" \
+              --arg reasoning "$BENCHMARK_OPENAI_REASONING" \
+              '[{provider: "openai", model: $model, reasoning: $reasoning}]')"
+          else
+            BENCHMARK_MODELS_JSON="$(jq -cn \
+              --arg openai_model "$BENCHMARK_OPENAI_MODEL" \
+              --arg openai_reasoning "$BENCHMARK_OPENAI_REASONING" \
+              --arg anthropic_model "$BENCHMARK_ANTHROPIC_MODEL" \
+              --arg anthropic_reasoning "$BENCHMARK_ANTHROPIC_REASONING" \
+              '[
+                {provider: "openai", model: $openai_model, reasoning: $openai_reasoning},
+                {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning}
+              ]')"
+          fi
+          export BENCHMARK_MODELS_JSON
           node scripts/ci/prepare-modal-benchmarks.mjs \
             "$candidate" \
             "${{ github.server_url }}/${{ github.repository }}" \
             "$generation" \
             "$BENCHMARK_CONTROL" \
-            "smoke" \
-            "$BENCHMARK_EXPERIMENT"
+            "$BENCHMARK_MODE"
+
+      - name: Persist immutable benchmark plan before starting Modal compute
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
 
       - name: Build an immutable Modal image for the candidate
         env:
@@ -92,15 +137,17 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
           image_name="$(jq -r '.image_name' "$BENCHMARK_CONTROL/manifest.json")"
-          node packages/modal/dist/cli.js build --image "$image_name" --repo-root .
+          node packages/modal/dist/cli.js build \
+            --image "$image_name" \
+            --build-scope "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --repo-root .
 
       - name: Launch detached Modal benchmark sandboxes
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -126,7 +173,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: modal-benchmark-launch-${{ github.run_id }}
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/ci-modal/benchmark-control
           if-no-files-found: warn
           overwrite: true
@@ -142,7 +189,6 @@ jobs:
     env:
       BENCHMARK_CONTROL: ${{ github.workspace }}/ci-modal/benchmark-control
       BENCHMARK_RESULTS: ${{ github.workspace }}/ci-modal/benchmark-results
-      BENCHMARK_EXPERIMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.experiment || 'candidate' }}
 
     steps:
       - name: Check out the benchmark candidate
@@ -173,7 +219,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ github.run_id }}
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/ci-modal/benchmark-control
 
       - name: Discover recoverable launch control
@@ -197,10 +243,12 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
-          deadline=$((SECONDS + 7200))
+          control_timeout_seconds="$(jq -er \
+            '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
+            "$BENCHMARK_CONTROL/manifest.json")"
+          deadline=$((SECONDS + control_timeout_seconds))
           while true; do
             all_terminal=true
             while IFS=$'\t' read -r config state pair; do
@@ -243,7 +291,7 @@ jobs:
                 if { [ "$recovery_exit" -eq 0 ] || [ "$recovery_exit" -eq 124 ] || [ "$recovery_exit" -eq 137 ]; } && \
                   jq -e '.launches | any(.phase == "reserved" or .phase == "sandbox-created" or .phase == "launched")' \
                     "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                  deadline=$((SECONDS + 7200))
+                  deadline=$((SECONDS + control_timeout_seconds))
                 fi
                 jq -n \
                   --arg pair "$pair" \
@@ -285,7 +333,7 @@ jobs:
 
               status_file="$BENCHMARK_CONTROL/$pair.status.json"
               status_exit=0
-              timeout --signal=TERM --kill-after=30s 2m \
+              timeout --signal=TERM --kill-after=30s 30s \
                 node packages/modal/dist/cli.js status \
                 --state "$BENCHMARK_CONTROL/$state" \
                 > "$status_file.tmp" || status_exit=$?
@@ -340,7 +388,7 @@ jobs:
                     --mode resume \
                     --repo-root . || resume_exit=$?
                     if [ "$resume_exit" -eq 0 ]; then
-                      deadline=$((SECONDS + 7200))
+                      deadline=$((SECONDS + control_timeout_seconds))
                     else
                       resume_category=resume-attempt-failed
                       if [ "$resume_exit" -eq 124 ] || [ "$resume_exit" -eq 137 ]; then
@@ -356,7 +404,7 @@ jobs:
                     if { [ "$resume_exit" -eq 124 ] || [ "$resume_exit" -eq 137 ]; } && \
                       jq -e '.launches | any(.phase == "reserved" or .phase == "sandbox-created" or .phase == "launched")' \
                         "$BENCHMARK_CONTROL/$state" > /dev/null 2>&1; then
-                      deadline=$((SECONDS + 7200))
+                      deadline=$((SECONDS + control_timeout_seconds))
                     fi
                   fi
                   ;;
@@ -374,7 +422,7 @@ jobs:
               break
             fi
             if (( SECONDS >= deadline )); then
-              echo "Modal benchmark matrix exceeded the two-hour control-plane deadline" >&2
+              echo "Modal benchmark matrix exceeded its ${control_timeout_seconds}-second control-plane deadline" >&2
               while IFS=$'\t' read -r pair; do
                 outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
                 if [ ! -f "$outcome_file" ]; then
@@ -391,16 +439,18 @@ jobs:
           done
 
       - name: Collect and validate public finding bundles
-        if: steps.launch_control.outputs.available == 'true'
+        if: always() && steps.launch_control.outputs.available == 'true'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BRAINTRUST_API_KEY: ${{ secrets.BRAINTRUST_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
-          while IFS=$'\t' read -r config state pair; do
+          collect_pair() {
+            local config="$1"
+            local state="$2"
+            local pair="$3"
             outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
             if [ ! -f "$outcome_file" ] || ! jq -e '.terminal_status == "succeeded"' "$outcome_file" > /dev/null; then
               diagnostic_exit=0
@@ -417,7 +467,7 @@ jobs:
                 fi
                 mv "$outcome_file.tmp" "$outcome_file"
               fi
-              continue
+              return 0
             fi
             collection_exit=0
             timeout --signal=TERM --kill-after=30s 5m \
@@ -451,26 +501,25 @@ jobs:
                 "$outcome_file" > "$outcome_file.tmp"
               mv "$outcome_file.tmp" "$outcome_file"
             fi
-          done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
+          }
 
-      - name: Build the paired Kaden strategy comparison
-        if: steps.launch_control.outputs.available == 'true' && env.BENCHMARK_EXPERIMENT == 'paired-kadenzipfel'
-        run: |
-          if ! node scripts/ci/compare-kadenzipfel-ablation.mjs \
-            "$BENCHMARK_CONTROL/manifest.json" \
-            "$BENCHMARK_RESULTS" \
-            "$BENCHMARK_RESULTS/comparison"; then
-            jq -n \
-              --arg category "ablation-comparison-failed" \
-              '{terminal_status: "failed", category: $category}' \
-              > "$BENCHMARK_CONTROL/failures/ablation-comparison-failed.json"
-          fi
+          max_parallel_collections=4
+          active_collections=0
+          while IFS=$'\t' read -r config state pair; do
+            collect_pair "$config" "$state" "$pair" &
+            active_collections=$((active_collections + 1))
+            if (( active_collections >= max_parallel_collections )); then
+              wait -n
+              active_collections=$((active_collections - 1))
+            fi
+          done < <(jq -r '.pairs[] | [.config_path, .state_path, .pair] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
+          wait
 
       - name: Upload public benchmark reports and findings
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: public-benchmark-results-${{ env.BENCHMARK_EXPERIMENT }}-${{ github.run_id }}
+          name: public-benchmark-results-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/ci-modal/benchmark-results
           if-no-files-found: warn
           overwrite: true
@@ -480,7 +529,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: modal-benchmark-control-${{ env.BENCHMARK_EXPERIMENT }}-${{ github.run_id }}
+          name: modal-benchmark-control-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/ci-modal/benchmark-control
             ${{ github.workspace }}/ci-modal/benchmark-results
@@ -530,28 +579,24 @@ jobs:
             exit 1
           fi
 
-  publish:
-    needs: collect
+  cleanup_incomplete_run:
+    needs:
+      - launch
+      - collect
     if: >-
-      needs.collect.result == 'success' &&
-      (github.event_name == 'push' ||
-      (github.ref == 'refs/heads/main' && inputs.experiment == 'candidate'))
-    permissions:
-      actions: read
-      contents: write
-      pull-requests: write
+      always() &&
+      (needs.launch.result == 'failure' || needs.launch.result == 'cancelled' ||
+      needs.collect.result == 'failure' || needs.collect.result == 'cancelled')
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      BENCHMARK_CONTROL: ${{ github.workspace }}/ci-modal/benchmark-control
-      BENCHMARK_RESULTS: ${{ github.workspace }}/ci-modal/benchmark-results
+    timeout-minutes: 45
 
     steps:
-      - name: Check out current main publication tooling
+      - name: Check out the exact incomplete benchmark candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -562,121 +607,160 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: pnpm
 
-      - name: Install and build the candidate
+      - name: Install and build the incomplete candidate
         run: |
           pnpm install --frozen-lockfile
           pnpm -w build
 
-      - name: Restore benchmark control metadata
+      - name: Restore the immutable pre-compute benchmark plan
+        id: restore_incomplete_plan
+        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ github.run_id }}
-          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          name: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/incomplete-modal-benchmark-plan
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Restore public benchmark results
+      - name: Restore any persisted launch IDs
+        id: restore_incomplete_launch
+        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: public-benchmark-results-candidate-${{ github.run_id }}
-          path: ${{ github.workspace }}/ci-modal/benchmark-results
+          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/incomplete-modal-benchmark-state
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
 
-      - name: Publish the atomic four-pair generation with compare-and-swap retries
+      - name: Validate incomplete-run cleanup paths
+        if: always() && steps.restore_incomplete_plan.outcome == 'success'
         env:
-          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
-          PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
+          CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
+          EXPECTED_CANDIDATE: ${{ github.sha }}
+          EXPECTED_GENERATION: ${{ github.run_id }}-${{ github.run_attempt }}
+          EXPECTED_MODE: ${{ env.BENCHMARK_MODE }}
+          EXPECTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
         run: |
-          artifact="$PUBLICATION_REPOSITORY/actions/runs/${{ github.run_id }}"
-          jq -n \
-            --arg repository "$PUBLICATION_REPOSITORY" \
-            --arg artifact "$artifact" \
-            '{
-              schema_version: "ultrafuzz.eval-history-publication-generation.v1",
-              candidate_repository_url: $repository,
-              source_artifact: $artifact,
-              runs: []
-            }' > "$PUBLICATION_GENERATION"
-          while IFS=$'\t' read -r pair benchmark lane slug; do
-            bundle="$BENCHMARK_RESULTS/$pair/$slug/public-results.json"
-            unpacked="$BENCHMARK_RESULTS/unpacked/$pair"
-            metadata="$(node packages/modal/dist/cli.js unpack-public --bundle "$bundle" --output "$unpacked")"
-            eval_run_id="$(jq -er '.eval_run_id' <<< "$metadata")"
-            jq \
-              --arg eval_run_id "$eval_run_id" \
-              --arg benchmark "$benchmark" \
-              --arg lane "$lane" \
-              --arg input_path "$pair/eval" \
-              '.runs += [{
-                eval_run_id: $eval_run_id,
-                benchmark: $benchmark,
-                lane: $lane,
-                input_path: $input_path
-              }]' \
-              "$PUBLICATION_GENERATION" > "$PUBLICATION_GENERATION.tmp"
-            mv "$PUBLICATION_GENERATION.tmp" "$PUBLICATION_GENERATION"
-          done < <(jq -r '.pairs[] | [.pair, .benchmark, .lane, .model_slug] | @tsv' "$BENCHMARK_CONTROL/manifest.json")
-          test "$(jq '.runs | length' "$PUBLICATION_GENERATION")" -eq 4
-          node scripts/ci/publish-eval-history-cas.mjs \
-            "$PUBLICATION_GENERATION" \
-            "$BENCHMARK_RESULTS/unpacked"
+          node --input-type=module - "$BENCHMARK_PLAN/manifest.json" "$CLEANUP_PAIR_LIST" <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
 
-      - name: Open the publication pull request when needed
+          const [manifestPath, outputPath] = process.argv.slice(2);
+          const root = path.dirname(manifestPath);
+          const boundedRegularFile = (filePath, label) => {
+            const stat = fs.lstatSync(filePath);
+            if (stat.isSymbolicLink() || !stat.isFile() || stat.size < 1 || stat.size > 1024 * 1024) {
+              throw new Error(`${label} must be a bounded regular file`);
+            }
+          };
+          boundedRegularFile(manifestPath, "incomplete benchmark manifest");
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          if (typeof manifest !== "object" || manifest === null || !Array.isArray(manifest.pairs)) {
+            throw new Error("incomplete benchmark manifest is invalid");
+          }
+          if (
+            manifest.candidate_commit !== process.env.EXPECTED_CANDIDATE ||
+            manifest.repository !== process.env.EXPECTED_REPOSITORY ||
+            manifest.generation !== process.env.EXPECTED_GENERATION ||
+            manifest.mode !== process.env.EXPECTED_MODE
+          ) {
+            throw new Error("incomplete benchmark manifest identity is invalid");
+          }
+          const expectedPairs = manifest.mode === "smoke" ? 1 : manifest.mode === "full" ? 2 : 0;
+          if (manifest.pairs.length !== expectedPairs) {
+            throw new Error("incomplete benchmark manifest has an invalid pair count");
+          }
+          const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+          if (!safeId.test(manifest.image_name)) throw new Error("incomplete benchmark image name is invalid");
+          const configs = [];
+          const states = [];
+          const rows = [];
+          for (const [index, value] of manifest.pairs.entries()) {
+            if (typeof value !== "object" || value === null || Array.isArray(value)) {
+              throw new Error(`incomplete benchmark pair ${index} is invalid`);
+            }
+            const { pair, config_path: configPath, state_path: statePath } = value;
+            if (
+              !safeId.test(pair) ||
+              !safeId.test(configPath) ||
+              !safeId.test(statePath) ||
+              path.basename(configPath) !== configPath ||
+              path.basename(statePath) !== statePath
+            ) {
+              throw new Error(`incomplete benchmark pair ${index} has an unsafe control path`);
+            }
+            if (configPath !== `${pair}.json` || statePath !== `${pair}.state.json`) {
+              throw new Error(`incomplete benchmark pair ${index} paths do not match its pair ID`);
+            }
+            if (configs.includes(configPath) || states.includes(statePath)) {
+              throw new Error(`incomplete benchmark pair ${index} duplicates a control path`);
+            }
+            boundedRegularFile(path.join(root, configPath), `incomplete benchmark config ${index}`);
+            configs.push(configPath);
+            states.push(statePath);
+            rows.push(`${configPath}\t${statePath}`);
+          }
+          fs.writeFileSync(outputPath, `${rows.join("\n")}\n`, { flag: "wx", mode: 0o600 });
+          NODE
+
+      - name: Terminate every exact incomplete-run sandbox
+        if: always() && steps.restore_incomplete_plan.outcome == 'success'
         env:
-          GH_TOKEN: ${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}
+          BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
+          BENCHMARK_STATE: ${{ runner.temp }}/incomplete-modal-benchmark-state
+          CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
+          BUILD_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}
+          STATE_AVAILABLE: ${{ steps.restore_incomplete_launch.outcome == 'success' && 'true' || 'false' }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...automation%2Feval-history?expand=1"
-          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
-          if ! git ls-remote --exit-code --heads origin refs/heads/automation/eval-history > /dev/null; then
-            echo "No pending eval-history publication branch is needed"
-            exit 0
-          fi
-          git fetch --no-tags origin \
-            "+refs/heads/automation/eval-history:refs/remotes/origin/automation/eval-history"
-          open_prs="$(gh pr list \
-            --state open \
-            --base main \
-            --head automation/eval-history \
-            --json number \
-            --jq 'length')"
-          if git diff --quiet \
-            origin/main \
-            origin/automation/eval-history \
-            -- \
-            benchmarks/history.json \
-            docs/assets/eval-history; then
-            pending_publication=false
-          else
-            diff_status=$?
-            if [ "$diff_status" -ne 1 ]; then
-              echo "Unable to compare the eval-history publication trees" >&2
-              exit "$diff_status"
+          termination_failed=false
+          terminate_scope() {
+            local label="$1"
+            shift
+            if ! timeout --signal=TERM --kill-after=30s 5m node packages/modal/dist/cli.js "$@"; then
+              echo "::warning title=Modal cleanup uncertainty::Could not confirm termination for $label."
+              termination_failed=true
             fi
-            pending_publication=true
+          }
+
+          if [ "$STATE_AVAILABLE" = true ]; then
+            while IFS=$'\t' read -r _config state; do
+              [ -n "$state" ] || continue
+              state_path="$BENCHMARK_STATE/$state"
+              if [ -f "$state_path" ] && [ ! -L "$state_path" ] && \
+                jq -e '((.launches | type == "array" and length > 0) or (.attempt_history | type == "array" and length > 0))' \
+                  "$state_path" > /dev/null 2>&1; then
+                terminate_scope "persisted state $state" terminate --state "$state_path"
+              fi
+            done < "$CLEANUP_PAIR_LIST"
           fi
-          if [ "$open_prs" -eq 0 ] && [ "$pending_publication" = true ]; then
-            if gh pr create \
-              --base main \
-              --head automation/eval-history \
-              --title "[ci skip] Update published eval history" \
-              --body $'## Summary\n\nAppend atomic Modal generations for GPT-5.6 Luna and Claude Sonnet 5 across EVMBench and Ultrafuzz-bench, scored by GPT-5.6 Sol xhigh.\n\n## Verification\n\n- Published only after every model × benchmark pair succeeded\n- Uploaded public reports and finding bundles as Actions artifacts\n- Retried remote-tip races without dropping generations\n- Regenerated and checked deterministic README charts'; then
-              exit 0
+
+          image_name="$(jq -er '.image_name' "$BENCHMARK_PLAN/manifest.json")"
+          for pass in 1 2; do
+            terminate_scope "image build pass $pass" terminate-build \
+              --image "$image_name" \
+              --build-scope "$BUILD_SCOPE" \
+              --repo-root .
+            while IFS=$'\t' read -r config _state; do
+              [ -n "$config" ] || continue
+              terminate_scope "eval config $config pass $pass" terminate \
+                --config "$BENCHMARK_PLAN/$config" \
+                --repo-root .
+            done < "$CLEANUP_PAIR_LIST"
+            if [ "$pass" -eq 1 ]; then
+              sleep 20
             fi
-            open_prs="$(gh pr list \
-              --state open \
-              --base main \
-              --head automation/eval-history \
-              --json number \
-              --jq 'length')"
-            if [ "$open_prs" -eq 0 ]; then
-              echo "::warning title=Eval-history PR not opened::Automatic pull-request creation is unavailable. The publication branch remains pushed; use the job summary link."
-              {
-                echo "### Eval-history publication is waiting for a pull request"
-                echo
-                echo "The complete generation remains preserved on \`automation/eval-history\`."
-                echo
-                echo "[Compare and open the publication pull request]($compare_url)"
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            echo "Another publisher opened the eval-history pull request"
+          done
+
+          if [ "$termination_failed" = true ]; then
+            exit 1
           fi
+
+      - name: Fail when the immutable cleanup plan was not preserved
+        if: always() && steps.restore_incomplete_plan.outcome != 'success'
+        run: |
+          echo "The pre-compute Modal plan could not be restored; sandbox termination cannot be confirmed." >&2
+          exit 1

@@ -48,8 +48,6 @@ const CONFIG: PublicModalBenchmarkConfig = {
     benchmark: "ultrafuzz-bench",
     lane: "smoke",
     runner_model_profile: MODEL.slug,
-    experiment: "candidate",
-    excluded_node_ids: [],
     candidate_repository: "https://github.com/monad-developers/ultrafuzz",
     candidate_commit: "a".repeat(40),
     max_runtime_seconds: 3_600
@@ -257,6 +255,131 @@ describe("public post-eval diagnostics", () => {
     expect(diagnostics.rows[0]?.reason_codes).toContain("run-record-missing");
   });
 
+  it("projects only bounded allowlisted failed-node diagnostics from durable state", () => {
+    const fixture = evalFixture();
+    const nodes = Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => {
+        const nodeId = `failed-node-${String(index).padStart(2, "0")}`;
+        const timedOut = index === 1;
+        return [
+          nodeId,
+          {
+            node_id: nodeId,
+            status: timedOut ? "timed-out" : "failed",
+            timed_out: timedOut,
+            last_error: `private failure detail ${index} sk-ant-secret-value`,
+            provenance: {
+              failure: {
+                category:
+                  index === 0 ? "artifact-contract" : index === 1 ? "provider-interruption" : "private-category",
+                causal_task_id: `/private/workspace/${nodeId}`,
+                causal_failure_category: "private-causal-category",
+                dependent_task_ids: ["private-dependent-task"]
+              },
+              ...(index === 0
+                ? {
+                    terminal_disposition: {
+                      schema_version: "ultrafuzz.terminal-disposition.v1",
+                      kind: "task-output-validation-failure"
+                    }
+                  }
+                : {})
+            }
+          }
+        ];
+      })
+    );
+    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+    fixture.runSummary.records[0]!.final_status = "failed";
+    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(diagnostics.rows[0]?.failed_nodes).toHaveLength(32);
+    expect(diagnostics.rows[0]?.failed_nodes.slice(0, 3)).toEqual([
+      {
+        node_id: "failed-node-00",
+        status: "failed",
+        timed_out: false,
+        failure_category: "artifact-contract",
+        failure_code: "task-output-validation-failure"
+      },
+      {
+        node_id: "failed-node-01",
+        status: "timed-out",
+        timed_out: true,
+        failure_category: "provider-interruption"
+      },
+      { node_id: "failed-node-02", status: "failed", timed_out: false }
+    ]);
+    expect(diagnostics.rows[0]?.failed_nodes.at(-1)?.node_id).toBe("failed-node-31");
+    const serialized = JSON.stringify(diagnostics);
+    for (const forbidden of [
+      "private failure detail",
+      "sk-ant-secret-value",
+      "private-category",
+      "private-causal-category",
+      "private-dependent-task",
+      "/private/workspace"
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+
+    const withPrivateCategory = structuredClone(diagnostics) as unknown as Record<string, unknown>;
+    const rows = withPrivateCategory.rows as Array<Record<string, unknown>>;
+    const failedNodes = rows[0]!.failed_nodes as Array<Record<string, unknown>>;
+    failedNodes[0]!.failure_category = "private-category";
+    expect(() => parsePublicEvalDiagnostics(withPrivateCategory)).toThrow();
+
+    const withRawDetail = structuredClone(diagnostics) as unknown as Record<string, unknown>;
+    const rawRows = withRawDetail.rows as Array<Record<string, unknown>>;
+    const rawFailedNodes = rawRows[0]!.failed_nodes as Array<Record<string, unknown>>;
+    rawFailedNodes[0]!.last_error = "private raw error";
+    expect(() => parsePublicEvalDiagnostics(withRawDetail)).toThrow();
+  });
+
+  it("sorts mixed-case and punctuation failed-node IDs by deterministic code units", () => {
+    const fixture = evalFixture();
+    const nodeIds = ["node_a", "node-z", "node.A", "node-a", "node_Z", "node-A"];
+    const nodes = Object.fromEntries(
+      nodeIds.map((nodeId) => [
+        nodeId,
+        {
+          node_id: nodeId,
+          status: "failed",
+          timed_out: false
+        }
+      ])
+    );
+    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(diagnostics.rows[0]?.failed_nodes.map((node) => node.node_id)).toEqual([
+      "node-A",
+      "node-a",
+      "node-z",
+      "node.A",
+      "node_Z",
+      "node_a"
+    ]);
+    expect(parsePublicEvalDiagnostics(diagnostics)).toEqual(diagnostics);
+  });
+
   it("rejects inconsistent rows, summaries, extra fields, secrets, and stale lineage", () => {
     const fixture = evalFixture();
     const input = {
@@ -273,6 +396,10 @@ describe("public post-eval diagnostics", () => {
     expect(() => createPublicEvalDiagnostics({ ...input, runSummary: { records: [] } })).toThrow();
 
     const diagnostics = createPublicEvalDiagnostics(input);
+    const legacyV1 = structuredClone(diagnostics) as unknown as Record<string, unknown>;
+    const legacyRows = legacyV1.rows as Array<Record<string, unknown>>;
+    delete legacyRows[0]!.failed_nodes;
+    expect(parsePublicEvalDiagnostics(legacyV1).rows[0]?.failed_nodes).toEqual([]);
     expect(() => parsePublicEvalDiagnostics({ ...diagnostics, extra: true })).toThrow();
     expect(() =>
       parsePublicEvalDiagnostics({ ...diagnostics, summary: { ...diagnostics.summary, planned: 2 } })

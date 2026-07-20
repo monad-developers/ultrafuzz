@@ -89,74 +89,6 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toMatch(/start\/end timestamps so\s+multi-vCPU runs prove that the two campaigns overlapped/u);
   });
 
-  it("coordinates the complete pinned Kaden corpus with relevance and reportability gates", () => {
-    const kaden = prompt("strategies/kadenzipfel-vulnerability-strategies.md");
-    const dynamic = prompt("strategies/dynamic-strategy-generator.md");
-    const dedupe = prompt("review/dedupe-findings.md");
-    const aggregate = prompt("review/aggregate-test-files.md");
-    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
-    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
-      nodes: Array<{
-        id: string;
-        kind: string;
-        reference?: string;
-        depends_on?: string[];
-        loops?: number;
-        outputs?: Array<{ path: string; contract: string; primary?: boolean }>;
-      }>;
-    };
-    const referenceNode = topology.nodes.find((node) => node.id === "reference-vulnerabilities-kadenzipfel");
-    const strategyNode = topology.nodes.find((node) => node.id === "kadenzipfel-vulnerability-strategies");
-
-    expect(referenceNode).toMatchObject({
-      kind: "reference",
-      reference: "vulnerabilities.kadenzipfel",
-      depends_on: ["__start__"]
-    });
-    expect(referenceNode?.outputs).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: "references/kadenzipfel-vulnerabilities.md", primary: true }),
-        expect.objectContaining({ path: "references/manifest.json" })
-      ])
-    );
-    expect(strategyNode).toMatchObject({
-      kind: "agentic",
-      loops: 1,
-      depends_on: ["property-specification-fanin", "actors-flows", "reference-vulnerabilities-kadenzipfel"]
-    });
-    expect(strategyNode?.outputs?.map((output) => [output.path, output.contract])).toEqual(
-      expect.arrayContaining([
-        ["strategy-plan.json", "ultrafuzz/json-object@1"],
-        ["generated-tests.json", "ultrafuzz/generated-tests@1"],
-        ["findings.json", "ultrafuzz/findings@1"],
-        ["provenance.json", "ultrafuzz/json-object@1"]
-      ])
-    );
-    expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
-      "kadenzipfel-vulnerability-strategies"
-    );
-    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toContain(
-      "kadenzipfel-vulnerability-strategies"
-    );
-
-    expect(kaden).toContain("exactly 38 Markdown source");
-    expect(kaden).toMatch(/Create exactly one\s+stable record per source path/u);
-    expect(kaden).toContain("`applicable`");
-    expect(kaden).toContain("`skipped-not-present`");
-    expect(kaden).toContain("`umbrella`");
-    expect(kaden).toContain("For each `applicable` leaf record, start one focused max-reasoning sub-agent");
-    expect(kaden).toContain("references/unsecure-signatures.md");
-    expect(kaden).toContain("non-informational impact");
-    expect(kaden).toContain("Keep purely informational or static-hygiene observations in the strategy plan");
-    expect(kaden).toContain("kaden_reference_path");
-    expect(kaden).toContain("Use `generated_tests` as the only test-file list");
-    expect(dynamic).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/strategy-plan.json");
-    expect(dynamic).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json");
-    expect(dedupe).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/findings.json");
-    expect(dedupe).toContain("Preserve `kaden_reference_path`");
-    expect(aggregate).toContain("{{artifact_path:kadenzipfel-vulnerability-strategies}}/generated-tests.json");
-  });
-
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
@@ -188,6 +120,82 @@ describe("prompt semantic anchors", () => {
     for (const sourceId of manifestSources) {
       expect(requiredArtifactsById.get(sourceId), sourceId).toContain("generated-tests.json");
     }
+  });
+
+  it("keeps admin/config tests target-native and mirrors canonical generated-test companions", () => {
+    const admin = prompt("strategies/admin-config-boundaries.md");
+
+    expect(admin).toContain("focused target-native tests");
+    expect(admin).toContain("Base test setup (when rendered):");
+    expect(admin).not.toContain("Base Foundry setup:");
+    expect(admin).toContain("For Foundry targets, write `.t.sol`");
+    expect(admin).toMatch(/For\s+Hardhat targets, use the existing JavaScript or TypeScript test location/u);
+    expect(admin).toMatch(/For Vyper targets, use the existing pytest, Ape,\s+Brownie/u);
+    expect(admin).toContain("Keep every generated test");
+    expect(admin).toContain("inside `{{workspace_path}}`");
+    expect(admin).toMatch(/Do not introduce Foundry into a Hardhat or Vyper\s+target/u);
+    expect(admin).toMatch(/Do not install or fetch\s+missing tools or dependencies/u);
+    expect(admin).toContain("{{artifact_dir}}/generated-tests/GeneratedTest.ext");
+    expect(admin).toContain("`generated-tests/<relative-file>` path");
+    expect(admin).toContain("{{artifact_dir}}/generated-tests.json");
+    expect(admin).toContain("Never list the workspace");
+  });
+
+  it("validates deduped native reproducers without hydrating isolated workspaces", () => {
+    const dedupe = prompt("review/dedupe-findings.md");
+
+    expect(dedupe).toContain("{{artifact_path:project-discovery}}/setup/project-discovery.md");
+    expect(dedupe).toContain("{{artifact_path:base-test-setup}}/setup/base-test-setup.md");
+    expect(dedupe).toContain("For Foundry");
+    expect(dedupe).toContain("For Hardhat");
+    expect(dedupe).toContain("For Vyper");
+    expect(dedupe).toContain("For mixed repositories");
+    expect(dedupe).toMatch(/manifest\s+`framework` and `language`/u);
+    expect(dedupe).toContain("Strategy workspaces are isolated from this node");
+    expect(dedupe).toContain("copy only its exact byte-for-byte canonical");
+    expect(dedupe).toContain("under the existing native test root in\n`{{workspace_path}}`");
+    expect(dedupe).toContain("normalized relative POSIX");
+    expect(dedupe).toContain("every symlink even when its\ntarget remains inside the artifact directory");
+    expect(dedupe).toContain("Never search a strategy workspace");
+    expect(dedupe).toContain("Never install, fetch, restore, or update dependencies during dedupe");
+    expect(dedupe).not.toContain("restore project-pinned dependencies first");
+    expect(dedupe).not.toContain("Dependency hydration used only");
+  });
+
+  it("aggregates canonical generated-test companions into framework-native roots", () => {
+    const aggregate = prompt("review/aggregate-test-files.md");
+
+    expect(aggregate).toContain("canonical generated-test companions");
+    expect(aggregate).toContain("`generated_tests` array as the source of truth");
+    expect(aggregate).toContain("exact byte-for-byte companion");
+    expect(aggregate).toContain("normalized relative POSIX");
+    expect(aggregate).toContain("every symlink even when its target remains\ninside the artifact directory");
+    expect(aggregate).toContain("Foundry `.t.sol`");
+    expect(aggregate).toContain("Hardhat `.js`, `.cjs`, `.mjs`, `.ts`, `.cts`, or `.mts`");
+    expect(aggregate).toContain("existing native Python test `.py` files");
+    expect(aggregate).toContain("repository's existing JavaScript or TypeScript test root");
+    expect(aggregate).toContain("existing pytest, Ape, Brownie, or other native test root");
+    expect(aggregate).toContain("never overwrite one entry with another");
+    expect(aggregate).toContain("Do not copy unknown manifest\nentry fields");
+    expect(aggregate).not.toContain("source_manifest_entry");
+    expect(aggregate).not.toContain("collect generated Foundry `.t.sol` files");
+  });
+
+  it("embeds one self-contained reproducer in the target's native language", () => {
+    const report = prompt("review/final-report.md");
+
+    expect(report).toContain("generated target-native reproducers belong in the normal issue");
+    expect(report).toContain("exact canonical `generated-tests/<relative-file>` companion");
+    expect(report).toContain("exactly one fenced code\nblock");
+    expect(report).toContain("minimized self-contained target-native reproducer");
+    expect(report).toContain("`solidity` for Foundry `.t.sol`");
+    expect(report).toContain("`javascript` or `typescript` for Hardhat");
+    expect(report).toContain("`python` (or `vyper`");
+    expect(report).toContain("Never translate a JavaScript, TypeScript");
+    expect(report).toContain("report must be self-sufficient");
+    expect(report).toContain("Stop and report an invalid\nupstream artifact");
+    expect(report).not.toContain("generated Solidity PoCs");
+    expect(report).not.toContain("minimized self-contained Foundry reproducer");
   });
 
   it("keeps the severity matrix and reportability gates in the classifier prompt", () => {

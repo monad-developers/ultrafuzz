@@ -3,47 +3,9 @@
   "smoke": {
     "trials_per_variant": 1,
     "strategy_loops": 1,
-    "excluded_strategy_families": ["stateful-invariant", "differential", "dynamic-strategy"],
+    "excluded_strategy_families": ["stateful-invariant", "differential"],
     "excluded_node_ids": [
-      "setup-foundry",
-      "base-test-setup",
-      "reference-properties-0kn0t",
-      "reference-properties-certora-thinking",
-      "reference-properties-certora-sanity",
-      "reference-properties-aviggiano",
-      "reference-properties-montyly-rounding",
-      "reference-properties-crytic",
-      "reference-properties-runtime-verification",
-      "reference-properties-a16z-erc4626",
-      "reference-properties-recon",
-      "property-specification-certora",
-      "property-specification-crytic",
-      "property-specification-runtime-verification",
-      "property-specification-a16z",
-      "property-specification-recon",
-      "property-specification-aviggiano",
-      "property-specification-0kn0t",
-      "property-specification-josselin-feist",
-      "property-specification-fanin",
-      "boundary-tests",
-      "encode-decode",
       "differential-library-tests",
-      "round-trip",
-      "workflow-property-based-tests",
-      "time-warp-sequences",
-      "expand-coverage",
-      "external-dependency-boundaries",
-      "externalized-state-accounting",
-      "amm-boundary-liquidity",
-      "payable-fallback-accounting",
-      "packed-action-parity",
-      "batch-atomicity-unsupported-actions",
-      "router-exact-accounting",
-      "rounding-direction-audit",
-      "market-exhaustion-boundaries",
-      "order-replacement-collateral",
-      "state-machine-boundaries",
-      "lifecycle-view-boundaries",
       "stateful-invariant-setup",
       "stateful-invariant-handlers",
       "stateful-invariant-coverage",
@@ -54,24 +16,14 @@
       "reference-and-lane-auditor",
       "differential-lane-author",
       "differential-red-triage",
-      "differential-repair-and-report-review",
-      "dynamic-strategy-generator",
-      "triage",
-      "severity-classification",
-      "aggregate-test-files"
+      "differential-repair-and-report-review"
     ],
     "model_profiles": [
       {
-        "id": "benchmark-smoke-gpt-5-6-luna-low",
+        "id": "benchmark-smoke-gpt-5-6-luna-high",
         "agent": "CodexAgent",
         "model": "gpt-5.6-luna",
-        "reasoning": "low"
-      },
-      {
-        "id": "benchmark-smoke-claude-sonnet-5-low",
-        "agent": "ClaudeAgent",
-        "model": "claude-sonnet-5",
-        "reasoning": "low"
+        "reasoning": "high"
       }
     ],
     "judge_profile": {
@@ -82,7 +34,7 @@
     }
   },
   "full": {
-    "trials_per_variant": 10,
+    "trials_per_variant": 1,
     "excluded_strategy_families": [],
     "excluded_node_ids": [],
     "model_profiles": [

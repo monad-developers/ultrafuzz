@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Dependency-light command surface for the target repository smoke workflow. */
+/** Dependency-light command surface for the paid target repository smoke workflow. */
 import { existsSync, readFileSync } from "node:fs";
 import process from "node:process";
 
@@ -71,126 +71,6 @@ function assertInspectHealthy(path: string): void {
       `run is not healthy: status=${JSON.stringify(status ?? null)}, ` +
         `workflow_status=${JSON.stringify(workflowStatus ?? null)}`
     );
-  }
-}
-
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function assertExactStringArray(value: unknown, expected: string[], label: string): void {
-  if (
-    !Array.isArray(value) ||
-    value.length !== expected.length ||
-    value.some((entry, index) => entry !== expected[index])
-  ) {
-    fail(`${label} must equal ${JSON.stringify(expected)}; received ${JSON.stringify(value)}`);
-  }
-}
-
-function commandOption(command: string[], option: string): string {
-  const indexes = command.flatMap((entry, index) => (entry === option ? [index] : []));
-  if (indexes.length !== 1) {
-    fail(`submission command must contain ${option} exactly once`);
-  }
-  const value = command[(indexes[0] as number) + 1];
-  if (!nonEmptyString(value)) {
-    fail(`submission command is missing a value for ${option}`);
-  }
-  return value;
-}
-
-function assertRunSubmission(
-  envelopePath: string,
-  statePath: string,
-  metadataPath: string,
-  submissionPath: string,
-  fakeRunnerLogPath: string,
-  expectedRunId: string
-): void {
-  const expectedWorkflowId = `ultrafuzz-${expectedRunId}`;
-  const envelope = loadJson(envelopePath);
-  if (envelope.ok !== true) {
-    fail(`run returned ok=false: ${JSON.stringify(envelope.diagnostics ?? null, null, 2)}`);
-  }
-  const data = isJsonObject(envelope.data) ? envelope.data : {};
-  if (data.run_id !== expectedRunId || data.status !== "running") {
-    fail(
-      `run submission has unexpected identity or status: run_id=${JSON.stringify(data.run_id ?? null)}, ` +
-        `status=${JSON.stringify(data.status ?? null)}`
-    );
-  }
-  if (!nonEmptyString(data.graph_fingerprint) || !nonEmptyString(data.config_fingerprint)) {
-    fail("run submission is missing graph or config fingerprints");
-  }
-  assertExactStringArray(data.workflow_ids, [expectedWorkflowId], "run workflow_ids");
-
-  const state = loadJson(statePath);
-  if (state.run_id !== expectedRunId || state.status !== "running") {
-    fail("archived run state does not describe the submitted running run");
-  }
-  if (state.graph_fingerprint !== data.graph_fingerprint || state.config_fingerprint !== data.config_fingerprint) {
-    fail("archived run state fingerprints do not match the run command result");
-  }
-  const provenance = isJsonObject(state.provenance) ? state.provenance : {};
-  const stateWorkflow = isJsonObject(provenance.workflow) ? provenance.workflow : {};
-  if (stateWorkflow.runId !== expectedWorkflowId) {
-    fail("archived run state is not linked to the submitted workflow ID");
-  }
-
-  const metadata = loadJson(metadataPath);
-  if (metadata.run_id !== expectedRunId) {
-    fail("archived run metadata has the wrong run ID");
-  }
-  assertExactStringArray(metadata.workflow_ids, [expectedWorkflowId], "run metadata workflow_ids");
-  const metadataWorkflow = isJsonObject(metadata.workflow) ? metadata.workflow : {};
-  if (metadataWorkflow.run_id !== expectedWorkflowId) {
-    fail("archived run metadata is not linked to the submitted workflow ID");
-  }
-
-  const submission = loadJson(submissionPath);
-  if (submission.smithers_run_id !== expectedWorkflowId) {
-    fail("workflow-runner submission evidence has the wrong workflow ID");
-  }
-  if (!Array.isArray(submission.command) || !submission.command.every((value) => typeof value === "string")) {
-    fail("workflow-runner submission evidence is missing its command");
-  }
-  const command = submission.command as string[];
-  if (command[0] !== "smithers" || command[1] !== "up" || !nonEmptyString(command[2])) {
-    fail("workflow-runner submission did not invoke the compiled workflow with 'smithers up'");
-  }
-  if (!command.includes("--detach") || !command.includes("--supervise")) {
-    fail("workflow-runner submission was not detached and supervised");
-  }
-  if (commandOption(command, "--run-id") !== expectedWorkflowId) {
-    fail("workflow-runner command has the wrong run ID");
-  }
-  if (commandOption(command, "--format") !== "json") {
-    fail("workflow-runner command did not request JSON output");
-  }
-  if (commandOption(command, "--input") !== "<redacted>") {
-    fail("workflow-runner submission evidence did not redact its input");
-  }
-  const submittedRoot = commandOption(command, "--root");
-
-  const fakeRunner = loadJson(fakeRunnerLogPath);
-  if (
-    fakeRunner.schema_version !== "ultrafuzz.target-e2e.submission.v1" ||
-    fakeRunner.command !== "up" ||
-    fakeRunner.run_id !== expectedWorkflowId ||
-    fakeRunner.input_run_id !== expectedRunId ||
-    fakeRunner.workflow_path !== command[2] ||
-    fakeRunner.project_root !== submittedRoot ||
-    fakeRunner.format !== "json" ||
-    fakeRunner.detached !== true ||
-    fakeRunner.supervised !== true ||
-    fakeRunner.supervise_max_concurrent !== 1 ||
-    typeof fakeRunner.max_concurrency !== "number" ||
-    fakeRunner.max_concurrency < 1 ||
-    typeof fakeRunner.task_count !== "number" ||
-    fakeRunner.task_count < 1
-  ) {
-    fail(`fake workflow-runner evidence is incomplete or inconsistent: ${JSON.stringify(fakeRunner, null, 2)}`);
   }
 }
 
@@ -313,22 +193,6 @@ function main(argv: string[]): number {
       assertInspectHealthy(path as string);
       return 0;
     }
-    case "assert-run-submission": {
-      const [envelopePath, statePath, metadataPath, submissionPath, fakeRunnerLogPath, expectedRunId] = requireArgs(
-        rest,
-        ["envelope_path", "state_path", "metadata_path", "submission_path", "fake_runner_log_path", "expected_run_id"],
-        command
-      );
-      assertRunSubmission(
-        envelopePath as string,
-        statePath as string,
-        metadataPath as string,
-        submissionPath as string,
-        fakeRunnerLogPath as string,
-        expectedRunId as string
-      );
-      return 0;
-    }
     case "validate-manifest": {
       const [manifestPath] = requireArgs(rest, ["manifest_path"], command);
       loadTargetManifest(manifestPath as string);
@@ -361,7 +225,7 @@ function main(argv: string[]): number {
     default:
       fail(
         "usage: target-e2e-ci.ts <redact|assert-cli-ok|assert-inspect-healthy|validate-manifest|target-field|" +
-          "write-target-metadata|assert-run-submission|extract-evidence|assert-report-accounting> [args...]"
+          "write-target-metadata|extract-evidence|assert-report-accounting> [args...]"
       );
   }
 }

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -50,6 +51,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalWorkerLineage,
+  parseModalLaunchState,
   parseModalWorkerResult,
   parseCompatibleModalLaunchState,
   readModalLaunchState,
@@ -93,6 +95,11 @@ const MODAL_RUNTIME_USER = "ubuntu";
 const MODAL_RUNTIME_HOME = "/home/ubuntu";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
 const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
+const MODAL_ATTEMPT_TAG = /^[1-9][0-9]*$/u;
+const MODAL_GENERATION_TAG = /^[1-9][0-9]*$/u;
+const MODAL_ATTEMPT_ID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MODAL_BUILD_SCOPE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = [
   "status.json",
@@ -119,9 +126,42 @@ export interface ModalCollectedLineage {
 
 export type { ModalLaunchRecord, ModalLaunchState } from "./launch-state.js";
 
+export interface ModalTerminationCounts {
+  scopes: number;
+  discovered: number;
+  matched: number;
+  ignored: number;
+  live: number;
+  already_stopped: number;
+  terminated: number;
+  failures: number;
+}
+
+export interface ModalTerminationSandbox {
+  readonly sandboxId: string;
+  getTags(): Promise<Record<string, string>>;
+  poll(): Promise<number | null>;
+  terminate(params: { wait: true }): Promise<number>;
+  detach(): void;
+}
+
+export interface ModalTerminationSandboxService {
+  fromId(sandboxId: string): Promise<ModalTerminationSandbox>;
+  list(params: { appId: string; tags: Record<string, string> }): AsyncIterable<ModalTerminationSandbox>;
+}
+
+export class ModalTerminationError extends Error {
+  override readonly name = "ModalTerminationError";
+
+  constructor(readonly counts: ModalTerminationCounts) {
+    super(`Modal termination could not confirm ${counts.failures} operation(s)`);
+  }
+}
+
 export interface BuildModalImageInput {
   appName?: string;
   imageName?: string;
+  buildScope?: string;
   repoRoot?: string;
   env?: Record<string, string | undefined>;
 }
@@ -132,6 +172,11 @@ export async function buildModalImage(
   const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
   const appName = input.appName ?? DEFAULT_MODAL_APP;
   const imageName = input.imageName ?? DEFAULT_MODAL_IMAGE;
+  const buildScope = input.buildScope;
+  if (buildScope !== undefined && !MODAL_BUILD_SCOPE_TAG.test(buildScope)) {
+    throw new Error("Modal image build scope must be a bounded safe ID");
+  }
+  const sourceFingerprint = fingerprintTrackedSource(repoRoot);
   const modal = modalClient(input.env);
   try {
     const app = await modal.apps.fromName(appName, { createIfMissing: true });
@@ -145,7 +190,10 @@ export async function buildModalImage(
       memoryLimitMiB: 12_288,
       timeoutMs: 2 * 60 * 60 * 1000,
       workdir: "/workspace",
-      tags: { purpose: "ultrafuzz-image-stage" }
+      tags:
+        buildScope === undefined
+          ? { purpose: "ultrafuzz-image-stage" }
+          : modalImageBuildTags({ buildScope, imageName, sourceFingerprint })
     });
     try {
       const archive = createExactCandidateSourceArchive(repoRoot);
@@ -563,6 +611,94 @@ async function taggedLaunches(
   return matches;
 }
 
+interface ModalTerminationScope {
+  kind: "eval" | "image-build";
+  tags: Record<string, string>;
+}
+
+function modalTerminationScopes(state: ModalLaunchState): ModalTerminationScope[] {
+  const scopes = new Map<string, ModalTerminationScope>();
+  const add = (
+    record: Pick<ModalLaunchRecord, "slug" | "generation" | "model_fingerprint">,
+    fingerprints: ModalLineageFingerprints
+  ): void => {
+    const scope: ModalTerminationScope = {
+      kind: "eval",
+      tags: {
+        purpose: "ultrafuzz-eval",
+        logical_run: state.logical_run_id,
+        generation: String(record.generation),
+        model_slug: record.slug,
+        config_fingerprint: fingerprints.config,
+        source_fingerprint: fingerprints.source,
+        image_fingerprint: fingerprints.image,
+        model_fingerprint: record.model_fingerprint
+      }
+    };
+    const key = JSON.stringify(Object.entries(scope.tags).sort(([left], [right]) => left.localeCompare(right)));
+    if (!scopes.has(key)) scopes.set(key, scope);
+  };
+  for (const record of state.launches) add(record, state.fingerprints);
+  for (const record of state.attempt_history) add(record, record.fingerprints);
+  return [...scopes.values()];
+}
+
+export function modalTerminationScopesForConfig(
+  config: ModalBenchmarkConfig,
+  fingerprints: Pick<ModalLineageFingerprints, "config" | "source">
+): ModalTerminationScope[] {
+  return config.models.map((model) => ({
+    kind: "eval",
+    tags: {
+      purpose: "ultrafuzz-eval",
+      logical_run: config.run_id,
+      model_slug: model.slug,
+      config_fingerprint: fingerprints.config,
+      source_fingerprint: fingerprints.source,
+      model_fingerprint: fingerprintModalModel(model)
+    }
+  }));
+}
+
+export function modalImageBuildTags(input: {
+  buildScope: string;
+  imageName: string;
+  sourceFingerprint: string;
+}): Record<string, string> {
+  if (!MODAL_BUILD_SCOPE_TAG.test(input.buildScope))
+    throw new Error("Modal image build scope must be a bounded safe ID");
+  if (!MODAL_FINGERPRINT_TAG.test(input.sourceFingerprint)) throw new Error("Modal source fingerprint is invalid");
+  return {
+    purpose: "ultrafuzz-image-stage",
+    build_scope: input.buildScope,
+    image_name_fingerprint: createHash("sha256").update(input.imageName).digest("hex"),
+    source_fingerprint: input.sourceFingerprint
+  };
+}
+
+function isExactModalTerminationCandidate(tags: Record<string, string>, scope: ModalTerminationScope): boolean {
+  if (!hasExactModalLaunchTags(tags, scope.tags)) return false;
+  if (scope.kind === "image-build") return true;
+  if (
+    !MODAL_GENERATION_TAG.test(tags.generation ?? "") ||
+    !MODAL_ATTEMPT_TAG.test(tags.attempt ?? "") ||
+    !MODAL_ATTEMPT_ID_TAG.test(tags.attempt_id ?? "") ||
+    !MODAL_FINGERPRINT_TAG.test(tags.image_fingerprint ?? "")
+  ) {
+    return false;
+  }
+  return Number.isSafeInteger(Number(tags.generation)) && Number.isSafeInteger(Number(tags.attempt));
+}
+
+function detachQuietly(sandbox: Pick<ModalTerminationSandbox, "detach">): void {
+  try {
+    sandbox.detach();
+  } catch {
+    // Detaching only releases local client resources and must not interrupt the
+    // remaining exact-lineage termination attempts.
+  }
+}
+
 async function assertNoLiveGeneration(modal: ModalClient, app: App, state: ModalLaunchState): Promise<void> {
   for (const record of state.launches) {
     const probe = await probeModalSandbox(modal, record.sandbox_id);
@@ -692,6 +828,201 @@ export async function modalBenchmarkStatus(input: {
   } finally {
     modal.close();
   }
+}
+
+export async function terminateModalBenchmark(input: {
+  statePath: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const modal = modalClient(input.env);
+  try {
+    const { state, app } = await requiredCurrentLaunchStateForTermination(input.statePath, modal);
+    return await terminateModalBenchmarkSandboxes({
+      state,
+      appId: app.appId,
+      sandboxes: modal.sandboxes
+    });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalBenchmarkConfig(input: {
+  configPath: string;
+  repoRoot?: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const configPath = path.resolve(input.configPath);
+  const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
+  const config = loadModalBenchmarkConfig(configPath);
+  const revision = sourceRevision(repoRoot).toLowerCase();
+  if (isPublicModalBenchmarkConfig(config) && revision !== config.public_benchmark.candidate_commit) {
+    throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
+  }
+  const scopes = modalTerminationScopesForConfig(config, {
+    config: fingerprintModalConfigFile(configPath),
+    source: fingerprintTrackedSource(repoRoot)
+  });
+  const modal = modalClient(input.env);
+  try {
+    let app: App;
+    try {
+      app = await modal.apps.fromName(config.app_name, { createIfMissing: false });
+    } catch (error) {
+      if (error instanceof NotFoundError) return emptyModalTerminationCounts(scopes.length);
+      throw error;
+    }
+    return await terminateModalBenchmarkTagScopes({ scopes, appId: app.appId, sandboxes: modal.sandboxes });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalImageBuild(input: {
+  imageName: string;
+  buildScope: string;
+  appName?: string;
+  repoRoot?: string;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalTerminationCounts> {
+  const repoRoot = path.resolve(input.repoRoot ?? process.cwd());
+  const scopes: ModalTerminationScope[] = [
+    {
+      kind: "image-build",
+      tags: modalImageBuildTags({
+        buildScope: input.buildScope,
+        imageName: input.imageName,
+        sourceFingerprint: fingerprintTrackedSource(repoRoot)
+      })
+    }
+  ];
+  const modal = modalClient(input.env);
+  try {
+    let app: App;
+    try {
+      app = await modal.apps.fromName(input.appName ?? DEFAULT_MODAL_APP, { createIfMissing: false });
+    } catch (error) {
+      if (error instanceof NotFoundError) return emptyModalTerminationCounts(scopes.length);
+      throw error;
+    }
+    return await terminateModalBenchmarkTagScopes({ scopes, appId: app.appId, sandboxes: modal.sandboxes });
+  } finally {
+    modal.close();
+  }
+}
+
+export async function terminateModalBenchmarkSandboxes(input: {
+  state: ModalLaunchState;
+  appId: string;
+  sandboxes: ModalTerminationSandboxService;
+}): Promise<ModalTerminationCounts> {
+  const state = parseModalLaunchState(input.state);
+  const scopes = modalTerminationScopes(state);
+  const knownSandboxIds = [...state.launches, ...state.attempt_history].flatMap((record) =>
+    record.sandbox_id === undefined ? [] : [record.sandbox_id]
+  );
+  return terminateModalBenchmarkTagScopes({ ...input, scopes, knownSandboxIds });
+}
+
+export async function terminateModalBenchmarkTagScopes(input: {
+  scopes: ModalTerminationScope[];
+  knownSandboxIds?: string[];
+  appId: string;
+  sandboxes: ModalTerminationSandboxService;
+}): Promise<ModalTerminationCounts> {
+  const counts = emptyModalTerminationCounts(input.scopes.length);
+  if (input.scopes.length === 0) {
+    counts.failures = 1;
+    throw new ModalTerminationError(counts);
+  }
+  const knownSandboxIds = new Set(input.knownSandboxIds ?? []);
+  const candidates = new Map<string, ModalTerminationSandbox>();
+  for (const sandboxId of knownSandboxIds) {
+    try {
+      candidates.set(sandboxId, await input.sandboxes.fromId(sandboxId));
+    } catch (error) {
+      if (error instanceof NotFoundError) counts.already_stopped += 1;
+      else counts.failures += 1;
+    }
+  }
+  for (const scope of input.scopes) {
+    try {
+      for await (const sandbox of input.sandboxes.list({ appId: input.appId, tags: scope.tags })) {
+        if (typeof sandbox.sandboxId !== "string" || sandbox.sandboxId.trim() === "") {
+          counts.failures += 1;
+          detachQuietly(sandbox);
+          continue;
+        }
+        const previous = candidates.get(sandbox.sandboxId);
+        if (previous === undefined) candidates.set(sandbox.sandboxId, sandbox);
+        else if (previous !== sandbox) detachQuietly(sandbox);
+      }
+    } catch {
+      counts.failures += 1;
+    }
+  }
+  counts.discovered = candidates.size;
+
+  for (const sandbox of candidates.values()) {
+    let tags: Record<string, string>;
+    try {
+      tags = await sandbox.getTags();
+    } catch {
+      counts.failures += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    if (!input.scopes.some((scope) => isExactModalTerminationCandidate(tags, scope))) {
+      counts.ignored += 1;
+      if (knownSandboxIds.has(sandbox.sandboxId)) counts.failures += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    counts.matched += 1;
+
+    let exitCode: number | null;
+    try {
+      exitCode = await sandbox.poll();
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        counts.already_stopped += 1;
+      } else {
+        counts.failures += 1;
+      }
+      detachQuietly(sandbox);
+      continue;
+    }
+    if (exitCode !== null) {
+      counts.already_stopped += 1;
+      detachQuietly(sandbox);
+      continue;
+    }
+    counts.live += 1;
+    try {
+      await sandbox.terminate({ wait: true });
+      counts.terminated += 1;
+    } catch (error) {
+      if (error instanceof NotFoundError) counts.already_stopped += 1;
+      else counts.failures += 1;
+      detachQuietly(sandbox);
+    }
+  }
+
+  if (counts.failures > 0) throw new ModalTerminationError(counts);
+  return counts;
+}
+
+function emptyModalTerminationCounts(scopes: number): ModalTerminationCounts {
+  return {
+    scopes,
+    discovered: 0,
+    matched: 0,
+    ignored: 0,
+    live: 0,
+    already_stopped: 0,
+    terminated: 0,
+    failures: 0
+  };
 }
 
 export async function collectModalBenchmark(input: {
@@ -830,15 +1161,7 @@ export function hasExactPublicDiagnosticCollectionConfig(input: {
 export function assertPublicBenchmarkBundleLineage(input: {
   bundle: Pick<
     PublicBenchmarkBundle,
-    | "benchmark"
-    | "lane"
-    | "experiment"
-    | "model_slug"
-    | "model"
-    | "reasoning"
-    | "candidate_commit"
-    | "eval_run_id"
-    | "lineage"
+    "benchmark" | "lane" | "model_slug" | "model" | "reasoning" | "candidate_commit" | "eval_run_id" | "lineage"
   >;
   config: PublicModalBenchmarkConfig;
   configFingerprint: string;
@@ -860,7 +1183,6 @@ export function assertPublicBenchmarkBundleLineage(input: {
     bundle.candidate_commit === scope.candidate_commit ? undefined : "candidate commit",
     bundle.benchmark === scope.benchmark ? undefined : "benchmark",
     bundle.lane === scope.lane ? undefined : "lane",
-    bundle.experiment === scope.experiment ? undefined : "experiment",
     bundle.model_slug === launch.slug ? undefined : "model slug",
     bundle.model === launch.model ? undefined : "model",
     bundle.reasoning === launch.reasoning ? undefined : "reasoning",
@@ -1115,6 +1437,25 @@ async function requiredLaunchStateForInspection(
   });
   assertStateImage(state, image);
   return { state, app, image };
+}
+
+async function requiredCurrentLaunchStateForTermination(
+  statePath: string,
+  modal: ModalClient
+): Promise<{ state: ModalLaunchState; app: App }> {
+  const absolute = path.resolve(statePath);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(absolute, "utf8")) as unknown;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw new Error(`Modal launch state not found: ${absolute}`, { cause: error });
+    }
+    throw error;
+  }
+  const state = parseModalLaunchState(raw);
+  const app = await modal.apps.fromName(state.app, { createIfMissing: false });
+  return { state, app };
 }
 
 function launchStateMetadata(value: unknown): { app: string; image: string } {

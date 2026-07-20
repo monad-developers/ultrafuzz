@@ -6,6 +6,11 @@ import path from "node:path";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  benchmarkLaneConcurrency,
+  BENCHMARK_FULL_MAX_PARALLEL_RUNS,
+  BENCHMARK_FULL_MAX_PARALLEL_TARGETS,
+  BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
+  BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
   boundedEvalId,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -42,6 +47,15 @@ const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
 const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
+export const PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_SMOKE_MAX_PARALLEL_RUNS;
+export const PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_FULL_MAX_PARALLEL_RUNS;
+export const PUBLIC_BENCHMARK_MAX_PARALLEL_WORKFLOW_NODES = BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS;
+export const PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_WORKFLOW_NODES = BENCHMARK_FULL_MAX_PARALLEL_TARGETS;
+export const PUBLIC_BENCHMARK_PREPARATION_PARALLELISM = 8;
+export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
+export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
+export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
+export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
 
 export class PublicEvalDiagnosticsBuildError extends Error {
   override readonly name = "PublicEvalDiagnosticsBuildError";
@@ -123,7 +137,9 @@ export async function runPublicBenchmarkWorker(input: {
       }
       await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
-      const prepared = await preparePublicBenchmark(input.config, input.model, workRoot, logPath);
+      const prepared = await runWithPublicPreparationTimeout((signal) =>
+        preparePublicBenchmark(input.config, input.model, workRoot, logPath, signal)
+      );
       await checkpointPublicModelWorkStart(
         writer,
         () => {
@@ -158,7 +174,12 @@ export async function runPublicBenchmarkWorker(input: {
             {
               cwd: prepared.controlRoot,
               logPath,
-              timeoutMs: (input.config.public_benchmark.max_runtime_seconds + 300) * 1000,
+              timeoutMs:
+                publicEvalCommandTimeoutSeconds({
+                  matrixRows: prepared.matrixRows,
+                  maxParallelRuns: prepared.maxParallelRuns,
+                  rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds
+                }) * 1000,
               timeoutCategory: "model-work-timeout"
             }
           ).then(() => undefined),
@@ -186,7 +207,11 @@ export async function runPublicBenchmarkWorker(input: {
         {
           cwd: prepared.controlRoot,
           logPath,
-          timeoutMs: 45 * 60 * 1000,
+          timeoutMs:
+            publicScoreCommandTimeoutSeconds({
+              matrixRows: prepared.matrixRows,
+              maxParallelRuns: prepared.maxParallelRuns
+            }) * 1000,
           env: {
             ULTRAFUZZ_EVAL_JUDGE_API_KEY: requiredEnv(judgeKeyEnv),
             ...(input.config.braintrust.judge_url === undefined
@@ -197,13 +222,12 @@ export async function runPublicBenchmarkWorker(input: {
       );
       await runCommand(
         ["node", CLI, "eval", "report", prepared.evalRunId, "--project", prepared.controlRoot, "--json"],
-        { cwd: prepared.controlRoot, logPath, timeoutMs: 5 * 60 * 1000 }
+        { cwd: prepared.controlRoot, logPath, timeoutMs: PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS * 1000 }
       );
       const bundle = createPublicBenchmarkBundle({
         benchmark: input.config.public_benchmark.benchmark,
         lane: input.config.public_benchmark.lane,
         modelSlug: input.model.slug,
-        experiment: input.config.public_benchmark.experiment,
         model: input.model.model,
         reasoning: input.model.reasoning,
         candidateCommit: input.config.public_benchmark.candidate_commit,
@@ -236,6 +260,46 @@ export function publicBenchmarkWorkRoot(dataRoot: string): string {
 
 export function publicEvalRunId(runId: string, modelSlug: string): string {
   return boundedEvalId([runId, modelSlug], PUBLIC_EVAL_RUN_ID_MAX_LENGTH);
+}
+
+export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): number {
+  return benchmarkLaneConcurrency(lane).max_parallel_runs;
+}
+
+export function publicBenchmarkMaxParallelWorkflowNodes(lane: "smoke" | "full"): number {
+  return benchmarkLaneConcurrency(lane).max_parallel_targets;
+}
+
+export function publicEvalCommandTimeoutSeconds(input: {
+  matrixRows: number;
+  maxParallelRuns: number;
+  rowWatchSeconds: number;
+}): number {
+  const waves = publicEvalMatrixWaves(input.matrixRows, input.maxParallelRuns);
+  assertPositiveSafeInteger("row watch seconds", input.rowWatchSeconds);
+  return checkedTimeoutSeconds(
+    waves * input.rowWatchSeconds + PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
+    "public eval command timeout"
+  );
+}
+
+export function publicScoreCommandTimeoutSeconds(input: { matrixRows: number; maxParallelRuns: number }): number {
+  const waves = publicEvalMatrixWaves(input.matrixRows, input.maxParallelRuns);
+  return checkedTimeoutSeconds(waves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS, "public score command timeout");
+}
+
+export async function runWithPublicPreparationTimeout<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS * 1000
+): Promise<T> {
+  assertPositiveSafeInteger("public preparation timeout milliseconds", timeoutMs);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("preparation-timeout")), timeoutMs);
+  try {
+    return await run(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function checkpointPublicModelWorkStart(
@@ -282,7 +346,6 @@ export function assertPublicWorkerBundleLineage(
   const mismatches = [
     bundle.benchmark === scope.benchmark ? undefined : "benchmark",
     bundle.lane === scope.lane ? undefined : "lane",
-    bundle.experiment === scope.experiment ? undefined : "experiment",
     bundle.model_slug === model.slug ? undefined : "model slug",
     bundle.model === model.model ? undefined : "model",
     bundle.reasoning === model.reasoning ? undefined : "reasoning",
@@ -326,22 +389,11 @@ export async function writePublicBundleAtomic(filePath: string, bundle: PublicBe
 
 function assertPublicWorkerInput(config: PublicModalBenchmarkConfig, model: ModalModelSpec): void {
   const scope = config.public_benchmark;
-  if (scope.lane !== "smoke") {
-    throw new Error("public benchmark worker supports only the bounded smoke lane");
-  }
   if (scope.runner_model_profile !== model.slug) {
     throw new Error("public benchmark runner profile must equal the selected Modal model slug");
   }
-  const expected = model.slug.includes("claude-sonnet-5")
-    ? { agent: "ClaudeAgent", model: "claude-sonnet-5", reasoning: "low", auth_mode: "api-key" }
-    : { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "low", auth_mode: "api-key" };
-  if (
-    model.agent !== expected.agent ||
-    model.model !== expected.model ||
-    model.reasoning !== expected.reasoning ||
-    model.auth_mode !== expected.auth_mode
-  ) {
-    throw new Error("public benchmark model does not match the pinned runner profile");
+  if (model.auth_mode !== "api-key") {
+    throw new Error("public benchmark runners must use API-key authentication");
   }
 }
 
@@ -349,20 +401,24 @@ async function preparePublicBenchmark(
   config: PublicModalBenchmarkConfig,
   model: ModalModelSpec,
   workRoot: string,
-  logPath: string
+  logPath: string,
+  signal: AbortSignal
 ): Promise<{
   controlRoot: string;
   targetsRoot: string;
   groundTruthRoot: string;
   suitePath: string;
   evalRunId: string;
+  matrixRows: number;
+  maxParallelRuns: number;
 }> {
   const scope = config.public_benchmark;
   const controlRoot = path.join(workRoot, "candidate");
   const targetsRoot = path.join(workRoot, "targets");
   const groundTruthRoot = path.join(workRoot, "ground-truth");
   const suitePath = path.join(workRoot, "suite.yml");
-  await materializeBakedCandidate(scope.candidate_commit, controlRoot, logPath);
+  throwIfAborted(signal);
+  await materializeBakedCandidate(scope.candidate_commit, controlRoot, logPath, BAKED_CANDIDATE_ARCHIVE, signal);
   const cohort = loadBenchmarkCohortManifest(
     path.join(
       controlRoot,
@@ -376,22 +432,29 @@ async function preparePublicBenchmark(
     lane: scope.lane,
     cohort,
     lanes,
-    runnerModelProfileId: scope.runner_model_profile
+    runnerModelProfileOverride: {
+      id: model.slug,
+      agent: model.agent,
+      model: model.model,
+      reasoning: model.reasoning
+    }
   });
-  const suite = applyBenchmarkExperiment(baseSuite, scope.experiment, scope.excluded_node_ids);
+  const suite = preparePublicEvalSuite(baseSuite, scope.lane);
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");
   }
   await mkdir(targetsRoot, { recursive: true, mode: 0o700 });
   await mkdir(groundTruthRoot, { recursive: true, mode: 0o700 });
-  for (const target of suite.targets) {
+  await mapLimitStable(suite.targets, PUBLIC_BENCHMARK_PREPARATION_PARALLELISM, async (target) => {
+    throwIfAborted(signal);
     const destination = path.join(targetsRoot, target.id);
-    await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true });
+    await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true, signal });
     await runCommand(["node", CLI, "init", "--project", destination, "--force", "--json"], {
       cwd: controlRoot,
       logPath,
-      timeoutMs: 5 * 60 * 1000
+      timeoutMs: 5 * 60 * 1000,
+      signal
     });
     await writeFile(path.join(destination, "ultrafuzz.toml"), modalTargetToml(model, config.node_timeout_seconds), {
       mode: 0o600
@@ -403,23 +466,27 @@ async function preparePublicBenchmark(
     await runCommand(["node", CLI, "references", "sync", "--project", destination, "--json"], {
       cwd: controlRoot,
       logPath,
-      timeoutMs: 5 * 60 * 1000
+      timeoutMs: 5 * 60 * 1000,
+      signal
     });
     await runCommand(["node", CLI, "validate", "--project", destination, "--json"], {
       cwd: controlRoot,
       logPath,
-      timeoutMs: 5 * 60 * 1000
+      timeoutMs: 5 * 60 * 1000,
+      signal
     });
-  }
+  });
   if (scope.benchmark === "evmbench") {
     await materializeEvmbenchGroundTruth(
       controlRoot,
       suite.targets.map((target) => target.id),
       groundTruthRoot,
-      logPath
+      logPath,
+      signal
     );
   } else {
     for (const target of suite.targets) {
+      throwIfAborted(signal);
       const source = path.join(controlRoot, "benchmarks/public-ground-truth/ultrafuzz-bench", `${target.id}.yml`);
       await writeFile(path.join(groundTruthRoot, `${target.id}.yml`), await readFile(source));
     }
@@ -442,63 +509,68 @@ async function preparePublicBenchmark(
       groundTruthRoot,
       "--json"
     ],
-    { cwd: controlRoot, logPath, timeoutMs: 5 * 60 * 1000 }
+    { cwd: controlRoot, logPath, timeoutMs: 5 * 60 * 1000, signal }
   );
-  return { controlRoot, targetsRoot, groundTruthRoot, suitePath, evalRunId };
+  return {
+    controlRoot,
+    targetsRoot,
+    groundTruthRoot,
+    suitePath,
+    evalRunId,
+    matrixRows: suite.targets.length * suite.variants.length * suite.run.trials_per_variant,
+    maxParallelRuns: suite.run.max_parallel_runs ?? 1
+  };
 }
 
 export async function materializeBakedCandidate(
   expectedCommit: string,
   destination: string,
   logPath: string,
-  archivePath = BAKED_CANDIDATE_ARCHIVE
+  archivePath = BAKED_CANDIDATE_ARCHIVE,
+  signal?: AbortSignal
 ): Promise<void> {
+  throwIfAborted(signal);
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true, mode: 0o700 });
   await runCommand(["tar", "--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", destination], {
     cwd: path.dirname(destination),
     logPath,
-    timeoutMs: 5 * 60 * 1000
+    timeoutMs: 5 * 60 * 1000,
+    ...(signal === undefined ? {} : { signal })
   });
-  const head = (await runCommand(["git", "rev-parse", "HEAD"], { cwd: destination, logPath, timeoutMs: 30_000 }))
+  const head = (
+    await runCommand(["git", "rev-parse", "HEAD"], {
+      cwd: destination,
+      logPath,
+      timeoutMs: 30_000,
+      ...(signal === undefined ? {} : { signal })
+    })
+  )
     .trim()
     .toLowerCase();
   const dirty = await runCommand(["git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"], {
     cwd: destination,
     logPath,
-    timeoutMs: 30_000
+    timeoutMs: 30_000,
+    ...(signal === undefined ? {} : { signal })
   });
   if (head !== expectedCommit.toLowerCase() || dirty.trim() !== "") {
     throw new Error("baked Modal candidate does not match the configured immutable commit");
   }
 }
 
-export function applyBenchmarkExperiment(
-  baseSuite: EvalSuiteSpec,
-  experiment: string,
-  additionalExcludedNodeIds: string[]
-): EvalSuiteSpec {
-  if (additionalExcludedNodeIds.length === 0) return baseSuite;
+export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" | "full"): EvalSuiteSpec {
   return {
     ...baseSuite,
-    suite: `${baseSuite.suite}-${experiment}`,
-    variants: baseSuite.variants.map((variant) => {
-      const workflowInput = (variant.workflow_input ?? {}) as Record<string, unknown>;
-      const execution = (workflowInput.benchmark_execution ?? {}) as Record<string, unknown>;
-      const existing = Array.isArray(execution.excluded_node_ids)
-        ? execution.excluded_node_ids.filter((value): value is string => typeof value === "string")
-        : [];
-      return {
-        ...variant,
-        workflow_input: {
-          ...workflowInput,
-          benchmark_execution: {
-            ...execution,
-            excluded_node_ids: [...new Set([...existing, ...additionalExcludedNodeIds])]
-          }
-        }
-      };
-    })
+    run: {
+      ...baseSuite.run,
+      // Smoke runs two eval rows with up to eight nodes each, matching the
+      // sandbox's ordinary 16-agent ceiling. Full mode uses two target waves
+      // for the 40-target EVMbench cohort and eight-way concurrency within each
+      // production workflow, avoiding structurally serial one-hour rows.
+      max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane),
+      max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane)
+    }
   };
 }
 
@@ -506,14 +578,19 @@ async function materializeEvmbenchGroundTruth(
   controlRoot: string,
   targetIds: string[],
   destination: string,
-  logPath: string
+  logPath: string,
+  signal: AbortSignal
 ): Promise<void> {
+  throwIfAborted(signal);
   const manifest = JSON.parse(await readFile(path.join(controlRoot, "benchmarks/evmbench-detect.json"), "utf8")) as {
     upstream: { dataset_repository: string; dataset_revision: string };
   };
   const dataset = path.join(path.dirname(destination), "frontier-evals");
-  await cloneAtCommit(manifest.upstream.dataset_repository, manifest.upstream.dataset_revision, dataset, logPath);
+  await cloneAtCommit(manifest.upstream.dataset_repository, manifest.upstream.dataset_revision, dataset, logPath, {
+    signal
+  });
   for (const targetId of targetIds) {
+    throwIfAborted(signal);
     const report = await readFile(
       path.join(dataset, "project/evmbench/audits", targetId, "findings/gold_audit.md"),
       "utf8"
@@ -530,38 +607,49 @@ async function cloneAtCommit(
   commit: string,
   destination: string,
   logPath: string,
-  options: { initializeSubmodules?: boolean } = {}
+  options: { initializeSubmodules?: boolean; signal?: AbortSignal } = {}
 ): Promise<void> {
+  throwIfAborted(options.signal);
   await rm(destination, { recursive: true, force: true });
   await runCommand(["git", "clone", "--filter=blob:none", "--no-checkout", repository, destination], {
     cwd: path.dirname(destination),
     logPath,
-    timeoutMs: 5 * 60 * 1000
+    timeoutMs: 5 * 60 * 1000,
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
   await runCommand(["git", "fetch", "--depth", "1", "origin", commit], {
     cwd: destination,
     logPath,
-    timeoutMs: 5 * 60 * 1000
+    timeoutMs: 5 * 60 * 1000,
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
   await runCommand(["git", "checkout", "--detach", commit], {
     cwd: destination,
     logPath,
-    timeoutMs: 2 * 60 * 1000
+    timeoutMs: 2 * 60 * 1000,
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
   if (options.initializeSubmodules === true) {
     await runCommand(["git", "submodule", "sync", "--recursive"], {
       cwd: destination,
       logPath,
-      timeoutMs: 2 * 60 * 1000
+      timeoutMs: 2 * 60 * 1000,
+      ...(options.signal === undefined ? {} : { signal: options.signal })
     });
     await runCommand(["git", "submodule", "update", "--init", "--recursive", "--depth", "1"], {
       cwd: destination,
       logPath,
-      timeoutMs: 10 * 60 * 1000
+      timeoutMs: 10 * 60 * 1000,
+      ...(options.signal === undefined ? {} : { signal: options.signal })
     });
   }
   const head = (
-    await runCommand(["git", "rev-parse", "HEAD"], { cwd: destination, logPath, timeoutMs: 30_000 })
+    await runCommand(["git", "rev-parse", "HEAD"], {
+      cwd: destination,
+      logPath,
+      timeoutMs: 30_000,
+      ...(options.signal === undefined ? {} : { signal: options.signal })
+    })
   ).trim();
   if (head !== commit.toLowerCase()) throw new Error(`checkout revision mismatch for ${repository}`);
 }
@@ -643,6 +731,23 @@ export function publicBundleSources(
   return sources;
 }
 
+async function mapLimitStable<T>(
+  values: readonly T[],
+  limit: number,
+  worker: (value: T) => Promise<void>
+): Promise<void> {
+  assertPositiveSafeInteger("parallel preparation limit", limit);
+  let nextIndex = 0;
+  const runNext = async (): Promise<void> => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      await worker(values[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, values.length) }, () => runNext()));
+}
+
 async function runCommand(
   argv: string[],
   options: {
@@ -651,9 +756,11 @@ async function runCommand(
     timeoutMs: number;
     env?: Record<string, string>;
     timeoutCategory?: string;
+    signal?: AbortSignal;
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
+  throwIfAborted(options.signal);
   const child = spawn(argv[0]!, argv.slice(1), {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
@@ -672,19 +779,40 @@ async function runCommand(
     });
   }
   let timedOut = false;
+  let aborted = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const terminateChild = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    killTimer ??= setTimeout(() => child.kill("SIGKILL"), 10_000);
+    killTimer.unref();
+  };
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGTERM");
-    setTimeout(() => child.kill("SIGKILL"), 10_000).unref();
+    terminateChild();
   }, options.timeoutMs);
+  const abortHandler = (): void => {
+    if (aborted) return;
+    aborted = true;
+    terminateChild();
+  };
+  options.signal?.addEventListener("abort", abortHandler, { once: true });
+  if (options.signal?.aborted) abortHandler();
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code ?? 1));
-  }).finally(() => clearTimeout(timer));
-  if (timedOut) {
+  }).finally(() => {
+    clearTimeout(timer);
+    if (killTimer !== undefined) clearTimeout(killTimer);
+    options.signal?.removeEventListener("abort", abortHandler);
+  });
+  if (timedOut || aborted) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
     throw new OperationalDispositionError("unreachable", {
-      cause: new Error(options.timeoutCategory ?? "operation-timeout")
+      cause:
+        aborted && options.signal?.reason instanceof Error
+          ? options.signal.reason
+          : new Error(options.timeoutCategory ?? "operation-timeout")
     });
   }
   if (exitCode !== 0) {
@@ -714,5 +842,31 @@ async function runBare(argv: string[]): Promise<void> {
 function requiredEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
+  return value;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw new OperationalDispositionError("unreachable", {
+    cause: signal.reason instanceof Error ? signal.reason : new Error("preparation-timeout")
+  });
+}
+
+function publicEvalMatrixWaves(matrixRows: number, maxParallelRuns: number): number {
+  assertPositiveSafeInteger("matrix rows", matrixRows);
+  assertPositiveSafeInteger("maximum parallel runs", maxParallelRuns);
+  return Math.ceil(matrixRows / maxParallelRuns);
+}
+
+function assertPositiveSafeInteger(label: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
+}
+
+function checkedTimeoutSeconds(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive safe integer`);
+  }
   return value;
 }

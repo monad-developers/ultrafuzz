@@ -8,7 +8,8 @@ import { z } from "zod/v4";
 import {
   adaptBenchmarkManifestToEvalSuite,
   loadBenchmarkCohortManifest,
-  loadBenchmarkLanesManifest
+  loadBenchmarkLanesManifest,
+  type BenchmarkModelProfileManifest
 } from "./benchmark-manifest.js";
 import {
   type EvalEfficiencyCompleteness,
@@ -576,6 +577,7 @@ export function mergeEvalHistory(history: EvalHistory, incoming: EvalHistoryObse
 
 export interface PublishEvalHistoryInput {
   projectRoot: string;
+  benchmarkPolicyRoot?: string;
   evalRunId: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
@@ -614,7 +616,13 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
   ) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPATIBLE", "run and scoring lineage do not match");
   }
-  assertPublicBenchmarkGeneration(input.projectRoot, input.benchmark, input.lane, manifest.suite, matrix);
+  assertPublicBenchmarkGeneration(
+    input.benchmarkPolicyRoot ?? input.projectRoot,
+    input.benchmark,
+    input.lane,
+    manifest.suite,
+    matrix
+  );
   const matches = matchedGroundTruthByRow(matrix, summary.rows, scores);
   const observations = createEvalHistoryObservations({
     benchmark: input.benchmark,
@@ -680,14 +688,29 @@ export function assertPublicBenchmarkGeneration(
     path.join(projectRoot, "benchmarks", benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json")
   );
   const lanes = loadBenchmarkLanesManifest(path.join(projectRoot, "benchmarks", "lanes.json"));
-  const actualRunnerProfiles = [...new Set(suite.variants.map((variant) => variant.runner_model_profile))];
-  const expected = adaptBenchmarkManifestToEvalSuite({
-    benchmark,
-    lane,
-    cohort,
-    lanes,
-    ...(actualRunnerProfiles.length === 1 ? { runnerModelProfileId: actualRunnerProfiles[0] } : {})
-  });
+  const actualRunnerProfiles = [
+    ...new Set(suite.variants.map((variant) => variant.runner_model_profile ?? suite.run.runner_model_profile))
+  ];
+  const runnerModelProfileOverride =
+    actualRunnerProfiles.length === 1 ? publicRunnerModelProfileOverride(suite, actualRunnerProfiles[0]!) : undefined;
+  let expected: EvalSuiteSpec;
+  try {
+    expected = adaptBenchmarkManifestToEvalSuite({
+      benchmark,
+      lane,
+      cohort,
+      lanes,
+      ...(runnerModelProfileOverride === undefined ? {} : { runnerModelProfileOverride })
+    });
+  } catch (error) {
+    if (error instanceof EvalError && error.code === "EVAL_BENCHMARK_MODEL_PROFILE_INVALID") {
+      throw new EvalError(
+        "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
+        "eval suite runner override is not a safe public benchmark profile"
+      );
+    }
+    throw error;
+  }
   if (stableStringify(publicSuiteScope(suite)) !== stableStringify(publicSuiteScope(expected))) {
     throw new EvalError(
       "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID",
@@ -753,6 +776,20 @@ export function assertPublicBenchmarkGeneration(
       "eval generation is missing rows from the checked-in public benchmark matrix"
     );
   }
+}
+
+function publicRunnerModelProfileOverride(
+  suite: EvalSuiteSpec,
+  runnerModelProfileId: string
+): BenchmarkModelProfileManifest | undefined {
+  const profile = suite.model_profiles[runnerModelProfileId];
+  if (profile?.model === undefined || profile.reasoning === undefined) return undefined;
+  return {
+    id: runnerModelProfileId,
+    agent: profile.agent,
+    model: profile.model,
+    reasoning: profile.reasoning
+  };
 }
 
 function publicSuiteScope(suite: EvalSuiteSpec): Omit<EvalSuiteSpec, "ground_truth_root"> {

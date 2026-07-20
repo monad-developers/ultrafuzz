@@ -14,7 +14,6 @@ target_id="$1"
 prepared_target_root="${2:-}"
 ultrafuzz_bin="${ULTRAFUZZ_BIN:-ultrafuzz}"
 work_root="${ULTRAFUZZ_E2E_WORK_ROOT:-.codex-runs/e2e-targets}"
-e2e_mode="${ULTRAFUZZ_E2E_MODE:-submission}"
 wait_seconds="${ULTRAFUZZ_E2E_WAIT_SECONDS:-18000}"
 poll_interval_seconds="${ULTRAFUZZ_E2E_POLL_INTERVAL_SECONDS:-30}"
 node_timeout_seconds="${ULTRAFUZZ_E2E_NODE_TIMEOUT_SECONDS:-900}"
@@ -22,7 +21,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 manifest="$script_dir/target-e2e-manifest.json"
 ci_helper="$script_dir/target-e2e-ci.ts"
 config_helper="$script_dir/configure-target-e2e.ts"
-fake_runner_source="$script_dir/fake-target-e2e-smithers.sh"
 
 if ! command -v "$ultrafuzz_bin" >/dev/null 2>&1 && [ ! -x "$ultrafuzz_bin" ]; then
   echo "Ultrafuzz CLI not found or not executable: $ultrafuzz_bin" >&2
@@ -32,22 +30,13 @@ if ! command -v bun >/dev/null 2>&1; then
   echo "bun is required to run the target E2E CI helpers" >&2
   exit 1
 fi
-case "$e2e_mode" in
-  submission) ;;
-  live)
-    if [ -z "${OPENAI_API_KEY:-}" ]; then
-      echo "The live target E2E mode requires its model credential." >&2
-      exit 1
-    fi
-    if [ -n "${GITHUB_ACTIONS:-}" ]; then
-      echo "::add-mask::${OPENAI_API_KEY}"
-    fi
-    ;;
-  *)
-    echo "ULTRAFUZZ_E2E_MODE must be 'submission' or 'live'." >&2
-    exit 2
-    ;;
-esac
+if [ -z "${OPENAI_API_KEY:-}" ]; then
+  echo "The required model credential is not available for target repository E2E." >&2
+  exit 1
+fi
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  echo "::add-mask::${OPENAI_API_KEY}"
+fi
 
 bun "$ci_helper" validate-manifest "$manifest"
 target_name="$(bun "$ci_helper" target-field "$manifest" "$target_id" name)"
@@ -58,7 +47,6 @@ run_root="${work_root}/${target_id}"
 evidence_root="${run_root}/evidence"
 target_root="${prepared_target_root:-${run_root}/repo}"
 run_id="e2e-${target_id}"
-fake_runner_log="$evidence_root/fake-smithers-invocation.json"
 
 case "$run_root" in
   "" | "/" | "." | "..")
@@ -124,13 +112,6 @@ archive_latest_run_diagnostics() {
     if [ -f "$latest_run/$path" ]; then
       cp "$latest_run/$path" "$diagnostics_root/$path"
       redact_file "$diagnostics_root/$path"
-    fi
-  done
-  mkdir -p "$diagnostics_root/smithers"
-  for path in submission.json tasks.json workflow.tsx; do
-    if [ -f "$latest_run/smithers/$path" ]; then
-      cp "$latest_run/smithers/$path" "$diagnostics_root/smithers/$path"
-      redact_file "$diagnostics_root/smithers/$path"
     fi
   done
 }
@@ -240,44 +221,17 @@ run_cli_json "$evidence_root/validate.json" "$evidence_root/validate.stderr.log"
 assert_cli_ok "$evidence_root/validate.json" "validate"
 
 run_status=0
-if [ "$e2e_mode" = "submission" ]; then
-  fake_runner="$(cd "$run_root" && pwd -P)/fake-bin/smithers"
-  fake_runner_log="$(cd "$evidence_root" && pwd -P)/fake-smithers-invocation.json"
-  mkdir -p "$(dirname "$fake_runner")"
-  install -m 0755 "$fake_runner_source" "$fake_runner"
-  run_cli_json "$evidence_root/run.json" "$evidence_root/run.stderr.log" \
-    env -u OPENAI_API_KEY \
-      SMITHERS_BIN="$fake_runner" \
-      SMITHERS_FAKE_LOG="$fake_runner_log" \
-      "$ultrafuzz_bin" run \
-        --project "$target_root" \
-        --run-id "$run_id" \
-        --json || run_status=$?
-else
-  run_cli_json "$evidence_root/run.json" "$evidence_root/run.stderr.log" \
-    "$ultrafuzz_bin" run \
-      --project "$target_root" \
-      --run-id "$run_id" \
-      --json || run_status=$?
-fi
+run_cli_json "$evidence_root/run.json" "$evidence_root/run.stderr.log" \
+  "$ultrafuzz_bin" run \
+    --project "$target_root" \
+    --run-id "$run_id" \
+    --json || run_status=$?
 archive_latest_run_diagnostics
 if [ "$run_status" -ne 0 ]; then
   echo "Ultrafuzz run command failed with status ${run_status}; bounded diagnostics were archived." >&2
   exit "$run_status"
 fi
 assert_cli_ok "$evidence_root/run.json" "run"
-
-if [ "$e2e_mode" = "submission" ]; then
-  bun "$ci_helper" assert-run-submission \
-    "$evidence_root/run.json" \
-    "$evidence_root/run-diagnostics/state.json" \
-    "$evidence_root/run-diagnostics/run.json" \
-    "$evidence_root/run-diagnostics/smithers/submission.json" \
-    "$fake_runner_log" \
-    "$run_id"
-  echo "Ultrafuzz bounded target submission completed for ${target_id}; no live agents were run. Evidence: ${evidence_root}"
-  exit 0
-fi
 
 wait_for_report
 archive_latest_run_diagnostics

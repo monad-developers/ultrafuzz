@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
-  parseEvalHistoryPublicationGeneration
+  parseEvalHistoryPublicationGeneration,
+  publishEvalHistoryGeneration
 } from "./publish-eval-history-cas.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
@@ -30,11 +31,12 @@ describe("eval history Git CAS publisher", () => {
   it("preserves two racing generations and makes a repeated generation idempotent", async () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
-    writeEvalRun(inputRoot, "run-a", "observation-a");
-    writeEvalRun(inputRoot, "run-a-2", "observation-a-2");
-    writeEvalRun(inputRoot, "run-b", "observation-b");
-    const generationA = writeGeneration(fixture.root, "generation-a.json", ["run-a", "run-a-2"]);
-    const generationB = writeGeneration(fixture.root, "generation-b.json", ["run-b"]);
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
+    writeEvalRun(inputRoot, "run-a-2", "observation-a-2", candidateCommit);
+    writeEvalRun(inputRoot, "run-b", "observation-b", candidateCommit);
+    const generationA = writeGeneration(fixture.root, "generation-a.json", ["run-a", "run-a-2"], candidateCommit);
+    const generationB = writeGeneration(fixture.root, "generation-b.json", ["run-b"], candidateCommit);
     const barrier = path.join(fixture.root, "barrier");
     fs.mkdirSync(barrier);
 
@@ -81,10 +83,11 @@ describe("eval history Git CAS publisher", () => {
   it("reconciles a retained post-squash branch without reverting main history", async () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
-    writeEvalRun(inputRoot, "run-a", "observation-a");
-    writeEvalRun(inputRoot, "run-b", "observation-b");
-    const generationA = writeGeneration(fixture.root, "generation-a.json", ["run-a"]);
-    const generationB = writeGeneration(fixture.root, "generation-b.json", ["run-b"]);
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
+    writeEvalRun(inputRoot, "run-b", "observation-b", candidateCommit);
+    const generationA = writeGeneration(fixture.root, "generation-a.json", ["run-a"], candidateCommit);
+    const generationB = writeGeneration(fixture.root, "generation-b.json", ["run-b"], candidateCommit);
 
     await invokePublisher(fixture.checkoutA, generationA, inputRoot);
     const retainedBeforeSquash = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
@@ -126,9 +129,51 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(targetAfter);
   }, 30_000);
 
+  it("rejects an ahead publication branch containing paths outside the publication allowlist", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutB, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
+
+    writeFile(path.join(fixture.checkoutA, "untrusted-publication-change.txt"), "must not be published\n");
+    git(fixture.checkoutA, ["add", "untrusted-publication-change.txt"]);
+    git(fixture.checkoutA, [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.com",
+      "commit",
+      "-m",
+      "Poison publication branch"
+    ]);
+    git(fixture.checkoutA, ["push", "origin", `HEAD:${TARGET_REF}`]);
+    const poisonedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+
+    expect(() =>
+      publishEvalHistoryGeneration({
+        generationPath: generation,
+        inputRoot,
+        repositoryRoot: fixture.checkoutB
+      })
+    ).toThrow(/cumulative diff contains unexpected paths: "untrusted-publication-change\.txt"/u);
+    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(poisonedTarget);
+
+    const independentGate = Bun.spawnSync(["node", SCRIPT, "verify-target"], {
+      cwd: fixture.checkoutB,
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    expect(independentGate.exitCode).not.toBe(0);
+    expect(independentGate.stderr.toString()).toMatch(
+      /cumulative diff contains unexpected paths: "untrusted-publication-change\.txt"/u
+    );
+  });
+
   it("rejects non-canonical generation paths and URLs", () => {
     const valid = {
       schema_version: EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+      candidate_commit: "a".repeat(40),
       candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
       source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
       runs: [{ eval_run_id: "run-a", benchmark: "evmbench", lane: "smoke", input_path: "runs/run-a" }]
@@ -145,6 +190,22 @@ describe("eval history Git CAS publisher", () => {
         source_artifact: "https://attacker.invalid/actions/runs/123"
       })
     ).toThrow(/GitHub Actions run URL/u);
+  });
+
+  it("rejects an eval artifact from a different candidate commit", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-a", "observation-a", "b".repeat(40));
+    const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
+
+    expect(() =>
+      publishEvalHistoryGeneration({
+        generationPath: generation,
+        inputRoot,
+        repositoryRoot: fixture.checkoutA
+      })
+    ).toThrow(/candidate commit does not match publication generation/u);
   });
 });
 
@@ -254,20 +315,29 @@ if (args.includes("--check")) {
   );
 }
 
-function writeEvalRun(inputRoot: string, evalRunId: string, observationId: string): void {
+function writeEvalRun(inputRoot: string, evalRunId: string, observationId: string, candidateCommit: string): void {
   writeFile(
     path.join(inputRoot, evalRunId, "eval.json"),
-    `${JSON.stringify({ eval_run_id: evalRunId, observation_id: observationId }, null, 2)}\n`
+    `${JSON.stringify(
+      {
+        eval_run_id: evalRunId,
+        observation_id: observationId,
+        provenance: { candidate: { commit: candidateCommit } }
+      },
+      null,
+      2
+    )}\n`
   );
 }
 
-function writeGeneration(root: string, file: string, evalRunIds: string[]): string {
+function writeGeneration(root: string, file: string, evalRunIds: string[], candidateCommit: string): string {
   const generationPath = path.join(root, file);
   writeFile(
     generationPath,
     `${JSON.stringify(
       {
         schema_version: EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+        candidate_commit: candidateCommit,
         candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
         source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
         runs: evalRunIds.map((evalRunId) => ({

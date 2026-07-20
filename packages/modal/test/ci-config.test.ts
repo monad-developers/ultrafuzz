@@ -6,8 +6,17 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
+import {
+  PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
+  PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
+  PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
+  PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
+  publicBenchmarkMaxParallelEvalRows,
+  publicBenchmarkMaxParallelWorkflowNodes
+} from "../src/public-worker.js";
+
 describe("public Modal benchmark configuration", () => {
-  it("creates exactly two models by two cohorts with a fixed one-hour budget", () => {
+  it("creates the exact three-target OpenAI smoke benchmark with bounded row and control budgets", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-ci-"));
     execFileSync(
@@ -23,34 +32,76 @@ describe("public Modal benchmark configuration", () => {
       { cwd: workspace }
     );
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
-      pairs: Array<{ benchmark: string; model_slug: string; config_path: string }>;
+      mode: string;
+      benchmark: string;
+      pairs: Array<{ benchmark: string; model_slug: string; provider: string; config_path: string }>;
       image_name: string;
+      matrix_rows_per_pair: number;
+      control_timeout_seconds: number;
+      concurrency: {
+        max_parallel_eval_rows_per_sandbox: number;
+        max_parallel_workflow_nodes_per_row: number;
+        max_live_runner_workflows_by_provider: Record<string, number>;
+        max_live_judge_rows: number;
+      };
     };
-    expect(manifest.pairs).toHaveLength(4);
-    expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench", "ultrafuzz-bench"]));
-    expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
-      new Set(["benchmark-smoke-gpt-5-6-luna-low", "benchmark-smoke-claude-sonnet-5-low"])
+    expect(manifest.mode).toBe("smoke");
+    expect(manifest).not.toHaveProperty("experiment");
+    expect(manifest.benchmark).toBe("ultrafuzz-bench");
+    expect(manifest.pairs).toHaveLength(1);
+    expect(manifest.pairs[0]).toEqual(
+      expect.objectContaining({
+        benchmark: "ultrafuzz-bench",
+        model_slug: "benchmark-smoke-gpt-5-6-luna-high",
+        provider: "openai"
+      })
     );
     expect(manifest.image_name).toBe(`ufz-runner-${"a".repeat(40)}`);
+    expect(manifest.matrix_rows_per_pair).toBe(3);
+    const maxParallel = publicBenchmarkMaxParallelEvalRows("smoke");
+    const matrixWaves = Math.ceil(manifest.matrix_rows_per_pair / maxParallel);
+    const workerEnvelopeSeconds =
+      matrixWaves * 3_600 +
+      PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
+      matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
+      PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS;
+    expect(manifest.control_timeout_seconds).toBe(
+      workerEnvelopeSeconds + PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS + 5 * 60
+    );
+    expect(manifest.concurrency).toEqual({
+      max_parallel_eval_rows_per_sandbox: maxParallel,
+      max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes("smoke"),
+      max_live_runner_workflows_by_provider: { openai: Math.min(3, maxParallel) },
+      max_live_judge_rows: Math.min(3, maxParallel)
+    });
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
         node_timeout_seconds: number;
-        public_benchmark: { max_runtime_seconds: number };
+        public_benchmark: { benchmark: string; lane: string; max_runtime_seconds: number };
         braintrust: { judge_api_key_env: string; judge_url?: string };
-        models: Array<{ reasoning: string }>;
+        models: Array<{ model: string; provider: string; agent: string; reasoning: string }>;
       };
       expect(config.node_timeout_seconds).toBe(1800);
-      expect(config.public_benchmark.max_runtime_seconds).toBe(3600);
+      expect(config.public_benchmark).toEqual(
+        expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 3600 })
+      );
       expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
       expect(config.braintrust.judge_url).toBe("https://api.openai.com/v1/chat/completions");
-      expect(config.models).toEqual([expect.objectContaining({ reasoning: "low" })]);
+      expect(config.models).toEqual([
+        expect.objectContaining({
+          model: "gpt-5.6-luna",
+          provider: "openai",
+          agent: "CodexAgent",
+          reasoning: "high"
+        })
+      ]);
     }
   });
 
-  it("rejects an unchunked full public matrix before any Modal work can launch", () => {
+  it("creates the complete two-provider EVMBench full mode from the checked-in cohort", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-full-"));
-    const result = spawnSync(
+    execFileSync(
       process.execPath,
       [
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
@@ -60,67 +111,237 @@ describe("public Modal benchmark configuration", () => {
         output,
         "full"
       ],
-      { cwd: workspace, encoding: "utf8" }
+      { cwd: workspace }
     );
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/supports only the bounded smoke lane/);
-    expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
+      mode: string;
+      benchmark: string;
+      matrix_rows_per_pair: number;
+      pairs: Array<{ pair: string; benchmark: string; provider: string; model_slug: string; config_path: string }>;
+      control_timeout_seconds: number;
+      concurrency: {
+        max_parallel_eval_rows_per_sandbox: number;
+        max_parallel_workflow_nodes_per_row: number;
+        max_live_runner_workflows_by_provider: Record<string, number>;
+        max_live_judge_rows: number;
+      };
+    };
+    expect(manifest.mode).toBe("full");
+    expect(manifest).not.toHaveProperty("experiment");
+    expect(manifest.benchmark).toBe("evmbench");
+    expect(manifest.matrix_rows_per_pair).toBe(40);
+    expect(manifest.pairs).toHaveLength(2);
+    expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench"]));
+    expect(new Set(manifest.pairs.map((pair) => pair.provider))).toEqual(new Set(["openai", "anthropic"]));
+    expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
+      new Set(["benchmark-full-gpt-5-6-luna-high", "benchmark-full-claude-sonnet-5-high"])
+    );
+    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(2);
+    const maxParallel = publicBenchmarkMaxParallelEvalRows("full");
+    const liveRows = Math.min(40, maxParallel);
+    const waves = Math.ceil(40 / maxParallel);
+    expect(manifest.control_timeout_seconds).toBe(
+      waves * 3_600 +
+        PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
+        waves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
+        PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +
+        PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS +
+        5 * 60
+    );
+    expect(manifest.concurrency.max_parallel_eval_rows_per_sandbox).toBe(maxParallel);
+    expect(manifest.concurrency.max_parallel_workflow_nodes_per_row).toBe(
+      publicBenchmarkMaxParallelWorkflowNodes("full")
+    );
+    expect(manifest.concurrency.max_live_runner_workflows_by_provider).toEqual({
+      openai: liveRows,
+      anthropic: liveRows
+    });
+    expect(manifest.concurrency.max_live_judge_rows).toBe(2 * liveRows);
+    for (const pair of manifest.pairs) {
+      const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
+        public_benchmark: { benchmark: string; lane: string; max_runtime_seconds: number };
+        models: Array<{ provider: string; model: string; reasoning: string }>;
+      };
+      expect(config.public_benchmark).toEqual(
+        expect.objectContaining({ benchmark: "evmbench", lane: "full", max_runtime_seconds: 3600 })
+      );
+      expect(config.models).toEqual([
+        expect.objectContaining(
+          pair.provider === "openai"
+            ? { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }
+            : { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }
+        )
+      ]);
+    }
   });
 
-  it("creates an eight-pair before/after Kaden experiment with qualified identities", () => {
+  it("accepts safe per-provider model overrides and derives deterministic unique slugs", () => {
     const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-paired-ablation-"));
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-overrides-"));
     execFileSync(
       process.execPath,
       [
         path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
         "c".repeat(40),
         "https://github.com/monad-developers/ultrafuzz",
-        "paired-1",
+        "overrides-1",
         output,
-        "smoke",
-        "paired-kadenzipfel"
+        "full"
       ],
-      { cwd: workspace }
+      {
+        cwd: workspace,
+        env: {
+          ...process.env,
+          BENCHMARK_MODELS_JSON: JSON.stringify([
+            { provider: "anthropic", model: "claude-sonnet-5-202607", reasoning: "medium" },
+            { provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "xhigh" }
+          ])
+        }
+      }
     );
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
-      experiment: string;
-      pairs: Array<{ pair: string; experiment: string; config_path: string }>;
+      pairs: Array<{ provider: string; model_slug: string; config_path: string }>;
     };
-    expect(manifest.experiment).toBe("paired-kadenzipfel");
-    expect(manifest.pairs).toHaveLength(8);
-    expect(new Set(manifest.pairs.map((pair) => pair.experiment))).toEqual(
-      new Set(["candidate", "without-kadenzipfel"])
+    expect(manifest.pairs.map((pair) => pair.provider)).toEqual(["openai", "anthropic"]);
+    expect(new Set(manifest.pairs.map((pair) => pair.model_slug)).size).toBe(2);
+    expect(manifest.pairs.every((pair) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(pair.model_slug))).toBe(true);
+    const models = Object.fromEntries(
+      manifest.pairs.map((pair) => {
+        const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
+          models: Array<{ provider: string; model: string; reasoning: string }>;
+        };
+        return [pair.provider, config.models[0]];
+      })
     );
-    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(8);
-    for (const pair of manifest.pairs) {
-      expect(pair.pair.startsWith(`${pair.experiment}-`)).toBe(true);
-      const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
-        public_benchmark: { experiment: string };
-      };
-      expect(config.public_benchmark.experiment).toBe(pair.experiment);
+    expect(models).toEqual({
+      openai: expect.objectContaining({ model: "gpt-5.6-luna-202607", reasoning: "xhigh" }),
+      anthropic: expect.objectContaining({ model: "claude-sonnet-5-202607", reasoning: "medium" })
+    });
+  });
+
+  it("rejects unsafe model overrides and provider sets that do not match the mode", () => {
+    const workspace = path.resolve("../..");
+    const cases = [
+      {
+        mode: "smoke",
+        models: [{ provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }],
+        message: /smoke BENCHMARK_MODELS_JSON must contain exactly openai/u
+      },
+      {
+        mode: "full",
+        models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }],
+        message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic/u
+      },
+      {
+        mode: "smoke",
+        models: [{ provider: "openai", model: "gpt-5.6;echo", reasoning: "high" }],
+        message: /model is unsafe or unpinned/u
+      }
+    ];
+    for (const [index, testCase] of cases.entries()) {
+      const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-invalid-model-"));
+      const result = spawnSync(
+        process.execPath,
+        [
+          path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
+          "d".repeat(40),
+          "https://github.com/monad-developers/ultrafuzz",
+          `invalid-${index}`,
+          output,
+          testCase.mode
+        ],
+        {
+          cwd: workspace,
+          encoding: "utf8",
+          env: { ...process.env, BENCHMARK_MODELS_JSON: JSON.stringify(testCase.models) }
+        }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(testCase.message);
+      expect(fs.existsSync(path.join(output, "manifest.json"))).toBe(false);
     }
   });
 
   it("uses GitHub Actions only as the asynchronous Modal control and publication plane", () => {
     const workspace = path.resolve("../..");
-    const workflow = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8");
-    expect(() => parse(workflow)).not.toThrow();
-    expect(workflow).toContain("node packages/modal/dist/cli.js launch");
-    expect(workflow).toContain("Launch detached Modal benchmark sandboxes");
-    expect(workflow).toContain("publish-eval-history-cas.mjs");
-    expect(workflow).toContain("actions/download-artifact@");
-    expect(workflow).toContain("--public-results");
-    expect(workflow).toContain("retention-days: 30");
-    expect(workflow).toContain("[ci skip] Update published eval history");
-    expect(workflow).not.toContain("group: publish-eval-history");
-    expect(workflow).not.toContain("peter-evans/create-pull-request");
-    expect(workflow).not.toContain("ultrafuzz-benchmark");
-    expect(workflow).not.toContain("self-hosted");
-    expect(workflow).not.toContain("- full");
+    const workflowText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8");
+    const workflow = parse(workflowText) as {
+      on: {
+        push: { branches: string[] };
+        workflow_dispatch: {
+          inputs: Record<string, { default: string; type: string }>;
+        };
+      };
+      env: { BENCHMARK_MODE: string };
+      concurrency: { group: string; "cancel-in-progress": string };
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          steps: Array<{ name?: string; env?: Record<string, string>; run?: string; with?: Record<string, unknown> }>;
+        }
+      >;
+    };
+    expect(Object.hasOwn(workflow.on, "push")).toBe(true);
+    expect(workflow.on.push.branches).toEqual(["**"]);
+    expect(workflow.on.workflow_dispatch.inputs).toEqual({
+      openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
+      openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
+      anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
+      anthropic_reasoning: expect.objectContaining({ default: "high", type: "string" })
+    });
+    expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
+    expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
+    expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
+    expect(workflow.concurrency.group).toContain("'full' || 'smoke'");
+    expect(workflow.concurrency.group).toContain("github.ref");
+    expect(workflow.concurrency.group).toContain("github.run_id");
+    expect(workflow.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'push' }}");
+    expect(workflow.jobs.launch?.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push'");
+    expect(workflow.jobs.launch?.if).not.toContain("refs/heads/main");
+
+    const prepare = workflow.jobs.launch?.steps.find(
+      (step) => step.name === "Prepare the exact model by benchmark matrix"
+    );
+    expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("inputs.openai_model");
+    expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("vars.BENCHMARK_SMOKE_OPENAI_MODEL");
+    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("inputs.openai_reasoning");
+    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("vars.BENCHMARK_SMOKE_OPENAI_REASONING");
+    expect(prepare?.env?.BENCHMARK_ANTHROPIC_MODEL).toContain("inputs.anthropic_model");
+    expect(prepare?.env?.BENCHMARK_ANTHROPIC_REASONING).toContain("inputs.anthropic_reasoning");
+    expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
+    expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
+
+    expect(workflowText).toContain("node packages/modal/dist/cli.js launch");
+    expect(workflowText).toContain("Launch detached Modal benchmark sandboxes");
+    expect(workflowText).toContain("actions/download-artifact@");
+    expect(workflowText).toContain("--public-results");
+    expect(workflowText).toContain("retention-days: 30");
+    expect(workflowText).toContain(
+      "modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    );
+    expect(workflowText).toContain(
+      "public-benchmark-results-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    );
+    expect(workflowText).toContain(
+      "modal-benchmark-control-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}"
+    );
+    expect(workflow.jobs).not.toHaveProperty("publish");
+    expect(workflowText).not.toContain("publish-eval-history-cas.mjs");
+    expect(workflowText).not.toContain("EVAL_HISTORY_PR_TOKEN");
+    expect(workflowText).not.toContain("contents: write");
+    expect(workflowText).not.toContain("pull-requests: write");
+    expect(workflowText).not.toContain("group: publish-eval-history");
+    expect(workflowText).not.toContain("peter-evans/create-pull-request");
+    expect(workflowText).not.toContain("ultrafuzz-benchmark");
+    expect(workflowText).not.toContain("self-hosted");
+    expect(workflowText).not.toMatch(/ablation|fake binary|BENCHMARK_EXPERIMENT/iu);
+    const generatorText = fs.readFileSync(path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"), "utf8");
+    expect(generatorText).not.toMatch(/ablation|experiment|fake/iu);
   });
 
-  it("limits trusted benchmark credentials to main-only Modal steps", () => {
+  it("limits trusted benchmark credentials to Modal steps for either supported trigger", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
       permissions: Record<string, string>;
@@ -147,25 +368,21 @@ describe("public Modal benchmark configuration", () => {
       "OPENAI_API_KEY"
     ].sort();
     const modalOnly = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"].sort();
+    const runnerCredentials = sensitive.filter((name) => name !== "BRAINTRUST_API_KEY");
     const expectedByStep = new Map<string, string[]>([
-      ["launch:Validate benchmark credentials", sensitive],
+      ["launch:Validate benchmark credentials", runnerCredentials],
       ["launch:Build an immutable Modal image for the candidate", modalOnly],
-      ["launch:Launch detached Modal benchmark sandboxes", sensitive],
-      ["collect:Wait for Modal compute and retry only pre-model launch failures", sensitive],
-      ["collect:Collect and validate public finding bundles", sensitive]
+      ["launch:Launch detached Modal benchmark sandboxes", runnerCredentials],
+      ["collect:Wait for Modal compute and retry only pre-model launch failures", runnerCredentials],
+      ["collect:Collect and validate public finding bundles", runnerCredentials],
+      ["cleanup_incomplete_run:Terminate every exact incomplete-run sandbox", modalOnly]
     ]);
 
     expect(workflow.permissions).toEqual({ actions: "read", contents: "read" });
-    expect(workflow.jobs.launch?.if).toContain(
-      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
-    );
-    expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push' && github.ref == 'refs/heads/main'");
-    expect(workflow.jobs.publish?.if).toContain("github.ref == 'refs/heads/main'");
-    expect(workflow.jobs.publish?.permissions).toEqual({
-      actions: "read",
-      contents: "write",
-      "pull-requests": "write"
-    });
+    expect(workflow.jobs.launch?.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push'");
+    expect(workflow.jobs.launch?.if).not.toContain("refs/heads/main");
+    expect(workflow.jobs).not.toHaveProperty("publish");
 
     for (const [jobName, job] of Object.entries(workflow.jobs)) {
       expect(
@@ -178,22 +395,102 @@ describe("public Modal benchmark configuration", () => {
         expect(actual, key).toEqual(expectedByStep.get(key) ?? []);
       }
     }
-    for (const jobName of ["launch", "collect"]) {
+    for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
       expect(checkout?.with?.["persist-credentials"], `${jobName} checkout credentials`).toBe(false);
     }
-    const publicationCheckout = workflow.jobs.publish?.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
-    expect(publicationCheckout?.with?.ref).toBe("main");
   });
 
-  it("does not cancel CI for distinct main commits before benchmark dispatch", () => {
+  it("cancels superseded CI work on the same branch", () => {
     const workspace = path.resolve("../..");
     const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/ci.yml"), "utf8")) as {
-      concurrency: { group: string; "cancel-in-progress": string };
+      concurrency: { group: string; "cancel-in-progress": boolean };
     };
 
-    expect(workflow.concurrency.group).toContain("github.ref == 'refs/heads/main' && github.sha || github.ref");
-    expect(workflow.concurrency["cancel-in-progress"]).toContain("github.ref != 'refs/heads/main'");
+    expect(workflow.concurrency.group).toContain("github.ref");
+    expect(workflow.concurrency["cancel-in-progress"]).toBe(true);
+  });
+
+  it("terminates every exact detached sandbox after either supported run becomes incomplete", () => {
+    const workspace = path.resolve("../..");
+    const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          needs?: string[];
+          steps: Array<{
+            name?: string;
+            run?: string;
+            uses?: string;
+            if?: string;
+            env?: Record<string, string>;
+            with?: Record<string, unknown>;
+            "continue-on-error"?: boolean;
+          }>;
+        }
+      >;
+    };
+    const cleanup = workflow.jobs.cleanup_incomplete_run!;
+    expect(cleanup.if).toContain("always()");
+    expect(cleanup.if).toContain("needs.launch.result == 'failure'");
+    expect(cleanup.if).toContain("needs.launch.result == 'cancelled'");
+    expect(cleanup.if).toContain("needs.collect.result == 'failure'");
+    expect(cleanup.if).toContain("needs.collect.result == 'cancelled'");
+    expect(cleanup.if).not.toContain("github.event_name");
+    expect(cleanup.needs).toEqual(["launch", "collect"]);
+    const launch = workflow.jobs.launch!;
+    const planUploadIndex = launch.steps.findIndex(
+      (step) => step.name === "Persist immutable benchmark plan before starting Modal compute"
+    );
+    const buildIndex = launch.steps.findIndex(
+      (step) => step.name === "Build an immutable Modal image for the candidate"
+    );
+    const launchIndex = launch.steps.findIndex((step) => step.name === "Launch detached Modal benchmark sandboxes");
+    expect(planUploadIndex).toBeGreaterThan(-1);
+    expect(planUploadIndex).toBeLessThan(buildIndex);
+    expect(buildIndex).toBeLessThan(launchIndex);
+    expect(launch.steps[planUploadIndex]?.with?.name).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(launch.steps[buildIndex]?.run).toContain('--build-scope "${{ github.run_id }}-${{ github.run_attempt }}"');
+
+    const restorePlan = cleanup.steps.find((step) => step.name === "Restore the immutable pre-compute benchmark plan")!;
+    expect(restorePlan["continue-on-error"]).toBe(true);
+    expect(restorePlan.with?.name).toContain("modal-benchmark-plan-");
+    expect(restorePlan.with?.name).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(restorePlan.with?.["run-id"]).toBe("${{ github.run_id }}");
+    expect(restorePlan.with?.["github-token"]).toBe("${{ github.token }}");
+    const restoreState = cleanup.steps.find((step) => step.name === "Restore any persisted launch IDs")!;
+    expect(restoreState["continue-on-error"]).toBe(true);
+
+    const pathValidation = cleanup.steps.find((step) => step.name === "Validate incomplete-run cleanup paths")?.run;
+    expect(pathValidation).toContain("manifest.candidate_commit !== process.env.EXPECTED_CANDIDATE");
+    expect(pathValidation).toContain("path.basename(configPath) !== configPath");
+    expect(pathValidation).toContain("path.basename(statePath) !== statePath");
+    expect(pathValidation).toContain("configPath !== `${pair}.json`");
+    expect(pathValidation).toContain("statePath !== `${pair}.state.json`");
+    expect(pathValidation).toContain("configs.includes(configPath) || states.includes(statePath)");
+    const termination = cleanup.steps.find((step) => step.name === "Terminate every exact incomplete-run sandbox")!;
+    expect(Object.keys(termination.env ?? {})).toEqual(
+      expect.arrayContaining([
+        "BENCHMARK_PLAN",
+        "BENCHMARK_STATE",
+        "CLEANUP_PAIR_LIST",
+        "BUILD_SCOPE",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET"
+      ])
+    );
+    expect(termination.run).toContain("terminate --state");
+    expect(termination.run).toContain("terminate-build");
+    expect(termination.run).toContain('terminate_scope "eval config $config pass $pass" terminate');
+    expect(termination.run).toContain("for pass in 1 2");
+    expect(termination.run).toContain("sleep 20");
+    expect(termination.run).toContain("termination_failed=true");
+    const missingPlan = cleanup.steps.find(
+      (step) => step.name === "Fail when the immutable cleanup plan was not preserved"
+    )!;
+    expect(missingPlan.if).toContain("restore_incomplete_plan.outcome != 'success'");
+    expect(missingPlan.run).toContain("termination cannot be confirmed");
   });
 
   it("validates persisted public results after lineage preflight and seals replacements atomically", () => {
@@ -214,23 +511,76 @@ describe("public Modal benchmark configuration", () => {
 
   it("uses compare-and-swap publication for both automatic and manual history updates", () => {
     const workspace = path.resolve("../..");
-    for (const file of ["eval-benchmarks.yml", "eval-history-publication.yml"]) {
-      const workflow = fs.readFileSync(path.join(workspace, ".github/workflows", file), "utf8");
-      expect(() => parse(workflow)).not.toThrow();
-      expect(workflow).toContain("publish-eval-history-cas.mjs");
-      expect(workflow).toContain("automation/eval-history");
-      expect(workflow).not.toContain("group: publish-eval-history");
-      expect(workflow).not.toContain("peter-evans/create-pull-request");
+    const producerText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8");
+    const publicationText = fs.readFileSync(
+      path.join(workspace, ".github/workflows/eval-history-publication.yml"),
+      "utf8"
+    );
+    expect(() => parse(producerText)).not.toThrow();
+    expect(() => parse(publicationText)).not.toThrow();
+    expect(producerText).not.toContain("publish-eval-history-cas.mjs");
+    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(3);
+    expect(publicationText).toContain("automation/eval-history");
+    expect(publicationText).not.toContain("group: publish-eval-history");
+    expect(publicationText).not.toContain("peter-evans/create-pull-request");
+
+    const publication = parse(publicationText) as {
+      on: { workflow_run: { workflows: string[]; types: string[] }; workflow_dispatch: unknown };
+      permissions: Record<string, string>;
+      jobs: Record<
+        string,
+        {
+          if?: string;
+          env?: Record<string, string>;
+          steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
+        }
+      >;
+    };
+    expect(publication.on.workflow_run).toEqual({ workflows: ["Modal Eval Benchmarks"], types: ["completed"] });
+    expect(publication.on).toHaveProperty("workflow_dispatch");
+    expect(publication.permissions).toEqual({
+      actions: "read",
+      contents: "write",
+      "pull-requests": "write"
+    });
+    const automatic = publication.jobs.publish_modal_benchmark!;
+    expect(automatic.if).toContain("workflow_run.conclusion == 'success'");
+    expect(automatic.if).toContain("workflow_run.head_repository.full_name == github.repository");
+    expect(automatic.if).toContain("workflow_run.path == '.github/workflows/eval-benchmarks.yml'");
+    expect(automatic.if).toContain("workflow_run.event == 'push'");
+    expect(automatic.if).toContain("workflow_run.event == 'workflow_dispatch'");
+    expect(automatic.env?.BENCHMARK_MODE).toContain("workflow_run.event == 'workflow_dispatch'");
+    const automaticCheckout = automatic.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+    expect(automaticCheckout?.with?.ref).toBe("main");
+    expect(automaticCheckout?.with?.["persist-credentials"]).toBe(true);
+    expect(automatic.steps.some((step) => step.uses?.startsWith("actions/cache@"))).toBe(false);
+    const downloads = automatic.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@"));
+    expect(downloads).toHaveLength(2);
+    for (const download of downloads) {
+      expect(download.with?.path).toContain("${{ runner.temp }}");
+      expect(download.with?.["run-id"]).toBe("${{ github.event.workflow_run.id }}");
+      expect(download.with?.["github-token"]).toBe("${{ github.token }}");
+      expect(download.with?.name).toContain("${{ github.event.workflow_run.run_attempt }}");
     }
-    const manual = parse(
-      fs.readFileSync(path.join(workspace, ".github/workflows/eval-history-publication.yml"), "utf8")
-    ) as { jobs: { publish: { if?: string } } };
-    expect(manual.jobs.publish.if).toBe("github.ref == 'refs/heads/main'");
+    const trustedPublish = automatic.steps.find(
+      (step) => step.name === "Validate and publish the atomic Modal benchmark generation"
+    )?.run;
+    expect(trustedPublish).toContain("prepare-eval-history-publication.mjs automatic");
+    expect(trustedPublish).toContain('git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$CANDIDATE_COMMIT"');
+    expect(trustedPublish).toContain('"$PUBLICATION_POLICY_ROOT"');
+    expect(trustedPublish).not.toContain("pnpm install");
+    const pullRequestGate = publication.jobs.open_publication_pr?.steps.find(
+      (step) => step.name === "Open the publication pull request when needed"
+    )?.run;
+    expect(pullRequestGate).toContain("publish-eval-history-cas.mjs verify-target");
+    expect(publication.jobs.publish_manual?.if).toBe(
+      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
+    );
   });
 
   it("preserves a pushed publication branch when repository policy blocks automatic pull requests", () => {
     const workspace = path.resolve("../..");
-    for (const file of ["eval-benchmarks.yml", "eval-history-publication.yml"]) {
+    for (const file of ["eval-history-publication.yml"]) {
       const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows", file), "utf8")) as {
         jobs: Record<
           string,
@@ -297,6 +647,7 @@ describe("public Modal benchmark configuration", () => {
 
     expect(collect.if).toContain("always()");
     expect(collect.if).toContain("needs.launch.result != 'skipped'");
+    expect(collect["timeout-minutes"]).toBe(360);
     expect(step("Restore detached launch state")["continue-on-error"]).toBe(true);
     expect(step("Discover recoverable launch control").if).toBe("always()");
 
@@ -306,7 +657,9 @@ describe("public Modal benchmark configuration", () => {
     expect(waitScript).toContain("initial-launch-recovery-succeeded");
     expect(waitScript).toContain("initial-launch-recovery-incomplete");
     expect(waitScript).toContain("initial-launch-recovery-timeout");
-    expect(waitScript).toContain("deadline=$((SECONDS + 7200))");
+    expect(waitScript).toContain(".control_timeout_seconds");
+    expect(waitScript).toContain("deadline=$((SECONDS + control_timeout_seconds))");
+    expect(waitScript).not.toContain("SECONDS + 7200");
     expect(waitScript).toContain('"$recovery_exit" -eq 137');
     expect(waitScript).toContain("resume-attempt-timeout");
     expect(waitScript).toContain('.phase == "reserved"');
@@ -316,13 +669,15 @@ describe("public Modal benchmark configuration", () => {
       waitScript.indexOf("launch-state-missing")
     );
     expect(waitScript).toContain("control-plane-timeout");
-    expect(waitScript).toContain("timeout --signal=TERM --kill-after=30s 2m");
+    expect(waitScript).toContain("timeout --signal=TERM --kill-after=30s 30s");
     expect(waitScript).toContain("status-query-timeout");
     expect(waitScript).not.toContain("exit 1");
 
     const collectScript = step("Collect and validate public finding bundles").run;
     expect(collectScript).toContain('.terminal_status == "succeeded"');
     expect(collectScript).toContain("timeout --signal=TERM --kill-after=30s 5m");
+    expect(collectScript).toContain("max_parallel_collections=4");
+    expect(collectScript).toContain("wait -n");
     expect(collectScript).toContain("node packages/modal/dist/cli.js collect");
     expect(collectScript).toContain('--config "$BENCHMARK_CONTROL/$config"');
     expect(collectScript).toContain('--state "$BENCHMARK_CONTROL/$state"');
@@ -348,7 +703,7 @@ describe("public Modal benchmark configuration", () => {
     const workspace = path.resolve("../..");
     const worker = fs.readFileSync(path.join(workspace, "packages/modal/src/public-worker.ts"), "utf8");
     const clone = worker.indexOf(
-      "await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true })"
+      "await cloneAtCommit(target.repo, target.ref, destination, logPath, { initializeSubmodules: true"
     );
     const init = worker.indexOf('["node", CLI, "init", "--project", destination', clone);
     const checkout = worker.indexOf('["git", "checkout", "--detach", commit]');
@@ -362,37 +717,5 @@ describe("public Modal benchmark configuration", () => {
     expect(referenceSync).toBeGreaterThan(timeoutCap);
     expect(checkout).toBeGreaterThan(-1);
     expect(submodules).toBeGreaterThan(checkout);
-  });
-
-  it("creates a controlled Kaden-free ablation without changing model or judge identities", () => {
-    const workspace = path.resolve("../..");
-    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-ablation-"));
-    execFileSync(
-      process.execPath,
-      [
-        path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
-        "b".repeat(40),
-        "https://github.com/monad-developers/ultrafuzz",
-        "ablation-1",
-        output,
-        "smoke",
-        "without-kadenzipfel"
-      ],
-      { cwd: workspace }
-    );
-    const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
-      experiment: string;
-      pairs: Array<{ config_path: string }>;
-    };
-    expect(manifest.experiment).toBe("without-kadenzipfel");
-    for (const pair of manifest.pairs) {
-      const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
-        public_benchmark: { excluded_node_ids: string[] };
-      };
-      expect(config.public_benchmark.excluded_node_ids).toEqual([
-        "reference-vulnerabilities-kadenzipfel",
-        "kadenzipfel-vulnerability-strategies"
-      ]);
-    }
   });
 });

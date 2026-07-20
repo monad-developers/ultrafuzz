@@ -414,7 +414,6 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     stage: "post-eval-pre-score",
     benchmark: TEST_BUNDLE_METADATA.benchmark,
     lane: TEST_BUNDLE_METADATA.lane,
-    experiment: "candidate",
     model_slug: TEST_MODEL_SLUG,
     model: TEST_MODEL,
     reasoning: TEST_REASONING,
@@ -456,6 +455,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
       terminal_report_present: true,
       workflow_ids: [`workflow-${index + 1}`],
       diagnostic_codes: [],
+      failed_nodes: [],
       scoring_ready: true,
       reason_codes: []
     }))

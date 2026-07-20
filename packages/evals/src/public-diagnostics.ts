@@ -5,6 +5,15 @@ import { boundedEvalId } from "./utils.js";
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
 export const PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v1" as const;
 export const MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES = 1024 * 1024;
+export const MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW = 32;
+export const PUBLIC_EVAL_FAILED_NODE_STATUSES = ["failed", "timed-out"] as const;
+export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
+  "agent-failure",
+  "artifact-contract",
+  "dependency-cascade",
+  "provider-interruption"
+] as const;
+export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure"] as const;
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
@@ -41,6 +50,21 @@ const reasonCode = z.enum([
   "workflow-id-missing",
   "terminal-report-missing"
 ]);
+const failedNodeStatus = z.enum(PUBLIC_EVAL_FAILED_NODE_STATUSES);
+const failureCategory = z.enum(PUBLIC_EVAL_FAILURE_CATEGORIES);
+const failureCode = z.enum(PUBLIC_EVAL_FAILURE_CODES);
+
+const failedNodeSchema = z
+  .strictObject({
+    node_id: safeId,
+    status: failedNodeStatus,
+    timed_out: z.boolean(),
+    failure_category: failureCategory.optional(),
+    failure_code: failureCode.optional()
+  })
+  .refine((node) => node.timed_out === (node.status === "timed-out"), {
+    message: "failed node timeout flag does not match its status"
+  });
 
 const lineageSchema = z.strictObject({
   logical_run_id: safeId,
@@ -66,6 +90,7 @@ const rowSchema = z.strictObject({
   terminal_report_present: z.boolean(),
   workflow_ids: z.array(workflowId).max(32),
   diagnostic_codes: z.array(safeId).max(64),
+  failed_nodes: z.array(failedNodeSchema).max(MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW).default([]),
   scoring_ready: z.boolean(),
   reason_codes: z.array(reasonCode).max(reasonCode.options.length)
 });
@@ -88,7 +113,6 @@ const diagnosticsSchema = z.strictObject({
   stage: z.literal("post-eval-pre-score"),
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
-  experiment: safeId,
   model_slug: safeId,
   model: z.string().min(1).max(256),
   reasoning: z.string().min(1).max(64),
@@ -103,6 +127,11 @@ const diagnosticsSchema = z.strictObject({
 export type PublicEvalDiagnostics = z.infer<typeof diagnosticsSchema>;
 export type PublicEvalDiagnosticsRow = z.infer<typeof rowSchema>;
 export type PublicEvalDiagnosticsReasonCode = z.infer<typeof reasonCode>;
+export type PublicEvalFailedNode = z.infer<typeof failedNodeSchema>;
+
+export function comparePublicEvalDiagnosticIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostics {
   const parsed = diagnosticsSchema.parse(value);
@@ -115,9 +144,14 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
     if (
       new Set(row.workflow_ids).size !== row.workflow_ids.length ||
       new Set(row.diagnostic_codes).size !== row.diagnostic_codes.length ||
+      new Set(row.failed_nodes.map((node) => node.node_id)).size !== row.failed_nodes.length ||
       new Set(row.reason_codes).size !== row.reason_codes.length
     ) {
       throw new Error(`public eval diagnostics row contains duplicate values: ${row.row_id}`);
+    }
+    const sortedFailedNodeIds = row.failed_nodes.map((node) => node.node_id).sort(comparePublicEvalDiagnosticIds);
+    if (JSON.stringify(row.failed_nodes.map((node) => node.node_id)) !== JSON.stringify(sortedFailedNodeIds)) {
+      throw new Error(`public eval diagnostics row failed nodes are not deterministic: ${row.row_id}`);
     }
     const expectedReasons = publicEvalDiagnosticsReadinessReasonCodes(row);
     if (

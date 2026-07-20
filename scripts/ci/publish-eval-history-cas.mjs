@@ -13,6 +13,7 @@ const MAIN_REF = "refs/remotes/origin/main";
 const MAX_ATTEMPTS = 12;
 const MAX_GENERATION_BYTES = 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const COMMIT_MESSAGE = "Update published eval history [ci skip]";
 const HISTORY_PATHS = [
   "benchmarks/history.json",
@@ -27,6 +28,7 @@ const HISTORY_PATHS = [
 export function parseEvalHistoryPublicationGeneration(value) {
   const generation = strictRecord(value, "publication generation", [
     "schema_version",
+    "candidate_commit",
     "candidate_repository_url",
     "source_artifact",
     "runs"
@@ -36,6 +38,7 @@ export function parseEvalHistoryPublicationGeneration(value) {
       `publication generation schema_version must be ${EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION}`
     );
   }
+  const candidateCommit = fullCommit(generation.candidate_commit, "publication candidate commit");
   const candidateRepositoryUrl = canonicalGitHubRepositoryUrl(generation.candidate_repository_url);
   const sourceArtifact = canonicalGitHubActionsRunUrl(generation.source_artifact, candidateRepositoryUrl);
   if (!Array.isArray(generation.runs) || generation.runs.length === 0 || generation.runs.length > 64) {
@@ -66,6 +69,7 @@ export function parseEvalHistoryPublicationGeneration(value) {
   });
   return {
     schema_version: EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+    candidate_commit: candidateCommit,
     candidate_repository_url: candidateRepositoryUrl,
     source_artifact: sourceArtifact,
     runs
@@ -77,6 +81,16 @@ export function publishEvalHistoryGeneration(input) {
   const generation = parseEvalHistoryPublicationGeneration(readGeneration(generationPath));
   const inputRoot = realDirectory(input.inputRoot, "publication input root");
   const repositoryRoot = gitRepositoryRoot(input.repositoryRoot ?? process.cwd());
+  const benchmarkPolicyRoot = gitRepositoryRoot(input.benchmarkPolicyRoot ?? repositoryRoot);
+  if (gitOutput(benchmarkPolicyRoot, ["rev-parse", "HEAD"]) !== generation.candidate_commit) {
+    throw new Error("publication checkout does not match the candidate commit");
+  }
+  if (gitOutput(benchmarkPolicyRoot, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
+    throw new Error("publication candidate checkout has tracked modifications");
+  }
+  if (gitOutput(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
+    throw new Error("publication tooling checkout has tracked modifications");
+  }
   const cliPath = regularFilePath(
     path.join(repositoryRoot, "packages", "cli", "dist", "index.js"),
     "built Ultrafuzz CLI"
@@ -90,7 +104,7 @@ export function publishEvalHistoryGeneration(input) {
   try {
     const snapshotRoot = path.join(temporaryRoot, "input-snapshot");
     fs.mkdirSync(snapshotRoot, { recursive: false, mode: 0o700 });
-    const snapshots = snapshotGenerationInputs(generation.runs, inputRoot, snapshotRoot);
+    const snapshots = snapshotGenerationInputs(generation, inputRoot, snapshotRoot);
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const base = refreshRemoteBase(repositoryRoot);
@@ -103,7 +117,7 @@ export function publishEvalHistoryGeneration(input) {
           renderHistoryWithCli(worktree, cliPath);
         }
         installRunSnapshots(snapshots, worktree);
-        appendGenerationWithCli(generation, worktree, cliPath);
+        appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyRoot);
         const stagedPaths = stageExactPublication(worktree);
         let commit = base.oid;
         let createdCommit = false;
@@ -157,14 +171,19 @@ export function publishEvalHistoryGeneration(input) {
   }
 }
 
-function snapshotGenerationInputs(runs, inputRoot, snapshotRoot) {
-  return runs.map((run) => {
+export function assertEvalHistoryPublicationBranch(repositoryRoot = process.cwd()) {
+  const root = gitRepositoryRoot(repositoryRoot);
+  return assertPublicationDiffPaths(root, MAIN_REF, TARGET_REMOTE_REF, `origin/${TARGET_BRANCH} cumulative diff`);
+}
+
+function snapshotGenerationInputs(generation, inputRoot, snapshotRoot) {
+  return generation.runs.map((run) => {
     const source = sourceDirectory(inputRoot, run.input_path, run.eval_run_id);
-    validateEvalRunIdentity(source, run.eval_run_id);
+    validateEvalRunIdentity(source, run.eval_run_id, generation.candidate_commit);
     validateTree(source, `eval run ${run.eval_run_id}`);
     const snapshot = path.join(snapshotRoot, run.eval_run_id);
     copyTree(source, snapshot);
-    validateEvalRunIdentity(snapshot, run.eval_run_id);
+    validateEvalRunIdentity(snapshot, run.eval_run_id, generation.candidate_commit);
     return { run, snapshot };
   });
 }
@@ -180,7 +199,7 @@ function installRunSnapshots(snapshots, worktree) {
   }
 }
 
-function appendGenerationWithCli(generation, worktree, cliPath) {
+function appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyRoot) {
   for (const run of generation.runs) {
     checked(
       "node",
@@ -198,7 +217,9 @@ function appendGenerationWithCli(generation, worktree, cliPath) {
         "--repository",
         generation.candidate_repository_url,
         "--artifact",
-        generation.source_artifact
+        generation.source_artifact,
+        "--benchmark-policy-root",
+        benchmarkPolicyRoot
       ],
       { cwd: worktree }
     );
@@ -276,7 +297,21 @@ function assertCommitContainsOnly(worktree, parent, commit, allowEmpty) {
 function assertAllowedPaths(paths, label) {
   const allowed = new Set(HISTORY_PATHS);
   const unexpected = paths.filter((entry) => !allowed.has(entry));
-  if (unexpected.length > 0) throw new Error(`${label} contains unexpected paths: ${unexpected.join(", ")}`);
+  if (unexpected.length > 0) {
+    throw new Error(
+      `${label} contains unexpected paths: ${unexpected.map((entry) => JSON.stringify(entry)).join(", ")}`
+    );
+  }
+}
+
+function assertPublicationDiffPaths(repositoryRoot, base, target, label) {
+  const paths = nulPaths(
+    checked("git", ["diff", "--name-only", "--no-renames", "-z", base, target, "--"], {
+      cwd: repositoryRoot
+    }).stdout
+  );
+  assertAllowedPaths(paths, label);
+  return paths;
 }
 
 function refreshRemoteBase(repositoryRoot) {
@@ -312,6 +347,7 @@ function refreshRemoteBase(repositoryRoot) {
         };
       }
       if (isAncestor(repositoryRoot, mainOid, targetOid)) {
+        assertPublicationDiffPaths(repositoryRoot, mainOid, targetOid, `origin/${TARGET_BRANCH} cumulative diff`);
         return {
           ref: TARGET_REMOTE_REF,
           oid: targetOid,
@@ -420,7 +456,7 @@ function sourceDirectory(inputRoot, relative, evalRunId) {
   return resolved;
 }
 
-function validateEvalRunIdentity(root, evalRunId) {
+function validateEvalRunIdentity(root, evalRunId, candidateCommit) {
   const manifestPath = regularFilePath(path.join(root, "eval.json"), `eval manifest for ${evalRunId}`);
   let manifest;
   try {
@@ -432,6 +468,9 @@ function validateEvalRunIdentity(root, evalRunId) {
     throw new Error(`eval manifest for ${evalRunId} must be an object`);
   }
   if (manifest.eval_run_id !== evalRunId) throw new Error(`eval manifest ID does not match ${evalRunId}`);
+  if (manifest.provenance?.candidate?.commit !== candidateCommit) {
+    throw new Error(`eval manifest candidate commit does not match publication generation for ${evalRunId}`);
+  }
 }
 
 function validateTree(root, label) {
@@ -561,6 +600,12 @@ function safeId(value, label) {
   return id;
 }
 
+function fullCommit(value, label) {
+  const commit = requiredString(value, label);
+  if (!FULL_COMMIT.test(commit)) throw new Error(`${label} must be a full lowercase commit SHA`);
+  return commit;
+}
+
 function requiredString(value, label) {
   if (typeof value !== "string" || value.trim() === "" || value !== value.trim()) {
     throw new Error(`${label} must be a non-empty string without surrounding whitespace`);
@@ -674,11 +719,26 @@ function reportRetry(attempt, reason) {
 }
 
 async function main() {
-  const [generationPath, inputRoot, ...extra] = process.argv.slice(2);
-  if (generationPath === undefined || inputRoot === undefined || extra.length > 0) {
-    throw new Error("usage: publish-eval-history-cas.mjs <generation.json> <input-root>");
+  const [command, ...args] = process.argv.slice(2);
+  if (command === "verify-target") {
+    if (args.length > 0) {
+      throw new Error("usage: publish-eval-history-cas.mjs verify-target");
+    }
+    const paths = assertEvalHistoryPublicationBranch();
+    process.stdout.write(`${JSON.stringify({ paths })}\n`);
+    return;
   }
-  const result = publishEvalHistoryGeneration({ generationPath, inputRoot });
+  const [generationPath, inputRoot, benchmarkPolicyRoot, ...extra] = [command, ...args];
+  if (generationPath === undefined || inputRoot === undefined || extra.length > 0) {
+    throw new Error(
+      "usage: publish-eval-history-cas.mjs <generation.json> <input-root> [benchmark-policy-root] | verify-target"
+    );
+  }
+  const result = publishEvalHistoryGeneration({
+    generationPath,
+    inputRoot,
+    ...(benchmarkPolicyRoot === undefined ? {} : { benchmarkPolicyRoot })
+  });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

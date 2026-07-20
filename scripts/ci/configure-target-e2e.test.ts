@@ -136,32 +136,6 @@ describe("target E2E workflow", () => {
     expect(step?.run).toContain('yarn_cli="__TARGET_YARN_CLI__"');
     expect(step?.run).toContain('-e "s|__TARGET_YARN_CLI__|$target_yarn_cli|g"');
   });
-
-  it("runs the bounded submission smoke without model credentials or a Codex installation", () => {
-    const workflowSource = readFileSync(join(repoRoot, ".github", "workflows", "target-e2e.yml"), "utf-8");
-    const workflow = parse(workflowSource) as {
-      jobs: {
-        "ultrafuzz-target": {
-          "timeout-minutes": number;
-          steps: Array<{ name?: string; env?: Record<string, string>; run?: string }>;
-        };
-      };
-    };
-    const job = workflow.jobs["ultrafuzz-target"];
-    const runStep = job.steps.find((step) => step.name === "Run bounded target submission smoke");
-
-    expect(job["timeout-minutes"]).toBe(60);
-    expect(runStep?.env).toEqual({
-      ULTRAFUZZ_BIN: "${{ github.workspace }}/.ci-bin/ultrafuzz",
-      ULTRAFUZZ_E2E_MODE: "submission"
-    });
-    expect(runStep?.run).toContain("run-target-e2e.sh");
-    expect(workflowSource).not.toContain("OPENAI_API_KEY");
-    expect(workflowSource).not.toContain("secrets.");
-    expect(workflowSource).not.toContain("@openai/codex");
-    expect(workflowSource).not.toContain("codex login");
-    expect(workflowSource).not.toContain("codex exec");
-  });
 });
 
 describe("target E2E runner", () => {
@@ -189,21 +163,5 @@ describe("target E2E runner", () => {
     expect(preserveIndex).toBeGreaterThanOrEqual(0);
     expect(resetIndex).toBeGreaterThan(preserveIndex);
     expect(restoreIndex).toBeGreaterThan(resetIndex);
-  });
-
-  it("defaults to a credential-free fake-runner submission while retaining opt-in live report checks", () => {
-    const script = readFileSync(join(repoRoot, "scripts", "ci", "run-target-e2e.sh"), "utf-8");
-
-    expect(script).toContain('e2e_mode="${ULTRAFUZZ_E2E_MODE:-submission}"');
-    expect(script).toContain("env -u OPENAI_API_KEY");
-    expect(script).toContain('SMITHERS_BIN="$fake_runner"');
-    expect(script).toContain('SMITHERS_FAKE_LOG="$fake_runner_log"');
-    expect(script).toContain('fake_runner="$(cd "$run_root" && pwd -P)/fake-bin/smithers"');
-    expect(script).toContain('fake_runner_log="$(cd "$evidence_root" && pwd -P)/fake-smithers-invocation.json"');
-    expect(script).toContain('if [ "$e2e_mode" = "submission" ]; then');
-    expect(script).toContain("assert-run-submission");
-    expect(script).toContain("wait_for_report");
-    expect(script).toContain("assert-report-accounting");
-    expect(script).toContain("no live agents were run");
   });
 });
