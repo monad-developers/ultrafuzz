@@ -182,10 +182,12 @@ describe("Modal launch ownership", () => {
       volumeName: "volume-placeholder",
       remoteRoot: "/data/logical-run/model-one",
       workspaceMode: "resume",
+      postModelRecovery: "stop",
       attemptId: "attempt-one",
       now: "2026-01-01T00:00:00.000Z"
     });
     expect(first.phase).toBe("reserved");
+    expect(first.post_model_recovery).toBe("stop");
     expect(first.sandbox_id).toBeUndefined();
     markModalSandboxCreated(first, "sandbox-one");
     markModalLaunchReady(first, "2026-01-01T00:01:00.000Z");
@@ -197,6 +199,7 @@ describe("Modal launch ownership", () => {
       volumeName: "different-volume",
       remoteRoot: "/data/different-root",
       workspaceMode: "resume",
+      postModelRecovery: "stop",
       attemptId: "attempt-two",
       now: "2026-01-01T00:02:00.000Z"
     });
@@ -205,10 +208,16 @@ describe("Modal launch ownership", () => {
       attempt: 2,
       volume_name: "volume-placeholder",
       remote_root: "/data/logical-run/model-one",
+      post_model_recovery: "stop",
       phase: "reserved"
     });
     expect(state.attempt_history).toEqual([
-      expect.objectContaining({ attempt_id: "attempt-one", sandbox_id: "sandbox-one", phase: "launched" })
+      expect.objectContaining({
+        attempt_id: "attempt-one",
+        sandbox_id: "sandbox-one",
+        post_model_recovery: "stop",
+        phase: "launched"
+      })
     ]);
   });
 });
@@ -430,17 +439,50 @@ describe("Modal runner status", () => {
         workerStatus: workerStatus("model-work", true)
       })
     ).toMatchObject({ category: "resume-required", action: "relaunch", model_work_started: true });
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "exited",
+        attempt: 1,
+        workerStatus: workerStatus("model-work", true),
+        postModelRecovery: "stop"
+      })
+    ).toMatchObject({ category: "resume-required", action: "none", model_work_started: true, retryable: false });
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "missing",
+        attempt: 1,
+        postModelRecovery: "stop",
+        modelWorkMayHaveStarted: true
+      })
+    ).toMatchObject({ category: "resume-required", action: "none", model_work_started: true, retryable: false });
   });
 
   it("bounds exponential backoff to transient failures before model work", () => {
     expect([1, 2, 3, 4].map(modalPreModelRetryDelay)).toEqual([1_000, 2_000, 4_000, 4_000]);
+    const stalePartial = workerStatus("transient-operational-failure", false);
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",
         attempt: 2,
-        workerStatus: workerStatus("transient-operational-failure", false)
+        workerStatus: stalePartial,
+        postModelRecovery: "stop",
+        modelWorkMayHaveStarted: true
       })
-    ).toMatchObject({ category: "transient-operational-failure", action: "relaunch", retry_after_ms: 2_000 });
+    ).toMatchObject({ category: "resume-required", action: "none", model_work_started: true, retryable: false });
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "missing",
+        attempt: 2,
+        workerStatus: { ...stalePartial, stage: "terminal" },
+        postModelRecovery: "stop",
+        modelWorkMayHaveStarted: true
+      })
+    ).toMatchObject({
+      category: "transient-operational-failure",
+      action: "relaunch",
+      model_work_started: false,
+      retry_after_ms: 2_000
+    });
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",

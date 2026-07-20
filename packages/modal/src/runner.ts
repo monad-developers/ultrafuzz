@@ -55,9 +55,11 @@ import {
   withModalLaunchStateLock,
   writeModalLaunchState,
   type ModalAttemptProvenance,
+  type ModalLaunchFailureCategory,
   type ModalLaunchRecord,
   type ModalLaunchState,
   type ModalLineageFingerprints,
+  type ModalPostModelRecovery,
   type ModalSandboxState
 } from "./launch-state.js";
 import {
@@ -226,7 +228,7 @@ export async function launchModalBenchmark(input: {
       }
 
       for (const entry of prepared) {
-        await launchOrResumeModel({ modal, app, image, configPath, statePath, state, ...entry });
+        await launchOrResumeModel({ modal, app, image, config, configPath, statePath, state, ...entry });
       }
       return state;
     });
@@ -239,6 +241,7 @@ interface LaunchModelInput {
   modal: ModalClient;
   app: App;
   image: Image;
+  config: ModalBenchmarkConfig;
   configPath: string;
   statePath: string;
   state: ModalLaunchState;
@@ -299,6 +302,8 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     const runnerStatus = classifyModalRunnerStatus({
       sandbox: probe.state,
       attempt: record.attempt,
+      postModelRecovery: configuredPostModelRecovery(input.config),
+      modelWorkMayHaveStarted: record.launched_at !== undefined,
       ...(workerStatus === undefined ? {} : { workerStatus }),
       ...(record.phase === "failed" && record.failure_category !== undefined
         ? { launchFailure: record.failure_category }
@@ -319,7 +324,8 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       modelFingerprint,
       volumeName,
       remoteRoot,
-      workspaceMode: input.state.generation_mode
+      workspaceMode: input.state.generation_mode,
+      postModelRecovery: configuredPostModelRecovery(input.config)
     });
     await writeModalLaunchState(input.statePath, input.state);
 
@@ -362,7 +368,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     } catch (error) {
       const modelMayHaveStarted = record.phase === "launched";
       const terminationConfirmed = sandbox === undefined ? true : await terminateModalSandbox(sandbox);
-      const category = isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
+      const category = classifyModalLaunchFailure(error, {
+        modelMayHaveStarted,
+        postModelRecovery: configuredPostModelRecovery(input.config)
+      });
       markModalLaunchFailed(record, category);
       await writeModalLaunchState(input.statePath, input.state);
       if (!terminationConfirmed) {
@@ -375,6 +384,20 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
+}
+
+function configuredPostModelRecovery(config: ModalBenchmarkConfig): ModalPostModelRecovery {
+  return isPublicModalBenchmarkConfig(config) ? "stop" : "relaunch";
+}
+
+export function classifyModalLaunchFailure(
+  error: unknown,
+  input: { modelMayHaveStarted: boolean; postModelRecovery: ModalPostModelRecovery }
+): ModalLaunchFailureCategory {
+  if (input.modelMayHaveStarted && input.postModelRecovery === "stop") {
+    return "permanent-operational-failure";
+  }
+  return isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure";
 }
 
 type ModalBenchmarkSandboxCreateParams = Omit<SandboxCreateParams, "cpu" | "cpuLimit" | "memoryMiB" | "memoryLimitMiB">;
@@ -403,7 +426,10 @@ async function recoverExistingSandboxLaunch(
     const terminationConfirmed = await terminateModalSandbox(sandbox);
     markModalLaunchFailed(
       record,
-      isTransientModalError(error) ? "transient-operational-failure" : "permanent-operational-failure"
+      classifyModalLaunchFailure(error, {
+        modelMayHaveStarted,
+        postModelRecovery: configuredPostModelRecovery(input.config)
+      })
     );
     await writeModalLaunchState(input.statePath, input.state);
     if (!terminationConfirmed) {
@@ -614,6 +640,8 @@ export async function modalBenchmarkStatus(input: {
       const runnerStatus = classifyModalRunnerStatus({
         sandbox: probe.state,
         attempt: launch.attempt,
+        postModelRecovery: launch.post_model_recovery ?? "relaunch",
+        modelWorkMayHaveStarted: launch.launched_at !== undefined,
         ...(workerStatus === undefined ? {} : { workerStatus }),
         ...(launch.phase === "failed" && launch.failure_category !== undefined
           ? { launchFailure: launch.failure_category }

@@ -17,12 +17,126 @@ import type { ModalWorkerLineage } from "../src/launch-state.js";
 import {
   applyBenchmarkExperiment,
   assertPublicWorkerBundleLineage,
+  checkpointPublicModelWorkStart,
   materializeBakedCandidate,
+  publicBenchmarkWorkRoot,
   publicBundleSources,
+  runPublicBenchmarkWorker,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
 import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
+import { WorkerResultWriter } from "../src/worker-result.js";
+
+it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
+  const dataRoot = "/data/public-run/model";
+  const workRoot = publicBenchmarkWorkRoot(dataRoot);
+
+  expect(path.isAbsolute(workRoot)).toBe(true);
+  expect(workRoot).toBe("/tmp/ultrafuzz-public-workspace");
+  expect(workRoot.startsWith(`${path.resolve(dataRoot)}${path.sep}`)).toBe(false);
+  expect(() => publicBenchmarkWorkRoot("/tmp")).toThrow(/persistent volume/u);
+  expect(() => publicBenchmarkWorkRoot(path.join(workRoot, "nested"))).toThrow(/persistent volume/u);
+});
+
+it("recognizes and cleans the legacy persistent public workspace without treating local work as durable", async () => {
+  const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-preflight-"));
+  const model: ModalModelSpec = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "public-preflight",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [model],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      experiment: "candidate",
+      excluded_node_ids: [],
+      runner_model_profile: model.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const lineage: ModalWorkerLineage = {
+    schema_version: "ultrafuzz.modal.worker-lineage.v1",
+    logical_run_id: config.run_id,
+    generation: 1,
+    attempt: 1,
+    attempt_id: "attempt-one",
+    workspace_mode: "fresh",
+    fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+    model_fingerprint: "e".repeat(64)
+  };
+  let captured: { workspaceEvidencePaths: string[]; freshCleanupPaths: string[] } | undefined;
+  const stop = new Error("stop after preflight capture");
+
+  await expect(
+    runPublicBenchmarkWorker({
+      config,
+      model,
+      lineage,
+      dataRoot,
+      preflight: async (context) => {
+        captured = context;
+        throw stop;
+      },
+      isCheckpointIncompatible: () => false,
+      checkpointIncompatibleError: (message) => new Error(message)
+    })
+  ).rejects.toBe(stop);
+
+  const localWorkRoot = publicBenchmarkWorkRoot(dataRoot);
+  const legacyWorkRoot = path.join(dataRoot, "public-workspace");
+  expect(captured?.workspaceEvidencePaths).toEqual([legacyWorkRoot, path.join(dataRoot, "public-results.json")]);
+  expect(captured?.workspaceEvidencePaths).not.toContain(localWorkRoot);
+  expect(captured?.freshCleanupPaths).toEqual(
+    expect.arrayContaining([localWorkRoot, legacyWorkRoot, path.join(dataRoot, "public-results.json")])
+  );
+});
+
+it("durably checkpoints the transition to paid model work before launch", async () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-checkpoint-"));
+  const statusPath = path.join(root, "status.json");
+  let modelWorkStarted = false;
+  let flushCount = 0;
+  const writer = await WorkerResultWriter.create({
+    statusPath,
+    resultPath: path.join(root, "result.json"),
+    executionContext: () => ({ launch_generation: 2, attempt: 3, model_work_started: modelWorkStarted })
+  });
+
+  await checkpointPublicModelWorkStart(
+    writer,
+    () => {
+      modelWorkStarted = true;
+    },
+    async () => {
+      expect(JSON.parse(fs.readFileSync(statusPath, "utf8"))).toMatchObject({ model_work_started: true });
+      flushCount += 1;
+    }
+  );
+
+  expect(flushCount).toBe(1);
+  expect(JSON.parse(fs.readFileSync(statusPath, "utf8"))).toMatchObject({
+    result_type: "partial",
+    exit_category: "live",
+    launch_generation: 2,
+    attempt: 3,
+    model_work_started: true
+  });
+});
 
 it("materializes the private candidate from the image with exact clean Git provenance", async () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-baked-candidate-"));

@@ -34,9 +34,11 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.image_name).toBe(`ufz-runner-${"a".repeat(40)}`);
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
+        node_timeout_seconds: number;
         public_benchmark: { max_runtime_seconds: number };
         braintrust: { judge_api_key_env: string; judge_url?: string };
       };
+      expect(config.node_timeout_seconds).toBe(1800);
       expect(config.public_benchmark.max_runtime_seconds).toBe(3600);
       expect(config.braintrust.judge_api_key_env).toBe("BRAINTRUST_API_KEY");
       expect(config.braintrust.judge_url).toBeUndefined();

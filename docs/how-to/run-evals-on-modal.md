@@ -93,10 +93,11 @@ image named for that commit and launches four independent sandboxes:
 Every pair has a 3,600-second model-work budget. Scoring is independent of the
 runner and always uses GPT-5.6 Sol at `xhigh`. The ordinary main-push lane uses
 the pinned smoke cohorts and caps every explicit topology node timeout to the
-configured 900-second node budget, including the Kaden coordinator. The public Modal launcher rejects the unchunked full
-cohorts before creating any sandbox: their matrix cannot fit the bounded
-control-plane deadline. Run full suites through the generic eval path only after
-splitting them into independently recoverable chunks.
+configured 1,800-second node budget, including the Kaden coordinator. The public
+Modal launcher rejects the unchunked full cohorts before creating any sandbox:
+their matrix cannot fit the bounded control-plane deadline. Run full suites
+through the generic eval path only after splitting them into independently
+recoverable chunks.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, and `BRAINTRUST_API_KEY` as Actions secrets. Modal receives

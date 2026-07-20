@@ -47,6 +47,7 @@ export interface ModalAttemptProvenance {
   model_fingerprint: string;
   fingerprints: ModalLineageFingerprints;
   workspace_mode: ModalLaunchMode;
+  post_model_recovery?: ModalPostModelRecovery;
   reserved_at: string;
   sandbox_id?: string;
   launched_at?: string;
@@ -56,6 +57,7 @@ export interface ModalAttemptProvenance {
 
 export type ModalLaunchPhase = "reserved" | "sandbox-created" | "launched" | "failed";
 export type ModalLaunchFailureCategory = "transient-operational-failure" | "permanent-operational-failure";
+export type ModalPostModelRecovery = "relaunch" | "stop";
 
 export interface ModalLaunchRecord extends ModalModelSpec {
   generation: number;
@@ -65,6 +67,7 @@ export interface ModalLaunchRecord extends ModalModelSpec {
   volume_name: string;
   remote_root: string;
   workspace_mode: ModalLaunchMode;
+  post_model_recovery?: ModalPostModelRecovery;
   phase: ModalLaunchPhase;
   reserved_at: string;
   sandbox_id?: string;
@@ -139,6 +142,7 @@ const attemptProvenanceSchema = z
     model_fingerprint: fingerprintSchema,
     fingerprints: lineageFingerprintsSchema,
     workspace_mode: z.enum(["resume", "fresh"]),
+    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
     reserved_at: timestampSchema,
     sandbox_id: z.string().min(1).optional(),
     launched_at: timestampSchema.optional(),
@@ -156,6 +160,7 @@ const launchRecordSchema = modelSchema
     volume_name: z.string().min(1),
     remote_root: z.string().min(1),
     workspace_mode: z.enum(["resume", "fresh"]),
+    post_model_recovery: z.enum(["relaunch", "stop"]).optional(),
     phase: z.enum(["reserved", "sandbox-created", "launched", "failed"]),
     reserved_at: timestampSchema,
     sandbox_id: z.string().min(1).optional(),
@@ -567,6 +572,7 @@ export function reserveModalLaunchAttempt(input: {
   volumeName: string;
   remoteRoot: string;
   workspaceMode: ModalLaunchMode;
+  postModelRecovery?: ModalPostModelRecovery;
   now?: string;
   attemptId?: string;
 }): ModalLaunchRecord {
@@ -587,6 +593,7 @@ export function reserveModalLaunchAttempt(input: {
     volume_name: existing?.volume_name ?? input.volumeName,
     remote_root: existing?.remote_root ?? input.remoteRoot,
     workspace_mode: input.workspaceMode,
+    ...(input.postModelRecovery === undefined ? {} : { post_model_recovery: input.postModelRecovery }),
     phase: "reserved",
     reserved_at: input.now ?? new Date().toISOString()
   };
@@ -676,6 +683,8 @@ export function classifyModalRunnerStatus(input: {
   attempt: number;
   workerStatus?: ModalWorkerStatus;
   launchFailure?: ModalLaunchFailureCategory;
+  postModelRecovery?: "relaunch" | "stop";
+  modelWorkMayHaveStarted?: boolean;
 }): ModalRunnerStatus {
   if (input.sandbox === "live") {
     return status("live", "none", input.workerStatus?.model_work_started ?? false, false, 0);
@@ -697,7 +706,10 @@ export function classifyModalRunnerStatus(input: {
     worker?.category === "post-processing" ||
     worker?.category === "resume-required"
   ) {
-    return status("resume-required", "relaunch", true, false, 0);
+    return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
+  }
+  if (input.modelWorkMayHaveStarted === true && (worker === undefined || worker.stage !== "terminal")) {
+    return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
   }
   if (input.launchFailure === "permanent-operational-failure") {
     return status("permanent-operational-failure", "none", false, false, 0);
@@ -848,6 +860,7 @@ function toAttemptProvenance(
     model_fingerprint: record.model_fingerprint,
     fingerprints,
     workspace_mode: record.workspace_mode,
+    ...(record.post_model_recovery === undefined ? {} : { post_model_recovery: record.post_model_recovery }),
     reserved_at: record.reserved_at,
     ...(record.sandbox_id === undefined ? {} : { sandbox_id: record.sandbox_id }),
     ...(record.launched_at === undefined ? {} : { launched_at: record.launched_at }),

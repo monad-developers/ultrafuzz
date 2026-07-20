@@ -33,6 +33,7 @@ const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
+const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
 
 export async function runPublicBenchmarkWorker(input: {
   config: PublicModalBenchmarkConfig;
@@ -47,7 +48,8 @@ export async function runPublicBenchmarkWorker(input: {
   const statusPath = path.join(input.dataRoot, "status.json");
   const resultPath = path.join(input.dataRoot, "result.json");
   const bundlePath = path.join(input.dataRoot, PUBLIC_BUNDLE_FILE);
-  const workRoot = path.join(input.dataRoot, "public-workspace");
+  const legacyPersistentWorkRoot = path.join(input.dataRoot, "public-workspace");
+  const workRoot = publicBenchmarkWorkRoot(input.dataRoot);
   let modelWorkStarted = false;
   await mkdir(input.dataRoot, { recursive: true, mode: 0o700 });
   const writer = await WorkerResultWriter.create({
@@ -66,9 +68,10 @@ export async function runPublicBenchmarkWorker(input: {
     diagnosticCodeForError: (error) => (input.isCheckpointIncompatible(error) ? "checkpoint-incompatible" : undefined),
     run: async () => {
       await input.preflight({
-        workspaceEvidencePaths: [workRoot, bundlePath],
+        workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath],
         freshCleanupPaths: [
           workRoot,
+          legacyPersistentWorkRoot,
           bundlePath,
           statusPath,
           resultPath,
@@ -78,6 +81,8 @@ export async function runPublicBenchmarkWorker(input: {
         ]
       });
       await writeFile(logPath, `${new Date().toISOString()} worker-started\n`, { mode: 0o600 });
+      await writer.writePartial(emptyWorkerCheckpoint());
+      await flushFilesystem();
       assertPublicWorkerInput(input.config, input.model);
       const forbiddenSecretValues = [
         requiredEnv(runnerApiKeyEnv(input.model.provider)),
@@ -92,9 +97,16 @@ export async function runPublicBenchmarkWorker(input: {
           throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
         }
       }
+      await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
       const prepared = await preparePublicBenchmark(input.config, input.model, workRoot, logPath);
-      modelWorkStarted = true;
+      await checkpointPublicModelWorkStart(
+        writer,
+        () => {
+          modelWorkStarted = true;
+        },
+        flushFilesystem
+      );
       await runCommand(
         [
           "node",
@@ -160,6 +172,29 @@ export async function runPublicBenchmarkWorker(input: {
       return "finished";
     }
   });
+}
+
+export function publicBenchmarkWorkRoot(dataRoot: string): string {
+  const persistentRoot = path.resolve(dataRoot);
+  const workRoot = path.resolve(PUBLIC_WORKSPACE_ROOT);
+  if (
+    workRoot === persistentRoot ||
+    workRoot.startsWith(`${persistentRoot}${path.sep}`) ||
+    persistentRoot.startsWith(`${workRoot}${path.sep}`)
+  ) {
+    throw new Error("public benchmark workspace must not be stored on the persistent volume");
+  }
+  return workRoot;
+}
+
+export async function checkpointPublicModelWorkStart(
+  writer: WorkerResultWriter,
+  markStarted: () => void,
+  flush: () => Promise<void>
+): Promise<void> {
+  markStarted();
+  await writer.writePartial(emptyWorkerCheckpoint());
+  await flush();
 }
 
 export function assertPublicWorkerBundleLineage(

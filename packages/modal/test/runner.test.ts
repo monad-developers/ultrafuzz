@@ -29,6 +29,7 @@ import {
   MODAL_COLLECT_RESULT_FILES,
   assertSanitizedModalCollectedFiles,
   assertPublicBenchmarkBundleLineage,
+  classifyModalLaunchFailure,
   createModalBenchmarkSandbox,
   createExactCandidateSourceArchive,
   createTrackedSourceArchive,
@@ -374,6 +375,27 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
 }
 
 describe("Modal worker identity", () => {
+  it("fails closed when non-resumable model work may have crossed the readiness boundary", () => {
+    const transient = new Error("injected transient failure");
+    transient.name = "TimeoutError";
+
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: false, postModelRecovery: "stop" })).toBe(
+      "transient-operational-failure"
+    );
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: true, postModelRecovery: "relaunch" })).toBe(
+      "transient-operational-failure"
+    );
+    expect(classifyModalLaunchFailure(transient, { modelMayHaveStarted: true, postModelRecovery: "stop" })).toBe(
+      "permanent-operational-failure"
+    );
+    expect(
+      classifyModalLaunchFailure(new Error("injected permanent failure"), {
+        modelMayHaveStarted: false,
+        postModelRecovery: "stop"
+      })
+    ).toBe("permanent-operational-failure");
+  });
+
   it("makes the compiled source tree readable by the non-root worker", () => {
     expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
   });

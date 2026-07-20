@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 
+const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
+
 const [candidateCommit, repository, generation, outputDirectory, lane = "smoke", experiment = "candidate"] =
   process.argv.slice(2);
 if (!/^[0-9a-f]{40}$/.test(candidateCommit ?? "")) throw new Error("candidate commit must be a full lowercase SHA");
@@ -69,7 +71,7 @@ for (const benchmarkExperiment of experiments) {
           api_key_env: "BRAINTRUST_API_KEY",
           judge_api_key_env: "BRAINTRUST_API_KEY"
         },
-        node_timeout_seconds: 900,
+        node_timeout_seconds: PUBLIC_NODE_TIMEOUT_SECONDS,
         loops: 1,
         models: [model]
       });
