@@ -1546,7 +1546,7 @@ function artifactCompleteRecoveryEvidence(
   layout: RunLayout,
   nodeId: string
 ): NodeWorkflowEvidence {
-  if (terminalStatus(evidence.status)) {
+  if (terminalStatus(evidence.status) && evidence.status !== "failed") {
     return evidence;
   }
   const requiredArtifacts = recordField(previous?.provenance, "required_artifacts");
@@ -1556,7 +1556,7 @@ function artifactCompleteRecoveryEvidence(
   return {
     ...evidence,
     status: "succeeded",
-    workflowState: "artifact-complete",
+    workflowState: evidence.status === "failed" ? "artifact-complete-after-failure" : "artifact-complete",
     ...(previous?.finished_at === undefined ? {} : { finishedAt: previous.finished_at })
   };
 }
@@ -1567,7 +1567,7 @@ function artifactProducedRecoveryEvidence(input: {
   task: StoredWorkflowTask;
   evidence: NodeWorkflowEvidence;
 }): NodeWorkflowEvidence {
-  if (terminalStatus(input.evidence.status)) {
+  if (terminalStatus(input.evidence.status) && input.evidence.status !== "failed") {
     return input.evidence;
   }
   if (input.node.required_artifacts.length === 0) {
@@ -1584,7 +1584,7 @@ function artifactProducedRecoveryEvidence(input: {
   return {
     ...input.evidence,
     status: "succeeded",
-    workflowState: "artifact-produced"
+    workflowState: input.evidence.status === "failed" ? "artifact-produced-after-failure" : "artifact-produced"
   };
 }
 

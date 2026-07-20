@@ -2609,6 +2609,41 @@ test("syncRun repairs complete artifacts for a running workflow node", async () 
   assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-produced");
 });
 
+test("syncRun repairs complete artifacts for a failed workflow node", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-artifact-failed";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 2 },
+      { type: "NodeFailed", nodeId: "node:project-discovery", attempt: 2, error: "agent failed after artifacts" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-artifact-failed", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-artifact-failed", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status?: string;
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "artifact-produced-after-failure");
+});
+
 test("syncRun refreshes started_at when a running attempt advances without a start event", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
