@@ -57,12 +57,14 @@ interface DurableRunState {
   status?: string;
   sync_status?: string;
   workflow_status?: string;
+  workflow_state?: string;
   workflow_verdict?: string;
   nodes?: Record<string, DurableNodeState>;
 }
 interface WorkflowSyncSummary {
   sync_status?: string;
   workflow_status?: string;
+  workflow_state?: string;
   workflow_verdict?: string;
   nodes?: Record<string, DurableNodeState>;
 }
@@ -868,6 +870,9 @@ function workflowSyncSummary(stdout: string): WorkflowSyncSummary | undefined {
     ...(stringField(data, "workflow_status") === undefined
       ? {}
       : { workflow_status: stringField(data, "workflow_status") }),
+    ...(stringField(data, "workflow_state") === undefined
+      ? {}
+      : { workflow_state: stringField(data, "workflow_state") }),
     ...(stringField(data, "verdict") === undefined ? {} : { workflow_verdict: stringField(data, "verdict") }),
     nodes: workflowSyncNodes(data)
   };

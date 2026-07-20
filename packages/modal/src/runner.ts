@@ -89,6 +89,7 @@ export interface ModalOverseerJob {
 interface RecoveryWorkflowProbe {
   status?: string;
   workflow_status?: string;
+  workflow_state?: string;
   verdict?: string;
 }
 
@@ -655,7 +656,7 @@ async function recoveryWorkflowProbe(sandbox: Sandbox, remoteRoot: string): Prom
     `cd ${shellQuote(remoteRoot)}`,
     String.raw`runid=$(find workspace/target/.ultrafuzz/runs -mindepth 2 -maxdepth 2 -name state.json -printf '%T@ %h\n' | sort -n | tail -n 1 | sed 's#^[^ ]* ##; s#.*/##')`,
     String.raw`if test -z "$runid"; then printf '{"status":"missing-run"}\n'; exit 0; fi`,
-    String.raw`timeout 150 node /opt/ultrafuzz/packages/cli/dist/index.js status "$runid" --project workspace/target --window 30 --json | jq -c '{status: (.data.status // null), workflow_status: (.data.workflow_status // null), verdict: (.data.verdict // null)}'`
+    String.raw`timeout 150 node /opt/ultrafuzz/packages/cli/dist/index.js status "$runid" --project workspace/target --window 30 --json | jq -c '{status: (.data.status // null), workflow_status: (.data.workflow_status // null), workflow_state: (.data.workflow_state // null), verdict: (.data.verdict // null)}'`
   ].join("\n");
   const processHandle = await sandbox.exec(["bash", "-lc", script], { timeoutMs: RECOVERY_WORKFLOW_PROBE_TIMEOUT_MS });
   const stdout = drainStream(processHandle.stdout);
@@ -671,6 +672,7 @@ async function recoveryWorkflowProbe(sandbox: Sandbox, remoteRoot: string): Prom
 function recoveryWorkflowProbeNeedsRotation(probe: RecoveryWorkflowProbe): boolean {
   const terminalStatuses = new Set(["succeeded", "failed", "timed-out", "canceled", "cancelled"]);
   if (terminalStatuses.has(probe.status ?? "") || terminalStatuses.has(probe.workflow_status ?? "")) return true;
+  if (probe.workflow_state === "orphaned" || probe.workflow_state === "stale") return true;
   return (
     probe.verdict === "done" ||
     probe.verdict === "failed" ||

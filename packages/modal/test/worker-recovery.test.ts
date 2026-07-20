@@ -38,6 +38,25 @@ describe("Modal worker recovery state", () => {
     ).toBe(true);
   });
 
+  it("stops polling when the lower-level workflow owner is stale", () => {
+    expect(
+      terminalDurableRunNeedsMoreWorkflowPolling(
+        {
+          status: "failed",
+          sync_status: "running",
+          workflow_status: "running",
+          workflow_state: "orphaned",
+          workflow_verdict: "progressing",
+          nodes: {
+            complete: { status: "succeeded" },
+            next: { status: "pending" }
+          }
+        },
+        0
+      )
+    ).toBe(false);
+  });
+
   it("stops waiting when failed durable nodes need recovery", () => {
     expect(
       terminalDurableRunNeedsMoreWorkflowPolling(

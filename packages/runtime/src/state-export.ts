@@ -193,6 +193,7 @@ export async function getRunHealth(input: {
     {
       ...readRunListEntry(evidence.layout.root, evidence.layout.runId),
       workflow_run_id: evidence.smithersRunId,
+      ...(sync.ok && sync.value.workflow_state !== undefined ? { workflow_state: sync.value.workflow_state } : {}),
       ...health
     },
     syncDiagnostics

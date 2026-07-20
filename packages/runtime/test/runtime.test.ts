@@ -2499,6 +2499,8 @@ test("syncRun fails active nodes when the workflow runner is orphaned", async ()
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "failed");
+  assert.equal(sync.value?.workflow_status, "running");
+  assert.equal(sync.value?.workflow_state, "orphaned");
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
     status?: string;
     nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { state?: string } } }>;

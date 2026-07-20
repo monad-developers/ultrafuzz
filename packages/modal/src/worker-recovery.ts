@@ -6,6 +6,7 @@ export interface WorkerRecoveryRunState {
   status?: string;
   sync_status?: string;
   workflow_status?: string;
+  workflow_state?: string;
   workflow_verdict?: string;
   nodes?: Record<string, WorkerRecoveryNodeState>;
 }
@@ -34,6 +35,10 @@ export function terminalDurableRunNeedsMoreWorkflowPolling(
     UNFINISHED_DURABLE_NODE_STATUSES.has(node.status ?? "")
   );
   if (!hasUnfinishedDurableNodes) {
+    return false;
+  }
+  const workflowState = state.workflow_state?.toLowerCase();
+  if (workflowState === "orphaned" || workflowState === "stale") {
     return false;
   }
   const workflowStatus = state.workflow_status?.toLowerCase();

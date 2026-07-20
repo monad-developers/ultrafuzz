@@ -238,6 +238,7 @@ export type RunHealthVerdict =
 export interface RunHealthValue extends RunListEntry {
   workflow_run_id: string;
   workflow_status: string;
+  workflow_state?: string;
   verdict: RunHealthVerdict;
   reason: string;
   counts: {
@@ -435,5 +436,7 @@ export interface SyncRunValue {
   run_root: string;
   status: string;
   workflow_run_id?: string;
+  workflow_status?: string;
+  workflow_state?: string;
   synced_nodes: number;
 }

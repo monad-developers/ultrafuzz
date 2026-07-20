@@ -371,6 +371,8 @@ export async function synchronizeLinkedWorkflowRun(
       run_root: layout.root,
       status: readRunState(layout).status,
       workflow_run_id: evidence.smithersRunId,
+      ...(inspect.runStatus === undefined ? {} : { workflow_status: inspect.runStatus }),
+      ...(inspect.runState === undefined ? {} : { workflow_state: inspect.runState }),
       synced_nodes: syncResult.syncedNodes
     }
   };
