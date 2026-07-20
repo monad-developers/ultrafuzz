@@ -492,9 +492,12 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
         LOG_PATH,
         `${new Date().toISOString()} [workflow recovery] resuming workflow (${attempt}/${RECOVERY_MAX_RESETS})\n`
       );
-      await runChecked(["node", CLI, "resume", state.run_id, "--project", target, "--max-concurrency", "1", "--json"], {
-        label: `workflow resume ${attempt}`
-      });
+      await runChecked(
+        ["node", CLI, "resume", state.run_id, "--project", target, "--force", "--max-concurrency", "1", "--json"],
+        {
+          label: `workflow resume ${attempt}`
+        }
+      );
     }
 
     const terminal = await waitForWorkflowTerminal(target, resetCooldowns, resetHistory);

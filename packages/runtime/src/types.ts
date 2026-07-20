@@ -397,6 +397,7 @@ export interface WorkflowLifecycleInput {
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
+  force?: boolean;
   label?: string;
   env?: Record<string, string | undefined>;
 }
