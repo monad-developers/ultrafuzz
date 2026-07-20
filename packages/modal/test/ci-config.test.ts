@@ -513,7 +513,11 @@ describe("public Modal benchmark configuration", () => {
     expect(planUploadIndex).toBeLessThan(buildIndex);
     expect(buildIndex).toBeLessThan(launchIndex);
     expect(launch.steps[planUploadIndex]?.with?.name).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(launch.steps[planUploadIndex]?.with?.["retention-days"]).toBe(30);
     expect(launch.steps[buildIndex]?.run).toContain('--build-scope "${{ github.run_id }}-${{ github.run_attempt }}"');
+    expect(launch.steps.find((step) => step.name === "Persist detached launch state")?.with?.["retention-days"]).toBe(
+      30
+    );
 
     const restorePlan = cleanup.steps.find((step) => step.name === "Restore the immutable pre-compute benchmark plan")!;
     expect(restorePlan["continue-on-error"]).toBeUndefined();

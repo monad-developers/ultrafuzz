@@ -131,7 +131,7 @@ jobs:
           path: ${{ github.workspace }}/ci-modal/benchmark-control
           if-no-files-found: error
           overwrite: true
-          retention-days: 7
+          retention-days: 30
 
       - name: Build an immutable Modal image for the candidate
         env:
@@ -179,7 +179,7 @@ jobs:
           path: ${{ github.workspace }}/ci-modal/benchmark-control
           if-no-files-found: warn
           overwrite: true
-          retention-days: 7
+          retention-days: 30
 
   collect:
     needs: launch
