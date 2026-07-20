@@ -174,6 +174,17 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   }
 
   const ordered = expectedProviders.map((provider) => validated.find((entry) => entry.provider === provider));
+  if (benchmarkMode === "smoke") {
+    const canonical = checkedInProfiles[0];
+    const requestedSmoke = ordered[0];
+    if (
+      requestedSmoke.model !== canonical.model ||
+      requestedSmoke.reasoning !== canonical.reasoning ||
+      canonical.agent !== "CodexAgent"
+    ) {
+      throw new Error("smoke BENCHMARK_MODELS_JSON must use exactly gpt-5.6-luna at high reasoning");
+    }
+  }
   const usedSlugs = new Set();
   return ordered.map((entry) => {
     let slug = boundedSafeId(

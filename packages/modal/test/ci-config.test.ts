@@ -228,6 +228,11 @@ describe("public Modal benchmark configuration", () => {
         message: /smoke BENCHMARK_MODELS_JSON must contain exactly openai/u
       },
       {
+        mode: "smoke",
+        models: [{ provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "high" }],
+        message: /smoke BENCHMARK_MODELS_JSON must use exactly gpt-5\.6-luna at high reasoning/u
+      },
+      {
         mode: "full",
         models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }],
         message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic/u
@@ -268,11 +273,12 @@ describe("public Modal benchmark configuration", () => {
     const workflow = parse(workflowText) as {
       on: {
         push: { branches: string[] };
+        pull_request: { types: string[] };
         workflow_dispatch: {
           inputs: Record<string, { default: string; type: string }>;
         };
       };
-      env: { BENCHMARK_MODE: string };
+      env: { BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
       concurrency: { group: string; "cancel-in-progress": string };
       jobs: Record<
         string,
@@ -283,7 +289,8 @@ describe("public Modal benchmark configuration", () => {
       >;
     };
     expect(Object.hasOwn(workflow.on, "push")).toBe(true);
-    expect(workflow.on.push.branches).toEqual(["**"]);
+    expect(workflow.on.push.branches).toEqual(["main"]);
+    expect(workflow.on.pull_request.types).toEqual(["opened", "synchronize", "reopened", "ready_for_review"]);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
@@ -293,25 +300,37 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
+    expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.pull_request.head.sha");
     expect(workflow.concurrency.group).toContain("'full' || 'smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
-    expect(workflow.concurrency["cancel-in-progress"]).toBe("${{ github.event_name == 'push' }}");
+    expect(workflow.concurrency.group).toContain("github.event.pull_request.number");
+    expect(workflow.concurrency["cancel-in-progress"]).toBe("${{ github.event_name != 'workflow_dispatch' }}");
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push'");
+    expect(workflow.jobs.launch?.if).toContain("github.event.pull_request.draft == false");
+    expect(workflow.jobs.launch?.if).toContain("github.event.pull_request.head.repo.full_name == github.repository");
     expect(workflow.jobs.launch?.if).not.toContain("refs/heads/main");
 
     const prepare = workflow.jobs.launch?.steps.find(
       (step) => step.name === "Prepare the exact model by benchmark matrix"
     );
     expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("inputs.openai_model");
-    expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("vars.BENCHMARK_SMOKE_OPENAI_MODEL");
+    expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("'gpt-5.6-luna'");
+    expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).not.toContain("vars.");
     expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("inputs.openai_reasoning");
-    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("vars.BENCHMARK_SMOKE_OPENAI_REASONING");
+    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("'high'");
+    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).not.toContain("vars.");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_MODEL).toContain("inputs.anthropic_model");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_REASONING).toContain("inputs.anthropic_reasoning");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
+    for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
+      const checkout = workflow.jobs[jobName]?.steps.find((step) =>
+        String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE")
+      );
+      expect(checkout?.with?.ref, `${jobName} exact candidate checkout`).toBe("${{ env.BENCHMARK_CANDIDATE }}");
+    }
 
     expect(workflowText).toContain("node packages/modal/dist/cli.js launch");
     expect(workflowText).toContain("Launch detached Modal benchmark sandboxes");
@@ -381,6 +400,7 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.permissions).toEqual({ actions: "read", contents: "read" });
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push'");
+    expect(workflow.jobs.launch?.if).toContain("github.event.pull_request.draft == false");
     expect(workflow.jobs.launch?.if).not.toContain("refs/heads/main");
     expect(workflow.jobs).not.toHaveProperty("publish");
 
@@ -398,6 +418,7 @@ describe("public Modal benchmark configuration", () => {
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
       expect(checkout?.with?.["persist-credentials"], `${jobName} checkout credentials`).toBe(false);
+      expect(checkout?.with?.ref, `${jobName} checkout ref`).toBe("${{ env.BENCHMARK_CANDIDATE }}");
     }
   });
 
@@ -463,6 +484,9 @@ describe("public Modal benchmark configuration", () => {
     expect(restoreState["continue-on-error"]).toBe(true);
 
     const pathValidation = cleanup.steps.find((step) => step.name === "Validate incomplete-run cleanup paths")?.run;
+    expect(
+      cleanup.steps.find((step) => step.name === "Validate incomplete-run cleanup paths")?.env?.EXPECTED_CANDIDATE
+    ).toBe("${{ env.BENCHMARK_CANDIDATE }}");
     expect(pathValidation).toContain("manifest.candidate_commit !== process.env.EXPECTED_CANDIDATE");
     expect(pathValidation).toContain("path.basename(configPath) !== configPath");
     expect(pathValidation).toContain("path.basename(statePath) !== statePath");
@@ -531,6 +555,8 @@ describe("public Modal benchmark configuration", () => {
         string,
         {
           if?: string;
+          needs?: string | string[];
+          permissions?: Record<string, string>;
           env?: Record<string, string>;
           steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
         }
@@ -543,13 +569,25 @@ describe("public Modal benchmark configuration", () => {
       contents: "write",
       "pull-requests": "write"
     });
+    const qualifier = publication.jobs.qualify_modal_benchmark!;
+    expect(qualifier.if).toBe("github.event_name == 'workflow_run'");
+    expect(qualifier.permissions).toEqual({ actions: "read", contents: "read" });
+    const qualifierCheckout = qualifier.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+    expect(qualifierCheckout?.with?.ref).toBe("main");
+    expect(qualifierCheckout?.with?.["persist-credentials"]).toBe(false);
+    const qualification = qualifier.steps.find(
+      (step) => step.name === "Qualify the exact completed producer attempt"
+    )?.run;
+    expect(qualification).toContain("/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100");
+    expect(qualification).toContain("qualify-modal-benchmark-publication.mjs");
+    expect(qualification).toContain('"$GITHUB_EVENT_PATH"');
+    expect(qualification).toContain('"$GITHUB_OUTPUT"');
+
     const automatic = publication.jobs.publish_modal_benchmark!;
-    expect(automatic.if).toContain("workflow_run.conclusion == 'success'");
-    expect(automatic.if).toContain("workflow_run.head_repository.full_name == github.repository");
-    expect(automatic.if).toContain("workflow_run.path == '.github/workflows/eval-benchmarks.yml'");
-    expect(automatic.if).toContain("workflow_run.event == 'push'");
-    expect(automatic.if).toContain("workflow_run.event == 'workflow_dispatch'");
-    expect(automatic.env?.BENCHMARK_MODE).toContain("workflow_run.event == 'workflow_dispatch'");
+    expect(automatic.needs).toBe("qualify_modal_benchmark");
+    expect(automatic.if).toBe("needs.qualify_modal_benchmark.outputs.eligible == 'true'");
+    expect(automatic.env?.BENCHMARK_MODE).toBe("${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}");
+    expect(automatic.env?.CANDIDATE_COMMIT).toBe("${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}");
     const automaticCheckout = automatic.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(automaticCheckout?.with?.ref).toBe("main");
     expect(automaticCheckout?.with?.["persist-credentials"]).toBe(true);

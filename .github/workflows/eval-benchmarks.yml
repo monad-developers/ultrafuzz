@@ -3,7 +3,13 @@ name: Modal Eval Benchmarks
 on:
   push:
     branches:
-      - "**"
+      - main
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   workflow_dispatch:
     inputs:
       openai_model:
@@ -29,19 +35,22 @@ on:
 
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+  BENCHMARK_CANDIDATE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   launch:
     if: >-
-      github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+      github.event_name == 'workflow_dispatch' || github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
@@ -51,7 +60,7 @@ jobs:
       - name: Check out the exact benchmark candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -91,8 +100,8 @@ jobs:
 
       - name: Prepare the exact model by benchmark matrix
         env:
-          BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || vars.BENCHMARK_SMOKE_OPENAI_MODEL || 'gpt-5.6-luna' }}
-          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || vars.BENCHMARK_SMOKE_OPENAI_REASONING || 'high' }}
+          BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || 'gpt-5.6-luna' }}
+          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || 'high' }}
           BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
         run: |
@@ -194,7 +203,7 @@ jobs:
       - name: Check out the benchmark candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -594,7 +603,7 @@ jobs:
       - name: Check out the exact incomplete benchmark candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -638,7 +647,7 @@ jobs:
         env:
           BENCHMARK_PLAN: ${{ runner.temp }}/incomplete-modal-benchmark-plan
           CLEANUP_PAIR_LIST: ${{ runner.temp }}/incomplete-modal-pairs.tsv
-          EXPECTED_CANDIDATE: ${{ github.sha }}
+          EXPECTED_CANDIDATE: ${{ env.BENCHMARK_CANDIDATE }}
           EXPECTED_GENERATION: ${{ github.run_id }}-${{ github.run_attempt }}
           EXPECTED_MODE: ${{ env.BENCHMARK_MODE }}
           EXPECTED_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}

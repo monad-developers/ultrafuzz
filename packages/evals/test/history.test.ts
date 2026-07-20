@@ -431,41 +431,38 @@ describe("longitudinal eval history", () => {
   });
 
   it("requires the exact public target, variant, and trial matrix", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
+    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
     const lanes = loadBenchmarkLanesManifest(path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json"));
-    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "smoke", cohort, lanes });
+    const suite = adaptBenchmarkManifestToEvalSuite({ benchmark: "ultrafuzz-bench", lane: "smoke", cohort, lanes });
     const matrix = publicMatrix(suite);
 
-    expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, matrix)).not.toThrow();
+    expect(() =>
+      assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "ultrafuzz-bench", "smoke", suite, matrix)
+    ).not.toThrow();
 
-    const singleRunnerSuite = adaptBenchmarkManifestToEvalSuite({
-      benchmark: "evmbench",
-      lane: "smoke",
-      cohort,
-      lanes,
-      runnerModelProfileOverride: {
-        id: "workflow-smoke-claude-sonnet-5-high",
-        agent: "ClaudeAgent",
-        model: "claude-sonnet-5",
-        reasoning: "high"
-      }
-    });
+    const noncanonicalSmokeSuite = structuredClone(suite);
+    const smokeRunner = noncanonicalSmokeSuite.run.runner_model_profile;
+    noncanonicalSmokeSuite.model_profiles[smokeRunner] = {
+      agent: "ClaudeAgent",
+      model: "claude-sonnet-5",
+      reasoning: "high"
+    };
     expect(() =>
       assertPublicBenchmarkGeneration(
         REPOSITORY_ROOT,
-        "evmbench",
+        "ultrafuzz-bench",
         "smoke",
-        singleRunnerSuite,
-        publicMatrix(singleRunnerSuite)
+        noncanonicalSmokeSuite,
+        publicMatrix(noncanonicalSmokeSuite)
       )
-    ).not.toThrow();
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" }));
 
-    const wrongJudgeSuite = structuredClone(singleRunnerSuite);
+    const wrongJudgeSuite = structuredClone(suite);
     wrongJudgeSuite.model_profiles[wrongJudgeSuite.run.judge_model_profile]!.model = "gpt-5.6-luna";
     expect(() =>
       assertPublicBenchmarkGeneration(
         REPOSITORY_ROOT,
-        "evmbench",
+        "ultrafuzz-bench",
         "smoke",
         wrongJudgeSuite,
         publicMatrix(wrongJudgeSuite)
@@ -474,9 +471,9 @@ describe("longitudinal eval history", () => {
 
     const duplicate = [...matrix];
     duplicate[duplicate.length - 1] = matrix[0]!;
-    expect(() => assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "evmbench", "smoke", suite, duplicate)).toThrowError(
-      expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" })
-    );
+    expect(() =>
+      assertPublicBenchmarkGeneration(REPOSITORY_ROOT, "ultrafuzz-bench", "smoke", suite, duplicate)
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_PUBLICATION_SCOPE_INVALID" }));
   });
 
   it("renders deterministic linked SVGs and marks missing efficiency unavailable", () => {

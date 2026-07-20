@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   readAutomaticPublicationManifest,
   validateAutomaticPublicationManifest,
+  validateAutomaticPairConfig,
   validateBenchmarkPolicyFiles
 } from "./prepare-eval-history-publication.mjs";
 
@@ -26,6 +27,57 @@ afterEach(() => {
 describe("trusted automatic eval-history publication handoff", () => {
   it("accepts only the exact event-bound smoke manifest", () => {
     expect(validateAutomaticPublicationManifest(smokeManifest(), context)).toEqual(smokeManifest());
+  });
+
+  it("rejects a noncanonical smoke runner before unpacking producer bundles", () => {
+    const modelSlug = "benchmark-smoke-gpt-5-6-luna-202607-high";
+    const pair = {
+      ...smokeManifest().pairs[0]!,
+      pair: `ultrafuzz-bench-${modelSlug}`,
+      model_slug: modelSlug,
+      config_path: `ultrafuzz-bench-${modelSlug}.json`
+    };
+    const model = {
+      slug: modelSlug,
+      model: "gpt-5.6-luna-202607",
+      provider: "openai",
+      agent: "CodexAgent",
+      reasoning: "high",
+      auth_mode: "api-key"
+    };
+    const config = {
+      run_id: "ci-12345-2-smoke-ultrafuzz-bench-openai",
+      image_name: `ufz-runner-${"a".repeat(40)}`,
+      node_timeout_seconds: 1800,
+      loops: 1,
+      braintrust: {
+        project: "ultrafuzz-public-benchmarks",
+        api_key_env: "BRAINTRUST_API_KEY",
+        judge_api_key_env: "OPENAI_API_KEY",
+        judge_url: "https://api.openai.com/v1/chat/completions"
+      },
+      public_benchmark: {
+        benchmark: "ultrafuzz-bench",
+        lane: "smoke",
+        runner_model_profile: modelSlug,
+        candidate_repository: context.repository,
+        candidate_commit: context.candidateCommit,
+        max_runtime_seconds: 3600
+      }
+    };
+    expect(() =>
+      validateAutomaticPairConfig(
+        config,
+        model,
+        pair,
+        {
+          ...context,
+          generation: "12345-2",
+          benchmark: "ultrafuzz-bench"
+        },
+        new Set()
+      )
+    ).toThrow(/canonical smoke model/u);
   });
 
   it("rejects untrusted identity, topology, provider, and path mutations", () => {

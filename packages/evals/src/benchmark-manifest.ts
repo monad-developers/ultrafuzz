@@ -13,20 +13,32 @@ export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 2;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 8;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
-export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = ["stateful-invariant", "differential"] as const;
-export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
-  "differential-library-tests",
+export const BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS = [
   "stateful-invariant-setup",
   "stateful-invariant-handlers",
   "stateful-invariant-coverage",
   "stateful-invariant-implement-properties",
-  "stateful-invariant-campaign",
+  "stateful-invariant-campaign"
+] as const;
+export const BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS = [
+  "differential-library-tests",
   "differential-oracle-planner",
   "reference-harness-author",
   "reference-and-lane-auditor",
   "differential-lane-author",
   "differential-red-triage",
   "differential-repair-and-report-review"
+] as const;
+export const BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS = ["dynamic-strategy-generator"] as const;
+export const BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES = [
+  "stateful-invariant",
+  "differential",
+  "dynamic-strategy"
+] as const;
+export const BENCHMARK_SMOKE_EXCLUDED_NODE_IDS = [
+  ...BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS,
+  ...BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS,
+  ...BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS
 ] as const;
 
 export function benchmarkLaneConcurrency(lane: "smoke" | "full"): {
@@ -81,9 +93,10 @@ export interface BenchmarkModelProfileManifest {
 
 export interface BenchmarkLaneManifest {
   trials_per_variant: number;
-  strategy_loops?: number;
-  excluded_strategy_families: string[];
-  excluded_node_ids: string[];
+  strategy_loops: number;
+  disable_invariant_tests: boolean;
+  disable_differential_tests: boolean;
+  disable_dynamic_strategies: boolean;
   model_profiles: BenchmarkModelProfileManifest[];
   judge_profile: BenchmarkModelProfileManifest;
 }
@@ -133,9 +146,10 @@ const modelProfileSchema = z.strictObject({
 });
 const laneSchema = z.strictObject({
   trials_per_variant: z.number().int().positive().default(DEFAULT_BENCHMARK_TRIALS_PER_VARIANT),
-  strategy_loops: z.number().int().positive().optional(),
-  excluded_strategy_families: z.array(safeId),
-  excluded_node_ids: z.array(safeId),
+  strategy_loops: z.number().int().positive(),
+  disable_invariant_tests: z.boolean(),
+  disable_differential_tests: z.boolean(),
+  disable_dynamic_strategies: z.boolean(),
   model_profiles: z.array(modelProfileSchema).min(1),
   judge_profile: modelProfileSchema
 });
@@ -183,25 +197,47 @@ export function loadBenchmarkLanesManifest(filePath: string): BenchmarkLanesMani
   }
   if (
     manifest.smoke.strategy_loops !== 1 ||
-    JSON.stringify(manifest.smoke.excluded_strategy_families) !==
-      JSON.stringify(BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES) ||
-    JSON.stringify(manifest.smoke.excluded_node_ids) !== JSON.stringify(BENCHMARK_SMOKE_EXCLUDED_NODE_IDS)
+    !manifest.smoke.disable_invariant_tests ||
+    !manifest.smoke.disable_differential_tests ||
+    !manifest.smoke.disable_dynamic_strategies
   ) {
     throw new EvalError(
       "EVAL_BENCHMARK_MANIFEST_INVALID",
-      "smoke lane must use one strategy loop and the exact invariant and differential topology exclusions"
+      "smoke lane must use one strategy loop and disable invariant tests, differential tests, and dynamic strategies"
     );
   }
-  if (manifest.full.excluded_strategy_families.length > 0) {
-    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "full lane must include every strategy family");
-  }
-  if (manifest.full.excluded_node_ids.length > 0) {
-    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "full lane cannot exclude production topology nodes");
-  }
-  if (manifest.full.strategy_loops !== undefined) {
-    throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "full lane must use the default production strategy loops");
+  if (
+    manifest.full.strategy_loops !== 1 ||
+    manifest.full.disable_invariant_tests ||
+    manifest.full.disable_differential_tests ||
+    manifest.full.disable_dynamic_strategies
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_MANIFEST_INVALID",
+      "full lane must use one strategy loop and include invariant tests, differential tests, and dynamic strategies"
+    );
   }
   return manifest;
+}
+
+export function benchmarkLaneTopologyExclusions(
+  lane: Pick<
+    BenchmarkLaneManifest,
+    "disable_invariant_tests" | "disable_differential_tests" | "disable_dynamic_strategies"
+  >
+): { excluded_strategy_families: string[]; excluded_node_ids: string[] } {
+  return {
+    excluded_strategy_families: [
+      ...(lane.disable_invariant_tests ? ["stateful-invariant"] : []),
+      ...(lane.disable_differential_tests ? ["differential"] : []),
+      ...(lane.disable_dynamic_strategies ? ["dynamic-strategy"] : [])
+    ],
+    excluded_node_ids: [
+      ...(lane.disable_invariant_tests ? BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS : []),
+      ...(lane.disable_differential_tests ? BENCHMARK_DIFFERENTIAL_EXCLUDED_NODE_IDS : []),
+      ...(lane.disable_dynamic_strategies ? BENCHMARK_DYNAMIC_EXCLUDED_NODE_IDS : [])
+    ]
+  };
 }
 
 function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: BenchmarkLaneManifest): void {
@@ -287,6 +323,15 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   runnerModelProfileId?: string;
   runnerModelProfileOverride?: BenchmarkModelProfileManifest;
 }): EvalSuiteSpec {
+  if (
+    (input.lane === "smoke" && input.benchmark !== "ultrafuzz-bench") ||
+    (input.lane === "full" && input.benchmark !== "evmbench")
+  ) {
+    throw new EvalError(
+      "EVAL_BENCHMARK_MANIFEST_INVALID",
+      "smoke requires the Ultrafuzz-bench cohort and full requires the EVMBench cohort"
+    );
+  }
   if (input.benchmark === "evmbench" && input.cohort.schema_version !== EVMBENCH_COHORT_SCHEMA_VERSION) {
     throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", "evmbench requires the pinned EVMbench cohort manifest");
   }
@@ -297,6 +342,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     );
   }
   const lane = input.lanes[input.lane];
+  const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
   const selectedTargets =
     input.lane === "smoke"
       ? input.cohort.smoke_targets.map((id) => input.cohort.targets.find((target) => target.id === id)!)
@@ -321,6 +367,15 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       );
     }
     runnerModelProfileOverride = parsedOverride.data;
+    if (
+      input.lane === "smoke" &&
+      JSON.stringify(runnerModelProfileOverride) !== JSON.stringify(lane.model_profiles[0])
+    ) {
+      throw new EvalError(
+        "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
+        "smoke runner override must remain the canonical gpt-5.6-luna high profile"
+      );
+    }
   }
   const selectedRunnerProfiles =
     runnerModelProfileOverride === undefined
@@ -359,15 +414,11 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       workflow_input: {
         benchmark_lane: input.lane,
         target_frameworks: Object.fromEntries(selectedTargets.map((target) => [target.id, target.framework])),
-        excluded_strategy_families: lane.excluded_strategy_families,
-        ...(lane.strategy_loops === undefined && lane.excluded_node_ids.length === 0
-          ? {}
-          : {
-              benchmark_execution: {
-                ...(lane.strategy_loops === undefined ? {} : { strategy_loops: lane.strategy_loops }),
-                excluded_node_ids: lane.excluded_node_ids
-              }
-            })
+        excluded_strategy_families: topologyExclusions.excluded_strategy_families,
+        benchmark_execution: {
+          strategy_loops: lane.strategy_loops,
+          excluded_node_ids: topologyExclusions.excluded_node_ids
+        }
       }
     })),
     run: {

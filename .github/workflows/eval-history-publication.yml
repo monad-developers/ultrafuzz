@@ -41,18 +41,50 @@ permissions:
   pull-requests: write
 
 jobs:
+  qualify_modal_benchmark:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      eligible: ${{ steps.qualify.outputs.eligible }}
+      candidate_commit: ${{ steps.qualify.outputs.candidate_commit }}
+      benchmark_mode: ${{ steps.qualify.outputs.benchmark_mode }}
+
+    steps:
+      - name: Check out trusted main qualification tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Qualify the exact completed producer attempt
+        id: qualify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          jobs_path="$RUNNER_TEMP/modal-benchmark-producer-jobs.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$jobs_path"
+          node scripts/ci/qualify-modal-benchmark-publication.mjs \
+            "$GITHUB_EVENT_PATH" \
+            "$jobs_path" \
+            "$GITHUB_OUTPUT" \
+            "$GITHUB_REPOSITORY"
+
   publish_modal_benchmark:
-    if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.path == '.github/workflows/eval-benchmarks.yml' &&
-      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+    needs: qualify_modal_benchmark
+    if: needs.qualify_modal_benchmark.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      BENCHMARK_MODE: ${{ github.event.workflow_run.event == 'workflow_dispatch' && 'full' || 'smoke' }}
-      CANDIDATE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+      BENCHMARK_MODE: ${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}
+      CANDIDATE_COMMIT: ${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}
       PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
       PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
       PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}

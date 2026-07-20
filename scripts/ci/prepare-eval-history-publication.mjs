@@ -392,7 +392,7 @@ function checkedProduct(left, right, label) {
   return value;
 }
 
-function validateAutomaticPairConfig(config, model, pair, context, usedModelSlugs) {
+export function validateAutomaticPairConfig(config, model, pair, context, usedModelSlugs) {
   const expectedRunId = `ci-${context.generation}-${context.mode}-${context.benchmark}-${pair.provider}`;
   const expectedAgent = pair.provider === "openai" ? "CodexAgent" : "ClaudeAgent";
   if (!SAFE_MODEL.test(model.model) || /(?:^|[-_.:/])latest$/iu.test(model.model)) {
@@ -434,6 +434,9 @@ function validateAutomaticPairConfig(config, model, pair, context, usedModelSlug
     model.slug === expectedModelSlug ? undefined : "derived model slug",
     model.provider === pair.provider ? undefined : "model provider",
     model.agent === expectedAgent ? undefined : "model agent",
+    context.mode !== "smoke" || (model.model === "gpt-5.6-luna" && model.reasoning === "high")
+      ? undefined
+      : "canonical smoke model",
     model.auth_mode === "api-key" ? undefined : "model authentication mode"
   ].filter((entry) => entry !== undefined);
   if (mismatches.length > 0) {

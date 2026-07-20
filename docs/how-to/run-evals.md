@@ -124,13 +124,20 @@ For configuration and architecture details, see
 
 The checked-in cohort and lane manifests live under `benchmarks/`. The smoke
 lane selects the three Ultrafuzz-bench targets, covering Foundry, Hardhat, and
-Vyper. It uses one strategy loop, excludes stateful-invariant and differential
-work, and runs GPT-5.6 Luna at `high`. The full lane uses
-every checked-in EVMBench target, keeps the production strategy set, and runs
-GPT-5.6 Luna at `high` plus Claude Sonnet 5 at `high`. Both lanes default to one
-trial per variant and use the separate GPT-5.6 Sol `xhigh` judge. The benchmark
-adapter converts either lane into the normal `EvalSuiteSpec` and can project one
-runner for an isolated Modal pair while retaining the fixed judge.
+Vyper, and runs GPT-5.6 Luna at `high`. Its canonical controls set
+`strategy_loops: 1`, `disable_invariant_tests: true`,
+`disable_differential_tests: true`, and `disable_dynamic_strategies: true`.
+The adapter derives the exact invariant, differential, and dynamic topology
+node exclusions from those flags; node IDs are not duplicated in the manifest.
+
+The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
+`high` plus Claude Sonnet 5 at `high`. It also pins `strategy_loops: 1`, while
+all three disable flags are `false`, so it retains the complete production
+topology with invariant tests, differential tests, and dynamic strategies.
+Both lanes default to one trial per variant and use the separate GPT-5.6 Sol
+`xhigh` judge. The benchmark adapter converts either lane into the normal
+`EvalSuiteSpec` and can project one runner for an isolated Modal pair while
+retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
 six charts in one transaction:
@@ -165,21 +172,22 @@ run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
 and available candidate, cohort, and scoring provenance. Missing timing or cost
 is allowed and renders as unavailable; it is never converted to zero.
 
-Every push on every branch launches the real three-target Ultrafuzz-bench smoke
-as detached Modal work, then restores its state in a separate collection job. A
-newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high` is
-the default runner; repository variables `BENCHMARK_SMOKE_OPENAI_MODEL` and
-`BENCHMARK_SMOKE_OPENAI_REASONING` can override it. Candidate installation and
-build happen before any Modal launch, so a broken push fails without allocating
-the benchmark matrix.
+Commits on `main` and head commits of trusted, non-draft pull requests launch
+the real three-target Ultrafuzz-bench smoke as detached Modal work, then restore
+its state in a separate collection job. Draft pull requests skip paid work;
+marking one ready for review launches its current head. A newer commit on the
+same pull request or branch cancels the older smoke. GPT-5.6 Luna `high` is the
+only smoke runner. Candidate installation and build happen before any Modal
+launch, so a broken commit fails without allocating the benchmark matrix.
 
 A manual workflow dispatch launches the full EVMBench cohort instead, with
 GPT-5.6 Luna `high` and Claude Sonnet 5 `high` by default. Its model and
-reasoning inputs can override both runners. Both modes retain the standard
-Modal CPU and memory allocation, give each target row a 3,600-second watchdog,
-and publish ordinary 30-day Actions artifacts. Missing credentials, revision
-drift, unavailable ground truth, failed model work, scoring errors, or an
-incomplete configured matrix fail before publication.
+reasoning inputs can override both runners. Full runs only through that manual
+dispatch; pushes and pull-request events always select smoke. Both modes retain
+the standard Modal CPU and memory allocation, give each target row a
+3,600-second watchdog, and publish ordinary 30-day Actions artifacts. Missing
+credentials, revision drift, unavailable ground truth, failed model work,
+scoring errors, or an incomplete configured matrix fail before publication.
 
 Every publisher updates one fixed pull request from the latest remote
 publication tip and uses a normal fast-forward push; a lost race is retried

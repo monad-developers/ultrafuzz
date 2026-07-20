@@ -81,24 +81,26 @@ credential in memory immediately before scoring and never persists it.
 
 ## Run the public benchmark workflow
 
-The checked-in GitHub workflow uses Actions only as a control plane. Every push
-on every branch installs and builds the exact candidate commit, builds an
-immutable Modal image for that commit, and launches the real Ultrafuzz-bench
-smoke. A newer push on the same branch cancels its older smoke workflow.
+The checked-in GitHub workflow uses Actions only as a control plane. It launches
+the paid smoke for commits on `main` and for head commits of trusted, non-draft
+pull requests. Draft pull requests allocate no Modal work; the
+`ready_for_review` event launches their current head commit. A newer commit on
+the same pull request or branch cancels its older smoke workflow. Each eligible
+run installs and builds the exact candidate commit before building its immutable
+Modal image.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
-one Vyper target. It runs GPT-5.6 Luna at `high` by default. Repository variables
-`BENCHMARK_SMOKE_OPENAI_MODEL` and `BENCHMARK_SMOKE_OPENAI_REASONING` can
-override that runner without changing the checked-in lane manifest. The smoke
-uses one strategy loop and excludes the stateful-invariant and differential
-families.
+one Vyper target. It runs only GPT-5.6 Luna at `high`, uses one strategy loop,
+and explicitly disables invariant tests, differential tests, and dynamic
+strategies.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
 checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
 `high` by default. Dispatch inputs `openai_model`, `openai_reasoning`,
 `anthropic_model`, and `anthropic_reasoning` provide explicit overrides. The
 full lane retains the production strategy set, including invariant,
-differential, and dynamic strategies.
+differential, and dynamic strategies, with all three disable flags set to
+`false`. Push and pull-request events can never select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Every
 target row has a 3,600-second model-work watchdog. The smoke admits two rows at
@@ -113,18 +115,20 @@ lanes resolve to one trial. Increase it only deliberately: benchmark work and
 cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
-Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY`; push
-smoke runs do not. Public rows score from their local artifacts and do not
-require a Braintrust reporting key. Modal receives only the provider credential
-needed by a pair plus the OpenAI judge credential. It never receives a GitHub
-token.
+Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY`;
+automatic smoke runs do not. Public rows score from their local artifacts and
+do not require a Braintrust reporting key. Modal receives only the provider
+credential needed by a pair plus the OpenAI judge credential. It never receives
+a GitHub token.
 
 The worker verifies the exact candidate and target commits, obtains EVMBench
 labels from the pinned public Frontier Evals revision, and uses the versioned
 public Ultrafuzz-bench labels. Public target reports and normalized findings are
 packed with SHA-256 and path validation and uploaded with 30-day retention. No
-partial generation updates history: every configured pair must finish and score
-before publication.
+partial generation updates history: the trusted publisher verifies that the
+exact producer attempt's launch and collection jobs both succeeded, and every
+configured pair must finish and score before publication. Pull-request results
+remain keyed to the PR head commit rather than GitHub's synthetic merge commit.
 
 The compare-and-swap publisher validates the generation with the benchmark
 policy from the exact candidate checkout, appends observations keyed to that

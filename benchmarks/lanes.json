@@ -3,21 +3,9 @@
   "smoke": {
     "trials_per_variant": 1,
     "strategy_loops": 1,
-    "excluded_strategy_families": ["stateful-invariant", "differential"],
-    "excluded_node_ids": [
-      "differential-library-tests",
-      "stateful-invariant-setup",
-      "stateful-invariant-handlers",
-      "stateful-invariant-coverage",
-      "stateful-invariant-implement-properties",
-      "stateful-invariant-campaign",
-      "differential-oracle-planner",
-      "reference-harness-author",
-      "reference-and-lane-auditor",
-      "differential-lane-author",
-      "differential-red-triage",
-      "differential-repair-and-report-review"
-    ],
+    "disable_invariant_tests": true,
+    "disable_differential_tests": true,
+    "disable_dynamic_strategies": true,
     "model_profiles": [
       {
         "id": "benchmark-smoke-gpt-5-6-luna-high",
@@ -35,8 +23,10 @@
   },
   "full": {
     "trials_per_variant": 1,
-    "excluded_strategy_families": [],
-    "excluded_node_ids": [],
+    "strategy_loops": 1,
+    "disable_invariant_tests": false,
+    "disable_differential_tests": false,
+    "disable_dynamic_strategies": false,
     "model_profiles": [
       {
         "id": "benchmark-full-gpt-5-6-luna-high",

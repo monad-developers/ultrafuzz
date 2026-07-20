@@ -8,6 +8,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  benchmarkLaneTopologyExclusions,
+  BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
+  BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
   DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest
@@ -18,16 +21,17 @@ const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
 
 describe("public benchmark manifests", () => {
-  it("pins every EVMbench detect target and uses a fixed smoke subset", () => {
-    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
-    expect(cohort.schema_version).toBe("ultrafuzz.evmbench.cohort.v1");
-    expect(cohort.targets).toHaveLength(40);
+  it("uses one model and exactly three pinned Ultrafuzz-bench targets in smoke", () => {
+    const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    expect(cohort.schema_version).toBe("ultrafuzz.benchmark.cohort.v1");
+    expect(cohort.targets).toHaveLength(3);
     expect(cohort.smoke_targets).toHaveLength(3);
+    expect(cohort.targets.map((target) => target.framework).sort()).toEqual(["foundry", "hardhat", "vyper"]);
     expect(cohort.targets.every((target) => /^[0-9a-f]{40}$/u.test(target.revision))).toBe(true);
     expect(new Set(cohort.targets.map((target) => target.revision)).has("latest")).toBe(false);
 
     const suite = adaptBenchmarkManifestToEvalSuite({
-      benchmark: "evmbench",
+      benchmark: "ultrafuzz-bench",
       lane: "smoke",
       cohort,
       lanes: loadBenchmarkLanesManifest(LANES_PATH)
@@ -61,32 +65,32 @@ describe("public benchmark manifests", () => {
       include: ["report.md", "report.json", "findings.normalized.json"]
     });
     expect(suite.variants[0]?.workflow_input).toMatchObject({
-      excluded_strategy_families: ["stateful-invariant", "differential"],
+      excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],
       benchmark_execution: {
         strategy_loops: 1,
-        excluded_node_ids: expect.arrayContaining(["stateful-invariant-setup", "differential-oracle-planner"])
+        excluded_node_ids: [...BENCHMARK_SMOKE_EXCLUDED_NODE_IDS]
       }
     });
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toMatchObject({
       topologyTransform: {
         strategyLoops: 1,
-        excludedNodeIds: expect.not.arrayContaining(["dynamic-strategy-generator"])
+        excludedNodeIds: [...BENCHMARK_SMOKE_EXCLUDED_NODE_IDS]
       }
     });
   });
 
-  it("accepts one explicit workflow runner override while retaining the fixed judge", () => {
+  it("accepts one explicit full runner override while keeping smoke canonical and retaining the fixed judge", () => {
     const cohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json"));
     const lanes = loadBenchmarkLanesManifest(LANES_PATH);
     const runnerModelProfileOverride = {
-      id: "workflow-smoke-claude-sonnet-5-medium",
-      agent: "ClaudeAgent",
-      model: "claude-sonnet-5",
+      id: "workflow-full-gpt-5-6-luna-202607-medium",
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna-202607",
       reasoning: "medium"
     };
     const suite = adaptBenchmarkManifestToEvalSuite({
       benchmark: "evmbench",
-      lane: "smoke",
+      lane: "full",
       cohort,
       lanes,
       runnerModelProfileOverride
@@ -100,8 +104,8 @@ describe("public benchmark manifests", () => {
       })
     ]);
     expect(suite.model_profiles[runnerModelProfileOverride.id]).toEqual({
-      agent: "ClaudeAgent",
-      model: "claude-sonnet-5",
+      agent: "CodexAgent",
+      model: "gpt-5.6-luna-202607",
       reasoning: "medium"
     });
     expect(Object.keys(suite.model_profiles)).toEqual([
@@ -116,20 +120,20 @@ describe("public benchmark manifests", () => {
     expect(() =>
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "evmbench",
-        lane: "smoke",
+        lane: "full",
         cohort,
         lanes,
-        runnerModelProfileId: "benchmark-smoke-gpt-5-6-sol-xhigh"
+        runnerModelProfileId: "benchmark-full-gpt-5-6-sol-xhigh"
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
     expect(() =>
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "evmbench",
-        lane: "smoke",
+        lane: "full",
         cohort,
         lanes,
         runnerModelProfileOverride: {
-          id: "workflow-smoke-unsafe-agent",
+          id: "workflow-full-unsafe-agent",
           agent: "ShellAgent",
           model: "claude-sonnet-5",
           reasoning: "medium"
@@ -139,11 +143,27 @@ describe("public benchmark manifests", () => {
     expect(() =>
       adaptBenchmarkManifestToEvalSuite({
         benchmark: "evmbench",
-        lane: "smoke",
+        lane: "full",
         cohort,
         lanes,
-        runnerModelProfileId: lanes.smoke.model_profiles[0]!.id,
+        runnerModelProfileId: lanes.full.model_profiles[0]!.id,
         runnerModelProfileOverride
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
+
+    const smokeCohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
+    expect(() =>
+      adaptBenchmarkManifestToEvalSuite({
+        benchmark: "ultrafuzz-bench",
+        lane: "smoke",
+        cohort: smokeCohort,
+        lanes,
+        runnerModelProfileOverride: {
+          id: "workflow-smoke-claude-sonnet-5-high",
+          agent: "ClaudeAgent",
+          model: "claude-sonnet-5",
+          reasoning: "high"
+        }
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
   });
@@ -163,7 +183,39 @@ describe("public benchmark manifests", () => {
     expect(suite.run).toMatchObject({ max_parallel_runs: 20, max_parallel_targets: 8 });
     expect(suite.variants.every((variant) => !JSON.stringify(variant).includes("latest"))).toBe(true);
     expect(suite.variants.every((variant) => variant.workflow_input)).toBe(true);
-    expect(suite.variants.every((variant) => !JSON.stringify(variant).includes("benchmark_execution"))).toBe(true);
+    for (const variant of suite.variants) {
+      expect(variant.workflow_input).toMatchObject({
+        excluded_strategy_families: [],
+        benchmark_execution: { strategy_loops: 1, excluded_node_ids: [] }
+      });
+    }
+    expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toEqual({
+      topologyTransform: { strategyLoops: 1, excludedNodeIds: [] }
+    });
+  });
+
+  it("derives exact topology exclusions from the canonical lane flags", () => {
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
+    expect(lanes.smoke).toMatchObject({
+      strategy_loops: 1,
+      disable_invariant_tests: true,
+      disable_differential_tests: true,
+      disable_dynamic_strategies: true
+    });
+    expect(benchmarkLaneTopologyExclusions(lanes.smoke)).toEqual({
+      excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],
+      excluded_node_ids: [...BENCHMARK_SMOKE_EXCLUDED_NODE_IDS]
+    });
+    expect(lanes.full).toMatchObject({
+      strategy_loops: 1,
+      disable_invariant_tests: false,
+      disable_differential_tests: false,
+      disable_dynamic_strategies: false
+    });
+    expect(benchmarkLaneTopologyExclusions(lanes.full)).toEqual({
+      excluded_strategy_families: [],
+      excluded_node_ids: []
+    });
   });
 
   it("keeps the canonical Ultrafuzz cohort immutable without a fallback target", () => {
@@ -172,6 +224,27 @@ describe("public benchmark manifests", () => {
     expect(cohort.smoke_targets).toEqual(cohort.targets.map((target) => target.id));
     expect(cohort.targets.map((target) => target.framework).sort()).toEqual(["foundry", "hardhat", "vyper"]);
     expect(cohort.targets.every((target) => /^[0-9a-f]{40}$/u.test(target.revision))).toBe(true);
+  });
+
+  it("rejects cross-lane benchmark cohorts", () => {
+    const lanes = loadBenchmarkLanesManifest(LANES_PATH);
+    const ultrafuzzCohort = loadBenchmarkCohortManifest(
+      path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json")
+    );
+    const evmbenchCohort = loadBenchmarkCohortManifest(
+      path.join(REPOSITORY_ROOT, "benchmarks", "evmbench-detect.json")
+    );
+    expect(() =>
+      adaptBenchmarkManifestToEvalSuite({ benchmark: "evmbench", lane: "smoke", cohort: evmbenchCohort, lanes })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" }));
+    expect(() =>
+      adaptBenchmarkManifestToEvalSuite({
+        benchmark: "ultrafuzz-bench",
+        lane: "full",
+        cohort: ultrafuzzCohort,
+        lanes
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" }));
   });
 
   it("defaults omitted benchmark trials to one and preserves explicit multi-trial experiments", () => {
@@ -303,28 +376,43 @@ describe("public benchmark manifests", () => {
     );
 
     const fullTopologyOverride = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
-      full: { strategy_loops?: number };
+      full: { strategy_loops: number };
     };
-    fullTopologyOverride.full.strategy_loops = 1;
+    fullTopologyOverride.full.strategy_loops = 2;
     fs.writeFileSync(lanesPath, JSON.stringify(fullTopologyOverride));
     expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
       expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
     );
 
-    const incompleteSmokeExclusions = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
-      smoke: { excluded_node_ids: string[] };
-    };
-    incompleteSmokeExclusions.smoke.excluded_node_ids = [];
-    fs.writeFileSync(lanesPath, JSON.stringify(incompleteSmokeExclusions));
-    expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
-      expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
-    );
+    for (const flag of [
+      "disable_invariant_tests",
+      "disable_differential_tests",
+      "disable_dynamic_strategies"
+    ] as const) {
+      const incompleteSmokeDisablement = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
+        smoke: Record<typeof flag, boolean>;
+      };
+      incompleteSmokeDisablement.smoke[flag] = false;
+      fs.writeFileSync(lanesPath, JSON.stringify(incompleteSmokeDisablement));
+      expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
+        expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
+      );
 
-    const broadenedSmokeFamilies = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
-      smoke: { excluded_strategy_families: string[] };
+      const disabledFullTopology = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
+        full: Record<typeof flag, boolean>;
+      };
+      disabledFullTopology.full[flag] = true;
+      fs.writeFileSync(lanesPath, JSON.stringify(disabledFullTopology));
+      expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
+        expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
+      );
+    }
+
+    const legacyLowLevelExclusions = JSON.parse(fs.readFileSync(LANES_PATH, "utf8")) as {
+      smoke: Record<string, unknown>;
     };
-    broadenedSmokeFamilies.smoke.excluded_strategy_families.push("unmapped-family");
-    fs.writeFileSync(lanesPath, JSON.stringify(broadenedSmokeFamilies));
+    legacyLowLevelExclusions.smoke.excluded_node_ids = [];
+    fs.writeFileSync(lanesPath, JSON.stringify(legacyLowLevelExclusions));
     expect(() => loadBenchmarkLanesManifest(lanesPath)).toThrowError(
       expect.objectContaining({ code: "EVAL_BENCHMARK_MANIFEST_INVALID" })
     );
