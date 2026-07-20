@@ -46,6 +46,7 @@ interface DurableNodeState {
   provenance?: {
     workflow?: {
       task_id?: string;
+      state?: string;
     };
   };
 }
@@ -67,7 +68,7 @@ interface WorkflowSyncSummary {
 type RecoverableNodeEntry = {
   nodeId: string;
   node: DurableNodeState;
-  reason: "failed" | "stale-running";
+  reason: "failed" | "stale-running" | "artifact-complete-workflow-failed";
 };
 type ResetCooldowns = Map<string, number>;
 
@@ -439,6 +440,9 @@ async function recoverWorkflow(target: string, evalRunId: string): Promise<boole
       recovery_attempt: attempt,
       failed_node_count: recoverableNodes.filter((node) => node.reason === "failed").length,
       stale_running_node_count: recoverableNodes.filter((node) => node.reason === "stale-running").length,
+      artifact_complete_failed_node_count: recoverableNodes.filter(
+        (node) => node.reason === "artifact-complete-workflow-failed"
+      ).length,
       recently_reset_node_count: resetCooldownNodeCount(recoverableNodes, resetCooldowns),
       workflow_status: state.status
     });
@@ -592,9 +596,19 @@ async function waitForWorkflowTerminal(
 function recoverableNodeEntries(state: DurableRunState): RecoverableNodeEntry[] {
   if (state.nodes === undefined) return [];
   const entries: RecoverableNodeEntry[] = [];
+  const workflowFailedWithPendingNodes =
+    state.status === "failed" && Object.values(state.nodes).some((node) => node.status === "pending");
   for (const [nodeId, node] of Object.entries(state.nodes)) {
     if (node.status === "failed") {
       entries.push({ nodeId, node, reason: "failed" });
+      continue;
+    }
+    if (
+      workflowFailedWithPendingNodes &&
+      node.status === "succeeded" &&
+      node.provenance?.workflow?.state === "artifact-complete-after-failure"
+    ) {
+      entries.push({ nodeId, node, reason: "artifact-complete-workflow-failed" });
       continue;
     }
     if (node.status !== "running" || node.started_at === undefined) continue;
