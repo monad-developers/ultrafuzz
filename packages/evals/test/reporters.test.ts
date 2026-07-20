@@ -301,6 +301,7 @@ describe("BraintrustReporter", () => {
           judge_mode: "deterministic",
           judge_prompt_version: "judge-prompt-generated",
           judge_models: ["judge-generated"],
+          judge_panel: { total: 4, quorum: 3 },
           ground_truth_sha256: provenance.benchmark.ground_truth_sha256,
           fingerprint: "scoring-generated"
         }
@@ -334,7 +335,9 @@ describe("BraintrustReporter", () => {
         scoring_fingerprint: "scoring-generated",
         judge_mode: "deterministic",
         judge_prompt_version: "judge-prompt-generated",
-        judge_models: ["judge-generated"]
+        judge_models: ["judge-generated"],
+        judge_panel_total: 4,
+        judge_panel_quorum: 3
       }
     });
   });

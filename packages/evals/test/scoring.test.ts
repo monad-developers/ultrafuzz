@@ -326,6 +326,178 @@ describe("deterministic scorer math", () => {
     });
     expect(scored.findingScores[0]?.judge_result.judge_kind).toBe("llm");
     expect(scored.findingScores[0]?.deterministic_match.judge_kind).toBe("deterministic");
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      rationale: "custom judge",
+      panel: {
+        total: 1,
+        quorum: 1,
+        model: "gpt-5.5",
+        prompt_version: "ultrafuzz-eval-judge-v4-panel",
+        aggregate_decision: { votes: 1 },
+        member_votes: [{ member: 1, rationale: "custom judge" }]
+      }
+    });
+  });
+
+  it("aggregates a 3-of-4 panel agreement and preserves every independent vote", async () => {
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
+    let calls = 0;
+    const observedInputs: string[] = [];
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite, { judge_reasoning: "xhigh" }),
+      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        const member = calls;
+        calls += 1;
+        observedInputs.push(JSON.stringify(input));
+        const agreed = member < 3;
+        return {
+          ...input.deterministicResult,
+          ...(agreed ? { matched_ground_truth_bug_id: "BUG-1" } : {}),
+          score: agreed ? 0.8 : 0.1,
+          classification: agreed ? "true-positive" : "false-positive",
+          reason_code: agreed ? "judge-confirmed-match" : "weak-unmatched-finding",
+          rationale: `member ${member + 1}`,
+          confidence: 0.9,
+          judge_kind: "llm"
+        };
+      }
+    });
+
+    expect(calls).toBe(4);
+    expect(new Set(observedInputs)).toHaveLength(1);
+    expect(scored.rowScore).toMatchObject({ true_positives: 1, human_review_queue_count: 0 });
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      matched_ground_truth_bug_id: "BUG-1",
+      classification: "true-positive",
+      reason_code: "judge-confirmed-match",
+      panel: {
+        total: 4,
+        quorum: 3,
+        model: "gpt-5.5",
+        reasoning_effort: "xhigh",
+        prompt_version: "ultrafuzz-eval-judge-v4-panel",
+        vote_split: [
+          { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
+          { classification: "false-positive", votes: 1 }
+        ],
+        aggregate_decision: {
+          classification: "true-positive",
+          matched_ground_truth_bug_id: "BUG-1",
+          votes: 3
+        }
+      }
+    });
+    expect(scored.findingScores[0]?.judge_result.panel?.member_votes.map((vote) => vote.rationale)).toEqual([
+      "member 1",
+      "member 2",
+      "member 3",
+      "member 4"
+    ]);
+  });
+
+  it("routes panel disagreement to human review with an explicit reason", async () => {
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
+    let calls = 0;
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        const positive = calls++ < 2;
+        return {
+          ...input.deterministicResult,
+          ...(positive ? { matched_ground_truth_bug_id: "BUG-1" } : {}),
+          score: positive ? 0.9 : 0.1,
+          classification: positive ? "true-positive" : "false-positive",
+          reason_code: positive ? "judge-confirmed-match" : "weak-unmatched-finding",
+          rationale: positive ? "match" : "no match",
+          confidence: 0.9,
+          judge_kind: "llm"
+        };
+      }
+    });
+
+    expect(scored.rowScore).toMatchObject({ true_positives: 0, false_positives: 0, human_review_queue_count: 1 });
+    expect(scored.reviewQueue[0]?.judge_result).toMatchObject({
+      classification: "needs-human-review",
+      reason_code: "panel-disagreement",
+      rationale: "Judge panel disagreement: no identical decision reached quorum (3 of 4).",
+      panel: {
+        vote_split: [
+          { classification: "false-positive", votes: 2 },
+          { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 2 }
+        ],
+        aggregate_decision: {
+          classification: "needs-human-review",
+          reason_code: "panel-disagreement",
+          votes: 2
+        }
+      }
+    });
+  });
+
+  it("counts true-positive vote identity by matched canonical bug ID", async () => {
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 4, quorum: 3 } });
+    let calls = 0;
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        const bugId = calls++ < 2 ? "BUG-1" : "BUG-2";
+        return {
+          ...input.deterministicResult,
+          matched_ground_truth_bug_id: bugId,
+          score: 0.9,
+          classification: "true-positive",
+          reason_code: "judge-confirmed-match",
+          rationale: `match ${bugId}`,
+          confidence: 0.9,
+          judge_kind: "llm"
+        };
+      }
+    });
+
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      classification: "needs-human-review",
+      reason_code: "panel-disagreement",
+      panel: {
+        vote_split: [
+          { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 2 },
+          { classification: "true-positive", matched_ground_truth_bug_id: "BUG-2", votes: 2 }
+        ]
+      }
+    });
+    expect(scored.findingScores[0]?.judge_result.matched_ground_truth_bug_id).toBeUndefined();
+  });
+
+  it("bounds panel member concurrency", async () => {
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 6, quorum: 4 } });
+    let active = 0;
+    let maximumActive = 0;
+    let calls = 0;
+    await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "finding-panel", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        calls += 1;
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        active -= 1;
+        return { ...input.deterministicResult, judge_kind: "llm", rationale: "no match" };
+      }
+    });
+
+    expect(calls).toBe(6);
+    expect(maximumActive).toBe(4);
   });
 
   it("uses the candidate-mode threshold consistently for deterministic and optional judges", async () => {
@@ -430,8 +602,9 @@ describe("deterministic scorer math", () => {
         availability: "historical-unavailable",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v3",
+          judge_prompt_version: "ultrafuzz-eval-judge-v4-panel",
           judge_models: ["gpt-5.5"],
+          judge_panel: { total: 1, quorum: 1 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
         }
       }
@@ -800,6 +973,59 @@ describe("deterministic scorer math", () => {
       ])
     );
     expect(scored.rowScore.true_positives).toBe(1);
+  });
+
+  it("keeps schema retries independent for every panel member", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const fetchImpl = (async (_input: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const content =
+        requests.length <= 3
+          ? JSON.stringify({ score: 1 })
+          : JSON.stringify({
+              matched_ground_truth_bug_id: "candidate-1",
+              score: 1,
+              signals: { root_cause: 1, affected_area: 1, impact: 1, evidence: 1 },
+              rationale: "The finding matches the first candidate.",
+              confidence: 1
+            });
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const judge = gatewayLlmJudge(
+      {
+        ULTRAFUZZ_EVAL_JUDGE_API_KEY: "dedicated-key",
+        ULTRAFUZZ_EVAL_JUDGE_ALLOW_PRIVATE_DATA: "true"
+      },
+      fetchImpl
+    );
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 3, quorum: 2 } });
+
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [matchedFinding()],
+      bugs: BUGS,
+      llmJudge: judge
+    });
+
+    expect(requests).toHaveLength(6);
+    expect(new Set(requests.slice(0, 3).map((request) => JSON.stringify(request.messages)))).toHaveLength(1);
+    expect(requests.slice(3).every((request) => JSON.stringify(request).includes("previous response"))).toBe(true);
+    expect(scored.findingScores[0]?.judge_result.panel).toMatchObject({
+      total: 3,
+      quorum: 2,
+      aggregate_decision: {
+        classification: "true-positive",
+        matched_ground_truth_bug_id: "BUG-1",
+        votes: 3
+      }
+    });
+    expect(scored.findingScores[0]?.judge_result.panel?.member_votes).toHaveLength(3);
+    expect(
+      scored.findingScores[0]?.judge_result.panel?.member_votes.every(
+        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v4-panel"
+      )
+    ).toBe(true);
   });
 
   it("omits optional Claude reasoning parameters in structured-output mode", async () => {

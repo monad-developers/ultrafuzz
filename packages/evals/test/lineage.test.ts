@@ -129,6 +129,14 @@ describe("versioned eval lineage", () => {
       judgeMode: "llm"
     });
     expect(llmScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
+    const panelScoring = buildScoringProvenance({
+      projectRoot: generated.candidateRoot,
+      suite: { ...generated.plan.suite, judge_panel: { total: 4, quorum: 3 } },
+      matrix: generated.plan.matrix,
+      judgeMode: "llm"
+    });
+    expect(panelScoring).toMatchObject({ judge_panel: { total: 4, quorum: 3 } });
+    expect(panelScoring.fingerprint).not.toBe(llmScoring.fingerprint);
     fs.writeFileSync(path.join(generated.candidateRoot, "scratch.log"), "local scratch\n", "utf8");
     const untracked = buildEvalRunProvenance(generated.plan, { watch: false });
     expect(untracked.candidate).toMatchObject({
@@ -160,8 +168,9 @@ describe("versioned eval lineage", () => {
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
       judge_mode: "deterministic",
-      judge_prompt_version: "ultrafuzz-eval-judge-v3",
+      judge_prompt_version: "ultrafuzz-eval-judge-v4-panel",
       judge_models: ["gpt-5.5"],
+      judge_panel: { total: 1, quorum: 1 },
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
     });
   });

@@ -7,7 +7,11 @@ export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v1" as const;
 
 export type EvalClassification = "true-positive" | "false-positive" | "needs-human-review" | "missed";
 export type EvalClassificationReasonCode =
-  "deterministic-match" | "judge-confirmed-match" | "strong-novel-finding" | "weak-unmatched-finding";
+  | "deterministic-match"
+  | "judge-confirmed-match"
+  | "strong-novel-finding"
+  | "weak-unmatched-finding"
+  | "panel-disagreement";
 export type ReviewerStatus = "pending" | "accepted" | "rejected" | "needs-more-evidence";
 
 export interface EvalResult<T> {
@@ -58,6 +62,11 @@ export interface EvalRunConfig {
   max_parallel_runs?: number;
 }
 
+export interface EvalJudgePanelConfig {
+  total: number;
+  quorum: number;
+}
+
 export interface EvalMetricsConfig {
   primary: string[];
   recall_threshold: number;
@@ -96,6 +105,8 @@ export interface EvalSuiteSpec {
   targets: EvalTarget[];
   variants: EvalVariant[];
   run: EvalRunConfig;
+  /** Optional independent adjudicator panel; omitted suites use one judge with quorum one. */
+  judge_panel?: EvalJudgePanelConfig;
   metrics: EvalMetricsConfig;
   /** Telemetry/artifact policy only — provider selection and credentials live in ultrafuzz.toml. */
   reporting: EvalReportingPolicy;
@@ -177,6 +188,8 @@ export interface EvalScoringProvenance {
   judge_mode: "deterministic" | "llm";
   judge_prompt_version: string;
   judge_models: string[];
+  /** Historical scoring artifacts may omit the panel identity. */
+  judge_panel?: EvalJudgePanelConfig;
   ground_truth_sha256: Record<string, string>;
   fingerprint: string;
 }
@@ -306,7 +319,7 @@ export interface FindingMatchSignalScores {
   evidence: number;
 }
 
-export interface FindingJudgeResult {
+export interface FindingJudgeDecision {
   matched_ground_truth_bug_id?: string;
   score: number;
   signals: FindingMatchSignalScores;
@@ -322,18 +335,51 @@ export interface FindingJudgeResult {
   timestamp: string;
 }
 
-/**
- * Generic judge seam: grading never depends on a provider. The deterministic
- * matcher is the default; an optional LLM judge is plugged in behind this type.
- */
-export type FindingJudge = (input: {
+export interface FindingJudgePanelMemberVote extends FindingJudgeDecision {
+  member: number;
+}
+
+export interface FindingJudgePanelVoteSplit {
+  classification: EvalClassification;
+  matched_ground_truth_bug_id?: string;
+  votes: number;
+}
+
+export interface FindingJudgePanelAggregateDecision {
+  classification: Exclude<EvalClassification, "missed">;
+  matched_ground_truth_bug_id?: string;
+  reason_code: EvalClassificationReasonCode;
+  votes: number;
+  rationale: string;
+}
+
+export interface FindingJudgePanelRecord extends EvalJudgePanelConfig {
+  model: string;
+  reasoning_effort?: string;
+  prompt_version: string;
+  vote_split: FindingJudgePanelVoteSplit[];
+  member_votes: FindingJudgePanelMemberVote[];
+  aggregate_decision: FindingJudgePanelAggregateDecision;
+}
+
+export interface FindingJudgeResult extends FindingJudgeDecision {
+  panel?: FindingJudgePanelRecord;
+}
+
+export interface FindingJudgeInput {
   suite: EvalSuiteSpec;
   row: EvalMatrixRow;
   finding: unknown;
   bugs: GroundTruthBug[];
   deterministicResult: FindingJudgeResult;
   threshold: number;
-}) => Promise<FindingJudgeResult>;
+}
+
+/**
+ * Generic judge seam: grading never depends on a provider. The deterministic
+ * matcher is the default; an optional LLM judge is plugged in behind this type.
+ */
+export type FindingJudge = (input: FindingJudgeInput) => Promise<FindingJudgeResult>;
 
 export interface EvalFindingScore {
   row_id: string;

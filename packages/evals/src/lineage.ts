@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 
+import { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
+import { resolveJudgePanelConfig } from "./suite.js";
 import type {
   EvalCandidateProvenance,
   EvalMatrixRow,
@@ -14,8 +16,8 @@ import type {
 
 export const EVAL_BENCHMARK_PROTOCOL_REVISION = "1";
 export const EVAL_EXECUTION_POLICY_REVISION = "ultrafuzz.eval-controller.v1";
-export const EVAL_SCORING_IMPLEMENTATION_REVISION = "ultrafuzz.eval-scorer.v1";
-export const EVAL_JUDGE_PROMPT_VERSION = "ultrafuzz-eval-judge-v3";
+export const EVAL_SCORING_IMPLEMENTATION_REVISION = "ultrafuzz.eval-scorer.v2-judge-panel";
+export { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
 export const DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS = 6 * 60 * 60;
 export const DEFAULT_EVAL_POLL_INTERVAL_MS = 15_000;
 
@@ -118,6 +120,7 @@ export function buildScoringProvenance(input: {
     judge_mode: input.judgeMode ?? ("deterministic" as const),
     judge_prompt_version: EVAL_JUDGE_PROMPT_VERSION,
     judge_models: judgeModels,
+    judge_panel: resolveJudgePanelConfig(input.suite.judge_panel),
     ground_truth_sha256: groundTruthSha256
   };
   return { ...identity, fingerprint: sha256Identity(identity) };

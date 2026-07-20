@@ -324,7 +324,13 @@ export class BraintrustReporter implements EvalReporter {
               scoring_fingerprint: summary.provenance.scoring.fingerprint,
               judge_mode: summary.provenance.scoring.judge_mode,
               judge_prompt_version: summary.provenance.scoring.judge_prompt_version,
-              judge_models: summary.provenance.scoring.judge_models
+              judge_models: summary.provenance.scoring.judge_models,
+              ...(summary.provenance.scoring.judge_panel === undefined
+                ? {}
+                : {
+                    judge_panel_total: summary.provenance.scoring.judge_panel.total,
+                    judge_panel_quorum: summary.provenance.scoring.judge_panel.quorum
+                  })
             }
           : {})
       }

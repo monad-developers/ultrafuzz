@@ -73,8 +73,36 @@ describe("eval suite loading and planning", () => {
     expect(suite.reporting.experiment_prefix).toBe("bug-finding");
     expect(suite.reporting.artifacts.mode).toBe("manifest-only");
     expect(suite.reporting.artifacts.mode_explicit).toBe(true);
+    expect(suite.judge_panel).toBeUndefined();
     // The YAML is provider-agnostic: no provider, endpoint, or env var names.
     expect(JSON.stringify(suite)).not.toMatch(/braintrust|langsmith|api_key/iu);
+  });
+
+  it("loads an optional strict-majority judge panel", () => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace("model_profiles:", "judge_panel: { total: 4, quorum: 3 }\n\nmodel_profiles:"),
+      "utf8"
+    );
+    expect(loadEvalSuite({ projectRoot, suitePath }).suite.judge_panel).toEqual({ total: 4, quorum: 3 });
+  });
+
+  it.each([
+    ["non-positive total", "{ total: 0, quorum: 1 }"],
+    ["non-positive quorum", "{ total: 3, quorum: 0 }"],
+    ["quorum above total", "{ total: 3, quorum: 4 }"],
+    ["quorum without a strict majority", "{ total: 4, quorum: 2 }"]
+  ])("rejects judge panel configuration with %s", (_description, panel) => {
+    const { projectRoot, suitePath } = setup();
+    fs.writeFileSync(
+      suitePath,
+      SUITE_YAML.replace("model_profiles:", `judge_panel: ${panel}\n\nmodel_profiles:`),
+      "utf8"
+    );
+    expect(() => loadEvalSuite({ projectRoot, suitePath })).toThrowError(
+      expect.objectContaining({ code: "EVAL_SUITE_INVALID" })
+    );
   });
 
   it("defaults the reporting policy when the suite omits it", () => {
