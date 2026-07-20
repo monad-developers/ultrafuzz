@@ -17,6 +17,7 @@ import {
   manifestDigest,
   queryNodeAttempts,
   queryEvents,
+  readEventQueryFacade,
   readFindings,
   readRunState,
   replayEvents,
@@ -349,6 +350,98 @@ test("events append to JSONL, redact secrets, replay, and expose query indexes",
   assert.equal(queryEvents(layout, { nodeId: "node-a", status: "succeeded" }).length, 1);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "node", "node-a.jsonl")), true);
   assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "status", "succeeded.jsonl")), true);
+});
+
+test("event indexes encode long IDs in a collision-free hash namespace", () => {
+  const maximumRunId = "r".repeat(128);
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: maximumRunId });
+  const facadeBeforeAppend = readEventQueryFacade(layout);
+  const secondMaximumRunId = `${"r".repeat(127)}s`;
+  const directBoundaryRunId = "d".repeat(122);
+  const longBoundaryEventType = "e".repeat(123);
+  const maximumEventType = "t".repeat(128);
+  const maximumNodeId = "n".repeat(128);
+  const maximumStatus = "s".repeat(128);
+  const legacyCollisionRunId = `${maximumRunId.slice(0, 97)}-${crypto
+    .createHash("sha256")
+    .update(maximumRunId, "utf8")
+    .digest("hex")
+    .slice(0, 24)}`;
+  assert.equal(legacyCollisionRunId.length, 122);
+
+  appendEvent(layout, {
+    eventType: maximumEventType,
+    nodeId: maximumNodeId,
+    status: maximumStatus,
+    payload: { id: "maximum" }
+  });
+  appendEvent(layout, {
+    runId: secondMaximumRunId,
+    eventType: longBoundaryEventType,
+    nodeId: "direct-node",
+    status: "direct-status",
+    payload: { id: "second-maximum" }
+  });
+  appendEvent(layout, {
+    runId: legacyCollisionRunId,
+    eventType: "direct-event",
+    payload: { id: "legacy-collision" }
+  });
+  appendEvent(layout, {
+    runId: directBoundaryRunId,
+    eventType: "boundary-event",
+    payload: { id: "direct-boundary" }
+  });
+
+  const hashedIndexPath = (dimension: string, value: string): string =>
+    path.join(
+      layout.eventsIndexDir,
+      dimension,
+      "sha256",
+      `${crypto.createHash("sha256").update(value, "utf8").digest("hex")}.jsonl`
+    );
+  const maximumRunIndex = hashedIndexPath("run", maximumRunId);
+  const secondMaximumRunIndex = hashedIndexPath("run", secondMaximumRunId);
+  assert.equal(fs.existsSync(maximumRunIndex), true);
+  assert.equal(fs.existsSync(secondMaximumRunIndex), true);
+  assert.notEqual(maximumRunIndex, secondMaximumRunIndex);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${legacyCollisionRunId}.jsonl`)), true);
+  assert.equal(fs.existsSync(path.join(layout.eventsIndexDir, "run", `${directBoundaryRunId}.jsonl`)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("type", longBoundaryEventType)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("type", maximumEventType)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("node", maximumNodeId)), true);
+  assert.equal(fs.existsSync(hashedIndexPath("status", maximumStatus)), true);
+
+  const maximumRecord = JSON.parse(fs.readFileSync(maximumRunIndex, "utf8")) as { run_id: string };
+  assert.equal(maximumRecord.run_id, maximumRunId);
+  const facadeAfterAppend = readEventQueryFacade(layout) as {
+    filters?: unknown;
+    long_filters?: unknown;
+    index_key_encoding?: unknown;
+  };
+  assert.deepEqual(facadeAfterAppend, facadeBeforeAppend);
+  assert.deepEqual(facadeAfterAppend.filters, {
+    run_id: "events.index/run/<run-id>.jsonl",
+    node_id: "events.index/node/<node-id>.jsonl",
+    event_type: "events.index/type/<event-type>.jsonl",
+    status: "events.index/status/<status>.jsonl",
+    timestamp: "events.index/timestamp/<yyyy-mm-dd>.jsonl"
+  });
+  assert.deepEqual(facadeAfterAppend.long_filters, {
+    run_id: "events.index/run/sha256/<sha256-hex(run-id)>.jsonl",
+    node_id: "events.index/node/sha256/<sha256-hex(node-id)>.jsonl",
+    event_type: "events.index/type/sha256/<sha256-hex(event-type)>.jsonl",
+    status: "events.index/status/sha256/<sha256-hex(status)>.jsonl"
+  });
+  assert.deepEqual(facadeAfterAppend.index_key_encoding, {
+    version: "1",
+    direct_max_id_length: 122,
+    direct_id_path: "<dimension>/<id>.jsonl",
+    long_id_path: "<dimension>/sha256/<sha256-hex(id)>.jsonl",
+    digest: "sha256",
+    hash_input_encoding: "utf8",
+    digest_encoding: "hex"
+  });
 });
 
 test("event redaction covers token families, AWS keys, URL credentials, and private keys", () => {
