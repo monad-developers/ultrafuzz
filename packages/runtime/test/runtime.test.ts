@@ -3868,6 +3868,41 @@ test("resume suppresses duplicate submissions for every active workflow run stat
   }
 });
 
+test("resume --reset-node keeps an active workflow runner attached after reset", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-active-reset-lifecycle-run",
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "active-reset-lifecycle-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "active-reset-lifecycle-run",
+    resetNode: "node:project-discovery",
+    maxConcurrency: 8,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-active-reset-lifecycle-run --format json/u);
+  assert.match(
+    commands,
+    /timetravel .*ultrafuzz-active-reset-lifecycle-run\.tsx --run-id ultrafuzz-active-reset-lifecycle-run --node-id node:project-discovery --no-vcs --deps --force --format json/
+  );
+  assert.doesNotMatch(commands, /^up /mu);
+});
+
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

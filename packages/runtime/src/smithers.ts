@@ -575,6 +575,31 @@ export async function runSmithersLifecycleCommand(input: {
         });
       }
     }
+    if (input.resumeRecovery !== undefined) {
+      const postResetInspection = await runSmithersInspectionCommand({
+        args: ["inspect", input.smithersRunId, "--format", "json"],
+        projectRoot: input.projectRoot,
+        env: input.env
+      });
+      if (!postResetInspection.ok) {
+        throw new Error(
+          `workflow inspection failed after reset: ${
+            postResetInspection.error ?? (postResetInspection.stderr.trim() || "unknown error")
+          }`
+        );
+      }
+      if (smithersSnapshotRunStateIsActive(postResetInspection)) {
+        if (resetMarkerPath !== undefined) {
+          fs.rmSync(resetMarkerPath, { force: true });
+        }
+        return {
+          stdout: postResetInspection.stdout,
+          stderr: [resetStderr, postResetInspection.stderr].filter((value) => value.length > 0).join("\n"),
+          command: postResetInspection.command,
+          alreadyRunning: true
+        };
+      }
+    }
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
     try {
       resumeResult = await execSmithersCli({
