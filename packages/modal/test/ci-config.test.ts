@@ -40,8 +40,8 @@ describe("public Modal benchmark configuration", () => {
       };
       expect(config.node_timeout_seconds).toBe(1800);
       expect(config.public_benchmark.max_runtime_seconds).toBe(3600);
-      expect(config.braintrust.judge_api_key_env).toBe("BRAINTRUST_API_KEY");
-      expect(config.braintrust.judge_url).toBeUndefined();
+      expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
+      expect(config.braintrust.judge_url).toBe("https://api.openai.com/v1/chat/completions");
     }
   });
 

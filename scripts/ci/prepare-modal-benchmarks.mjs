@@ -69,7 +69,8 @@ for (const benchmarkExperiment of experiments) {
         braintrust: {
           project: "ultrafuzz-public-benchmarks",
           api_key_env: "BRAINTRUST_API_KEY",
-          judge_api_key_env: "BRAINTRUST_API_KEY"
+          judge_api_key_env: "OPENAI_API_KEY",
+          judge_url: "https://api.openai.com/v1/chat/completions"
         },
         node_timeout_seconds: PUBLIC_NODE_TIMEOUT_SECONDS,
         loops: 1,
