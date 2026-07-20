@@ -33,6 +33,7 @@ const RECOVERY_MAX_RESETS = 96;
 const RECOVERY_POLL_MS = 60_000;
 const RECOVERY_RESET_SETTLE_MS = 15 * 60_000;
 const WORKFLOW_STATUS_SYNC_TIMEOUT_MS = 2 * 60_000;
+const WORKFLOW_STATUS_SYNC_STREAM_DRAIN_MS = 5_000;
 const SCORE_RETRY_BASE_MS = 5 * 60_000;
 const SCORE_RETRY_MAX_MS = 15 * 60_000;
 const EVAL_SCORE_TIMEOUT_MS = 5 * 60_000;
@@ -781,6 +782,7 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
   const child = spawn("node", [CLI, "status", runId, "--project", target, "--window", "30", "--json"], {
     cwd: ULTRAFUZZ_ROOT,
     env: process.env,
+    detached: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const stdout = readLimitedStream(child.stdout);
@@ -794,13 +796,16 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
       resolve(code);
     };
     const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
+      terminateProcessGroup(child);
       finish(124);
     }, WORKFLOW_STATUS_SYNC_TIMEOUT_MS);
     child.once("error", () => finish(1));
-    child.once("close", (code) => finish(code ?? 1));
+    child.once("exit", (code) => finish(code ?? 1));
   });
-  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+  const [stdoutText, stderrText] = await Promise.race([
+    Promise.all([stdout, stderr]),
+    sleep(WORKFLOW_STATUS_SYNC_STREAM_DRAIN_MS).then(() => ["", ""] as const)
+  ]);
   if (exitCode !== 0) {
     await appendFile(
       LOG_PATH,
@@ -809,6 +814,27 @@ async function synchronizeWorkflowState(target: string, runId: string): Promise<
     return undefined;
   }
   return workflowSyncSummary(stdoutText);
+}
+
+function terminateProcessGroup(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid;
+  if (pid === undefined) {
+    child.kill("SIGTERM");
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  const killTimer = setTimeout(() => {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }, 15_000);
+  killTimer.unref();
 }
 
 function readLimitedStream(stream: NodeJS.ReadableStream | null): Promise<string> {
