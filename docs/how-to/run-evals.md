@@ -147,7 +147,8 @@ ultrafuzz eval history <eval-run-id> \
   --benchmark ultrafuzz-bench \
   --lane smoke \
   --repository https://github.com/monad-developers/ultrafuzz \
-  --artifact <immutable-run-artifact-reference>
+  --artifact <immutable-run-artifact-reference> \
+  --publication-url <validated-result-bundle-url>
 ```
 
 Use `--benchmark evmbench` and `--lane full` for the full cohort. Publication

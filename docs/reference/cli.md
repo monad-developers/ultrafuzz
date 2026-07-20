@@ -321,8 +321,9 @@ plan → run → score → report → compare loop working offline.
 given. With a run ID, it accepts only a complete, successfully scored generation
 with immutable lineage, appends observations idempotently, and replaces history
 and charts together. Append mode also requires the benchmark, lane, public
-candidate repository, and immutable source artifact flags. `--check` compares
-the checked-in SVGs with a fresh in-memory render and performs no writes.
+candidate repository, immutable source artifact, and publication URL flags.
+`--check` compares the checked-in SVGs with a fresh in-memory render and
+performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](evals.md) for configuration, architecture, and telemetry policy

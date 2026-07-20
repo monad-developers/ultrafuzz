@@ -47,9 +47,10 @@ export default class EvalHistory extends Command {
           flags.benchmark === undefined ||
           flags.lane === undefined ||
           flags.repository === undefined ||
-          flags.artifact === undefined
+          flags.artifact === undefined ||
+          flags["publication-url"] === undefined
         ) {
-          throw new Error("appending requires --benchmark, --lane, --repository, and --artifact");
+          throw new Error("appending requires --benchmark, --lane, --repository, --artifact, and --publication-url");
         }
         const result = publishEvalRunToHistory({
           projectRoot: root,

@@ -276,6 +276,22 @@ describe("longitudinal eval history", () => {
     expect(parsed.observations[0]?.trial_count).toBe(10);
   });
 
+  it("preserves legacy v1 observations without publication metadata", () => {
+    const {
+      status: _status,
+      executed_case_count: _executedCaseCount,
+      graded_case_count: _gradedCaseCount,
+      publication_url: _publicationUrl,
+      target_publication: _targetPublication,
+      ...legacy
+    } = observation({ schema_version: "ultrafuzz.eval.history.observation.v1" });
+    const parsed = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [legacy]
+    });
+    expect(parsed.observations).toEqual([legacy]);
+  });
+
   it("rejects malformed history and inconsistent completeness", () => {
     expect(() =>
       parseEvalHistory({
@@ -337,6 +353,22 @@ describe("longitudinal eval history", () => {
         }
       })
     ];
+    expect(() =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        suite,
+        matrix: [first, second],
+        summary: summary(rows),
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a", "bug-b"])],
+          [second.id, new Set(["bug-b"])]
+        ])
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_SOURCE_INVALID" }));
     const observations = createEvalHistoryObservations({
       benchmark: "evmbench",
       lane: "smoke",
