@@ -311,7 +311,7 @@ describe("deterministic scorer math", () => {
   });
 
   it("supports a custom FindingJudge (grading never depends on a provider)", async () => {
-    const suite = testSuite("/tmp/gt");
+    const suite = testSuite("/tmp/gt", { judge_panel: { total: 1, quorum: 1 } });
     const row = testRow(suite);
     const scored = await scoreFindingsAgainstGroundTruth({
       suite,
@@ -332,11 +332,89 @@ describe("deterministic scorer math", () => {
         total: 1,
         quorum: 1,
         model: "gpt-5.5",
-        prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
         aggregate_decision: { votes: 1 },
         member_votes: [{ member: 1, rationale: "custom judge" }]
       }
     });
+  });
+
+  it("uses three fresh default members and accepts an exact normalized 2-of-3 decision", async () => {
+    const suite = testSuite("/tmp/gt");
+    let calls = 0;
+    const observedInputs: string[] = [];
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "finding-default-panel", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        const member = calls++;
+        observedInputs.push(JSON.stringify(input));
+        const agreed = member < 2;
+        return {
+          ...input.deterministicResult,
+          ...(agreed ? { matched_ground_truth_bug_id: "BUG-1" } : {}),
+          score: agreed ? 0.8 : 0.1,
+          classification: agreed ? ("true-positive" as const) : ("false-positive" as const),
+          reason_code: agreed ? ("judge-confirmed-match" as const) : ("weak-unmatched-finding" as const),
+          rationale: `default member ${member + 1}`,
+          confidence: 0.9,
+          judge_kind: "llm" as const
+        };
+      }
+    });
+
+    expect(calls).toBe(3);
+    expect(new Set(observedInputs)).toHaveLength(1);
+    expect(scored.findingScores[0]?.judge_result).toMatchObject({
+      classification: "true-positive",
+      matched_ground_truth_bug_id: "BUG-1",
+      panel: {
+        total: 3,
+        quorum: 2,
+        aggregate_decision: { classification: "true-positive", votes: 2 },
+        member_votes: [{ member: 1 }, { member: 2 }, { member: 3 }]
+      }
+    });
+  });
+
+  it("routes a default three-way normalized-decision split to human review", async () => {
+    const suite = testSuite("/tmp/gt");
+    let calls = 0;
+    const scored = await scoreFindingsAgainstGroundTruth({
+      suite,
+      row: testRow(suite),
+      findings: [{ id: "finding-three-way", title: "Possible issue", summary: "A partial match" }],
+      bugs: BUGS,
+      llmJudge: async (input) => {
+        const member = calls++;
+        const bugId = member === 0 ? "BUG-1" : member === 1 ? "BUG-2" : undefined;
+        return {
+          ...input.deterministicResult,
+          ...(bugId === undefined ? {} : { matched_ground_truth_bug_id: bugId }),
+          score: bugId === undefined ? 0.1 : 0.8,
+          classification: bugId === undefined ? ("false-positive" as const) : ("true-positive" as const),
+          reason_code: bugId === undefined ? ("weak-unmatched-finding" as const) : ("judge-confirmed-match" as const),
+          rationale: `three-way member ${member + 1}`,
+          confidence: 0.9,
+          judge_kind: "llm" as const
+        };
+      }
+    });
+
+    expect(calls).toBe(3);
+    expect(scored.reviewQueue[0]?.judge_result).toMatchObject({
+      classification: "needs-human-review",
+      reason_code: "panel-disagreement",
+      rationale: "Judge panel disagreement: no identical decision reached quorum (2 of 3).",
+      panel: {
+        total: 3,
+        quorum: 2,
+        aggregate_decision: { classification: "needs-human-review", votes: 1 }
+      }
+    });
+    expect(scored.reviewQueue[0]?.judge_result.panel?.vote_split).toHaveLength(3);
   });
 
   it("aggregates a 3-of-4 panel agreement and preserves every independent vote", async () => {
@@ -378,7 +456,7 @@ describe("deterministic scorer math", () => {
         quorum: 3,
         model: "gpt-5.5",
         reasoning_effort: "xhigh",
-        prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
+        prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
         vote_split: [
           { classification: "true-positive", matched_ground_truth_bug_id: "BUG-1", votes: 3 },
           { classification: "false-positive", votes: 1 }
@@ -562,7 +640,7 @@ describe("deterministic scorer math", () => {
         }
       })
     ).rejects.toThrow("forced judge failure");
-    expect(judgeCalls).toBe(2);
+    expect(judgeCalls).toBe(3);
     expectPriorOutputs();
     expect(fs.readdirSync(fixture.evalRunRoot).some((entry) => entry.startsWith(".scoring-transaction-"))).toBe(false);
 
@@ -602,9 +680,9 @@ describe("deterministic scorer math", () => {
         availability: "historical-unavailable",
         scoring: {
           judge_mode: "deterministic",
-          judge_prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
+          judge_prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
           judge_models: ["gpt-5.5"],
-          judge_panel: { total: 1, quorum: 1 },
+          judge_panel: { total: 3, quorum: 2 },
           ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
         }
       }
@@ -844,12 +922,12 @@ describe("deterministic scorer math", () => {
       llmJudge: judge
     });
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.headers.authorization).toBe("Bearer dedicated-key");
-    expect(requests[0]?.redirect).toBe("error");
-    expect(JSON.stringify(requests[0]?.body)).not.toContain("BUG-1");
-    expect(JSON.stringify(requests[0]?.body)).not.toContain("BUG-2");
-    expect(JSON.stringify(requests[0]?.body)).toContain("untrusted data");
+    expect(requests).toHaveLength(3);
+    expect(requests.every((request) => request.headers.authorization === "Bearer dedicated-key")).toBe(true);
+    expect(requests.every((request) => request.redirect === "error")).toBe(true);
+    expect(requests.every((request) => !JSON.stringify(request.body).includes("BUG-1"))).toBe(true);
+    expect(requests.every((request) => !JSON.stringify(request.body).includes("BUG-2"))).toBe(true);
+    expect(requests.every((request) => JSON.stringify(request.body).includes("untrusted data"))).toBe(true);
     expect(scored.findingScores[0]?.judge_result).toMatchObject({
       matched_ground_truth_bug_id: "BUG-1",
       score: 0.7,
@@ -945,7 +1023,7 @@ describe("deterministic scorer math", () => {
       llmJudge: judge
     });
 
-    expect(requests).toHaveLength(2);
+    expect(requests).toHaveLength(4);
     expect(requests[0]).toMatchObject({ model: "gpt-5.5", reasoning_effort: "xhigh" });
     expect(requests[0]?.response_format).toMatchObject({
       type: "json_schema",
@@ -965,7 +1043,8 @@ describe("deterministic scorer math", () => {
         expect.objectContaining({ role: "system", content: expect.stringContaining("final classification policy") })
       ])
     );
-    expect(requests[1]?.messages).toEqual(
+    const retryRequest = requests.find((request) => JSON.stringify(request.messages).includes("previous response"));
+    expect(retryRequest?.messages).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ role: "user", content: expect.stringContaining("previous response") }),
         expect.objectContaining({ role: "user", content: expect.stringContaining("0.0 through 1.0") }),
@@ -1023,7 +1102,7 @@ describe("deterministic scorer math", () => {
     expect(scored.findingScores[0]?.judge_result.panel?.member_votes).toHaveLength(3);
     expect(
       scored.findingScores[0]?.judge_result.panel?.member_votes.every(
-        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v8-semantic-boundary-family"
+        (vote) => vote.prompt_version === "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family"
       )
     ).toBe(true);
   });

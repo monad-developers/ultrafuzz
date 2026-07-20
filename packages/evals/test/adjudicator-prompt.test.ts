@@ -55,7 +55,9 @@ describe("adjudicator prompt assets", () => {
     const messages = buildAdjudicatorPrompt(judgeInput());
     const rendered = messages.map((message) => message.content).join("\n");
 
-    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v8-semantic-boundary-family");
+    expect(EVAL_JUDGE_PROMPT_VERSION).toBe("ultrafuzz-eval-judge-v9-independent-semantic-boundary-family");
+    expect(rendered).toContain("Decide solely from the supplied finding, candidates, evidence, and rubric");
+    expect(rendered).toContain("Do not anticipate, defer to, infer, or simulate any other evaluator's decision");
     expect(rendered).toContain("Analyze the candidate finding's demonstrated behavior first");
     expect(rendered).toContain("domain boundary or admitted-state family");
     expect(rendered).toContain("same externally observable violated guarantee");

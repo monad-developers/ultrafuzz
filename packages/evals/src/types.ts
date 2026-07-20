@@ -105,7 +105,7 @@ export interface EvalSuiteSpec {
   targets: EvalTarget[];
   variants: EvalVariant[];
   run: EvalRunConfig;
-  /** Optional independent adjudicator panel; omitted suites use one judge with quorum one. */
+  /** Optional independent adjudicator panel; omitted suites use three judges with quorum two. */
   judge_panel?: EvalJudgePanelConfig;
   metrics: EvalMetricsConfig;
   /** Telemetry/artifact policy only — provider selection and credentials live in ultrafuzz.toml. */

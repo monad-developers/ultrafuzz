@@ -119,7 +119,7 @@ const suiteSchema = z.looseObject({
   reporting: reportingSchema.optional()
 });
 
-export const DEFAULT_EVAL_JUDGE_PANEL = { total: 1, quorum: 1 } as const satisfies EvalJudgePanelConfig;
+export const DEFAULT_EVAL_JUDGE_PANEL = { total: 3, quorum: 2 } as const satisfies EvalJudgePanelConfig;
 
 /** Resolve and validate panel settings for loaded and programmatically constructed suites. */
 export function resolveJudgePanelConfig(config: EvalJudgePanelConfig | undefined): EvalJudgePanelConfig {

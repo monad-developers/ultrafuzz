@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { loadEvalSuite, planEvalSuite } from "../src/suite.js";
+import { DEFAULT_EVAL_JUDGE_PANEL, loadEvalSuite, planEvalSuite, resolveJudgePanelConfig } from "../src/suite.js";
 import { EvalError } from "../src/utils.js";
 
 const SUITE_YAML = `
@@ -74,18 +74,25 @@ describe("eval suite loading and planning", () => {
     expect(suite.reporting.artifacts.mode).toBe("manifest-only");
     expect(suite.reporting.artifacts.mode_explicit).toBe(true);
     expect(suite.judge_panel).toBeUndefined();
+    expect(resolveJudgePanelConfig(suite.judge_panel)).toEqual({ total: 3, quorum: 2 });
+    expect(DEFAULT_EVAL_JUDGE_PANEL).toEqual({ total: 3, quorum: 2 });
     // The YAML is provider-agnostic: no provider, endpoint, or env var names.
     expect(JSON.stringify(suite)).not.toMatch(/braintrust|langsmith|api_key/iu);
   });
 
-  it("loads an optional strict-majority judge panel", () => {
+  it.each([
+    [1, 1],
+    [4, 3]
+  ])("loads an explicit %i-of-%i strict-majority judge panel", (total, quorum) => {
     const { projectRoot, suitePath } = setup();
     fs.writeFileSync(
       suitePath,
-      SUITE_YAML.replace("model_profiles:", "judge_panel: { total: 4, quorum: 3 }\n\nmodel_profiles:"),
+      SUITE_YAML.replace("model_profiles:", `judge_panel: { total: ${total}, quorum: ${quorum} }\n\nmodel_profiles:`),
       "utf8"
     );
-    expect(loadEvalSuite({ projectRoot, suitePath }).suite.judge_panel).toEqual({ total: 4, quorum: 3 });
+    const panel = loadEvalSuite({ projectRoot, suitePath }).suite.judge_panel;
+    expect(panel).toEqual({ total, quorum });
+    expect(resolveJudgePanelConfig(panel)).toEqual({ total, quorum });
   });
 
   it.each([

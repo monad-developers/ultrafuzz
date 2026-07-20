@@ -168,9 +168,9 @@ describe("versioned eval lineage", () => {
     expect(dirtyScoring.fingerprint).not.toBe(cleanScoring.fingerprint);
     expect(cleanScoring).toMatchObject({
       judge_mode: "deterministic",
-      judge_prompt_version: "ultrafuzz-eval-judge-v8-semantic-boundary-family",
+      judge_prompt_version: "ultrafuzz-eval-judge-v9-independent-semantic-boundary-family",
       judge_models: ["gpt-5.5"],
-      judge_panel: { total: 1, quorum: 1 },
+      judge_panel: { total: 3, quorum: 2 },
       ground_truth_sha256: { "target-a": expect.stringMatching(/^sha256:/u) }
     });
   });

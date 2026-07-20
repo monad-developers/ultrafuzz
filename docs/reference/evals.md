@@ -199,9 +199,11 @@ judge_panel:
   quorum: 3
 ```
 
-The default is one member with quorum one. `total` and `quorum` must be
-positive integers, `quorum` cannot exceed `total`, and the quorum must be a
-strict majority. Each member gets a fresh model context containing the same
+The default is three independent members with quorum two. Explicit strict-majority
+overrides remain supported, including one member with quorum one and four members
+with quorum three. `total` and `quorum` must be positive integers, `quorum` cannot
+exceed `total`, and the quorum must be a strict majority. Each member gets a fresh
+model context containing the same
 versioned adjudicator prompt; panel requests use bounded concurrency while
 retaining each request's retry, timeout, privacy, and credential boundaries.
 The evaluator applies the normal classification policy to every response and
