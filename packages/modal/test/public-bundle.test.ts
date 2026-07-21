@@ -72,8 +72,7 @@ describe("public Modal benchmark bundles", () => {
             report_paths: [
               "reports/target-a-runner-trial-1/report.md",
               "reports/target-a-runner-trial-1/report.json",
-              "reports/target-a-runner-trial-1/findings.normalized.json",
-              "reports/target-a-runner-trial-1/deduped-findings.json"
+              "reports/target-a-runner-trial-1/findings.normalized.json"
             ]
           }
         },
@@ -90,8 +89,7 @@ describe("public Modal benchmark bundles", () => {
             report_paths: [
               "reports/target-b-runner-trial-1/report.md",
               "reports/target-b-runner-trial-1/report.json",
-              "reports/target-b-runner-trial-1/findings.normalized.json",
-              "reports/target-b-runner-trial-1/deduped-findings.json"
+              "reports/target-b-runner-trial-1/findings.normalized.json"
             ]
           }
         }
@@ -106,9 +104,6 @@ describe("public Modal benchmark bundles", () => {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
       expect(
         JSON.parse(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8"))
-      ).toHaveLength(1);
-      expect(
-        JSON.parse(fs.readFileSync(path.join(output, "reports", rowId, "deduped-findings.json"), "utf8"))
       ).toHaveLength(1);
     }
   });
@@ -165,7 +160,7 @@ describe("public Modal benchmark bundles", () => {
     expect(() => readPublicBenchmarkBundle(oversizedBundle)).toThrow(/exceeds the size limit/u);
   });
 
-  it("requires every smoke report and its dedupe evidence for each exact matrix row", () => {
+  it("requires the complete report triplet for every exact matrix row", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-rows-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
     const bundle = createPublicBenchmarkBundle({
@@ -173,7 +168,7 @@ describe("public Modal benchmark bundles", () => {
       files: completePublicSources(root, rowIds)
     });
 
-    for (const required of ["report.md", "report.json", "findings.normalized.json", "deduped-findings.json"]) {
+    for (const required of ["report.md", "report.json", "findings.normalized.json"]) {
       expect(() =>
         parsePublicBenchmarkBundle({
           ...bundle,
@@ -192,8 +187,8 @@ describe("public Modal benchmark bundles", () => {
     });
 
     expect(() =>
-      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/deduped-findings.json`, "[]\n"))
-    ).toThrow(/must report at least one deduplicated finding/u);
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[]\n"))
+    ).toThrow(/must report at least one normalized finding/u);
   });
 
   it("rejects malformed entries instead of counting them as smoke findings", () => {
@@ -205,8 +200,8 @@ describe("public Modal benchmark bundles", () => {
     });
 
     expect(() =>
-      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/deduped-findings.json`, "[{}]\n"))
-    ).toThrow(/invalid deduplicated findings/u);
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[{}]\n"))
+    ).toThrow(/invalid normalized findings/u);
   });
 
   it("requires complete positive result metadata for executed and graded cases", () => {
@@ -616,8 +611,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
           2
         )}\n`
       ],
-      ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`],
-      ["deduped-findings.json", `${JSON.stringify([finding], null, 2)}\n`]
+      ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`]
     ] as const) {
       const source = path.join(root, "report-source", rowId, name);
       fs.mkdirSync(path.dirname(source), { recursive: true });

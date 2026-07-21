@@ -20,7 +20,6 @@ const MAX_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_FILE_BASE64_CHARACTERS = 4 * Math.ceil(MAX_FILE_BYTES / 3);
 const MAX_ROWS = 2_048;
 const PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
-const PUBLIC_SMOKE_DEDUPE_FILE = "deduped-findings.json" as const;
 const DEFAULT_PUBLICATION_BUNDLE_PATH = "public-results.json";
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -52,7 +51,7 @@ const targetPublicationLocationSchema = z.strictObject({
   report_paths: z
     .array(relativePath)
     .min(1)
-    .max(MAX_ROWS * (PUBLIC_REPORT_FILES.length + 1))
+    .max(MAX_ROWS * PUBLIC_REPORT_FILES.length)
 });
 
 const bundleTargetSchema = z.strictObject({
@@ -145,8 +144,7 @@ export function createPublicBenchmarkBundle(input: {
   });
   const metadata = summarizePublicBenchmarkBundleFiles(
     files,
-    input.publicationBundlePath ?? DEFAULT_PUBLICATION_BUNDLE_PATH,
-    input.lane
+    input.publicationBundlePath ?? DEFAULT_PUBLICATION_BUNDLE_PATH
   );
   const bundle = parsePublicBenchmarkBundle(
     {
@@ -308,7 +306,7 @@ export function parsePublicBenchmarkBundle(
     }
   }
   for (const rowId of matrixRows.keys()) {
-    for (const reportFile of publicReportFiles(parsed.lane)) {
+    for (const reportFile of PUBLIC_REPORT_FILES) {
       const required = `reports/${rowId}/${reportFile}`;
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
@@ -319,8 +317,7 @@ export function parsePublicBenchmarkBundle(
     matrixRows,
     diagnostics,
     summaryRows,
-    publicationBundlePath,
-    lane: parsed.lane
+    publicationBundlePath
   });
   assertPublicBenchmarkBundleMetadata(parsed, expectedMetadata);
   return parsed;
@@ -333,7 +330,7 @@ function assertSmokeFindingFloor(
 ): void {
   if (lane !== "smoke") return;
   for (const rowId of matrixRows.keys()) {
-    const bundlePath = `reports/${rowId}/${PUBLIC_SMOKE_DEDUPE_FILE}`;
+    const bundlePath = `reports/${rowId}/findings.normalized.json`;
     const contents = contentsByPath.get(bundlePath);
     let findings;
     try {
@@ -341,10 +338,10 @@ function assertSmokeFindingFloor(
         contents === undefined ? undefined : (JSON.parse(contents.toString("utf8")) as unknown)
       );
     } catch (error) {
-      throw new Error(`smoke benchmark row ${rowId} has invalid deduplicated findings`, { cause: error });
+      throw new Error(`smoke benchmark row ${rowId} has invalid normalized findings`, { cause: error });
     }
     if (findings.length === 0) {
-      throw new Error(`smoke benchmark row ${rowId} must report at least one deduplicated finding`);
+      throw new Error(`smoke benchmark row ${rowId} must report at least one normalized finding`);
     }
   }
 }
@@ -455,8 +452,7 @@ function parseSummaryRows(contents: Buffer): Set<string> {
 
 function summarizePublicBenchmarkBundleFiles(
   files: readonly PublicBenchmarkBundleFile[],
-  publicationBundlePath: string,
-  lane: PublicBenchmarkBundle["lane"]
+  publicationBundlePath: string
 ): PublicBenchmarkBundleMetadata {
   const contentsByPath = new Map<string, Buffer>();
   for (const file of files) contentsByPath.set(file.path, Buffer.from(file.contents_base64, "base64"));
@@ -472,8 +468,7 @@ function summarizePublicBenchmarkBundleFiles(
     matrixRows: parseMatrixRows(matrixContents),
     diagnostics: parseBundleDiagnostics(diagnosticsContents),
     summaryRows: parseSummaryRows(summaryContents),
-    publicationBundlePath,
-    lane
+    publicationBundlePath
   });
 }
 
@@ -482,7 +477,6 @@ function summarizePublicBenchmarkBundleContents(input: {
   diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>;
   summaryRows: Set<string>;
   publicationBundlePath: string;
-  lane: PublicBenchmarkBundle["lane"];
 }): PublicBenchmarkBundleMetadata {
   const diagnosticsByRow = new Map(input.diagnostics.rows.map((row) => [row.row_id, row]));
   const rowsByTarget = new Map<string, PublicBundleMatrixRow[]>();
@@ -514,7 +508,7 @@ function summarizePublicBenchmarkBundleContents(input: {
         ? "succeeded"
         : "genuine-task-failures";
       const reportPaths = rows.flatMap((row) =>
-        publicReportFiles(input.lane).map((reportFile) => `reports/${row.id}/${reportFile}`)
+        PUBLIC_REPORT_FILES.map((reportFile) => `reports/${row.id}/${reportFile}`)
       );
       return {
         id: target.id,
@@ -838,13 +832,9 @@ function isAllowedBundlePath(value: string): boolean {
     "eval/review/new-findings.jsonl"
   ]);
   if (evalFiles.has(value)) return true;
-  return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json|findings\.normalized\.json|deduped-findings\.json)$/u.test(
+  return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json|findings\.normalized\.json)$/u.test(
     value
   );
-}
-
-function publicReportFiles(lane: PublicBenchmarkBundle["lane"]): readonly string[] {
-  return lane === "smoke" ? [...PUBLIC_REPORT_FILES, PUBLIC_SMOKE_DEDUPE_FILE] : PUBLIC_REPORT_FILES;
 }
 
 function digest(contents: Uint8Array): string {

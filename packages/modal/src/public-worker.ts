@@ -752,18 +752,14 @@ export function publicBundleSources(
     if (report === undefined || record.ultrafuzz_run_root === undefined) {
       throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
     }
+    const normalizedFindingsSource =
+      lane === "smoke"
+        ? path.join(record.ultrafuzz_run_root, "artifacts", "dedupe-findings", "deduped-findings.json")
+        : path.join(path.dirname(report), "findings.normalized.json");
     const candidates = [
       { name: "report.json", source: report },
       { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: path.join(path.dirname(report), "findings.normalized.json") },
-      ...(lane === "smoke"
-        ? [
-            {
-              name: "deduped-findings.json",
-              source: path.join(record.ultrafuzz_run_root, "artifacts", "dedupe-findings", "deduped-findings.json")
-            }
-          ]
-        : [])
+      { name: "findings.normalized.json", source: normalizedFindingsSource }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {

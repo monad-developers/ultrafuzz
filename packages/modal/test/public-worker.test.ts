@@ -492,7 +492,7 @@ it("publishes only the final journal record for each benchmark row", () => {
   expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
 });
 
-it("publishes smoke dedupe evidence separately from normalized production findings", () => {
+it("publishes smoke dedupe evidence through the trusted normalized-findings bundle path", () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-smoke-dedupe";
@@ -520,11 +520,15 @@ it("publishes smoke dedupe evidence separately from normalized production findin
   const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   fs.writeFileSync(diagnosticsPath, "{}\n");
 
-  expect(
-    publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke")
-      .filter((source) => source.path.startsWith("reports/"))
-      .map((source) => source.path)
-  ).toContain(`reports/${rowId}/deduped-findings.json`);
+  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke").filter(
+    (source) => source.path.startsWith("reports/")
+  );
+  expect(reportSources.map((source) => source.path)).toEqual([
+    `reports/${rowId}/report.json`,
+    `reports/${rowId}/report.md`,
+    `reports/${rowId}/findings.normalized.json`
+  ]);
+  expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {

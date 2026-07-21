@@ -410,11 +410,9 @@ describe("longitudinal eval history", () => {
             "reports/target-a-baseline-trial-1/report.md",
             "reports/target-a-baseline-trial-1/report.json",
             "reports/target-a-baseline-trial-1/findings.normalized.json",
-            "reports/target-a-baseline-trial-1/deduped-findings.json",
             "reports/target-a-baseline-trial-2/report.md",
             "reports/target-a-baseline-trial-2/report.json",
-            "reports/target-a-baseline-trial-2/findings.normalized.json",
-            "reports/target-a-baseline-trial-2/deduped-findings.json"
+            "reports/target-a-baseline-trial-2/findings.normalized.json"
           ]
         }
       }
