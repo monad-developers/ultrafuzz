@@ -61,6 +61,7 @@ test("generated Smithers agent preserves its final response as missing Markdown"
 
   const agent = source.slice(agentStart, preparationStart);
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
+  assert.match(agent, /prepareArtifactMirror\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);

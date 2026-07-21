@@ -112,6 +112,10 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
     ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
     generate: async (args) => {
       const result = await agent.generate(args);
+      // Agent work may replace or clean its worktree, including the prepared
+      // artifact mirror. Re-establish the same path-checked directories before
+      // preserving outputs; this remains deterministic and model-free.
+      prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
       normalizeLegacyGeneratedTestManifests(task);
       // Keep artifact validation inside the agent task completion boundary.

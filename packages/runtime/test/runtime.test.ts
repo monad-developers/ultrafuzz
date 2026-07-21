@@ -1262,6 +1262,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
   assert.match(workflowSource, /function artifactAwareAgent/);
+  assert.match(workflowSource, /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);/);
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
