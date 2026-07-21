@@ -34,6 +34,9 @@ describe("smoke benchmark topology", () => {
       expect(topology.nodes.find((node) => node.id === strategyId)?.depends_on).toEqual(["smoke-context"]);
     }
     expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.depends_on).toEqual(STRATEGY_IDS);
+    expect(topology.nodes.find((node) => node.id === "dedupe-findings")?.outputs).toContainEqual(
+      expect.objectContaining({ path: "deduped-findings.json", contract: "ultrafuzz/findings@1", primary: true })
+    );
     expect(topology.nodes.find((node) => node.id === "final-report")?.depends_on).toEqual(["dedupe-findings"]);
     expect(topology.nodes.find((node) => node.id === "final-report")?.outputs).toEqual([
       expect.objectContaining({ path: "report.md", contract: "ultrafuzz/nonempty-markdown@1", primary: true }),

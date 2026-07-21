@@ -288,7 +288,10 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
     return;
   }
   const output = task.outputs.find((candidate) => candidate.primary && candidate.path === "deduped-findings.json");
-  if (output === undefined || output.contract !== "ultrafuzz/json-array@1") {
+  if (
+    output === undefined ||
+    (output.contract !== "ultrafuzz/json-array@1" && output.contract !== "ultrafuzz/findings@1")
+  ) {
     return;
   }
 
@@ -300,7 +303,8 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
         path.resolve(candidateRoot, output.path),
         `artifact-contract failure: output is not a regular file ${output.path}`
       );
-      if (validateArtifactContract(output.contract, readFileSync(candidatePath, "utf8"), output.path).ok) {
+      const validation = validateArtifactContract(output.contract, readFileSync(candidatePath, "utf8"), output.path);
+      if (validation.ok && Array.isArray(validation.value) && validation.value.length > 0) {
         return;
       }
     } catch {

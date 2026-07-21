@@ -83,6 +83,8 @@ test("generated Smithers agent retains validated strategy findings when dedupe o
   const fallback = source.slice(fallbackStart, findingNormalizerStart);
   assert.match(fallback, /logicalNodeId !== "dedupe-findings"/u);
   assert.match(fallback, /candidate\.primary && candidate\.path === "deduped-findings\.json"/u);
+  assert.match(fallback, /output\.contract !== "ultrafuzz\/findings@1"/u);
+  assert.match(fallback, /validation\.value\.length > 0/u);
   assert.match(fallback, /task\.metadata\.dependencies\.attemptIds/u);
   assert.match(fallback, /validateArtifactContract\(\s*"ultrafuzz\/findings@1"/u);
   assert.match(fallback, /retained\.push\(\.\.\.validation\.value\)/u);

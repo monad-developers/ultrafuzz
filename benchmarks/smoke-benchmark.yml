@@ -100,7 +100,7 @@ nodes:
       - lifecycle-view-boundaries
     outputs:
       - path: deduped-findings.json
-        contract: ultrafuzz/json-array@1
+        contract: ultrafuzz/findings@1
         primary: true
       - path: strategy-detections.json
         contract: ultrafuzz/json-array@1
