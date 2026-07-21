@@ -118,14 +118,15 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
       normalizeLegacyFindingEvidence(task);
+      normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
-      // Generated-test handling only adapts the agent's legacy string-list
-      // representation and mirrors tests from their mandated workspace path;
-      // the strict verifier still validates every companion.
+      // Compatibility handling only adapts known legacy field representations;
+      // generated-test companions are mirrored from their mandated workspace
+      // path, and the strict verifier still validates every resulting artifact.
       verifyArtifacts(task);
       return result;
     }
@@ -340,6 +341,77 @@ function normalizeLegacyFindingEvidenceArray(contents: string): string | undefin
   });
 
   return changed ? `${JSON.stringify(findings, null, 2)}\n` : undefined;
+}
+
+function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/report@1") {
+      continue;
+    }
+    for (const candidateRoot of artifactRoots) {
+      let resolvedPath: string;
+      try {
+        resolvedPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+      } catch {
+        continue;
+      }
+      const contents = readFileSync(resolvedPath, "utf8");
+      if (validateArtifactContract(output.contract, contents, output.path).ok) {
+        break;
+      }
+      const normalized = normalizeLegacyReportProvenanceFields(contents);
+      if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
+        writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+        break;
+      }
+    }
+  }
+}
+
+function normalizeLegacyReportProvenanceFields(contents: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const report = parsed as { property_provenance?: unknown };
+  if (!Array.isArray(report.property_provenance)) {
+    return undefined;
+  }
+
+  let changed = false;
+  const propertyProvenance = report.property_provenance.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return entry;
+    }
+    const provenance = { ...entry } as Record<string, unknown>;
+    for (const field of ["implementation_paths", "test_paths"] as const) {
+      if (provenance[field] === "unavailable") {
+        provenance[field] = [];
+        changed = true;
+      }
+    }
+    for (const field of ["fuzzer_backend", "fuzzer_backends"] as const) {
+      if (provenance[field] === "unavailable") {
+        delete provenance[field];
+        changed = true;
+      }
+    }
+    return provenance;
+  });
+
+  return changed ? `${JSON.stringify({ ...report, property_provenance: propertyProvenance }, null, 2)}\n` : undefined;
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {

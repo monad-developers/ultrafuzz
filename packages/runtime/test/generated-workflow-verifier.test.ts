@@ -63,6 +63,7 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
   assert.match(agent, /prepareArtifactMirror\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
@@ -101,6 +102,25 @@ test("generated Smithers agent normalizes legacy scalar finding evidence", () =>
   assert.match(normalizer, /typeof evidence !== "string"/u);
   assert.match(normalizer, /evidence === null \|\| Array\.isArray\(evidence\)/u);
   assert.match(normalizer, /return \{ \.\.\.finding, evidence: \[evidence\] \}/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
+  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+});
+
+test("generated Smithers agent normalizes legacy unavailable report provenance fields", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const normalizerStart = source.indexOf("function normalizeLegacyReportProvenance");
+  const generatedTestNormalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
+
+  assert.ok(normalizerStart >= 0, source);
+  assert.ok(generatedTestNormalizerStart > normalizerStart, source);
+
+  const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
+  assert.match(normalizer, /output\.contract !== "ultrafuzz\/report@1"/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
+  assert.match(normalizer, /\["implementation_paths", "test_paths"\]/u);
+  assert.match(normalizer, /provenance\[field\] = \[\]/u);
+  assert.match(normalizer, /\["fuzzer_backend", "fuzzer_backends"\]/u);
+  assert.match(normalizer, /delete provenance\[field\]/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });
