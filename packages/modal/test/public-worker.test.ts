@@ -337,7 +337,7 @@ it("bounds public provider fan-out by mode", () => {
     run: {
       ...smokeBaseSuite.run,
       max_parallel_runs: PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
-      max_parallel_targets: 8
+      max_parallel_targets: 4
     }
   });
   expect(smokeBaseSuite).toEqual(original);

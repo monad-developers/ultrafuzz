@@ -8,18 +8,14 @@ import { expandTopology, loadTopology } from "../src/index.js";
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SMOKE_TOPOLOGY_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "smoke-benchmark.yml");
 const STRATEGY_IDS = [
-  "admin-config-boundaries",
   "time-warp-sequences",
   "external-dependency-boundaries",
   "externalized-state-accounting",
-  "amm-boundary-liquidity",
-  "rounding-direction-audit",
-  "state-machine-boundaries",
   "lifecycle-view-boundaries"
 ];
 
 describe("smoke benchmark topology", () => {
-  it("runs one context pass, eight strategies in one wave, and two review passes", () => {
+  it("runs one context pass, four strategies in one wave, and two review passes", () => {
     const topology = loadTopology(REPOSITORY_ROOT, {
       topologyPath: SMOKE_TOPOLOGY_PATH,
       requirePromptFiles: true
@@ -58,7 +54,7 @@ describe("smoke benchmark topology", () => {
       defaultModelProfileId: "benchmark"
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
-    expect(executable).toHaveLength(11);
+    expect(executable).toHaveLength(7);
     expect(
       executable
         .filter((node) => STRATEGY_IDS.includes(node.logicalId))

@@ -17,8 +17,6 @@ production code.
 
 Apply the focus matching `{{strategy}}`:
 
-- `admin-config-boundaries`: authorization, pause behavior, configuration
-  setters, role handoff, removal/disable flows, and getter reflection.
 - `time-warp-sequences`: block/time transitions, accrual, vesting, auctions,
   deadlines, stale snapshots, and sequences whose result depends on elapsed
   time.
@@ -27,13 +25,6 @@ Apply the focus matching `{{strategy}}`:
 - `externalized-state-accounting`: cached/stored balances, donations, fees,
   rewards, bad debt, utilization, exchange rates, and state that can diverge
   from live balances.
-- `amm-boundary-liquidity`: empty/near-empty liquidity, first/last liquidity,
-  imbalanced reserves, virtual price, quote/execution agreement, and nested or
-  base-pool interactions.
-- `rounding-direction-audit`: conversion direction, share/asset math, fee math,
-  decimal scaling, repeated small operations, and boundary off-by-one errors.
-- `state-machine-boundaries`: initialization, pause/unpause, active/inactive,
-  auction/liquidation, add/remove, settle/close, and invalid transition order.
 - `lifecycle-view-boundaries`: max/preview/view agreement before, during, and
   after lifecycle transitions, especially empty, paused, removed, nested, and
   terminal states.

@@ -41,18 +41,6 @@ nodes:
       - path: smoke-context.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
-  - id: admin-config-boundaries
-    kind: agentic
-    prompt: smoke/smoke-strategy.md
-    group: strategies
-    depends_on:
-      - smoke-context
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
   - id: time-warp-sequences
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -89,42 +77,6 @@ nodes:
         primary: true
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1
-  - id: amm-boundary-liquidity
-    kind: agentic
-    prompt: smoke/smoke-strategy.md
-    group: strategies
-    depends_on:
-      - smoke-context
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-  - id: rounding-direction-audit
-    kind: agentic
-    prompt: smoke/smoke-strategy.md
-    group: strategies
-    depends_on:
-      - smoke-context
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
-  - id: state-machine-boundaries
-    kind: agentic
-    prompt: smoke/smoke-strategy.md
-    group: strategies
-    depends_on:
-      - smoke-context
-    outputs:
-      - path: findings.json
-        contract: ultrafuzz/findings@1
-        primary: true
-      - path: generated-tests.json
-        contract: ultrafuzz/generated-tests@1
   - id: lifecycle-view-boundaries
     kind: agentic
     prompt: smoke/smoke-strategy.md
@@ -142,13 +94,9 @@ nodes:
     prompt: smoke/smoke-dedupe-findings.md
     group: review
     depends_on:
-      - admin-config-boundaries
       - time-warp-sequences
       - external-dependency-boundaries
       - externalized-state-accounting
-      - amm-boundary-liquidity
-      - rounding-direction-audit
-      - state-machine-boundaries
       - lifecycle-view-boundaries
     outputs:
       - path: deduped-findings.json

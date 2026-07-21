@@ -61,7 +61,7 @@ describe("public benchmark manifests", () => {
       true
     );
     expect(suite.run.judge_model_profile).toBe("benchmark-judge-gpt-5-6-sol-xhigh");
-    expect(suite.run).toMatchObject({ max_parallel_runs: 3, max_parallel_targets: 8 });
+    expect(suite.run).toMatchObject({ max_parallel_runs: 3, max_parallel_targets: 4 });
     expect(suite.reporting.artifacts).toMatchObject({
       mode: "upload",
       mode_explicit: true,

@@ -5,19 +5,15 @@ display_name: Dedupe smoke findings
 
 # Dedupe smoke findings
 
-Perform one bounded, model-only consolidation pass over the eight completed
+Perform one bounded, model-only consolidation pass over the four completed
 strategy lanes. Do not rerun tests, install dependencies, edit production code,
 or begin new exploratory analysis.
 
 Read every input, including valid empty arrays:
 
-- Admin/config: `{{artifact_path:admin-config-boundaries}}/findings.json`
 - Time sequences: `{{artifact_path:time-warp-sequences}}/findings.json`
 - External dependencies: `{{artifact_path:external-dependency-boundaries}}/findings.json`
 - Externalized accounting: `{{artifact_path:externalized-state-accounting}}/findings.json`
-- AMM/liquidity: `{{artifact_path:amm-boundary-liquidity}}/findings.json`
-- Rounding: `{{artifact_path:rounding-direction-audit}}/findings.json`
-- State machines: `{{artifact_path:state-machine-boundaries}}/findings.json`
 - Lifecycle/views: `{{artifact_path:lifecycle-view-boundaries}}/findings.json`
 
 Use affected code, reachable workflow, violated property, root cause, and

@@ -5,7 +5,7 @@ display_name: Build smoke benchmark context
 
 # Build smoke benchmark context
 
-Create one compact, source-backed map that lets eight parallel bug-finding
+Create one compact, source-backed map that lets four parallel bug-finding
 strategies start immediately. Inspect only this target checkout. Do not read or
 search benchmark ground truth, expected findings, audit answers, sibling target
 checkouts, or prior Ultrafuzz runs.

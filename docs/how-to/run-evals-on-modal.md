@@ -103,7 +103,7 @@ provider and Modal budgets remain the hard aggregate cost boundary.
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
 and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
-medium-reasoning context node feeds eight high-reasoning bug-finding strategies
+medium-reasoning context node feeds four high-reasoning bug-finding strategies
 in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
 differential, dynamic, and production-only review stages are absent from this
 graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
@@ -121,8 +121,8 @@ differential, and dynamic strategies, with all three disable flags set to
 Both lanes use the standard Modal benchmark resources described above. Every
 target row has a 3,600-second model-work watchdog. The smoke admits all three
 rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
-waves. Both modes use eight-way workflow concurrency so full rows can progress
-through the complete production topology without serializing their agent work.
+waves. Smoke uses four-way workflow concurrency; full uses eight-way concurrency
+so production rows can progress without serializing their agent work.
 Scoring remains independent of the runner and always uses GPT-5.6 Sol at
 `xhigh`.
 

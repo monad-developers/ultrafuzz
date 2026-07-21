@@ -154,10 +154,10 @@ and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
 Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It uses
 `benchmarks/smoke-benchmark.yml` instead of filtering the production topology:
-one medium-reasoning context pass feeds eight high-reasoning strategies in one
-parallel wave, followed by medium-reasoning dedupe and report passes. The eight
-strategies cover admin/config, time, external dependencies, externalized
-accounting, AMM/liquidity, rounding, state machines, and lifecycle views. Its
+one medium-reasoning context pass feeds four high-reasoning strategies in one
+parallel wave, followed by medium-reasoning dedupe and report passes. The four
+strategies cover time, external dependencies, externalized accounting, and
+lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled
 strategy families. The full lane selects every checked-in EVMBench target, pins
 GPT-5.6 Luna `high` plus Claude Sonnet 5 `high`, sets the same one strategy loop,

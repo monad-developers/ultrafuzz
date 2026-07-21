@@ -128,10 +128,10 @@ Vyper, and runs GPT-5.6 Luna at `high`. Its canonical controls set
 `strategy_loops: 1`, `disable_invariant_tests: true`,
 `disable_differential_tests: true`, and `disable_dynamic_strategies: true`.
 The adapter selects `benchmarks/smoke-benchmark.yml`, whose bounded graph has a
-single context pass, eight parallel ground-truth-informed strategy families,
+single context pass, four parallel ground-truth-informed strategy families,
 dedupe, and final report. The production topology is not modified or filtered.
-All three target rows run concurrently, while the eight strategy nodes within
-each row share the existing eight-way workflow concurrency limit.
+All three target rows run concurrently, while the four strategy nodes within
+each row use a smoke-only four-way workflow concurrency limit.
 
 The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
 `high` plus Claude Sonnet 5 at `high`. It also pins `strategy_loops: 1`, while

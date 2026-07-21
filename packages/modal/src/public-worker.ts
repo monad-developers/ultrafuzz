@@ -598,7 +598,7 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
     ...baseSuite,
     run: {
       ...baseSuite.run,
-      // Smoke runs all three pinned target rows together, with one eight-way
+      // Smoke runs all three pinned target rows together, with one four-way
       // strategy wave inside each bounded workflow. Full mode uses two target
       // waves for the 40-target EVMbench cohort and eight-way concurrency
       // within each production workflow.

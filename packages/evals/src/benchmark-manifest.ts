@@ -11,18 +11,14 @@ export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v1" as 
 export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
 export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
-export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 8;
+export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
 export const BENCHMARK_SMOKE_WORKFLOW_PATH = "benchmarks/smoke-benchmark.yml" as const;
 export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
 export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
-  "admin-config-boundaries",
   "time-warp-sequences",
   "external-dependency-boundaries",
   "externalized-state-accounting",
-  "amm-boundary-liquidity",
-  "rounding-direction-audit",
-  "state-machine-boundaries",
   "lifecycle-view-boundaries"
 ] as const;
 export const BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS = [

@@ -877,10 +877,10 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
-  assert.equal(executable.length, 11);
+  assert.equal(executable.length, 7);
   const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
   const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
-  assert.equal(strategies.length, 8);
+  assert.equal(strategies.length, 4);
   assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
   assert.equal(coordination.length, 3);
   assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
