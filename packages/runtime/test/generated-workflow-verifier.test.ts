@@ -97,7 +97,10 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
 
   const materializer = source.slice(materializerStart, resolverStart);
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
-  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", workspaceRelativePath\)/u);
+  assert.match(materializer, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/u);
+  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/u);
+  assert.match(materializer, /existsSync\(directSourceCandidate\)/u);
+  assert.match(materializer, /existsSync\(nodeScopedSourceCandidate\)/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);

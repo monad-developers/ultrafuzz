@@ -370,14 +370,24 @@ function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): v
       }
       const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
       for (const entry of entries) {
-        materializeGeneratedTestCompanion(workspaceRoot, candidateRoot, entry.path ?? "");
+        materializeGeneratedTestCompanion(
+          workspaceRoot,
+          candidateRoot,
+          task.metadata.node.concreteNodeId,
+          entry.path ?? ""
+        );
       }
       break;
     }
   }
 }
 
-function materializeGeneratedTestCompanion(workspaceRoot: string, artifactRoot: string, relativePath: string): void {
+function materializeGeneratedTestCompanion(
+  workspaceRoot: string,
+  artifactRoot: string,
+  nodeId: string,
+  relativePath: string
+): void {
   const generatedPrefix = "generated-tests/";
   if (!relativePath.startsWith(generatedPrefix) || relativePath.length === generatedPrefix.length) {
     throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
@@ -397,7 +407,13 @@ function materializeGeneratedTestCompanion(workspaceRoot: string, artifactRoot: 
   }
 
   const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
-  const sourceCandidate = path.resolve(workspaceRoot, "test", "foundry", workspaceRelativePath);
+  const directSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", workspaceRelativePath);
+  const nodeScopedSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath);
+  const sourceCandidate = existsSync(directSourceCandidate)
+    ? directSourceCandidate
+    : existsSync(nodeScopedSourceCandidate)
+      ? nodeScopedSourceCandidate
+      : directSourceCandidate;
   if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
     throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
   }
