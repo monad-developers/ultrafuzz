@@ -118,6 +118,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // preserving outputs; this remains deterministic and model-free.
       prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
+      materializeMissingDedupeArtifact(task);
       normalizeLegacyFindingFields(task);
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
@@ -279,6 +280,72 @@ function agentResultSummary(result: unknown): string | undefined {
     }
   }
   return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
+}
+
+function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "dedupe-findings") {
+    return;
+  }
+  const output = task.outputs.find((candidate) => candidate.primary && candidate.path === "deduped-findings.json");
+  if (output === undefined || output.contract !== "ultrafuzz/json-array@1") {
+    return;
+  }
+
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  for (const candidateRoot of taskArtifactRoots(task, artifactDir)) {
+    try {
+      const candidatePath = resolveRegularArtifactFile(
+        candidateRoot,
+        path.resolve(candidateRoot, output.path),
+        `artifact-contract failure: output is not a regular file ${output.path}`
+      );
+      if (validateArtifactContract(output.contract, readFileSync(candidatePath, "utf8"), output.path).ok) {
+        return;
+      }
+    } catch {
+      // Recover from the already validated dependency findings below.
+    }
+  }
+
+  const retained: unknown[] = [];
+  for (const dependencyAttemptId of task.metadata.dependencies.attemptIds) {
+    const dependency = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
+    if (dependency === undefined) {
+      continue;
+    }
+    for (const candidateRootPath of [dependency.metadata.artifacts.dir, mirroredArtifactDir(dependency)]) {
+      try {
+        const candidateRoot = realpathSync(candidateRootPath);
+        const findingsPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, "findings.json"),
+          "artifact-contract failure: dependency findings are not a regular file"
+        );
+        const validation = validateArtifactContract(
+          "ultrafuzz/findings@1",
+          readFileSync(findingsPath, "utf8"),
+          "findings.json"
+        );
+        if (validation.ok && Array.isArray(validation.value)) {
+          retained.push(...validation.value);
+          break;
+        }
+      } catch {
+        // Try the dependency's task-owned mirror when canonical publication is still catching up.
+      }
+    }
+  }
+
+  const mirrorRoot = realpathSync(mirroredArtifactDir(task));
+  const outputPath = path.resolve(mirrorRoot, output.path);
+  if (!isStrictlyInsideDirectory(mirrorRoot, outputPath)) {
+    throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+  }
+  writeFileSync(outputPath, `${JSON.stringify(retained, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: existsSync(outputPath) ? "w" : "wx",
+    mode: 0o600
+  });
 }
 
 function normalizeLegacyFindingFields(task: (typeof taskSpecs)[number]): void {
