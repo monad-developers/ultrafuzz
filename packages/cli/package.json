@@ -33,6 +33,12 @@
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/dashboard": "workspace:*",
     "@ultrafuzz/evals": "workspace:*",
-    "@ultrafuzz/runtime": "workspace:*"
+    "@ultrafuzz/runtime": "workspace:*",
+    "adm-zip": "^0.5.18",
+    "tar-stream": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/tar-stream": "^3.1.4"
   }
 }

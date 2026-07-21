@@ -27,6 +27,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `eval score <id>`      | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
 | `eval report <id>`     | Show the scored eval run variant ranking.                                                                                 |
 | `eval compare <id>`    | Compare scored eval variants against a `--baseline` variant.                                                              |
+| `eval analyze <type>`  | Generate private offline benchmark analysis from a finalized handoff ZIP.                                                 |
 | `eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                                   |
 | `eval publish <id>`    | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
 
@@ -89,7 +90,7 @@ explicit `--copy` selections for files you have reviewed.
 
 ## Eval Commands
 
-`eval plan | run | score | report | compare | bundle | history | publish` drive eval suites that
+`eval plan | run | score | report | compare | bundle | analyze | history | publish` drive eval suites that
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
@@ -108,6 +109,8 @@ Common flags:
 - `--against <eval-run-id>` (compare releases with compatible lineage)
 - `--allow-incompatible` (explicitly waive release provenance mismatches)
 - `--output <directory>` (bundle, required)
+- `--input <external-handoff.zip>` and `--output <external-directory>`
+  (`analyze`, both required and refused inside the project repository)
 - `--history <path>` and `--charts <directory>` (history)
 - `--publication-url <url>` (history source bundle location, required when appending)
 - `--check` (history validation without writes)
@@ -120,6 +123,13 @@ Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 `eval bundle` exports only fixed-schema aggregate evidence for offline
 analysis. The self-contained directory is checksum-verified and excludes raw
 reports and execution-local data.
+
+`eval analyze all` reads an already-finalized private benchmark handoff and
+generates CSV, JSON, Markdown, and editable SVG reports. Individual report
+commands are `upset`, `scores`, `provenance`, `table`, and `cost`; `upsert` and
+`precision-recall-f1` are compatibility aliases. Because the source and output
+may contain private target and ground-truth details, both paths must remain
+outside the repository and generated analysis must not be committed.
 
 ## JSON Envelope
 
