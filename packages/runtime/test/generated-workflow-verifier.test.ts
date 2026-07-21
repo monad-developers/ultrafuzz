@@ -63,6 +63,7 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
   assert.match(agent, /prepareArtifactMirror\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
@@ -86,6 +87,27 @@ test("generated Smithers agent retains validated strategy findings when dedupe o
   assert.match(fallback, /validateArtifactContract\(\s*"ultrafuzz\/findings@1"/u);
   assert.match(fallback, /retained\.push\(\.\.\.validation\.value\)/u);
   assert.match(fallback, /JSON\.stringify\(retained, null, 2\)/u);
+});
+
+test("generated Smithers agent retains validated dedupe findings when a smoke final report stays empty", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const fallbackStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+  const findingNormalizerStart = source.indexOf("function normalizeLegacyFindingFields");
+
+  assert.ok(fallbackStart >= 0, source);
+  assert.ok(findingNormalizerStart > fallbackStart, source);
+
+  const fallback = source.slice(fallbackStart, findingNormalizerStart);
+  assert.match(fallback, /logicalNodeId !== "final-report"/u);
+  assert.match(fallback, /candidate\.path === "findings\.normalized\.json"/u);
+  assert.match(fallback, /dependency\.metadata\.node\.logicalNodeId !== "dedupe-findings"/u);
+  assert.match(fallback, /validateArtifactContract\(\s*"ultrafuzz\/findings@1"/u);
+  assert.match(fallback, /isCanonicalEmptyReport/u);
+  assert.match(fallback, /artifact_recovery: "retained-validated-dedupe-findings"/u);
+  assert.match(fallback, /issues: findings\.map\(normalizedFallbackReportIssue\)/u);
+  assert.match(fallback, /normalizeFinalReportSeverityRecord\(issue\)\.value/u);
+  assert.match(fallback, /const existingCanonical = resolveRegularArtifactFile/u);
+  assert.match(fallback, /writeFileSync\(existingCanonical, serialized/u);
 });
 
 test("generated Smithers agent normalizes legacy generated-test string lists", () => {

@@ -736,7 +736,8 @@ jobs:
             "$EXPECTED_CANDIDATE" \
             "$EXPECTED_REPOSITORY" \
             "$EXPECTED_GENERATION" \
-            "$EXPECTED_MODE"
+            "$EXPECTED_MODE" \
+            .
 
       - name: Terminate every exact incomplete-run sandbox
         if: always() && steps.validate_incomplete_plan.outcome == 'success'

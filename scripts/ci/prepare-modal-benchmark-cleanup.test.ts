@@ -141,12 +141,12 @@ function cleanupFixture() {
     image_name: `ufz-runner-${candidate}`,
     targets: cleanupTargets(),
     matrix_rows_per_pair: 3,
-    control_timeout_seconds: 14_700,
+    control_timeout_seconds: 8_400,
     concurrency: {
-      max_parallel_eval_rows_per_sandbox: 2,
-      max_parallel_workflow_nodes_per_row: 8,
-      max_live_runner_workflows_by_provider: { openai: 2 },
-      max_live_judge_rows: 2
+      max_parallel_eval_rows_per_sandbox: 3,
+      max_parallel_workflow_nodes_per_row: 4,
+      max_live_runner_workflows_by_provider: { openai: 3 },
+      max_live_judge_rows: 3
     },
     pairs: [
       {
@@ -207,7 +207,16 @@ function cleanupFixture() {
       expectedCandidate: candidate,
       expectedRepository: repository,
       expectedGeneration: "12345-2",
-      expectedMode: "smoke"
+      expectedMode: "smoke",
+      policyDimensions: {
+        targets: cleanupTargets(),
+        targetIds: cleanupTargets().map((target) => target.id),
+        targetCount: 3,
+        trialsPerVariant: 1,
+        maxParallelEvalRows: 3,
+        maxParallelWorkflowNodes: 4,
+        controlTimeoutSeconds: 8_400
+      }
     }
   };
 }

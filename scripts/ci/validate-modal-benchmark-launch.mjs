@@ -48,7 +48,7 @@ export function validateModalBenchmarkLaunch(input) {
     );
   }
   assertModalDispatchMode(rawManifest, manifestPath);
-  const dimensions = benchmarkPolicyDimensions(policyRoot, mode);
+  const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode);
   assertConfiguredTargetCoverage(rawManifest, manifestPath, dimensions);
   const [producerRunId, producerRunAttempt] = generationParts(rawManifest.generation, manifestPath);
   const manifest = readAutomaticPublicationManifest(manifestPath, {
@@ -211,7 +211,7 @@ function assertConfigDispatchMode(config, configPath, manifestPath) {
   }
 }
 
-function benchmarkPolicyDimensions(policyRoot, mode) {
+export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
   const cohortPath = path.join(
     policyRoot,
