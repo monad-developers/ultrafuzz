@@ -125,11 +125,13 @@ analysis. The self-contained directory is checksum-verified and excludes raw
 reports and execution-local data.
 
 `eval analyze all` reads an already-finalized private benchmark handoff and
-generates CSV, JSON, Markdown, and editable SVG reports. Individual report
-commands are `upset`, `scores`, `provenance`, `table`, and `cost`; `upsert` and
-`precision-recall-f1` are compatibility aliases. Because the source and output
-may contain private target and ground-truth details, both paths must remain
-outside the repository and generated analysis must not be committed.
+generates CSV, JSON, Markdown, PNG, and editable SVG reports. Score summaries
+include the mean, median, and sample standard deviation across completed rows.
+Individual report commands are `upset`, `scores`, `provenance`, `table`, and
+`cost`; `upsert` and `precision-recall-f1` are compatibility aliases. Because
+the source and output may contain private target and ground-truth details, both
+paths must remain outside the repository and generated analysis must not be
+committed.
 
 ## JSON Envelope
 

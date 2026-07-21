@@ -4,7 +4,7 @@ import type { AnalysisResult, Severity } from "../types.js";
 import { SEVERITY_ORDER } from "../types.js";
 import { intersectionGroups, orderedSetRows, severityCounts } from "./analysis.js";
 import { mean, sampleStdev } from "./stats.js";
-import { circle, element, line, polygon, rect, svgDocument, text, writeSvg } from "./svg.js";
+import { circle, element, line, polygon, rect, svgDocument, text, writeSvgAndPng } from "./svg.js";
 
 const SEVERITY_COLORS: Record<Severity, string> = {
   H: "#111111",
@@ -171,8 +171,7 @@ export async function buildUpSetChart(result: AnalysisResult, outputDir: string)
     })
   );
   const svgPath = join(outputDir, "upset_provenance.svg");
-  await writeSvg(svgDocument(width, height, parts.join("\n")), svgPath);
-  return [svgPath];
+  return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }
 
 export async function buildScoreChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
@@ -199,6 +198,12 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     );
     legendX += metric === "precision" ? 125 : 105;
   }
+  parts.push(
+    text(60, 164, "Condition summary: bar = mean · diamond = median · whisker = ±1 sample SD", {
+      "font-size": 12,
+      fill: "#666"
+    })
+  );
 
   for (let tick = 0; tick <= 4; tick += 1) {
     const x = plotLeft + (plotWidth * tick) / 4;
@@ -268,8 +273,7 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     })
   );
   const svgPath = join(outputDir, "precision_recall_f1.svg");
-  await writeSvg(svgDocument(width, height, parts.join("\n")), svgPath);
-  return [svgPath];
+  return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }
 
 function pareto(rows: AnalysisResult["rowMetrics"]): AnalysisResult["rowMetrics"] {
@@ -396,6 +400,5 @@ export async function buildCostChart(result: AnalysisResult, outputDir: string):
     })
   );
   const svgPath = join(outputDir, "cost_performance.svg");
-  await writeSvg(svgDocument(width, height, parts.join("\n")), svgPath);
-  return [svgPath];
+  return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }

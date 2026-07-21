@@ -286,7 +286,9 @@ ultrafuzz eval history [eval-run-id] \
 adjudication output through `handoff/current-state.json`. Available report
 types are `all`, `upset` (`upsert` alias), `scores`
 (`precision-recall-f1` alias), `provenance`, `table`, and `cost`. Charts are
-written as editable SVG alongside CSV, JSON, and Markdown reports.
+written as PNG and editable SVG alongside CSV, JSON, and Markdown reports.
+Condition score summaries report the mean, median, and sample standard
+deviation across completed rows.
 
 The input and output paths are required to be outside `--project`. Handoff
 archives and generated reports may contain private target details,

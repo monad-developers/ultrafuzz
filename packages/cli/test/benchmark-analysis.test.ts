@@ -184,13 +184,20 @@ test("eval analyze all generates reports from finalized handoff data", async () 
     "row_results_table.md",
     "provenance.json",
     "upset_provenance.svg",
+    "upset_provenance.png",
     "precision_recall_f1.svg",
+    "precision_recall_f1.png",
     "cost_performance.svg",
+    "cost_performance.png",
     "METHOD.md",
     "source_manifest.json",
     "analysis_manifest.json"
   ]) {
     assert.equal(fs.existsSync(path.join(output, file)), true, file);
+  }
+  for (const file of ["upset_provenance.png", "precision_recall_f1.png", "cost_performance.png"]) {
+    const signature = fs.readFileSync(path.join(output, file)).subarray(0, 8);
+    assert.deepEqual(signature, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), file);
   }
   const scores = fs.readFileSync(path.join(output, "row_scores.csv"), "utf8");
   assert.match(scores, /d1,Ultrafuzz,true,valid,,2,1,1,0,2/u);
@@ -203,6 +210,7 @@ test("eval analyze all generates reports from finalized handoff data", async () 
     manifest.artifacts.some((artifact) => artifact.path === "row_scores.csv"),
     true
   );
+  assert.equal(manifest.artifacts.filter((artifact) => artifact.path.endsWith(".png")).length, 3);
   assert.equal(
     manifest.artifacts.every((artifact) => /^[a-f0-9]{64}$/u.test(artifact.sha256)),
     true

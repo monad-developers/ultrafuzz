@@ -1,4 +1,7 @@
 import { writeFile } from "node:fs/promises";
+
+import { Resvg } from "@resvg/resvg-js";
+
 import { escapeXml } from "./format.js";
 
 export const FONT = "Inter, Arial, Helvetica, sans-serif";
@@ -65,4 +68,18 @@ export function svgDocument(width: number, height: number, content: string): str
 
 export async function writeSvg(svg: string, svgPath: string): Promise<void> {
   await writeFile(svgPath, svg, "utf8");
+}
+
+export async function writeSvgAndPng(svg: string, svgPath: string): Promise<string[]> {
+  if (!svgPath.endsWith(".svg")) throw new Error(`Expected an SVG output path: ${svgPath}`);
+  const pngPath = `${svgPath.slice(0, -4)}.png`;
+  await writeSvg(svg, svgPath);
+  const png = new Resvg(svg, {
+    background: "#ffffff",
+    fitTo: { mode: "original" }
+  })
+    .render()
+    .asPng();
+  await writeFile(pngPath, png);
+  return [svgPath, pngPath];
 }

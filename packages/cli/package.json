@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@oclif/core": "^4.11.11",
+    "@resvg/resvg-js": "^2.6.2",
     "@ultrafuzz/artifacts": "workspace:*",
     "@ultrafuzz/config": "workspace:*",
     "@ultrafuzz/dashboard": "workspace:*",
