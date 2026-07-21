@@ -4,7 +4,7 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -62,11 +62,14 @@ function promptForTask(
   task: (typeof taskSpecs)[number],
   inputTask?: { prompt?: string; prompt_path?: string }
 ): string {
+  let prompt: string;
   if (typeof inputTask?.prompt === "string") {
-    return inputTask.prompt;
+    prompt = inputTask.prompt;
+  } else {
+    const promptPath = inputTask?.prompt_path ?? task.promptPath;
+    prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
   }
-  const promptPath = inputTask?.prompt_path ?? task.promptPath;
-  return promptPath ? readFileSync(promptPath, "utf8") : "";
+  return prompt.replaceAll(task.artifactDir, mirroredArtifactDir(task));
 }
 
 function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
@@ -83,6 +86,28 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
 
 function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
   return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
+}
+
+function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
+  return path.join(task.workspacePath, "artifacts", task.attemptId);
+}
+
+function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDir: string): string[] {
+  const roots = [canonicalArtifactDir];
+  try {
+    const workspaceRoot = realpathSync(task.workspacePath);
+    const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
+    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || !existsSync(candidate)) {
+      return roots;
+    }
+    const mirroredRoot = realpathSync(candidate);
+    if (isStrictlyInsideDirectory(workspaceRoot, mirroredRoot)) {
+      roots.push(mirroredRoot);
+    }
+  } catch {
+    // The strict verifier below will report the required output as missing.
+  }
+  return roots;
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
@@ -113,16 +138,31 @@ function resolveNonEmptyRegularArtifactFile(
 
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
   const artifacts = task.outputs.map((output) => {
-    const artifactPath = path.resolve(artifactDir, output.path);
-    if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
+    const canonicalPath = path.resolve(artifactDir, output.path);
+    if (!isStrictlyInsideDirectory(artifactDir, canonicalPath)) {
       throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
     }
-    const resolvedPath = resolveRegularArtifactFile(
-      artifactDir,
-      artifactPath,
-      `artifact-contract failure: output is not a regular file ${output.path}`
-    );
+    const failureMessage = `artifact-contract failure: output is not a regular file ${output.path}`;
+    let artifactRoot: string | undefined;
+    let resolvedPath: string | undefined;
+    for (const candidateRoot of artifactRoots) {
+      try {
+        resolvedPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          failureMessage
+        );
+        artifactRoot = candidateRoot;
+        break;
+      } catch {
+        // Try the exact task-owned worktree mirror before failing closed.
+      }
+    }
+    if (artifactRoot === undefined || resolvedPath === undefined) {
+      throw new Error(failureMessage);
+    }
     const contents = readFileSync(resolvedPath, "utf8");
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
@@ -133,7 +173,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
       );
     }
     if (output.contract === "ultrafuzz/generated-tests@1") {
-      verifyGeneratedTestFiles(artifactDir, validation.value);
+      verifyGeneratedTestFiles(artifactRoot, validation.value);
     }
     return {
       path: output.path,

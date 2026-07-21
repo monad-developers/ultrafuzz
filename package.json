@@ -20,7 +20,7 @@
     "test": "pnpm run test:ci-scripts && pnpm -r test",
     "test:ci-scripts": "bun test scripts/ci/*.test.ts",
     "validate:release": "node scripts/validate-release.mjs",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r --workspace-concurrency=1 typecheck"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
