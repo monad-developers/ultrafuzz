@@ -117,6 +117,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // preserving outputs; this remains deterministic and model-free.
       prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
+      normalizeLegacyFindingEvidence(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
       // Keep artifact validation inside the agent task completion boundary.
@@ -276,6 +277,69 @@ function agentResultSummary(result: unknown): string | undefined {
     }
   }
   return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
+}
+
+function normalizeLegacyFindingEvidence(task: (typeof taskSpecs)[number]): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/findings@1") {
+      continue;
+    }
+    for (const candidateRoot of artifactRoots) {
+      let resolvedPath: string;
+      try {
+        resolvedPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+      } catch {
+        continue;
+      }
+      const contents = readFileSync(resolvedPath, "utf8");
+      if (validateArtifactContract(output.contract, contents, output.path).ok) {
+        break;
+      }
+      const normalized = normalizeLegacyFindingEvidenceArray(contents);
+      if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
+        writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+        break;
+      }
+    }
+  }
+}
+
+function normalizeLegacyFindingEvidenceArray(contents: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  let changed = false;
+  const findings = parsed.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return entry;
+    }
+    const finding = entry as { evidence?: unknown };
+    const evidence = finding.evidence;
+    if (
+      typeof evidence !== "string" &&
+      (typeof evidence !== "object" || evidence === null || Array.isArray(evidence))
+    ) {
+      return entry;
+    }
+    changed = true;
+    return { ...finding, evidence: [evidence] };
+  });
+
+  return changed ? `${JSON.stringify(findings, null, 2)}\n` : undefined;
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {

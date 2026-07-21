@@ -87,6 +87,24 @@ test("generated Smithers agent normalizes legacy generated-test string lists", (
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });
 
+test("generated Smithers agent normalizes legacy scalar finding evidence", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const normalizerStart = source.indexOf("function normalizeLegacyFindingEvidence");
+  const generatedTestNormalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
+
+  assert.ok(normalizerStart >= 0, source);
+  assert.ok(generatedTestNormalizerStart > normalizerStart, source);
+
+  const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
+  assert.match(normalizer, /output\.contract !== "ultrafuzz\/findings@1"/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
+  assert.match(normalizer, /typeof evidence !== "string"/u);
+  assert.match(normalizer, /evidence === null \|\| Array\.isArray\(evidence\)/u);
+  assert.match(normalizer, /return \{ \.\.\.finding, evidence: \[evidence\] \}/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
+  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+});
+
 test("generated Smithers agent mirrors declared workspace tests before strict verification", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const materializerStart = source.indexOf("function materializeGeneratedTestCompanions");
