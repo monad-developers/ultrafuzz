@@ -1258,8 +1258,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
-  assert.match(workflowSource, /output\.contract === "ultrafuzz\/findings@1" && !output\.primary/);
-  assert.match(workflowSource, /writeFileSync\(artifactPath, "\[\]\\n"/);
+  assert.match(workflowSource, /function canonicalEmptyArtifact/);
+  assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
+  assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
+  assert.match(workflowSource, /function artifactAwareAgent/);
+  assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
+  assert.match(workflowSource, /verifyArtifacts\(task\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);

@@ -13,7 +13,9 @@ import { z } from "zod/v4";
 // .smithers/agents/ directory this workflow needs.
 import * as projectAgents from "../agents/index.ts";
 
-const { assertRegularFileInside, validateArtifactContract } = await import(__ULTRAFUZZ_ARTIFACTS_MODULE__);
+const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(
+  __ULTRAFUZZ_ARTIFACTS_MODULE__
+);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -77,7 +79,7 @@ function promptForTask(
   return prompt.replaceAll(task.artifactDir, mirroredArtifactDir(task));
 }
 
-function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
+function baseAgentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
   const factory = agentFactories[task.agentRef];
   if (factory === undefined) {
     return agentRegistry[task.agentRef];
@@ -87,6 +89,37 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
     ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort }),
     addDir: [task.artifactDir]
   });
+}
+
+function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
+  const selected = baseAgentForTask(task);
+  if (selected === undefined) {
+    return undefined;
+  }
+  return Array.isArray(selected)
+    ? selected.map((agent) => artifactAwareAgent(task, agent))
+    : artifactAwareAgent(task, selected);
+}
+
+function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike): AgentLike {
+  return {
+    ...(agent.id === undefined ? {} : { id: `${agent.id}:ultrafuzz-artifacts` }),
+    ...(agent.tools === undefined ? {} : { tools: agent.tools }),
+    ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
+    ...(agent.supportsNativeStructuredOutput === undefined
+      ? {}
+      : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
+    ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
+    generate: async (args) => {
+      const result = await agent.generate(args);
+      materializeMissingMarkdownArtifacts(task, result);
+      // Keep artifact validation inside the agent task completion boundary.
+      // This does not create a second model opportunity; it validates and, for
+      // Markdown only, preserves the same agent's final response as its output.
+      verifyArtifacts(task);
+      return result;
+    }
+  };
 }
 
 function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
@@ -139,14 +172,101 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
       throw new Error(`artifact-contract failure: unsafe output parent ${output.path}`);
     }
 
-    // Findings are an optional sidecar for analysis tasks. A valid empty array
-    // lets the agent focus on the primary artifact while still allowing it to
-    // overwrite this file when it discovers concrete findings.
-    if (output.contract === "ultrafuzz/findings@1" && !output.primary && !existsSync(artifactPath)) {
-      writeFileSync(artifactPath, "[]\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const emptyArtifact = canonicalEmptyArtifact(task, output);
+    if (emptyArtifact !== undefined && !existsSync(artifactPath)) {
+      writeFileSync(artifactPath, emptyArtifact, { encoding: "utf8", flag: "wx", mode: 0o600 });
     }
   }
   return { prepared: true };
+}
+
+function canonicalEmptyArtifact(
+  task: (typeof taskSpecs)[number],
+  output: (typeof task.outputs)[number]
+): string | undefined {
+  // A primary findings array canonically represents "no findings". Other
+  // primary outputs must still come from the agent. Non-primary outputs use
+  // their contract-defined empty representation and remain overwritable.
+  if (output.primary && output.contract !== "ultrafuzz/findings@1") {
+    return undefined;
+  }
+  const example = artifactContractDefinition(output.contract).validEmptyExample;
+  if (example === undefined) {
+    return undefined;
+  }
+  return `${example
+    .replaceAll("<run-id>", task.metadata.run.ultrafuzzRunId)
+    .replaceAll("<node-id>", task.metadata.node.concreteNodeId)}\n`;
+}
+
+function materializeMissingMarkdownArtifacts(task: (typeof taskSpecs)[number], result: unknown): void {
+  const summary = agentResultSummary(result);
+  if (summary === undefined) {
+    return;
+  }
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const mirrorRoot = realpathSync(mirroredArtifactDir(task));
+  const title = String(task.metadata.node.label ?? task.metadata.node.concreteNodeId).replace(/[\r\n]+/gu, " ");
+  const fallback = `# ${title}\n\n${summary}\n`;
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/nonempty-markdown@1") {
+      continue;
+    }
+    let invalidArtifactPath: string | undefined;
+    let invalidArtifactRoot: string | undefined;
+    let valid = false;
+    for (const candidateRoot of artifactRoots) {
+      try {
+        const resolvedPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+        const validation = validateArtifactContract(output.contract, readFileSync(resolvedPath, "utf8"), output.path);
+        if (validation.ok) {
+          valid = true;
+          break;
+        }
+        if (invalidArtifactPath === undefined) {
+          invalidArtifactPath = resolvedPath;
+          invalidArtifactRoot = candidateRoot;
+        }
+      } catch {
+        // A missing output is materialized into the exact task-owned mirror.
+      }
+    }
+    if (valid) {
+      continue;
+    }
+    const artifactPath = invalidArtifactPath ?? path.resolve(mirrorRoot, output.path);
+    const artifactRoot = invalidArtifactRoot ?? mirrorRoot;
+    if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
+      throw new Error(`artifact-contract failure: unsafe Markdown output path ${output.path}`);
+    }
+    writeFileSync(artifactPath, fallback, {
+      encoding: "utf8",
+      flag: invalidArtifactPath === undefined ? "wx" : "w",
+      mode: 0o600
+    });
+  }
+}
+
+function agentResultSummary(result: unknown): string | undefined {
+  if (typeof result !== "object" || result === null) {
+    return typeof result === "string" && result.trim().length > 0 ? result.trim() : undefined;
+  }
+  const record = result as { output?: unknown; experimental_output?: unknown; text?: unknown };
+  for (const candidate of [record.output, record.experimental_output]) {
+    if (typeof candidate === "object" && candidate !== null) {
+      const summary = (candidate as { summary?: unknown }).summary;
+      if (typeof summary === "string" && summary.trim().length > 0) {
+        return summary.trim();
+      }
+    }
+  }
+  return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {

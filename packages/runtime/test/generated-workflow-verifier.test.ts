@@ -21,7 +21,10 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.ok(workflowStart > verifierStart, source);
 
   const helper = source.slice(helperStart, verifierStart);
-  assert.match(source, /const \{ assertRegularFileInside, validateArtifactContract \} = await import/u);
+  assert.match(
+    source,
+    /const \{ artifactContractDefinition, assertRegularFileInside, validateArtifactContract \} = await import/u
+  );
   assert.match(source, /assertRegularFileInside\(artifactDir, artifactPath, failureMessage\)/u);
   assert.match(helper, /resolveRegularArtifactFile\(artifactDir, artifactPath, missingFailureMessage\)/u);
   assert.match(helper, /statSync\(resolvedPath\)\.size === 0/u);
@@ -32,7 +35,7 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.match(generatedTestVerifier, /generated test file is empty \$\{relativePath\}/u);
 });
 
-test("generated Smithers workflow prepares only non-primary findings sidecars", () => {
+test("generated Smithers workflow prepares canonical empty sidecars and primary findings", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const verifierStart = source.indexOf("function resolveRegularArtifactFile");
@@ -41,10 +44,27 @@ test("generated Smithers workflow prepares only non-primary findings sidecars", 
   assert.ok(verifierStart > preparationStart, source);
 
   const preparation = source.slice(preparationStart, verifierStart);
-  assert.match(preparation, /output\.contract === "ultrafuzz\/findings@1" && !output\.primary/u);
-  assert.match(preparation, /writeFileSync\(artifactPath, "\[\]\\n"/u);
+  assert.match(preparation, /function canonicalEmptyArtifact/u);
+  assert.match(preparation, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/u);
+  assert.match(preparation, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/u);
   assert.match(source, /id=\{task\.preparationId\}/u);
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
+});
+
+test("generated Smithers agent preserves its final response as missing Markdown", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+
+  assert.ok(agentStart >= 0, source);
+  assert.ok(preparationStart > agentStart, source);
+
+  const agent = source.slice(agentStart, preparationStart);
+  assert.match(agent, /const result = await agent\.generate\(args\)/u);
+  assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /verifyArtifacts\(task\)/u);
+  assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
+  assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
