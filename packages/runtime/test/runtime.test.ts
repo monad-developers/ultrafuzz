@@ -1320,14 +1320,15 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(workflowSource, /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);/);
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
-  assert.match(workflowSource, /normalizeLegacyFindingEvidence\(task\)/);
+  assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
   assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
   assert.match(workflowSource, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/);
   assert.match(workflowSource, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/);
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
-  assert.match(workflowSource, /return \{ \.\.\.finding, evidence: \[evidence\] \}/);
+  assert.match(workflowSource, /finding = \{ \.\.\.finding, evidence: \[evidence\] \}/);
+  assert.match(workflowSource, /finding = \{ \.\.\.finding, confidence: String\(confidence\) \}/);
   assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
   assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
   assert.match(workflowSource, /verifyArtifacts\(task\);/);

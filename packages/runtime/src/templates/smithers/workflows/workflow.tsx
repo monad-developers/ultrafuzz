@@ -117,7 +117,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // preserving outputs; this remains deterministic and model-free.
       prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
-      normalizeLegacyFindingEvidence(task);
+      normalizeLegacyFindingFields(task);
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
@@ -280,7 +280,7 @@ function agentResultSummary(result: unknown): string | undefined {
   return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
 }
 
-function normalizeLegacyFindingEvidence(task: (typeof taskSpecs)[number]): void {
+function normalizeLegacyFindingFields(task: (typeof taskSpecs)[number]): void {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
 
@@ -303,7 +303,7 @@ function normalizeLegacyFindingEvidence(task: (typeof taskSpecs)[number]): void 
       if (validateArtifactContract(output.contract, contents, output.path).ok) {
         break;
       }
-      const normalized = normalizeLegacyFindingEvidenceArray(contents);
+      const normalized = normalizeLegacyFindingArray(contents);
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
         break;
@@ -312,7 +312,7 @@ function normalizeLegacyFindingEvidence(task: (typeof taskSpecs)[number]): void 
   }
 }
 
-function normalizeLegacyFindingEvidenceArray(contents: string): string | undefined {
+function normalizeLegacyFindingArray(contents: string): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -328,16 +328,21 @@ function normalizeLegacyFindingEvidenceArray(contents: string): string | undefin
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       return entry;
     }
-    const finding = entry as { evidence?: unknown };
+    let finding = entry as Record<string, unknown>;
     const evidence = finding.evidence;
     if (
-      typeof evidence !== "string" &&
-      (typeof evidence !== "object" || evidence === null || Array.isArray(evidence))
+      typeof evidence === "string" ||
+      (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence))
     ) {
-      return entry;
+      finding = { ...finding, evidence: [evidence] };
+      changed = true;
     }
-    changed = true;
-    return { ...finding, evidence: [evidence] };
+    const confidence = finding.confidence;
+    if (typeof confidence === "number" && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1) {
+      finding = { ...finding, confidence: String(confidence) };
+      changed = true;
+    }
+    return finding;
   });
 
   return changed ? `${JSON.stringify(findings, null, 2)}\n` : undefined;
