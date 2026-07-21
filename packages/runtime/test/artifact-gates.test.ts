@@ -415,6 +415,21 @@ test("final report gate rejects dangling property references while allowing hist
   );
   assert.equal(verifyRequiredArtifactsForAttempt(historicalLayout, node, node.id).ok, true);
 
+  const smokeLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-smoke-report" });
+  writeArtifact(
+    smokeLayout,
+    node.id,
+    "report.json",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: []
+    })
+  );
+  assert.equal(verifyRequiredArtifactsForAttempt(smokeLayout, node, node.id).ok, true);
+
   const currentLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-current-report" });
   writeArtifact(
     currentLayout,
