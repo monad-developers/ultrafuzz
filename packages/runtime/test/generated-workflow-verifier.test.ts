@@ -62,9 +62,27 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   const agent = source.slice(agentStart, preparationStart);
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
+  assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
+});
+
+test("generated Smithers agent normalizes legacy generated-test string lists", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const normalizerStart = source.indexOf("function normalizeLegacyGeneratedTestManifests");
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+
+  assert.ok(normalizerStart >= 0, source);
+  assert.ok(resolverStart > normalizerStart, source);
+
+  const normalizer = source.slice(normalizerStart, resolverStart);
+  assert.match(normalizer, /output\.contract !== "ultrafuzz\/generated-tests@1"/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
+  assert.match(normalizer, /manifest\.generated_tests\.some\(\(entry\) => typeof entry === "string"\)/u);
+  assert.match(normalizer, /typeof entry === "string" \? \{ path: entry \} : entry/u);
+  assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
+  assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {

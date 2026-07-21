@@ -1263,6 +1263,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
+  assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
+  assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
   assert.match(workflowSource, /verifyArtifacts\(task\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);

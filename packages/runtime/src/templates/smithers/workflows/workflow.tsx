@@ -113,9 +113,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
     generate: async (args) => {
       const result = await agent.generate(args);
       materializeMissingMarkdownArtifacts(task, result);
+      normalizeLegacyGeneratedTestManifests(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
+      // Generated-test normalization only adapts the agent's legacy string-list
+      // representation; the strict verifier still validates every companion.
       verifyArtifacts(task);
       return result;
     }
@@ -267,6 +270,68 @@ function agentResultSummary(result: unknown): string | undefined {
     }
   }
   return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
+}
+
+function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/generated-tests@1") {
+      continue;
+    }
+    for (const candidateRoot of artifactRoots) {
+      let resolvedPath: string;
+      try {
+        resolvedPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+      } catch {
+        continue;
+      }
+      const contents = readFileSync(resolvedPath, "utf8");
+      if (validateArtifactContract(output.contract, contents, output.path).ok) {
+        break;
+      }
+      const normalized = normalizeLegacyGeneratedTestManifest(contents);
+      if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
+        writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+        break;
+      }
+    }
+  }
+}
+
+function normalizeLegacyGeneratedTestManifest(contents: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const manifest = parsed as { generated_tests?: unknown };
+  if (
+    !Array.isArray(manifest.generated_tests) ||
+    !manifest.generated_tests.some((entry) => typeof entry === "string") ||
+    !manifest.generated_tests.every(
+      (entry) => typeof entry === "string" || (typeof entry === "object" && entry !== null && !Array.isArray(entry))
+    )
+  ) {
+    return undefined;
+  }
+  return `${JSON.stringify(
+    {
+      ...manifest,
+      generated_tests: manifest.generated_tests.map((entry) => (typeof entry === "string" ? { path: entry } : entry))
+    },
+    null,
+    2
+  )}\n`;
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
