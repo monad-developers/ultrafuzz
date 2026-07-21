@@ -24,7 +24,11 @@ drop evidence-supported findings just because a native runner was unavailable,
 and never invent a finding to satisfy CI.
 
 Use only High, Medium, or Low for severity, impact, and likelihood. Recompute
-severity from evidence. Normalize each production issue to include at least:
+severity from evidence with this exact matrix: Low impact is Low; Medium impact
+with Low likelihood is Low and otherwise Medium; High impact with Low
+likelihood is Medium and otherwise High. Set both `severity` and
+`severity_guess` to that matrix result. Normalize each production issue to
+include at least:
 
 - `schema_version: "1.0"`, stable `id`, concise `title`, `status`,
   `severity_guess`, `confidence`, and `summary`;
