@@ -348,6 +348,17 @@ function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed
     finding.confidence = String(finding.confidence);
     changed = true;
   }
+  const strategy = finding.strategy;
+  if (typeof strategy === "object" && strategy !== null && !Array.isArray(strategy)) {
+    const legacyStrategy = [
+      (strategy as Record<string, unknown>).strategy,
+      (strategy as Record<string, unknown>).origin
+    ].find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
+    if (legacyStrategy !== undefined) {
+      finding.strategy = legacyStrategy.trim();
+      changed = true;
+    }
+  }
   const evidence = finding.evidence;
   if (typeof evidence === "string" || (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence))) {
     finding.evidence = [evidence];

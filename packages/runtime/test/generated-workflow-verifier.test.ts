@@ -102,6 +102,9 @@ test("generated Smithers agent normalizes legacy finding field shapes", () => {
   assert.match(normalizer, /typeof finding\.confidence === "number"/u);
   assert.match(normalizer, /Number\.isFinite\(finding\.confidence\)/u);
   assert.match(normalizer, /finding\.confidence = String\(finding\.confidence\)/u);
+  assert.match(normalizer, /typeof strategy === "object" && strategy !== null && !Array\.isArray\(strategy\)/u);
+  assert.match(normalizer, /\(strategy as Record<string, unknown>\)\.origin/u);
+  assert.match(normalizer, /finding\.strategy = legacyStrategy\.trim\(\)/u);
   assert.match(normalizer, /typeof evidence === "string"/u);
   assert.match(normalizer, /finding\.evidence = \[evidence\]/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);

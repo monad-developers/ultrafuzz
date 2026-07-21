@@ -1329,6 +1329,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
   assert.match(workflowSource, /typeof finding\.confidence === "number"/);
   assert.match(workflowSource, /finding\.confidence = String\(finding\.confidence\)/);
+  assert.match(workflowSource, /\(strategy as Record<string, unknown>\)\.origin/);
+  assert.match(workflowSource, /finding\.strategy = legacyStrategy\.trim\(\)/);
   assert.match(workflowSource, /finding\.evidence = \[evidence\]/);
   assert.match(workflowSource, /report\.issues\.map/);
   assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
