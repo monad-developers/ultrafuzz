@@ -1,13 +1,49 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { expectedSeverityFromMatrix, validateSeverityMatrixArtifact } from "../src/severity-matrix.js";
+import {
+  expectedSeverityFromMatrix,
+  normalizeFinalReportSeverityRecord,
+  validateSeverityMatrixArtifact
+} from "../src/severity-matrix.js";
 
 test("severity matrix caps low-likelihood findings", () => {
   assert.equal(expectedSeverityFromMatrix("High", "Low"), "Medium");
   assert.equal(expectedSeverityFromMatrix("Medium", "Low"), "Low");
   assert.equal(expectedSeverityFromMatrix("High", "Medium"), "High");
   assert.equal(expectedSeverityFromMatrix("Low", "High"), "Low");
+});
+
+test("final report normalization reconciles severity aliases to the declared matrix", () => {
+  const result = normalizeFinalReportSeverityRecord({
+    severity: "High",
+    final_severity: "high",
+    severity_guess: "medium",
+    impact: "high",
+    likelihood: "low"
+  });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.value, {
+    severity: "Medium",
+    final_severity: "Medium",
+    severity_guess: "Medium",
+    impact: "High",
+    likelihood: "Low"
+  });
+  assert.deepEqual(
+    validateSeverityMatrixArtifact({
+      kind: "final-report",
+      artifactPath: "/tmp/report.json",
+      artifact: { issues: [result.value] }
+    }),
+    []
+  );
+});
+
+test("final report normalization does not infer missing matrix evidence", () => {
+  const issue = { severity: "High", impact: "High" };
+  assert.deepEqual(normalizeFinalReportSeverityRecord(issue), { value: issue, changed: false });
 });
 
 test("final report validation blocks matrix-inconsistent production issues", () => {

@@ -16,6 +16,7 @@ import * as projectAgents from "../agents/index.ts";
 const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(
   __ULTRAFUZZ_ARTIFACTS_MODULE__
 );
+const { normalizeFinalReportSeverityRecord } = await import(__ULTRAFUZZ_RUNTIME_MODULE__);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -387,12 +388,13 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
         continue;
       }
       const contents = readFileSync(resolvedPath, "utf8");
-      if (validateArtifactContract(output.contract, contents, output.path).ok) {
-        break;
-      }
+      const originalIsValid = validateArtifactContract(output.contract, contents, output.path).ok;
       const normalized = normalizeLegacyReportProvenanceFields(contents);
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+        break;
+      }
+      if (originalIsValid) {
         break;
       }
     }
@@ -415,8 +417,9 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
   const issues = Array.isArray(report.issues)
     ? report.issues.map((entry) => {
         const normalized = normalizeLegacyFindingRecord(entry);
-        changed ||= normalized.changed;
-        return normalized.value;
+        const severity = normalizeFinalReportSeverityRecord(normalized.value);
+        changed ||= normalized.changed || severity.changed;
+        return severity.value;
       })
     : report.issues;
   const propertyProvenance = Array.isArray(report.property_provenance)
