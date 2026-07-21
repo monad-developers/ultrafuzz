@@ -31,6 +31,7 @@ export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.o
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
+const EVAL_HISTORY_PUBLIC_SMOKE_DEDUPE_FILE = "deduped-findings.json" as const;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = "smoke" | "full";
@@ -416,7 +417,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       )
         ? "succeeded"
         : "genuine-task-failures";
-      const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath);
+      const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath, input.lane);
       const model = requiredConsistent(
         rows.map((row) => row.runner_model),
         "runner model",
@@ -578,7 +579,8 @@ function targetPublicationForRows(
   rows: EvalMatrixRow[],
   scores: Array<EvalScoreSummary["rows"][number]>,
   status: EvalHistoryObservationStatus,
-  bundlePath: string
+  bundlePath: string,
+  lane: EvalHistoryLane
 ): EvalHistoryTargetPublication {
   const first = rows[0];
   if (first === undefined) throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "publication target has no rows");
@@ -610,10 +612,16 @@ function targetPublicationForRows(
     publication_location: {
       bundle_path: bundlePath,
       report_paths: rows.flatMap((row) =>
-        EVAL_HISTORY_PUBLIC_REPORT_FILES.map((reportFile) => `reports/${row.id}/${reportFile}`)
+        historyPublicReportFiles(lane).map((reportFile) => `reports/${row.id}/${reportFile}`)
       )
     }
   };
+}
+
+function historyPublicReportFiles(lane: EvalHistoryLane): readonly string[] {
+  return lane === "smoke"
+    ? [...EVAL_HISTORY_PUBLIC_REPORT_FILES, EVAL_HISTORY_PUBLIC_SMOKE_DEDUPE_FILE]
+    : EVAL_HISTORY_PUBLIC_REPORT_FILES;
 }
 
 function matrixRowTargetFramework(row: EvalMatrixRow): string | undefined {

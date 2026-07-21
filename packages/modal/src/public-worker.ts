@@ -234,10 +234,15 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
-        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
-          root: input.dataRoot,
-          source: diagnosticsPath
-        }),
+        files: publicBundleSources(
+          prepared.controlRoot,
+          prepared.evalRunId,
+          {
+            root: input.dataRoot,
+            source: diagnosticsPath
+          },
+          input.config.public_benchmark.lane
+        ),
         forbiddenSecretValues
       });
       await writePublicBundleAtomic(bundlePath, bundle);
@@ -691,7 +696,8 @@ async function cloneAtCommit(
 export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
-  diagnostics: { root: string; source: string }
+  diagnostics: { root: string; source: string },
+  lane: "smoke" | "full" = "full"
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
@@ -749,7 +755,15 @@ export function publicBundleSources(
     const candidates = [
       { name: "report.json", source: report },
       { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: path.join(path.dirname(report), "findings.normalized.json") }
+      { name: "findings.normalized.json", source: path.join(path.dirname(report), "findings.normalized.json") },
+      ...(lane === "smoke"
+        ? [
+            {
+              name: "deduped-findings.json",
+              source: path.join(record.ultrafuzz_run_root, "artifacts", "dedupe-findings", "deduped-findings.json")
+            }
+          ]
+        : [])
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
