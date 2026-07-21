@@ -303,9 +303,22 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
         path.resolve(candidateRoot, output.path),
         `artifact-contract failure: output is not a regular file ${output.path}`
       );
-      const validation = validateArtifactContract(output.contract, readFileSync(candidatePath, "utf8"), output.path);
+      const contents = readFileSync(candidatePath, "utf8");
+      const validation = validateArtifactContract("ultrafuzz/findings@1", contents, output.path);
       if (validation.ok && Array.isArray(validation.value) && validation.value.length > 0) {
         return;
+      }
+      const normalized = normalizeLegacyFindingArray(contents);
+      if (normalized !== undefined) {
+        const normalizedValidation = validateArtifactContract("ultrafuzz/findings@1", normalized, output.path);
+        if (
+          normalizedValidation.ok &&
+          Array.isArray(normalizedValidation.value) &&
+          normalizedValidation.value.length > 0
+        ) {
+          writeFileSync(candidatePath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+          return;
+        }
       }
     } catch {
       // Recover from the already validated dependency findings below.
@@ -346,7 +359,11 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
   if (!isStrictlyInsideDirectory(mirrorRoot, outputPath)) {
     throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
   }
-  writeFileSync(outputPath, `${JSON.stringify(retained, null, 2)}\n`, {
+  const serialized = `${JSON.stringify(retained, null, 2)}\n`;
+  if (!validateArtifactContract("ultrafuzz/findings@1", serialized, output.path).ok) {
+    throw new Error(`artifact-contract failure: retained findings did not form ${output.path}`);
+  }
+  writeFileSync(outputPath, serialized, {
     encoding: "utf8",
     flag: existsSync(outputPath) ? "w" : "wx",
     mode: 0o600

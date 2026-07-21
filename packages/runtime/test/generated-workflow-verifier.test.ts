@@ -87,6 +87,8 @@ test("generated Smithers agent retains validated strategy findings when dedupe o
   assert.match(fallback, /validation\.value\.length > 0/u);
   assert.match(fallback, /task\.metadata\.dependencies\.attemptIds/u);
   assert.match(fallback, /validateArtifactContract\(\s*"ultrafuzz\/findings@1"/u);
+  assert.match(fallback, /normalizeLegacyFindingArray\(contents\)/u);
+  assert.match(fallback, /writeFileSync\(candidatePath, normalized/u);
   assert.match(fallback, /retained\.push\(\.\.\.validation\.value\)/u);
   assert.match(fallback, /JSON\.stringify\(retained, null, 2\)/u);
 });
