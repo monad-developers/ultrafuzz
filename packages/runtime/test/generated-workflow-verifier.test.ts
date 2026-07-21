@@ -64,6 +64,7 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   assert.match(agent, /prepareArtifactMirror\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
+  assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
   assert.match(agent, /verifyArtifacts\(task\)/u);
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
@@ -84,6 +85,23 @@ test("generated Smithers agent normalizes legacy generated-test string lists", (
   assert.match(normalizer, /typeof entry === "string" \? \{ path: entry \} : entry/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
+});
+
+test("generated Smithers agent mirrors declared workspace tests before strict verification", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const materializerStart = source.indexOf("function materializeGeneratedTestCompanions");
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+
+  assert.ok(materializerStart >= 0, source);
+  assert.ok(resolverStart > materializerStart, source);
+
+  const materializer = source.slice(materializerStart, resolverStart);
+  assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
+  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", workspaceRelativePath\)/u);
+  assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
+  assert.match(materializer, /sourceBefore\.nlink !== 1/u);
+  assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
+  assert.match(materializer, /generated test copy mismatch/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {

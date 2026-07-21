@@ -1265,6 +1265,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);/);
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
+  assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
+  assert.match(workflowSource, /path\.resolve\(workspaceRoot, "test", "foundry", workspaceRelativePath\)/);
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
   assert.match(workflowSource, /verifyArtifacts\(task\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);

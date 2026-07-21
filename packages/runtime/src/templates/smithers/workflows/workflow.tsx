@@ -118,11 +118,13 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       prepareArtifactMirror(task);
       materializeMissingMarkdownArtifacts(task, result);
       normalizeLegacyGeneratedTestManifests(task);
+      materializeGeneratedTestCompanions(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
-      // Generated-test normalization only adapts the agent's legacy string-list
-      // representation; the strict verifier still validates every companion.
+      // Generated-test handling only adapts the agent's legacy string-list
+      // representation and mirrors tests from their mandated workspace path;
+      // the strict verifier still validates every companion.
       verifyArtifacts(task);
       return result;
     }
@@ -336,6 +338,115 @@ function normalizeLegacyGeneratedTestManifest(contents: string): string | undefi
     null,
     2
   )}\n`;
+}
+
+function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const workspaceRoot = realpathSync(task.workspacePath);
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/generated-tests@1") {
+      continue;
+    }
+    for (const candidateRoot of artifactRoots) {
+      let resolvedManifestPath: string;
+      try {
+        resolvedManifestPath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+      } catch {
+        continue;
+      }
+      const validation = validateArtifactContract(
+        output.contract,
+        readFileSync(resolvedManifestPath, "utf8"),
+        output.path
+      );
+      if (!validation.ok) {
+        continue;
+      }
+      const entries = (validation.value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
+      for (const entry of entries) {
+        materializeGeneratedTestCompanion(workspaceRoot, candidateRoot, entry.path ?? "");
+      }
+      break;
+    }
+  }
+}
+
+function materializeGeneratedTestCompanion(workspaceRoot: string, artifactRoot: string, relativePath: string): void {
+  const generatedPrefix = "generated-tests/";
+  if (!relativePath.startsWith(generatedPrefix) || relativePath.length === generatedPrefix.length) {
+    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
+  }
+  const artifactPath = path.resolve(artifactRoot, relativePath);
+  if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
+    throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
+  }
+  if (existsSync(artifactPath)) {
+    resolveNonEmptyRegularArtifactFile(
+      artifactRoot,
+      artifactPath,
+      `artifact-contract failure: generated test file is missing ${relativePath}`,
+      `artifact-contract failure: generated test file is empty ${relativePath}`
+    );
+    return;
+  }
+
+  const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
+  const sourceCandidate = path.resolve(workspaceRoot, "test", "foundry", workspaceRelativePath);
+  if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
+    throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
+  }
+  const missingSource = `artifact-contract failure: generated test file is missing ${relativePath}`;
+  const emptySource = `artifact-contract failure: generated test file is empty ${relativePath}`;
+  const sourcePath = resolveNonEmptyRegularArtifactFile(workspaceRoot, sourceCandidate, missingSource, emptySource);
+  const sourceBefore = statSync(sourcePath);
+  if (sourceBefore.nlink !== 1) {
+    throw new Error(`artifact-contract failure: generated test source is hard-linked ${relativePath}`);
+  }
+  const contents = readFileSync(sourcePath);
+  const sourcePathAfter = resolveNonEmptyRegularArtifactFile(
+    workspaceRoot,
+    sourceCandidate,
+    missingSource,
+    emptySource
+  );
+  const sourceAfter = statSync(sourcePathAfter);
+  if (
+    sourcePathAfter !== sourcePath ||
+    sourceBefore.dev !== sourceAfter.dev ||
+    sourceBefore.ino !== sourceAfter.ino ||
+    sourceBefore.size !== sourceAfter.size ||
+    sourceBefore.mtimeMs !== sourceAfter.mtimeMs ||
+    sourceAfter.nlink !== 1
+  ) {
+    throw new Error(`artifact-contract failure: generated test source changed ${relativePath}`);
+  }
+
+  const artifactParent = path.dirname(artifactPath);
+  mkdirSync(artifactParent, { recursive: true });
+  const resolvedParent = realpathSync(artifactParent);
+  if (!isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
+    throw new Error(`artifact-contract failure: unsafe generated test parent ${relativePath}`);
+  }
+  const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
+  writeFileSync(anchoredArtifactPath, contents, { flag: "wx", mode: 0o600 });
+  const resolvedArtifactPath = resolveNonEmptyRegularArtifactFile(
+    artifactRoot,
+    anchoredArtifactPath,
+    `artifact-contract failure: generated test file is missing ${relativePath}`,
+    `artifact-contract failure: generated test file is empty ${relativePath}`
+  );
+  if (
+    createHash("sha256").update(readFileSync(resolvedArtifactPath)).digest("hex") !==
+    createHash("sha256").update(contents).digest("hex")
+  ) {
+    throw new Error(`artifact-contract failure: generated test copy mismatch ${relativePath}`);
+  }
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
