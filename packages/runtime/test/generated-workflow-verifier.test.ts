@@ -99,12 +99,11 @@ test("generated Smithers agent normalizes legacy finding field shapes", () => {
   const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
   assert.match(normalizer, /output\.contract !== "ultrafuzz\/findings@1"/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
+  assert.match(normalizer, /typeof finding\.confidence === "number"/u);
+  assert.match(normalizer, /Number\.isFinite\(finding\.confidence\)/u);
+  assert.match(normalizer, /finding\.confidence = String\(finding\.confidence\)/u);
   assert.match(normalizer, /typeof evidence === "string"/u);
-  assert.match(normalizer, /evidence !== null && !Array\.isArray\(evidence\)/u);
-  assert.match(normalizer, /finding = \{ \.\.\.finding, evidence: \[evidence\] \}/u);
-  assert.match(normalizer, /typeof confidence === "number" && Number\.isFinite\(confidence\)/u);
-  assert.match(normalizer, /confidence >= 0 && confidence <= 1/u);
-  assert.match(normalizer, /finding = \{ \.\.\.finding, confidence: String\(confidence\) \}/u);
+  assert.match(normalizer, /finding\.evidence = \[evidence\]/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });
@@ -120,6 +119,8 @@ test("generated Smithers agent normalizes legacy unavailable report provenance f
   const normalizer = source.slice(normalizerStart, generatedTestNormalizerStart);
   assert.match(normalizer, /output\.contract !== "ultrafuzz\/report@1"/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, contents, output\.path\)\.ok/u);
+  assert.match(normalizer, /report\.issues\.map/u);
+  assert.match(normalizer, /normalizeLegacyFindingRecord\(entry\)/u);
   assert.match(normalizer, /\["implementation_paths", "test_paths"\]/u);
   assert.match(normalizer, /provenance\[field\] = \[\]/u);
   assert.match(normalizer, /\["fuzzer_backend", "fuzzer_backends"\]/u);

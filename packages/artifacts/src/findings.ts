@@ -140,7 +140,7 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   normalized.title = requiredString(value, "title", index);
   normalized.status = requiredString(value, "status", index);
   normalized.severity_guess = requiredString(value, "severity_guess", index);
-  normalized.confidence = requiredString(value, "confidence", index);
+  normalized.confidence = normalizedConfidence(value, index);
   normalized.summary = requiredString(value, "summary", index);
   if (value.triage_classification !== undefined && value.triage_classification !== null) {
     normalized.triage_classification = requiredEnum(value, "triage_classification", TRIAGE_CLASSIFICATIONS, index);
@@ -175,6 +175,17 @@ function requiredString(record: Record<string, unknown>, key: string, index: num
     throw new FindingsValidationError(`finding ${index} missing required field ${key}`);
   }
   return value;
+}
+
+function normalizedConfidence(record: Record<string, unknown>, index: number): string {
+  const value = record.confidence;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new FindingsValidationError(`finding ${index} field confidence must be a number from 0 through 1`);
+    }
+    return String(value);
+  }
+  return requiredString(record, "confidence", index);
 }
 
 function requiredEnum<const T extends readonly string[]>(
@@ -278,6 +289,7 @@ function validateEvidence(value: unknown, index: number): void {
     optionalString(entry, "kind");
     optionalString(entry, "command");
     const existingLine = optionalLineNumber(entry, "line");
+    const existingEndLine = optionalLineNumber(entry, "end_line");
     const evidencePath = optionalString(entry, "path");
     if (evidencePath !== undefined && !path.isAbsolute(evidencePath)) {
       if (looksLikeEvidenceCommand(evidencePath)) {
@@ -299,6 +311,19 @@ function validateEvidence(value: unknown, index: number): void {
         entry.line = reference.line;
       } else if (existingLine !== undefined) {
         entry.line = existingLine;
+      }
+      if (reference.endLine !== undefined) {
+        if (existingEndLine !== undefined && existingEndLine !== reference.endLine) {
+          throw new FindingsValidationError(`evidence path end line conflicts with existing end_line field`);
+        }
+        entry.end_line = reference.endLine;
+      } else if (existingEndLine !== undefined) {
+        entry.end_line = existingEndLine;
+      }
+      const normalizedLine = reference.line ?? existingLine;
+      const normalizedEndLine = reference.endLine ?? existingEndLine;
+      if (normalizedLine !== undefined && normalizedEndLine !== undefined && normalizedEndLine < normalizedLine) {
+        throw new FindingsValidationError(`evidence end_line must not precede line`);
       }
       if (reference.fragment !== undefined) {
         if (existingFragment !== undefined && existingFragment !== reference.fragment) {
@@ -327,13 +352,21 @@ function looksLikeEvidenceCommand(value: string): boolean {
 function normalizeFindingMetadataPathReference(
   value: string,
   key: string
-): { path: string; fragment?: string; line?: number } {
+): { path: string; fragment?: string; line?: number; endLine?: number } {
   const hashIndex = value.indexOf("#");
   if (hashIndex === -1) {
     const lineReference = splitLineReference(value);
     const relativePath = lineReference?.path ?? value;
     validateFindingMetadataRelativePath(relativePath, key);
-    return { path: relativePath, ...(lineReference === undefined ? {} : { line: lineReference.line }) };
+    return {
+      path: relativePath,
+      ...(lineReference === undefined
+        ? {}
+        : {
+            line: lineReference.line,
+            ...(lineReference.endLine === undefined ? {} : { endLine: lineReference.endLine })
+          })
+    };
   }
 
   const relativePath = value.slice(0, hashIndex);
@@ -343,17 +376,20 @@ function normalizeFindingMetadataPathReference(
   return { path: relativePath, fragment };
 }
 
-function splitLineReference(value: string): { path: string; line: number } | undefined {
-  const match = /^(?<path>.+):(?<line>[1-9][0-9]*)$/u.exec(value);
+function splitLineReference(value: string): { path: string; line: number; endLine?: number } | undefined {
+  const match = /^(?<path>.+):(?<line>[1-9][0-9]*)(?:-(?<endLine>[1-9][0-9]*))?$/u.exec(value);
   const linePath = match?.groups?.path;
   const line = match?.groups?.line;
+  const endLine = match?.groups?.endLine;
   if (linePath === undefined || line === undefined) {
     return undefined;
   }
-  return {
-    path: linePath,
-    line: Number(line)
-  };
+  const parsedLine = Number(line);
+  const parsedEndLine = endLine === undefined ? undefined : Number(endLine);
+  if (parsedEndLine !== undefined && parsedEndLine < parsedLine) {
+    throw new FindingsValidationError(`evidence line range must not descend`);
+  }
+  return { path: linePath, line: parsedLine, ...(parsedEndLine === undefined ? {} : { endLine: parsedEndLine }) };
 }
 
 function validateFindingMetadataFragment(value: string, key: string): void {

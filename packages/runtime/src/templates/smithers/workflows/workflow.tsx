@@ -325,27 +325,35 @@ function normalizeLegacyFindingArray(contents: string): string | undefined {
 
   let changed = false;
   const findings = parsed.map((entry) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      return entry;
-    }
-    let finding = entry as Record<string, unknown>;
-    const evidence = finding.evidence;
-    if (
-      typeof evidence === "string" ||
-      (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence))
-    ) {
-      finding = { ...finding, evidence: [evidence] };
-      changed = true;
-    }
-    const confidence = finding.confidence;
-    if (typeof confidence === "number" && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1) {
-      finding = { ...finding, confidence: String(confidence) };
-      changed = true;
-    }
-    return finding;
+    const normalized = normalizeLegacyFindingRecord(entry);
+    changed ||= normalized.changed;
+    return normalized.value;
   });
 
   return changed ? `${JSON.stringify(findings, null, 2)}\n` : undefined;
+}
+
+function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed: boolean } {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return { value: entry, changed: false };
+  }
+  const finding = { ...entry } as Record<string, unknown>;
+  let changed = false;
+  if (
+    typeof finding.confidence === "number" &&
+    Number.isFinite(finding.confidence) &&
+    finding.confidence >= 0 &&
+    finding.confidence <= 1
+  ) {
+    finding.confidence = String(finding.confidence);
+    changed = true;
+  }
+  const evidence = finding.evidence;
+  if (typeof evidence === "string" || (typeof evidence === "object" && evidence !== null && !Array.isArray(evidence))) {
+    finding.evidence = [evidence];
+    changed = true;
+  }
+  return changed ? { value: finding, changed: true } : { value: entry, changed: false };
 }
 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
@@ -390,33 +398,49 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const report = parsed as { property_provenance?: unknown };
-  if (!Array.isArray(report.property_provenance)) {
-    return undefined;
-  }
+  const report = parsed as { issues?: unknown; property_provenance?: unknown };
 
   let changed = false;
-  const propertyProvenance = report.property_provenance.map((entry) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      return entry;
-    }
-    const provenance = { ...entry } as Record<string, unknown>;
-    for (const field of ["implementation_paths", "test_paths"] as const) {
-      if (provenance[field] === "unavailable") {
-        provenance[field] = [];
-        changed = true;
-      }
-    }
-    for (const field of ["fuzzer_backend", "fuzzer_backends"] as const) {
-      if (provenance[field] === "unavailable") {
-        delete provenance[field];
-        changed = true;
-      }
-    }
-    return provenance;
-  });
+  const issues = Array.isArray(report.issues)
+    ? report.issues.map((entry) => {
+        const normalized = normalizeLegacyFindingRecord(entry);
+        changed ||= normalized.changed;
+        return normalized.value;
+      })
+    : report.issues;
+  const propertyProvenance = Array.isArray(report.property_provenance)
+    ? report.property_provenance.map((entry) => {
+        if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+          return entry;
+        }
+        const provenance = { ...entry } as Record<string, unknown>;
+        for (const field of ["implementation_paths", "test_paths"] as const) {
+          if (provenance[field] === "unavailable") {
+            provenance[field] = [];
+            changed = true;
+          }
+        }
+        for (const field of ["fuzzer_backend", "fuzzer_backends"] as const) {
+          if (provenance[field] === "unavailable") {
+            delete provenance[field];
+            changed = true;
+          }
+        }
+        return provenance;
+      })
+    : report.property_provenance;
 
-  return changed ? `${JSON.stringify({ ...report, property_provenance: propertyProvenance }, null, 2)}\n` : undefined;
+  return changed
+    ? `${JSON.stringify(
+        {
+          ...report,
+          ...(issues === undefined ? {} : { issues }),
+          ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
+        },
+        null,
+        2
+      )}\n`
+    : undefined;
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {

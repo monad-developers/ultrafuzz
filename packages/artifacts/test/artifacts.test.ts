@@ -549,6 +549,27 @@ test("findings normalize schema-versioned findings arrays", () => {
   ]);
 });
 
+test("findings normalize bounded numeric confidence to its canonical string representation", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Numeric confidence issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: 0.85,
+        summary: "The agent emitted a bounded numeric confidence."
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.equal(report.findings[0]!.confidence, "0.85");
+});
+
 test("findings normalize agent lifecycle statuses and flexible evidence references", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
@@ -659,6 +680,26 @@ test("findings normalize source evidence line suffixes", () => {
   const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
 
   assert.deepEqual(report.findings[0]!.evidence, [{ kind: "source", path: "src/Oracle.sol", line: 42 }]);
+
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Source range-backed issue",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "A source line range anchors the issue.",
+        evidence: [{ kind: "source", path: "PoolLens.sol:248-274" }]
+      }
+    ])
+  );
+
+  const rangeReport = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(rangeReport.findings[0]!.evidence, [
+    { kind: "source", path: "PoolLens.sol", line: 248, end_line: 274 }
+  ]);
 
   fs.writeFileSync(
     path.join(nodeDir, "findings.json"),

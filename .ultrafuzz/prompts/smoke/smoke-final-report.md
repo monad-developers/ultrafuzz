@@ -33,7 +33,10 @@ severity from evidence. Normalize each production issue to include at least:
 - `severity`, `impact`, `likelihood`, `description`, and a reproducible
   `proof_of_concept` or precise execution trace; and
 - structured `strategy_provenance` and its matching lifecycle record when
-  available.
+available.
+
+Write every issue's `confidence` as one of the strings `high`, `medium`, or
+`low`; never use a numeric confidence in the normalized report.
 
 Write `{{artifact_path}}/report.json` with `schema_version: "1.0"`, a
 `run_metadata` object, normalized production `issues`,
