@@ -32,6 +32,21 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.match(generatedTestVerifier, /generated test file is empty \$\{relativePath\}/u);
 });
 
+test("generated Smithers workflow prepares only non-primary findings sidecars", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const verifierStart = source.indexOf("function resolveRegularArtifactFile");
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(verifierStart > preparationStart, source);
+
+  const preparation = source.slice(preparationStart, verifierStart);
+  assert.match(preparation, /output\.contract === "ultrafuzz\/findings@1" && !output\.primary/u);
+  assert.match(preparation, /writeFileSync\(artifactPath, "\[\]\\n"/u);
+  assert.match(source, /id=\{task\.preparationId\}/u);
+  assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
+});
+
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-verifier-"));
   const realDirectory = path.join(root, "real");

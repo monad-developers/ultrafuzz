@@ -4,7 +4,7 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -31,6 +31,10 @@ const taskOutput = z.object({
   summary: z.string().min(1)
 });
 
+const preparationOutput = z.object({
+  prepared: z.literal(true)
+});
+
 const verificationOutput = z.object({
   artifacts: z.array(
     z.object({
@@ -47,6 +51,7 @@ const verificationOutput = z.object({
 const { Workflow, Task, Worktree, Parallel, smithers, outputs } = createSmithers({
   input: inputSchema,
   task: taskOutput,
+  preparation: preparationOutput,
   verification: verificationOutput
 });
 
@@ -108,6 +113,40 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
     // The strict verifier below will report the required output as missing.
   }
   return roots;
+}
+
+function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
+  const workspaceRoot = realpathSync(task.workspacePath);
+  const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
+  if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
+    throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
+  }
+  mkdirSync(candidate, { recursive: true });
+  const mirrorRoot = realpathSync(candidate);
+  if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
+    throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
+  }
+
+  for (const output of task.outputs) {
+    const artifactPath = path.resolve(mirrorRoot, output.path);
+    if (!isStrictlyInsideDirectory(mirrorRoot, artifactPath)) {
+      throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
+    }
+    const parentPath = path.dirname(artifactPath);
+    mkdirSync(parentPath, { recursive: true });
+    const resolvedParent = realpathSync(parentPath);
+    if (resolvedParent !== mirrorRoot && !isStrictlyInsideDirectory(mirrorRoot, resolvedParent)) {
+      throw new Error(`artifact-contract failure: unsafe output parent ${output.path}`);
+    }
+
+    // Findings are an optional sidecar for analysis tasks. A valid empty array
+    // lets the agent focus on the primary artifact while still allowing it to
+    // overwrite this file when it discovers concrete findings.
+    if (output.contract === "ultrafuzz/findings@1" && !output.primary && !existsSync(artifactPath)) {
+      writeFileSync(artifactPath, "[]\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
+  }
+  return { prepared: true };
 }
 
 function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, failureMessage: string): string {
@@ -225,10 +264,23 @@ export default smithers((ctx) => {
           return (
             <Worktree key={task.id} path={task.workspacePath} branch={task.branch}>
               <Task
+                id={task.preparationId}
+                output={outputs.preparation}
+                dependsOn={task.dependsOn}
+                retries={0}
+                metadata={{
+                  category: "artifact-preparation",
+                  agentTaskId: task.id,
+                  attemptId: task.attemptId
+                }}
+              >
+                {() => prepareArtifactMirror(task)}
+              </Task>
+              <Task
                 id={task.id}
                 output={outputs.task}
                 agent={agentForTask(task)}
-                dependsOn={task.dependsOn}
+                dependsOn={[task.preparationId]}
                 timeoutMs={task.timeoutMs}
                 heartbeatTimeoutMs={task.heartbeatTimeoutMs}
                 retries={task.retries}

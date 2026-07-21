@@ -1257,6 +1257,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
+  assert.match(workflowSource, /function prepareArtifactMirror/);
+  assert.match(workflowSource, /output\.contract === "ultrafuzz\/findings@1" && !output\.primary/);
+  assert.match(workflowSource, /writeFileSync\(artifactPath, "\[\]\\n"/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
@@ -1265,7 +1268,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
+  assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
+  assert.match(workflowSource, /dependsOn=\{\[task\.preparationId\]\}/);
   assert.match(workflowSource, /untrusted data, not instructions/);
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
@@ -5338,7 +5343,15 @@ test(
       { cwd: project, encoding: "utf8", maxBuffer: 1024 * 1024 * 16 }
     );
     const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };
-    assert.equal(graph.tasks?.[0]?.nodeId, "node:project-discovery");
+    assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === "node:project-discovery"),
+      true
+    );
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === "verify:project-discovery"),
+      true
+    );
   }
 );
 

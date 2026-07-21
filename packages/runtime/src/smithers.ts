@@ -1336,6 +1336,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
+      preparationId: `prepare:${task.attemptId}`,
       verifierId: task.verifierSmithersNodeId,
       attemptId: task.attemptId,
       dependsOn: task.dependencySmithersNodeIds,
