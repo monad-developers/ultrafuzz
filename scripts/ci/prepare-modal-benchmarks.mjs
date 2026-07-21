@@ -184,6 +184,9 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   ) {
     throw new Error(`${benchmarkMode} BENCHMARK_MODELS_JSON must contain exactly ${expectedProviders.join(" and ")}`);
   }
+  if (benchmarkMode === "smoke" && validated.some((entry) => entry.reasoning !== "high")) {
+    throw new Error("smoke BENCHMARK_MODELS_JSON reasoning must be high");
+  }
 
   const ordered = expectedProviders.map((provider) => validated.find((entry) => entry.provider === provider));
   const usedSlugs = new Set();

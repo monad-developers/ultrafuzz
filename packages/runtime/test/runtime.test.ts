@@ -830,6 +830,62 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
 
+test("plan uses an eval topology override without replacing the project topology", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const canonicalTopology = path.join(project, ".ultrafuzz", "topology.yml");
+  const smokeTopology = path.join(project, "smoke-benchmark.yml");
+  fs.copyFileSync(canonicalTopology, smokeTopology);
+  fs.writeFileSync(canonicalTopology, "not: [valid\n", "utf8");
+
+  const plan = await planRun({
+    projectRoot: project,
+    topologyPath: smokeTopology,
+    runId: "topology-override",
+    env: {}
+  });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.validation.topology?.path, smokeTopology);
+  assert.deepEqual(
+    plan.value!.graph.nodes.map((node) => node.logical_id),
+    ["project-discovery"]
+  );
+  assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
+});
+
+test("plan applies smoke eval model profiles to a normally initialized target", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
+
+  const plan = await planRun({
+    projectRoot: project,
+    topologyPath: smokeTopology,
+    runId: "smoke-topology-profiles",
+    runtimeOverrides: {
+      models: {
+        profiles: {
+          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+        }
+      }
+    },
+    env: {}
+  });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
+  assert.equal(executable.length, 11);
+  const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
+  const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
+  assert.equal(strategies.length, 8);
+  assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
+  assert.equal(coordination.length, 3);
+  assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+});
+
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

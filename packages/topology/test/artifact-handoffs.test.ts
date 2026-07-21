@@ -14,6 +14,17 @@ describe("artifact handoff validation", () => {
     ).not.toThrow();
   });
 
+  it("prefers an explicit prompt path over a colliding node-id catalog entry", () => {
+    expect(() =>
+      validateTopology(validTopology(), {
+        promptTexts: {
+          review: "Read {{artifact_handoff:missing}}.",
+          "review/review.md": "Read {{artifact_handoff:strategy}}."
+        }
+      })
+    ).not.toThrow();
+  });
+
   it("rejects unknown, non-ancestor, and missing-primary handoffs", () => {
     expect(() =>
       validateTopology(validTopology(), {

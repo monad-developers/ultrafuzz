@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertRegularFileInside } from "@ultrafuzz/artifacts";
+import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifacts";
 import {
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
@@ -311,6 +311,7 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
+  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
     matrixRows,
@@ -320,6 +321,29 @@ export function parsePublicBenchmarkBundle(
   });
   assertPublicBenchmarkBundleMetadata(parsed, expectedMetadata);
   return parsed;
+}
+
+function assertSmokeFindingFloor(
+  lane: PublicBenchmarkBundle["lane"],
+  matrixRows: Map<string, PublicBundleMatrixRow>,
+  contentsByPath: Map<string, Buffer>
+): void {
+  if (lane !== "smoke") return;
+  for (const rowId of matrixRows.keys()) {
+    const bundlePath = `reports/${rowId}/findings.normalized.json`;
+    const contents = contentsByPath.get(bundlePath);
+    let findings;
+    try {
+      findings = assertFindingsSchema(
+        contents === undefined ? undefined : (JSON.parse(contents.toString("utf8")) as unknown)
+      );
+    } catch (error) {
+      throw new Error(`smoke benchmark row ${rowId} has invalid normalized findings`, { cause: error });
+    }
+    if (findings.length === 0) {
+      throw new Error(`smoke benchmark row ${rowId} must report at least one normalized finding`);
+    }
+  }
 }
 
 interface PublicBundleMatrixRow {

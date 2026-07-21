@@ -102,10 +102,13 @@ provider and Modal budgets remain the hard aggregate cost boundary.
 
 The smoke has exactly three targets: one Foundry target, one Hardhat target, and
 one Vyper target. It defaults to GPT-5.6 Luna at `high`, uses one strategy loop,
-and explicitly disables invariant tests, differential tests, and dynamic
-strategies. Repository variables `BENCHMARK_SMOKE_OPENAI_MODEL` and
-`BENCHMARK_SMOKE_OPENAI_REASONING` can override that smoke runner without
-changing its single OpenAI/Codex provider or its target and topology limits.
+and uses the dedicated `benchmarks/smoke-benchmark.yml` graph. One
+medium-reasoning context node feeds eight high-reasoning bug-finding strategies
+in parallel; medium-reasoning dedupe and report nodes finish the row. Invariant,
+differential, dynamic, and production-only review stages are absent from this
+graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
+smoke model without changing its single OpenAI/Codex provider, fixed
+high/medium reasoning split, or target and topology limits.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
 checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
@@ -116,8 +119,8 @@ differential, and dynamic strategies, with all three disable flags set to
 `false`. Push events can never select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Every
-target row has a 3,600-second model-work watchdog. The smoke admits two rows at
-a time; the full lane admits 20, keeping each checked-in cohort to two row
+target row has a 3,600-second model-work watchdog. The smoke admits all three
+rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
 waves. Both modes use eight-way workflow concurrency so full rows can progress
 through the complete production topology without serializing their agent work.
 Scoring remains independent of the runner and always uses GPT-5.6 Sol at
@@ -142,6 +145,10 @@ partial generation updates history: the trusted publisher verifies that the
 exact producer attempt's launch and collection jobs both succeeded, and every
 configured pair must finish and score before publication. Branch results remain
 keyed to the exact pushed commit.
+
+Smoke publication also fails when any target row produces zero normalized
+findings. This is a no-regression signal, not a synthetic canary: the workflow
+must find and support a real issue from target source evidence.
 
 The compare-and-swap publisher validates the generation with the benchmark
 policy from the exact candidate checkout, appends observations keyed to that

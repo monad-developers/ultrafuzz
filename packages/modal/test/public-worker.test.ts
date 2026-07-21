@@ -359,7 +359,7 @@ it("bounds public provider fan-out by mode", () => {
     max_parallel_runs: PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
     max_parallel_targets: 8
   });
-  expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(2);
+  expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(3);
   expect(publicBenchmarkMaxParallelEvalRows("full")).toBe(20);
 });
 

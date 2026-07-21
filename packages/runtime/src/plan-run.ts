@@ -92,7 +92,10 @@ export async function planRun(input: PlanRunInput) {
   let catalog: PromptCatalog;
   try {
     const topology = transformTopologyForRun(
-      loadTopology(projectRoot, { requirePromptFiles: true }),
+      loadTopology(projectRoot, {
+        ...(input.topologyPath === undefined ? {} : { topologyPath: input.topologyPath }),
+        requirePromptFiles: true
+      }),
       input.topologyTransform
     );
     catalog = transformPromptCatalogForRun(loadPromptCatalog({ projectRoot }), input.topologyTransform);

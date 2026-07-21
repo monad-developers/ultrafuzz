@@ -102,7 +102,9 @@ describe("public Modal benchmark bundles", () => {
     for (const rowId of rowIds) {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.json"), "utf8")).toContain("issues");
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
-      expect(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8")).toBe("[]\n");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8"))
+      ).toHaveLength(1);
     }
   });
 
@@ -174,6 +176,32 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("fails the smoke no-regression gate when any target row has no finding", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-finding-floor-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[]\n"))
+    ).toThrow(/must report at least one normalized finding/u);
+  });
+
+  it("rejects malformed entries instead of counting them as smoke findings", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-invalid-finding-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[{}]\n"))
+    ).toThrow(/invalid normalized findings/u);
   });
 
   it("requires complete positive result metadata for executed and graded cases", () => {
@@ -551,7 +579,10 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     ["run-summary.json", `${JSON.stringify({ succeeded: rowIds.length }, null, 2)}\n`],
     ["public-eval-diagnostics.json", `${JSON.stringify(diagnostics, null, 2)}\n`],
     ["scores.jsonl", `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, score: 1 })).join("\n")}\n`],
-    ["summary.json", `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId })) }, null, 2)}\n`],
+    [
+      "summary.json",
+      `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId, finding_count: 1 })) }, null, 2)}\n`
+    ],
     ["summary.md", "# Eval summary\n"]
   ]);
   const sources = [...evalContents].map(([name, contents]) => {
@@ -561,10 +592,26 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     return { path: `eval/${name}`, root, source };
   });
   for (const rowId of rowIds) {
+    const finding = {
+      schema_version: "1.0",
+      id: `${rowId}-finding-1`,
+      title: "Fixture finding",
+      status: "confirmed",
+      severity_guess: "Low",
+      confidence: "high",
+      summary: "A fixture finding used to exercise public bundle validation."
+    };
     for (const [name, contents] of [
       ["report.md", `# Report for ${rowId}\n`],
-      ["report.json", `${JSON.stringify({ schema_version: "1.0", issues: [] }, null, 2)}\n`],
-      ["findings.normalized.json", "[]\n"]
+      [
+        "report.json",
+        `${JSON.stringify(
+          { schema_version: "1.0", run_metadata: {}, issues: [finding], non_production_outcomes: [] },
+          null,
+          2
+        )}\n`
+      ],
+      ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`]
     ] as const) {
       const source = path.join(root, "report-source", rowId, name);
       fs.mkdirSync(path.dirname(source), { recursive: true });

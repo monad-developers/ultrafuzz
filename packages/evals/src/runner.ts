@@ -2,9 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifacts";
-import type { EvalConfig } from "@ultrafuzz/config";
+import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
 import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
+import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
 import { NodeTelemetryPump } from "./node-telemetry.js";
 import {
@@ -19,6 +20,7 @@ import {
   EVAL_RUN_SCHEMA_VERSION,
   type EvalMatrixRow,
   type EvalCandidateProvenance,
+  type EvalModelProfile,
   type EvalPlanValue,
   type EvalRunRecord,
   type EvalRunValue,
@@ -284,6 +286,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   const runnerProfile = input.suite.model_profiles[input.row.runner_model_profile];
   const result = await startRun({
     projectRoot: input.row.target.path,
+    ...(input.row.variant.topology_path === undefined ? {} : { topologyPath: input.row.variant.topology_path }),
     runId: input.runId,
     ...(runnerProfile?.agent !== undefined ? { agent: runnerProfile.agent } : {}),
     ...(runnerProfile?.model !== undefined ? { model: runnerProfile.model } : {}),
@@ -293,6 +296,7 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
       : {}),
     workflowInput: buildWorkflowInput(input.row),
     ...benchmarkTopologyTransform(input.row),
+    ...benchmarkModelProfileOverrides(input.row, runnerProfile),
     ...(input.env !== undefined ? { env: input.env } : {})
   });
   if (result.ok && result.value) {
@@ -333,6 +337,32 @@ export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_in
     topologyTransform: {
       ...(strategyLoops === undefined ? {} : { strategyLoops: Number(strategyLoops) }),
       ...(excludedNodeIds === undefined ? {} : { excludedNodeIds: [...excludedNodeIds] as string[] })
+    }
+  };
+}
+
+export function benchmarkModelProfileOverrides(
+  row: Pick<EvalMatrixRow, "workflow_input">,
+  runnerProfile: EvalModelProfile | undefined
+): { runtimeOverrides?: RuntimeConfigOverrides } {
+  if (!isRecordValue(row.workflow_input)) return {};
+  const execution = row.workflow_input.benchmark_execution;
+  if (!isRecordValue(execution) || execution.workflow_profile !== BENCHMARK_SMOKE_WORKFLOW_PROFILE) return {};
+  if (runnerProfile === undefined) {
+    throw new EvalError("EVAL_MODEL_PROFILE_UNKNOWN", "smoke benchmark runner profile is missing");
+  }
+  const selectedModel = {
+    agent: runnerProfile.agent,
+    ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
+  };
+  return {
+    runtimeOverrides: {
+      models: {
+        profiles: {
+          benchmark: { ...selectedModel, reasoning: "high" },
+          "smoke-coordination": { ...selectedModel, reasoning: "medium" }
+        }
+      }
     }
   };
 }

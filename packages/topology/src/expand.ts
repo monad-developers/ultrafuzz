@@ -282,11 +282,11 @@ function buildFingerprintInputs(
 }
 
 function promptTextFor(nodeId: string, promptPath: string, options: ExpandTopologyOptions): string | undefined {
-  if (options.promptTexts?.[nodeId] !== undefined) {
-    return options.promptTexts[nodeId];
-  }
   if (options.promptTexts?.[promptPath] !== undefined) {
     return options.promptTexts[promptPath];
+  }
+  if (options.promptTexts?.[nodeId] !== undefined) {
+    return options.promptTexts[nodeId];
   }
   if (!options.projectRoot) {
     return undefined;

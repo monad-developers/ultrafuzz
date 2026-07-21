@@ -598,10 +598,10 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
     ...baseSuite,
     run: {
       ...baseSuite.run,
-      // Smoke runs two eval rows with up to eight nodes each, matching the
-      // sandbox's ordinary 16-agent ceiling. Full mode uses two target waves
-      // for the 40-target EVMbench cohort and eight-way concurrency within each
-      // production workflow, avoiding structurally serial one-hour rows.
+      // Smoke runs all three pinned target rows together, with one eight-way
+      // strategy wave inside each bounded workflow. Full mode uses two target
+      // waves for the 40-target EVMbench cohort and eight-way concurrency
+      // within each production workflow.
       max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane),
       max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane)
     }

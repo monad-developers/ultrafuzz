@@ -257,7 +257,7 @@ describe("public Modal benchmark configuration", () => {
     });
   });
 
-  it("accepts a safe OpenAI smoke override while keeping the smoke provider and topology fixed", () => {
+  it("accepts a safe OpenAI smoke model override while keeping high strategy reasoning fixed", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-smoke-override-"));
     execFileSync(
@@ -275,7 +275,7 @@ describe("public Modal benchmark configuration", () => {
         env: {
           ...process.env,
           BENCHMARK_MODELS_JSON: JSON.stringify([
-            { provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "medium" }
+            { provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "high" }
           ])
         }
       }
@@ -289,7 +289,7 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.pairs[0]).toEqual(
       expect.objectContaining({
         provider: "openai",
-        model_slug: "benchmark-smoke-gpt-5-6-luna-202607-medium"
+        model_slug: "benchmark-smoke-gpt-5-6-luna-202607-high"
       })
     );
     const config = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
@@ -300,7 +300,7 @@ describe("public Modal benchmark configuration", () => {
         agent: "CodexAgent",
         model: "gpt-5.6-luna-202607",
         provider: "openai",
-        reasoning: "medium"
+        reasoning: "high"
       })
     ]);
   });
@@ -312,6 +312,11 @@ describe("public Modal benchmark configuration", () => {
         mode: "smoke",
         models: [{ provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }],
         message: /smoke BENCHMARK_MODELS_JSON must contain exactly openai/u
+      },
+      {
+        mode: "smoke",
+        models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "medium" }],
+        message: /smoke BENCHMARK_MODELS_JSON reasoning must be high/u
       },
       {
         mode: "full",
@@ -400,10 +405,11 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_OPENAI_MODEL).toContain("vars.BENCHMARK_SMOKE_OPENAI_MODEL");
     expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("inputs.openai_reasoning");
     expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("'high'");
-    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).toContain("vars.BENCHMARK_SMOKE_OPENAI_REASONING");
+    expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).not.toContain("vars.BENCHMARK_SMOKE_OPENAI_REASONING");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_MODEL).toContain("inputs.anthropic_model");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_REASONING).toContain("inputs.anthropic_reasoning");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
+    expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>

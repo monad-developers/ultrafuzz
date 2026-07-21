@@ -653,7 +653,13 @@ function publicMatrix(suite: EvalSuiteSpec): EvalMatrixRow[] {
             path: path.join("/tmp/public-targets", target.id),
             ground_truth_path: path.join("/tmp/public-ground-truth", target.ground_truth)
           },
-          variant: { ...variant, prompt_overlay_paths: [] },
+          variant: {
+            ...variant,
+            ...(variant.topology === undefined
+              ? {}
+              : { topology_path: path.join("/tmp/modal-worker/candidate", variant.topology) }),
+            prompt_overlay_paths: []
+          },
           runner_model_profile: runnerProfileId,
           judge_model_profile: judgeProfileId,
           ...(runnerProfile.model === undefined ? {} : { runner_model: runnerProfile.model }),

@@ -940,7 +940,7 @@ export function assertPublicBenchmarkGeneration(
       row.id !== expectedId ||
       row.run_id !== expectedRunId ||
       stableStringify(publicTargetScope(row.target)) !== stableStringify(target) ||
-      stableStringify(row.variant) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
+      stableStringify(publicVariantScope(row.variant)) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
       stableStringify(row.workflow_input) !== stableStringify(variant.workflow_input) ||
       row.runner_model_profile !== runnerProfileId ||
       row.runner_model !== runnerProfile.model ||
@@ -991,6 +991,13 @@ function publicSuiteScope(suite: EvalSuiteSpec): Omit<EvalSuiteSpec, "ground_tru
 
 function publicTargetScope(target: EvalMatrixRow["target"]): EvalSuiteSpec["targets"][number] {
   const { path: _targetPath, ground_truth_path: _groundTruthPath, ...scope } = target;
+  return scope;
+}
+
+function publicVariantScope(variant: EvalMatrixRow["variant"]): Omit<EvalMatrixRow["variant"], "topology_path"> {
+  // The matrix records the absolute path from its execution checkout, while
+  // publication validates against a separate worktree at the same commit.
+  const { topology_path: _topologyPath, ...scope } = variant;
   return scope;
 }
 
