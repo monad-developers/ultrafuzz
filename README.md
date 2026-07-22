@@ -16,14 +16,25 @@ local dashboard plus final report for review.
 > review generated artifacts before copying anything into your project. See
 > [Security](docs/security.md) for details.
 
-| Quality                                                        | Coverage                                                                                                     |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| ![Precision over time](docs/assets/eval-history/precision.svg) | ![Recall over time](docs/assets/eval-history/recall.svg)                                                     |
-| ![F1 over time](docs/assets/eval-history/f1.svg)               | ![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg) |
+**Quality**
 
-| Efficiency                                                                 | Spend                                                |
-| -------------------------------------------------------------------------- | ---------------------------------------------------- |
-| ![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg) | ![Cost over time](docs/assets/eval-history/cost.svg) |
+![Precision over time](docs/assets/eval-history/precision.svg)
+
+![F1 over time](docs/assets/eval-history/f1.svg)
+
+**Coverage**
+
+![Recall over time](docs/assets/eval-history/recall.svg)
+
+![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg)
+
+**Efficiency**
+
+![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg)
+
+**Spend**
+
+![Cost over time](docs/assets/eval-history/cost.svg)
 
 ## Operator Flow
 
