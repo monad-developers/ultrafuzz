@@ -14,18 +14,13 @@ const successfulJobs = [
 ];
 
 describe("trusted Modal benchmark publication qualification", () => {
-  it("accepts a successful repository branch push as smoke", () => {
-    for (const headBranch of ["main", "feature/nested", "draft/issue-103"]) {
-      expect(
-        qualifyModalBenchmarkPublication(event({ event: "push", head_branch: headBranch }), successfulJobs, repository),
-        headBranch
-      ).toEqual({
-        eligible: true,
-        candidateCommit: candidate,
-        benchmarkMode: "smoke",
-        reason: expect.any(String)
-      });
-    }
+  it("accepts a successful default-branch push as smoke", () => {
+    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), successfulJobs, repository)).toEqual({
+      eligible: true,
+      candidateCommit: candidate,
+      benchmarkMode: "smoke",
+      reason: expect.any(String)
+    });
   });
 
   it("accepts a successful manual run as full", () => {
@@ -62,8 +57,9 @@ describe("trusted Modal benchmark publication qualification", () => {
     ).toEqual(expect.objectContaining({ eligible: false }));
   });
 
-  it("fails closed for the wrong repository, workflow, event, conclusion, or run head", () => {
+  it("fails closed for a feature branch, wrong repository, workflow, event, conclusion, or run head", () => {
     const mutations = [
+      { head_branch: "feature/untrusted-producer" },
       { head_repository: { full_name: "example/other" } },
       { path: ".github/workflows/other.yml" },
       { event: "schedule" },
@@ -82,12 +78,13 @@ describe("trusted Modal benchmark publication qualification", () => {
 
 function event(overrides: Record<string, unknown>) {
   return {
+    repository: { default_branch: "main" },
     workflow_run: {
       conclusion: "success",
       event: "push",
       path: ".github/workflows/eval-benchmarks.yml",
       head_repository: { full_name: repository },
-      head_branch: "feature",
+      head_branch: "main",
       head_sha: candidate,
       ...overrides
     }

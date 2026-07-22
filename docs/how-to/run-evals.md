@@ -224,6 +224,13 @@ with `Always allow`. Publication-only paths are excluded from the Modal push
 trigger, preventing a direct chart commit from recursively allocating another
 benchmark matrix.
 
+Publication accepts only successful Modal benchmark producers from the
+repository's default `main` branch and rechecks that the exact candidate commit
+remains reachable from `main` before minting the bypass-capable token.
+Feature-branch runs remain useful CI evidence but cannot write history or
+charts; their merged successor on `main` performs publication. The publisher
+does not expose a free-form manual artifact replay path.
+
 The eval summary and comparison record Ultrafuzz runner tokens and runner cost
 with explicit completeness. Judge usage in Braintrust and sandbox spend in
 Modal remain separate provider-side records keyed by the immutable run IDs; use

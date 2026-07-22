@@ -14,6 +14,8 @@ const MAX_GENERATION_BYTES = 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const COMMIT_MESSAGE = "Update published eval history";
+const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
+const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
 const HISTORY_PATHS = [
   "benchmarks/history.json",
   "docs/assets/eval-history/precision.svg",
@@ -149,7 +151,7 @@ export function publishEvalHistoryGeneration(input) {
         let commit = base.oid;
         let createdCommit = false;
         if (stagedPaths.length > 0) {
-          commit = createPublicationCommit(worktree, base.oid);
+          commit = createPublicationCommit(worktree, base.oid, generation);
           createdCommit = true;
         }
         const needsPush = createdCommit;
@@ -258,18 +260,20 @@ function stageExactPublication(worktree) {
   return staged;
 }
 
-function createPublicationCommit(worktree, parent) {
+function createPublicationCommit(worktree, parent, generation) {
   checked(
     "git",
     [
       "-c",
-      "user.name=github-actions[bot]",
+      `user.name=${COMMIT_AUTHOR_NAME}`,
       "-c",
-      "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+      `user.email=${COMMIT_AUTHOR_EMAIL}`,
       "commit",
       "--no-verify",
       "-m",
       COMMIT_MESSAGE,
+      "-m",
+      `Source-Workflow-Run: ${generation.source_artifact}\nCandidate-Commit: ${generation.candidate_commit}`,
       "--",
       ...HISTORY_PATHS
     ],

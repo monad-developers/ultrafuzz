@@ -62,6 +62,24 @@ describe("eval history Git CAS publisher", () => {
         .trim()
         .split("\n")
     ).toEqual(["Update published eval history", "Update published eval history"]);
+    expect(
+      git(fixture.bare, ["log", "--format=%an", `${candidateCommit}..${TARGET_REF}`])
+        .trim()
+        .split("\n")
+    ).toEqual(["ultrafuzz-eval-history-publisher[bot]", "ultrafuzz-eval-history-publisher[bot]"]);
+    expect(
+      git(fixture.bare, ["log", "--format=%ae", `${candidateCommit}..${TARGET_REF}`])
+        .trim()
+        .split("\n")
+    ).toEqual([
+      "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com",
+      "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com"
+    ]);
+    const latestCommitBody = git(fixture.bare, ["log", "-1", "--format=%B", TARGET_REF]);
+    expect(latestCommitBody).toContain(
+      "Source-Workflow-Run: https://github.com/monad-developers/ultrafuzz/actions/runs/123"
+    );
+    expect(latestCommitBody).toContain(`Candidate-Commit: ${candidateCommit}`);
 
     const beforeRetry = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
     const retried = await invokePublisher(fixture.checkoutA, generationA, inputRoot);

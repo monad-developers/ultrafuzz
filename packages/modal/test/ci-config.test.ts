@@ -726,7 +726,7 @@ describe("public Modal benchmark configuration", () => {
     expect(source).not.toContain("writeFile(bundlePath");
   });
 
-  it("uses compare-and-swap publication for both automatic and manual history updates", () => {
+  it("uses a least-privilege App token for automatic default-branch history publication", () => {
     const workspace = path.resolve("../..");
     const producerText = fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8");
     const publicationText = fs.readFileSync(
@@ -736,14 +736,14 @@ describe("public Modal benchmark configuration", () => {
     expect(() => parse(producerText)).not.toThrow();
     expect(() => parse(publicationText)).not.toThrow();
     expect(producerText).not.toContain("publish-eval-history-cas.mjs");
-    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(2);
+    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(1);
     expect(publicationText).not.toContain("automation/eval-history");
     expect(publicationText).not.toContain("group: publish-eval-history");
     expect(publicationText).not.toContain("peter-evans/create-pull-request");
     expect(publicationText).not.toContain("gh pr create");
 
     const publication = parse(publicationText) as {
-      on: { workflow_run: { workflows: string[]; types: string[] }; workflow_dispatch: unknown };
+      on: { workflow_run: { workflows: string[]; types: string[] } };
       permissions: Record<string, string>;
       jobs: Record<
         string,
@@ -752,12 +752,19 @@ describe("public Modal benchmark configuration", () => {
           needs?: string | string[];
           permissions?: Record<string, string>;
           env?: Record<string, string>;
-          steps: Array<{ id?: string; name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
+          steps: Array<{
+            id?: string;
+            name?: string;
+            uses?: string;
+            run?: string;
+            env?: Record<string, string>;
+            with?: Record<string, unknown>;
+          }>;
         }
       >;
     };
     expect(publication.on.workflow_run).toEqual({ workflows: ["Modal Eval Benchmarks"], types: ["completed"] });
-    expect(publication.on).toHaveProperty("workflow_dispatch");
+    expect(publication.on).not.toHaveProperty("workflow_dispatch");
     expect(publication.permissions).toEqual({
       actions: "read",
       contents: "read"
@@ -793,12 +800,23 @@ describe("public Modal benchmark configuration", () => {
     expect(automaticToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
     expect(automaticToken?.with).toEqual({
       "client-id": "${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}",
-      "private-key": "${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}"
+      "private-key": "${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}",
+      owner: "${{ github.repository_owner }}",
+      repositories: "${{ github.event.repository.name }}",
+      "permission-contents": "write",
+      "skip-token-revoke": false
     });
-    const automaticCheckout = automatic.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+    const automaticCheckout = automatic.steps.find(
+      (step) => step.name === "Check out trusted main publication tooling"
+    );
     expect(automaticCheckout?.with?.ref).toBe("main");
-    expect(automaticCheckout?.with?.token).toBe("${{ steps.publisher-token.outputs.token }}");
-    expect(automaticCheckout?.with?.["persist-credentials"]).toBe(true);
+    expect(automaticCheckout?.with).not.toHaveProperty("token");
+    expect(automaticCheckout?.with?.["persist-credentials"]).toBe(false);
+    const policyCheckout = automatic.steps.find(
+      (step) => step.name === "Check out the exact candidate benchmark policy"
+    );
+    expect(policyCheckout?.with?.ref).toBe("${{ env.CANDIDATE_COMMIT }}");
+    expect(policyCheckout?.with?.["persist-credentials"]).toBe(false);
     expect(automatic.steps.some((step) => step.uses?.startsWith("actions/cache@"))).toBe(false);
     const downloads = automatic.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@"));
     expect(downloads).toHaveLength(2);
@@ -808,19 +826,34 @@ describe("public Modal benchmark configuration", () => {
       expect(download.with?.["github-token"]).toBe("${{ github.token }}");
       expect(download.with?.name).toContain("${{ github.event.workflow_run.run_attempt }}");
     }
-    const trustedPublish = automatic.steps.find(
-      (step) => step.name === "Validate and publish the atomic Modal benchmark generation"
+    const reachability = automatic.steps.find(
+      (step) => step.name === "Verify the candidate remains reachable from main"
     )?.run;
-    expect(trustedPublish).toContain("prepare-eval-history-publication.mjs automatic");
-    expect(trustedPublish).toContain('git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$CANDIDATE_COMMIT"');
-    expect(trustedPublish).toContain('"$PUBLICATION_POLICY_ROOT"');
-    expect(trustedPublish).not.toContain("pnpm install");
-    const manual = publication.jobs.publish_manual!;
-    expect(manual.if).toBe("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'");
-    const manualToken = manual.steps.find((step) => step.id === "publisher-token");
-    expect(manualToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
-    const manualCheckout = manual.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
-    expect(manualCheckout?.with?.token).toBe("${{ steps.publisher-token.outputs.token }}");
+    expect(reachability).toContain("compare/$CANDIDATE_COMMIT...main");
+    expect(reachability).toContain("comparison_status");
+    const trustedValidation = automatic.steps.find(
+      (step) => step.name === "Validate the atomic Modal benchmark generation"
+    )?.run;
+    expect(trustedValidation).toContain("prepare-eval-history-publication.mjs automatic");
+    expect(trustedValidation).toContain('"$PUBLICATION_POLICY_ROOT"');
+    expect(trustedValidation).not.toContain("publish-eval-history-cas.mjs");
+    expect(trustedValidation).not.toContain("pnpm install");
+    const privilegedPublish = automatic.steps.find(
+      (step) => step.name === "Publish the validated generation with remote-tip compare-and-swap retries"
+    );
+    expect(privilegedPublish?.env?.PUBLISHER_TOKEN).toBe("${{ steps.publisher-token.outputs.token }}");
+    expect(privilegedPublish?.run).toContain('GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $publisher_basic"');
+    expect(privilegedPublish?.run).toContain("publish-eval-history-cas.mjs");
+    const buildIndex = automatic.steps.findIndex((step) => step.name === "Install and build trusted main");
+    const validationIndex = automatic.steps.findIndex(
+      (step) => step.name === "Validate the atomic Modal benchmark generation"
+    );
+    const tokenIndex = automatic.steps.findIndex((step) => step.id === "publisher-token");
+    const publishIndex = automatic.steps.indexOf(privilegedPublish!);
+    expect(tokenIndex).toBeGreaterThan(buildIndex);
+    expect(tokenIndex).toBeGreaterThan(validationIndex);
+    expect(publishIndex).toBeGreaterThan(tokenIndex);
+    expect(publication.jobs).not.toHaveProperty("publish_manual");
     expect(publication.jobs).not.toHaveProperty("open_publication_pr");
   });
 

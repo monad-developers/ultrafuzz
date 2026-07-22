@@ -6,34 +6,6 @@ on:
       - Modal Eval Benchmarks
     types:
       - completed
-  workflow_dispatch:
-    inputs:
-      artifact_run_id:
-        description: Completed workflow run containing one scored eval artifact
-        required: true
-        type: string
-      artifact_name:
-        description: Name of the complete scored eval artifact
-        required: true
-        type: string
-      eval_run_id:
-        description: Immutable eval run ID inside the artifact
-        required: true
-        type: string
-      benchmark:
-        description: Benchmark cohort
-        required: true
-        type: choice
-        options:
-          - evmbench
-          - ultrafuzz-bench
-      lane:
-        description: Benchmark lane
-        required: true
-        type: choice
-        options:
-          - smoke
-          - full
 
 permissions:
   actions: read
@@ -94,20 +66,12 @@ jobs:
       PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
 
     steps:
-      - name: Create the eval-history publisher token
-        id: publisher-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
-          private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
-
       - name: Check out trusted main publication tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ steps.publisher-token.outputs.token }}
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -140,18 +104,34 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
-      - name: Validate and publish the atomic Modal benchmark generation
+      - name: Check out the exact candidate benchmark policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          path: eval-history-benchmark-policy
+          persist-credentials: false
+
+      - name: Verify the candidate remains reachable from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          comparison_status="$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_COMMIT...main" \
+            --jq '.status')"
+          if [ "$comparison_status" != ahead ] && [ "$comparison_status" != identical ]; then
+            echo "Benchmark candidate is no longer reachable from main" >&2
+            exit 1
+          fi
+
+      - name: Validate the atomic Modal benchmark generation
         env:
           BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control
           BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/results
           PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
           PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
-          PUBLICATION_POLICY_ROOT: ${{ runner.temp }}/eval-history-benchmark-policy
+          PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
           PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
         run: |
-          git fetch --no-tags origin "$CANDIDATE_COMMIT"
-          git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$CANDIDATE_COMMIT"
-          trap 'git worktree remove --force "$PUBLICATION_POLICY_ROOT"' EXIT
           node scripts/ci/prepare-eval-history-publication.mjs automatic \
             "$BENCHMARK_CONTROL/manifest.json" \
             "$BENCHMARK_CONTROL" \
@@ -183,114 +163,30 @@ jobs:
               <<< "$metadata" > /dev/null
           done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
             "$PUBLICATION_PLAN")
-          node scripts/ci/publish-eval-history-cas.mjs \
-            "$PUBLICATION_GENERATION" \
-            "$PUBLICATION_UNPACKED" \
-            "$PUBLICATION_POLICY_ROOT"
-          git worktree remove --force "$PUBLICATION_POLICY_ROOT"
-          trap - EXIT
 
-  publish_manual:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Create the eval-history publisher token
+      - name: Create the narrowly scoped eval-history publisher token
         id: publisher-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
           private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          skip-token-revoke: false
 
-      - name: Check out trusted main publication tooling
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ steps.publisher-token.outputs.token }}
-          persist-credentials: true
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
-        with:
-          version: 11.1.1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-
-      - name: Validate publication inputs
+      - name: Publish the validated generation with remote-tip compare-and-swap retries
         env:
-          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
-          PUBLICATION_ARTIFACT_NAME: ${{ inputs.artifact_name }}
-          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
-        run: |
-          node -e '
-            const [artifactRunId, artifactName, evalRunId] = process.argv.slice(1);
-            if (!/^[0-9]+$/.test(artifactRunId)) throw new Error("artifact run ID must be numeric");
-            const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-            if (!safeId.test(artifactName)) throw new Error("artifact name is invalid");
-            if (!safeId.test(evalRunId)) throw new Error("eval run ID is invalid");
-          ' "$PUBLICATION_ARTIFACT_RUN_ID" "$PUBLICATION_ARTIFACT_NAME" "$PUBLICATION_EVAL_RUN_ID"
-
-      - name: Install and build trusted main
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm -w build
-
-      - name: Download complete scored generation
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ inputs.artifact_name }}
-          path: ${{ runner.temp }}/manual-eval-publication-input/${{ inputs.eval_run_id }}
-          run-id: ${{ inputs.artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Publish with remote-tip compare-and-swap retries
-        env:
-          PUBLICATION_INPUT_ROOT: ${{ runner.temp }}/manual-eval-publication-input
+          PUBLISHER_TOKEN: ${{ steps.publisher-token.outputs.token }}
           PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
-          PUBLICATION_POLICY_ROOT: ${{ runner.temp }}/eval-history-benchmark-policy
-          PUBLICATION_ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
-          PUBLICATION_EVAL_RUN_ID: ${{ inputs.eval_run_id }}
-          PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
+          PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
+          PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
         run: |
-          candidate_commit="$(jq -er '.provenance.candidate.commit' \
-            "$PUBLICATION_INPUT_ROOT/$PUBLICATION_EVAL_RUN_ID/eval.json")"
-          if ! [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Artifact candidate commit must be a full lowercase SHA" >&2
-            exit 1
-          fi
-          git fetch --no-tags origin "$candidate_commit"
-          git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$candidate_commit"
-          trap 'git worktree remove --force "$PUBLICATION_POLICY_ROOT"' EXIT
-          node scripts/ci/prepare-eval-history-publication.mjs policy \
-            "$PUBLICATION_POLICY_ROOT" \
-            "$candidate_commit" \
-            "${{ inputs.benchmark }}"
-          node -e '
-            const fs = require("node:fs");
-            const [file, repository, artifactRunId, evalRunId, benchmark, lane, candidateCommit] = process.argv.slice(1);
-            fs.writeFileSync(file, JSON.stringify({
-              schema_version: "ultrafuzz.eval-history-publication-generation.v1",
-              candidate_commit: candidateCommit,
-              candidate_repository_url: repository,
-              source_artifact: repository + "/actions/runs/" + artifactRunId,
-              runs: [{ eval_run_id: evalRunId, benchmark, lane, input_path: evalRunId }]
-            }, null, 2) + "\n", { mode: 0o600 });
-          ' \
-            "$PUBLICATION_GENERATION" \
-            "$PUBLICATION_REPOSITORY" \
-            "$PUBLICATION_ARTIFACT_RUN_ID" \
-            "$PUBLICATION_EVAL_RUN_ID" \
-            "${{ inputs.benchmark }}" \
-            "${{ inputs.lane }}" \
-            "$candidate_commit"
-          node scripts/ci/publish-eval-history-cas.mjs \
-            "$PUBLICATION_GENERATION" \
-            "$PUBLICATION_INPUT_ROOT" \
-            "$PUBLICATION_POLICY_ROOT"
-          git worktree remove --force "$PUBLICATION_POLICY_ROOT"
-          trap - EXIT
+          publisher_basic="$(printf 'x-access-token:%s' "$PUBLISHER_TOKEN" | base64 -w 0)"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $publisher_basic" \
+            node scripts/ci/publish-eval-history-cas.mjs \
+              "$PUBLICATION_GENERATION" \
+              "$PUBLICATION_UNPACKED" \
+              "$PUBLICATION_POLICY_ROOT"

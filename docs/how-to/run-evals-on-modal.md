@@ -160,6 +160,13 @@ rebuilt and retried before a normal fast-forward push. Publication-only history
 and chart paths are excluded from the Modal push trigger, so the App commit
 cannot recursively start another benchmark run.
 
+Only a successful producer run whose candidate is still reachable from the
+repository's default `main` branch may mint the publisher token. Feature-branch
+smoke runs still execute and upload review artifacts, but their data is not
+published; the successful `main` run after merge is the publication source.
+Full-lane runs follow the same boundary by dispatching the Modal benchmark
+workflow on `main`. There is no free-form artifact replay entry point.
+
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
 variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
 secret. The workflow exchanges those credentials for a short-lived
