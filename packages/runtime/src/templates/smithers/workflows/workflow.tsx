@@ -4,7 +4,16 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from "node:fs";
 import path from "node:path";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -112,10 +121,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
     ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
     generate: async (args) => {
-      // Smithers retries the same task in the same worktree. Start every model
-      // attempt from empty, exact task-owned roots so a retry cannot combine
-      // artifacts left by the failed attempt with newly generated outputs.
-      resetTaskArtifactsForAttempt(task);
+      // Smithers retries the same task in the same worktree. Preserve the
+      // preparation task's first-attempt roots, but empty their exact contents
+      // before every retry so outputs cannot span multiple model attempts.
+      if ((args?.taskContext?.attempt ?? 1) > 1) {
+        resetTaskArtifactsForRetry(task);
+      }
       const result = await agent.generate(args);
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
@@ -148,8 +159,8 @@ function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
   return path.join(task.workspacePath, "artifacts", task.attemptId);
 }
 
-function resetTaskArtifactsForAttempt(task: (typeof taskSpecs)[number]): void {
-  resetTaskArtifactRoot(task.metadata.artifacts.dir, task.attemptId, "canonical");
+function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
+  resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical");
 
   const workspaceRoot = realpathSync(task.workspacePath);
   const artifactsParentCandidate = path.resolve(workspaceRoot, "artifacts");
@@ -161,7 +172,7 @@ function resetTaskArtifactsForAttempt(task: (typeof taskSpecs)[number]): void {
   if (!isStrictlyInsideDirectory(workspaceRoot, artifactsParent)) {
     throw new Error(`artifact-contract failure: unsafe task artifact parent ${task.attemptId}`);
   }
-  resetTaskArtifactRoot(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
+  resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
   if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")) {
     const foundryParentCandidate = path.resolve(workspaceRoot, "test", "foundry");
@@ -173,7 +184,7 @@ function resetTaskArtifactsForAttempt(task: (typeof taskSpecs)[number]): void {
     if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
       throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
     }
-    resetTaskArtifactRoot(
+    resetTaskArtifactContents(
       path.join(foundryParent, task.metadata.node.logicalNodeId),
       task.metadata.node.logicalNodeId,
       "generated-test"
@@ -182,7 +193,7 @@ function resetTaskArtifactsForAttempt(task: (typeof taskSpecs)[number]): void {
   prepareArtifactMirror(task);
 }
 
-function resetTaskArtifactRoot(
+function resetTaskArtifactContents(
   rootPath: string,
   attemptId: string,
   label: "canonical" | "mirror" | "generated-test"
@@ -192,11 +203,12 @@ function resetTaskArtifactRoot(
     throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
   }
   const parent = realpathSync(path.dirname(candidate));
-  const anchoredRoot = path.join(parent, attemptId);
-  rmSync(anchoredRoot, { recursive: true, force: true });
-  mkdirSync(anchoredRoot, { recursive: false, mode: 0o700 });
-  if (realpathSync(anchoredRoot) !== anchoredRoot) {
+  const anchoredRoot = realpathSync(candidate);
+  if (anchoredRoot !== path.join(parent, attemptId)) {
     throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
+  }
+  for (const entry of readdirSync(anchoredRoot)) {
+    rmSync(path.join(anchoredRoot, entry), { recursive: true, force: true });
   }
 }
 
