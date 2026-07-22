@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import type { AnalysisResult, Severity } from "../types.js";
+import type { AnalysisResult, PairComparison, Severity } from "../types.js";
 import { SEVERITY_ORDER } from "../types.js";
 import { intersectionGroups, orderedSetRows, severityCounts } from "./analysis.js";
 import { mean, sampleStdev } from "./stats.js";
@@ -38,6 +38,33 @@ function symbolDiamond(x: number, y: number, size: number, options: Record<strin
 
 function markerSquare(x: number, y: number, size: number, options: Record<string, unknown> = {}): string {
   return rect(x - size, y - size, size * 2, size * 2, options);
+}
+
+function niceAxisMaximum(value: number, divisions: number): number {
+  const roughStep = Math.max(value, Number.EPSILON) / divisions;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const normalized = roughStep / magnitude;
+  const step =
+    normalized <= 1
+      ? magnitude
+      : normalized <= 2
+        ? 2 * magnitude
+        : normalized <= 2.5
+          ? 2.5 * magnitude
+          : normalized <= 5
+            ? 5 * magnitude
+            : 10 * magnitude;
+  return step * divisions;
+}
+
+interface PairwisePanel {
+  title: string;
+  note: string;
+  maximum: number;
+  divisions: number;
+  value: (pair: PairComparison, condition: "ultrafuzz" | "no-fuzz") => number | null;
+  format: (value: number) => string;
+  formatTick: (value: number) => string;
 }
 
 export async function buildUpSetChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
@@ -273,6 +300,157 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     })
   );
   const svgPath = join(outputDir, "precision_recall_f1.svg");
+  return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
+}
+
+export async function buildPairwiseChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
+  const pairs = result.pairComparison;
+  if (pairs.length === 0) throw new Error("No Ultrafuzz/no-fuzz row pairs are available for pairwise analysis");
+
+  const creditMaximum = niceAxisMaximum(
+    Math.max(
+      1,
+      ...pairs.flatMap((pair) => [
+        pair.ultrafuzz.distinctGroundTruthCredits ?? 0,
+        pair.noFuzz.distinctGroundTruthCredits ?? 0
+      ])
+    ),
+    3
+  );
+  const tokenMaximum = niceAxisMaximum(
+    Math.max(1, ...pairs.flatMap((pair) => [pair.ultrafuzz.totalTokensMillions, pair.noFuzz.totalTokensMillions])),
+    4
+  );
+  const panels: PairwisePanel[] = [
+    {
+      title: "Ground-truth TP credits",
+      note: "Higher is better",
+      maximum: creditMaximum,
+      divisions: 3,
+      value: (pair, condition) =>
+        condition === "ultrafuzz" ? pair.ultrafuzz.distinctGroundTruthCredits : pair.noFuzz.distinctGroundTruthCredits,
+      format: (value) => value.toFixed(0),
+      formatTick: (value) => value.toFixed(0)
+    },
+    {
+      title: "F1 score",
+      note: "Higher is better",
+      maximum: 1,
+      divisions: 4,
+      value: (pair, condition) => (condition === "ultrafuzz" ? pair.ultrafuzz.f1 : pair.noFuzz.f1),
+      format: (value) => `${(value * 100).toFixed(1)}%`,
+      formatTick: (value) => tickLabel(value)
+    },
+    {
+      title: "Total tokens (millions)",
+      note: "Lower is better",
+      maximum: tokenMaximum,
+      divisions: 4,
+      value: (pair, condition) =>
+        condition === "ultrafuzz" ? pair.ultrafuzz.totalTokensMillions : pair.noFuzz.totalTokensMillions,
+      format: (value) => value.toFixed(1),
+      formatTick: (value) => value.toFixed(0)
+    }
+  ];
+
+  const width = 1600;
+  const panelLeft = [145, 655, 1165];
+  const panelWidth = 375;
+  const rowTop = 270;
+  const rowStep = 92;
+  const axisTop = 220;
+  const axisBottom = rowTop + (pairs.length - 1) * rowStep + 58;
+  const height = axisBottom + 105;
+  const parts: string[] = [];
+
+  parts.push(text(60, 58, "Paired Ultrafuzz vs no-fuzz comparison", { "font-size": 28, "font-weight": 650 }));
+  parts.push(
+    text(60, 90, `${pairs.length} matched row pairs · finalized global adjudication`, {
+      "font-size": 15,
+      fill: "#666"
+    })
+  );
+  parts.push(circle(72, 132, 8, CONDITION_STYLES[0]));
+  parts.push(text(91, 137, "Ultrafuzz (d#)", { "font-size": 13 }));
+  parts.push(markerSquare(248, 132, 8, CONDITION_STYLES[1]));
+  parts.push(text(267, 137, "no-fuzz (n#)", { "font-size": 13 }));
+
+  pairs.forEach((pair, index) => {
+    const y = rowTop + index * rowStep;
+    if (index % 2 === 1) parts.push(rect(45, y - 35, width - 90, 70, { fill: "#f5f5f5" }));
+    parts.push(
+      text(116, y + 6, `${pair.ultrafuzz.rowId} / ${pair.noFuzz.rowId}`, {
+        "font-size": 15,
+        "font-weight": 650,
+        "text-anchor": "end"
+      })
+    );
+  });
+
+  panels.forEach((panel, panelIndex) => {
+    const left = panelLeft[panelIndex] ?? 145;
+    const right = left + panelWidth;
+    const xAt = (value: number) => left + (value / panel.maximum) * panelWidth;
+    parts.push(text(left, 172, panel.title, { "font-size": 17, "font-weight": 650 }));
+    parts.push(text(right, 195, panel.note, { "font-size": 12, fill: "#666", "text-anchor": "end" }));
+
+    for (let tick = 0; tick <= panel.divisions; tick += 1) {
+      const value = (panel.maximum * tick) / panel.divisions;
+      const x = xAt(value);
+      parts.push(line(x, axisTop, x, axisBottom, { stroke: tick === 0 ? "#999" : "#e1e1e1" }));
+      parts.push(
+        text(x, axisBottom + 28, panel.formatTick(value), {
+          "font-size": 11,
+          "text-anchor": "middle",
+          fill: "#666"
+        })
+      );
+    }
+
+    pairs.forEach((pair, pairIndex) => {
+      const y = rowTop + pairIndex * rowStep;
+      const ultrafuzz = panel.value(pair, "ultrafuzz");
+      const noFuzz = panel.value(pair, "no-fuzz");
+      if (ultrafuzz === null || noFuzz === null) {
+        parts.push(text((left + right) / 2, y + 5, "NA", { "font-size": 12, "text-anchor": "middle", fill: "#777" }));
+        return;
+      }
+      const ultrafuzzX = xAt(ultrafuzz);
+      const noFuzzX = xAt(noFuzz);
+      parts.push(line(ultrafuzzX, y, noFuzzX, y, { stroke: "#777", "stroke-width": 2 }));
+      parts.push(circle(ultrafuzzX, y, 8, CONDITION_STYLES[0]));
+      parts.push(markerSquare(noFuzzX, y, 8, CONDITION_STYLES[1]));
+      parts.push(
+        text(ultrafuzzX, y - 15, panel.format(ultrafuzz), {
+          "font-size": 11,
+          "font-weight": 600,
+          "text-anchor": "middle"
+        })
+      );
+      parts.push(
+        text(noFuzzX, y + 25, panel.format(noFuzz), {
+          "font-size": 11,
+          "font-weight": 600,
+          "text-anchor": "middle",
+          fill: "#555"
+        })
+      );
+    });
+  });
+
+  parts.push(
+    text(
+      width - 55,
+      height - 22,
+      "Lines connect matched benchmark rows; repeated findings are deduplicated before TP crediting.",
+      {
+        "font-size": 12,
+        "text-anchor": "end",
+        fill: "#777"
+      }
+    )
+  );
+  const svgPath = join(outputDir, "paired_row_comparison.svg");
   return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }
 

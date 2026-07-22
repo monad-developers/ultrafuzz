@@ -2,7 +2,7 @@ export const SEVERITY_ORDER = ["H", "M", "L", "I"] as const;
 
 export type Severity = (typeof SEVERITY_ORDER)[number];
 export type Classification = "true-positive" | "false-positive" | "needs-human-review" | string;
-export type AnalysisCommandName = "upset" | "scores" | "provenance" | "table" | "cost" | "all";
+export type AnalysisCommandName = "upset" | "scores" | "provenance" | "table" | "cost" | "pairwise" | "all";
 
 export interface BenchmarkRow {
   rowId: string;

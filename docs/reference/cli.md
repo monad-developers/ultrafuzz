@@ -285,10 +285,11 @@ ultrafuzz eval history [eval-run-id] \
 `eval analyze` reads a finalized handoff ZIP directly and discovers its
 adjudication output through `handoff/current-state.json`. Available report
 types are `all`, `upset` (`upsert` alias), `scores`
-(`precision-recall-f1` alias), `provenance`, `table`, and `cost`. Charts are
-written as PNG and editable SVG alongside CSV, JSON, and Markdown reports.
-Condition score summaries report the mean, median, and sample standard
-deviation across completed rows.
+(`precision-recall-f1` alias), `provenance`, `table`, `cost`, and `pairwise`.
+The pairwise chart connects matched Ultrafuzz/no-fuzz rows across ground-truth
+TP credits, F1, and total tokens. Charts are written as PNG and editable SVG
+alongside CSV, JSON, and Markdown reports. Condition score summaries report
+the mean, median, and sample standard deviation across completed rows.
 
 The input and output paths are required to be outside `--project`. Handoff
 archives and generated reports may contain private target details,

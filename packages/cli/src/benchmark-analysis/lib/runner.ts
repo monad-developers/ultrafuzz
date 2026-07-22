@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { AnalysisCommandName } from "../types.js";
 import { analyzeArchive } from "./analysis.js";
-import { buildCostChart, buildScoreChart, buildUpSetChart } from "./charts.js";
+import { buildCostChart, buildPairwiseChart, buildScoreChart, buildUpSetChart } from "./charts.js";
 import { writeMethodOutputs, writeProvenanceOutputs, writeScoreOutputs, writeTableOutputs } from "./outputs.js";
 
 export interface AnalysisOptions {
@@ -53,6 +53,7 @@ export async function runAnalysisCommand(
     outputs.push(...(await buildScoreChart(result, output)));
   }
   if (command === "cost" || command === "all") outputs.push(...(await buildCostChart(result, output)));
+  if (command === "pairwise" || command === "all") outputs.push(...(await buildPairwiseChart(result, output)));
   if (command === "table" || command === "all") outputs.push(...(await writeTableOutputs(result, output)));
   if (command === "all") outputs.push(...(await writeMethodOutputs(result, output)));
   const analysisManifestPath = path.join(output, "analysis_manifest.json");
