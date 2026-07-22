@@ -1087,8 +1087,26 @@ export function checkEvalHistoryCharts(history: EvalHistory, chartsDirectory: st
   return mismatches;
 }
 
+// Ordered series-identity fields. Every field except `target` is treated as
+// shared context: when it is constant across all plotted series it is rendered
+// once in the chart subtitle, and only the fields that actually vary end up in
+// each series legend label. `target` always labels the series so per-target
+// lines stay legible even when it is the only distinguishing field.
+const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning", "cohort", "policy"] as const;
+
+interface SeriesFields {
+  benchmark: string;
+  lane: string;
+  model: string;
+  reasoning: string;
+  cohort: string;
+  policy: string;
+  target: string;
+}
+
 interface ChartPoint {
-  series: string;
+  seriesKey: string;
+  fields: SeriesFields;
   timestamp: string;
   commit: string;
   repositoryUrl: string;
@@ -1105,6 +1123,7 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
       observation.reasoning_effort,
       observation.cohort_fingerprint,
       observation.execution_policy_fingerprint,
+      observation.target,
       observation.run_timestamp,
       observation.candidate_commit
     ].join("\u0000");
@@ -1113,15 +1132,18 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
   return [...groups.values()]
     .map((group) => {
       const first = group[0]!;
+      const fields: SeriesFields = {
+        benchmark: first.benchmark,
+        lane: first.lane,
+        model: first.model,
+        reasoning: first.reasoning_effort,
+        cohort: `cohort-${shortFingerprint(first.cohort_fingerprint)}`,
+        policy: `policy-${shortFingerprint(first.execution_policy_fingerprint)}`,
+        target: first.target
+      };
       return {
-        series: [
-          first.benchmark,
-          first.lane,
-          first.model,
-          first.reasoning_effort,
-          `cohort-${shortFingerprint(first.cohort_fingerprint)}`,
-          `policy-${shortFingerprint(first.execution_policy_fingerprint)}`
-        ].join(" "),
+        seriesKey: [...SERIES_CONTEXT_FIELDS.map((field) => fields[field]), fields.target].join(" "),
+        fields,
         timestamp: first.run_timestamp,
         commit: first.candidate_commit,
         repositoryUrl: first.candidate_repository_url,
@@ -1130,7 +1152,7 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     })
     .sort(
       (left, right) =>
-        compareText(left.series, right.series) ||
+        compareText(left.seriesKey, right.seriesKey) ||
         compareText(left.timestamp, right.timestamp) ||
         compareText(left.commit, right.commit)
     );
@@ -1165,111 +1187,152 @@ function renderChart(
   title: string,
   ratioMetric: boolean
 ): string {
-  const width = 960;
-  const height = 420;
-  const left = 72;
-  const right = 32;
-  const top = 50;
-  const bottom = 98;
+  const width = 660;
+  const left = 66;
+  const right = 24;
+  const top = 104;
   const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
+  const plotHeight = 320;
+  const plotBottom = top + plotHeight;
+  const legendTop = plotBottom + 58;
   const points = chartPoints(observations, metric);
+
+  const seriesKeys = [...new Set(points.map((point) => point.seriesKey))];
+  const height = legendTop + seriesKeys.length * 22 + 12;
+  const palette = ["#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c", "#4f46e5"];
+  const color = new Map(seriesKeys.map((name, index) => [name, palette[index % palette.length]!]));
+  const seriesIndex = new Map(seriesKeys.map((name, index) => [name, index]));
+  const seriesFieldsByKey = new Map(
+    seriesKeys.map((key) => [key, points.find((point) => point.seriesKey === key)!.fields])
+  );
+
+  // Split shared context (rendered once as a subtitle) from the fields that
+  // distinguish the plotted series (rendered in each legend row).
+  const constantContext: string[] = [];
+  const varyingFields: Array<(typeof SERIES_CONTEXT_FIELDS)[number]> = [];
+  for (const field of SERIES_CONTEXT_FIELDS) {
+    const values = new Set([...seriesFieldsByKey.values()].map((fields) => fields[field]));
+    const sample = [...seriesFieldsByKey.values()][0];
+    if (values.size <= 1) {
+      if (sample !== undefined) constantContext.push(sample[field]);
+    } else {
+      varyingFields.push(field);
+    }
+  }
+  const seriesLabel = (fields: SeriesFields): string =>
+    [...varyingFields.map((field) => fields[field]), fields.target].join(" ");
+
   const timestamps = points.map((point) => Date.parse(point.timestamp));
   const minTime = timestamps.length === 0 ? 0 : Math.min(...timestamps);
   const maxTime = timestamps.length === 0 ? 0 : Math.max(...timestamps);
+  // With a single benchmarked commit there is no time axis to spread points
+  // along, so lay the per-target series out side by side instead of stacking
+  // them on one x. Multiple commits use the real time axis.
+  const singleColumn = points.length > 0 && minTime === maxTime;
   const available = points.map((point) => point.value).filter((value): value is number => value !== null);
   const maxValue = ratioMetric ? 1 : Math.max(1, ...available);
-  const series = [...new Set(points.map((point) => point.series))];
-  const palette = ["#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c", "#4f46e5"];
-  const color = new Map(series.map((name, index) => [name, palette[index % palette.length]!]));
-  const x = (timestamp: string): number => {
+  const x = (point: ChartPoint): number => {
+    if (singleColumn) {
+      return left + (plotWidth * ((seriesIndex.get(point.seriesKey) ?? 0) + 1)) / (seriesKeys.length + 1);
+    }
     if (minTime === maxTime) return left + plotWidth / 2;
-    return left + ((Date.parse(timestamp) - minTime) / (maxTime - minTime)) * plotWidth;
+    const pad = 28;
+    return left + pad + ((Date.parse(point.timestamp) - minTime) / (maxTime - minTime)) * (plotWidth - 2 * pad);
   };
   const y = (value: number): number => top + plotHeight - (value / maxValue) * plotHeight;
+
   const lines: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     `<title id="title">${xml(title)}</title>`,
-    `<desc id="desc">${xml(`${title} by candidate commit and benchmark lane`)}</desc>`,
-    '<rect width="960" height="420" fill="#ffffff"/>',
-    `<text x="${left}" y="28" font-family="system-ui, sans-serif" font-size="20" font-weight="600" fill="#111827">${xml(title)}</text>`,
-    `<line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" stroke="#6b7280"/>`,
-    `<line x1="${left}" y1="${top + plotHeight}" x2="${left + plotWidth}" y2="${top + plotHeight}" stroke="#6b7280"/>`
+    `<desc id="desc">${xml(`${title} by candidate commit and benchmark target`)}</desc>`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">${xml(title)}</text>`
   ];
+  if (constantContext.length > 0) {
+    lines.push(
+      `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(constantContext.join(" · "))}</text>`
+    );
+  }
+  lines.push(
+    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across candidate commits.")}</text>`,
+    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
+  );
   for (let tick = 0; tick <= 4; tick += 1) {
     const value = (maxValue * tick) / 4;
     const tickY = y(value);
     lines.push(
       `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
-      `<text x="${left - 10}" y="${format(tickY + 4)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">${xml(formatMetric(value, ratioMetric))}</text>`
+      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">${xml(formatMetric(value, ratioMetric))}</text>`
     );
   }
   if (points.length === 0) {
     lines.push(
-      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="15" fill="#6b7280">No published observations</text>`
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No published observations</text>`
     );
   } else {
     const bySeries = new Map<string, ChartPoint[]>();
-    for (const point of points) bySeries.set(point.series, [...(bySeries.get(point.series) ?? []), point]);
+    for (const point of points) bySeries.set(point.seriesKey, [...(bySeries.get(point.seriesKey) ?? []), point]);
     for (const [name, values] of bySeries) {
+      const stroke = color.get(name)!;
       const availableValues = values.filter((point): point is ChartPoint & { value: number } => point.value !== null);
       if (availableValues.length > 1) {
         lines.push(
-          `<polyline fill="none" stroke="${color.get(name)}" stroke-width="2" points="${availableValues
-            .map((point) => `${format(x(point.timestamp))},${format(y(point.value))}`)
+          `<polyline fill="none" stroke="${stroke}" stroke-width="2.5" points="${availableValues
+            .map((point) => `${format(x(point))},${format(y(point.value))}`)
             .join(" ")}"/>`
         );
       }
       for (const point of values) {
-        const pointX = x(point.timestamp);
+        const pointX = x(point);
         const commitUrl = `${point.repositoryUrl.replace(/\/$/u, "")}/commit/${point.commit}`;
         const shortCommit = point.commit.slice(0, 7);
+        const label = seriesLabel(point.fields);
         if (point.value === null) {
-          const pointY = top + plotHeight - 8;
+          const pointY = plotBottom - 8;
           lines.push(
-            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="unavailable"><title>${xml(`${name} ${shortCommit}: unavailable`)}</title>`,
-            `<line x1="${format(pointX - 4)}" y1="${format(pointY - 4)}" x2="${format(pointX + 4)}" y2="${format(pointY + 4)}" stroke="${color.get(name)}"/>`,
-            `<line x1="${format(pointX + 4)}" y1="${format(pointY - 4)}" x2="${format(pointX - 4)}" y2="${format(pointY + 4)}" stroke="${color.get(name)}"/>`,
-            `<text x="${format(pointX)}" y="${format(pointY - 8)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#6b7280">n/a ${shortCommit}</text></a>`
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}" data-status="unavailable"><title>${xml(`${label} ${shortCommit}: unavailable`)}</title>`,
+            `<line x1="${format(pointX - 5)}" y1="${format(pointY - 5)}" x2="${format(pointX + 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
+            `<line x1="${format(pointX + 5)}" y1="${format(pointY - 5)}" x2="${format(pointX - 5)}" y2="${format(pointY + 5)}" stroke="${stroke}"/>`,
+            `<text x="${format(pointX)}" y="${format(pointY - 10)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#6b7280">n/a ${shortCommit}</text></a>`
           );
           continue;
         }
         const pointY = y(point.value);
         lines.push(
-          `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${name} ${shortCommit}: ${formatMetric(point.value, ratioMetric)}`)}</title>`,
-          `<circle cx="${format(pointX)}" cy="${format(pointY)}" r="4" fill="${color.get(name)}"/>`,
-          `<text x="${format(pointX)}" y="${format(pointY - 9)}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#374151">${shortCommit}</text></a>`
+          `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${shortCommit}: ${formatMetric(point.value, ratioMetric)}`)}</title>`,
+          `<circle cx="${format(pointX)}" cy="${format(pointY)}" r="5" fill="${stroke}"/></a>`
         );
       }
     }
-    const chronological = [...points].sort(
+    // Label each distinct commit column once beneath the axis; cap crowded
+    // histories to the earliest and latest commits.
+    const columnByTimestamp = new Map<string, ChartPoint>();
+    for (const point of points)
+      if (!columnByTimestamp.has(point.timestamp)) columnByTimestamp.set(point.timestamp, point);
+    let columns = [...columnByTimestamp.values()].sort(
       (leftPoint, rightPoint) =>
         compareText(leftPoint.timestamp, rightPoint.timestamp) || compareText(leftPoint.commit, rightPoint.commit)
     );
-    const firstPoint = chronological[0]!;
-    const lastPoint = chronological.at(-1)!;
-    const dateLabels =
-      firstPoint.timestamp.slice(0, 10) === lastPoint.timestamp.slice(0, 10) ? [firstPoint] : [firstPoint, lastPoint];
-    for (const point of dateLabels) {
-      const date = point.timestamp.slice(0, 10);
+    if (columns.length > 8) columns = [columns[0]!, columns.at(-1)!];
+    for (const column of columns) {
+      const columnX = singleColumn ? left + plotWidth / 2 : x(column);
       lines.push(
-        `<text x="${format(x(point.timestamp))}" y="${top + plotHeight + 20}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">${date}</text>`
+        `<text x="${format(columnX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
+        `<text x="${format(columnX)}" y="${plotBottom + 34}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
       );
     }
   }
-  series.forEach((name, index) => {
-    const legendY = height - 50 + Math.floor(index / 3) * 20;
-    const legendX = left + (index % 3) * 285;
+  seriesKeys.forEach((name, index) => {
+    const fields = seriesFieldsByKey.get(name)!;
+    const rowY = legendTop + index * 22;
     lines.push(
-      `<rect x="${legendX}" y="${legendY - 9}" width="10" height="10" fill="${color.get(name)}"/>`,
-      `<text x="${legendX + 16}" y="${legendY}" font-family="system-ui, sans-serif" font-size="11" fill="#374151">${xml(name)}</text>`
+      `<rect x="${left}" y="${rowY - 11}" width="12" height="12" fill="${color.get(name)}"/>`,
+      `<text x="${left + 18}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(seriesLabel(fields))}</text>`
     );
   });
-  lines.push(
-    `<text x="${left + plotWidth / 2}" y="${height - 72}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#374151">Date</text>`,
-    "</svg>"
-  );
+  lines.push("</svg>");
   return `${lines.join("\n")}\n`;
 }
 

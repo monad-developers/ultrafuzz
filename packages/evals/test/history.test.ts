@@ -584,9 +584,10 @@ describe("longitudinal eval history", () => {
     expect(first).toEqual(second);
     expect(first.get("precision.svg")).toContain(`https://github.com/monad-developers/ultrafuzz/commit/${CANDIDATE}`);
     expect(first.get("precision.svg")).toContain(CANDIDATE.slice(0, 7));
-    expect(first.get("precision.svg")).toContain("gpt-5.6-luna high");
+    expect(first.get("precision.svg")).toContain("gpt-5.6-luna · high");
     expect(first.get("precision.svg")).toContain("cohort-aaaaaaaa");
     expect(first.get("precision.svg")).toContain("policy-dddddddd");
+    expect(first.get("precision.svg")).toContain(">target-a</text>");
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
   });
