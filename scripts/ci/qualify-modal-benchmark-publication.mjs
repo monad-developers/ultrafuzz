@@ -9,14 +9,17 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
   const event = record(eventValue);
   const workflowRun = record(event.workflow_run);
   const eventName = string(workflowRun.event);
+  const defaultBranch = string(record(event.repository).default_branch);
 
   if (
     workflowRun.conclusion !== "success" ||
     workflowRun.path !== PRODUCER_WORKFLOW_PATH ||
     record(workflowRun.head_repository).full_name !== repository ||
+    defaultBranch === "" ||
+    workflowRun.head_branch !== defaultBranch ||
     !SUPPORTED_EVENTS.has(eventName)
   ) {
-    return ineligible("the completed run is not an eligible trusted benchmark producer");
+    return ineligible("the completed run is not an eligible default-branch benchmark producer");
   }
   const jobs = jobRecords(jobsValue);
   for (const requiredJob of ["launch", "collect"]) {

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - "**"
+    paths-ignore:
+      - benchmarks/history.json
+      - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
       openai_model:

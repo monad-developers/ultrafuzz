@@ -6,15 +6,16 @@ import { pathToFileURL } from "node:url";
 
 export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
 
-const TARGET_BRANCH = "automation/eval-history";
+const TARGET_BRANCH = "main";
 const TARGET_REF = `refs/heads/${TARGET_BRANCH}`;
 const TARGET_REMOTE_REF = `refs/remotes/origin/${TARGET_BRANCH}`;
-const MAIN_REF = "refs/remotes/origin/main";
 const MAX_ATTEMPTS = 12;
 const MAX_GENERATION_BYTES = 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
-const COMMIT_MESSAGE = "Update published eval history [ci skip]";
+const COMMIT_MESSAGE = "Update published eval history";
+const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
+const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
 const HISTORY_PATHS = [
   "benchmarks/history.json",
   "docs/assets/eval-history/precision.svg",
@@ -144,20 +145,13 @@ export function publishEvalHistoryGeneration(input) {
       checked("git", ["worktree", "add", "--detach", worktree, base.ref], { cwd: repositoryRoot });
       activeWorktree = worktree;
       try {
-        if (base.reconcileRetainedTarget) {
-          reconcileRetainedTargetHistory(worktree, repositoryRoot, base.targetOid);
-          renderHistoryWithCli(worktree, cliPath);
-        }
         installRunSnapshots(snapshots, worktree);
         appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyRoot);
         const stagedPaths = stageExactPublication(worktree);
         let commit = base.oid;
         let createdCommit = false;
-        if (base.reconcileRetainedTarget) {
-          commit = createReconciliationCommit(worktree, base.mainOid, base.targetOid);
-          createdCommit = true;
-        } else if (stagedPaths.length > 0) {
-          commit = createPublicationCommit(worktree, base.oid);
+        if (stagedPaths.length > 0) {
+          commit = createPublicationCommit(worktree, base.oid, generation);
           createdCommit = true;
         }
         const needsPush = createdCommit;
@@ -168,18 +162,14 @@ export function publishEvalHistoryGeneration(input) {
             reportRetry(attempt, "a remote tip advanced during an idempotent rebuild");
             continue;
           }
-          return publicationResult(generation, latest.targetOid ?? latest.oid, attempt, false);
+          return publicationResult(generation, latest.oid, attempt, false);
         }
 
         const push = run("git", ["push", "origin", `HEAD:${TARGET_REF}`], { cwd: worktree });
         if (push.status === 0) {
           const published = refreshRemoteBase(repositoryRoot);
-          if (!published.targetExists || !isAncestor(repositoryRoot, commit, published.targetOid)) {
+          if (!isAncestor(repositoryRoot, commit, published.oid)) {
             throw new Error(`pushed commit ${commit} is not present on origin/${TARGET_BRANCH}`);
-          }
-          if (!isAncestor(repositoryRoot, published.mainOid, published.targetOid)) {
-            reportRetry(attempt, "origin/main advanced while the publication was being pushed");
-            continue;
           }
           return publicationResult(generation, commit, attempt, true);
         }
@@ -201,11 +191,6 @@ export function publishEvalHistoryGeneration(input) {
     safeRemoveTemporaryRoot(temporaryRoot);
     run("git", ["worktree", "prune"], { cwd: repositoryRoot });
   }
-}
-
-export function assertEvalHistoryPublicationBranch(repositoryRoot = process.cwd()) {
-  const root = gitRepositoryRoot(repositoryRoot);
-  return assertPublicationDiffPaths(root, MAIN_REF, TARGET_REMOTE_REF, `origin/${TARGET_BRANCH} cumulative diff`);
 }
 
 function snapshotGenerationInputs(generation, inputRoot, snapshotRoot) {
@@ -261,10 +246,6 @@ function appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyR
   checked("node", [cliPath, "eval", "history", "--project", worktree, "--check"], { cwd: worktree });
 }
 
-function renderHistoryWithCli(worktree, cliPath) {
-  checked("node", [cliPath, "eval", "history", "--project", worktree], { cwd: worktree });
-}
-
 function stageExactPublication(worktree) {
   for (const relative of HISTORY_PATHS)
     regularFilePath(path.join(worktree, relative), `publication output ${relative}`);
@@ -279,18 +260,20 @@ function stageExactPublication(worktree) {
   return staged;
 }
 
-function createPublicationCommit(worktree, parent) {
+function createPublicationCommit(worktree, parent, generation) {
   checked(
     "git",
     [
       "-c",
-      "user.name=github-actions[bot]",
+      `user.name=${COMMIT_AUTHOR_NAME}`,
       "-c",
-      "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+      `user.email=${COMMIT_AUTHOR_EMAIL}`,
       "commit",
       "--no-verify",
       "-m",
       COMMIT_MESSAGE,
+      "-m",
+      `Source-Workflow-Run: ${generation.source_artifact}\nCandidate-Commit: ${generation.candidate_commit}`,
       "--",
       ...HISTORY_PATHS
     ],
@@ -298,27 +281,6 @@ function createPublicationCommit(worktree, parent) {
   );
   const commit = gitOutput(worktree, ["rev-parse", "HEAD"]);
   assertCommitContainsOnly(worktree, parent, commit, false);
-  return commit;
-}
-
-function createReconciliationCommit(worktree, mainOid, targetOid) {
-  const tree = gitOutput(worktree, ["write-tree"]);
-  const commit = gitOutput(worktree, [
-    "-c",
-    "user.name=github-actions[bot]",
-    "-c",
-    "user.email=41898282+github-actions[bot]@users.noreply.github.com",
-    "commit-tree",
-    tree,
-    "-p",
-    mainOid,
-    "-p",
-    targetOid,
-    "-m",
-    COMMIT_MESSAGE
-  ]);
-  checked("git", ["reset", "--hard", commit], { cwd: worktree });
-  assertCommitContainsOnly(worktree, mainOid, commit, true);
   return commit;
 }
 
@@ -338,124 +300,16 @@ function assertAllowedPaths(paths, label) {
   }
 }
 
-function assertPublicationDiffPaths(repositoryRoot, base, target, label) {
-  const paths = nulPaths(
-    checked("git", ["diff", "--name-only", "--no-renames", "-z", base, target, "--"], {
-      cwd: repositoryRoot
-    }).stdout
-  );
-  assertAllowedPaths(paths, label);
-  return paths;
-}
-
 function refreshRemoteBase(repositoryRoot) {
   checked("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], {
     cwd: repositoryRoot
   });
-  const mainOid = gitOutput(repositoryRoot, ["rev-parse", MAIN_REF]);
-  for (let probe = 1; probe <= 3; probe += 1) {
-    const advertised = run("git", ["ls-remote", "--exit-code", "--heads", "origin", TARGET_REF], {
-      cwd: repositoryRoot
-    });
-    if (advertised.status === 0) {
-      const advertisedOid = advertised.stdout.trim().split(/\s+/u)[0];
-      if (!/^[0-9a-f]{40}$/u.test(advertisedOid ?? "")) {
-        throw new Error(`origin/${TARGET_BRANCH} advertised an invalid commit ID`);
-      }
-      const fetched = run("git", ["fetch", "--no-tags", "origin", `+${TARGET_REF}:${TARGET_REMOTE_REF}`], {
-        cwd: repositoryRoot
-      });
-      if (fetched.status !== 0) {
-        if (probe < 3) continue;
-        throw processFailure("git", ["fetch", "--no-tags", "origin", `+${TARGET_REF}:${TARGET_REMOTE_REF}`], fetched);
-      }
-      const targetOid = gitOutput(repositoryRoot, ["rev-parse", TARGET_REMOTE_REF]);
-      if (isAncestor(repositoryRoot, targetOid, mainOid)) {
-        return {
-          ref: MAIN_REF,
-          oid: mainOid,
-          mainOid,
-          targetOid,
-          targetExists: true,
-          reconcileRetainedTarget: false
-        };
-      }
-      if (isAncestor(repositoryRoot, mainOid, targetOid)) {
-        assertPublicationDiffPaths(repositoryRoot, mainOid, targetOid, `origin/${TARGET_BRANCH} cumulative diff`);
-        return {
-          ref: TARGET_REMOTE_REF,
-          oid: targetOid,
-          mainOid,
-          targetOid,
-          targetExists: true,
-          reconcileRetainedTarget: false
-        };
-      }
-      return {
-        ref: MAIN_REF,
-        oid: mainOid,
-        mainOid,
-        targetOid,
-        targetExists: true,
-        reconcileRetainedTarget: true
-      };
-    }
-    if (advertised.status !== 2) {
-      throw processFailure("git", ["ls-remote", "--exit-code", "--heads", "origin", TARGET_REF], advertised);
-    }
-    checked("git", ["update-ref", "-d", TARGET_REMOTE_REF], { cwd: repositoryRoot });
-    return {
-      ref: MAIN_REF,
-      oid: mainOid,
-      mainOid,
-      targetOid: undefined,
-      targetExists: false,
-      reconcileRetainedTarget: false
-    };
-  }
-  throw new Error(`failed to resolve origin/${TARGET_BRANCH}`);
-}
-
-function reconcileRetainedTargetHistory(worktree, repositoryRoot, targetOid) {
-  const historyPath = path.join(worktree, "benchmarks", "history.json");
-  const current = historyRecord(readJsonFile(historyPath), `${MAIN_REF}:benchmarks/history.json`);
-  const retained = historyRecord(
-    JSON.parse(gitOutput(repositoryRoot, ["show", `${targetOid}:benchmarks/history.json`])),
-    `${targetOid}:benchmarks/history.json`
-  );
-  if (current.schema_version !== retained.schema_version) {
-    throw new Error("main and retained publication histories use different schema versions");
-  }
-  const observations = [...current.observations];
-  const byId = new Map();
-  for (const observation of observations) {
-    const id = historyObservationId(observation, "main history observation");
-    if (byId.has(id)) throw new Error(`main history repeats observation ${id}`);
-    byId.set(id, stableJson(observation));
-  }
-  for (const observation of retained.observations) {
-    const id = historyObservationId(observation, "retained history observation");
-    const canonical = stableJson(observation);
-    const previous = byId.get(id);
-    if (previous !== undefined && previous !== canonical) {
-      throw new Error(`retained publication observation ${id} conflicts with main`);
-    }
-    if (previous === undefined) {
-      byId.set(id, canonical);
-      observations.push(observation);
-    }
-  }
-  fs.writeFileSync(
-    historyPath,
-    `${JSON.stringify({ schema_version: current.schema_version, observations }, null, 2)}\n`,
-    "utf8"
-  );
+  const oid = gitOutput(repositoryRoot, ["rev-parse", TARGET_REMOTE_REF]);
+  return { ref: TARGET_REMOTE_REF, oid };
 }
 
 function sameRemoteState(left, right) {
-  return (
-    left.mainOid === right.mainOid && left.targetExists === right.targetExists && left.targetOid === right.targetOid
-  );
+  return left.oid === right.oid;
 }
 
 function isAncestor(repositoryRoot, ancestor, descendant) {
@@ -627,37 +481,6 @@ function publicationStatus(value, evalRunId) {
   return value;
 }
 
-function historyRecord(value, label) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  if (typeof value.schema_version !== "string" || !Array.isArray(value.observations)) {
-    throw new Error(`${label} must contain schema_version and observations`);
-  }
-  return value;
-}
-
-function historyObservationId(value, label) {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || typeof value.id !== "string") {
-    throw new Error(`${label} must contain a string ID`);
-  }
-  return requiredString(value.id, `${label} ID`);
-}
-
-function stableJson(value) {
-  return JSON.stringify(stableValue(value));
-}
-
-function stableValue(value) {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (typeof value !== "object" || value === null) return value;
-  return Object.fromEntries(
-    Object.keys(value)
-      .sort()
-      .map((key) => [key, stableValue(value[key])])
-  );
-}
-
 function strictRecord(value, label, keys, optionalKeys = []) {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error(`${label} must be an object`);
@@ -696,14 +519,6 @@ function readGeneration(filePath) {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch (error) {
     throw new Error(`failed to read publication generation JSON ${filePath}`, { cause: error });
-  }
-}
-
-function readJsonFile(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
-    throw new Error(`failed to read JSON file ${filePath}`, { cause: error });
   }
 }
 
@@ -796,19 +611,9 @@ function reportRetry(attempt, reason) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (command === "verify-target") {
-    if (args.length > 0) {
-      throw new Error("usage: publish-eval-history-cas.mjs verify-target");
-    }
-    const paths = assertEvalHistoryPublicationBranch();
-    process.stdout.write(`${JSON.stringify({ paths })}\n`);
-    return;
-  }
   const [generationPath, inputRoot, benchmarkPolicyRoot, ...extra] = [command, ...args];
   if (generationPath === undefined || inputRoot === undefined || extra.length > 0) {
-    throw new Error(
-      "usage: publish-eval-history-cas.mjs <generation.json> <input-root> [benchmark-policy-root] | verify-target"
-    );
+    throw new Error("usage: publish-eval-history-cas.mjs <generation.json> <input-root> [benchmark-policy-root]");
   }
   const result = publishEvalHistoryGeneration({
     generationPath,
