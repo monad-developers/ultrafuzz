@@ -11,11 +11,14 @@ import {
   benchmarkLaneTopologyExclusions,
   BENCHMARK_SMOKE_EXCLUDED_NODE_IDS,
   BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES,
+  BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS,
+  BENCHMARK_SMOKE_WORKFLOW_PATH,
+  BENCHMARK_SMOKE_WORKFLOW_PROFILE,
   DEFAULT_BENCHMARK_TRIALS_PER_VARIANT,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest
 } from "../src/benchmark-manifest.js";
-import { benchmarkTopologyTransform } from "../src/runner.js";
+import { benchmarkModelProfileOverrides, benchmarkTopologyTransform } from "../src/runner.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const LANES_PATH = path.join(REPOSITORY_ROOT, "benchmarks", "lanes.json");
@@ -58,23 +61,41 @@ describe("public benchmark manifests", () => {
       true
     );
     expect(suite.run.judge_model_profile).toBe("benchmark-judge-gpt-5-6-sol-xhigh");
-    expect(suite.run).toMatchObject({ max_parallel_runs: 2, max_parallel_targets: 8 });
+    expect(suite.run).toMatchObject({ max_parallel_runs: 3, max_parallel_targets: 4 });
     expect(suite.reporting.artifacts).toMatchObject({
       mode: "upload",
       mode_explicit: true,
       include: ["report.md", "report.json", "findings.normalized.json"]
     });
+    expect(suite.variants[0]?.topology).toBe(BENCHMARK_SMOKE_WORKFLOW_PATH);
     expect(suite.variants[0]?.workflow_input).toMatchObject({
       excluded_strategy_families: [...BENCHMARK_SMOKE_EXCLUDED_STRATEGY_FAMILIES],
       benchmark_execution: {
+        workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+        selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS],
         strategy_loops: 1,
-        excluded_node_ids: [...BENCHMARK_SMOKE_EXCLUDED_NODE_IDS]
+        excluded_node_ids: []
       }
     });
     expect(benchmarkTopologyTransform({ workflow_input: suite.variants[0]?.workflow_input })).toMatchObject({
       topologyTransform: {
         strategyLoops: 1,
-        excludedNodeIds: [...BENCHMARK_SMOKE_EXCLUDED_NODE_IDS]
+        excludedNodeIds: []
+      }
+    });
+    expect(
+      benchmarkModelProfileOverrides(
+        { workflow_input: suite.variants[0]?.workflow_input },
+        suite.model_profiles[suite.run.runner_model_profile]
+      )
+    ).toEqual({
+      runtimeOverrides: {
+        models: {
+          profiles: {
+            benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+            "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+          }
+        }
       }
     });
   });
@@ -207,6 +228,7 @@ describe("public benchmark manifests", () => {
     expect(suite.run.trials_per_variant).toBe(1);
     expect(suite.run).toMatchObject({ max_parallel_runs: 20, max_parallel_targets: 8 });
     expect(suite.variants.every((variant) => !JSON.stringify(variant).includes("latest"))).toBe(true);
+    expect(suite.variants.every((variant) => variant.topology === undefined)).toBe(true);
     expect(suite.variants.every((variant) => variant.workflow_input)).toBe(true);
     for (const variant of suite.variants) {
       expect(variant.workflow_input).toMatchObject({

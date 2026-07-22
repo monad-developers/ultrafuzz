@@ -37,7 +37,7 @@ export async function validateProject(input: ValidateProjectInput) {
   posture.prompts = promptCheck.posture;
 
   let topologySummary: ValidateProjectResult["topology"];
-  const topologyCheck = validateTopologySurface(projectRoot, resolved.config);
+  const topologyCheck = validateTopologySurface(projectRoot, resolved.config, input.topologyPath);
   posture.topology = topologyCheck.posture;
   if (topologyCheck.summary) {
     topologySummary = topologyCheck.summary;
@@ -181,14 +181,16 @@ function validatePrompts(projectRoot: string): {
 
 function validateTopologySurface(
   projectRoot: string,
-  config: ResolvedConfig | undefined
+  config: ResolvedConfig | undefined,
+  topologyPath?: string
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
 } {
   try {
-    const pathToTopology = resolveTopologyPath(projectRoot);
+    const pathToTopology = topologyPath ?? resolveTopologyPath(projectRoot);
     const topology = loadTopology(projectRoot, {
+      ...(topologyPath === undefined ? {} : { topologyPath }),
       requirePromptFiles: true
     });
     const expanded = expandTopology(topology, {

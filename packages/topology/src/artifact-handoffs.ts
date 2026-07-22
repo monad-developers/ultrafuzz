@@ -39,7 +39,7 @@ function promptTextForNode(
     return undefined;
   }
   const promptPath = node.prompt ?? (node.group ? `${node.group}/${node.id}.md` : `${node.id}.md`);
-  return promptTexts[node.id] ?? promptTexts[promptPath];
+  return promptTexts[promptPath] ?? promptTexts[node.id];
 }
 
 function validatePromptVariable(

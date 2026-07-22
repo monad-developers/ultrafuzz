@@ -55,6 +55,12 @@ if (
 ) {
   throw new Error("smoke benchmark must select exactly one Foundry, one Hardhat, and one Vyper target");
 }
+const targets = selectedTargets.map((target) => ({
+  id: target.id,
+  repository: target.repository,
+  revision: target.revision,
+  framework: target.framework
+}));
 
 const models = benchmarkModels(mode, lane.model_profiles);
 const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
@@ -91,6 +97,7 @@ for (const model of models) {
       runner_model_profile: model.slug,
       candidate_repository: repository,
       candidate_commit: candidateCommit,
+      targets,
       max_runtime_seconds: PUBLIC_MAX_RUNTIME_SECONDS
     },
     braintrust: {
@@ -125,7 +132,12 @@ const manifest = {
   generation,
   mode,
   benchmark,
+  execution: {
+    mode: "modal",
+    dry_run: false
+  },
   image_name: imageName,
+  targets,
   matrix_rows_per_pair: matrixRowsPerPair,
   control_timeout_seconds: controlTimeoutSeconds,
   concurrency: {
@@ -171,6 +183,9 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
     expectedProviders.some((provider) => !providers.includes(provider))
   ) {
     throw new Error(`${benchmarkMode} BENCHMARK_MODELS_JSON must contain exactly ${expectedProviders.join(" and ")}`);
+  }
+  if (benchmarkMode === "smoke" && validated.some((entry) => entry.reasoning !== "high")) {
+    throw new Error("smoke BENCHMARK_MODELS_JSON reasoning must be high");
   }
 
   const ordered = expectedProviders.map((provider) => validated.find((entry) => entry.provider === provider));

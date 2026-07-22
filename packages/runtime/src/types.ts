@@ -61,6 +61,8 @@ export interface PolicyPosture {
 
 export interface ValidateProjectInput {
   projectRoot: string;
+  /** Optional candidate-owned topology override, used by eval variants. */
+  topologyPath?: string;
   runtimeOverrides?: RuntimeConfigOverrides;
   env?: Record<string, string | undefined>;
   agent?: string;

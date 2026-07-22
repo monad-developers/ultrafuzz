@@ -52,8 +52,49 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v2");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v3");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
+    expect(bundle).toMatchObject({
+      status: "succeeded",
+      executed_case_count: 2,
+      graded_case_count: 2,
+      targets: [
+        {
+          id: "target-1",
+          repository: "https://github.com/example/benchmark-target",
+          revision: "1".repeat(40),
+          framework: "foundry",
+          status: "succeeded",
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_location: {
+            bundle_path: "public-results.json",
+            report_paths: [
+              "reports/target-a-runner-trial-1/report.md",
+              "reports/target-a-runner-trial-1/report.json",
+              "reports/target-a-runner-trial-1/findings.normalized.json"
+            ]
+          }
+        },
+        {
+          id: "target-2",
+          repository: "https://github.com/example/benchmark-target",
+          revision: "1".repeat(40),
+          framework: "hardhat",
+          status: "succeeded",
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_location: {
+            bundle_path: "public-results.json",
+            report_paths: [
+              "reports/target-b-runner-trial-1/report.md",
+              "reports/target-b-runner-trial-1/report.json",
+              "reports/target-b-runner-trial-1/findings.normalized.json"
+            ]
+          }
+        }
+      ]
+    });
     extractPublicBenchmarkBundle(bundle, output);
     expect(
       JSON.parse(fs.readFileSync(path.join(output, "eval", "public-eval-diagnostics.json"), "utf8"))
@@ -61,7 +102,9 @@ describe("public Modal benchmark bundles", () => {
     for (const rowId of rowIds) {
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.json"), "utf8")).toContain("issues");
       expect(fs.readFileSync(path.join(output, "reports", rowId, "report.md"), "utf8")).toContain("Report");
-      expect(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8")).toBe("[]\n");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(output, "reports", rowId, "findings.normalized.json"), "utf8"))
+      ).toHaveLength(1);
     }
   });
 
@@ -133,6 +176,62 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("fails the smoke no-regression gate when any target row has no finding", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-finding-floor-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[]\n"))
+    ).toThrow(/must report at least one normalized finding/u);
+  });
+
+  it("rejects malformed entries instead of counting them as smoke findings", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-invalid-finding-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[{}]\n"))
+    ).toThrow(/invalid normalized findings/u);
+  });
+
+  it("requires complete positive result metadata for executed and graded cases", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-counts-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+
+    const missing = structuredClone(bundle) as Record<string, unknown>;
+    delete missing.targets;
+    expect(() => parsePublicBenchmarkBundle(missing)).toThrow();
+    const missingExecuted = structuredClone(bundle) as Record<string, unknown>;
+    delete missingExecuted.executed_case_count;
+    expect(() => parsePublicBenchmarkBundle(missingExecuted)).toThrow();
+
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, executed_case_count: 0 })).toThrow(/executed case count/u);
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, graded_case_count: 0 })).toThrow(/graded case count/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target, index) => (index === 0 ? { ...target, executed_case_count: 0 } : target))
+      })
+    ).toThrow(/target target-1 executed case count/u);
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target, index) => (index === 0 ? { ...target, graded_case_count: 0 } : target))
+      })
+    ).toThrow(/target target-1 graded case count/u);
   });
 
   it("requires ready diagnostics bound to the exact bundle lineage and matrix", () => {
@@ -237,13 +336,23 @@ describe("public Modal benchmark bundles", () => {
           id: "target-a-runner-trial-1",
           target_id: "target-a",
           variant_id: TEST_MODEL_SLUG,
-          trial_id: "trial-1"
+          trial_id: "trial-1",
+          target: {
+            id: "target-a",
+            repo: "https://github.com/example/benchmark-target",
+            ref: "1".repeat(40)
+          }
         },
         {
           id: "target-a-runner-trial-1",
           target_id: "target-a",
           variant_id: TEST_MODEL_SLUG,
-          trial_id: "trial-1"
+          trial_id: "trial-1",
+          target: {
+            id: "target-a",
+            repo: "https://github.com/example/benchmark-target",
+            ref: "1".repeat(40)
+          }
         }
       ])}\n`
     );
@@ -470,7 +579,10 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     ["run-summary.json", `${JSON.stringify({ succeeded: rowIds.length }, null, 2)}\n`],
     ["public-eval-diagnostics.json", `${JSON.stringify(diagnostics, null, 2)}\n`],
     ["scores.jsonl", `${rowIds.map((rowId) => JSON.stringify({ row_id: rowId, score: 1 })).join("\n")}\n`],
-    ["summary.json", `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId })) }, null, 2)}\n`],
+    [
+      "summary.json",
+      `${JSON.stringify({ rows: rowIds.map((rowId) => ({ row_id: rowId, finding_count: 1 })) }, null, 2)}\n`
+    ],
     ["summary.md", "# Eval summary\n"]
   ]);
   const sources = [...evalContents].map(([name, contents]) => {
@@ -480,10 +592,26 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
     return { path: `eval/${name}`, root, source };
   });
   for (const rowId of rowIds) {
+    const finding = {
+      schema_version: "1.0",
+      id: `${rowId}-finding-1`,
+      title: "Fixture finding",
+      status: "confirmed",
+      severity_guess: "Low",
+      confidence: "high",
+      summary: "A fixture finding used to exercise public bundle validation."
+    };
     for (const [name, contents] of [
       ["report.md", `# Report for ${rowId}\n`],
-      ["report.json", `${JSON.stringify({ schema_version: "1.0", issues: [] }, null, 2)}\n`],
-      ["findings.normalized.json", "[]\n"]
+      [
+        "report.json",
+        `${JSON.stringify(
+          { schema_version: "1.0", run_metadata: {}, issues: [finding], non_production_outcomes: [] },
+          null,
+          2
+        )}\n`
+      ],
+      ["findings.normalized.json", `${JSON.stringify([finding], null, 2)}\n`]
     ] as const) {
       const source = path.join(root, "report-source", rowId, name);
       fs.mkdirSync(path.dirname(source), { recursive: true });
@@ -497,6 +625,7 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
 function realisticMatrix(rowIds: string[]) {
   return rowIds.map((id, index) => {
     const targetId = `target-${index + 1}`;
+    const framework = index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper";
     return {
       id,
       target_id: targetId,
@@ -511,6 +640,9 @@ function realisticMatrix(rowIds: string[]) {
         ground_truth_path: `/ground-truth/${targetId}.yml`
       },
       variant: { id: TEST_MODEL_SLUG, prompt_overlay_paths: [] },
+      workflow_input: {
+        target_frameworks: { [targetId]: framework }
+      },
       runner_model_profile: TEST_MODEL_SLUG,
       runner_model: TEST_MODEL,
       runner_reasoning: TEST_REASONING,

@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.build.json",
     "smoke": "pnpm run build && node dist/cli.js smoke",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+    "typecheck": "pnpm --filter @ultrafuzz/modal^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@ultrafuzz/artifacts": "workspace:*",

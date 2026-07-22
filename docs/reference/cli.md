@@ -31,6 +31,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz eval score <id>`      | Score finished eval run reports against external ground truth.                                                 |
 | `ultrafuzz eval report <id>`     | Show the scored eval run variant ranking.                                                                      |
 | `ultrafuzz eval compare <id>`    | Compare scored eval variants against a baseline variant.                                                       |
+| `ultrafuzz eval analyze <type>`  | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
 | `ultrafuzz eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                        |
 | `ultrafuzz eval publish <id>`    | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
@@ -258,6 +259,11 @@ ultrafuzz eval compare <candidate-eval-run-id> \
   [--allow-incompatible] \
   [--project <path>] \
   [--json]
+ultrafuzz eval analyze all \
+  --input </external/private-handoff.zip> \
+  --output </external/private-analysis-directory> \
+  [--project <path>] \
+  [--json]
 ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
   [--provider braintrust|langsmith] \
@@ -271,9 +277,26 @@ ultrafuzz eval history [eval-run-id] \
   [--lane smoke|full] \
   [--repository <public-repository-url>] \
   [--artifact <immutable-artifact-reference>] \
+  [--publication-url <validated-result-url>] \
   [--check] \
   [--json]
 ```
+
+`eval analyze` reads a finalized handoff ZIP directly and discovers its
+adjudication output through `handoff/current-state.json`. Available report
+types are `all`, `upset` (`upsert` alias), `scores`
+(`precision-recall-f1` alias), `provenance`, `table`, `cost`, and `pairwise`.
+The pairwise chart connects matched Ultrafuzz/no-fuzz rows across ground-truth
+TP credits, F1, and total tokens. Charts are written as PNG and editable SVG
+alongside CSV, JSON, and Markdown reports. Condition score summaries report
+the mean, median, and sample standard deviation across completed rows.
+
+The input and output paths are required to be outside `--project`. Handoff
+archives and generated reports may contain private target details,
+ground-truth findings, and adjudication evidence; the CLI refuses to place
+either inside the repository tree. Generated reports are private local
+artifacts and must not be committed or published without a separate redaction
+and disclosure review.
 
 Eval suites benchmark the fuzzing pipeline against targets with known
 ground-truth bugs. The experiment definition lives in a committable eval YAML
@@ -320,8 +343,9 @@ plan → run → score → report → compare loop working offline.
 given. With a run ID, it accepts only a complete, successfully scored generation
 with immutable lineage, appends observations idempotently, and replaces history
 and charts together. Append mode also requires the benchmark, lane, public
-candidate repository, and immutable source artifact flags. `--check` compares
-the checked-in SVGs with a fresh in-memory render and performs no writes.
+candidate repository, immutable source artifact, and publication URL flags.
+`--check` compares the checked-in SVGs with a fresh in-memory render and
+performs no writes.
 
 Eval artifacts are written under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](evals.md) for configuration, architecture, and telemetry policy

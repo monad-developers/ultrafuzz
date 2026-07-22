@@ -16,19 +16,24 @@ const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/u;
+const PUBLIC_EVAL_DIAGNOSTICS_PATH = "eval/public-eval-diagnostics.json";
 const ROOT_KEYS = [
   "candidate_commit",
   "repository",
   "generation",
   "mode",
   "benchmark",
+  "execution",
   "image_name",
+  "targets",
   "matrix_rows_per_pair",
   "control_timeout_seconds",
   "concurrency",
   "pairs"
 ];
 const PAIR_KEYS = ["pair", "benchmark", "mode", "lane", "model_slug", "provider", "config_path", "state_path"];
+const EXECUTION_KEYS = ["mode", "dry_run"];
+const TARGET_KEYS = ["id", "repository", "revision", "framework"];
 const CONCURRENCY_KEYS = [
   "max_parallel_eval_rows_per_sandbox",
   "max_parallel_workflow_nodes_per_row",
@@ -51,9 +56,11 @@ export function validateAutomaticPublicationManifest(value, context) {
   if (manifest.mode !== expected.mode || manifest.benchmark !== expected.benchmark) {
     throw new Error("benchmark manifest mode or benchmark does not match the triggering workflow");
   }
+  validateExecution(manifest.execution);
   if (manifest.image_name !== `ufz-runner-${expected.candidateCommit}`) {
     throw new Error("benchmark manifest image name does not match the candidate commit");
   }
+  const targets = validateManifestTargets(manifest.targets, expected);
   if (manifest.matrix_rows_per_pair !== expected.matrixRowsPerPair) {
     throw new Error("benchmark manifest matrix row count does not match the trusted lane");
   }
@@ -113,7 +120,9 @@ export function validateAutomaticPublicationManifest(value, context) {
     generation: expected.generation,
     mode: expected.mode,
     benchmark: expected.benchmark,
+    execution: { mode: "modal", dry_run: false },
     image_name: manifest.image_name,
+    targets,
     matrix_rows_per_pair: expected.matrixRowsPerPair,
     control_timeout_seconds: expected.controlTimeoutSeconds,
     concurrency: manifest.concurrency,
@@ -173,6 +182,7 @@ export async function prepareAutomaticPublication(input) {
   const usedModelSlugs = new Set();
   const evalRunIds = new Set();
   const pairs = [];
+  const publicationUrl = `${context.repository}/actions/runs/${context.producerRunId}/artifacts`;
   for (const pair of manifest.pairs) {
     const configPath = regularFileInside(
       controlRoot,
@@ -216,7 +226,19 @@ export async function prepareAutomaticPublication(input) {
     if (!Number.isSafeInteger(bundle.lineage.attempt) || bundle.lineage.attempt < 1 || bundle.lineage.attempt > 3) {
       throw new Error(`public benchmark bundle ${pair.pair} has an invalid launch attempt`);
     }
-    assertBundleMatrixCount(bundle, context.matrixRowsPerPair, pair.pair);
+    const publicationSummary = summarizePublicBenchmarkBundlePublication(
+      bundle,
+      {
+        matrixRowsPerPair: context.matrixRowsPerPair,
+        targetIds: context.targetIds,
+        targets: context.targets,
+        trialsPerVariant: context.trialsPerVariant,
+        modelSlug: pair.model_slug,
+        evalRunId: bundle.eval_run_id
+      },
+      pair.pair,
+      publicationUrl
+    );
     assertUnique(evalRunIds, bundle.eval_run_id, "public eval run ID");
     pairs.push({
       pair: pair.pair,
@@ -226,7 +248,12 @@ export async function prepareAutomaticPublication(input) {
       unpack_path: pair.pair,
       eval_run_id: bundle.eval_run_id,
       benchmark: context.benchmark,
-      lane: context.mode
+      lane: context.mode,
+      status: publicationSummary.status,
+      target_ids: publicationSummary.target_ids,
+      executed_case_count: publicationSummary.executed_case_count,
+      graded_case_count: publicationSummary.graded_case_count,
+      publication_url: publicationSummary.publication_url
     });
   }
 
@@ -240,7 +267,12 @@ export async function prepareAutomaticPublication(input) {
       eval_run_id: pair.eval_run_id,
       benchmark: pair.benchmark,
       lane: pair.lane,
-      input_path: `${pair.unpack_path}/eval`
+      status: pair.status,
+      input_path: `${pair.unpack_path}/eval`,
+      target_ids: pair.target_ids,
+      executed_case_count: pair.executed_case_count,
+      graded_case_count: pair.graded_case_count,
+      publication_url: pair.publication_url
     }))
   };
   const plan = {
@@ -266,7 +298,23 @@ function publicationExpectations(input) {
   const producerRunAttempt = positiveDecimal(input.producerRunAttempt, "producer run attempt");
   if (input.mode !== "smoke" && input.mode !== "full") throw new Error("benchmark mode must be smoke or full");
   const smoke = input.mode === "smoke";
-  const targetCount = positiveSafeInteger(input.targetCount ?? (smoke ? 3 : 40), "benchmark target count");
+  const targets = input.targets === undefined ? undefined : validatedTargets(input.targets);
+  const explicitTargetIds = input.targetIds === undefined ? undefined : validatedTargetIds(input.targetIds);
+  const targetIds = explicitTargetIds ?? targets?.map((target) => target.id);
+  if (
+    explicitTargetIds !== undefined &&
+    targets !== undefined &&
+    JSON.stringify(explicitTargetIds) !== JSON.stringify(targets.map((target) => target.id))
+  ) {
+    throw new Error("benchmark target IDs do not match the expected target metadata");
+  }
+  const targetCount = positiveSafeInteger(
+    input.targetCount ?? targets?.length ?? targetIds?.length ?? (smoke ? 3 : 40),
+    "benchmark target count"
+  );
+  if (targetIds !== undefined && targetIds.length !== targetCount) {
+    throw new Error("benchmark target IDs do not match the expected target count");
+  }
   const trialsPerVariant = positiveSafeInteger(input.trialsPerVariant ?? 1, "benchmark trials per variant");
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = positiveSafeInteger(
@@ -292,6 +340,8 @@ function publicationExpectations(input) {
     mode: input.mode,
     benchmark: smoke ? "ultrafuzz-bench" : "evmbench",
     providers,
+    targetIds,
+    targets,
     targetCount,
     trialsPerVariant,
     matrixRowsPerPair,
@@ -301,6 +351,30 @@ function publicationExpectations(input) {
     maxLiveRowsPerPair,
     maxLiveJudgeRows: checkedProduct(providers.length, maxLiveRowsPerPair, "maximum live judge rows")
   };
+}
+
+function validateExecution(value) {
+  const execution = strictRecord(value, "benchmark execution", EXECUTION_KEYS);
+  if (execution.mode !== "modal" || execution.dry_run !== false) {
+    throw new Error("benchmark manifest execution must be Modal with dry-run disabled");
+  }
+}
+
+function validateManifestTargets(value, expected) {
+  const targets = validatedTargets(value);
+  if (targets.length !== expected.targetCount) {
+    throw new Error("benchmark manifest target count does not match the trusted lane");
+  }
+  if (
+    expected.targetIds !== undefined &&
+    JSON.stringify(targets.map((target) => target.id)) !== JSON.stringify(expected.targetIds)
+  ) {
+    throw new Error("benchmark manifest target IDs do not match the trusted lane");
+  }
+  if (expected.targets !== undefined && JSON.stringify(targets) !== JSON.stringify(expected.targets)) {
+    throw new Error("benchmark manifest targets do not match the trusted benchmark policy");
+  }
+  return targets;
 }
 
 function validateConcurrency(value, expected) {
@@ -368,6 +442,13 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModul
     workerModule.PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS +
     5 * 60;
   return {
+    targets: selectedTargets.map((target) => ({
+      id: target.id,
+      repository: target.repository,
+      revision: target.revision,
+      framework: target.framework
+    })),
+    targetIds: selectedTargets.map((target) => target.id),
     targetCount,
     trialsPerVariant,
     maxParallelEvalRows,
@@ -427,6 +508,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     scope.runner_model_profile === pair.model_slug ? undefined : "runner profile",
     scope.candidate_repository === context.repository ? undefined : "candidate repository",
     scope.candidate_commit === context.candidateCommit ? undefined : "candidate commit",
+    context.targets === undefined || JSON.stringify(scope.targets) === JSON.stringify(context.targets)
+      ? undefined
+      : "target selection",
     scope.max_runtime_seconds === 3600 ? undefined : "maximum runtime",
     config.braintrust.project === "ultrafuzz-public-benchmarks" ? undefined : "reporting project",
     config.braintrust.api_key_env === "BRAINTRUST_API_KEY" ? undefined : "reporting credential name",
@@ -443,7 +527,8 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   }
 }
 
-function assertBundleMatrixCount(bundle, expectedRows, pair) {
+export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
+  const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
   const matrixFile = bundle.files.find((file) => file.path === "eval/matrix.json");
   if (matrixFile === undefined) throw new Error(`public benchmark bundle ${pair} is missing its matrix`);
   let matrix;
@@ -452,9 +537,243 @@ function assertBundleMatrixCount(bundle, expectedRows, pair) {
   } catch (error) {
     throw new Error(`public benchmark bundle ${pair} matrix is invalid`, { cause: error });
   }
-  if (!Array.isArray(matrix) || matrix.length !== expectedRows) {
-    throw new Error(`public benchmark bundle ${pair} matrix row count does not match the trusted lane`);
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    throw new Error(`public benchmark bundle ${pair} matrix is not a non-empty array`);
   }
+  const targetIds = expected.targetIds === undefined ? undefined : validatedTargetIds(expected.targetIds);
+  if (targetIds === undefined) {
+    if (matrix.length !== expectedRows) {
+      throw new Error(`public benchmark bundle ${pair} matrix row count does not match the trusted lane`);
+    }
+    return;
+  }
+
+  const trialsPerVariant = positiveSafeInteger(expected.trialsPerVariant, "benchmark trials per variant");
+  const modelSlug = safeLowerId(expected.modelSlug, `public benchmark bundle ${pair} model slug`);
+  if (checkedProduct(targetIds.length, trialsPerVariant, "benchmark bundle target matrix row count") !== expectedRows) {
+    throw new Error(`public benchmark bundle ${pair} trusted target IDs do not match the expected row count`);
+  }
+
+  const expectedRowsByScope = new Set();
+  for (const targetId of targetIds) {
+    for (let trial = 1; trial <= trialsPerVariant; trial += 1) {
+      expectedRowsByScope.add(matrixScopeKey(targetId, modelSlug, `trial-${trial}`));
+    }
+  }
+  const missingRows = new Set(expectedRowsByScope);
+  const seenRows = new Set();
+  const duplicateRows = [];
+  const unexpectedRows = [];
+  for (const [index, row] of matrix.entries()) {
+    const identity = matrixRowIdentity(row, index, pair);
+    const key = matrixScopeKey(identity.targetId, identity.variantId, identity.trialId);
+    if (seenRows.has(key)) duplicateRows.push(key);
+    seenRows.add(key);
+    if (expectedRowsByScope.has(key)) missingRows.delete(key);
+    else unexpectedRows.push(key);
+  }
+
+  const problems = [];
+  if (matrix.length !== expectedRows) {
+    problems.push(`row count ${matrix.length} does not match expected ${expectedRows}`);
+  }
+  if (missingRows.size > 0) {
+    problems.push(`missing target result(s): ${formatMatrixScopeList([...missingRows])}`);
+  }
+  if (unexpectedRows.length > 0) {
+    problems.push(`unexpected target/model/trial row(s): ${formatMatrixScopeList(unexpectedRows)}`);
+  }
+  if (duplicateRows.length > 0) {
+    problems.push(`duplicate target/model/trial row(s): ${formatMatrixScopeList(duplicateRows)}`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `public benchmark bundle ${pair} matrix does not match the trusted target set: ${problems.join("; ")}`
+    );
+  }
+}
+
+export function summarizePublicBenchmarkBundlePublication(bundle, expected, pair, publicationUrl) {
+  assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair);
+  const targetIds = expected.targetIds === undefined ? undefined : validatedTargetIds(expected.targetIds);
+  if (targetIds === undefined) {
+    throw new Error(`public benchmark bundle ${pair} is missing trusted target identities`);
+  }
+  const bundleTargets = validatedBundleTargets(bundle.targets, pair);
+  assertBundleTargetsMatchExpected(bundleTargets, expected.targets, targetIds, pair);
+  const diagnostics = bundleFileJson(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair);
+  const summary = bundleFileJson(bundle, "eval/summary.json", pair);
+  const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark bundle matrix row count");
+  const evalRunId = safeLowerId(expected.evalRunId, `public benchmark bundle ${pair} eval run ID`);
+  const status = safeBundleStatus(bundle.status, `public benchmark bundle ${pair} status`);
+  const mismatches = [
+    diagnostics.eval_run_id === evalRunId ? undefined : "diagnostics eval run",
+    diagnostics.summary?.scoring_ready === true ? undefined : "diagnostics scoring readiness",
+    summary.eval_run_id === evalRunId ? undefined : "score summary eval run"
+  ].filter((entry) => entry !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public benchmark bundle ${pair} has mismatched ${mismatches.join(", ")}`);
+  }
+  const executedCaseCount = positiveSafeInteger(
+    bundle.executed_case_count,
+    `public benchmark bundle ${pair} executed case count`
+  );
+  const gradedCaseCount = positiveSafeInteger(
+    bundle.graded_case_count,
+    `public benchmark bundle ${pair} graded case count`
+  );
+  const diagnosticsExecuted = positiveSafeInteger(
+    diagnostics.summary?.launched,
+    `public benchmark bundle ${pair} diagnostics executed case count`
+  );
+  const summaryGraded = positiveSafeInteger(
+    Array.isArray(summary.rows) ? summary.rows.length : undefined,
+    `public benchmark bundle ${pair} summary graded case count`
+  );
+  if (
+    executedCaseCount !== expectedRows ||
+    gradedCaseCount !== expectedRows ||
+    diagnosticsExecuted !== executedCaseCount ||
+    summaryGraded !== gradedCaseCount
+  ) {
+    throw new Error(
+      `public benchmark bundle ${pair} case counts do not match the trusted lane: executed ${executedCaseCount}, graded ${gradedCaseCount}, expected ${expectedRows}`
+    );
+  }
+  return {
+    status,
+    target_ids: targetIds,
+    executed_case_count: executedCaseCount,
+    graded_case_count: gradedCaseCount,
+    publication_url: canonicalPublicationUrl(publicationUrl)
+  };
+}
+
+function validatedBundleTargets(value, pair) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`public benchmark bundle ${pair} targets must be a non-empty array`);
+  }
+  const seen = new Set();
+  return value.map((entry, index) => {
+    const target = strictRecord(entry, `public benchmark bundle ${pair} target ${index}`, [
+      "id",
+      "repository",
+      "revision",
+      "status",
+      "executed_case_count",
+      "graded_case_count",
+      "publication_location",
+      ...(entry.framework === undefined ? [] : ["framework"])
+    ]);
+    const id = safeLowerId(target.id, `public benchmark bundle ${pair} target ${index} ID`);
+    assertUnique(seen, id, "public benchmark bundle target ID");
+    const executed = positiveSafeInteger(
+      target.executed_case_count,
+      `public benchmark bundle ${pair} target ${id} executed case count`
+    );
+    const graded = positiveSafeInteger(
+      target.graded_case_count,
+      `public benchmark bundle ${pair} target ${id} graded case count`
+    );
+    return {
+      id,
+      repository: canonicalRepository(target.repository),
+      revision: fullCommit(target.revision, `public benchmark bundle ${pair} target ${id} revision`),
+      ...(target.framework === undefined
+        ? {}
+        : { framework: safeId(target.framework, `public benchmark bundle ${pair} target ${id} framework`) }),
+      status: safeBundleStatus(target.status, `public benchmark bundle ${pair} target ${id} status`),
+      executed_case_count: executed,
+      graded_case_count: graded
+    };
+  });
+}
+
+function assertBundleTargetsMatchExpected(bundleTargets, expectedTargetsValue, targetIds, pair) {
+  if (JSON.stringify([...bundleTargets.map((target) => target.id)].sort()) !== JSON.stringify([...targetIds].sort())) {
+    throw new Error(`public benchmark bundle ${pair} target IDs do not match the trusted lane`);
+  }
+  if (expectedTargetsValue === undefined) return;
+  const expectedTargets = new Map(validatedTargets(expectedTargetsValue).map((target) => [target.id, target]));
+  for (const target of bundleTargets) {
+    const expected = expectedTargets.get(target.id);
+    if (
+      expected === undefined ||
+      target.repository !== expected.repository ||
+      target.revision !== expected.revision ||
+      (target.framework !== undefined && target.framework !== expected.framework)
+    ) {
+      throw new Error(
+        `public benchmark bundle ${pair} target ${target.id} does not match the trusted benchmark policy`
+      );
+    }
+  }
+}
+
+function safeBundleStatus(value, label) {
+  if (value !== "succeeded" && value !== "genuine-task-failures") throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function bundleFileJson(bundle, relativePath, pair) {
+  const file = bundle.files.find((entry) => entry.path === relativePath);
+  if (file === undefined) throw new Error(`public benchmark bundle ${pair} is missing ${relativePath}`);
+  try {
+    return JSON.parse(Buffer.from(file.contents_base64, "base64").toString("utf8"));
+  } catch (error) {
+    throw new Error(`public benchmark bundle ${pair} ${relativePath} is invalid`, { cause: error });
+  }
+}
+
+function matrixRowIdentity(row, index, pair) {
+  if (typeof row !== "object" || row === null || Array.isArray(row)) {
+    throw new Error(`public benchmark bundle ${pair} matrix row ${index} must be an object`);
+  }
+  return {
+    targetId: safeLowerId(row.target_id, `public benchmark bundle ${pair} matrix row ${index} target ID`),
+    variantId: safeLowerId(row.variant_id, `public benchmark bundle ${pair} matrix row ${index} variant ID`),
+    trialId: safeLowerId(row.trial_id, `public benchmark bundle ${pair} matrix row ${index} trial ID`)
+  };
+}
+
+function validatedTargetIds(value) {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("benchmark target IDs must be a non-empty array");
+  const targetIds = [];
+  const seen = new Set();
+  for (const [index, targetId] of value.entries()) {
+    const safeTargetId = safeLowerId(targetId, `benchmark target ID ${index}`);
+    assertUnique(seen, safeTargetId, "benchmark target ID");
+    targetIds.push(safeTargetId);
+  }
+  return targetIds;
+}
+
+function validatedTargets(value) {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("benchmark targets must be a non-empty array");
+  const targets = [];
+  const seen = new Set();
+  for (const [index, entry] of value.entries()) {
+    const target = strictRecord(entry, `benchmark target ${index}`, TARGET_KEYS);
+    const id = safeLowerId(target.id, `benchmark target ${index} ID`);
+    assertUnique(seen, id, "benchmark target ID");
+    targets.push({
+      id,
+      repository: canonicalRepository(target.repository),
+      revision: fullCommit(target.revision, `benchmark target ${index} revision`),
+      framework: safeId(target.framework, `benchmark target ${index} framework`)
+    });
+  }
+  return targets;
+}
+
+function matrixScopeKey(targetId, variantId, trialId) {
+  return [targetId, variantId, trialId].join("\u0000");
+}
+
+function formatMatrixScopeList(keys) {
+  const values = keys.map((key) => key.split("\u0000").join("/"));
+  const shown = values.slice(0, 8);
+  return `${shown.join(", ")}${values.length > shown.length ? `, and ${values.length - shown.length} more` : ""}`;
 }
 
 function readJsonRegular(filePath, maxBytes, label) {
@@ -527,6 +846,11 @@ function safeLowerId(value, label) {
   return value;
 }
 
+function safeId(value, label) {
+  if (typeof value !== "string" || !SAFE_ID.test(value)) throw new Error(`${label} is invalid`);
+  return value;
+}
+
 function safeBasename(value, label) {
   if (typeof value !== "string" || !SAFE_ID.test(value) || path.basename(value) !== value) {
     throw new Error(`${label} is invalid`);
@@ -542,6 +866,16 @@ function fullCommit(value, label) {
 function canonicalRepository(value) {
   if (typeof value !== "string" || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value)) {
     throw new Error("candidate repository must be a canonical public GitHub URL");
+  }
+  return value;
+}
+
+function canonicalPublicationUrl(value) {
+  if (
+    typeof value !== "string" ||
+    !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[1-9][0-9]*\/artifacts$/u.test(value)
+  ) {
+    throw new Error("publication URL must be a canonical public GitHub Actions artifact URL");
   }
   return value;
 }

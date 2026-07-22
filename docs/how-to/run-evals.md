@@ -127,8 +127,11 @@ lane selects the three Ultrafuzz-bench targets, covering Foundry, Hardhat, and
 Vyper, and runs GPT-5.6 Luna at `high`. Its canonical controls set
 `strategy_loops: 1`, `disable_invariant_tests: true`,
 `disable_differential_tests: true`, and `disable_dynamic_strategies: true`.
-The adapter derives the exact invariant, differential, and dynamic topology
-node exclusions from those flags; node IDs are not duplicated in the manifest.
+The adapter selects `benchmarks/smoke-benchmark.yml`, whose bounded graph has a
+single context pass, four parallel ground-truth-informed strategy families,
+dedupe, and final report. The production topology is not modified or filtered.
+All three target rows run concurrently, while the four strategy nodes within
+each row use a smoke-only four-way workflow concurrency limit.
 
 The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
 `high` plus Claude Sonnet 5 at `high`. It also pins `strategy_loops: 1`, while
@@ -147,7 +150,8 @@ ultrafuzz eval history <eval-run-id> \
   --benchmark ultrafuzz-bench \
   --lane smoke \
   --repository https://github.com/monad-developers/ultrafuzz \
-  --artifact <immutable-run-artifact-reference>
+  --artifact <immutable-run-artifact-reference> \
+  --publication-url <validated-result-bundle-url>
 ```
 
 Use `--benchmark evmbench` and `--lane full` for the full cohort. Publication
@@ -179,9 +183,9 @@ run the workflow. Repository write access that is allowed to receive Actions
 secrets is inside the benchmark credential and cost trust boundary, so push
 access, provider credentials, and provider/Modal budgets must be tightly scoped.
 A newer commit on the same branch cancels the older smoke. GPT-5.6 Luna `high`
-is the default smoke runner; repository variables
-`BENCHMARK_SMOKE_OPENAI_MODEL` and `BENCHMARK_SMOKE_OPENAI_REASONING` can
-override its model and reasoning while retaining the single OpenAI/Codex lane.
+is the default smoke runner; repository variable
+`BENCHMARK_SMOKE_OPENAI_MODEL` can override its model while retaining the
+single OpenAI/Codex lane and fixed high-strategy/medium-coordination reasoning.
 Candidate installation and build happen before any Modal launch, so a broken
 commit fails without allocating the benchmark matrix. GitHub Actions still
 performs the build, control, and collection work; benchmark and model compute

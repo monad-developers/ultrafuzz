@@ -221,6 +221,47 @@ describe("eval history Git CAS publisher", () => {
     ).toThrow(/GitHub Actions run URL/u);
   });
 
+  it("accepts enriched automatic generation rows and rejects invalid case counts", () => {
+    const valid = {
+      schema_version: EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
+      candidate_commit: "a".repeat(40),
+      candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
+      source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
+      runs: [
+        {
+          eval_run_id: "run-a",
+          benchmark: "ultrafuzz-bench",
+          lane: "smoke",
+          status: "succeeded",
+          input_path: "runs/run-a",
+          target_ids: ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"],
+          executed_case_count: 3,
+          graded_case_count: 3,
+          publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+        }
+      ]
+    };
+    expect(parseEvalHistoryPublicationGeneration(valid).runs[0]).toMatchObject({
+      status: "succeeded",
+      target_ids: ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"],
+      executed_case_count: 3,
+      graded_case_count: 3,
+      publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+    });
+    expect(() =>
+      parseEvalHistoryPublicationGeneration({
+        ...valid,
+        runs: [{ ...valid.runs[0], executed_case_count: 0 }]
+      })
+    ).toThrow(/executed_case_count must be a positive safe integer/u);
+    expect(() =>
+      parseEvalHistoryPublicationGeneration({
+        ...valid,
+        runs: [{ ...valid.runs[0], graded_case_count: 2 }]
+      })
+    ).toThrow(/case counts do not cover its target set/u);
+  });
+
   it("rejects an eval artifact from a different candidate commit", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");

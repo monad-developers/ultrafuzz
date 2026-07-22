@@ -27,7 +27,10 @@ import {
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
+const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
+const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
+const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
 
 export type EvalHistoryBenchmark = "evmbench" | "ultrafuzz-bench";
 export type EvalHistoryLane = "smoke" | "full";
@@ -37,11 +40,29 @@ export interface EvalHistoryCompleteness {
   reasons: string[];
 }
 
+export type EvalHistoryObservationStatus = "succeeded" | "genuine-task-failures";
+
+export interface EvalHistoryTargetPublication {
+  target: string;
+  repository: string;
+  revision: string;
+  framework?: string;
+  status: EvalHistoryObservationStatus;
+  executed_case_count: number;
+  graded_case_count: number;
+  publication_location: {
+    bundle_path: string;
+    report_paths: string[];
+  };
+}
+
 export interface EvalHistoryObservation {
-  schema_version: typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION;
+  schema_version:
+    typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
+  status?: EvalHistoryObservationStatus;
   target: string;
   variant: string;
   trial_count: number;
@@ -63,6 +84,10 @@ export interface EvalHistoryObservation {
   wall_clock_completeness: EvalHistoryCompleteness;
   cost_usd: number | null;
   cost_completeness: EvalHistoryCompleteness;
+  executed_case_count?: number;
+  graded_case_count?: number;
+  publication_url?: string;
+  target_publication?: EvalHistoryTargetPublication;
   source_eval_run_id: string;
   source_artifact: string;
 }
@@ -86,24 +111,56 @@ const sourceArtifactSchema = z
   .min(1)
   .max(500)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
+const publicationUrlSchema = z
+  .string()
+  .url()
+  .max(1_000)
+  .regex(/^https:\/\//u);
 const githubRepositoryUrl = z
   .string()
   .url()
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
+const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
+const positiveInteger = z.number().int().positive();
+const relativePathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .refine(
+    (value) =>
+      !path.posix.isAbsolute(value) &&
+      !path.win32.isAbsolute(value) &&
+      !value.includes("\\") &&
+      !value.split("/").some((part) => part === "" || part === "." || part === ".."),
+    "must be a canonical relative POSIX path"
+  );
 
 const completenessSchema = z.strictObject({
   status: z.enum(["complete", "partial", "unavailable"]),
   reasons: z.array(safeText)
 });
 
-const observationSchema = z.strictObject({
-  schema_version: z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
+const targetPublicationSchema = z.strictObject({
+  target: safeText,
+  repository: z.string().url().max(2_048),
+  revision: shaSchema,
+  framework: safeText.optional(),
+  status: publicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_location: z.strictObject({
+    bundle_path: relativePathSchema,
+    report_paths: z.array(relativePathSchema).min(1)
+  })
+});
+
+const observationBaseShape = {
   id: safeText,
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
   target: safeText,
   variant: safeText,
-  trial_count: z.number().int().positive(),
+  trial_count: positiveInteger,
   run_timestamp: z.string().datetime({ offset: true }),
   candidate_commit: shaSchema,
   candidate_repository_url: githubRepositoryUrl,
@@ -124,7 +181,27 @@ const observationSchema = z.strictObject({
   cost_completeness: completenessSchema,
   source_eval_run_id: safeText,
   source_artifact: sourceArtifactSchema
+} as const;
+
+const currentObservationSchema = z.strictObject({
+  schema_version: z.union([
+    z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
+    z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
+  ]),
+  ...observationBaseShape,
+  status: publicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: targetPublicationSchema
 });
+
+const legacyObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape
+});
+
+const observationSchema = z.union([currentObservationSchema, legacyObservationSchema]);
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
@@ -189,6 +266,29 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
     }
+    if (hasPublicationMetadata(observation)) {
+      const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
+      if (
+        observation.status === undefined ||
+        observation.executed_case_count === undefined ||
+        observation.graded_case_count === undefined ||
+        observation.publication_url === undefined ||
+        observation.target_publication === undefined ||
+        targetRevision === undefined ||
+        observation.target_publication.target !== observation.target ||
+        observation.target_publication.revision !== targetRevision.revision ||
+        observation.target_publication.status !== observation.status ||
+        observation.target_publication.executed_case_count !== observation.executed_case_count ||
+        observation.target_publication.graded_case_count !== observation.graded_case_count ||
+        observation.executed_case_count !== observation.trial_count ||
+        observation.graded_case_count !== observation.trial_count
+      ) {
+        throw new EvalError(
+          "EVAL_HISTORY_INVALID",
+          `observation ${observation.id} has inconsistent publication metadata`
+        );
+      }
+    }
     const canonical = stableStringify(observation);
     const previous = byId.get(observation.id);
     if (previous !== undefined && previous !== canonical) {
@@ -199,6 +299,17 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     }
     byId.set(observation.id, canonical);
   }
+}
+
+function hasPublicationMetadata(observation: EvalHistoryObservation): boolean {
+  return (
+    observation.schema_version === EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION ||
+    observation.status !== undefined ||
+    observation.executed_case_count !== undefined ||
+    observation.graded_case_count !== undefined ||
+    observation.publication_url !== undefined ||
+    observation.target_publication !== undefined
+  );
 }
 
 function assertCompletenessValue(value: number | null, completeness: EvalHistoryCompleteness, field: string): void {
@@ -216,6 +327,8 @@ export interface EvalHistoryGenerationInput {
   runTimestamp: string;
   candidateRepositoryUrl: string;
   sourceArtifact: string;
+  publicationUrl?: string;
+  publicationBundlePath?: string;
   suite: EvalSuiteSpec;
   matrix: EvalMatrixRow[];
   summary: EvalScoreSummary;
@@ -230,6 +343,11 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
   if (!sourceArtifactSchema.safeParse(input.sourceArtifact).success) {
     throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "source artifact reference must be a safe opaque ID or URL");
   }
+  if (input.publicationUrl === undefined) {
+    throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "publication URL is required when publishing history");
+  }
+  const publicationUrl = normalizedPublicationUrl(input.publicationUrl);
+  const publicationBundlePath = normalizedPublicationBundlePath(input.publicationBundlePath);
   if (input.matrix.length === 0) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval generation has no matrix rows");
   }
@@ -293,6 +411,12 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     .map((rows) => {
       const first = rows[0]!;
       const scores = rows.map((row) => summaryRows.get(row.id)!);
+      const status: EvalHistoryObservationStatus = scores.every(
+        (score) => score.lifecycle.workflow.terminal && score.lifecycle.workflow.status === "succeeded"
+      )
+        ? "succeeded"
+        : "genuine-task-failures";
+      const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath);
       const model = requiredConsistent(
         rows.map((row) => row.runner_model),
         "runner model",
@@ -323,6 +447,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         id: observationId(input.summary.eval_run_id, first.target_id, first.variant_id, profile),
         benchmark: input.benchmark,
         lane: input.lane,
+        status,
         target: first.target_id,
         variant: first.variant_id,
         trial_count: rows.length,
@@ -344,6 +469,10 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         wall_clock_completeness: wallClock.completeness,
         cost_usd: cost.value,
         cost_completeness: cost.completeness,
+        executed_case_count: rows.length,
+        graded_case_count: scores.length,
+        publication_url: publicationUrl,
+        target_publication: targetPublication,
         source_eval_run_id: input.summary.eval_run_id,
         source_artifact: input.sourceArtifact
       } satisfies EvalHistoryObservation;
@@ -443,6 +572,59 @@ function verifiedGenuineTaskFailureRows(
     if (genuineTaskFailure) genuineTaskFailures.add(diagnostic.row_id);
   }
   return genuineTaskFailures;
+}
+
+function targetPublicationForRows(
+  rows: EvalMatrixRow[],
+  scores: Array<EvalScoreSummary["rows"][number]>,
+  status: EvalHistoryObservationStatus,
+  bundlePath: string
+): EvalHistoryTargetPublication {
+  const first = rows[0];
+  if (first === undefined) throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "publication target has no rows");
+  const frameworks = new Set(rows.flatMap((row) => matrixRowTargetFramework(row) ?? []));
+  if (frameworks.size > 1) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `target framework is inconsistent for ${first.target_id}`);
+  }
+  for (const row of rows) {
+    if (
+      row.target_id !== first.target_id ||
+      row.target.id !== first.target.id ||
+      row.target.repo !== first.target.repo ||
+      row.target.ref !== first.target.ref
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_LINEAGE_INCOMPLETE",
+        `target publication metadata is inconsistent for ${first.target_id}`
+      );
+    }
+  }
+  return {
+    target: first.target_id,
+    repository: first.target.repo,
+    revision: first.target.ref,
+    ...(frameworks.size === 0 ? {} : { framework: [...frameworks][0]! }),
+    status,
+    executed_case_count: rows.length,
+    graded_case_count: scores.length,
+    publication_location: {
+      bundle_path: bundlePath,
+      report_paths: rows.flatMap((row) =>
+        EVAL_HISTORY_PUBLIC_REPORT_FILES.map((reportFile) => `reports/${row.id}/${reportFile}`)
+      )
+    }
+  };
+}
+
+function matrixRowTargetFramework(row: EvalMatrixRow): string | undefined {
+  const workflowInput = recordValue(row.workflow_input);
+  const frameworks = recordValue(workflowInput?.target_frameworks);
+  if (frameworks === undefined || !(row.target_id in frameworks)) return undefined;
+  const value = frameworks?.[row.target_id];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `target framework is invalid for ${row.target_id}`);
+  }
+  return value;
 }
 
 function assertGenerationLineage(
@@ -583,6 +765,8 @@ export interface PublishEvalHistoryInput {
   lane: EvalHistoryLane;
   candidateRepositoryUrl: string;
   sourceArtifact: string;
+  publicationUrl?: string;
+  publicationBundlePath?: string;
   historyPath: string;
   chartsDirectory: string;
 }
@@ -630,6 +814,8 @@ export function publishEvalRunToHistory(input: PublishEvalHistoryInput): {
     runTimestamp: manifest.created_at,
     candidateRepositoryUrl: input.candidateRepositoryUrl,
     sourceArtifact: input.sourceArtifact,
+    ...(input.publicationUrl === undefined ? {} : { publicationUrl: input.publicationUrl }),
+    ...(input.publicationBundlePath === undefined ? {} : { publicationBundlePath: input.publicationBundlePath }),
     suite: manifest.suite,
     matrix,
     summary,
@@ -754,7 +940,7 @@ export function assertPublicBenchmarkGeneration(
       row.id !== expectedId ||
       row.run_id !== expectedRunId ||
       stableStringify(publicTargetScope(row.target)) !== stableStringify(target) ||
-      stableStringify(row.variant) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
+      stableStringify(publicVariantScope(row.variant)) !== stableStringify({ ...variant, prompt_overlay_paths: [] }) ||
       stableStringify(row.workflow_input) !== stableStringify(variant.workflow_input) ||
       row.runner_model_profile !== runnerProfileId ||
       row.runner_model !== runnerProfile.model ||
@@ -806,6 +992,29 @@ function publicSuiteScope(suite: EvalSuiteSpec): Omit<EvalSuiteSpec, "ground_tru
 function publicTargetScope(target: EvalMatrixRow["target"]): EvalSuiteSpec["targets"][number] {
   const { path: _targetPath, ground_truth_path: _groundTruthPath, ...scope } = target;
   return scope;
+}
+
+function publicVariantScope(variant: EvalMatrixRow["variant"]): Omit<EvalMatrixRow["variant"], "topology_path"> {
+  // The matrix records the absolute path from its execution checkout, while
+  // publication validates against a separate worktree at the same commit.
+  const { topology_path: _topologyPath, ...scope } = variant;
+  return scope;
+}
+
+function normalizedPublicationUrl(value: string): string {
+  const parsed = publicationUrlSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "publication URL must be a valid public URL");
+  }
+  return parsed.data;
+}
+
+function normalizedPublicationBundlePath(value = EVAL_HISTORY_PUBLIC_BUNDLE_FILE): string {
+  const parsed = relativePathSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new EvalError("EVAL_HISTORY_SOURCE_INVALID", "publication bundle path must be a safe relative path");
+  }
+  return parsed.data;
 }
 
 function matrixScopeKey(targetId: string, variantId: string, trialId: string): string {
@@ -1154,6 +1363,12 @@ function stableStringify(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }
 
 function compareText(left: string, right: string): number {

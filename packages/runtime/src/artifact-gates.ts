@@ -390,6 +390,9 @@ function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: str
   if (!isRecord(report) || !Array.isArray(report.property_provenance)) {
     return [];
   }
+  if (report.property_provenance.length === 0) {
+    return [];
+  }
 
   const catalog = readCanonicalPropertyCatalog(layout);
   if (catalog.diagnostics.length > 0 || catalog.value === undefined) {
@@ -411,10 +414,6 @@ function verifyFinalReportPropertyReferences(layout: RunLayout, artifactDir: str
     );
   });
   const diagnostics = propertyReferenceDiagnostics(catalog.value, references);
-  if (report.property_provenance.length === 0) {
-    return diagnostics;
-  }
-
   const implementation = readImplementedProperties(layout);
   if (implementation.diagnostics.length > 0 || implementation.value === undefined) {
     return [...diagnostics, ...implementation.diagnostics];

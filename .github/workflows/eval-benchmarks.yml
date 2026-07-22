@@ -94,7 +94,7 @@ jobs:
       - name: Prepare the exact model by benchmark matrix
         env:
           BENCHMARK_OPENAI_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_model || vars.BENCHMARK_SMOKE_OPENAI_MODEL || 'gpt-5.6-luna' }}
-          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || vars.BENCHMARK_SMOKE_OPENAI_REASONING || 'high' }}
+          BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || 'high' }}
           BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
         run: |
@@ -103,7 +103,7 @@ jobs:
           if [ "$BENCHMARK_MODE" = smoke ]; then
             BENCHMARK_MODELS_JSON="$(jq -cn \
               --arg model "$BENCHMARK_OPENAI_MODEL" \
-              --arg reasoning "$BENCHMARK_OPENAI_REASONING" \
+              --arg reasoning "high" \
               '[{provider: "openai", model: $model, reasoning: $reasoning}]')"
           else
             BENCHMARK_MODELS_JSON="$(jq -cn \
@@ -122,6 +122,13 @@ jobs:
             "${{ github.server_url }}/${{ github.repository }}" \
             "$generation" \
             "$BENCHMARK_CONTROL" \
+            "$BENCHMARK_MODE"
+
+      - name: Validate Modal benchmark launch guardrails
+        run: |
+          node scripts/ci/validate-modal-benchmark-launch.mjs \
+            "$BENCHMARK_CONTROL/manifest.json" \
+            . \
             "$BENCHMARK_MODE"
 
       - name: Persist immutable benchmark plan before starting Modal compute
@@ -729,7 +736,8 @@ jobs:
             "$EXPECTED_CANDIDATE" \
             "$EXPECTED_REPOSITORY" \
             "$EXPECTED_GENERATION" \
-            "$EXPECTED_MODE"
+            "$EXPECTED_MODE" \
+            .
 
       - name: Terminate every exact incomplete-run sandbox
         if: always() && steps.validate_incomplete_plan.outcome == 'success'

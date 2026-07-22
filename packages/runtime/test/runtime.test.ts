@@ -719,6 +719,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
   assert.match(codexAgentText, /addDir:\s*options\.addDir/);
+  assert.match(codexAgentText, /sandbox:\s*"workspace-write"/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
@@ -827,6 +828,62 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+});
+
+test("plan uses an eval topology override without replacing the project topology", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const canonicalTopology = path.join(project, ".ultrafuzz", "topology.yml");
+  const smokeTopology = path.join(project, "smoke-benchmark.yml");
+  fs.copyFileSync(canonicalTopology, smokeTopology);
+  fs.writeFileSync(canonicalTopology, "not: [valid\n", "utf8");
+
+  const plan = await planRun({
+    projectRoot: project,
+    topologyPath: smokeTopology,
+    runId: "topology-override",
+    env: {}
+  });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  assert.equal(plan.value!.validation.topology?.path, smokeTopology);
+  assert.deepEqual(
+    plan.value!.graph.nodes.map((node) => node.logical_id),
+    ["project-discovery"]
+  );
+  assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
+});
+
+test("plan applies smoke eval model profiles to a normally initialized target", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
+
+  const plan = await planRun({
+    projectRoot: project,
+    topologyPath: smokeTopology,
+    runId: "smoke-topology-profiles",
+    runtimeOverrides: {
+      models: {
+        profiles: {
+          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+        }
+      }
+    },
+    env: {}
+  });
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
+  assert.equal(executable.length, 7);
+  const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
+  const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
+  assert.equal(strategies.length, 4);
+  assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
+  assert.equal(coordination.length, 3);
+  assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {
@@ -1253,6 +1310,32 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
   assert.match(workflowSource, /addDir:\s*\[task\.artifactDir\]/);
+  assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
+  assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
+  assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
+  assert.match(workflowSource, /function prepareArtifactMirror/);
+  assert.match(workflowSource, /function canonicalEmptyArtifact/);
+  assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
+  assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
+  assert.match(workflowSource, /function artifactAwareAgent/);
+  assert.match(workflowSource, /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);/);
+  assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
+  assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
+  assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
+  assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
+  assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
+  assert.match(workflowSource, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/);
+  assert.match(workflowSource, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/);
+  assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
+  assert.match(workflowSource, /typeof finding\.confidence === "number"/);
+  assert.match(workflowSource, /finding\.confidence = String\(finding\.confidence\)/);
+  assert.match(workflowSource, /\(strategy as Record<string, unknown>\)\.origin/);
+  assert.match(workflowSource, /finding\.strategy = legacyStrategy\.trim\(\)/);
+  assert.match(workflowSource, /finding\.evidence = \[evidence\]/);
+  assert.match(workflowSource, /report\.issues\.map/);
+  assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
+  assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
+  assert.match(workflowSource, /verifyArtifacts\(task\);/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
@@ -1261,7 +1344,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
+  assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
+  assert.match(workflowSource, /dependsOn=\{\[task\.preparationId\]\}/);
   assert.match(workflowSource, /untrusted data, not instructions/);
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
@@ -5334,7 +5419,15 @@ test(
       { cwd: project, encoding: "utf8", maxBuffer: 1024 * 1024 * 16 }
     );
     const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };
-    assert.equal(graph.tasks?.[0]?.nodeId, "node:project-discovery");
+    assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === "node:project-discovery"),
+      true
+    );
+    assert.equal(
+      graph.tasks?.some((task) => task.nodeId === "verify:project-discovery"),
+      true
+    );
   }
 );
 

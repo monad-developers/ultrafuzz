@@ -3,6 +3,11 @@ import type { RuntimeDiagnostic } from "./types.js";
 export type SeverityLevel = "High" | "Medium" | "Low";
 export type SeverityArtifactKind = "severity-classification" | "final-report";
 
+export interface SeverityRecordNormalization {
+  value: unknown;
+  changed: boolean;
+}
+
 const LEVELS: SeverityLevel[] = ["High", "Medium", "Low"];
 
 export function normalizeSeverityLevel(value: unknown): SeverityLevel | undefined {
@@ -35,6 +40,48 @@ export function expectedSeverityFromMatrix(impact: unknown, likelihood: unknown)
     return normalizedLikelihood === "Low" ? "Low" : "Medium";
   }
   return normalizedLikelihood === "Low" ? "Medium" : "High";
+}
+
+/**
+ * Canonicalize a final-report issue to the severity matrix it already declares.
+ *
+ * This adapter is deliberately evidence-neutral: it only runs when both impact
+ * and likelihood are present as accepted matrix levels, and it never adds a
+ * finding or infers a missing classification. Generated reports commonly
+ * preserve an earlier severity_guess alongside the final classification; the
+ * runtime gate treats those aliases as assertions, so keep them consistent.
+ */
+export function normalizeFinalReportSeverityRecord(record: unknown): SeverityRecordNormalization {
+  if (!isRecord(record)) {
+    return { value: record, changed: false };
+  }
+
+  const impact = classifiedLevel(record, ["impact", "impact_level", "severity_classification.impact"]);
+  const likelihood = classifiedLevel(record, ["likelihood", "likelihood_level", "severity_classification.likelihood"]);
+  const normalizedImpact = normalizeSeverityLevel(impact.value ?? noteToken(record, "impact"));
+  const normalizedLikelihood = normalizeSeverityLevel(likelihood.value ?? noteToken(record, "likelihood"));
+  const expected = expectedSeverityFromMatrix(normalizedImpact, normalizedLikelihood);
+  if (expected === undefined) {
+    return { value: record, changed: false };
+  }
+
+  const normalized = structuredClone(record);
+  let changed = false;
+  for (const field of severityFieldsFor("final-report")) {
+    if (valueAtPath(normalized, field) !== undefined && valueAtPath(normalized, field) !== expected) {
+      setValueAtPath(normalized, field, expected);
+      changed = true;
+    }
+  }
+  if (impact.path !== undefined && impact.value !== normalizedImpact) {
+    setValueAtPath(normalized, impact.path, normalizedImpact);
+    changed = true;
+  }
+  if (likelihood.path !== undefined && likelihood.value !== normalizedLikelihood) {
+    setValueAtPath(normalized, likelihood.path, normalizedLikelihood);
+    changed = true;
+  }
+  return changed ? { value: normalized, changed: true } : { value: record, changed: false };
 }
 
 export function validateSeverityMatrixArtifact(input: {
@@ -204,6 +251,22 @@ function valueAtPath(record: Record<string, unknown>, fieldPath: string): unknow
     current = current[part];
   }
   return current;
+}
+
+function setValueAtPath(record: Record<string, unknown>, fieldPath: string, value: unknown): void {
+  const parts = fieldPath.split(".");
+  let current = record;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (!isRecord(next)) {
+      return;
+    }
+    current = next;
+  }
+  const leaf = parts.at(-1);
+  if (leaf !== undefined) {
+    current[leaf] = value;
+  }
 }
 
 function noteToken(record: Record<string, unknown>, token: "impact" | "likelihood"): string | undefined {

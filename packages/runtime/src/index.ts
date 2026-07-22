@@ -4,6 +4,7 @@ export * from "./init.js";
 export * from "./materialize.js";
 export * from "./plan-run.js";
 export * from "./references.js";
+export * from "./severity-matrix.js";
 export * from "./start-run.js";
 export * from "./state-export.js";
 export * from "./types.js";

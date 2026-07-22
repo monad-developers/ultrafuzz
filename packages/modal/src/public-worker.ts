@@ -15,6 +15,7 @@ import {
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   resolveTerminalReportPath,
+  type BenchmarkCohortManifest,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
@@ -233,10 +234,15 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
-        files: publicBundleSources(prepared.controlRoot, prepared.evalRunId, {
-          root: input.dataRoot,
-          source: diagnosticsPath
-        }),
+        files: publicBundleSources(
+          prepared.controlRoot,
+          prepared.evalRunId,
+          {
+            root: input.dataRoot,
+            source: diagnosticsPath
+          },
+          input.config.public_benchmark.lane
+        ),
         forbiddenSecretValues
       });
       await writePublicBundleAtomic(bundlePath, bundle);
@@ -426,12 +432,14 @@ async function preparePublicBenchmark(
       scope.benchmark === "evmbench" ? "evmbench-detect.json" : "ultrafuzz-bench.json"
     )
   );
+  const selectedTargetIds = publicBenchmarkConfiguredTargetIds(config, cohort);
   const lanes = loadBenchmarkLanesManifest(path.join(controlRoot, "benchmarks", "lanes.json"));
   const baseSuite = adaptBenchmarkManifestToEvalSuite({
     benchmark: scope.benchmark,
     lane: scope.lane,
     cohort,
     lanes,
+    ...(selectedTargetIds === undefined ? {} : { selectedTargetIds }),
     runnerModelProfileOverride: {
       id: model.slug,
       agent: model.agent,
@@ -522,6 +530,37 @@ async function preparePublicBenchmark(
   };
 }
 
+function publicBenchmarkConfiguredTargetIds(
+  config: PublicModalBenchmarkConfig,
+  cohort: BenchmarkCohortManifest
+): string[] | undefined {
+  const configured = config.public_benchmark.targets;
+  if (configured === undefined) return undefined;
+  const selectedIds =
+    config.public_benchmark.lane === "smoke" ? cohort.smoke_targets : cohort.targets.map((target) => target.id);
+  const cohortTargets = new Map(cohort.targets.map((target) => [target.id, target]));
+  const seen = new Set<string>();
+  for (const target of configured) {
+    if (seen.has(target.id)) throw new Error(`public benchmark config contains duplicate target ${target.id}`);
+    seen.add(target.id);
+    const expected = cohortTargets.get(target.id);
+    if (expected === undefined) {
+      throw new Error(`public benchmark config target ${target.id} is absent from the checked-in benchmark cohort`);
+    }
+    if (
+      target.repository !== expected.repository ||
+      target.revision !== expected.revision ||
+      target.framework !== expected.framework
+    ) {
+      throw new Error(`public benchmark config target ${target.id} does not match the checked-in benchmark cohort`);
+    }
+  }
+  if (JSON.stringify(configured.map((target) => target.id)) !== JSON.stringify(selectedIds)) {
+    throw new Error("public benchmark config target list does not match the checked-in benchmark lane selection");
+  }
+  return configured.map((target) => target.id);
+}
+
 export async function materializeBakedCandidate(
   expectedCommit: string,
   destination: string,
@@ -564,10 +603,10 @@ export function preparePublicEvalSuite(baseSuite: EvalSuiteSpec, lane: "smoke" |
     ...baseSuite,
     run: {
       ...baseSuite.run,
-      // Smoke runs two eval rows with up to eight nodes each, matching the
-      // sandbox's ordinary 16-agent ceiling. Full mode uses two target waves
-      // for the 40-target EVMbench cohort and eight-way concurrency within each
-      // production workflow, avoiding structurally serial one-hour rows.
+      // Smoke runs all three pinned target rows together, with one four-way
+      // strategy wave inside each bounded workflow. Full mode uses two target
+      // waves for the 40-target EVMbench cohort and eight-way concurrency
+      // within each production workflow.
       max_parallel_runs: publicBenchmarkMaxParallelEvalRows(lane),
       max_parallel_targets: publicBenchmarkMaxParallelWorkflowNodes(lane)
     }
@@ -657,7 +696,8 @@ async function cloneAtCommit(
 export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
-  diagnostics: { root: string; source: string }
+  diagnostics: { root: string; source: string },
+  lane: "smoke" | "full" = "full"
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
@@ -712,10 +752,14 @@ export function publicBundleSources(
     if (report === undefined || record.ultrafuzz_run_root === undefined) {
       throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
     }
+    const normalizedFindingsSource =
+      lane === "smoke"
+        ? path.join(record.ultrafuzz_run_root, "artifacts", "dedupe-findings", "deduped-findings.json")
+        : path.join(path.dirname(report), "findings.normalized.json");
     const candidates = [
       { name: "report.json", source: report },
       { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: path.join(path.dirname(report), "findings.normalized.json") }
+      { name: "findings.normalized.json", source: normalizedFindingsSource }
     ];
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {

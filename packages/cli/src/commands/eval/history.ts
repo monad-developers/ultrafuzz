@@ -28,6 +28,7 @@ export default class EvalHistory extends Command {
     lane: Flags.string({ options: ["smoke", "full"], summary: "Benchmark lane" }),
     repository: Flags.string({ summary: "Public candidate repository URL" }),
     artifact: Flags.string({ summary: "Immutable source eval artifact reference" }),
+    "publication-url": Flags.string({ summary: "Public URL for the validated result bundle" }),
     "benchmark-policy-root": Flags.string({
       summary: "Candidate checkout whose benchmark manifests define the published run"
     }),
@@ -46,9 +47,10 @@ export default class EvalHistory extends Command {
           flags.benchmark === undefined ||
           flags.lane === undefined ||
           flags.repository === undefined ||
-          flags.artifact === undefined
+          flags.artifact === undefined ||
+          flags["publication-url"] === undefined
         ) {
-          throw new Error("appending requires --benchmark, --lane, --repository, and --artifact");
+          throw new Error("appending requires --benchmark, --lane, --repository, --artifact, and --publication-url");
         }
         const result = publishEvalRunToHistory({
           projectRoot: root,
@@ -60,6 +62,7 @@ export default class EvalHistory extends Command {
           lane: flags.lane as EvalHistoryLane,
           candidateRepositoryUrl: flags.repository,
           sourceArtifact: flags.artifact,
+          ...(flags["publication-url"] === undefined ? {} : { publicationUrl: flags["publication-url"] }),
           historyPath,
           chartsDirectory
         });

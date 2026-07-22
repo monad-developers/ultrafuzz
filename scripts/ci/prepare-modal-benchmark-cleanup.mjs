@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
+import {
+  readAutomaticPublicationManifest,
+  validateAutomaticPairConfig,
+  validateBenchmarkPolicyFiles
+} from "./prepare-eval-history-publication.mjs";
+import { modalBenchmarkPolicyDimensions } from "./validate-modal-benchmark-launch.mjs";
 
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const GENERATION = /^[1-9][0-9]*-[1-9][0-9]*$/u;
@@ -38,12 +43,20 @@ export function prepareModalBenchmarkCleanup(input) {
   }
 
   const [producerRunId, producerRunAttempt] = input.expectedGeneration.split("-");
+  const dimensions = input.policyDimensions;
   const manifest = readAutomaticPublicationManifest(manifestPath, {
     candidateCommit: input.expectedCandidate,
     repository: input.expectedRepository,
     producerRunId,
     producerRunAttempt,
-    mode: input.expectedMode
+    mode: input.expectedMode,
+    targets: dimensions.targets,
+    targetIds: dimensions.targetIds,
+    targetCount: dimensions.targetCount,
+    trialsPerVariant: dimensions.trialsPerVariant,
+    maxParallelEvalRows: dimensions.maxParallelEvalRows,
+    maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
+    controlTimeoutSeconds: dimensions.controlTimeoutSeconds
   });
 
   const configs = new Set();
@@ -77,7 +90,8 @@ export function prepareModalBenchmarkCleanup(input) {
         repository: input.expectedRepository,
         generation: input.expectedGeneration,
         mode: input.expectedMode,
-        benchmark: manifest.benchmark
+        benchmark: manifest.benchmark,
+        targets: manifest.targets
       },
       modelSlugs
     );
@@ -108,19 +122,37 @@ function assertExactKeys(value, expected, label) {
 }
 
 function main(args) {
-  if (args.length !== 6) {
+  if (args.length !== 7) {
     throw new Error(
-      "usage: prepare-modal-benchmark-cleanup.mjs <manifest> <output> <candidate> <repository> <generation> <mode>"
+      "usage: prepare-modal-benchmark-cleanup.mjs <manifest> <output> <candidate> <repository> <generation> <mode> <policy-root>"
     );
   }
-  const [manifestPath, outputPath, expectedCandidate, expectedRepository, expectedGeneration, expectedMode] = args;
+  const [
+    manifestPath,
+    outputPath,
+    expectedCandidate,
+    expectedRepository,
+    expectedGeneration,
+    expectedMode,
+    policyRoot
+  ] = args;
+  if (expectedMode !== "smoke" && expectedMode !== "full") {
+    throw new Error("cleanup mode must be smoke or full");
+  }
+  const benchmark = expectedMode === "smoke" ? "ultrafuzz-bench" : "evmbench";
+  const trustedPolicyRoot = validateBenchmarkPolicyFiles({
+    policyRoot,
+    candidateCommit: expectedCandidate,
+    benchmark
+  });
   prepareModalBenchmarkCleanup({
     manifestPath,
     outputPath,
     expectedCandidate,
     expectedRepository,
     expectedGeneration,
-    expectedMode
+    expectedMode,
+    policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
   });
 }
 

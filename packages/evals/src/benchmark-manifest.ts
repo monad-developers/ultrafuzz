@@ -9,10 +9,18 @@ export const EVMBENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.evmbench.cohort.v1" as 
 export const ULTRAFUZZ_BENCH_COHORT_SCHEMA_VERSION = "ultrafuzz.benchmark.cohort.v1" as const;
 export const BENCHMARK_LANES_SCHEMA_VERSION = "ultrafuzz.benchmark.lanes.v1" as const;
 export const DEFAULT_BENCHMARK_TRIALS_PER_VARIANT = 1;
-export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 2;
+export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;
 export const BENCHMARK_FULL_MAX_PARALLEL_RUNS = 20;
-export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 8;
+export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;
 export const BENCHMARK_FULL_MAX_PARALLEL_TARGETS = 8;
+export const BENCHMARK_SMOKE_WORKFLOW_PATH = "benchmarks/smoke-benchmark.yml" as const;
+export const BENCHMARK_SMOKE_WORKFLOW_PROFILE = "smoke-benchmark-v1" as const;
+export const BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS = [
+  "time-warp-sequences",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "lifecycle-view-boundaries"
+] as const;
 export const BENCHMARK_INVARIANT_EXCLUDED_NODE_IDS = [
   "stateful-invariant-setup",
   "stateful-invariant-handlers",
@@ -322,6 +330,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   lanes: BenchmarkLanesManifest;
   runnerModelProfileId?: string;
   runnerModelProfileOverride?: BenchmarkModelProfileManifest;
+  selectedTargetIds?: string[];
 }): EvalSuiteSpec {
   if (
     (input.lane === "smoke" && input.benchmark !== "ultrafuzz-bench") ||
@@ -343,10 +352,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
   }
   const lane = input.lanes[input.lane];
   const topologyExclusions = benchmarkLaneTopologyExclusions(lane);
-  const selectedTargets =
-    input.lane === "smoke"
-      ? input.cohort.smoke_targets.map((id) => input.cohort.targets.find((target) => target.id === id)!)
-      : input.cohort.targets;
+  const selectedTargets = resolveBenchmarkTargets(input);
   if (input.runnerModelProfileId !== undefined && input.runnerModelProfileOverride !== undefined) {
     throw new EvalError(
       "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
@@ -406,6 +412,7 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     })),
     variants: selectedRunnerProfiles.map((profile) => ({
       id: profile.id,
+      ...(input.lane === "smoke" ? { topology: BENCHMARK_SMOKE_WORKFLOW_PATH } : {}),
       runner_model_profile: profile.id,
       judge_model_profile: judgeProfile.id,
       workflow_input: {
@@ -413,8 +420,16 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
         target_frameworks: Object.fromEntries(selectedTargets.map((target) => [target.id, target.framework])),
         excluded_strategy_families: topologyExclusions.excluded_strategy_families,
         benchmark_execution: {
+          ...(input.lane === "smoke"
+            ? {
+                workflow_profile: BENCHMARK_SMOKE_WORKFLOW_PROFILE,
+                selected_strategy_ids: [...BENCHMARK_SMOKE_SELECTED_STRATEGY_IDS]
+              }
+            : {}),
           strategy_loops: lane.strategy_loops,
-          excluded_node_ids: topologyExclusions.excluded_node_ids
+          // The dedicated smoke graph contains only its selected nodes, so
+          // production-topology exclusions would be unknown-node errors.
+          excluded_node_ids: input.lane === "smoke" ? [] : topologyExclusions.excluded_node_ids
         }
       }
     })),
@@ -441,4 +456,23 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       }
     }
   };
+}
+
+function resolveBenchmarkTargets(input: {
+  lane: "smoke" | "full";
+  cohort: BenchmarkCohortManifest;
+  selectedTargetIds?: string[];
+}): BenchmarkTargetManifest[] {
+  const ids =
+    input.selectedTargetIds ??
+    (input.lane === "smoke" ? input.cohort.smoke_targets : input.cohort.targets.map((target) => target.id));
+  assertUnique(ids, "selected target", "benchmark suite input");
+  const targetsById = new Map(input.cohort.targets.map((target) => [target.id, target]));
+  return ids.map((id) => {
+    const target = targetsById.get(id);
+    if (target === undefined) {
+      throw new EvalError("EVAL_BENCHMARK_MANIFEST_INVALID", `selected benchmark target ${id} is absent from cohort`);
+    }
+    return target;
+  });
 }

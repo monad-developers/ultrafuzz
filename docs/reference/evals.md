@@ -152,10 +152,14 @@ ultrafuzz eval publish   # post-hoc replay of a recorded run to a provider
 The public cohort and lane manifests under `benchmarks/` adapt EVMbench detect
 and the canonical Ultrafuzz benchmark cohort into the same eval-suite types.
 The bounded smoke lane selects the three Foundry, Hardhat, and Vyper
-Ultrafuzz-bench targets and pins GPT-5.6 Luna `high`. Its lane definition sets
-`strategy_loops: 1` and explicitly disables invariant tests, differential
-tests, and dynamic strategies; the adapter derives their exact production node
-exclusions. The full lane selects every checked-in EVMBench target, pins
+Ultrafuzz-bench targets and pins GPT-5.6 Luna `high` for bug-finding. It uses
+`benchmarks/smoke-benchmark.yml` instead of filtering the production topology:
+one medium-reasoning context pass feeds four high-reasoning strategies in one
+parallel wave, followed by medium-reasoning dedupe and report passes. The four
+strategies cover time, external dependencies, externalized accounting, and
+lifecycle views. Its
+lane definition still records `strategy_loops: 1` and the three disabled
+strategy families. The full lane selects every checked-in EVMBench target, pins
 GPT-5.6 Luna `high` plus Claude Sonnet 5 `high`, sets the same one strategy loop,
 and explicitly leaves all three disable flags off so the complete topology is
 included. Both default to one trial per variant and use GPT-5.6 Sol `xhigh` as
@@ -165,6 +169,10 @@ workflow dispatch inputs may override either runner. These overrides retain
 the lane's fixed provider count, target selection, and topology. Publication
 validates every pair as an exact projection of the candidate commit's trusted
 lane policy before merging its observations.
+Smoke publication additionally requires at least one normalized finding for
+every target row. The smoke workflow profile and selected strategy IDs are part
+of the execution-policy fingerprint, so its charts cannot mix with full or
+legacy smoke observations.
 `eval history` consumes only complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or

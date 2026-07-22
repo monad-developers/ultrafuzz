@@ -337,7 +337,7 @@ it("bounds public provider fan-out by mode", () => {
     run: {
       ...smokeBaseSuite.run,
       max_parallel_runs: PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
-      max_parallel_targets: 8
+      max_parallel_targets: 4
     }
   });
   expect(smokeBaseSuite).toEqual(original);
@@ -359,7 +359,7 @@ it("bounds public provider fan-out by mode", () => {
     max_parallel_runs: PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
     max_parallel_targets: 8
   });
-  expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(2);
+  expect(publicBenchmarkMaxParallelEvalRows("smoke")).toBe(3);
   expect(publicBenchmarkMaxParallelEvalRows("full")).toBe(20);
 });
 
@@ -490,6 +490,45 @@ it("publishes only the final journal record for each benchmark row", () => {
 
   fs.rmSync(path.join(reportRoot, "report.md"));
   expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/missing report\.md/u);
+});
+
+it("publishes smoke dedupe evidence through the trusted normalized-findings bundle path", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-worker-smoke-"));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = "eval-smoke-dedupe";
+  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  const runRoot = path.join(root, "target-run");
+  const reportRoot = path.join(runRoot, "artifacts/final-report");
+  const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.mkdirSync(reportRoot, { recursive: true });
+  fs.mkdirSync(dedupeRoot, { recursive: true });
+  fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
+  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
+  const rowId = "target-a-runner-trial-1";
+  const record = {
+    row_id: rowId,
+    ultrafuzz_run_root: runRoot,
+    report_json_path: path.join(reportRoot, "report.json"),
+    final_status: "succeeded",
+    workflow: { status: "succeeded", terminal: true }
+  };
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(record)}\n`);
+  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+
+  const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke").filter(
+    (source) => source.path.startsWith("reports/")
+  );
+  expect(reportSources.map((source) => source.path)).toEqual([
+    `reports/${rowId}/report.json`,
+    `reports/${rowId}/report.md`,
+    `reports/${rowId}/findings.normalized.json`
+  ]);
+  expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
