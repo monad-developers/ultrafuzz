@@ -16,10 +16,15 @@
 <text x="62" y="122" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">0.75</text>
 <line x1="72" y1="50" x2="928" y2="50" stroke="#e5e7eb"/>
 <text x="62" y="54" text-anchor="end" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">1.00</text>
+<polyline fill="none" stroke="#2563eb" stroke-width="2" points="72,50 928,50"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5"><title>ultrafuzz-bench smoke gpt-5.6-luna high cohort-cf3da608 policy-b0f7d6d0 953a397: 1.00</title>
-<circle cx="500" cy="50" r="4" fill="#2563eb"/>
-<text x="500" y="41" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#374151">953a397</text></a>
-<text x="500" y="342" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">2026-07-21</text>
+<circle cx="72" cy="50" r="4" fill="#2563eb"/>
+<text x="72" y="41" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#374151">953a397</text></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16"><title>ultrafuzz-bench smoke gpt-5.6-luna high cohort-cf3da608 policy-b0f7d6d0 2051b64: 1.00</title>
+<circle cx="928" cy="50" r="4" fill="#2563eb"/>
+<text x="928" y="41" text-anchor="middle" font-family="ui-monospace, monospace" font-size="9" fill="#374151">2051b64</text></a>
+<text x="72" y="342" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">2026-07-21</text>
+<text x="928" y="342" text-anchor="middle" font-family="system-ui, sans-serif" font-size="11" fill="#4b5563">2026-07-22</text>
 <rect x="72" y="361" width="10" height="10" fill="#2563eb"/>
 <text x="88" y="370" font-family="system-ui, sans-serif" font-size="11" fill="#374151">ultrafuzz-bench smoke gpt-5.6-luna high cohort-cf3da608 policy-b0f7d6d0</text>
 <text x="500" y="348" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#374151">Date</text>
