@@ -1187,12 +1187,14 @@ function renderChart(
   title: string,
   ratioMetric: boolean
 ): string {
-  const width = 660;
-  const left = 66;
-  const right = 24;
+  // Sized to be read at (or near) the README's full content width, one chart
+  // per row — a two-up layout would halve this and shrink the text again.
+  const width = 960;
+  const left = 70;
+  const right = 30;
   const top = 104;
   const plotWidth = width - left - right;
-  const plotHeight = 320;
+  const plotHeight = 300;
   const plotBottom = top + plotHeight;
   const legendTop = plotBottom + 58;
   const points = chartPoints(observations, metric);
@@ -1236,14 +1238,14 @@ function renderChart(
       return left + (plotWidth * ((seriesIndex.get(point.seriesKey) ?? 0) + 1)) / (seriesKeys.length + 1);
     }
     if (minTime === maxTime) return left + plotWidth / 2;
-    const pad = 28;
+    const pad = 44;
     return left + pad + ((Date.parse(point.timestamp) - minTime) / (maxTime - minTime)) * (plotWidth - 2 * pad);
   };
   const y = (value: number): number => top + plotHeight - (value / maxValue) * plotHeight;
 
   const lines: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     `<title id="title">${xml(title)}</title>`,
     `<desc id="desc">${xml(`${title} by candidate commit and benchmark target`)}</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
