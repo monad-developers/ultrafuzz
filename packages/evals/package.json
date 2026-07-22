@@ -16,7 +16,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompts.mjs",
     "test": "pnpm --filter @ultrafuzz/evals^... build && vitest run",
     "typecheck": "pnpm --filter @ultrafuzz/evals^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },

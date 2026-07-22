@@ -7,6 +7,7 @@ import { z } from "zod/v4";
 
 import {
   EVAL_SPEC_SCHEMA_VERSION,
+  type EvalJudgePanelConfig,
   type EvalMatrixRow,
   type EvalPlanValue,
   type EvalReportingPolicy,
@@ -60,6 +61,28 @@ const variantSchema = z.looseObject({
   judge_model_profile: nonEmptyString.optional()
 });
 
+const judgePanelSchema = z
+  .looseObject({
+    total: z.number().int().positive(),
+    quorum: z.number().int().positive()
+  })
+  .superRefine((panel, context) => {
+    if (panel.quorum > panel.total) {
+      context.addIssue({
+        code: "custom",
+        path: ["quorum"],
+        message: "judge panel quorum must be at most total"
+      });
+    }
+    if (panel.quorum * 2 <= panel.total) {
+      context.addIssue({
+        code: "custom",
+        path: ["quorum"],
+        message: "judge panel quorum must be a strict majority"
+      });
+    }
+  });
+
 const reportingSchema = z.looseObject({
   node_telemetry: z.boolean().default(true),
   heartbeat_interval_seconds: z.number().int().positive().default(DEFAULT_HEARTBEAT_INTERVAL_SECONDS),
@@ -87,6 +110,7 @@ const suiteSchema = z.looseObject({
     max_parallel_targets: z.number().int().positive().optional(),
     max_parallel_runs: z.number().int().positive().optional()
   }),
+  judge_panel: judgePanelSchema.optional(),
   metrics: z.looseObject({
     primary: z.array(nonEmptyString).default(["precision", "recall", "f1_score"]),
     recall_threshold: z.number().min(0).max(1).default(0.7),
@@ -94,6 +118,26 @@ const suiteSchema = z.looseObject({
   }),
   reporting: reportingSchema.optional()
 });
+
+export const DEFAULT_EVAL_JUDGE_PANEL = { total: 3, quorum: 2 } as const satisfies EvalJudgePanelConfig;
+
+/** Resolve and validate panel settings for loaded and programmatically constructed suites. */
+export function resolveJudgePanelConfig(config: EvalJudgePanelConfig | undefined): EvalJudgePanelConfig {
+  const panel = config ?? DEFAULT_EVAL_JUDGE_PANEL;
+  if (!Number.isInteger(panel.total) || panel.total <= 0) {
+    throw new EvalError("EVAL_JUDGE_PANEL_INVALID", "judge panel total must be a positive integer", { panel });
+  }
+  if (!Number.isInteger(panel.quorum) || panel.quorum <= 0) {
+    throw new EvalError("EVAL_JUDGE_PANEL_INVALID", "judge panel quorum must be a positive integer", { panel });
+  }
+  if (panel.quorum > panel.total) {
+    throw new EvalError("EVAL_JUDGE_PANEL_INVALID", "judge panel quorum must be at most total", { panel });
+  }
+  if (panel.quorum * 2 <= panel.total) {
+    throw new EvalError("EVAL_JUDGE_PANEL_INVALID", "judge panel quorum must be a strict majority", { panel });
+  }
+  return { total: panel.total, quorum: panel.quorum };
+}
 
 export interface PlanEvalSuiteInput {
   projectRoot: string;

@@ -198,6 +198,34 @@ Grading never depends on a provider: scores are computed locally
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
 
+Configure an independent judge panel at the root of the eval suite YAML selected
+by `--suite` or `[eval].eval_config`:
+
+```yaml
+judge_panel:
+  total: 4
+  quorum: 3
+```
+
+The default is three independent members with quorum two. Explicit strict-majority
+overrides remain supported, including one member with quorum one and four members
+with quorum three. `total` and `quorum` must be positive integers, `quorum` cannot
+exceed `total`, and the quorum must be a strict majority. Each member gets a fresh
+model context containing the same
+versioned adjudicator prompt; panel requests use bounded concurrency while
+retaining each request's retry, timeout, privacy, and credential boundaries.
+The evaluator applies the normal classification policy to every response and
+requires quorum on an identical decision. A true-positive vote's identity
+includes its canonical matched bug ID. Findings without quorum enter the human
+review queue with the `panel-disagreement` reason.
+
+Each judged finding in `scores.jsonl` records the panel total and quorum,
+model, reasoning effort when configured, prompt version, deterministic vote
+split, individual member decisions and rationales, and aggregate decision.
+Scoring provenance includes the effective panel configuration and versioned
+prompt/scorer revisions, so panel scores are not interchangeable with older
+single-judge artifacts. Credentials are never part of score artifacts.
+
 `eval bundle <eval-run-id> --output <directory>` is the explicit offline
 analysis export. It derives fixed-schema aggregate files rather than copying
 the eval or run directories. `analysis-bundle.json` records bundle-relative
