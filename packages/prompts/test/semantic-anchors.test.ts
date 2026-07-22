@@ -16,6 +16,7 @@ describe("prompt semantic anchors", () => {
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()
+      .filter((asset) => !asset.relativePath.startsWith("smoke/"))
       .map((asset) => asset.markdown)
       .join("\n");
 
@@ -28,29 +29,14 @@ describe("prompt semantic anchors", () => {
 
   it("keeps the comparison prompt set free of generated-test collection contracts", () => {
     const promptCorpus = loadBuiltInPromptAssets()
+      .filter((asset) => !asset.relativePath.startsWith("smoke/"))
       .map((asset) => asset.markdown)
       .join("\n");
-    const targetE2eFixture = readFileSync(
-      fileURLToPath(new URL("../../../scripts/ci/target-e2e-fixture/.ultrafuzz/topology.yml", import.meta.url)),
-      "utf8"
-    ).concat(
-      "\n",
-      readFileSync(
-        fileURLToPath(
-          new URL(
-            "../../../scripts/ci/target-e2e-fixture/.ultrafuzz/prompts/strategies/signal-analysis.md",
-            import.meta.url
-          )
-        ),
-        "utf8"
-      )
-    );
 
     expect(promptCorpus).not.toContain("generated-tests.json");
     expect(promptCorpus).not.toContain("generated_tests");
     expect(promptCorpus).not.toContain("strategy_attempt_test_dir");
     expect(promptCorpus).not.toContain("test_files");
-    expect(targetE2eFixture).not.toContain("generated-tests.json");
   });
 
   it("keeps the severity matrix and reportability gates in the classifier prompt", () => {
@@ -83,7 +69,7 @@ describe("prompt semantic anchors", () => {
     expect(template).toContain("line ranges in `detail`");
   });
 
-  it("keeps Vyper target setup guidance concrete for Foundry harnesses", () => {
+  it("keeps Vyper target setup guidance concrete", () => {
     const projectDiscovery = prompt("setup/project-discovery.md");
     const setupFoundry = prompt("setup/prepare-foundry-harness.md");
     const baseSetup = prompt("setup/discover-base-test.md");

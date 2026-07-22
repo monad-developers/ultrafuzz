@@ -22,21 +22,48 @@ function baseRenderInput(tmp: string) {
       logicalNodes: [
         {
           id: "project-discovery",
-          requiredArtifacts: ["setup/project-discovery.md"],
-          primaryArtifact: "setup/project-discovery.md",
+          outputs: [
+            {
+              path: "setup/project-discovery.md",
+              contract: "ultrafuzz/nonempty-markdown@1",
+              primary: true,
+              description: "A non-empty Markdown document."
+            }
+          ],
           artifactDir: path.join(runArtifacts, "project-discovery")
         },
         {
           id: "base-test-setup",
           dependsOn: ["project-discovery"],
-          requiredArtifacts: ["setup/base-test-setup.md"],
-          primaryArtifact: "setup/base-test-setup.md",
+          outputs: [
+            {
+              path: "setup/base-test-setup.md",
+              contract: "ultrafuzz/nonempty-markdown@1",
+              primary: true,
+              description: "A non-empty Markdown document."
+            }
+          ],
           artifactDir: path.join(runArtifacts, "base-test-setup")
         },
         {
           id: "boundary-tests",
           dependsOn: ["base-test-setup"],
-          requiredArtifacts: ["findings.json"],
+          outputs: [
+            {
+              path: "findings.json",
+              contract: "ultrafuzz/findings@1",
+              primary: true,
+              description: "A findings array with severity_guess.",
+              validEmptyExample: "[]"
+            },
+            {
+              path: "generated-tests.json",
+              contract: "ultrafuzz/generated-tests@1",
+              primary: false,
+              description: "A manifest containing generated_tests.",
+              validEmptyExample: '{"generated_tests":[]}'
+            }
+          ],
           artifactDir: path.join(runArtifacts, "boundary-tests")
         }
       ]
@@ -87,24 +114,13 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain(path.join("base-test-setup", "setup", "base-test-setup.md"));
     expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "findings.json"));
     expect(result.renderedMarkdown).toContain("## Ultrafuzz Output Contract");
+    expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
     expect(result.renderedMarkdown).toContain("severity_guess");
-    expect(result.renderedMarkdown).not.toContain("generated_tests");
+    expect(result.renderedMarkdown).toContain("generated_tests");
+    expect(result.renderedMarkdown).toContain("write each artifact to the exact absolute path");
     expect(result.renderedMarkdown).toContain("final response MUST contain ONLY one raw, valid JSON object");
     expect(result.renderedMarkdown).toContain('{"summary":"A concise description');
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
-  });
-
-  it("does not require a deleted generated-test contract template for legacy artifact manifests", () => {
-    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
-    tmpDirs.push(tmp);
-    const input = baseRenderInput(tmp);
-    input.graph.logicalNodes[2]!.requiredArtifacts = ["generated-tests.json", "findings.json"];
-
-    const result = renderPrompt(input);
-
-    expect(result.renderedMarkdown).toContain(path.join("boundary-tests-0", "generated-tests.json"));
-    expect(result.renderedMarkdown).not.toContain("generated_tests");
-    expect(result.renderedMarkdown).toContain("severity_guess");
   });
 
   it("returns model provenance for task metadata", () => {
@@ -134,8 +150,14 @@ describe("prompt rendering", () => {
     input.graph.logicalNodes.push({
       id: "unrelated",
       dependsOn: ["project-discovery"],
-      requiredArtifacts: ["unrelated.txt"],
-      primaryArtifact: "unrelated.txt",
+      outputs: [
+        {
+          path: "unrelated.txt",
+          contract: "ultrafuzz/text@1",
+          primary: true,
+          description: "Text."
+        }
+      ],
       artifactDir: path.join(tmp, "runs", "run-1", "artifacts", "unrelated")
     });
     input.prompt = "{{artifact_handoff:unrelated}}";
@@ -147,9 +169,12 @@ describe("prompt rendering", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
     const input = baseRenderInput(tmp);
-    delete input.graph.logicalNodes[1]!.primaryArtifact;
+    input.graph.logicalNodes[1]!.outputs = input.graph.logicalNodes[1]!.outputs?.map((output) => ({
+      ...output,
+      primary: false
+    }));
 
-    expect(() => renderPrompt(input)).toThrow(/primary_artifact/);
+    expect(() => renderPrompt(input)).toThrow(/primary output/);
   });
 
   it("writes prompt.rendered.md before workflow launch", () => {

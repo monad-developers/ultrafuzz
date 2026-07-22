@@ -1,8 +1,10 @@
 ## Ultrafuzz Output Contract
 
-Before finishing, you MUST ensure these required artifacts exist exactly at these paths:
-{{required_artifact_paths}}
-{{findings_contract}}{{boundary_recipes_contract}}
+Before finishing, you MUST ensure every artifact below exists and satisfies its named contract. A file merely existing is not sufficient:
+
+{{artifact_contracts}}
+
+Artifact writing is part of the task, not optional final-response metadata. Create parent directories before writing, write each artifact to the exact absolute path shown above, and then verify each path exists, is non-empty unless its contract explicitly allows an empty form, and matches its JSON or Markdown contract. Do not write required artifacts only under the repository root, a relative working directory, or a different similarly named path.
 
 After completing the work and writing every required artifact, your final response MUST contain ONLY one raw, valid JSON object in exactly this form:
 
