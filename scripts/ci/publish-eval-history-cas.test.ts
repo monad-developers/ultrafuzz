@@ -12,7 +12,7 @@ import {
 } from "./publish-eval-history-cas.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
-const TARGET_REF = "refs/heads/automation/eval-history";
+const TARGET_REF = "refs/heads/main";
 const CHARTS = [
   "precision.svg",
   "recall.svg",
@@ -56,23 +56,21 @@ describe("eval history Git CAS publisher", () => {
       "observation-a-2",
       "observation-b"
     ]);
-    expect(Number(git(fixture.bare, ["rev-list", "--count", `refs/heads/main..${TARGET_REF}`]))).toBe(2);
+    expect(Number(git(fixture.bare, ["rev-list", "--count", `${candidateCommit}..${TARGET_REF}`]))).toBe(2);
     expect(
-      git(fixture.bare, ["log", "--format=%s", `refs/heads/main..${TARGET_REF}`])
+      git(fixture.bare, ["log", "--format=%s", `${candidateCommit}..${TARGET_REF}`])
         .trim()
         .split("\n")
-    ).toEqual(["Update published eval history [ci skip]", "Update published eval history [ci skip]"]);
+    ).toEqual(["Update published eval history", "Update published eval history"]);
 
     const beforeRetry = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
     const retried = await invokePublisher(fixture.checkoutA, generationA, inputRoot);
     expect(retried).toMatchObject({ published: false, attempts: 1, commit: beforeRetry });
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(beforeRetry);
-    expect(Number(git(fixture.bare, ["rev-list", "--count", `refs/heads/main..${TARGET_REF}`]))).toBe(2);
-    expect(
-      git(fixture.bare, ["diff", "--name-only", `refs/heads/main..${TARGET_REF}`])
-        .trim()
-        .split("\n")
-    ).toEqual(["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`).sort()].sort());
+    expect(Number(git(fixture.bare, ["rev-list", "--count", `${candidateCommit}..${TARGET_REF}`]))).toBe(2);
+    expect(git(fixture.bare, ["diff", "--name-only", candidateCommit, TARGET_REF]).trim().split("\n")).toEqual(
+      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`).sort()].sort()
+    );
     for (const chart of CHARTS) {
       expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(
         `${chart}:observation-a,observation-a-2,observation-b\n`
@@ -80,7 +78,7 @@ describe("eval history Git CAS publisher", () => {
     }
   }, 30_000);
 
-  it("reconciles a retained post-squash branch without reverting main history", async () => {
+  it("preserves independent history already committed to main", async () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
@@ -90,26 +88,19 @@ describe("eval history Git CAS publisher", () => {
     const generationB = writeGeneration(fixture.root, "generation-b.json", ["run-b"], candidateCommit);
 
     await invokePublisher(fixture.checkoutA, generationA, inputRoot);
-    const retainedBeforeSquash = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
-    git(fixture.seed, ["fetch", "origin", `+${TARGET_REF}:refs/remotes/origin/automation/eval-history`]);
-    git(fixture.seed, ["merge", "--squash", "origin/automation/eval-history"]);
-    git(fixture.seed, ["commit", "-m", "Squash eval history publication"]);
+    git(fixture.seed, ["pull", "--ff-only", "origin", "main"]);
     appendFixtureHistoryObservation(fixture.seed, "observation-main", "run-main");
     git(fixture.seed, ["add", "benchmarks/history.json", "docs/assets/eval-history"]);
     git(fixture.seed, ["commit", "-m", "Append independent main history"]);
     git(fixture.seed, ["push", "origin", "main"]);
     const mainBeforePublication = git(fixture.bare, ["rev-parse", "refs/heads/main"]).trim();
-    expect(gitStatus(fixture.bare, ["merge-base", "--is-ancestor", retainedBeforeSquash, mainBeforePublication])).toBe(
-      1
-    );
 
     const published = await invokePublisher(fixture.checkoutB, generationB, inputRoot);
 
     expect(published).toMatchObject({ published: true, attempts: 1 });
     const targetAfter = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
     expect(gitStatus(fixture.bare, ["merge-base", "--is-ancestor", mainBeforePublication, targetAfter])).toBe(0);
-    expect(gitStatus(fixture.bare, ["merge-base", "--is-ancestor", retainedBeforeSquash, targetAfter])).toBe(0);
-    expect(git(fixture.bare, ["rev-list", "--parents", "-n", "1", targetAfter]).trim().split(" ")).toHaveLength(3);
+    expect(git(fixture.bare, ["rev-list", "--parents", "-n", "1", targetAfter]).trim().split(" ")).toHaveLength(2);
     const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
       observations: Array<{ id: string }>;
     };
@@ -129,7 +120,7 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(targetAfter);
   }, 30_000);
 
-  it("does not repoint an already-merged publication branch during an idempotent retry", async () => {
+  it("does not move main during an idempotent retry", async () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
@@ -137,36 +128,23 @@ describe("eval history Git CAS publisher", () => {
     const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
 
     await invokePublisher(fixture.checkoutA, generation, inputRoot);
-    const retainedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
-    git(fixture.seed, ["fetch", "origin", `+${TARGET_REF}:refs/remotes/origin/automation/eval-history`]);
-    git(fixture.seed, [
-      "merge",
-      "--no-ff",
-      "origin/automation/eval-history",
-      "-m",
-      "Merge published history [ci skip]"
-    ]);
-    writeFile(path.join(fixture.seed, "main-only.txt"), "advance main without a skip directive\n");
-    git(fixture.seed, ["add", "main-only.txt"]);
-    git(fixture.seed, ["commit", "-m", "Advance main independently"]);
-    git(fixture.seed, ["push", "origin", "main"]);
+    const publishedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
 
     const retried = await invokePublisher(fixture.checkoutA, generation, inputRoot);
 
-    expect(retried).toMatchObject({ published: false, attempts: 1, commit: retainedTarget });
-    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(retainedTarget);
-    expect(git(fixture.bare, ["rev-parse", "refs/heads/main"]).trim()).not.toBe(retainedTarget);
+    expect(retried).toMatchObject({ branch: "main", published: false, attempts: 1, commit: publishedTarget });
+    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(publishedTarget);
   }, 30_000);
 
-  it("rejects an ahead publication branch containing paths outside the publication allowlist", () => {
+  it("preserves unrelated main changes while committing only publication paths", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutB, ["rev-parse", "HEAD"]).trim();
     writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
     const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
 
-    writeFile(path.join(fixture.checkoutA, "untrusted-publication-change.txt"), "must not be published\n");
-    git(fixture.checkoutA, ["add", "untrusted-publication-change.txt"]);
+    writeFile(path.join(fixture.checkoutA, "independent-main-change.txt"), "must be preserved\n");
+    git(fixture.checkoutA, ["add", "independent-main-change.txt"]);
     git(fixture.checkoutA, [
       "-c",
       "user.name=Fixture",
@@ -174,28 +152,21 @@ describe("eval history Git CAS publisher", () => {
       "user.email=fixture@example.com",
       "commit",
       "-m",
-      "Poison publication branch"
+      "Advance main independently"
     ]);
     git(fixture.checkoutA, ["push", "origin", `HEAD:${TARGET_REF}`]);
-    const poisonedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    const independentTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
 
-    expect(() =>
-      publishEvalHistoryGeneration({
-        generationPath: generation,
-        inputRoot,
-        repositoryRoot: fixture.checkoutB
-      })
-    ).toThrow(/cumulative diff contains unexpected paths: "untrusted-publication-change\.txt"/u);
-    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(poisonedTarget);
-
-    const independentGate = Bun.spawnSync(["node", SCRIPT, "verify-target"], {
-      cwd: fixture.checkoutB,
-      stdout: "pipe",
-      stderr: "pipe"
+    const published = publishEvalHistoryGeneration({
+      generationPath: generation,
+      inputRoot,
+      repositoryRoot: fixture.checkoutB
     });
-    expect(independentGate.exitCode).not.toBe(0);
-    expect(independentGate.stderr.toString()).toMatch(
-      /cumulative diff contains unexpected paths: "untrusted-publication-change\.txt"/u
+    expect(published).toMatchObject({ branch: "main", published: true, attempts: 1 });
+    const publishedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    expect(git(fixture.bare, ["show", `${TARGET_REF}:independent-main-change.txt`])).toBe("must be preserved\n");
+    expect(git(fixture.bare, ["diff", "--name-only", independentTarget, publishedTarget]).trim().split("\n")).toEqual(
+      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
     );
   });
 

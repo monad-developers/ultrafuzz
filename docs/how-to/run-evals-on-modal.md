@@ -152,17 +152,18 @@ must find and support a real issue from target source evidence.
 
 The compare-and-swap publisher validates the generation with the benchmark
 policy from the exact candidate checkout, appends observations keyed to that
-candidate commit, regenerates the charts, and updates the
-`automation/eval-history` pull request. It retries a changed remote publication
-tip and commits with `[ci skip]`, so chart-only publication does not start a new
-benchmark run.
+candidate commit, regenerates the charts, and commits the exact publication
+allowlist directly to `main`. It authenticates with the repository-scoped eval
+history GitHub App, which has `Contents: read and write` and an explicit
+`Always allow` exception in the default-branch ruleset. A changed remote tip is
+rebuilt and retried before a normal fast-forward push. Publication-only history
+and chart paths are excluded from the Modal push trigger, so the App commit
+cannot recursively start another benchmark run.
 
-Set the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
-token that can create pull requests when organization policy prevents
-`github.token` from doing so. Without that secret, publication falls back to
-`github.token`. If policy still blocks PR creation, the workflow succeeds with
-a warning, preserves the complete publication on `automation/eval-history`,
-and adds a compare-and-open link to the job summary for manual completion.
+Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
+variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
+secret. The workflow exchanges those credentials for a short-lived
+installation token; the private key is never passed to Modal.
 
 ## Build and launch
 

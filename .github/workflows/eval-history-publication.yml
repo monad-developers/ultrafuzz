@@ -37,8 +37,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   qualify_modal_benchmark:
@@ -95,11 +94,19 @@ jobs:
       PUBLICATION_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
 
     steps:
+      - name: Create the eval-history publisher token
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
+
       - name: Check out trusted main publication tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ steps.publisher-token.outputs.token }}
           persist-credentials: true
 
       - name: Set up pnpm
@@ -183,102 +190,25 @@ jobs:
           git worktree remove --force "$PUBLICATION_POLICY_ROOT"
           trap - EXIT
 
-  open_publication_pr:
-    needs:
-      - publish_modal_benchmark
-      - publish_manual
-    if: >-
-      always() &&
-      (needs.publish_modal_benchmark.result == 'success' || needs.publish_manual.result == 'success')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out trusted main publication tooling
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: main
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-
-      - name: Open the publication pull request when needed
-        env:
-          GH_TOKEN: ${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}
-        run: |
-          compare_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...automation%2Feval-history?expand=1"
-          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
-          if ! git ls-remote --exit-code --heads origin refs/heads/automation/eval-history > /dev/null; then
-            echo "No pending eval-history publication branch is needed"
-            exit 0
-          fi
-          git fetch --no-tags origin \
-            "+refs/heads/automation/eval-history:refs/remotes/origin/automation/eval-history"
-          node scripts/ci/publish-eval-history-cas.mjs verify-target
-          open_prs="$(gh pr list \
-            --state open \
-            --base main \
-            --head automation/eval-history \
-            --json number \
-            --jq 'length')"
-          if git diff --quiet \
-            origin/main \
-            origin/automation/eval-history \
-            -- \
-            benchmarks/history.json \
-            docs/assets/eval-history; then
-            pending_publication=false
-          else
-            diff_status=$?
-            if [ "$diff_status" -ne 1 ]; then
-              echo "Unable to compare the eval-history publication trees" >&2
-              exit "$diff_status"
-            fi
-            pending_publication=true
-          fi
-          if [ "$open_prs" -eq 0 ] && [ "$pending_publication" = true ]; then
-            if gh pr create \
-              --base main \
-              --head automation/eval-history \
-              --title "[ci skip] Update published eval history" \
-              --body $'## Summary\n\nAppend complete scored benchmark generations and regenerate the deterministic README charts.\n\n## Verification\n\n- Validated versioned history and immutable lineage\n- Consumed Modal artifacts only through trusted default-branch publication tooling\n- Retried remote-tip races without dropping generations\n- Regenerated and checked all SVG charts'; then
-              exit 0
-            fi
-            open_prs="$(gh pr list \
-              --state open \
-              --base main \
-              --head automation/eval-history \
-              --json number \
-              --jq 'length')"
-            if [ "$open_prs" -eq 0 ]; then
-              echo "::warning title=Eval-history PR not opened::Automatic pull-request creation is unavailable. The publication branch remains pushed; use the job summary link."
-              {
-                echo "### Eval-history publication is waiting for a pull request"
-                echo
-                echo "The complete generation remains preserved on automation/eval-history."
-                echo
-                echo "[Compare and open the publication pull request]($compare_url)"
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            echo "Another publisher opened the eval-history pull request"
-          fi
-
   publish_manual:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
+      - name: Create the eval-history publisher token
+        id: publisher-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}
+
       - name: Check out trusted main publication tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ steps.publisher-token.outputs.token }}
           persist-credentials: true
 
       - name: Set up pnpm

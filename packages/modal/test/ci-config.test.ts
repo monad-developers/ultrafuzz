@@ -736,10 +736,11 @@ describe("public Modal benchmark configuration", () => {
     expect(() => parse(producerText)).not.toThrow();
     expect(() => parse(publicationText)).not.toThrow();
     expect(producerText).not.toContain("publish-eval-history-cas.mjs");
-    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(3);
-    expect(publicationText).toContain("automation/eval-history");
+    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(2);
+    expect(publicationText).not.toContain("automation/eval-history");
     expect(publicationText).not.toContain("group: publish-eval-history");
     expect(publicationText).not.toContain("peter-evans/create-pull-request");
+    expect(publicationText).not.toContain("gh pr create");
 
     const publication = parse(publicationText) as {
       on: { workflow_run: { workflows: string[]; types: string[] }; workflow_dispatch: unknown };
@@ -751,7 +752,7 @@ describe("public Modal benchmark configuration", () => {
           needs?: string | string[];
           permissions?: Record<string, string>;
           env?: Record<string, string>;
-          steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
+          steps: Array<{ id?: string; name?: string; uses?: string; run?: string; with?: Record<string, unknown> }>;
         }
       >;
     };
@@ -759,8 +760,7 @@ describe("public Modal benchmark configuration", () => {
     expect(publication.on).toHaveProperty("workflow_dispatch");
     expect(publication.permissions).toEqual({
       actions: "read",
-      contents: "write",
-      "pull-requests": "write"
+      contents: "read"
     });
     for (const [jobName, job] of Object.entries(publication.jobs)) {
       const firstNodeInvocation = job.steps.findIndex((step) => /(^|\s)node(?:\s|$)/u.test(step.run ?? ""));
@@ -789,8 +789,15 @@ describe("public Modal benchmark configuration", () => {
     expect(automatic.if).toBe("needs.qualify_modal_benchmark.outputs.eligible == 'true'");
     expect(automatic.env?.BENCHMARK_MODE).toBe("${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}");
     expect(automatic.env?.CANDIDATE_COMMIT).toBe("${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}");
+    const automaticToken = automatic.steps.find((step) => step.id === "publisher-token");
+    expect(automaticToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
+    expect(automaticToken?.with).toEqual({
+      "client-id": "${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}",
+      "private-key": "${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}"
+    });
     const automaticCheckout = automatic.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(automaticCheckout?.with?.ref).toBe("main");
+    expect(automaticCheckout?.with?.token).toBe("${{ steps.publisher-token.outputs.token }}");
     expect(automaticCheckout?.with?.["persist-credentials"]).toBe(true);
     expect(automatic.steps.some((step) => step.uses?.startsWith("actions/cache@"))).toBe(false);
     const downloads = automatic.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@"));
@@ -808,43 +815,27 @@ describe("public Modal benchmark configuration", () => {
     expect(trustedPublish).toContain('git worktree add --detach "$PUBLICATION_POLICY_ROOT" "$CANDIDATE_COMMIT"');
     expect(trustedPublish).toContain('"$PUBLICATION_POLICY_ROOT"');
     expect(trustedPublish).not.toContain("pnpm install");
-    const pullRequestGate = publication.jobs.open_publication_pr?.steps.find(
-      (step) => step.name === "Open the publication pull request when needed"
-    )?.run;
-    expect(pullRequestGate).toContain("publish-eval-history-cas.mjs verify-target");
-    expect(publication.jobs.publish_manual?.if).toBe(
-      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'"
-    );
+    const manual = publication.jobs.publish_manual!;
+    expect(manual.if).toBe("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'");
+    const manualToken = manual.steps.find((step) => step.id === "publisher-token");
+    expect(manualToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
+    const manualCheckout = manual.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+    expect(manualCheckout?.with?.token).toBe("${{ steps.publisher-token.outputs.token }}");
+    expect(publication.jobs).not.toHaveProperty("open_publication_pr");
   });
 
-  it("preserves a pushed publication branch when repository policy blocks automatic pull requests", () => {
+  it("keeps direct App publications from recursively launching Modal", () => {
     const workspace = path.resolve("../..");
-    for (const file of ["eval-history-publication.yml"]) {
-      const workflow = parse(fs.readFileSync(path.join(workspace, ".github/workflows", file), "utf8")) as {
-        jobs: Record<
-          string,
-          {
-            steps: Array<{
-              name?: string;
-              env?: Record<string, string>;
-              run?: string;
-            }>;
-          }
-        >;
-      };
-      const publicationStep = Object.values(workflow.jobs)
-        .flatMap((job) => job.steps)
-        .find((step) => step.name === "Open the publication pull request when needed");
-      expect(publicationStep).toBeDefined();
-      expect(publicationStep?.env?.GH_TOKEN).toBe("${{ secrets.EVAL_HISTORY_PR_TOKEN || github.token }}");
-      expect(publicationStep?.run).toContain("gh pr create");
-      expect(publicationStep?.run).toContain("Another publisher opened the eval-history pull request");
-      expect(publicationStep?.run).toContain("::warning title=Eval-history PR not opened::");
-      expect(publicationStep?.run).toContain("GITHUB_STEP_SUMMARY");
-      expect(publicationStep?.run).toContain("compare/main...automation%2Feval-history?expand=1");
-      expect(publicationStep?.run).toContain("publication branch remains pushed");
-      expect(publicationStep?.run).not.toContain("Failed to create or find the eval-history publication pull request");
-    }
+    const producer = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
+      on: { push: { branches: string[]; "paths-ignore": string[] } };
+    };
+    expect(producer.on.push.branches).toEqual(["**"]);
+    expect(producer.on.push["paths-ignore"]).toEqual(["benchmarks/history.json", "docs/assets/eval-history/**"]);
+
+    const publisher = fs.readFileSync(path.join(workspace, "scripts/ci/publish-eval-history-cas.mjs"), "utf8");
+    expect(publisher).toContain('const TARGET_BRANCH = "main"');
+    expect(publisher).toContain('const COMMIT_MESSAGE = "Update published eval history"');
+    expect(publisher).not.toContain("[ci skip]");
   });
 
   it("preserves partial launches and defers matrix failure until after artifact upload", () => {

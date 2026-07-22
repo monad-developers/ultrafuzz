@@ -207,21 +207,22 @@ the standard Modal CPU and memory allocation, give each target row a
 credentials, revision drift, unavailable ground truth, failed model work,
 scoring errors, or an incomplete configured matrix fail before publication.
 
-Every publisher updates one fixed pull request from the latest remote
-publication tip and uses a normal fast-forward push; a lost race is retried
-with the new tip. The exact candidate checkout supplies the benchmark policy,
-and observations and regenerated charts stay keyed to that candidate commit.
-This compare-and-swap loop retains every complete generation without relying
-on a GitHub concurrency queue, which can discard a pending job. The publication
-commit uses `[ci skip]`, preventing a chart-only merge from recursively
-allocating another benchmark matrix.
+Every publisher rebuilds from the latest `main` tip and uses a normal
+fast-forward push authenticated by the repository-scoped eval-history GitHub
+App; a lost race is retried with the new tip. The exact candidate checkout
+supplies the benchmark policy, and observations and regenerated charts stay
+keyed to that candidate commit. This compare-and-swap loop retains every
+complete generation without relying on a GitHub concurrency queue, which can
+discard a pending job. Its commit is restricted to `benchmarks/history.json`
+and the six `docs/assets/eval-history/*.svg` charts.
 
-When organization policy disables pull-request creation by `github.token`, set
-the optional `EVAL_HISTORY_PR_TOKEN` Actions secret to a repository-scoped
-credential that can create pull requests. If it is absent or PR creation is
-still blocked, the pushed `automation/eval-history` branch remains intact and
-the successful job emits a warning plus a manual compare/PR link in its
-summary; no complete scored generation is discarded.
+Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
+variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions
+secret. The App must be installed only on this repository with
+`Contents: read and write` and added to the default-branch ruleset bypass list
+with `Always allow`. Publication-only paths are excluded from the Modal push
+trigger, preventing a direct chart commit from recursively allocating another
+benchmark matrix.
 
 The eval summary and comparison record Ultrafuzz runner tokens and runner cost
 with explicit completeness. Judge usage in Braintrust and sandbox spend in
