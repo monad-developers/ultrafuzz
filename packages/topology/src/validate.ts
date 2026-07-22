@@ -172,12 +172,19 @@ function normalizeGroupDefaults(groupId: string, input: unknown): TopologyGroupD
       group: groupId
     });
   }
-  assertOnlyKeys(input, ["loops", "timeout_seconds", "model_profiles"], `topology group \`${groupId}\` defaults`);
+  assertOnlyKeys(
+    input,
+    ["loops", "timeout_seconds", "max_attempts", "model_profiles"],
+    `topology group \`${groupId}\` defaults`
+  );
   return {
     ...(input.loops === undefined ? {} : { loops: normalizePositiveInteger(input.loops, "loops", groupId) }),
     ...(input.timeout_seconds === undefined
       ? {}
       : { timeout_seconds: normalizePositiveInteger(input.timeout_seconds, "timeout_seconds", groupId) }),
+    ...(input.max_attempts === undefined
+      ? {}
+      : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", groupId) }),
     model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", groupId, false)
   };
 }
@@ -206,6 +213,7 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
       "loops",
       "loop_mode",
       "timeout_seconds",
+      "max_attempts",
       "outputs",
       "model_profiles"
     ],
@@ -230,6 +238,9 @@ function normalizeNode(input: unknown, index: number): NormalizedTopologyNode {
     ...(input.timeout_seconds === undefined
       ? {}
       : { timeout_seconds: normalizePositiveInteger(input.timeout_seconds, "timeout_seconds", input.id) }),
+    ...(input.max_attempts === undefined
+      ? {}
+      : { max_attempts: normalizePositiveInteger(input.max_attempts, "max_attempts", input.id) }),
     outputs: normalizeOutputs(input.outputs, input.id),
     model_profiles: normalizeStringArray(input.model_profiles, "model_profiles", input.id, false)
   };
@@ -338,6 +349,11 @@ function validateNodeShape(
       nodeId: node.id
     });
   }
+  if (node.max_attempts !== undefined && node.max_attempts <= 0) {
+    throw topologyError("INVALID_TOPOLOGY_SHAPE", `Node \`${node.id}\` max_attempts must be greater than zero`, {
+      nodeId: node.id
+    });
+  }
   if (node.group !== undefined) {
     validateGroupId(node.group);
     if (Object.keys(groups).length > 0 && !groups[node.group]) {
@@ -374,6 +390,11 @@ function validateGroups(
     }
     if (group.defaults?.timeout_seconds !== undefined && group.defaults.timeout_seconds <= 0) {
       throw topologyError("INVALID_TIMEOUT", `Group \`${groupId}\` timeout_seconds must be greater than zero`, {
+        group: groupId
+      });
+    }
+    if (group.defaults?.max_attempts !== undefined && group.defaults.max_attempts <= 0) {
+      throw topologyError("INVALID_TOPOLOGY_SHAPE", `Group \`${groupId}\` max_attempts must be greater than zero`, {
         group: groupId
       });
     }
@@ -430,7 +451,8 @@ function validateMetaNode(node: NormalizedTopologyNode): void {
     ["prompt", node.prompt],
     ["reference", node.reference],
     ["group", node.group],
-    ["timeout_seconds", node.timeout_seconds]
+    ["timeout_seconds", node.timeout_seconds],
+    ["max_attempts", node.max_attempts]
   ].filter(([, value]) => value !== undefined);
   if (forbidden.length > 0 || node.outputs.length > 0) {
     throw topologyError("INVALID_META_NODE", "Meta nodes must not define execution fields", { nodeId: node.id });
@@ -460,6 +482,9 @@ function validateReferenceNode(node: NormalizedTopologyNode): void {
   }
   if (node.model_profiles.length > 0) {
     throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must not set model_profiles", { nodeId: node.id });
+  }
+  if (node.max_attempts !== undefined) {
+    throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must not set max_attempts", { nodeId: node.id });
   }
   if (node.loops !== 1 || node.loop_mode !== "parallel") {
     throw topologyError("INVALID_REFERENCE_NODE", "Reference nodes must use loops: 1 and loop_mode: parallel", {

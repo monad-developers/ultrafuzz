@@ -79,11 +79,14 @@ Group defaults may include:
 | ----------------- | --------------------------------------------------- |
 | `loops`           | Default loop count for nodes in the group.          |
 | `timeout_seconds` | Default timeout for nodes in the group.             |
+| `max_attempts`    | Maximum attempts for an agent task.                 |
 | `model_profiles`  | Explicit model profile list for nodes in the group. |
 
 Node fields override group defaults. A node or group `model_profiles` list is
 the model fan-out surface. When neither a node nor its group selects model
 profiles, the node uses the configured default model profile only.
+`max_attempts` defaults to `1`; values greater than one retry the same agent task
+and its artifact-contract validation with Smithers' bounded retry policy.
 
 ## Node Fields
 
@@ -104,6 +107,7 @@ Agentic nodes support:
 | `loops`           | Node loop count. Overrides group and global loop defaults.  |
 | `loop_mode`       | `parallel` or `series`. Defaults to `parallel`.             |
 | `timeout_seconds` | Node timeout override.                                      |
+| `max_attempts`    | Maximum attempts for the agent task.                        |
 | `outputs`         | Required output paths, named contracts, and primary marker. |
 | `model_profiles`  | Explicit model profile fan-out for this node.               |
 

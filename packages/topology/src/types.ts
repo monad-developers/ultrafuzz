@@ -26,6 +26,7 @@ export interface TopologyDefaults {
 export interface TopologyGroupDefaults {
   loops?: number;
   timeout_seconds?: number;
+  max_attempts?: number;
   model_profiles?: string[];
 }
 
@@ -46,6 +47,7 @@ export interface TopologyNode {
   loops?: number;
   loop_mode?: LoopMode;
   timeout_seconds?: number;
+  max_attempts?: number;
   outputs?: TopologyArtifactOutput[];
   model_profiles?: string[];
 }
@@ -75,6 +77,7 @@ export interface NormalizedTopologyNode {
   explicit_loops: boolean;
   loop_mode: LoopMode;
   timeout_seconds?: number;
+  max_attempts?: number;
   outputs: NormalizedArtifactOutput[];
   model_profiles: string[];
 }

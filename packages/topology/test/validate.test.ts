@@ -56,6 +56,10 @@ describe("validateTopology", () => {
     zeroLoops.nodes[1] = { ...zeroLoops.nodes[1]!, loops: 0 };
     expect(() => validateTopology(zeroLoops)).toThrow(expect.objectContaining({ code: "INVALID_LOOP_COUNT" }));
 
+    const zeroAttempts = validTopology();
+    zeroAttempts.nodes[1] = { ...zeroAttempts.nodes[1]!, max_attempts: 0 };
+    expect(() => validateTopology(zeroAttempts)).toThrow(expect.objectContaining({ code: "INVALID_TOPOLOGY_SHAPE" }));
+
     const unsafeArtifact = validTopology();
     unsafeArtifact.nodes[1] = {
       ...unsafeArtifact.nodes[1]!,

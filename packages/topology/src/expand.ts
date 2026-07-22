@@ -80,7 +80,7 @@ function expandNode(
     dependsOn,
     artifactDir: deterministicArtifactDir(concreteId),
     ...timeoutSecondsFor(node, topology),
-    retryPolicy: { maxAttempts: 1 },
+    retryPolicy: { maxAttempts: maxAttemptsFor(node, topology) },
     loop: {
       index: loopIndex,
       count: loopCount,
@@ -175,6 +175,13 @@ function timeoutSecondsFor(
   const timeoutSeconds =
     node.timeout_seconds ?? (node.group ? topology.groups[node.group]?.defaults?.timeout_seconds : undefined);
   return timeoutSeconds === undefined ? {} : { timeoutSeconds };
+}
+
+function maxAttemptsFor(node: NormalizedTopologyNode, topology: NormalizedProjectTopology): number {
+  if (node.kind !== "agentic") {
+    return 1;
+  }
+  return node.max_attempts ?? (node.group ? topology.groups[node.group]?.defaults?.max_attempts : undefined) ?? 1;
 }
 
 function modelFanoutFor(

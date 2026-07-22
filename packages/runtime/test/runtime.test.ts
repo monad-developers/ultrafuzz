@@ -1040,7 +1040,7 @@ test("compileSmithersWorkflow escapes the evidence workflow import", async () =>
   assert.ok(evidenceSource.includes(`from ${JSON.stringify(importPath)};`), evidenceSource);
 });
 
-test("compileSmithersWorkflow applies group timeout defaults", async () => {
+test("compileSmithersWorkflow applies group execution defaults", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   fs.writeFileSync(
@@ -1053,6 +1053,7 @@ groups:
     label: Setup
     defaults:
       timeout_seconds: 1200
+      max_attempts: 2
 nodes:
   - id: __start__
     kind: meta
@@ -1093,12 +1094,19 @@ nodes:
       attemptId: string;
       timeoutMs: number;
       heartbeatTimeoutMs: number;
-      metadata?: { timeout?: { seconds?: number; heartbeatTimeoutMs?: number } };
+      retries: number;
+      metadata?: {
+        retryPolicy?: { maxAttempts?: number; smithersRetries?: number };
+        timeout?: { seconds?: number; heartbeatTimeoutMs?: number };
+      };
     }>;
   };
   const task = smithersTasks.tasks.find((entry) => entry.attemptId === "project-discovery");
   assert.equal(task?.timeoutMs, 1_200_000);
   assert.equal(task?.heartbeatTimeoutMs, 1_200_000);
+  assert.equal(task?.retries, 1);
+  assert.equal(task?.metadata?.retryPolicy?.maxAttempts, 2);
+  assert.equal(task?.metadata?.retryPolicy?.smithersRetries, 1);
   assert.equal(task?.metadata?.timeout?.seconds, 1200);
   assert.equal(task?.metadata?.timeout?.heartbeatTimeoutMs, 1_200_000);
   const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
