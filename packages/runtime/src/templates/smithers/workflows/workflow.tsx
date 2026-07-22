@@ -4,7 +4,7 @@
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -112,6 +112,10 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       : { supportsNativeStructuredOutput: agent.supportsNativeStructuredOutput }),
     ...(agent.preflight === undefined ? {} : { preflight: (args) => agent.preflight!(args) }),
     generate: async (args) => {
+      // Smithers retries the same task in the same worktree. Start every model
+      // attempt from empty, exact task-owned roots so a retry cannot combine
+      // artifacts left by the failed attempt with newly generated outputs.
+      resetTaskArtifactsForAttempt(task);
       const result = await agent.generate(args);
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
@@ -142,6 +146,58 @@ function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
 
 function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
   return path.join(task.workspacePath, "artifacts", task.attemptId);
+}
+
+function resetTaskArtifactsForAttempt(task: (typeof taskSpecs)[number]): void {
+  resetTaskArtifactRoot(task.metadata.artifacts.dir, task.attemptId, "canonical");
+
+  const workspaceRoot = realpathSync(task.workspacePath);
+  const artifactsParentCandidate = path.resolve(workspaceRoot, "artifacts");
+  if (!isStrictlyInsideDirectory(workspaceRoot, artifactsParentCandidate)) {
+    throw new Error(`artifact-contract failure: unsafe task artifact parent ${task.attemptId}`);
+  }
+  mkdirSync(artifactsParentCandidate, { recursive: true });
+  const artifactsParent = realpathSync(artifactsParentCandidate);
+  if (!isStrictlyInsideDirectory(workspaceRoot, artifactsParent)) {
+    throw new Error(`artifact-contract failure: unsafe task artifact parent ${task.attemptId}`);
+  }
+  resetTaskArtifactRoot(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
+
+  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")) {
+    const foundryParentCandidate = path.resolve(workspaceRoot, "test", "foundry");
+    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
+      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
+    }
+    mkdirSync(foundryParentCandidate, { recursive: true });
+    const foundryParent = realpathSync(foundryParentCandidate);
+    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
+      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
+    }
+    resetTaskArtifactRoot(
+      path.join(foundryParent, task.metadata.node.logicalNodeId),
+      task.metadata.node.logicalNodeId,
+      "generated-test"
+    );
+  }
+  prepareArtifactMirror(task);
+}
+
+function resetTaskArtifactRoot(
+  rootPath: string,
+  attemptId: string,
+  label: "canonical" | "mirror" | "generated-test"
+): void {
+  const candidate = path.resolve(rootPath);
+  if (path.basename(candidate) !== attemptId) {
+    throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
+  }
+  const parent = realpathSync(path.dirname(candidate));
+  const anchoredRoot = path.join(parent, attemptId);
+  rmSync(anchoredRoot, { recursive: true, force: true });
+  mkdirSync(anchoredRoot, { recursive: false, mode: 0o700 });
+  if (realpathSync(anchoredRoot) !== anchoredRoot) {
+    throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
+  }
 }
 
 function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDir: string): string[] {
