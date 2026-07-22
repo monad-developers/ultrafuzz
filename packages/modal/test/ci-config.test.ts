@@ -687,6 +687,10 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(validation?.run).toContain("prepare-modal-benchmark-cleanup.mjs");
     expect(validation?.run).toContain('git -C "$CANDIDATE_SOURCE" rev-parse HEAD');
+    const cleanupInvocation = validation?.run?.match(
+      /node scripts\/ci\/prepare-modal-benchmark-cleanup\.mjs[\s\S]*$/u
+    )?.[0];
+    expect(cleanupInvocation?.trimEnd().endsWith('"$CANDIDATE_SOURCE"')).toBe(true);
     const termination = cleanup.steps.find((step) => step.name === "Terminate every exact incomplete-run sandbox");
     expect(termination?.run).toContain("terminate-modal-benchmark.sh");
     expect(termination?.run).toContain("false");

@@ -136,6 +136,22 @@ describe("expandTopology", () => {
     expect(expandTopology(topology).nodes.find((node) => node.id === "strategy-0")?.timeoutSeconds).toBe(60);
   });
 
+  it("uses group retry defaults unless the node overrides them", () => {
+    const topology = validTopology({
+      groups: {
+        ...validTopology().groups,
+        setup: { label: "Setup", defaults: { max_attempts: 2 } },
+        strategies: { label: "Strategies", defaults: { max_attempts: 2 } }
+      }
+    });
+
+    expect(expandTopology(topology).nodes.find((node) => node.id === "setup")?.retryPolicy.maxAttempts).toBe(2);
+    expect(expandTopology(topology).nodes.find((node) => node.id === "strategy-0")?.retryPolicy.maxAttempts).toBe(2);
+
+    topology.nodes[2] = { ...topology.nodes[2]!, max_attempts: 3 };
+    expect(expandTopology(topology).nodes.find((node) => node.id === "strategy-0")?.retryPolicy.maxAttempts).toBe(3);
+  });
+
   it("expands reference nodes with pinned revision metadata", () => {
     const topology = validTopology({
       groups: { ...validTopology().groups, references: { label: "References" } },

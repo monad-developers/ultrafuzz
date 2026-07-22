@@ -174,7 +174,8 @@ jobs:
             "$BENCHMARK_CANDIDATE" \
             "$EXPECTED_REPOSITORY" \
             "$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT" \
-            "$BENCHMARK_MODE"
+            "$BENCHMARK_MODE" \
+            "$CANDIDATE_SOURCE"
 
       - name: Terminate every exact incomplete-run sandbox
         if: always() && steps.validate_incomplete_plan.outcome == 'success'

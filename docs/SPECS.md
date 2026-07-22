@@ -167,7 +167,8 @@ Top-level fields:
 - `groups` MAY define labels, colors, and defaults.
 - `nodes` MUST be an ordered list of logical nodes.
 
-Group defaults MAY include `loops`, `timeout_seconds`, and `model_profiles`.
+Group defaults MAY include `loops`, `timeout_seconds`, `max_attempts`, and
+`model_profiles`.
 Node fields override group defaults. The default scaffold SHOULD use three
 loops for normal strategy nodes through the `strategies` group and explicit
 `loops: 1` for exception flows such as stateful invariant and differential

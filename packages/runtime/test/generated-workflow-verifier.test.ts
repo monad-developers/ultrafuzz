@@ -51,6 +51,41 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const rootsStart = source.indexOf("function resetTaskArtifactsForRetry");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+
+  assert.ok(agentStart >= 0, source);
+  assert.ok(rootsStart > agentStart, source);
+  assert.ok(preparationStart > rootsStart, source);
+
+  const agent = source.slice(agentStart, rootsStart);
+  assert.match(agent, /if \(\(args\?\.taskContext\?\.attempt \?\? 1\) > 1\)/u);
+  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(args)"), agent);
+
+  const reset = source.slice(rootsStart, preparationStart);
+  assert.match(reset, /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical"\)/u);
+  assert.match(
+    reset,
+    /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
+  );
+  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
+  assert.match(reset, /path\.resolve\(workspaceRoot, "test", "foundry"\)/u);
+  assert.match(
+    reset,
+    /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
+  );
+  assert.match(reset, /path\.basename\(candidate\) !== attemptId/u);
+  assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
+  assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
+  assert.match(reset, /anchoredRoot !== path\.join\(parent, attemptId\)/u);
+  assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
+  assert.match(reset, /rmSync\(path\.join\(anchoredRoot, entry\), \{ recursive: true, force: true \}\)/u);
+  assert.match(reset, /prepareArtifactMirror\(task\)/u);
+});
+
 test("generated Smithers agent preserves its final response as missing Markdown", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
