@@ -16,26 +16,6 @@ local dashboard plus final report for review.
 > review generated artifacts before copying anything into your project. See
 > [Security](docs/security.md) for details.
 
-**Quality**
-
-![Precision over time](docs/assets/eval-history/precision.svg)
-
-![F1 over time](docs/assets/eval-history/f1.svg)
-
-**Coverage**
-
-![Recall over time](docs/assets/eval-history/recall.svg)
-
-![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg)
-
-**Efficiency**
-
-![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg)
-
-**Spend**
-
-![Cost over time](docs/assets/eval-history/cost.svg)
-
 ## Operator Flow
 
 1. `ultrafuzz init --project <project>`
@@ -89,3 +69,29 @@ pnpm -w docs:check
 
 Some package-local scripts build their direct workspace dependencies first
 because workspace package exports point at `dist/**` entrypoints.
+
+## Evals
+
+Longitudinal results from the public benchmark suite — one line per target
+across candidate commits. See [Eval Suites](docs/reference/evals.md) and the
+[EVMBench integration](benchmarks/evmbench/README.md) for methodology.
+
+**Quality**
+
+![Precision over time](docs/assets/eval-history/precision.svg)
+
+![F1 over time](docs/assets/eval-history/f1.svg)
+
+**Coverage**
+
+![Recall over time](docs/assets/eval-history/recall.svg)
+
+![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg)
+
+**Efficiency**
+
+![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg)
+
+**Spend**
+
+![Cost over time](docs/assets/eval-history/cost.svg)
