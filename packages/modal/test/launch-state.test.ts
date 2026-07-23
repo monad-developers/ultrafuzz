@@ -219,10 +219,61 @@ describe("Modal launch ownership", () => {
         phase: "launched"
       })
     ]);
+    expect(state.recovery_lifecycle).toEqual([
+      expect.objectContaining({
+        attempt_id: "attempt-one",
+        start_reason: "initial",
+        terminal_reason: "unknown",
+        controller_requested: "unknown"
+      }),
+      expect.objectContaining({
+        attempt_id: "attempt-two",
+        parent_attempt_id: "attempt-one",
+        start_reason: "unknown",
+        terminal_reason: "active"
+      })
+    ]);
   });
 });
 
 describe("Modal lineage", () => {
+  it("surfaces missing v2 recovery fields as unknown during migration", () => {
+    const state = launchState();
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      attemptId: "historical-attempt",
+      now: "2026-01-01T00:00:00.000Z"
+    });
+    const {
+      generation_start_reason: _generationStartReason,
+      recovery_lifecycle: _recoveryLifecycle,
+      ...previous
+    } = state;
+    const migrated = parseCompatibleModalLaunchState({
+      ...previous,
+      schema_version: "ultrafuzz.modal.launch-state.v2"
+    });
+
+    expect(migrated).toMatchObject({
+      schema_version: "ultrafuzz.modal.launch-state.v3",
+      generation_start_reason: "unknown",
+      recovery_lifecycle: [
+        {
+          start_reason: "unknown",
+          terminal_reason: "unknown",
+          model_work_started: "unknown",
+          progress_made: "unknown",
+          controller_requested: "unknown"
+        }
+      ]
+    });
+  });
+
   it("adapts legacy launch state files for inspection and guarded resume", async () => {
     const legacy = {
       schema_version: "ultrafuzz.modal.launch-state.v1",
@@ -255,7 +306,7 @@ describe("Modal lineage", () => {
     });
 
     expect(migrated).toMatchObject({
-      schema_version: "ultrafuzz.modal.launch-state.v2",
+      schema_version: "ultrafuzz.modal.launch-state.v3",
       logical_run_id: "logical-run",
       generation: 1,
       generation_mode: "resume",
@@ -275,7 +326,15 @@ describe("Modal lineage", () => {
           launched_at: "2026-01-01T00:00:00.000Z"
         })
       ],
-      attempt_history: []
+      attempt_history: [],
+      generation_start_reason: "unknown",
+      recovery_lifecycle: [
+        expect.objectContaining({
+          start_reason: "unknown",
+          terminal_reason: "unknown",
+          progress_made: "unknown"
+        })
+      ]
     });
     expect(migrated!.launches[0]!.attempt_id).toBe(
       parseCompatibleModalLaunchState(legacy, {
@@ -417,6 +476,9 @@ describe("Modal runner status", () => {
       retryable: true,
       generation: 1,
       attempt: 1,
+      eval_run_id: "generic-evaluation",
+      run_status: "running",
+      node_counts: { running: 1 },
       error_code: "worker-live"
     });
   });

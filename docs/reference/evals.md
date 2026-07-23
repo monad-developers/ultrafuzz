@@ -234,6 +234,11 @@ expected evidence that was unavailable. Collection validates every payload,
 reference, checksum, and the privacy allowlist before replacing the output
 directory. The resulting bundle contains no raw agent output, findings,
 configuration, absolute execution paths, or deployment identifiers.
+When Modal recovery lifecycle evidence is supplied, the bundle includes
+`data/recovery-summary.json` with exactly reconciled generation, progress,
+model-work, resumption, rotation, and genuine-failure counts. Historical
+exports without that evidence record a typed source omission rather than
+guessing from launcher attempts.
 
 Scored row summaries take lifecycle timestamps and terminal status from the
 durable run state rather than the detached launcher process. Their typed

@@ -260,7 +260,18 @@ Runner state (`live`, `exited`, or `missing`) describes the Modal sandbox. The
 runner combines that state with the exact-attempt worker snapshot to select a
 machine-readable action such as `succeeded`, `resume-required`,
 `transient-operational-failure`, `permanent-operational-failure`, or
-`incompatible-checkpoint`.
+`incompatible-checkpoint`. Each status row also reports a recovery summary
+derived from the launch state's append-only lifecycle records. The summary
+separates genuine worker failures from controller rotations and reports total,
+progress-making, no-progress, model-work, and resumed generations.
+
+Lifecycle records use typed start reasons and typed terminal reasons. Image
+rollouts, stale-probe rotations, and operator requests remain controller
+actions even when the terminated sandbox has a nonzero exit code; an exit code
+is retained only as supporting evidence. A terminal transition is write-once
+and idempotent. Older launch states are upgraded with unavailable lifecycle
+facts set to `unknown` rather than inferred from an attempt number or exit
+code.
 
 Persisted worker snapshots use this separate stable exit taxonomy:
 
@@ -284,7 +295,12 @@ pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
 artifacts. By default, `collect` copies `status.json`, `result.json`, the generic
 worker lifecycle log, and an allowlisted `public-eval-diagnostics.json` when a
-public worker reached the post-eval gate. The diagnostic contains only row
+public worker reached the post-eval gate. It also writes
+`recovery-lifecycle.json` and a privacy-safe analysis bundle whose recovery
+totals are derived from those exact records. The lifecycle projection contains
+only typed reasons, timestamps, aggregate node counts, fingerprints, and
+hashed ledger/evaluation linkage; it excludes sandbox IDs, paths, logs,
+prompts, findings, and provider output. The diagnostic contains only row
 identities, terminal states, report-presence flags, diagnostic codes, exact
 launch lineage, and a bounded failed-node projection (node ID, status, timeout
 flag, and allowlisted failure category or code). It never contains messages,
