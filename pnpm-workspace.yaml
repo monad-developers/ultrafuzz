@@ -14,6 +14,7 @@ packages:
 allowBuilds:
   "@parcel/watcher": false
   "@smithers-orchestrator/jj-linux-arm64": false
+  "@smithers-orchestrator/jj-linux-x64": false
   cbor-extract: true
   esbuild: true
   koffi: false
