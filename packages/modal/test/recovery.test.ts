@@ -261,6 +261,33 @@ describe("Modal durable recovery policy", () => {
     });
   });
 
+  it("clears a stale pending rollout when the requested image matches the owner", () => {
+    let row = reserveWorker(rowState(), 1, "2026-01-01T00:00:00.000Z");
+    row = markModalRecoveryWorkerLaunched(row, 1, "sandbox-one", "2026-01-01T00:00:01.000Z");
+    row = { ...row, pending_image: IMAGE_TWO };
+
+    const unavailable = reconcileModalRecoveryRow({
+      row,
+      now: "2026-01-01T00:01:00.000Z",
+      requestedImage: IMAGE_ONE,
+      owner: recoveryOwner(1, true, "2026-01-01T00:00:01.000Z"),
+      policy: POLICY
+    });
+    expect(unavailable).toMatchObject({ action: "keep", reason: "canonical-unavailable" });
+    expect(unavailable.row.pending_image).toBeUndefined();
+
+    const grace = reconcileModalRecoveryRow({
+      row,
+      now: "2026-01-01T00:00:05.000Z",
+      requestedImage: IMAGE_ONE,
+      owner: recoveryOwner(1, true, "2026-01-01T00:00:01.000Z"),
+      canonical: progress({ last_transition_at: "2025-12-31T23:00:00.000Z" }),
+      policy: POLICY
+    });
+    expect(grace).toMatchObject({ action: "wait", reason: "resume-grace" });
+    expect(grace.row.pending_image).toBeUndefined();
+  });
+
   it("treats a terminal wrapper with recent durable progress as healthy", () => {
     const result = reconcileModalRecoveryRow({
       row: rowState(),

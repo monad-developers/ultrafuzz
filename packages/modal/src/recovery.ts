@@ -280,7 +280,7 @@ export function reconcileModalRecoveryRow(input: {
   const imageChanged = owner !== undefined && owner.image !== input.requestedImage;
   if (owner?.live === true && imageChanged && input.forceRollout === true) {
     row.status = "healthy";
-    row.pending_image = input.requestedImage;
+    updatePendingImage(row, imageChanged, input.requestedImage);
     delete row.next_eligible_at;
     return decision("replace", "forced-rollout", row, "rollout");
   }
@@ -297,12 +297,12 @@ export function reconcileModalRecoveryRow(input: {
   }
   if (owner?.live === true && input.canonical === undefined) {
     row.status = "healthy";
-    if (imageChanged) row.pending_image = input.requestedImage;
+    updatePendingImage(row, imageChanged, input.requestedImage);
     return decision("keep", "canonical-unavailable", row);
   }
   if (owner?.live === true && nowMs - requiredTimestamp(owner.launched_at, "owner launch") < policy.resumeGraceMs) {
     row.status = "grace";
-    if (imageChanged) row.pending_image = input.requestedImage;
+    updatePendingImage(row, imageChanged, input.requestedImage);
     const retryAfterMs = policy.resumeGraceMs - (nowMs - Date.parse(owner.launched_at));
     return decision("wait", "resume-grace", row, undefined, retryAfterMs);
   }
@@ -324,7 +324,7 @@ export function reconcileModalRecoveryRow(input: {
 
   if (owner?.live === true) {
     row.status = "backoff";
-    row.pending_image = imageChanged ? input.requestedImage : row.pending_image;
+    updatePendingImage(row, imageChanged, input.requestedImage);
     row.next_eligible_at = nextEligibleAt(row, input.now, policy);
     return decision("replace", "owner-stalled", row, "recovery");
   }
@@ -335,7 +335,7 @@ export function reconcileModalRecoveryRow(input: {
     return decision("wait", "backoff", row, undefined, retryAtMs - nowMs);
   }
   row.status = "idle";
-  row.pending_image = imageChanged ? input.requestedImage : row.pending_image;
+  updatePendingImage(row, imageChanged, input.requestedImage);
   delete row.next_eligible_at;
   return decision("launch", "owner-missing", row, imageChanged ? "rollout" : "recovery");
 }
@@ -461,6 +461,11 @@ function accountRecoveryGeneration(row: ModalRecoveryRowState, generation: numbe
   const madeProgress = worker.made_progress || next.successful_nodes > worker.baseline_successful_nodes;
   next.no_progress_generations = madeProgress ? 0 : next.no_progress_generations + 1;
   return next;
+}
+
+function updatePendingImage(row: ModalRecoveryRowState, imageChanged: boolean, requestedImage: string): void {
+  if (imageChanged) row.pending_image = requestedImage;
+  else delete row.pending_image;
 }
 
 function stopNonLiveRecoveryGeneration(
