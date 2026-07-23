@@ -42,7 +42,7 @@ async function rowArchive(totalTokens: number): Promise<Buffer> {
   return gzipSync(await buffer(pack));
 }
 
-async function writeSyntheticBundle(target: string): Promise<void> {
+async function writeSyntheticBundle(target: string, modelComparison = false): Promise<void> {
   const root = "synthetic-bundle/";
   const outputPath = "adjudication/root-cause-final/output";
   const findings = [
@@ -57,6 +57,12 @@ async function writeSyntheticBundle(target: string): Promise<void> {
     mapping("n1", 0, "n1:issue-c", "issue-c", "cluster-alpha", "true-positive", "candidate-alpha"),
     mapping("n1", 1, "n1:issue-d", "issue-d", "cluster-review", "needs-human-review", null)
   ];
+  if (modelComparison) {
+    mappings[3] = {
+      ...mapping("n1", 1, "n1:issue-d", "issue-d", "cluster-alpha", "true-positive", "candidate-alpha"),
+      duplicateOfFindingInstanceId: "n1:issue-c"
+    };
+  }
   const zip = new AdmZip();
   addJson(zip, `${root}handoff/current-state.json`, {
     schemaVersion: "ultrafuzz-adjudication-handoff/test",
@@ -65,6 +71,14 @@ async function writeSyntheticBundle(target: string): Promise<void> {
   addJson(zip, `${root}${outputPath}/finding-manifest.json`, {
     rows: ["d1", "n1"],
     rowCounts: { d1: 2, n1: 2 },
+    ...(modelComparison
+      ? {
+          rowMetadata: {
+            d1: { label: "Model Alpha", condition: "Model Alpha", order: 0 },
+            n1: { label: "Model Beta", condition: "Model Beta", order: 1 }
+          }
+        }
+      : {}),
     candidateCatalog: [
       { candidateId: "candidate-alpha", heading: "[H-01] - Synthetic cause alpha", source: "canonical-ground-truth" },
       { candidateId: "candidate-beta", heading: "[M-01] - Synthetic cause beta", source: "canonical-ground-truth" }
@@ -79,8 +93,14 @@ async function writeSyntheticBundle(target: string): Promise<void> {
       { rootCauseClusterId: "cluster-review", groundTruthTpCredits: 0 }
     ]
   });
-  zip.addFile(`${root}rows/default/d1/row-artifacts.tar.gz`, await rowArchive(1_000_000));
-  zip.addFile(`${root}rows/no-fuzz/n1/row-artifacts.tar.gz`, await rowArchive(2_000_000));
+  zip.addFile(
+    `${root}rows/${modelComparison ? "model-alpha" : "default"}/d1/row-artifacts.tar.gz`,
+    await rowArchive(1_000_000)
+  );
+  zip.addFile(
+    `${root}rows/${modelComparison ? "model-beta" : "no-fuzz"}/n1/row-artifacts.tar.gz`,
+    await rowArchive(2_000_000)
+  );
   zip.writeZip(target);
 }
 
@@ -267,4 +287,41 @@ test("eval analyze refuses private input or output inside the project repository
   assert.equal(body.diagnostics[0]?.code, "BENCHMARK_ANALYSIS_FAILED");
   assert.match(body.diagnostics[0]?.message ?? "", /must be outside the project repository/u);
   assert.equal(fs.existsSync(output), false);
+});
+
+test("eval analyze all generates cross-row comparison outputs for independently configured models", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-model-analysis-test-"));
+  const project = path.join(root, "project");
+  const privateData = path.join(root, "private-data");
+  const input = path.join(privateData, "synthetic-model-handoff.zip");
+  const output = path.join(privateData, "reports");
+  fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(privateData, { recursive: true });
+  await writeSyntheticBundle(input, true);
+
+  const capture = await cli(root, [
+    "eval",
+    "analyze",
+    "all",
+    "--input",
+    input,
+    "--output",
+    output,
+    "--project",
+    project,
+    "--json"
+  ]);
+  assert.equal(capture.code, 0, capture.stderr);
+  for (const file of ["model_comparison.svg", "model_comparison.png", "row_comparison.csv", "row_results_table.md"]) {
+    assert.equal(fs.existsSync(path.join(output, file)), true, file);
+  }
+  assert.equal(fs.existsSync(path.join(output, "paired_row_comparison.svg")), false);
+  assert.match(fs.readFileSync(path.join(output, "row_results_table.md"), "utf8"), /Cross-row ranking/u);
+  assert.match(fs.readFileSync(path.join(output, "row_comparison.csv"), "utf8"), /Model Alpha/u);
+  const scoreLines = fs.readFileSync(path.join(output, "row_scores.csv"), "utf8").trim().split("\n");
+  const scoreHeader = scoreLines[0]?.split(",") ?? [];
+  const beta = scoreLines.find((line) => line.startsWith("n1,"))?.split(",") ?? [];
+  assert.equal(beta[scoreHeader.indexOf("duplicate_count")], "1");
+  assert.equal(beta[scoreHeader.indexOf("true_positives")], "1");
+  assert.equal(beta[scoreHeader.indexOf("precision")], "0.500000");
 });

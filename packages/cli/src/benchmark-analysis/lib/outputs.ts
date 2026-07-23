@@ -37,7 +37,9 @@ function rowMetricRecord(row: RowMetric): Record<string, unknown> {
     estimated_spend_usd: row.estimatedSpendUsd,
     partial_pricing: row.partialPricing,
     priced_event_count: row.pricedEventCount,
-    unpriced_event_count: row.unpricedEventCount
+    unpriced_event_count: row.unpricedEventCount,
+    duplicate_count: row.duplicateCount,
+    row_label: row.label
   };
 }
 
@@ -75,7 +77,8 @@ export async function writeProvenanceOutputs(result: AnalysisResult, outputDir: 
     ground_truth_label: record.groundTruthLabel,
     ground_truth_title: record.groundTruthTitle,
     ground_truth_tp_credits: record.groundTruthTpCredits,
-    stable_issue_id: record.stableIssueId
+    stable_issue_id: record.stableIssueId,
+    duplicate_of_finding_instance_id: record.duplicateOfFindingInstanceId
   }));
   const entityRows = result.entities.map((entity) => ({
     root_cause_cluster_id: entity.entityId,
@@ -113,6 +116,7 @@ export async function writeScoreOutputs(result: AnalysisResult, outputDir: strin
     true_positives: item.truePositives,
     false_positives: item.falsePositives,
     needs_human_review: item.needsHumanReview,
+    duplicate_count: item.duplicateCount,
     distinct_ground_truth_credits: item.distinctGroundTruthCredits,
     ground_truth_root_cause_ids: item.groundTruthRootCauseIds,
     pooled_precision: item.pooledPrecision,
@@ -150,14 +154,14 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     "",
     "Root-cause credits use the finalized global adjudication. A single detected cluster may receive more than one credit when it covers multiple underlying ground-truth causes.",
     "",
-    "| Row | Mode | Findings | TP | GT credits | FP | Review | Precision | Recall | F1 | Tokens (M) | Reported USD* |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Row | Condition | Findings | TP | GT credits | FP | Review | Dup | Precision | Recall | F1 | Tokens (M) | Reported USD* |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
   ];
   for (const rowId of result.rowOrder) {
     const row = lookup.get(rowId);
     if (!row) continue;
     lines.push(
-      `| ${rowId} | ${row.condition} | ${row.findings ?? "NA"} | ${row.truePositives ?? "NA"} | ${row.distinctGroundTruthCredits ?? "NA"} | ${row.falsePositives ?? "NA"} | ${row.needsHumanReview ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} | ${fixed(row.totalTokensMillions)} | ${spend(row)} |`
+      `| ${markdownCell(row.label)} | ${row.condition} | ${row.findings ?? "NA"} | ${row.truePositives ?? "NA"} | ${row.distinctGroundTruthCredits ?? "NA"} | ${row.falsePositives ?? "NA"} | ${row.needsHumanReview ?? "NA"} | ${row.duplicateCount ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} | ${fixed(row.totalTokensMillions)} | ${spend(row)} |`
     );
   }
 
@@ -167,12 +171,12 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     "",
     "## Condition aggregates",
     "",
-    "| Mode | Rows | Findings | TP | FP | Review | GT credits | Pooled precision | Union recall | Union F1 | Tokens (M) |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Condition | Rows | Findings | TP | FP | Review | Dup | GT credits | Pooled precision | Union recall | Union F1 | Tokens (M) |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
   );
   for (const item of result.conditionAggregate) {
     lines.push(
-      `| ${item.condition} | ${item.validRows} | ${item.findings} | ${item.truePositives} | ${item.falsePositives} | ${item.needsHumanReview} | ${item.distinctGroundTruthCredits} | ${percent(item.pooledPrecision)} | ${percent(item.unionRecall)} | ${percent(item.unionF1)} | ${fixed(item.allRunTokensMillions)} |`
+      `| ${item.condition} | ${item.validRows} | ${item.findings} | ${item.truePositives} | ${item.falsePositives} | ${item.needsHumanReview} | ${item.duplicateCount} | ${item.distinctGroundTruthCredits} | ${percent(item.pooledPrecision)} | ${percent(item.unionRecall)} | ${percent(item.unionF1)} | ${fixed(item.allRunTokensMillions)} |`
     );
   }
 
@@ -180,11 +184,12 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     "",
     "## Row summaries",
     "",
-    "| Mode | Metric | n | Average | Median | Sample SD |",
+    "| Condition | Metric | n | Average | Median | Sample SD |",
     "| --- | --- | ---: | ---: | ---: | ---: |"
   );
   const summaryMetrics: Array<[string, string, boolean]> = [
     ["distinctGroundTruthCredits", "Ground-truth credits / row", false],
+    ["duplicateCount", "Duplicates / row", false],
     ["precision", "Precision", true],
     ["recall", "Recall", true],
     ["f1", "F1", true],
@@ -200,17 +205,32 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     }
   }
 
-  lines.push(
-    "",
-    "## Paired row comparison",
-    "",
-    "| Pair | Rows | GT credits | F1 | Tokens (M) | Shared clusters | Ultrafuzz-only | no-fuzz-only |",
-    "| --- | --- | ---: | ---: | ---: | --- | --- | --- |"
-  );
-  for (const pair of result.pairComparison) {
+  if (result.pairComparison.length > 0) {
     lines.push(
-      `| ${pair.pair} | ${pair.ultrafuzz.rowId} / ${pair.noFuzz.rowId} | ${pair.ultrafuzz.distinctGroundTruthCredits ?? "NA"} / ${pair.noFuzz.distinctGroundTruthCredits ?? "NA"} | ${percent(pair.ultrafuzz.f1)} / ${percent(pair.noFuzz.f1)} | ${fixed(pair.ultrafuzz.totalTokensMillions)} / ${fixed(pair.noFuzz.totalTokensMillions)} | ${pair.sharedRootCauseIds.join(", ") || "—"} | ${pair.ultrafuzzOnlyRootCauseIds.join(", ") || "—"} | ${pair.noFuzzOnlyRootCauseIds.join(", ") || "—"} |`
+      "",
+      "## Paired row comparison",
+      "",
+      "| Pair | Rows | GT credits | F1 | Tokens (M) | Shared clusters | Ultrafuzz-only | no-fuzz-only |",
+      "| --- | --- | ---: | ---: | ---: | --- | --- | --- |"
     );
+    for (const pair of result.pairComparison) {
+      lines.push(
+        `| ${pair.pair} | ${pair.ultrafuzz.rowId} / ${pair.noFuzz.rowId} | ${pair.ultrafuzz.distinctGroundTruthCredits ?? "NA"} / ${pair.noFuzz.distinctGroundTruthCredits ?? "NA"} | ${percent(pair.ultrafuzz.f1)} / ${percent(pair.noFuzz.f1)} | ${fixed(pair.ultrafuzz.totalTokensMillions)} / ${fixed(pair.noFuzz.totalTokensMillions)} | ${pair.sharedRootCauseIds.join(", ") || "—"} | ${pair.ultrafuzzOnlyRootCauseIds.join(", ") || "—"} | ${pair.noFuzzOnlyRootCauseIds.join(", ") || "—"} |`
+      );
+    }
+  } else {
+    lines.push(
+      "",
+      "## Cross-row ranking",
+      "",
+      "| Rank | Row | Condition | GT credits | Precision | Recall | F1 | Tokens (M) |",
+      "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+    );
+    for (const [index, row] of rankedRows(result).entries()) {
+      lines.push(
+        `| ${index + 1} | ${markdownCell(row.label)} | ${row.condition} | ${row.distinctGroundTruthCredits ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} | ${fixed(row.totalTokensMillions)} |`
+      );
+    }
   }
 
   const matched = new Map(
@@ -250,16 +270,46 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
   }));
   const rootsByRow = result.rowMetrics.map((row) => ({
     row_id: row.rowId,
+    row_label: row.label,
     condition: row.condition,
     ground_truth_credit_count: row.distinctGroundTruthCredits,
     ground_truth_root_cause_ids: row.groundTruthRootCauseIds,
     canonical_labels: row.groundTruthLabels
   }));
+  const comparisonPath =
+    result.pairComparison.length > 0
+      ? await writeText(join(outputDir, "paired_row_comparison.csv"), toCsv(pairRows))
+      : await writeText(
+          join(outputDir, "row_comparison.csv"),
+          toCsv(
+            rankedRows(result).map((row, index) => ({
+              rank: index + 1,
+              row_id: row.rowId,
+              row_label: row.label,
+              condition: row.condition,
+              ground_truth_credits: row.distinctGroundTruthCredits,
+              precision: row.precision,
+              recall: row.recall,
+              f1: row.f1,
+              total_tokens_millions: row.totalTokensMillions
+            }))
+          )
+        );
   return [
     await writeText(join(outputDir, "row_results_table.md"), lines.join("\n")),
-    await writeText(join(outputDir, "paired_row_comparison.csv"), toCsv(pairRows)),
+    comparisonPath,
     await writeText(join(outputDir, "ground_truth_credits_by_row.csv"), toCsv(rootsByRow))
   ];
+}
+
+function rankedRows(result: AnalysisResult): RowMetric[] {
+  return [...result.rowMetrics].sort(
+    (left, right) =>
+      (right.f1 ?? -1) - (left.f1 ?? -1) ||
+      (right.distinctGroundTruthCredits ?? -1) - (left.distinctGroundTruthCredits ?? -1) ||
+      left.totalTokensMillions - right.totalTokensMillions ||
+      left.rowId.localeCompare(right.rowId)
+  );
 }
 
 export async function writeMethodOutputs(result: AnalysisResult, outputDir: string): Promise<string[]> {
@@ -271,7 +321,7 @@ export async function writeMethodOutputs(result: AnalysisResult, outputDir: stri
 - Input is discovered from \`handoff/current-state.json\`; no target, repository, or finding constants are compiled into the CLI.
 - Finding classifications and clusters come from the handoff's finalized \`instance-to-cluster.json\`.
 - Sets are benchmark rows and entities are globally adjudicated root-cause clusters.
-- Precision = TP / (TP + FP); unresolved findings are excluded.
+- Precision = TP / (TP + FP + duplicates); unresolved findings are excluded.
 - Recall = distinct ground-truth TP credits / ${result.groundTruthCount}. Multi-root clusters contribute their explicit credit multiplicity.
 - Average, median, and sample standard deviation use finalized rows.
 - Compute cost is total tokens from each nested row \`run.json\`; reported USD values may be partial.
@@ -285,7 +335,12 @@ export async function writeMethodOutputs(result: AnalysisResult, outputDir: stri
     archive_root: result.archiveRoot,
     handoff_schema_version: result.handoffSchemaVersion,
     adjudication_output_path: result.outputPath,
-    rows: result.rows.map((row) => ({ row_id: row.rowId, condition: row.condition, variant: row.variant })),
+    rows: result.rows.map((row) => ({
+      row_id: row.rowId,
+      row_label: row.label,
+      condition: row.condition,
+      variant: row.variant
+    })),
     ground_truth_count: result.groundTruthCount
   };
   return [
