@@ -20,6 +20,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalPreModelRetryDelay,
+  modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
   parseCompatibleModalLaunchState,
   parseModalWorkerStatus,
@@ -538,6 +539,12 @@ describe("Modal runner status", () => {
         modelWorkStarted: true
       })
     ).toBe("succeeded");
+    expect(
+      modalRecoveryFinishedAtForWorkerStatus({ updated_at: "2026-01-01T00:00:00.000Z" }, "2026-01-01T00:10:00.000Z")
+    ).toBe("2026-01-01T00:00:00.000Z");
+    expect(modalRecoveryFinishedAtForWorkerStatus(undefined, "2026-01-01T00:10:00.000Z")).toBe(
+      "2026-01-01T00:10:00.000Z"
+    );
     expect(
       classifyModalRunnerStatus({
         sandbox: "exited",

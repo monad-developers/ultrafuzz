@@ -913,6 +913,13 @@ export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   return "operational-failure";
 }
 
+export function modalRecoveryFinishedAtForWorkerStatus(
+  workerStatus: Pick<ModalWorkerStatus, "updated_at"> | undefined,
+  fallback: string
+): string {
+  return workerStatus?.updated_at ?? fallback;
+}
+
 export function modalPreModelRetryDelay(completedAttempts: number): number {
   const exponent = Math.max(0, completedAttempts - 1);
   return Math.min(MODAL_PRE_MODEL_RETRY_MAX_DELAY_MS, MODAL_PRE_MODEL_RETRY_BASE_DELAY_MS * 2 ** exponent);

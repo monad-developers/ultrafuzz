@@ -80,6 +80,16 @@ describe("Modal recovery lifecycle", () => {
     expect(() =>
       finishModalRecoveryLifecycle(records, { ...terminal, terminalReason: "genuine-worker-failure" })
     ).toThrow(/different terminal transition/u);
+
+    const nullExitStart = startInput(2, "pre-model-retry");
+    startModalRecoveryLifecycle(records, nullExitStart);
+    finishModalRecoveryLifecycle(records, {
+      attemptId: nullExitStart.attemptId,
+      terminalReason: "operational-failure",
+      finishedAt: "2026-07-20T00:02:00.000Z",
+      workerExitCode: null
+    });
+    expect(records[1]?.worker_exit_code).toBeNull();
   });
 
   it("derives measurable progress from durable transitions and node-count deltas", () => {

@@ -292,7 +292,7 @@ export function finishModalRecoveryLifecycle(
     terminal_reason: input.terminalReason,
     terminal_class: modalRecoveryTerminalClass(input.terminalReason),
     ...(input.finishedAt === undefined ? {} : { finished_at: input.finishedAt }),
-    worker_exit_code: input.workerExitCode ?? (input.workerExitCode === null ? null : "unknown"),
+    worker_exit_code: input.workerExitCode === undefined ? "unknown" : input.workerExitCode,
     model_work_started: input.modelWorkStarted ?? "unknown",
     last_durable_transition_at: input.lastDurableTransitionAt ?? "unknown",
     node_counts_after: input.nodeCountsAfter ?? "unknown",

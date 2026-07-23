@@ -56,6 +56,7 @@ import {
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
+  modalRecoveryFinishedAtForWorkerStatus,
   modalRecoveryTerminalReasonForWorkerStatus,
   modalWorkerLineage,
   parseModalLaunchState,
@@ -422,6 +423,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         : {})
     });
     if (runnerStatus.action === "none") {
+      const finishedAt = new Date().toISOString();
       if (
         finishActiveModalRecoveryLifecycle(input.state, record, {
           terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
@@ -429,7 +431,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
             attempt: record.attempt,
             modelWorkStarted: runnerStatus.model_work_started
           }),
-          finishedAt: new Date().toISOString(),
+          finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
           ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
           modelWorkStarted: runnerStatus.model_work_started,
           ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
@@ -441,10 +443,11 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
       throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
     }
+    const finishedAt = new Date().toISOString();
     if (
       finishActiveModalRecoveryLifecycle(input.state, record, {
         terminalReason: "operational-failure",
-        finishedAt: new Date().toISOString(),
+        finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
         ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
         modelWorkStarted: runnerStatus.model_work_started,
         ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
@@ -1177,7 +1180,7 @@ export async function collectModalBenchmark(input: {
             attempt: launch.attempt,
             modelWorkStarted: persistedStatus.model_work_started
           }),
-          finishedAt: new Date().toISOString(),
+          finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
           modelWorkStarted: persistedStatus.model_work_started,
           ...(persistedStatus.updated_at === undefined ? {} : { lastDurableTransitionAt: persistedStatus.updated_at }),
           ...(persistedStatus.node_counts === undefined ? {} : { nodeCountsAfter: persistedStatus.node_counts })
