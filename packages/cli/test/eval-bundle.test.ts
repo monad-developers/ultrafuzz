@@ -40,9 +40,12 @@ test("eval bundle exposes the privacy-safe offline export mode", async () => {
   assert.equal(result.command, "eval bundle");
   assert.equal(result.ok, true);
   assert.equal(result.data.output_dir, path.join(project, "analysis"));
-  assert.deepEqual(
-    result.data.omissions.omissions.map(({ kind }) => kind).sort(),
-    ["accounting-summary", "attempt-history", "evaluation-metrics", "recovery-summary", "terminal-status"]
-  );
+  assert.deepEqual(result.data.omissions.omissions.map(({ kind }) => kind).sort(), [
+    "accounting-summary",
+    "attempt-history",
+    "evaluation-metrics",
+    "recovery-summary",
+    "terminal-status"
+  ]);
   assert.doesNotThrow(() => validateAnalysisBundle(result.data.output_dir));
 });
