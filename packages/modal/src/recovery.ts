@@ -310,6 +310,7 @@ export function reconcileModalRecoveryRow(input: {
   if (owner?.kind === "recovery") {
     const previousNoProgress = row.no_progress_generations;
     row = accountRecoveryGeneration(row, owner.generation);
+    if (!owner.live) row = stopNonLiveRecoveryGeneration(row, owner.generation, input.now);
     if (row.no_progress_generations > previousNoProgress) {
       row.next_eligible_at = nextEligibleAt(row, input.now, policy);
     }
@@ -460,6 +461,17 @@ function accountRecoveryGeneration(row: ModalRecoveryRowState, generation: numbe
   const madeProgress = worker.made_progress || next.successful_nodes > worker.baseline_successful_nodes;
   next.no_progress_generations = madeProgress ? 0 : next.no_progress_generations + 1;
   return next;
+}
+
+function stopNonLiveRecoveryGeneration(
+  row: ModalRecoveryRowState,
+  generation: number | undefined,
+  now: string
+): ModalRecoveryRowState {
+  if (generation === undefined) throw new Error("recovery owner is missing its generation");
+  const worker = requiredWorker(row, generation);
+  if (worker.phase === "stopped") return row;
+  return markModalRecoveryWorkerStopped(row, generation, "exited", now);
 }
 
 function nextEligibleAt(row: ModalRecoveryRowState, now: string, policy: ModalRecoveryPolicy): string {

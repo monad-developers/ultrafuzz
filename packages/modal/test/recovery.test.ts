@@ -210,6 +210,32 @@ describe("Modal durable recovery policy", () => {
     });
   });
 
+  it("records an unobserved exited recovery owner before backing off", () => {
+    let row = reserveWorker(rowState(), 1, "2026-01-01T00:00:00.000Z");
+    row = markModalRecoveryWorkerLaunched(row, 1, "sandbox-one", "2026-01-01T00:00:01.000Z");
+
+    const result = reconcileModalRecoveryRow({
+      row,
+      now: "2026-01-01T00:00:06.000Z",
+      requestedImage: IMAGE_ONE,
+      owner: recoveryOwner(1, false, "2026-01-01T00:00:01.000Z"),
+      canonical: progress({ last_transition_at: "2025-12-31T20:00:00.000Z" }),
+      policy: POLICY
+    });
+
+    expect(result).toMatchObject({
+      action: "wait",
+      reason: "backoff",
+      row: { status: "backoff", no_progress_generations: 1 }
+    });
+    expect(result.row.workers[0]).toMatchObject({
+      phase: "stopped",
+      stop_reason: "exited",
+      stopped_at: "2026-01-01T00:00:06.000Z",
+      no_progress_accounted: true
+    });
+  });
+
   it("defers a healthy image rollout unless it is explicitly forced", () => {
     let row = reserveWorker(rowState(), 1, "2026-01-01T00:00:00.000Z");
     row = markModalRecoveryWorkerLaunched(row, 1, "sandbox-one", "2026-01-01T00:00:01.000Z");
