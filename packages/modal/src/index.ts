@@ -13,4 +13,5 @@ export * from "./resume.js";
 export * from "./smoke-modal.js";
 export * from "./smoke.js";
 export * from "./terminal-disposition.js";
+export * from "./volume.js";
 export * from "./worker-result.js";

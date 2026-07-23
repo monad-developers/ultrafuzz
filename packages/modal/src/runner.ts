@@ -128,6 +128,7 @@ import {
   type ModalRecoveryState,
   type ModalRecoveryWorker
 } from "./recovery.js";
+import { getOrCreateModalV2Volume } from "./volume.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
@@ -401,7 +402,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
 
   const volumeName = record?.volume_name ?? modalVolumeName(input.state.logical_run_id, input.model.slug);
   const remoteRoot = record?.remote_root ?? persistentDataRoot(input.state.logical_run_id, input.model.slug);
-  const volume = await input.modal.volumes.fromName(volumeName, {
+  const volume = await getOrCreateModalV2Volume(input.modal, volumeName, {
     createIfMissing: record === undefined || input.state.generation_mode === "fresh"
   });
 
