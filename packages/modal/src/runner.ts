@@ -56,6 +56,7 @@ import {
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
+  modalRecoveryTerminalReasonForWorkerStatus,
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
@@ -421,17 +422,13 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         : {})
     });
     if (runnerStatus.action === "none") {
-      const terminalReason =
-        runnerStatus.category === "succeeded" || runnerStatus.category === "genuine-task-outcome"
-          ? "succeeded"
-          : record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
-              runnerStatus.category === "permanent-operational-failure" &&
-              runnerStatus.model_work_started === false
-            ? "recovery-budget-exhausted"
-            : "operational-failure";
       if (
         finishActiveModalRecoveryLifecycle(input.state, record, {
-          terminalReason,
+          terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+            category: runnerStatus.category,
+            attempt: record.attempt,
+            modelWorkStarted: runnerStatus.model_work_started
+          }),
           finishedAt: new Date().toISOString(),
           ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
           modelWorkStarted: runnerStatus.model_work_started,
@@ -1175,10 +1172,11 @@ export async function collectModalBenchmark(input: {
       if (
         persistedStatus?.stage === "terminal" &&
         finishActiveModalRecoveryLifecycle(state, launch, {
-          terminalReason:
-            persistedStatus.category === "succeeded" || persistedStatus.category === "genuine-task-outcome"
-              ? "succeeded"
-              : "operational-failure",
+          terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+            category: persistedStatus.category,
+            attempt: launch.attempt,
+            modelWorkStarted: persistedStatus.model_work_started
+          }),
           finishedAt: new Date().toISOString(),
           modelWorkStarted: persistedStatus.model_work_started,
           ...(persistedStatus.updated_at === undefined ? {} : { lastDurableTransitionAt: persistedStatus.updated_at }),

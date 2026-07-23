@@ -24,7 +24,8 @@ import {
   startModalRecoveryLifecycle,
   type FinishModalRecoveryLifecycleInput,
   type ModalRecoveryLifecycleRecord,
-  type ModalRecoveryStartReason
+  type ModalRecoveryStartReason,
+  type ModalRecoveryTerminalReason
 } from "./recovery-lifecycle.js";
 import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
 import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
@@ -893,6 +894,23 @@ export function classifyModalRunnerStatus(input: {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
   return status("transient-operational-failure", "relaunch", false, true, modalPreModelRetryDelay(input.attempt));
+}
+
+export function modalRecoveryTerminalReasonForWorkerStatus(input: {
+  category: ModalRunnerStatusCategory | ModalWorkerStatusCategory;
+  attempt: number;
+  modelWorkStarted: boolean;
+}): Exclude<ModalRecoveryTerminalReason, "active"> {
+  if (input.category === "succeeded") return "succeeded";
+  if (input.category === "genuine-task-outcome") return "genuine-worker-failure";
+  if (
+    input.category === "permanent-operational-failure" &&
+    input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
+    !input.modelWorkStarted
+  ) {
+    return "recovery-budget-exhausted";
+  }
+  return "operational-failure";
 }
 
 export function modalPreModelRetryDelay(completedAttempts: number): number {

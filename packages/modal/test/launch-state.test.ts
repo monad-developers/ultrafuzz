@@ -20,6 +20,7 @@ import {
   markModalSandboxCreated,
   modalLaunchTags,
   modalPreModelRetryDelay,
+  modalRecoveryTerminalReasonForWorkerStatus,
   parseCompatibleModalLaunchState,
   parseModalWorkerStatus,
   readModalLaunchState,
@@ -446,6 +447,14 @@ describe("Modal runner status", () => {
     expect(
       parseModalWorkerStatus(
         workerResult({
+          exit_category: "genuine-evaluation-failure",
+          diagnostic_code: "genuine-evaluation-failure"
+        })
+      )
+    ).toMatchObject({ category: "genuine-task-outcome", retryable: false });
+    expect(
+      parseModalWorkerStatus(
+        workerResult({
           model_work_started: true,
           exit_category: "authentication-failure",
           diagnostic_code: "authentication-failure"
@@ -508,6 +517,27 @@ describe("Modal runner status", () => {
         workerStatus: workerStatus("genuine-task-outcome", true)
       })
     ).toMatchObject({ category: "genuine-task-outcome", action: "none", retryable: false });
+    expect(
+      modalRecoveryTerminalReasonForWorkerStatus({
+        category: "genuine-task-outcome",
+        attempt: 1,
+        modelWorkStarted: true
+      })
+    ).toBe("genuine-worker-failure");
+    expect(
+      modalRecoveryTerminalReasonForWorkerStatus({
+        category: "permanent-operational-failure",
+        attempt: 3,
+        modelWorkStarted: false
+      })
+    ).toBe("recovery-budget-exhausted");
+    expect(
+      modalRecoveryTerminalReasonForWorkerStatus({
+        category: "succeeded",
+        attempt: 1,
+        modelWorkStarted: true
+      })
+    ).toBe("succeeded");
     expect(
       classifyModalRunnerStatus({
         sandbox: "exited",
