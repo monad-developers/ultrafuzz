@@ -39,6 +39,7 @@ import {
   finishReservedModalLaunch,
   hasExactPublicDiagnosticCollectionConfig,
   launchModalBenchmark,
+  modalCanonicalRecoveryProbeCommand,
   modalImageBuildTags,
   modalImageBuildCommand,
   modalSandboxName,
@@ -685,6 +686,41 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
     }
   };
 }
+
+describe("Modal canonical recovery probe", () => {
+  it("reads durable transitions and completions independently of a stale mirrored status", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const dataRoot = path.join(mount, "logical-run", "model-one");
+    const runRoot = path.join(dataRoot, "workspace", "target", ".ultrafuzz", "runs", "durable-run");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(dataRoot, "status.json"),
+      JSON.stringify({ updated_at: "2025-12-31T20:00:00.000Z", stage: "running" })
+    );
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      JSON.stringify({
+        status: "running",
+        created_at: "2026-01-01T00:00:00.000Z",
+        last_transition_at: "2026-01-01T00:09:50.000Z",
+        nodes: {
+          complete: { status: "succeeded", finished_at: "2026-01-01T00:09:45.000Z" },
+          pending: { status: "pending" }
+        }
+      })
+    );
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+
+    expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({
+      status: "running",
+      successful_nodes: 1,
+      total_nodes: 2,
+      last_transition_at: "2026-01-01T00:09:50.000Z",
+      last_success_at: "2026-01-01T00:09:45.000Z"
+    });
+  });
+});
 
 describe("Modal worker identity", () => {
   it("fails closed when non-resumable model work may have crossed the readiness boundary", () => {
