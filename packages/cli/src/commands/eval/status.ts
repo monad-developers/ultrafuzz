@@ -18,7 +18,7 @@ export default class EvalStatus extends Command {
   static override args = { evalRunId: Args.string({ required: true, description: "Eval run ID" }) };
   static override flags = {
     ...globalFlags,
-    watch: Flags.boolean({ summary: "Refresh until every row is terminal" }),
+    watch: Flags.boolean({ summary: "Refresh active rows until they finish or become unavailable" }),
     interval: Flags.integer({
       summary: "Watch refresh interval in seconds",
       min: 1,
@@ -41,7 +41,7 @@ export default class EvalStatus extends Command {
         } else {
           emitCommandResult(this, "eval status", result, flags.json === true);
         }
-        refresh = flags.watch === true && !snapshot.rows.every((row) => row.terminal);
+        refresh = flags.watch === true && shouldRefresh(snapshot);
         if (refresh) {
           await wait(flags.interval * 1_000);
         }
@@ -69,6 +69,14 @@ function statusResult(snapshot: EvalStatusSnapshot): CommandResult {
     text: renderEvalStatusTable(snapshot),
     diagnostics: []
   };
+}
+
+function shouldRefresh(snapshot: EvalStatusSnapshot): boolean {
+  return snapshot.rows.some((row) => !row.terminal && rowMayStillProgress(row.status));
+}
+
+function rowMayStillProgress(status: string): boolean {
+  return status === "not-launched" || status === "pending" || status === "running" || status === "paused";
 }
 
 async function wait(milliseconds: number): Promise<void> {

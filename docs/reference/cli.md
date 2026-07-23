@@ -337,8 +337,10 @@ the durable workflow start through its latest checkpoint and is explicitly an
 estimate because node runtimes differ. ETA is typed as unavailable when no
 node has completed, timestamps are missing or invalid, or an incomplete row's
 checkpoint is more than five minutes old. `--watch` refreshes the whole matrix
-at the requested interval and exits when every row is terminal. Combined with
-`--json`, watch mode emits one schema-versioned JSON object per line.
+at the requested interval while at least one row is still pending, running,
+paused, or not yet launched; typed invalid or inaccessible rows remain visible
+without making the command poll forever. Combined with `--json`, watch mode
+emits one schema-versioned JSON object per line.
 
 `score` grades finished run reports against external ground truth resolved
 under `[eval].ground_truth_root`, deterministically by default and with the

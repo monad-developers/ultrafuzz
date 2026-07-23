@@ -146,6 +146,66 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
   assert.equal(fs.statSync(statePath).mtimeMs, modifiedBefore);
 });
 
+test("eval status watch exits when remaining rows cannot progress", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-invalid-"));
+  const evalRunId = "synthetic-invalid-eval";
+  const evalRoot = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
+  const runRoot = path.join(project, "private-invalid-target", ".ultrafuzz", "runs", "synthetic-invalid-run");
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.mkdirSync(runRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(evalRoot, "matrix.json"),
+    `${JSON.stringify([
+      {
+        id: "secret-invalid-row",
+        target: {
+          sensitivity: "private",
+          repo: "https://private.example/secret-invalid-repository",
+          path: "/private/secret-invalid-target",
+          ref: "secret-invalid-ref",
+          ground_truth_path: "/private/secret-invalid-ground-truth.yml"
+        }
+      }
+    ])}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({
+      row_id: "secret-invalid-row",
+      status: "launched",
+      ultrafuzz_run_id: "synthetic-invalid-run",
+      ultrafuzz_run_root: runRoot
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(path.join(runRoot, "state.json"), "{invalid", "utf8");
+
+  const watch = await invoke(project, [
+    "eval",
+    "status",
+    evalRunId,
+    "--project",
+    project,
+    "--watch",
+    "--interval",
+    "1",
+    "--json"
+  ]);
+
+  assert.equal(watch.code, 0, watch.stderr || watch.stdout);
+  const lines = watch.stdout.trim().split("\n");
+  assert.equal(lines.length, 1);
+  const result = JSON.parse(lines[0] ?? "") as {
+    data: { rows: Array<{ row: string; status: string; terminal: boolean }> };
+  };
+  assert.deepEqual(
+    result.data.rows.map((row) => ({ row: row.row, status: row.status, terminal: row.terminal })),
+    [{ row: "row-01", status: "invalid", terminal: false }]
+  );
+  assert.equal(`${watch.stdout}\n${watch.stderr}`.includes("secret-invalid"), false);
+});
+
 async function invoke(project: string, argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";
