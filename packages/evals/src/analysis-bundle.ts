@@ -11,6 +11,7 @@ import {
   type AnalysisBundleDataKind,
   type AnalysisBundleOmissionReason,
   type AnalysisEvaluationMetrics,
+  type AnalysisRecoverySummary,
   type AnalysisTerminalStatus,
   type RunStatus,
   type WriteAnalysisBundleResult
@@ -76,6 +77,7 @@ export interface CollectEvalAnalysisBundleInput {
   projectRoot: string;
   evalRunId: string;
   outputDir: string;
+  recoverySummary?: AnalysisRecoverySummary;
 }
 
 /**
@@ -94,6 +96,12 @@ export function collectEvalAnalysisBundle(input: CollectEvalAnalysisBundleInput)
   const payloads: Partial<Record<AnalysisBundleDataKind, unknown>> = {};
   const omissions: Partial<Record<AnalysisBundleDataKind, AnalysisBundleOmissionReason>> = {};
   let terminalPayload: AnalysisTerminalStatus | undefined;
+
+  if (input.recoverySummary === undefined) {
+    omissions["recovery-summary"] = "source-missing";
+  } else {
+    payloads["recovery-summary"] = input.recoverySummary;
+  }
 
   if (recordsSource.value === undefined) {
     const reason = recordsSource.reason ?? "data-unavailable";

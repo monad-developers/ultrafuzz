@@ -1,5 +1,5 @@
 export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v1" as const;
-export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v2" as const;
+export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v3" as const;
 export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-state.v1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
 export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status.v2" as const;

@@ -16,6 +16,11 @@ import {
   type Volume
 } from "modal";
 
+import {
+  ANALYSIS_BUNDLE_SCHEMA_VERSION,
+  writeAnalysisBundle,
+  type AnalysisRecoverySummary
+} from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
 
 import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
@@ -46,13 +51,17 @@ import {
   createModalLaunchState,
   fingerprintModalImage,
   fingerprintTrackedSource,
+  finishModalLaunchRecoveryLifecycle,
   hasExactModalLaunchTags,
+  isModalWorkerStatusTerminal,
   isTransientModalError,
   latestModalWorkerStatus,
-  markModalLaunchFailed,
+  markModalLaunchFailedWithRecovery,
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
+  modalRecoveryFinishedAtForWorkerStatus,
+  modalRecoveryTerminalReasonForWorkerStatus,
   modalWorkerLineage,
   parseModalLaunchState,
   parseModalWorkerResult,
@@ -93,6 +102,15 @@ import {
   type PublicEvalDiagnostics
 } from "./public-eval-diagnostics.js";
 import {
+  assertModalRecoveryLifecycleContainsNoSecrets,
+  createModalRecoveryLifecycleDocument,
+  MODAL_RECOVERY_LIFECYCLE_FILE,
+  parseModalRecoveryLifecycleDocument,
+  summarizeModalRecoveryLifecycle,
+  type ModalRecoveryStartReason,
+  type ModalRecoveryTerminalReason
+} from "./recovery-lifecycle.js";
+import {
   attachModalRecoverySandbox,
   createModalRecoveryState,
   markModalRecoveryWorkerLaunched,
@@ -126,7 +144,8 @@ export const MODAL_COLLECT_RESULT_FILES = [
   "status.json",
   "worker.log",
   "result.json",
-  PUBLIC_EVAL_DIAGNOSTICS_FILE
+  PUBLIC_EVAL_DIAGNOSTICS_FILE,
+  MODAL_RECOVERY_LIFECYCLE_FILE
 ] as const;
 export const MODAL_PUBLIC_RESULT_FILE = "public-results.json" as const;
 
@@ -283,6 +302,7 @@ export async function launchModalBenchmark(input: {
           logicalRunId: config.run_id,
           generation: 1,
           generationMode: mode,
+          generationStartReason: "initial",
           app: config.app_name,
           image: config.image_name,
           imageId: image.imageId,
@@ -296,6 +316,19 @@ export async function launchModalBenchmark(input: {
           throw new Error(`launch state belongs to ${state.logical_run_id}, not ${config.run_id}`);
         }
         await assertNoLiveGeneration(modal, app, state);
+        const generationStartReason: ModalRecoveryStartReason =
+          state.fingerprints.image === fingerprints.image ? "operator-restart" : "image-rollout";
+        const terminalReason: ModalRecoveryTerminalReason =
+          generationStartReason === "image-rollout" ? "image-rollout" : "operator-request";
+        const finishedAt = new Date().toISOString();
+        for (const launch of state.launches) {
+          finishActiveModalRecoveryLifecycle(state, launch, {
+            terminalReason,
+            finishedAt,
+            modelWorkStarted: launch.launched_at === undefined ? false : "unknown",
+            controllerRequested: true
+          });
+        }
         const previousFingerprints = state.fingerprints;
         const history = [
           ...state.attempt_history,
@@ -305,13 +338,15 @@ export async function launchModalBenchmark(input: {
           logicalRunId: config.run_id,
           generation: state.generation + 1,
           generationMode: "fresh",
+          generationStartReason,
           app: config.app_name,
           image: config.image_name,
           imageId: image.imageId,
           timeoutMs: MODAL_SANDBOX_TIMEOUT_MS,
           sourceRevision: candidateRevision,
           fingerprints,
-          attemptHistory: history
+          attemptHistory: history,
+          recoveryLifecycle: state.recovery_lifecycle
         });
         await writeModalLaunchState(statePath, state);
       } else {
@@ -357,6 +392,8 @@ export interface ModalLaunchStagingInput {
 
 async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
   let record = input.state.launches.find((launch) => launch.slug === input.model.slug);
+  let nextStartReason: ModalRecoveryStartReason =
+    record === undefined ? input.state.generation_start_reason : "unknown";
   const modelFingerprint = fingerprintModalModel(input.model);
   if (record !== undefined && record.model_fingerprint !== modelFingerprint) {
     throw new Error(`incompatible Modal checkpoint: model fingerprint mismatch for ${input.model.slug}`);
@@ -408,9 +445,44 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         : {})
     });
     if (runnerStatus.action === "none") {
+      const finishedAt = new Date().toISOString();
+      if (
+        finishActiveModalRecoveryLifecycle(input.state, record, {
+          terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+            category: runnerStatus.category,
+            attempt: record.attempt,
+            modelWorkStarted: runnerStatus.model_work_started,
+            recoveryBudgetExhausted:
+              runnerStatus.category === "permanent-operational-failure" &&
+              workerStatus?.category !== "permanent-operational-failure" &&
+              record.failure_category !== "permanent-operational-failure"
+          }),
+          finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
+          ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
+          modelWorkStarted: workerStatus?.model_work_started ?? (record.launched_at === undefined ? false : "unknown"),
+          ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
+          ...(workerStatus?.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
+        })
+      ) {
+        await writeModalLaunchState(input.statePath, input.state);
+      }
       if (["succeeded", "genuine-task-outcome"].includes(runnerStatus.category)) return;
       throw new Error(`Modal runner cannot relaunch ${record.slug}: ${runnerStatus.category}`);
     }
+    const finishedAt = new Date().toISOString();
+    if (
+      finishActiveModalRecoveryLifecycle(input.state, record, {
+        terminalReason: "operational-failure",
+        finishedAt: modalRecoveryFinishedAtForWorkerStatus(workerStatus, finishedAt),
+        ...(probe.exitCode === undefined ? {} : { workerExitCode: probe.exitCode }),
+        modelWorkStarted: workerStatus?.model_work_started ?? (record.launched_at === undefined ? false : "unknown"),
+        ...(workerStatus?.updated_at === undefined ? {} : { lastDurableTransitionAt: workerStatus.updated_at }),
+        ...(workerStatus?.node_counts === undefined ? {} : { nodeCountsAfter: workerStatus.node_counts })
+      })
+    ) {
+      await writeModalLaunchState(input.statePath, input.state);
+    }
+    nextStartReason = runnerStatus.model_work_started ? "post-model-resume" : "pre-model-retry";
     if (runnerStatus.retry_after_ms > 0) await sleep(runnerStatus.retry_after_ms);
   }
 
@@ -423,7 +495,8 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       volumeName,
       remoteRoot,
       workspaceMode: input.state.generation_mode,
-      postModelRecovery: configuredPostModelRecovery(input.config)
+      postModelRecovery: configuredPostModelRecovery(input.config),
+      startReason: nextStartReason
     });
     await writeModalLaunchState(input.statePath, input.state);
 
@@ -470,7 +543,10 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         modelMayHaveStarted,
         postModelRecovery: configuredPostModelRecovery(input.config)
       });
-      markModalLaunchFailed(record, category);
+      markModalLaunchFailedWithRecovery(input.state, record, category, {
+        modelWorkStarted: modelMayHaveStarted ? "unknown" : false,
+        controllerRequested: sandbox !== undefined && terminationConfirmed
+      });
       await writeModalLaunchState(input.statePath, input.state);
       if (!terminationConfirmed) {
         throw new Error("could not confirm Modal sandbox termination", { cause: error });
@@ -479,6 +555,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
         throw new Error("Modal launch readiness was uncertain", { cause: error });
       }
       if (category !== "transient-operational-failure" || record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT) throw error;
+      nextStartReason = "pre-model-retry";
       await sleep(classifyModalRunnerStatus({ sandbox: "missing", attempt: record.attempt }).retry_after_ms);
     }
   }
@@ -522,13 +599,14 @@ async function recoverExistingSandboxLaunch(
   } catch (error) {
     const modelMayHaveStarted = record.phase === "launched";
     const terminationConfirmed = await terminateModalSandbox(sandbox);
-    markModalLaunchFailed(
-      record,
-      classifyModalLaunchFailure(error, {
-        modelMayHaveStarted,
-        postModelRecovery: configuredPostModelRecovery(input.config)
-      })
-    );
+    const category = classifyModalLaunchFailure(error, {
+      modelMayHaveStarted,
+      postModelRecovery: configuredPostModelRecovery(input.config)
+    });
+    markModalLaunchFailedWithRecovery(input.state, record, category, {
+      modelWorkStarted: modelMayHaveStarted ? "unknown" : false,
+      controllerRequested: terminationConfirmed
+    });
     await writeModalLaunchState(input.statePath, input.state);
     if (!terminationConfirmed) {
       throw new Error("could not confirm Modal sandbox termination", { cause: error });
@@ -774,6 +852,26 @@ function attemptProvenance(record: ModalLaunchRecord, fingerprints: ModalLineage
   };
 }
 
+function finishActiveModalRecoveryLifecycle(
+  state: ModalLaunchState,
+  record: Pick<ModalLaunchRecord, "attempt_id">,
+  input: Parameters<typeof finishModalLaunchRecoveryLifecycle>[2]
+): boolean {
+  const lifecycle = state.recovery_lifecycle.find((candidate) => candidate.attempt_id === record.attempt_id);
+  if (lifecycle === undefined) {
+    throw new Error(`Modal launch ${record.attempt_id} is missing recovery lifecycle`);
+  }
+  if (lifecycle.terminal_reason !== "active") return false;
+  return finishModalLaunchRecoveryLifecycle(state, record, input);
+}
+
+function modalRecoveryAnalysisSummary(records: ModalLaunchState["recovery_lifecycle"]): AnalysisRecoverySummary {
+  return {
+    schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
+    ...summarizeModalRecoveryLifecycle(records)
+  };
+}
+
 export function modalImageBuildCommand(): string {
   return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
 }
@@ -842,7 +940,10 @@ export async function modalBenchmarkStatus(input: {
         runner: probe.state,
         exit_code: probe.exitCode,
         runner_status: runnerStatus,
-        worker_status: workerStatus ?? null
+        worker_status: workerStatus ?? null,
+        recovery_summary: summarizeModalRecoveryLifecycle(
+          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
+        )
       });
     }
     return rows;
@@ -1541,11 +1642,29 @@ export async function terminateModalBenchmark(input: {
 }): Promise<ModalTerminationCounts> {
   const modal = modalClient(input.env);
   try {
-    const { state, app } = await requiredCurrentLaunchStateForTermination(input.statePath, modal);
-    return await terminateModalBenchmarkSandboxes({
-      state,
-      appId: app.appId,
-      sandboxes: modal.sandboxes
+    return await withModalLaunchStateLock(input.statePath, async () => {
+      const { state, app } = await requiredCurrentLaunchStateForTermination(input.statePath, modal);
+      const terminatedAttempts = new Set<string>();
+      const counts = await terminateModalBenchmarkSandboxes({
+        state,
+        appId: app.appId,
+        sandboxes: modal.sandboxes,
+        onTerminatedAttempt: (attemptId) => terminatedAttempts.add(attemptId)
+      });
+      const finishedAt = new Date().toISOString();
+      let changed = false;
+      for (const launch of state.launches) {
+        if (!terminatedAttempts.has(launch.attempt_id)) continue;
+        changed =
+          finishActiveModalRecoveryLifecycle(state, launch, {
+            terminalReason: "operator-request",
+            finishedAt,
+            modelWorkStarted: launch.launched_at === undefined ? false : "unknown",
+            controllerRequested: true
+          }) || changed;
+      }
+      if (changed) await writeModalLaunchState(input.statePath, state);
+      return counts;
     });
   } finally {
     modal.close();
@@ -1620,6 +1739,7 @@ export async function terminateModalBenchmarkSandboxes(input: {
   state: ModalLaunchState;
   appId: string;
   sandboxes: ModalTerminationSandboxService;
+  onTerminatedAttempt?: (attemptId: string) => void;
 }): Promise<ModalTerminationCounts> {
   const state = parseModalLaunchState(input.state);
   const scopes = modalTerminationScopes(state);
@@ -1634,6 +1754,7 @@ export async function terminateModalBenchmarkTagScopes(input: {
   knownSandboxIds?: string[];
   appId: string;
   sandboxes: ModalTerminationSandboxService;
+  onTerminatedAttempt?: (attemptId: string) => void;
 }): Promise<ModalTerminationCounts> {
   const counts = emptyModalTerminationCounts(input.scopes.length);
   if (input.scopes.length === 0) {
@@ -1706,6 +1827,7 @@ export async function terminateModalBenchmarkTagScopes(input: {
     try {
       await sandbox.terminate({ wait: true });
       counts.terminated += 1;
+      if (tags.attempt_id !== undefined) input.onTerminatedAttempt?.(tags.attempt_id);
     } catch (error) {
       if (error instanceof NotFoundError) counts.already_stopped += 1;
       else counts.failures += 1;
@@ -1755,86 +1877,125 @@ export async function collectModalBenchmark(input: {
   }
   const modal = modalClient(input.env);
   try {
-    const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
-    for (const launch of state.launches) {
-      const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
-      const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
-        ...MODAL_COLLECT_RESULT_FILES,
-        ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
-      ]);
-      const output = path.resolve(input.outputDir, launch.slug);
-      const configuredModel = collectionConfig?.models.find((model) => model.slug === launch.slug);
-      const collectionEnv = input.env ?? process.env;
-      const exactDiagnosticConfig =
-        collectionConfig !== undefined &&
-        collectionConfigFingerprint !== undefined &&
-        configuredModel !== undefined &&
-        hasExactPublicDiagnosticCollectionConfig({
-          config: collectionConfig,
-          configFingerprint: collectionConfigFingerprint,
-          configuredModel,
-          state,
-          launch
-        })
-          ? { config: collectionConfig, model: configuredModel }
-          : undefined;
-      const selectedEvidence = selectModalCollectedEvidence(
-        files,
-        exactDiagnosticConfig?.config,
-        exactDiagnosticConfig?.model,
-        collectionEnv
-      );
-      await replaceSanitizedModalCollectedFiles(
-        output,
-        selectedEvidence.files,
-        {
-          generation: launch.generation,
-          attempt: launch.attempt,
-          logical_run_id: state.logical_run_id,
-          attempt_id: launch.attempt_id,
-          model_slug: launch.slug,
-          model: launch.model,
-          reasoning: launch.reasoning,
-          candidate_commit: state.source_revision,
-          config_fingerprint: state.fingerprints.config,
-          source_fingerprint: state.fingerprints.source,
-          image_fingerprint: state.fingerprints.image,
-          model_fingerprint: launch.model_fingerprint
-        },
-        selectedEvidence.forbiddenSecretValues
-      );
-      const persistedStatus = latestPersistedWorkerStatus(files, launch);
-      if (
-        collectionConfig !== undefined &&
-        isPublicModalBenchmarkConfig(collectionConfig) &&
-        persistedStatus?.model_work_started === true &&
-        selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
-      ) {
-        throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
-      }
-      if (input.includePublicResults === true) {
-        const contents = files[MODAL_PUBLIC_RESULT_FILE];
-        if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
-        if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
-        const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
-          requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
-          requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+    await withModalLaunchStateLock(input.statePath, async () => {
+      const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
+      for (const launch of state.launches) {
+        const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
+        const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
+          ...MODAL_COLLECT_RESULT_FILES.filter((name) => name !== MODAL_RECOVERY_LIFECYCLE_FILE),
+          ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])
         ]);
-        assertPublicBenchmarkBundleLineage({
-          bundle,
-          config: publicCollection!.config,
-          configFingerprint: publicCollection!.configFingerprint,
-          state,
-          launch
-        });
-        const collectedDiagnostics = selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
-        if (collectedDiagnostics === undefined) {
-          throw new Error(`public benchmark diagnostics are not ready for ${launch.slug}`);
+        const persistedStatus = latestPersistedWorkerStatus(files, launch);
+        if (
+          isModalWorkerStatusTerminal(persistedStatus) &&
+          finishActiveModalRecoveryLifecycle(state, launch, {
+            terminalReason: modalRecoveryTerminalReasonForWorkerStatus({
+              category: persistedStatus.category,
+              attempt: launch.attempt,
+              modelWorkStarted: persistedStatus.model_work_started
+            }),
+            finishedAt: modalRecoveryFinishedAtForWorkerStatus(persistedStatus, new Date().toISOString()),
+            modelWorkStarted: persistedStatus.model_work_started,
+            ...(persistedStatus.updated_at === undefined
+              ? {}
+              : { lastDurableTransitionAt: persistedStatus.updated_at }),
+            ...(persistedStatus.node_counts === undefined ? {} : { nodeCountsAfter: persistedStatus.node_counts })
+          })
+        ) {
+          await writeModalLaunchState(input.statePath, state);
         }
-        assertPublicBenchmarkBundleDiagnosticsMatch(bundle, collectedDiagnostics);
-        await writeCollectedPublicBundle(output, contents);
+        const output = path.resolve(input.outputDir, launch.slug);
+        const configuredModel = collectionConfig?.models.find((model) => model.slug === launch.slug);
+        const collectionEnv = input.env ?? process.env;
+        const exactDiagnosticConfig =
+          collectionConfig !== undefined &&
+          collectionConfigFingerprint !== undefined &&
+          configuredModel !== undefined &&
+          hasExactPublicDiagnosticCollectionConfig({
+            config: collectionConfig,
+            configFingerprint: collectionConfigFingerprint,
+            configuredModel,
+            state,
+            launch
+          })
+            ? { config: collectionConfig, model: configuredModel }
+            : undefined;
+        const selectedWorkerEvidence = selectModalCollectedEvidence(
+          files,
+          exactDiagnosticConfig?.config,
+          exactDiagnosticConfig?.model,
+          collectionEnv
+        );
+        const recoveryLifecycle = createModalRecoveryLifecycleDocument(
+          state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
+        );
+        assertModalRecoveryLifecycleContainsNoSecrets(recoveryLifecycle, selectedWorkerEvidence.forbiddenSecretValues);
+        const selectedEvidence: { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } = {
+          files: {
+            ...selectedWorkerEvidence.files,
+            [MODAL_RECOVERY_LIFECYCLE_FILE]: `${JSON.stringify(recoveryLifecycle, null, 2)}\n`
+          },
+          forbiddenSecretValues: selectedWorkerEvidence.forbiddenSecretValues
+        };
+        await replaceSanitizedModalCollectedFiles(
+          output,
+          selectedEvidence.files,
+          {
+            generation: launch.generation,
+            attempt: launch.attempt,
+            logical_run_id: state.logical_run_id,
+            attempt_id: launch.attempt_id,
+            model_slug: launch.slug,
+            model: launch.model,
+            reasoning: launch.reasoning,
+            candidate_commit: state.source_revision,
+            config_fingerprint: state.fingerprints.config,
+            source_fingerprint: state.fingerprints.source,
+            image_fingerprint: state.fingerprints.image,
+            model_fingerprint: launch.model_fingerprint
+          },
+          selectedEvidence.forbiddenSecretValues
+        );
+        writeAnalysisBundle({
+          outputDir: path.join(output, "analysis"),
+          payloads: {
+            "recovery-summary": modalRecoveryAnalysisSummary(
+              state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
+            )
+          }
+        });
+        if (
+          collectionConfig !== undefined &&
+          isPublicModalBenchmarkConfig(collectionConfig) &&
+          persistedStatus?.model_work_started === true &&
+          selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined
+        ) {
+          throw new Error(`public eval diagnostics are not safely collectable for ${launch.slug}`);
+        }
+        if (input.includePublicResults === true) {
+          const contents = files[MODAL_PUBLIC_RESULT_FILE];
+          if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
+          if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
+          const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
+            requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
+            requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+          ]);
+          assertPublicBenchmarkBundleLineage({
+            bundle,
+            config: publicCollection!.config,
+            configFingerprint: publicCollection!.configFingerprint,
+            state,
+            launch
+          });
+          const collectedDiagnostics = selectedEvidence.files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
+          if (collectedDiagnostics === undefined) {
+            throw new Error(`public benchmark diagnostics are not ready for ${launch.slug}`);
+          }
+          assertPublicBenchmarkBundleDiagnosticsMatch(bundle, collectedDiagnostics);
+          await writeCollectedPublicBundle(output, contents);
+        }
       }
-    }
+    });
   } finally {
     modal.close();
   }
@@ -2315,6 +2476,44 @@ export function assertSanitizedModalCollectedFiles(
       throw new Error("refusing to collect unsanitized public eval diagnostics", { cause: error });
     }
     assertPublicEvalDiagnosticsLineage(diagnostics, launch);
+  }
+  const recoveryContents = files[MODAL_RECOVERY_LIFECYCLE_FILE];
+  if (recoveryContents !== undefined) {
+    let recovery: ReturnType<typeof parseModalRecoveryLifecycleDocument>;
+    try {
+      recovery = parseModalRecoveryLifecycleDocument(JSON.parse(recoveryContents) as unknown);
+      assertModalRecoveryLifecycleContainsNoSecrets(recovery, forbiddenSecretValues);
+    } catch (error) {
+      throw new Error("refusing to collect an unsanitized Modal recovery lifecycle", { cause: error });
+    }
+    const current = recovery.records.find(
+      (record) => record.generation === launch.generation && record.attempt === launch.attempt
+    );
+    if (current === undefined) {
+      throw new Error("Modal recovery lifecycle does not contain the collected launch attempt");
+    }
+    const mismatches = [
+      launch.logical_run_id === undefined || current.logical_run_id === launch.logical_run_id
+        ? undefined
+        : "logical run",
+      launch.attempt_id === undefined || current.attempt_id === launch.attempt_id ? undefined : "attempt ID",
+      launch.model_slug === undefined || current.model_slug === launch.model_slug ? undefined : "model",
+      launch.config_fingerprint === undefined || current.fingerprints.config === launch.config_fingerprint
+        ? undefined
+        : "configuration fingerprint",
+      launch.source_fingerprint === undefined || current.fingerprints.source === launch.source_fingerprint
+        ? undefined
+        : "source fingerprint",
+      launch.image_fingerprint === undefined || current.fingerprints.image === launch.image_fingerprint
+        ? undefined
+        : "image fingerprint",
+      launch.model_fingerprint === undefined || current.fingerprints.model === launch.model_fingerprint
+        ? undefined
+        : "model fingerprint"
+    ].filter((value): value is string => value !== undefined);
+    if (mismatches.length > 0) {
+      throw new Error(`Modal recovery lifecycle has mismatched ${mismatches.join(", ")}`);
+    }
   }
 }
 

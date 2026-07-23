@@ -16,7 +16,8 @@ export const ANALYSIS_BUNDLE_DATA_KINDS = [
   "terminal-status",
   "evaluation-metrics",
   "accounting-summary",
-  "attempt-history"
+  "attempt-history",
+  "recovery-summary"
 ] as const;
 
 export const ANALYSIS_BUNDLE_OMISSION_REASONS = [
@@ -34,7 +35,8 @@ const DATA_PATHS = {
   "terminal-status": "data/terminal-status.json",
   "evaluation-metrics": "data/evaluation-metrics.json",
   "accounting-summary": "data/accounting-summary.json",
-  "attempt-history": "data/attempt-history.json"
+  "attempt-history": "data/attempt-history.json",
+  "recovery-summary": "data/recovery-summary.json"
 } as const satisfies Record<AnalysisBundleDataKind, string>;
 
 const TERMINAL_STATUS_VALUES = [
@@ -222,6 +224,108 @@ export const analysisAttemptHistorySchema = z
     });
   });
 
+const recoveryStartReasonsSchema = z.strictObject({
+  initial: nonNegativeInteger,
+  "pre-model-retry": nonNegativeInteger,
+  "post-model-resume": nonNegativeInteger,
+  "image-rollout": nonNegativeInteger,
+  "stale-probe-rotation": nonNegativeInteger,
+  "operator-restart": nonNegativeInteger,
+  unknown: nonNegativeInteger
+});
+const recoveryTerminalReasonsSchema = z.strictObject({
+  active: nonNegativeInteger,
+  succeeded: nonNegativeInteger,
+  "genuine-worker-failure": nonNegativeInteger,
+  "operational-failure": nonNegativeInteger,
+  "image-rollout": nonNegativeInteger,
+  "stale-probe-rotation": nonNegativeInteger,
+  "operator-request": nonNegativeInteger,
+  timeout: nonNegativeInteger,
+  "resource-termination": nonNegativeInteger,
+  "recovery-budget-exhausted": nonNegativeInteger,
+  unknown: nonNegativeInteger
+});
+const recoveryTerminalClassesSchema = z.strictObject({
+  active: nonNegativeInteger,
+  succeeded: nonNegativeInteger,
+  "genuine-worker-failure": nonNegativeInteger,
+  "operational-failure": nonNegativeInteger,
+  "controller-rotation": nonNegativeInteger,
+  timeout: nonNegativeInteger,
+  "resource-termination": nonNegativeInteger,
+  "recovery-budget-exhausted": nonNegativeInteger,
+  unknown: nonNegativeInteger
+});
+
+export const analysisRecoverySummarySchema = z
+  .strictObject({
+    schema_version: z.literal(ANALYSIS_BUNDLE_SCHEMA_VERSION),
+    total_generations: nonNegativeInteger,
+    terminal_generations: nonNegativeInteger,
+    active_generations: nonNegativeInteger,
+    progress_generations: nonNegativeInteger,
+    no_progress_generations: nonNegativeInteger,
+    unknown_progress_generations: nonNegativeInteger,
+    model_work_generations: nonNegativeInteger,
+    no_model_work_generations: nonNegativeInteger,
+    unknown_model_work_generations: nonNegativeInteger,
+    genuine_failures: nonNegativeInteger,
+    rotations: nonNegativeInteger,
+    resumptions: nonNegativeInteger,
+    start_reasons: recoveryStartReasonsSchema,
+    terminal_reasons: recoveryTerminalReasonsSchema,
+    terminal_classes: recoveryTerminalClassesSchema
+  })
+  .superRefine((value, ctx) => {
+    const totals = [
+      value.terminal_generations + value.active_generations,
+      value.progress_generations + value.no_progress_generations + value.unknown_progress_generations,
+      value.model_work_generations + value.no_model_work_generations + value.unknown_model_work_generations,
+      sumObject(value.start_reasons),
+      sumObject(value.terminal_reasons),
+      sumObject(value.terminal_classes)
+    ];
+    if (totals.some((total) => total !== value.total_generations)) {
+      ctx.addIssue({ code: "custom", path: ["total_generations"], message: "must reconcile with every count group" });
+    }
+    if (value.genuine_failures !== value.terminal_classes["genuine-worker-failure"]) {
+      ctx.addIssue({ code: "custom", path: ["genuine_failures"], message: "must match terminal classes" });
+    }
+    if (value.rotations !== value.terminal_classes["controller-rotation"]) {
+      ctx.addIssue({ code: "custom", path: ["rotations"], message: "must match terminal classes" });
+    }
+    if (value.resumptions !== value.start_reasons["post-model-resume"]) {
+      ctx.addIssue({ code: "custom", path: ["resumptions"], message: "must match start reasons" });
+    }
+    if (value.active_generations !== value.terminal_reasons.active) {
+      ctx.addIssue({ code: "custom", path: ["active_generations"], message: "must match active terminal reasons" });
+    }
+    const expectedTerminalClasses = {
+      active: value.terminal_reasons.active,
+      succeeded: value.terminal_reasons.succeeded,
+      "genuine-worker-failure": value.terminal_reasons["genuine-worker-failure"],
+      "operational-failure": value.terminal_reasons["operational-failure"],
+      "controller-rotation":
+        value.terminal_reasons["image-rollout"] +
+        value.terminal_reasons["stale-probe-rotation"] +
+        value.terminal_reasons["operator-request"],
+      timeout: value.terminal_reasons.timeout,
+      "resource-termination": value.terminal_reasons["resource-termination"],
+      "recovery-budget-exhausted": value.terminal_reasons["recovery-budget-exhausted"],
+      unknown: value.terminal_reasons.unknown
+    };
+    for (const [terminalClass, expected] of Object.entries(expectedTerminalClasses)) {
+      if (value.terminal_classes[terminalClass as keyof typeof value.terminal_classes] !== expected) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["terminal_classes", terminalClass],
+          message: "must reconcile with terminal reasons"
+        });
+      }
+    }
+  });
+
 function manifestEntryForKind(kind: AnalysisBundleFileKind) {
   return z.strictObject({
     kind: z.literal(kind),
@@ -245,6 +349,7 @@ const manifestEntrySchema = z.discriminatedUnion("kind", [
   manifestEntryForKind("evaluation-metrics"),
   manifestEntryForKind("accounting-summary"),
   manifestEntryForKind("attempt-history"),
+  manifestEntryForKind("recovery-summary"),
   manifestEntryForKind("omissions")
 ]);
 
@@ -283,7 +388,8 @@ export const analysisBundleOmissionsSchema = z
         omissionEntryForKind("terminal-status"),
         omissionEntryForKind("evaluation-metrics"),
         omissionEntryForKind("accounting-summary"),
-        omissionEntryForKind("attempt-history")
+        omissionEntryForKind("attempt-history"),
+        omissionEntryForKind("recovery-summary")
       ])
     )
   })
@@ -309,19 +415,21 @@ export type AnalysisTerminalStatus = z.infer<typeof analysisTerminalStatusSchema
 export type AnalysisEvaluationMetrics = z.infer<typeof analysisEvaluationMetricsSchema>;
 export type AnalysisAccountingSummary = z.infer<typeof analysisAccountingSummarySchema>;
 export type AnalysisAttemptHistory = z.infer<typeof analysisAttemptHistorySchema>;
+export type AnalysisRecoverySummary = z.infer<typeof analysisRecoverySummarySchema>;
 export type AnalysisBundleManifest = z.infer<typeof analysisBundleManifestSchema>;
 export type AnalysisBundleOmissions = z.infer<typeof analysisBundleOmissionsSchema>;
 
 const analysisBundleFilesJsonSchema = {
   type: "array",
   minItems: 1,
-  maxItems: 5,
+  maxItems: 6,
   items: {
     oneOf: [
       analysisBundleFileEntryJsonSchema("terminal-status", DATA_PATHS["terminal-status"]),
       analysisBundleFileEntryJsonSchema("evaluation-metrics", DATA_PATHS["evaluation-metrics"]),
       analysisBundleFileEntryJsonSchema("accounting-summary", DATA_PATHS["accounting-summary"]),
       analysisBundleFileEntryJsonSchema("attempt-history", DATA_PATHS["attempt-history"]),
+      analysisBundleFileEntryJsonSchema("recovery-summary", DATA_PATHS["recovery-summary"]),
       analysisBundleFileEntryJsonSchema("omissions", ANALYSIS_BUNDLE_OMISSIONS_FILE)
     ]
   },
@@ -330,6 +438,7 @@ const analysisBundleFilesJsonSchema = {
     { contains: { properties: { kind: { const: "evaluation-metrics" } } }, minContains: 0, maxContains: 1 },
     { contains: { properties: { kind: { const: "accounting-summary" } } }, minContains: 0, maxContains: 1 },
     { contains: { properties: { kind: { const: "attempt-history" } } }, minContains: 0, maxContains: 1 },
+    { contains: { properties: { kind: { const: "recovery-summary" } } }, minContains: 0, maxContains: 1 },
     { contains: { properties: { kind: { const: "omissions" } } }, minContains: 1, maxContains: 1 }
   ]
 } as const;
@@ -363,11 +472,16 @@ function analysisBundleFileEntryJsonSchema(kind: AnalysisBundleFileKind, relativ
   };
 }
 
+function sumObject(value: Record<string, number>): number {
+  return Object.values(value).reduce((total, count) => total + count, 0);
+}
+
 const PAYLOAD_SCHEMAS = {
   "terminal-status": analysisTerminalStatusSchema,
   "evaluation-metrics": analysisEvaluationMetricsSchema,
   "accounting-summary": analysisAccountingSummarySchema,
-  "attempt-history": analysisAttemptHistorySchema
+  "attempt-history": analysisAttemptHistorySchema,
+  "recovery-summary": analysisRecoverySummarySchema
 } as const;
 
 const FORBIDDEN_BUNDLE_KEYS = new Set([
@@ -532,6 +646,12 @@ export function validateAnalysisBundle(bundleRoot: string): AnalysisBundleManife
 
   for (const kind of ANALYSIS_BUNDLE_DATA_KINDS) {
     const entry = entriesByKind.get(kind);
+    if (kind === "recovery-summary" && entry === undefined && !omittedKinds.has(kind)) {
+      // recovery-summary was added additively to v1. Bundles written before
+      // that addition remain valid; new writers surface the missing source in
+      // omissions.json instead of inventing recovery evidence.
+      continue;
+    }
     if ((entry === undefined) === !omittedKinds.has(kind)) {
       throw new Error(`analysis bundle ${kind} must be either included or omitted exactly once`);
     }
