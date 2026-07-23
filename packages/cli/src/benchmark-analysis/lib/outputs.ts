@@ -147,6 +147,10 @@ function markdownCell(value: string): string {
 export async function writeTableOutputs(result: AnalysisResult, outputDir: string): Promise<string[]> {
   await mkdir(outputDir, { recursive: true });
   const lookup = new Map(result.rowMetrics.map((row) => [row.rowId, row]));
+  const orderedRows = result.rowOrder.flatMap((rowId) => {
+    const row = lookup.get(rowId);
+    return row ? [row] : [];
+  });
   const lines = [
     "# Row-level benchmark results",
     "",
@@ -154,30 +158,66 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     "",
     "Root-cause credits use the finalized global adjudication. A single detected cluster may receive more than one credit when it covers multiple underlying ground-truth causes.",
     "",
-    "| Row | Condition | Findings | TP | GT credits | FP | Review | Dup | Precision | Recall | F1 | Tokens (M) | Reported USD* |",
-    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "## Row quality",
+    "",
+    "| Row | Condition | GT credits | Precision | Recall | F1 |",
+    "| --- | --- | ---: | ---: | ---: | ---: |"
   ];
-  for (const rowId of result.rowOrder) {
-    const row = lookup.get(rowId);
-    if (!row) continue;
+  for (const row of orderedRows) {
     lines.push(
-      `| ${markdownCell(row.label)} | ${row.condition} | ${row.findings ?? "NA"} | ${row.truePositives ?? "NA"} | ${row.distinctGroundTruthCredits ?? "NA"} | ${row.falsePositives ?? "NA"} | ${row.needsHumanReview ?? "NA"} | ${row.duplicateCount ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} | ${fixed(row.totalTokensMillions)} | ${spend(row)} |`
+      `| ${markdownCell(row.label)} | ${markdownCell(row.condition)} | ${row.distinctGroundTruthCredits ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} |`
     );
+  }
+
+  lines.push(
+    "",
+    "## Finding disposition",
+    "",
+    "| Row | Findings | TP | FP | Review | Dup |",
+    "| --- | ---: | ---: | ---: | ---: | ---: |"
+  );
+  for (const row of orderedRows) {
+    lines.push(
+      `| ${markdownCell(row.label)} | ${row.findings ?? "NA"} | ${row.truePositives ?? "NA"} | ${row.falsePositives ?? "NA"} | ${row.needsHumanReview ?? "NA"} | ${row.duplicateCount ?? "NA"} |`
+    );
+  }
+
+  lines.push("", "## Compute and spend", "", "| Row | Tokens (M) | Reported USD* |", "| --- | ---: | ---: |");
+  for (const row of orderedRows) {
+    lines.push(`| ${markdownCell(row.label)} | ${fixed(row.totalTokensMillions)} | ${spend(row)} |`);
   }
 
   lines.push(
     "",
     "*Reported USD is a partial lower bound. Total tokens are used as the comparable cost proxy.*",
     "",
-    "## Condition aggregates",
+    "## Condition quality",
     "",
-    "| Condition | Rows | Findings | TP | FP | Review | Dup | GT credits | Pooled precision | Union recall | Union F1 | Tokens (M) |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    "| Condition | Rows | GT credits | Pooled precision | Union recall | Union F1 |",
+    "| --- | ---: | ---: | ---: | ---: | ---: |"
   );
   for (const item of result.conditionAggregate) {
     lines.push(
-      `| ${item.condition} | ${item.validRows} | ${item.findings} | ${item.truePositives} | ${item.falsePositives} | ${item.needsHumanReview} | ${item.duplicateCount} | ${item.distinctGroundTruthCredits} | ${percent(item.pooledPrecision)} | ${percent(item.unionRecall)} | ${percent(item.unionF1)} | ${fixed(item.allRunTokensMillions)} |`
+      `| ${markdownCell(item.condition)} | ${item.validRows} | ${item.distinctGroundTruthCredits} | ${percent(item.pooledPrecision)} | ${percent(item.unionRecall)} | ${percent(item.unionF1)} |`
     );
+  }
+
+  lines.push(
+    "",
+    "## Condition finding disposition",
+    "",
+    "| Condition | Findings | TP | FP | Review | Dup |",
+    "| --- | ---: | ---: | ---: | ---: | ---: |"
+  );
+  for (const item of result.conditionAggregate) {
+    lines.push(
+      `| ${markdownCell(item.condition)} | ${item.findings} | ${item.truePositives} | ${item.falsePositives} | ${item.needsHumanReview} | ${item.duplicateCount} |`
+    );
+  }
+
+  lines.push("", "## Condition compute", "", "| Condition | Tokens (M) |", "| --- | ---: |");
+  for (const item of result.conditionAggregate) {
+    lines.push(`| ${markdownCell(item.condition)} | ${fixed(item.allRunTokensMillions)} |`);
   }
 
   lines.push(
@@ -200,7 +240,7 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
       const item = summary.stats[key];
       if (!item) continue;
       lines.push(
-        `| ${summary.condition} | ${label} | ${item.n} | ${metric(item.mean, asPercent)} | ${metric(item.median, asPercent)} | ${metric(item.stdev, asPercent)} |`
+        `| ${markdownCell(summary.condition)} | ${label} | ${item.n} | ${metric(item.mean, asPercent)} | ${metric(item.median, asPercent)} | ${metric(item.stdev, asPercent)} |`
       );
     }
   }
@@ -208,14 +248,27 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
   if (result.pairComparison.length > 0) {
     lines.push(
       "",
-      "## Paired row comparison",
+      "## Paired score comparison",
       "",
-      "| Pair | Rows | GT credits | F1 | Tokens (M) | Shared clusters | Ultrafuzz-only | no-fuzz-only |",
-      "| --- | --- | ---: | ---: | ---: | --- | --- | --- |"
+      "| Pair | Rows | GT credits | F1 | Tokens (M) |",
+      "| --- | --- | ---: | ---: | ---: |"
     );
     for (const pair of result.pairComparison) {
       lines.push(
-        `| ${pair.pair} | ${pair.ultrafuzz.rowId} / ${pair.noFuzz.rowId} | ${pair.ultrafuzz.distinctGroundTruthCredits ?? "NA"} / ${pair.noFuzz.distinctGroundTruthCredits ?? "NA"} | ${percent(pair.ultrafuzz.f1)} / ${percent(pair.noFuzz.f1)} | ${fixed(pair.ultrafuzz.totalTokensMillions)} / ${fixed(pair.noFuzz.totalTokensMillions)} | ${pair.sharedRootCauseIds.join(", ") || "—"} | ${pair.ultrafuzzOnlyRootCauseIds.join(", ") || "—"} | ${pair.noFuzzOnlyRootCauseIds.join(", ") || "—"} |`
+        `| ${markdownCell(pair.pair)} | ${markdownCell(`${pair.ultrafuzz.rowId} / ${pair.noFuzz.rowId}`)} | ${pair.ultrafuzz.distinctGroundTruthCredits ?? "NA"} / ${pair.noFuzz.distinctGroundTruthCredits ?? "NA"} | ${percent(pair.ultrafuzz.f1)} / ${percent(pair.noFuzz.f1)} | ${fixed(pair.ultrafuzz.totalTokensMillions)} / ${fixed(pair.noFuzz.totalTokensMillions)} |`
+      );
+    }
+
+    lines.push(
+      "",
+      "## Paired detection overlap",
+      "",
+      "| Pair | Shared clusters | Ultrafuzz-only | no-fuzz-only |",
+      "| --- | --- | --- | --- |"
+    );
+    for (const pair of result.pairComparison) {
+      lines.push(
+        `| ${markdownCell(pair.pair)} | ${markdownCell(pair.sharedRootCauseIds.join(", ") || "—")} | ${markdownCell(pair.ultrafuzzOnlyRootCauseIds.join(", ") || "—")} | ${markdownCell(pair.noFuzzOnlyRootCauseIds.join(", ") || "—")} |`
       );
     }
   } else {
@@ -223,12 +276,12 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
       "",
       "## Cross-row ranking",
       "",
-      "| Rank | Row | Condition | GT credits | Precision | Recall | F1 | Tokens (M) |",
-      "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+      "| Rank | Row | Condition | GT credits | F1 |",
+      "| ---: | --- | --- | ---: | ---: |"
     );
     for (const [index, row] of rankedRows(result).entries()) {
       lines.push(
-        `| ${index + 1} | ${markdownCell(row.label)} | ${row.condition} | ${row.distinctGroundTruthCredits ?? "NA"} | ${percent(row.precision)} | ${percent(row.recall)} | ${percent(row.f1)} | ${fixed(row.totalTokensMillions)} |`
+        `| ${index + 1} | ${markdownCell(row.label)} | ${markdownCell(row.condition)} | ${row.distinctGroundTruthCredits ?? "NA"} | ${percent(row.f1)} |`
       );
     }
   }

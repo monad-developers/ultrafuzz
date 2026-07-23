@@ -229,6 +229,24 @@ test("eval analyze all generates reports from finalized handoff data", async () 
   const scores = fs.readFileSync(path.join(output, "row_scores.csv"), "utf8");
   assert.match(scores, /d1,Ultrafuzz,true,valid,,2,1,1,0,2/u);
   assert.match(scores, /n1,no-fuzz,true,valid,,2,1,0,1,2/u);
+  const rowTable = fs.readFileSync(path.join(output, "row_results_table.md"), "utf8");
+  for (const section of [
+    "## Row quality",
+    "## Finding disposition",
+    "## Compute and spend",
+    "## Condition quality",
+    "## Condition finding disposition",
+    "## Condition compute",
+    "## Paired score comparison",
+    "## Paired detection overlap"
+  ]) {
+    assert.match(rowTable, new RegExp(section, "u"), section);
+  }
+  const markdownTableWidths = rowTable
+    .split("\n")
+    .filter((line) => line.startsWith("|"))
+    .map((line) => (line.match(/(?<!\\)\|/gu)?.length ?? 1) - 1);
+  assert.equal(Math.max(...markdownTableWidths) <= 6, true, "Markdown tables should have at most six columns");
   assert.match(fs.readFileSync(path.join(output, "METHOD.md"), "utf8"), /Do not commit it/u);
   const manifest = JSON.parse(fs.readFileSync(path.join(output, "analysis_manifest.json"), "utf8")) as {
     artifacts: Array<{ path: string; sha256: string }>;
