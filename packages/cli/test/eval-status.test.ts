@@ -32,6 +32,7 @@ test("eval status renders disclosure-safe table and JSON snapshots without mutat
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
+      eval_run_id: evalRunId,
       row_id: "secret-target-private-variant",
       status: "launched",
       ultrafuzz_run_id: "synthetic-run",
@@ -172,6 +173,7 @@ test("eval status watch exits when remaining rows cannot progress", async () => 
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
+      eval_run_id: evalRunId,
       row_id: "secret-invalid-row",
       status: "launched",
       ultrafuzz_run_id: "synthetic-invalid-run",

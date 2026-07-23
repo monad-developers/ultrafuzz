@@ -99,7 +99,7 @@ export function readEvalStatus(input: ReadEvalStatusInput): EvalStatusSnapshot {
     throw new EvalError("EVAL_STATUS_ID_INVALID", "eval run ID is invalid");
   }
   const matrix = readMatrix(path.join(root, "matrix.json"));
-  const records = readRunRecords(path.join(root, "runs.jsonl"));
+  const records = readRunRecords(path.join(root, "runs.jsonl"), input.evalRunId);
   const labelWidth = Math.max(2, String(matrix.length).length);
   const idCounts = new Map<string, number>();
   for (const row of matrix) {
@@ -137,7 +137,7 @@ export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
     input.executedNodes >= 0 &&
     input.totalNodes >= 0 &&
     input.executedNodes <= input.totalNodes;
-  if (!countsValid || !Number.isFinite(input.snapshotAtMs)) {
+  if (!countsValid || !isTimestampMs(input.snapshotAtMs)) {
     return unavailableEta("timing-unavailable");
   }
   if (input.totalNodes === 0) {
@@ -155,8 +155,9 @@ export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
   if (
     input.startedAtMs === null ||
     input.checkpointAtMs === null ||
-    !Number.isFinite(input.startedAtMs) ||
-    !Number.isFinite(input.checkpointAtMs) ||
+    input.checkpointStale !== false ||
+    !isTimestampMs(input.startedAtMs) ||
+    !isTimestampMs(input.checkpointAtMs) ||
     input.checkpointAtMs <= input.startedAtMs ||
     input.checkpointAtMs > input.snapshotAtMs
   ) {
@@ -166,9 +167,13 @@ export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
   const elapsedSeconds = (input.checkpointAtMs - input.startedAtMs) / 1_000;
   const remainingNodes = input.totalNodes - input.executedNodes;
   const remainingSeconds = Math.ceil((remainingNodes * elapsedSeconds) / input.executedNodes);
+  const etaAtMs = input.snapshotAtMs + remainingSeconds * 1_000;
+  if (!Number.isSafeInteger(remainingSeconds) || !isTimestampMs(etaAtMs)) {
+    return unavailableEta("timing-unavailable");
+  }
   return {
     eta_remaining_seconds: remainingSeconds,
-    eta_at: new Date(input.snapshotAtMs + remainingSeconds * 1_000).toISOString(),
+    eta_at: new Date(etaAtMs).toISOString(),
     eta_basis: EVAL_STATUS_ETA_BASIS,
     eta_unavailable_reason: null
   };
@@ -217,7 +222,7 @@ function readMatrix(matrixPath: string): MatrixRow[] {
   });
 }
 
-function readRunRecords(recordsPath: string): RunRecords {
+function readRunRecords(recordsPath: string, expectedEvalRunId: string): RunRecords {
   if (!fs.existsSync(recordsPath)) {
     return { latestByRowId: new Map(), malformed: false };
   }
@@ -233,7 +238,12 @@ function readRunRecords(recordsPath: string): RunRecords {
     if (line.trim().length === 0) continue;
     try {
       const record: unknown = JSON.parse(line);
-      if (!isRecord(record) || typeof record.row_id !== "string" || record.row_id.length === 0) {
+      if (
+        !isRecord(record) ||
+        record.eval_run_id !== expectedEvalRunId ||
+        typeof record.row_id !== "string" ||
+        record.row_id.length === 0
+      ) {
         malformed = true;
         continue;
       }
@@ -261,7 +271,8 @@ function statusForRecord(input: {
     typeof input.record.ultrafuzz_run_id !== "string" ||
     input.record.ultrafuzz_run_id.length === 0 ||
     typeof input.record.ultrafuzz_run_root !== "string" ||
-    input.record.ultrafuzz_run_root.length === 0
+    input.record.ultrafuzz_run_root.length === 0 ||
+    !path.isAbsolute(input.record.ultrafuzz_run_root)
   ) {
     return unavailableRow(input.row, "invalid", false);
   }
@@ -330,7 +341,7 @@ function statusForRecord(input: {
 
 function terminalEta(input: Pick<CalculateEvalEtaInput, "checkpointAtMs" | "snapshotAtMs">): EvalEta {
   const etaAt =
-    input.checkpointAtMs !== null && Number.isFinite(input.checkpointAtMs) && input.checkpointAtMs <= input.snapshotAtMs
+    input.checkpointAtMs !== null && isTimestampMs(input.checkpointAtMs) && input.checkpointAtMs <= input.snapshotAtMs
       ? input.checkpointAtMs
       : input.snapshotAtMs;
   return {
@@ -404,6 +415,10 @@ function timestamp(value: unknown): number | null {
   if (typeof value !== "string" || value.length === 0) return null;
   const milliseconds = Date.parse(value);
   return Number.isFinite(milliseconds) ? milliseconds : null;
+}
+
+function isTimestampMs(value: number): boolean {
+  return Number.isFinite(value) && Number.isFinite(new Date(value).getTime());
 }
 
 function latestTimestamp(values: unknown[]): number | null {

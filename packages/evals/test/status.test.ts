@@ -16,6 +16,7 @@ import {
 const START = "2026-01-02T15:00:00.000Z";
 const CHECKPOINT = "2026-01-02T15:01:40.000Z";
 const SNAPSHOT = new Date("2026-01-02T15:01:52.000Z");
+const EVAL_RUN_ID = "synthetic-status";
 
 describe("eval status", () => {
   it("reports every private matrix row with opaque labels and terminal node progress", () => {
@@ -165,7 +166,7 @@ describe("eval status", () => {
     fs.writeFileSync(
       path.join(fixture.root, "runs.jsonl"),
       [
-        { row_id: "launch-failed", status: "failed" },
+        { eval_run_id: EVAL_RUN_ID, row_id: "launch-failed", status: "failed" },
         record("inaccessible", "run-inaccessible", inaccessibleRoot),
         record("invalid-state", "run-invalid", invalidRoot),
         record("zero-progress", "run-zero", zeroRoot),
@@ -235,6 +236,36 @@ describe("eval status", () => {
     expect(snapshot.rows).toEqual([expect.objectContaining({ row: "row-01", status: "invalid", terminal: false })]);
     expect(JSON.stringify(snapshot)).not.toContain("row-secret");
   });
+
+  it("rejects cross-run records and relative durable run roots", () => {
+    const fixture = evalFixture([privateRow("foreign-row"), privateRow("relative-root")]);
+    fs.writeFileSync(
+      path.join(fixture.root, "runs.jsonl"),
+      [
+        {
+          ...record("foreign-row", "foreign-run", path.join(fixture.base, "foreign-run")),
+          eval_run_id: "another-eval"
+        },
+        record("relative-root", "relative-run", "relative-run-root")
+      ]
+        .map((value) => JSON.stringify(value))
+        .join("\n") + "\n",
+      "utf8"
+    );
+
+    const snapshot = readEvalStatus({
+      projectRoot: fixture.project,
+      evalRunId: fixture.evalRunId,
+      now: SNAPSHOT
+    });
+
+    expect(snapshot.rows).toEqual([
+      expect.objectContaining({ row: "row-01", status: "invalid", terminal: false }),
+      expect.objectContaining({ row: "row-02", status: "invalid", terminal: false })
+    ]);
+    expect(JSON.stringify(snapshot)).not.toContain("foreign-row");
+    expect(JSON.stringify(snapshot)).not.toContain("relative-root");
+  });
 });
 
 describe("calculateEvalEta", () => {
@@ -302,6 +333,26 @@ describe("calculateEvalEta", () => {
       eta_unavailable_reason: null
     });
   });
+
+  it("returns a typed unavailable estimate when the projected ETA is outside the timestamp range", () => {
+    const nearLatestTimestamp = 8.64e15 - 1_000;
+    expect(
+      calculateEvalEta({
+        executedNodes: 1,
+        totalNodes: 2,
+        terminal: false,
+        startedAtMs: 0,
+        checkpointAtMs: nearLatestTimestamp,
+        snapshotAtMs: nearLatestTimestamp,
+        checkpointStale: false
+      })
+    ).toEqual({
+      eta_remaining_seconds: null,
+      eta_at: null,
+      eta_basis: null,
+      eta_unavailable_reason: "timing-unavailable"
+    });
+  });
 });
 
 function evalFixture(matrix: unknown[]): {
@@ -313,7 +364,7 @@ function evalFixture(matrix: unknown[]): {
 } {
   const base = mkdtempSync(path.join(tmpdir(), "ufz-eval-status-"));
   const project = path.join(base, "project");
-  const evalRunId = "synthetic-status";
+  const evalRunId = EVAL_RUN_ID;
   const root = path.join(project, ".ultrafuzz", "evals", "runs", evalRunId);
   const matrixPath = path.join(root, "matrix.json");
   fs.mkdirSync(root, { recursive: true });
@@ -336,8 +387,9 @@ function privateRow(id: string): unknown {
   };
 }
 
-function record(rowId: string, runId: string, runRoot: string): unknown {
+function record(rowId: string, runId: string, runRoot: string): Record<string, unknown> {
   return {
+    eval_run_id: EVAL_RUN_ID,
     row_id: rowId,
     status: "launched",
     ultrafuzz_run_id: runId,
