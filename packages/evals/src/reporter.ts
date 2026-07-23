@@ -1,7 +1,7 @@
 import type { ArtifactManifestEntry } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
-import type { EvalMatrixRow, EvalPlanValue, EvalRowScore, EvalScoreSummary } from "./types.js";
+import type { EvalMatrixRow, EvalPlanValue, EvalRecoveryEquivalence, EvalRowScore, EvalScoreSummary } from "./types.js";
 import { isRecord, warningDiagnostic } from "./utils.js";
 
 /** The plan handed to reporters is the local plan value — providers never shape it. */
@@ -20,6 +20,7 @@ export interface EvalRowResult {
   graphFingerprint?: string;
   configFingerprint?: string;
   executionArtifactId?: string;
+  recoveryEquivalence?: EvalRecoveryEquivalence;
   diagnostics?: RuntimeDiagnostic[];
 }
 

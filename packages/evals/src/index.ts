@@ -8,6 +8,7 @@ export * from "./node-telemetry.js";
 export * from "./lineage.js";
 export * from "./publish.js";
 export * from "./public-diagnostics.js";
+export * from "./recovery-equivalence.js";
 export * from "./reporter.js";
 export * from "./reporters/index.js";
 export * from "./runner.js";

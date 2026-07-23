@@ -378,6 +378,12 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     if (!input.matchedGroundTruthByRow.has(row.id)) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} is missing scoring evidence`);
     }
+    if (score.recovery_equivalence?.classification !== "clean") {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `eval row ${row.id} is not a clean recovery-equivalent observation`
+      );
+    }
   }
 
   const groups = new Map<string, EvalMatrixRow[]>();

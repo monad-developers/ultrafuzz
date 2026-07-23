@@ -13,6 +13,7 @@ import {
   DEFAULT_EVAL_POLL_INTERVAL_MS,
   DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS
 } from "./lineage.js";
+import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
 import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
@@ -468,6 +469,10 @@ export async function watchEvalRow(
       }
     : undefined;
   if (timeoutDiagnostic !== undefined) diagnostics.push(timeoutDiagnostic);
+  const recoveryEquivalence = classifyRecoveryEquivalence({
+    runRoot,
+    policy: input.plan.suite.recovery_equivalence
+  });
   const result: EvalRowResult = {
     status: watchTimedOut ? "timed-out" : rowStatus(state),
     ...(input.record.ultrafuzz_run_id !== undefined ? { runId: input.record.ultrafuzz_run_id } : {}),
@@ -479,6 +484,7 @@ export async function watchEvalRow(
     ...(input.record.execution_artifact_id !== undefined
       ? { executionArtifactId: input.record.execution_artifact_id }
       : {}),
+    recoveryEquivalence,
     diagnostics
   };
   for (const reporter of input.reporters) {
@@ -488,6 +494,7 @@ export async function watchEvalRow(
     ...input.record,
     final_status: result.status,
     workflow: evalWorkflowLifecycle(state),
+    recovery_equivalence: recoveryEquivalence,
     ...(timeoutDiagnostic === undefined ? {} : { diagnostics: [...input.record.diagnostics, timeoutDiagnostic] })
   };
   appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);

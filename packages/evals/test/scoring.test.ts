@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
-import { testRow, testSuite, writeRunFixture } from "./helpers.js";
+import { cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -169,6 +169,53 @@ function scoreRunFixture(): {
 }
 
 describe("deterministic scorer math", () => {
+  it.each([
+    ["include", 1, 0, 0],
+    ["exclude", 0, 1, 0],
+    ["separate", 0, 1, 1]
+  ] as const)(
+    "%s mode exposes non-comparable rows without silently dropping them",
+    async (mode, included, excluded, separateRows) => {
+      const fixture = scoreRunFixture();
+      const manifestPath = path.join(fixture.evalRunRoot, "eval.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+        suite: ReturnType<typeof testSuite>;
+      };
+      manifest.suite.recovery_equivalence = {
+        max_repeated_model_executions: 0,
+        aggregate_non_comparable: mode,
+        publication: "comparable"
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+      const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+      const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown>;
+      fs.writeFileSync(
+        runsPath,
+        `${JSON.stringify({
+          ...record,
+          recovery_equivalence: cleanRecoveryEquivalence({
+            classification: "non-comparable",
+            reason: "generated untraceable recovery"
+          })
+        })}\n`,
+        "utf8"
+      );
+
+      const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+      expect(summary.recovery_equivalence).toMatchObject({
+        aggregate_non_comparable: mode,
+        included_row_count: included,
+        excluded_row_count: excluded,
+        classification_counts: { "non-comparable": 1 }
+      });
+      expect(summary.variants.reduce((total, variant) => total + variant.row_count, 0)).toBe(included);
+      expect(
+        summary.recovery_equivalence.non_comparable_variants.reduce((total, variant) => total + variant.row_count, 0)
+      ).toBe(separateRows);
+    }
+  );
+
   it("computes exact precision/recall/f1 for known inputs", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);

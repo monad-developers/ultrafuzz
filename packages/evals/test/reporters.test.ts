@@ -12,7 +12,7 @@ import {
 } from "../src/reporters/index.js";
 import { EvalError } from "../src/utils.js";
 import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
-import { testReportingPolicy, testRow, testSuite } from "./helpers.js";
+import { recoveryEquivalenceSummary, testReportingPolicy, testRow, testSuite } from "./helpers.js";
 
 interface RecordedRequest {
   url: string;
@@ -292,6 +292,7 @@ describe("BraintrustReporter", () => {
       scores_path: "scores.jsonl",
       summary_path: "summary.json",
       review_queue_path: "review.jsonl",
+      recovery_equivalence: recoveryEquivalenceSummary(),
       provenance: {
         availability: "available",
         ...provenance,

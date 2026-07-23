@@ -6,6 +6,7 @@ import type { EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { NodeTelemetryPump, createTelemetryCursor } from "./node-telemetry.js";
+import { recoveryEquivalenceIsPublishable, withRecordedRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalRowResult } from "./reporter.js";
 import { EVAL_PROVIDER_NONE, createEvalReporters, resolveEvalProvider } from "./reporters/index.js";
 import {
@@ -16,7 +17,7 @@ import {
   type EvalScoreSummary,
   type EvalSuiteSpec
 } from "./types.js";
-import { EvalError, evalRunRoot, jsonFile, readJsonLines, resolveTerminalReportPath } from "./utils.js";
+import { EvalError, appendJsonLine, evalRunRoot, jsonFile, readJsonLines, resolveTerminalReportPath } from "./utils.js";
 
 export interface PublishEvalRunInput {
   projectRoot: string;
@@ -67,7 +68,16 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
   const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
-  assertPublishableTerminalReports(root, matrix, recordsByRow);
+  for (const row of matrix) {
+    const record = recordsByRow.get(row.id);
+    if (record === undefined) continue;
+    const recorded = withRecordedRecoveryEquivalence(record, suite);
+    recordsByRow.set(row.id, recorded);
+    if (record.recovery_equivalence === undefined) {
+      appendJsonLine(path.join(root, "runs.jsonl"), recorded);
+    }
+  }
+  assertPublishableTerminalReports(root, matrix, recordsByRow, suite);
 
   const resolved = resolveEvalProvider({
     ...(input.provider !== undefined ? { cliProvider: input.provider } : {}),
@@ -169,7 +179,8 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
 function assertPublishableTerminalReports(
   evalRunRoot: string,
   matrix: EvalMatrixRow[],
-  recordsByRow: Map<string, EvalRunRecord>
+  recordsByRow: Map<string, EvalRunRecord>,
+  suite: EvalSuiteSpec
 ): void {
   const diagnostics: Array<{
     code: string;
@@ -207,6 +218,20 @@ function assertPublishableTerminalReports(
                 ? "terminal report file is missing"
                 : "terminal report does not satisfy ultrafuzz/report@1",
         ...(reportResolution.relativePath === undefined ? {} : { report_path: reportResolution.relativePath })
+      });
+    }
+    const recoveryEquivalence = record?.recovery_equivalence;
+    if (
+      recoveryEquivalence === undefined ||
+      !recoveryEquivalenceIsPublishable(recoveryEquivalence, suite.recovery_equivalence)
+    ) {
+      diagnostics.push({
+        code: "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE",
+        row_id: row.id,
+        contract: "ultrafuzz/report@1",
+        reason:
+          recoveryEquivalence?.reason ??
+          `recovery classification ${recoveryEquivalence?.classification ?? "unavailable"} is not allowed by the suite publication policy`
       });
     }
   }
@@ -255,7 +280,8 @@ function rowResult(record: EvalRunRecord, runRoot: string): EvalRowResult {
     ...(state?.finished_at !== undefined ? { finishedAt: state.finished_at } : {}),
     ...(record.graph_fingerprint !== undefined ? { graphFingerprint: record.graph_fingerprint } : {}),
     ...(record.config_fingerprint !== undefined ? { configFingerprint: record.config_fingerprint } : {}),
-    ...(record.execution_artifact_id !== undefined ? { executionArtifactId: record.execution_artifact_id } : {})
+    ...(record.execution_artifact_id !== undefined ? { executionArtifactId: record.execution_artifact_id } : {}),
+    ...(record.recovery_equivalence === undefined ? {} : { recoveryEquivalence: record.recovery_equivalence })
   };
 }
 
