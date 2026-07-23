@@ -4,7 +4,12 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { locateModalResumeWorkspace, modalDurableResumeCommand, repairModalEvalRunRecord } from "../src/resume.js";
+import {
+  locateModalResumeWorkspace,
+  modalDurableResumeCommand,
+  NonResumableTerminalRunError,
+  repairModalEvalRunRecord
+} from "../src/resume.js";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
@@ -109,13 +114,13 @@ describe("Modal durable evaluation resume", () => {
   it("fails closed for operational terminal states and unrelated runs", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    await expect(
-      repairModalEvalRunRecord(
-        workspace,
-        { run_id: "durable-run-one", status: "failed" },
-        { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
-      )
-    ).rejects.toThrow("refusing to finalize");
+    const rejected = repairModalEvalRunRecord(
+      workspace,
+      { run_id: "durable-run-one", status: "failed" },
+      { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
+    );
+    await expect(rejected).rejects.toBeInstanceOf(NonResumableTerminalRunError);
+    await expect(rejected).rejects.toMatchObject({ code: "TERMINAL_RUN_NON_RESUMABLE" });
     await expect(
       repairModalEvalRunRecord(workspace, { run_id: "unrelated-run", status: "succeeded" }, undefined)
     ).rejects.toThrow("unrelated run");

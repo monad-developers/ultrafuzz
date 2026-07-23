@@ -18,6 +18,7 @@ import {
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
   modalEvalRunCommand,
+  NonResumableTerminalRunError,
   repairModalEvalRunRecord,
   type ModalResumeRunState,
   type ModalResumeWorkspace
@@ -84,7 +85,11 @@ async function main(): Promise<void> {
     snapshot: () => (target === undefined ? Promise.resolve(emptyWorkerCheckpoint()) : readWorkerCheckpoint(target)),
     flush: flushVolume,
     diagnosticCodeForError: (error) =>
-      error instanceof CheckpointIncompatibleError ? "checkpoint-incompatible" : undefined,
+      error instanceof CheckpointIncompatibleError
+        ? "checkpoint-incompatible"
+        : error instanceof NonResumableTerminalRunError
+          ? "terminal-run-non-resumable"
+          : undefined,
     run: async () => {
       assertWorkerInputLineage({
         config: CONFIG,

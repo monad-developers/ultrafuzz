@@ -26,5 +26,8 @@
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*"
+  },
+  "devDependencies": {
+    "smithers-orchestrator": "0.28.0"
   }
 }

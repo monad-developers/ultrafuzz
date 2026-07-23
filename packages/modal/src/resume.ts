@@ -22,6 +22,19 @@ export interface ModalResumeRunState {
   nodes?: Record<string, { status?: string }>;
 }
 
+export class NonResumableTerminalRunError extends Error {
+  readonly code = "TERMINAL_RUN_NON_RESUMABLE";
+
+  constructor(status: string | undefined, disposition: TerminalDisposition | undefined) {
+    super(
+      `refusing to finalize non-resumable terminal run status ${status ?? "unknown"} with disposition ${
+        disposition?.kind ?? "unknown"
+      }`
+    );
+    this.name = "NonResumableTerminalRunError";
+  }
+}
+
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--json"];
 }
@@ -88,7 +101,7 @@ export async function repairModalEvalRunRecord(
 ): Promise<void> {
   const genuineTaskOutcome = state.status === "failed" && disposition?.kind === "genuine-task-failures";
   if (state.status !== "succeeded" && !genuineTaskOutcome) {
-    throw new Error(`refusing to finalize evaluation row from run status ${state.status ?? "unknown"}`);
+    throw new NonResumableTerminalRunError(state.status, disposition);
   }
   if (state.run_id !== workspace.productRunId) {
     throw new Error(`refusing to finalize evaluation row from unrelated run ${state.run_id}`);

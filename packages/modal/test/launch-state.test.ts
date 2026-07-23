@@ -463,6 +463,24 @@ describe("Modal runner status", () => {
       retryable: false,
       error_code: "public-eval-diagnostics-invalid"
     });
+    const nonResumable = parseModalWorkerStatus(
+      workerResult({
+        model_work_started: true,
+        exit_category: "sandbox-exited",
+        diagnostic_code: "terminal-run-non-resumable"
+      })
+    );
+    expect(nonResumable).toMatchObject({
+      category: "permanent-operational-failure",
+      model_work_started: true,
+      retryable: false,
+      error_code: "terminal-run-non-resumable"
+    });
+    expect(classifyModalRunnerStatus({ sandbox: "exited", attempt: 1, workerStatus: nonResumable })).toMatchObject({
+      category: "permanent-operational-failure",
+      action: "none",
+      retryable: false
+    });
     expect(
       parseModalWorkerStatus(
         workerResult({

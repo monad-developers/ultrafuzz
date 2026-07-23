@@ -15,6 +15,7 @@ import {
   normalizeFindings,
   normalizeSafeRelativePath,
   manifestDigest,
+  publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
   readEventQueryFacade,
@@ -236,6 +237,38 @@ test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink esc
   const outside = tempProject();
   fs.symlinkSync(outside, path.join(root, "link"));
   assert.throws(() => safeResolveInside(root, "link/file.txt"), /symlink/);
+});
+
+test("validated artifact publication is atomic, exclusive, durable, and idempotent", () => {
+  const root = tempProject();
+  const expected = "verified artifact\n";
+
+  const first = publishFileDurableExclusive(root, "nested/result.md", expected);
+  const replay = publishFileDurableExclusive(root, "nested/result.md", expected);
+
+  assert.equal(first.created, true);
+  assert.equal(replay.created, false);
+  assert.equal(replay.sha256, first.sha256);
+  assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+  assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(first.path)).filter((entry) => entry.includes(".publish-")),
+    []
+  );
+  assert.throws(
+    () => publishFileDurableExclusive(root, "nested/result.md", "different artifact\n"),
+    /different contents/u
+  );
+  assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+});
+
+test("validated artifact publication rejects symlinked canonical parents", () => {
+  const root = tempProject();
+  const outside = tempProject();
+  fs.symlinkSync(outside, path.join(root, "linked"), "dir");
+
+  assert.throws(() => publishFileDurableExclusive(root, "linked/result.md", "verified\n"), /symlink/u);
+  assert.equal(fs.existsSync(path.join(outside, "result.md")), false);
 });
 
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {

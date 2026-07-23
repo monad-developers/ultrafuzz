@@ -12,6 +12,10 @@ packages:
   - "packages/modal"
   - "packages/cli"
 allowBuilds:
+  "@parcel/watcher": false
+  "@smithers-orchestrator/jj-linux-arm64": false
   cbor-extract: true
   esbuild: true
+  koffi: false
+  msgpackr-extract: false
   protobufjs: true
