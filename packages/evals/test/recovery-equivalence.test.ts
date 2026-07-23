@@ -319,6 +319,22 @@ describe("recovery equivalence", () => {
     });
   });
 
+  it("fails closed when a controller identity reappears after another generation", () => {
+    const root = evidenceRoot({
+      controllers: ["local-controller-1"],
+      attempts: [
+        { nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "provider-controller-1" },
+        { nodeId: "model-b", strategyAttemptId: "model-b", controllerInvocationId: "provider-controller-2" },
+        { nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "provider-controller-1" }
+      ]
+    });
+
+    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
+      classification: "non-comparable",
+      reason: "controller recovery lineage cannot be reconciled"
+    });
+  });
+
   it("fails closed on contradictory graph kind and model fanout", () => {
     const root = evidenceRoot({
       controllers: ["controller-1"],

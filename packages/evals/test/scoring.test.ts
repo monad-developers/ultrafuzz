@@ -177,7 +177,9 @@ describe("deterministic scorer math", () => {
     const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
     fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
 
-    await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_RECOVERY_EQUIVALENCE_NOT_FINAL" });
 
     const records = fs
       .readFileSync(runsPath, "utf8")
@@ -864,6 +866,7 @@ describe("deterministic scorer math", () => {
     const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
     fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
     fs.writeFileSync(customReportPath, reportContents, "utf8");
+    fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ status: "succeeded", nodes: {} }), "utf8");
     fs.writeFileSync(
       path.join(runRoot, "graph.json"),
       JSON.stringify({

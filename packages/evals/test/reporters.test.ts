@@ -434,36 +434,6 @@ describe("BraintrustReporter", () => {
 });
 
 describe("LangSmithReporter", () => {
-  it("mirrors recovery equivalence into score updates", async () => {
-    const { requests, fetchImpl } = fakeFetch();
-    const suite = testSuite("/tmp/gt");
-    const row = testRow(suite);
-    const reporter = new LangSmithReporter({
-      apiKey: "secret",
-      project: "ultrafuzz-evals",
-      evalRunId: "eval-1",
-      policy: testReportingPolicy(),
-      fetchImpl
-    });
-    await reporter.onScores(
-      [
-        {
-          row_id: row.id,
-          precision: 1,
-          recall: 1,
-          f1_score: 1,
-          recovery_equivalence: cleanRecoveryEquivalence()
-        } as EvalScoreSummary["rows"][number]
-      ],
-      { eval_run_id: "eval-1" } as EvalScoreSummary
-    );
-
-    const scorePatch = requests.find((request) => request.method === "PATCH");
-    expect(scorePatch?.body).toMatchObject({
-      outputs: { recovery_equivalence: { classification: "clean" } }
-    });
-  });
-
   it("creates live runs on node-started and patches them on node-finished", async () => {
     const { requests, fetchImpl } = fakeFetch();
     const suite = testSuite("/tmp/gt");

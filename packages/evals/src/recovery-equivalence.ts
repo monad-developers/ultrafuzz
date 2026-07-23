@@ -517,9 +517,19 @@ function reconcileAttemptControllers(
   const observationIds = new Set(orderedObservations.map((observation) => observation.id));
   const aliasesByObservation = new Map<string, string>();
   const reconciled = new Map<string, string>();
+  const seenAttemptControllerIds = new Set<string>();
+  let previousAttemptControllerId: string | undefined;
   for (const entry of [...entries].sort((left, right) =>
     left.lifecycle.started_at.localeCompare(right.lifecycle.started_at)
   )) {
+    if (
+      entry.controller_invocation_id !== previousAttemptControllerId &&
+      seenAttemptControllerIds.has(entry.controller_invocation_id)
+    ) {
+      return undefined;
+    }
+    seenAttemptControllerIds.add(entry.controller_invocation_id);
+    previousAttemptControllerId = entry.controller_invocation_id;
     if (
       orderedObservations.some(
         (observation) =>

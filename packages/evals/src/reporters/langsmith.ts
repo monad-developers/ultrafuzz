@@ -217,7 +217,6 @@ export class LangSmithReporter implements EvalReporter {
   async onScores(scores: EvalRowScore[], summary: EvalSummary): Promise<void> {
     for (const score of scores) {
       const runId = this.rowRunId(score.row_id);
-      await this.patchRun(runId, { outputs: { recovery_equivalence: score.recovery_equivalence } });
       for (const metric of ["precision", "recall", "f1_score"] as const) {
         await this.request("POST", "/api/v1/feedback", {
           id: deterministicUuid([this.options.evalRunId, score.row_id, metric]),

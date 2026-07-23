@@ -139,6 +139,12 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     const record = recordsByRow.get(row.id);
     if (record === undefined) continue;
     const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
+    if (!canRecordRecoveryEquivalence) {
+      throw new EvalError(
+        "EVAL_RECOVERY_EQUIVALENCE_NOT_FINAL",
+        `eval row ${row.id} cannot be scored before its workflow is terminal`
+      );
+    }
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
     if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
