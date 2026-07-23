@@ -6,6 +6,7 @@ export * from "./launch-state.js";
 export * from "./public-bundle.js";
 export * from "./public-eval-diagnostics.js";
 export * from "./recovery-lifecycle.js";
+export * from "./recovery.js";
 export * from "./runner.js";
 export * from "./resume.js";
 export * from "./smoke-modal.js";
