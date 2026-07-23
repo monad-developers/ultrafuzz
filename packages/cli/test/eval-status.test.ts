@@ -208,6 +208,30 @@ test("eval status watch exits when remaining rows cannot progress", async () => 
   assert.equal(`${watch.stdout}\n${watch.stderr}`.includes("secret-invalid"), false);
 });
 
+test("eval status watch keeps JSON failures on one line", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-cli-eval-status-error-"));
+
+  const result = await invoke(project, [
+    "eval",
+    "status",
+    "synthetic-missing-eval",
+    "--project",
+    project,
+    "--watch",
+    "--json"
+  ]);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "");
+  const lines = result.stdout.trim().split("\n");
+  assert.equal(lines.length, 1);
+  const envelope = JSON.parse(lines[0] ?? "") as { command: string; ok: boolean; diagnostics: unknown[]; data: null };
+  assert.equal(envelope.command, "eval status");
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.data, null);
+  assert.equal(envelope.diagnostics.length, 1);
+});
+
 async function invoke(project: string, argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";

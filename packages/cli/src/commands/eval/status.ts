@@ -36,25 +36,21 @@ export default class EvalStatus extends Command {
           evalRunId: args.evalRunId
         });
         const result = statusResult(snapshot);
-        if (flags.watch === true && flags.json === true) {
-          cliIo().stdout.write(`${JSON.stringify(envelope("eval status", result))}\n`);
-        } else {
-          emitCommandResult(this, "eval status", result, flags.json === true);
-        }
+        emitStatusResult(this, result, flags.watch === true, flags.json === true);
         refresh = flags.watch === true && shouldRefresh(snapshot);
         if (refresh) {
           await wait(flags.interval * 1_000);
         }
       }
     } catch (error) {
-      emitCommandResult(
+      emitStatusResult(
         this,
-        "eval status",
         commandFailure(
           "eval status",
           error instanceof Error ? error.message : "eval status is unavailable",
           "EVAL_STATUS_FAILED"
         ),
+        flags.watch === true,
         flags.json === true
       );
     }
@@ -69,6 +65,15 @@ function statusResult(snapshot: EvalStatusSnapshot): CommandResult {
     text: renderEvalStatusTable(snapshot),
     diagnostics: []
   };
+}
+
+function emitStatusResult(command: Command, result: CommandResult, watch: boolean, json: boolean): void {
+  if (watch && json) {
+    if (!result.ok) process.exitCode = process.exitCode ?? 1;
+    cliIo().stdout.write(`${JSON.stringify(envelope("eval status", result))}\n`);
+    return;
+  }
+  emitCommandResult(command, "eval status", result, json);
 }
 
 function shouldRefresh(snapshot: EvalStatusSnapshot): boolean {
