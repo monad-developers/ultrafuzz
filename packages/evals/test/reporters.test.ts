@@ -12,7 +12,13 @@ import {
 } from "../src/reporters/index.js";
 import { EvalError } from "../src/utils.js";
 import type { EvalRunProvenance, EvalScoreSummary } from "../src/types.js";
-import { testReportingPolicy, testRow, testSuite } from "./helpers.js";
+import {
+  cleanRecoveryEquivalence,
+  recoveryEquivalenceSummary,
+  testReportingPolicy,
+  testRow,
+  testSuite
+} from "./helpers.js";
 
 interface RecordedRequest {
   url: string;
@@ -281,7 +287,8 @@ describe("BraintrustReporter", () => {
       status: "succeeded",
       graphFingerprint: "graph-generated",
       configFingerprint: "config-generated",
-      executionArtifactId: "image-generated"
+      executionArtifactId: "image-generated",
+      recoveryEquivalence: cleanRecoveryEquivalence()
     });
     const summary: EvalScoreSummary = {
       eval_run_id: "eval-lineage",
@@ -292,6 +299,7 @@ describe("BraintrustReporter", () => {
       scores_path: "scores.jsonl",
       summary_path: "summary.json",
       review_queue_path: "review.jsonl",
+      recovery_equivalence: recoveryEquivalenceSummary(),
       provenance: {
         availability: "available",
         ...provenance,
@@ -307,7 +315,19 @@ describe("BraintrustReporter", () => {
         }
       }
     };
-    await reporter.onScores([], summary);
+    const rowScore = {
+      row_id: row.id,
+      precision: 1,
+      recall: 1,
+      f1_score: 1,
+      full_match_rate: 1,
+      true_positives: 1,
+      false_positives: 0,
+      missed: 0,
+      human_review_queue_count: 0,
+      recovery_equivalence: cleanRecoveryEquivalence()
+    } as EvalScoreSummary["rows"][number];
+    await reporter.onScores([rowScore], summary);
 
     const inserts = requests.filter((request) => request.url.includes("/insert"));
     const events = inserts.flatMap(
@@ -323,6 +343,7 @@ describe("BraintrustReporter", () => {
       }
     });
     expect(events.find((event) => event.id === `row-${row.id}` && event.output !== undefined)).toMatchObject({
+      output: { recovery_equivalence: { classification: "clean" } },
       metadata: {
         graph_fingerprint: "graph-generated",
         config_fingerprint: "config-generated",
@@ -330,6 +351,7 @@ describe("BraintrustReporter", () => {
       }
     });
     expect(events.find((event) => event.id === "summary-eval-lineage")).toMatchObject({
+      output: { recovery_equivalence: { aggregate_non_comparable: "include" } },
       metadata: {
         scoring_revision: "scorer-generated",
         scoring_fingerprint: "scoring-generated",
@@ -339,6 +361,9 @@ describe("BraintrustReporter", () => {
         judge_panel_total: 4,
         judge_panel_quorum: 3
       }
+    });
+    expect(events.find((event) => event.id === `row-${row.id}` && event.scores !== undefined)).toMatchObject({
+      output: { recovery_equivalence: { classification: "clean" } }
     });
   });
 
@@ -517,7 +542,8 @@ describe("LangSmithReporter", () => {
     await reporter.onRowFinish(row, {
       status: "succeeded",
       startedAt: "2026-07-01T00:00:00.000Z",
-      finishedAt: "2026-07-01T01:00:00.000Z"
+      finishedAt: "2026-07-01T01:00:00.000Z",
+      recoveryEquivalence: cleanRecoveryEquivalence()
     });
 
     const patches = requests.filter((request) => request.method === "PATCH");
@@ -529,6 +555,9 @@ describe("LangSmithReporter", () => {
         end_time: "2026-07-01T01:00:00.000Z"
       });
     }
+    expect(patches[patches.length - 1]?.body).toMatchObject({
+      outputs: { recovery_equivalence: { classification: "clean" } }
+    });
   });
 
   it("leaves start_time untouched on row finish when result.startedAt is absent", async () => {

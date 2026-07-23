@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { gatewayLlmJudge, loadGroundTruth, scoreEvalRun, scoreFindingsAgainstGroundTruth } from "../src/scoring.js";
 import { EVAL_RUN_SCHEMA_VERSION, type GroundTruthBug } from "../src/types.js";
-import { testRow, testSuite, writeRunFixture } from "./helpers.js";
+import { cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 const BUGS: GroundTruthBug[] = [
   {
@@ -169,6 +169,74 @@ function scoreRunFixture(): {
 }
 
 describe("deterministic scorer math", () => {
+  it("does not persist a recovery snapshot while the workflow is running", async () => {
+    const fixture = scoreRunFixture();
+    const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as { ultrafuzz_run_root: string };
+    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
+
+    await expect(
+      scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId })
+    ).rejects.toMatchObject({ code: "EVAL_RECOVERY_EQUIVALENCE_NOT_FINAL" });
+
+    const records = fs
+      .readFileSync(runsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { recovery_equivalence?: unknown });
+    expect(records).toHaveLength(1);
+    expect(records[0]).not.toHaveProperty("recovery_equivalence");
+  });
+
+  it.each([
+    ["include", 1, 0, 0],
+    ["exclude", 0, 1, 0],
+    ["separate", 0, 1, 1]
+  ] as const)(
+    "%s mode exposes non-comparable rows without silently dropping them",
+    async (mode, included, excluded, separateRows) => {
+      const fixture = scoreRunFixture();
+      const manifestPath = path.join(fixture.evalRunRoot, "eval.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+        suite: ReturnType<typeof testSuite>;
+      };
+      manifest.suite.recovery_equivalence = {
+        max_repeated_model_executions: 0,
+        aggregate_non_comparable: mode,
+        publication: "comparable"
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+      const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+      const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown>;
+      fs.writeFileSync(
+        runsPath,
+        `${JSON.stringify({
+          ...record,
+          recovery_equivalence: cleanRecoveryEquivalence({
+            classification: "non-comparable",
+            reason: "generated untraceable recovery"
+          })
+        })}\n`,
+        "utf8"
+      );
+
+      const summary = await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+      expect(summary.recovery_equivalence).toMatchObject({
+        aggregate_non_comparable: mode,
+        included_row_count: included,
+        excluded_row_count: excluded,
+        classification_counts: { "non-comparable": 1 }
+      });
+      expect(summary.variants.reduce((total, variant) => total + variant.row_count, 0)).toBe(included);
+      expect(
+        summary.recovery_equivalence.non_comparable_variants.reduce((total, variant) => total + variant.row_count, 0)
+      ).toBe(separateRows);
+    }
+  );
+
   it("computes exact precision/recall/f1 for known inputs", async () => {
     const suite = testSuite("/tmp/gt");
     const row = testRow(suite);
@@ -798,6 +866,7 @@ describe("deterministic scorer math", () => {
     const customReportPath = path.join(runRoot, "artifacts", "terminal", "custom-report.json");
     fs.mkdirSync(path.dirname(customReportPath), { recursive: true });
     fs.writeFileSync(customReportPath, reportContents, "utf8");
+    fs.writeFileSync(path.join(runRoot, "state.json"), JSON.stringify({ status: "succeeded", nodes: {} }), "utf8");
     fs.writeFileSync(
       path.join(runRoot, "graph.json"),
       JSON.stringify({

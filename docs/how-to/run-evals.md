@@ -28,6 +28,21 @@ provider = "none" # keep the local loop offline; switch when publishing
 Ground truth must live outside the repository; suite targets reference
 ground-truth files relative to `ground_truth_root`.
 
+Declare the suite's recovery exposure alongside its metric policy:
+
+```yaml
+recovery_equivalence:
+  max_repeated_model_executions: 1
+  aggregate_non_comparable: separate
+  publication: comparable
+```
+
+Use a zero repeat budget with `publication: clean` for lanes whose observations
+must never include post-model recovery. `summary.md` reports the resulting
+classification and recovery totals for every row; `separate` keeps
+non-comparable rows out of the primary aggregates while showing their metrics
+in a dedicated table.
+
 ## Plan The Matrix
 
 ```bash
@@ -155,7 +170,7 @@ ultrafuzz eval history <eval-run-id> \
 ```
 
 Use `--benchmark evmbench` and `--lane full` for the full cohort. Publication
-refuses missing rows, failed or non-terminal workflows,
+refuses missing rows, failed or non-terminal workflows, non-clean recovery classifications,
 invalid reports, a matrix that differs from the exact public target/variant/trial
 scope, incomplete or inconsistent lineage, unpinned targets, and missing scoring
 evidence before modifying history. Repeating the same immutable eval result is

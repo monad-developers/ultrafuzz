@@ -7,7 +7,8 @@ import {
   ANALYSIS_BUNDLE_MANIFEST_FILE,
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
   createInitialRunState,
-  validateAnalysisBundle
+  validateAnalysisBundle,
+  type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { describe, expect, it } from "vitest";
 
@@ -117,8 +118,18 @@ describe("privacy-safe eval analysis bundles", () => {
 
     const firstOutput = path.join(projectRoot, "bundle-one");
     const secondOutput = path.join(projectRoot, "bundle-two");
-    const first = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: firstOutput });
-    const second = collectEvalAnalysisBundle({ projectRoot, evalRunId, outputDir: secondOutput });
+    const first = collectEvalAnalysisBundle({
+      projectRoot,
+      evalRunId,
+      outputDir: firstOutput,
+      recoverySummary: syntheticRecoverySummary()
+    });
+    const second = collectEvalAnalysisBundle({
+      projectRoot,
+      evalRunId,
+      outputDir: secondOutput,
+      recoverySummary: syntheticRecoverySummary()
+    });
 
     expect(first.manifest).toEqual(second.manifest);
     expect(first.omissions.omissions).toEqual([]);
@@ -143,6 +154,15 @@ describe("privacy-safe eval analysis bundles", () => {
       total_tokens: 312,
       estimated_spend_usd: 0.03,
       partial_pricing: false
+    });
+    const recovery = JSON.parse(fs.readFileSync(path.join(firstOutput, "data", "recovery-summary.json"), "utf8"));
+    expect(recovery).toMatchObject({
+      total_generations: 2,
+      progress_generations: 1,
+      no_progress_generations: 1,
+      model_work_generations: 1,
+      rotations: 1,
+      resumptions: 1
     });
 
     const bundleText = fs
@@ -179,7 +199,8 @@ describe("privacy-safe eval analysis bundles", () => {
 
     expect(result.omissions.omissions).toEqual([
       { kind: "accounting-summary", path: "data/accounting-summary.json", reason: "not-terminal" },
-      { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "not-terminal" }
+      { kind: "evaluation-metrics", path: "data/evaluation-metrics.json", reason: "not-terminal" },
+      { kind: "recovery-summary", path: "data/recovery-summary.json", reason: "source-missing" }
     ]);
     const terminal = JSON.parse(fs.readFileSync(path.join(output, "data", "terminal-status.json"), "utf8"));
     expect(terminal).toMatchObject({ terminal: false, status: "unknown", status_counts: { unknown: 1 } });
@@ -220,6 +241,7 @@ describe("privacy-safe eval analysis bundles", () => {
 
     expect(result.omissions.omissions).toEqual([
       { kind: "attempt-history", path: "data/attempt-history.json", reason: "source-missing" },
+      { kind: "recovery-summary", path: "data/recovery-summary.json", reason: "source-missing" },
       { kind: "terminal-status", path: "data/terminal-status.json", reason: "source-missing" }
     ]);
     expect(accounting).toMatchObject({
@@ -234,3 +256,54 @@ describe("privacy-safe eval analysis bundles", () => {
     expect(() => validateAnalysisBundle(output)).not.toThrow();
   });
 });
+
+function syntheticRecoverySummary(): AnalysisRecoverySummary {
+  return {
+    schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
+    total_generations: 2,
+    terminal_generations: 2,
+    active_generations: 0,
+    progress_generations: 1,
+    no_progress_generations: 1,
+    unknown_progress_generations: 0,
+    model_work_generations: 1,
+    no_model_work_generations: 1,
+    unknown_model_work_generations: 0,
+    genuine_failures: 0,
+    rotations: 1,
+    resumptions: 1,
+    start_reasons: {
+      initial: 1,
+      "pre-model-retry": 0,
+      "post-model-resume": 1,
+      "image-rollout": 0,
+      "stale-probe-rotation": 0,
+      "operator-restart": 0,
+      unknown: 0
+    },
+    terminal_reasons: {
+      active: 0,
+      succeeded: 1,
+      "genuine-worker-failure": 0,
+      "operational-failure": 0,
+      "image-rollout": 0,
+      "stale-probe-rotation": 1,
+      "operator-request": 0,
+      timeout: 0,
+      "resource-termination": 0,
+      "recovery-budget-exhausted": 0,
+      unknown: 0
+    },
+    terminal_classes: {
+      active: 0,
+      succeeded: 1,
+      "genuine-worker-failure": 0,
+      "operational-failure": 0,
+      "controller-rotation": 1,
+      timeout: 0,
+      "resource-termination": 0,
+      "recovery-budget-exhausted": 0,
+      unknown: 0
+    }
+  };
+}

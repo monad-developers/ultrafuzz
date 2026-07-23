@@ -37,6 +37,11 @@ metrics:
   primary: [precision, recall, f1_score]
   recall_threshold: 0.7
 
+recovery_equivalence:
+  max_repeated_model_executions: 1
+  aggregate_non_comparable: separate
+  publication: comparable
+
 reporting: # policy only — provider selection/credentials live in ultrafuzz.toml
   node_telemetry: true
   heartbeat_interval_seconds: 60

@@ -16,12 +16,24 @@ import {
   type ModalLaunchMode,
   type ModalModelSpec
 } from "./defaults.js";
+import {
+  finishModalRecoveryLifecycle,
+  modalRecoveryLifecycleRecordSchema,
+  parseModalRecoveryLifecycleRecord,
+  parseModalRecoveryLifecycleRecords,
+  startModalRecoveryLifecycle,
+  type FinishModalRecoveryLifecycleInput,
+  type ModalRecoveryLifecycleRecord,
+  type ModalRecoveryStartReason,
+  type ModalRecoveryTerminalReason
+} from "./recovery-lifecycle.js";
 import { OPERATIONAL_DISPOSITION_CATEGORIES } from "./terminal-disposition.js";
 import { WORKER_DIAGNOSTIC_CODES, WORKER_RESULT_SCHEMA_VERSION, type WorkerResultContract } from "./worker-result.js";
 
 const fingerprintSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.string().min(1);
 const LEGACY_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v1" as const;
+const PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v2" as const;
 const modelSchema = z
   .object({
     slug: z.string().min(1),
@@ -81,6 +93,7 @@ export interface ModalLaunchState {
   logical_run_id: string;
   generation: number;
   generation_mode: ModalLaunchMode;
+  generation_start_reason: ModalRecoveryStartReason;
   app: string;
   image: string;
   image_id: string;
@@ -89,6 +102,7 @@ export interface ModalLaunchState {
   fingerprints: ModalLineageFingerprints;
   launches: ModalLaunchRecord[];
   attempt_history: ModalAttemptProvenance[];
+  recovery_lifecycle: ModalRecoveryLifecycleRecord[];
 }
 
 export interface ModalWorkerLineage {
@@ -117,6 +131,7 @@ export interface ModalWorkerStatus {
   schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION | typeof WORKER_RESULT_SCHEMA_VERSION;
   updated_at?: string;
   stage: string;
+  terminal: boolean;
   category: ModalWorkerStatusCategory;
   model_work_started: boolean;
   retryable: boolean;
@@ -181,9 +196,9 @@ const launchRecordSchema = modelSchema
     }
   });
 
-const launchStateSchema = z
+const previousLaunchStateSchema = z
   .object({
-    schema_version: z.literal(MODAL_LAUNCH_STATE_SCHEMA_VERSION),
+    schema_version: z.literal(PREVIOUS_MODAL_LAUNCH_STATE_SCHEMA_VERSION),
     logical_run_id: z.string().min(1),
     generation: z.number().int().positive(),
     generation_mode: z.enum(["resume", "fresh"]),
@@ -213,6 +228,97 @@ const launchStateSchema = z
       const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
       if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
       attempts.add(key);
+    }
+  });
+
+const launchStateSchema = z
+  .object({
+    schema_version: z.literal(MODAL_LAUNCH_STATE_SCHEMA_VERSION),
+    logical_run_id: z.string().min(1),
+    generation: z.number().int().positive(),
+    generation_mode: z.enum(["resume", "fresh"]),
+    generation_start_reason: z.enum([
+      "initial",
+      "pre-model-retry",
+      "post-model-resume",
+      "image-rollout",
+      "stale-probe-rotation",
+      "operator-restart",
+      "unknown"
+    ]),
+    app: z.string().min(1),
+    image: z.string().min(1),
+    image_id: z.string().min(1),
+    timeout_ms: z.number().int().positive(),
+    source_revision: z.string().min(1),
+    fingerprints: lineageFingerprintsSchema,
+    launches: z.array(launchRecordSchema),
+    attempt_history: z.array(attemptProvenanceSchema),
+    recovery_lifecycle: z.array(modalRecoveryLifecycleRecordSchema)
+  })
+  .strict()
+  .superRefine((state, context) => {
+    const slugs = new Set<string>();
+    for (const launch of state.launches) {
+      if (launch.generation !== state.generation) {
+        context.addIssue({ code: "custom", message: `launch ${launch.slug} has the wrong generation` });
+      }
+      if (slugs.has(launch.slug)) {
+        context.addIssue({ code: "custom", message: `duplicate launch slug: ${launch.slug}` });
+      }
+      slugs.add(launch.slug);
+    }
+    const attempts = new Set<string>();
+    const attemptIds = new Set<string>();
+    for (const attempt of [...state.attempt_history, ...state.launches]) {
+      const key = `${attempt.generation}:${attempt.slug}:${attempt.attempt}`;
+      if (attempts.has(key)) context.addIssue({ code: "custom", message: `duplicate launch attempt: ${key}` });
+      attempts.add(key);
+      attemptIds.add(attempt.attempt_id);
+      const lifecycle = state.recovery_lifecycle.find((record) => record.attempt_id === attempt.attempt_id);
+      const expectedFingerprints = "fingerprints" in attempt ? attempt.fingerprints : state.fingerprints;
+      if (lifecycle === undefined) {
+        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} is missing lifecycle` });
+      } else if (
+        lifecycle.logical_run_id !== state.logical_run_id ||
+        lifecycle.model_slug !== attempt.slug ||
+        lifecycle.generation !== attempt.generation ||
+        lifecycle.attempt !== attempt.attempt ||
+        lifecycle.fingerprints.config !== expectedFingerprints.config ||
+        lifecycle.fingerprints.source !== expectedFingerprints.source ||
+        lifecycle.fingerprints.image !== expectedFingerprints.image ||
+        lifecycle.fingerprints.model !== attempt.model_fingerprint
+      ) {
+        context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} has mismatched lifecycle` });
+      }
+    }
+    try {
+      const recoveryRecords = parseModalRecoveryLifecycleRecords(state.recovery_lifecycle);
+      const activeModels = new Set<string>();
+      for (const record of recoveryRecords) {
+        if (record.logical_run_id !== state.logical_run_id || !attemptIds.has(record.attempt_id)) {
+          context.addIssue({
+            code: "custom",
+            path: ["recovery_lifecycle"],
+            message: `orphaned recovery lifecycle ${record.attempt_id}`
+          });
+        }
+        if (record.terminal_reason !== "active") continue;
+        if (activeModels.has(record.model_slug)) {
+          context.addIssue({
+            code: "custom",
+            path: ["recovery_lifecycle"],
+            message: `multiple active recovery generations for ${record.model_slug}`
+          });
+        }
+        activeModels.add(record.model_slug);
+      }
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        path: ["recovery_lifecycle"],
+        message: error instanceof Error ? error.message : "invalid recovery lifecycle"
+      });
     }
   });
 
@@ -247,6 +353,7 @@ const legacyLaunchStateSchema = z
   });
 
 type LegacyModalLaunchState = z.infer<typeof legacyLaunchStateSchema>;
+type PreviousModalLaunchState = z.infer<typeof previousLaunchStateSchema>;
 
 export interface ModalLaunchStateCompatibilityContext {
   imageId: string;
@@ -367,6 +474,8 @@ export function parseCompatibleModalLaunchState(
 ): ModalLaunchState {
   const current = launchStateSchema.safeParse(value);
   if (current.success) return current.data as ModalLaunchState;
+  const previous = previousLaunchStateSchema.safeParse(value);
+  if (previous.success) return migratePreviousLaunchState(previous.data);
   const legacy = legacyLaunchStateSchema.safeParse(value);
   if (!legacy.success) return launchStateSchema.parse(value) as ModalLaunchState;
   if (compatibility === undefined) {
@@ -390,11 +499,15 @@ export function parseModalWorkerStatus(
       schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
       updated_at: candidate.updated_at,
       stage: candidate.category,
+      terminal: candidate.stage === "terminal",
       category: candidate.category,
       model_work_started: candidate.model_work_started,
       retryable: candidate.retryable,
       generation: candidate.generation,
       attempt: candidate.attempt,
+      ...(candidate.eval_run_id === undefined ? {} : { eval_run_id: candidate.eval_run_id }),
+      ...(candidate.run_status === undefined ? {} : { run_status: candidate.run_status }),
+      ...(candidate.node_counts === undefined ? {} : { node_counts: candidate.node_counts }),
       ...(candidate.error_code === undefined ? {} : { error_code: candidate.error_code })
     };
     return matchesWorkerAttempt(status, expected) ? status : undefined;
@@ -404,11 +517,13 @@ export function parseModalWorkerStatus(
   const status: ModalWorkerStatus = {
     schema_version: WORKER_RESULT_SCHEMA_VERSION,
     stage: contract.result_type,
+    terminal: contract.result_type === "terminal",
     category: workerResultCategory(contract),
     model_work_started: contract.model_work_started,
     retryable: workerResultCategory(contract) === "transient-operational-failure",
     generation: contract.launch_generation,
     attempt: contract.attempt,
+    node_counts: { ...contract.counts },
     error_code: contract.diagnostic_code,
     result_generation: contract.generation
   };
@@ -440,6 +555,12 @@ export function latestModalWorkerStatus(
     }
   }
   return latest;
+}
+
+export function isModalWorkerStatusTerminal(
+  status: ModalWorkerStatus | undefined
+): status is ModalWorkerStatus & { terminal: true } {
+  return status?.terminal === true;
 }
 
 function matchesWorkerAttempt(
@@ -487,6 +608,7 @@ export function createModalLaunchState(input: {
   logicalRunId: string;
   generation: number;
   generationMode: ModalLaunchMode;
+  generationStartReason?: ModalRecoveryStartReason;
   app: string;
   image: string;
   imageId: string;
@@ -494,12 +616,14 @@ export function createModalLaunchState(input: {
   sourceRevision: string;
   fingerprints: ModalLineageFingerprints;
   attemptHistory?: ModalAttemptProvenance[];
+  recoveryLifecycle?: ModalRecoveryLifecycleRecord[];
 }): ModalLaunchState {
   return parseModalLaunchState({
     schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
     logical_run_id: input.logicalRunId,
     generation: input.generation,
     generation_mode: input.generationMode,
+    generation_start_reason: input.generationStartReason ?? (input.generation === 1 ? "initial" : "unknown"),
     app: input.app,
     image: input.image,
     image_id: input.imageId,
@@ -507,7 +631,21 @@ export function createModalLaunchState(input: {
     source_revision: input.sourceRevision,
     fingerprints: input.fingerprints,
     launches: [],
-    attempt_history: input.attemptHistory ?? []
+    attempt_history: input.attemptHistory ?? [],
+    recovery_lifecycle: input.recoveryLifecycle ?? []
+  });
+}
+
+function migratePreviousLaunchState(state: PreviousModalLaunchState): ModalLaunchState {
+  return parseModalLaunchState({
+    ...state,
+    schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
+    generation_start_reason: "unknown",
+    recovery_lifecycle: historicalRecoveryLifecycle(
+      state.logical_run_id,
+      [...state.attempt_history, ...state.launches],
+      state.fingerprints
+    )
   });
 }
 
@@ -515,30 +653,33 @@ function migrateLegacyLaunchState(
   state: LegacyModalLaunchState,
   compatibility: ModalLaunchStateCompatibilityContext
 ): ModalLaunchState {
+  const launches: ModalLaunchRecord[] = state.launches.map((launch, index) => ({
+    ...launch,
+    generation: 1,
+    attempt: 1,
+    attempt_id: legacyAttemptId(launch, index),
+    model_fingerprint: fingerprintLegacyModel(launch),
+    workspace_mode: "resume",
+    phase: "launched",
+    reserved_at: launch.launched_at,
+    sandbox_id: launch.sandbox_id,
+    launched_at: launch.launched_at
+  }));
   return parseModalLaunchState({
     schema_version: MODAL_LAUNCH_STATE_SCHEMA_VERSION,
     logical_run_id: state.run_id,
     generation: 1,
     generation_mode: "resume",
+    generation_start_reason: "unknown",
     app: state.app,
     image: state.image,
     image_id: compatibility.imageId,
     timeout_ms: state.timeout_ms,
     source_revision: state.source_revision,
     fingerprints: compatibility.fingerprints,
-    launches: state.launches.map((launch, index) => ({
-      ...launch,
-      generation: 1,
-      attempt: 1,
-      attempt_id: legacyAttemptId(launch, index),
-      model_fingerprint: fingerprintLegacyModel(launch),
-      workspace_mode: "resume",
-      phase: "launched",
-      reserved_at: launch.launched_at,
-      sandbox_id: launch.sandbox_id,
-      launched_at: launch.launched_at
-    })),
-    attempt_history: []
+    launches,
+    attempt_history: [],
+    recovery_lifecycle: historicalRecoveryLifecycle(state.run_id, launches, compatibility.fingerprints)
   });
 }
 
@@ -574,6 +715,7 @@ export function reserveModalLaunchAttempt(input: {
   remoteRoot: string;
   workspaceMode: ModalLaunchMode;
   postModelRecovery?: ModalPostModelRecovery;
+  startReason?: ModalRecoveryStartReason;
   now?: string;
   attemptId?: string;
 }): ModalLaunchRecord {
@@ -583,6 +725,19 @@ export function reserveModalLaunchAttempt(input: {
     throw new Error(`incompatible Modal checkpoint: model fingerprint mismatch for ${input.model.slug}`);
   }
   if (existing !== undefined) {
+    const previousLifecycle = input.state.recovery_lifecycle.find(
+      (record) => record.attempt_id === existing.attempt_id
+    );
+    if (previousLifecycle?.terminal_reason === "active") {
+      finishModalRecoveryLifecycle(input.state.recovery_lifecycle, {
+        attemptId: existing.attempt_id,
+        terminalReason: "unknown",
+        finishedAt: input.now ?? new Date().toISOString(),
+        modelWorkStarted: "unknown",
+        progressMade: "unknown",
+        controllerRequested: "unknown"
+      });
+    }
     input.state.attempt_history.push(toAttemptProvenance(existing, input.state.fingerprints));
   }
   const record: ModalLaunchRecord = {
@@ -600,8 +755,42 @@ export function reserveModalLaunchAttempt(input: {
   };
   if (existingIndex === -1) input.state.launches.push(record);
   else input.state.launches[existingIndex] = record;
+  const parent = existing ?? latestModalRecoveryLifecycle(input.state.recovery_lifecycle, input.model.slug);
+  startModalRecoveryLifecycle(input.state.recovery_lifecycle, {
+    logicalRunId: input.state.logical_run_id,
+    modelSlug: input.model.slug,
+    generation: record.generation,
+    attempt: record.attempt,
+    attemptId: record.attempt_id,
+    ...(parent === undefined
+      ? {}
+      : {
+          parentGeneration: parent.generation,
+          parentAttemptId: parent.attempt_id
+        }),
+    startReason: input.startReason ?? (existing === undefined ? input.state.generation_start_reason : "unknown"),
+    launchedAt: record.reserved_at,
+    fingerprints: {
+      ...input.state.fingerprints,
+      model: input.modelFingerprint
+    },
+    ...(parent !== undefined && "node_counts_after" in parent && typeof parent.node_counts_after === "object"
+      ? { nodeCountsBefore: parent.node_counts_after }
+      : {})
+  });
   parseModalLaunchState(input.state);
   return record;
+}
+
+export function finishModalLaunchRecoveryLifecycle(
+  state: ModalLaunchState,
+  record: Pick<ModalLaunchRecord, "attempt_id">,
+  input: Omit<FinishModalRecoveryLifecycleInput, "attemptId">
+): boolean {
+  return finishModalRecoveryLifecycle(state.recovery_lifecycle, {
+    ...input,
+    attemptId: record.attempt_id
+  }).changed;
 }
 
 export function markModalSandboxCreated(record: ModalLaunchRecord, sandboxId: string): void {
@@ -627,6 +816,28 @@ export function markModalLaunchFailed(
   record.phase = "failed";
   record.failure_category = category;
   record.finished_at = now;
+}
+
+export function markModalLaunchFailedWithRecovery(
+  state: ModalLaunchState,
+  record: ModalLaunchRecord,
+  category: ModalLaunchFailureCategory,
+  input: {
+    now?: string;
+    modelWorkStarted: boolean | "unknown";
+    controllerRequested: boolean;
+  }
+): boolean {
+  markModalLaunchFailed(record, category, input.now);
+  return finishModalLaunchRecoveryLifecycle(state, record, {
+    terminalReason:
+      category === "transient-operational-failure" && record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT
+        ? "recovery-budget-exhausted"
+        : "operational-failure",
+    finishedAt: record.finished_at!,
+    modelWorkStarted: input.modelWorkStarted,
+    controllerRequested: input.controllerRequested
+  });
 }
 
 export function modalWorkerLineage(state: ModalLaunchState, record: ModalLaunchRecord): ModalWorkerLineage {
@@ -709,7 +920,7 @@ export function classifyModalRunnerStatus(input: {
   ) {
     return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
   }
-  if (input.modelWorkMayHaveStarted === true && (worker === undefined || worker.stage !== "terminal")) {
+  if (input.modelWorkMayHaveStarted === true && (worker === undefined || !isModalWorkerStatusTerminal(worker))) {
     return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
   }
   if (input.launchFailure === "permanent-operational-failure") {
@@ -719,6 +930,31 @@ export function classifyModalRunnerStatus(input: {
     return status("permanent-operational-failure", "none", false, false, 0);
   }
   return status("transient-operational-failure", "relaunch", false, true, modalPreModelRetryDelay(input.attempt));
+}
+
+export function modalRecoveryTerminalReasonForWorkerStatus(input: {
+  category: ModalRunnerStatusCategory | ModalWorkerStatusCategory;
+  attempt: number;
+  modelWorkStarted: boolean;
+  recoveryBudgetExhausted?: boolean;
+}): Exclude<ModalRecoveryTerminalReason, "active"> {
+  if (input.category === "succeeded") return "succeeded";
+  if (input.category === "genuine-task-outcome") return "genuine-worker-failure";
+  if (
+    (input.recoveryBudgetExhausted === true || input.category === "transient-operational-failure") &&
+    input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
+    !input.modelWorkStarted
+  ) {
+    return "recovery-budget-exhausted";
+  }
+  return "operational-failure";
+}
+
+export function modalRecoveryFinishedAtForWorkerStatus(
+  workerStatus: Pick<ModalWorkerStatus, "updated_at"> | undefined,
+  fallback: string
+): string {
+  return workerStatus?.updated_at ?? fallback;
 }
 
 export function modalPreModelRetryDelay(completedAttempts: number): number {
@@ -868,6 +1104,65 @@ function toAttemptProvenance(
     ...(record.finished_at === undefined ? {} : { finished_at: record.finished_at }),
     phase: record.phase
   };
+}
+
+function historicalRecoveryLifecycle(
+  logicalRunId: string,
+  attempts: ReadonlyArray<ModalAttemptProvenance | ModalLaunchRecord>,
+  fallbackFingerprints: ModalLineageFingerprints
+): ModalRecoveryLifecycleRecord[] {
+  const records: ModalRecoveryLifecycleRecord[] = [];
+  const latestBySlug = new Map<string, ModalRecoveryLifecycleRecord>();
+  for (const attempt of attempts) {
+    const parent = latestBySlug.get(attempt.slug);
+    const record = parseModalRecoveryLifecycleRecord({
+      schema_version: "ultrafuzz.modal.recovery-lifecycle.v1",
+      logical_run_id: logicalRunId,
+      model_slug: attempt.slug,
+      generation: attempt.generation,
+      attempt: attempt.attempt,
+      attempt_id: attempt.attempt_id,
+      ...(parent === undefined
+        ? {}
+        : {
+            parent_generation: parent.generation,
+            parent_attempt_id: parent.attempt_id
+          }),
+      trigger_action: "unknown",
+      start_reason: "unknown",
+      terminal_reason: "unknown",
+      terminal_class: "unknown",
+      launched_at: attempt.launched_at ?? attempt.reserved_at,
+      ...(attempt.finished_at === undefined ? {} : { finished_at: attempt.finished_at }),
+      worker_exit_code: "unknown",
+      fingerprints: {
+        ...("fingerprints" in attempt ? attempt.fingerprints : fallbackFingerprints),
+        model: attempt.model_fingerprint
+      },
+      model_work_started: "unknown",
+      last_durable_transition_at: "unknown",
+      node_counts_before: "unknown",
+      node_counts_after: "unknown",
+      progress_made: "unknown",
+      controller_requested: "unknown",
+      node_attempt_ledger_digest: "unknown",
+      evaluation_lineage_digest: "unknown"
+    });
+    records.push(record);
+    latestBySlug.set(attempt.slug, record);
+  }
+  return records;
+}
+
+function latestModalRecoveryLifecycle(
+  records: readonly ModalRecoveryLifecycleRecord[],
+  modelSlug: string
+): ModalRecoveryLifecycleRecord | undefined {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index];
+    if (record?.model_slug === modelSlug) return record;
+  }
+  return undefined;
 }
 
 function status(

@@ -42,6 +42,11 @@ metrics:
   primary: [precision, recall, f1_score]
   recall_threshold: 0.7
 
+recovery_equivalence:
+  max_repeated_model_executions: 1
+  aggregate_non_comparable: separate
+  publication: comparable
+
 reporting:
   node_telemetry: true
   heartbeat_interval_seconds: 60
@@ -74,6 +79,11 @@ describe("eval suite loading and planning", () => {
     expect(suite.reporting.artifacts.mode).toBe("manifest-only");
     expect(suite.reporting.artifacts.mode_explicit).toBe(true);
     expect(suite.judge_panel).toBeUndefined();
+    expect(suite.recovery_equivalence).toEqual({
+      max_repeated_model_executions: 1,
+      aggregate_non_comparable: "separate",
+      publication: "comparable"
+    });
     expect(resolveJudgePanelConfig(suite.judge_panel)).toEqual({ total: 3, quorum: 2 });
     expect(DEFAULT_EVAL_JUDGE_PANEL).toEqual({ total: 3, quorum: 2 });
     // The YAML is provider-agnostic: no provider, endpoint, or env var names.

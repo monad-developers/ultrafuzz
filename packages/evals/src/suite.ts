@@ -10,6 +10,7 @@ import {
   type EvalJudgePanelConfig,
   type EvalMatrixRow,
   type EvalPlanValue,
+  type EvalRecoveryEquivalencePolicy,
   type EvalReportingPolicy,
   type EvalSuiteSpec,
   type ResolvedEvalTarget,
@@ -96,6 +97,18 @@ const reportingSchema = z.looseObject({
     .default({ include: DEFAULT_ARTIFACT_INCLUDE, max_file_bytes: DEFAULT_ARTIFACT_MAX_FILE_BYTES })
 });
 
+const recoveryEquivalenceSchema = z
+  .strictObject({
+    max_repeated_model_executions: z.number().int().nonnegative().default(0),
+    aggregate_non_comparable: z.enum(["include", "exclude", "separate"]).default("include"),
+    publication: z.enum(["clean", "comparable"]).default("comparable")
+  })
+  .default({
+    max_repeated_model_executions: 0,
+    aggregate_non_comparable: "include",
+    publication: "comparable"
+  });
+
 const suiteSchema = z.looseObject({
   schema_version: z.literal(EVAL_SPEC_SCHEMA_VERSION),
   suite: nonEmptyString,
@@ -116,10 +129,40 @@ const suiteSchema = z.looseObject({
     recall_threshold: z.number().min(0).max(1).default(0.7),
     secondary: z.array(nonEmptyString).default([])
   }),
+  recovery_equivalence: recoveryEquivalenceSchema,
   reporting: reportingSchema.optional()
 });
 
 export const DEFAULT_EVAL_JUDGE_PANEL = { total: 3, quorum: 2 } as const satisfies EvalJudgePanelConfig;
+export const DEFAULT_RECOVERY_EQUIVALENCE_POLICY = {
+  max_repeated_model_executions: 0,
+  aggregate_non_comparable: "include",
+  publication: "comparable"
+} as const satisfies EvalRecoveryEquivalencePolicy;
+
+/** Resolve and validate recovery policy for loaded and programmatically constructed suites. */
+export function resolveRecoveryEquivalencePolicy(
+  policy: EvalRecoveryEquivalencePolicy | undefined
+): EvalRecoveryEquivalencePolicy {
+  const resolved = policy ?? DEFAULT_RECOVERY_EQUIVALENCE_POLICY;
+  if (!Number.isSafeInteger(resolved.max_repeated_model_executions) || resolved.max_repeated_model_executions < 0) {
+    throw new EvalError(
+      "EVAL_RECOVERY_POLICY_INVALID",
+      "recovery policy max_repeated_model_executions must be a non-negative safe integer"
+    );
+  }
+  if (!["include", "exclude", "separate"].includes(resolved.aggregate_non_comparable)) {
+    throw new EvalError("EVAL_RECOVERY_POLICY_INVALID", "recovery policy aggregation mode is invalid");
+  }
+  if (!["clean", "comparable"].includes(resolved.publication)) {
+    throw new EvalError("EVAL_RECOVERY_POLICY_INVALID", "recovery policy publication mode is invalid");
+  }
+  return {
+    max_repeated_model_executions: resolved.max_repeated_model_executions,
+    aggregate_non_comparable: resolved.aggregate_non_comparable,
+    publication: resolved.publication
+  };
+}
 
 /** Resolve and validate panel settings for loaded and programmatically constructed suites. */
 export function resolveJudgePanelConfig(config: EvalJudgePanelConfig | undefined): EvalJudgePanelConfig {

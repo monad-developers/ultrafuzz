@@ -16,7 +16,13 @@ import {
 import { runIndependentJudgePanel } from "./evaluator/judge-panel.js";
 import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
-import { resolveJudgePanelConfig } from "./suite.js";
+import {
+  classifyRecoveryEquivalence,
+  reconcileEvalRunRecords,
+  recoveryEquivalenceCanBeRecorded,
+  withRecordedRecoveryEquivalence
+} from "./recovery-equivalence.js";
+import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
   type EvalCompareValue,
   type EvalClassificationReasonCode,
@@ -38,6 +44,7 @@ import {
 } from "./types.js";
 import {
   EvalError,
+  appendJsonLine,
   evalRunRoot,
   isRecord,
   jsonFile,
@@ -127,7 +134,23 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const suite = evalManifest.suite;
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
-  const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
+  const recordsByRow = reconcileEvalRunRecords(records);
+  for (const row of matrix) {
+    const record = recordsByRow.get(row.id);
+    if (record === undefined) continue;
+    const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
+    if (!canRecordRecoveryEquivalence) {
+      throw new EvalError(
+        "EVAL_RECOVERY_EQUIVALENCE_NOT_FINAL",
+        `eval row ${row.id} cannot be scored before its workflow is terminal`
+      );
+    }
+    const recorded = withRecordedRecoveryEquivalence(record, suite);
+    recordsByRow.set(row.id, recorded);
+    if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
+      appendJsonLine(path.join(root, "runs.jsonl"), recorded);
+    }
+  }
   const scoresPath = path.join(root, "scores.jsonl");
   const reviewQueuePath = path.join(root, "review", "new-findings.jsonl");
   const judgeMode = input.llmJudge === undefined || input.llmJudge === false ? "deterministic" : "llm";
@@ -161,7 +184,13 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
 
   const summaryPath = path.join(root, "summary.json");
   const summaryMarkdownPath = path.join(root, "summary.md");
-  const variants = summarizeVariants(rowScores);
+  const recoveryPolicy = resolveRecoveryEquivalencePolicy(suite.recovery_equivalence);
+  const nonComparableRows = rowScores.filter((row) => row.recovery_equivalence.classification === "non-comparable");
+  const aggregateRows =
+    recoveryPolicy.aggregate_non_comparable === "include"
+      ? rowScores
+      : rowScores.filter((row) => row.recovery_equivalence.classification !== "non-comparable");
+  const variants = summarizeVariants(aggregateRows);
   const summary: EvalScoreSummary = {
     eval_run_id: input.evalRunId,
     eval_run_root: root,
@@ -171,6 +200,19 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
     scores_path: scoresPath,
     summary_path: summaryPath,
     review_queue_path: reviewQueuePath,
+    recovery_equivalence: {
+      aggregate_non_comparable: recoveryPolicy.aggregate_non_comparable,
+      included_row_count: aggregateRows.length,
+      excluded_row_count: rowScores.length - aggregateRows.length,
+      classification_counts: {
+        clean: countRecoveryClassification(rowScores, "clean"),
+        "infrastructure-recovered": countRecoveryClassification(rowScores, "infrastructure-recovered"),
+        "model-reexecuted-within-policy": countRecoveryClassification(rowScores, "model-reexecuted-within-policy"),
+        "non-comparable": nonComparableRows.length
+      },
+      non_comparable_variants:
+        recoveryPolicy.aggregate_non_comparable === "separate" ? summarizeVariants(nonComparableRows) : []
+    },
     provenance: buildEvalSummaryProvenance({
       projectRoot: input.projectRoot,
       suite,
@@ -465,6 +507,7 @@ export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
     `Candidate: ${candidate === undefined ? "unavailable (historical result)" : `${candidate.label} (${candidate.commit})`}`,
     `Benchmark cohort: ${benchmark?.cohort_fingerprint ?? "unavailable (historical result)"}`,
     `Scoring identity: ${scoring?.fingerprint ?? "unavailable"}`,
+    `Recovery aggregation: ${summary.recovery_equivalence.aggregate_non_comparable} (${summary.recovery_equivalence.included_row_count} included, ${summary.recovery_equivalence.excluded_row_count} excluded)`,
     "",
     `Recall threshold: ${summary.recall_threshold}`,
     "",
@@ -486,6 +529,20 @@ export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
       ].join(" | ") + " |"
     );
   }
+  if (summary.recovery_equivalence.non_comparable_variants.length > 0) {
+    lines.push(
+      "",
+      "## Non-comparable row aggregates",
+      "",
+      "| Variant | Rows | Precision | Recall | F1 |",
+      "| --- | ---: | ---: | ---: | ---: |"
+    );
+    for (const variant of summary.recovery_equivalence.non_comparable_variants) {
+      lines.push(
+        `| ${variant.variant_id} | ${variant.row_count} | ${variant.precision} | ${variant.recall} | ${variant.f1_score} |`
+      );
+    }
+  }
   lines.push(
     "",
     "## Row lifecycle",
@@ -504,6 +561,29 @@ export function renderSummaryMarkdown(summary: EvalScoreSummary): string {
         row.lifecycle.workflow.terminal,
         markdownValue(row.lifecycle.workflow.started_at),
         markdownValue(row.lifecycle.workflow.finished_at)
+      ].join(" | ") + " |"
+    );
+  }
+  lines.push(
+    "",
+    "## Recovery equivalence",
+    "",
+    "| Row | Classification | Unique model executions | Repeated model executions | Recovery re-executions | Infrastructure-only generations | Model-work generations | No-progress generations | Reason |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+  );
+  for (const row of summary.rows) {
+    const recovery = row.recovery_equivalence;
+    lines.push(
+      [
+        `| ${row.row_id}`,
+        recovery.classification,
+        recovery.unique_model_backed_node_executions,
+        recovery.repeated_model_backed_node_executions,
+        recovery.recovery_reexecuted_model_backed_node_executions,
+        recovery.infrastructure_only_recovery_generations,
+        recovery.model_work_recovery_generations,
+        recovery.no_progress_recovery_generations,
+        recovery.reason ?? ""
       ].join(" | ") + " |"
     );
   }
@@ -677,6 +757,10 @@ async function scoreFindings(input: {
   const f1 = precision + recall === 0 ? 0 : roundMetric((2 * precision * recall) / (precision + recall));
   const judgedFindings = truePositives + falsePositives + duplicates;
   const terminal = summarizeEvalTerminal(input.record);
+  const recoveryEquivalence =
+    input.record === undefined
+      ? classifyRecoveryEquivalence({ policy: input.suite.recovery_equivalence })
+      : withRecordedRecoveryEquivalence(input.record, input.suite).recovery_equivalence!;
   const rowScore: EvalRowScore = {
     row_id: input.row.id,
     target_id: input.row.target_id,
@@ -700,7 +784,8 @@ async function scoreFindings(input: {
     runtime_seconds: terminal.efficiency.wall_time_seconds,
     cost_estimate: terminal.efficiency.cost_usd,
     lifecycle: terminal.lifecycle,
-    efficiency: terminal.efficiency
+    efficiency: terminal.efficiency,
+    recovery_equivalence: recoveryEquivalence
   };
   return { rowScore, findingScores: matches, reviewQueue };
 }
@@ -1137,6 +1222,13 @@ function summarizeVariants(rows: EvalRowScore[]): EvalVariantScoreSummary[] {
       duplicate_rate: mean(variantRows.map((row) => row.duplicate_rate)),
       report_schema_valid_rate: mean(variantRows.map((row) => (row.report_schema_valid ? 1 : 0)))
     }));
+}
+
+function countRecoveryClassification(
+  rows: readonly EvalRowScore[],
+  classification: EvalRowScore["recovery_equivalence"]["classification"]
+): number {
+  return rows.filter((row) => row.recovery_equivalence.classification === classification).length;
 }
 
 function keywordScore(keywords: string[], text: string): number {

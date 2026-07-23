@@ -73,6 +73,39 @@ export interface EvalMetricsConfig {
   secondary: string[];
 }
 
+export type EvalRecoveryEquivalenceClassification =
+  "clean" | "infrastructure-recovered" | "model-reexecuted-within-policy" | "non-comparable";
+
+export type EvalNonComparableAggregation = "include" | "exclude" | "separate";
+
+export interface EvalRecoveryEquivalencePolicy {
+  /** Maximum model-backed node executions repeated in a later recovery generation. */
+  max_repeated_model_executions: number;
+  /** Controls whether non-comparable rows contribute to the primary variant aggregates. */
+  aggregate_non_comparable: EvalNonComparableAggregation;
+  /** `clean` rejects every recovered row; `comparable` accepts policy-bounded recovery. */
+  publication: "clean" | "comparable";
+}
+
+export interface EvalRecoveryEquivalence {
+  schema_version: "ultrafuzz.eval.recovery-equivalence.v1";
+  policy: {
+    max_repeated_model_executions: number;
+  };
+  unique_model_backed_node_executions: number;
+  repeated_model_backed_node_executions: number;
+  recovery_reexecuted_model_backed_node_executions: number;
+  infrastructure_only_recovery_generations: number;
+  model_work_recovery_generations: number;
+  no_progress_recovery_generations: number;
+  recovery_generations: number;
+  observed_node_attempts: number;
+  observed_workflow_executions: number;
+  observed_controller_invocations: number;
+  classification: EvalRecoveryEquivalenceClassification;
+  reason: string | null;
+}
+
 export type EvalArtifactMode = "manifest-only" | "upload";
 
 export interface EvalArtifactPolicy {
@@ -108,6 +141,8 @@ export interface EvalSuiteSpec {
   /** Optional independent adjudicator panel; omitted suites use three judges with quorum two. */
   judge_panel?: EvalJudgePanelConfig;
   metrics: EvalMetricsConfig;
+  /** Recovery-exposure and aggregation policy; omitted suites use a zero-repeat, comparable-publication policy. */
+  recovery_equivalence?: EvalRecoveryEquivalencePolicy;
   /** Telemetry/artifact policy only — provider selection and credentials live in ultrafuzz.toml. */
   reporting: EvalReportingPolicy;
 }
@@ -165,6 +200,7 @@ export interface EvalExecutionPolicyProvenance {
   watch_timeout_seconds: number;
   poll_interval_ms: number;
   benchmark_execution_fingerprint?: string;
+  recovery_equivalence_fingerprint?: string;
 }
 
 export interface EvalBenchmarkProvenance {
@@ -278,6 +314,8 @@ export interface EvalRunRecord {
   launcher?: EvalLauncherLifecycle;
   /** Last observed durable workflow lifecycle; summaries always re-read state.json. */
   workflow?: EvalWorkflowLifecycle;
+  /** Immutable execution-exposure classification captured from append-only run evidence. */
+  recovery_equivalence?: EvalRecoveryEquivalence;
   /** Legacy launcher timestamp retained for reading existing eval runs. */
   started_at?: string;
   /** Legacy launcher timestamp retained for reading existing eval runs. */
@@ -430,6 +468,7 @@ export interface EvalRowScore {
   cost_estimate: number | null;
   lifecycle: EvalRowLifecycle;
   efficiency: EvalEfficiency;
+  recovery_equivalence: EvalRecoveryEquivalence;
 }
 
 export interface EvalScoreSummary {
@@ -441,7 +480,16 @@ export interface EvalScoreSummary {
   scores_path: string;
   summary_path: string;
   review_queue_path: string;
+  recovery_equivalence: EvalRecoveryEquivalenceSummary;
   provenance?: EvalSummaryProvenance;
+}
+
+export interface EvalRecoveryEquivalenceSummary {
+  aggregate_non_comparable: EvalNonComparableAggregation;
+  included_row_count: number;
+  excluded_row_count: number;
+  classification_counts: Record<EvalRecoveryEquivalenceClassification, number>;
+  non_comparable_variants: EvalVariantScoreSummary[];
 }
 
 export interface EvalVariantScoreSummary {

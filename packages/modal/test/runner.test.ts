@@ -26,6 +26,7 @@ import {
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } from "../src/layout.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
+import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
   MODAL_COLLECT_RESULT_FILES,
   ModalTerminationError,
@@ -39,6 +40,7 @@ import {
   finishReservedModalLaunch,
   hasExactPublicDiagnosticCollectionConfig,
   launchModalBenchmark,
+  modalCanonicalRecoveryProbeCommand,
   modalImageBuildTags,
   modalImageBuildCommand,
   modalSandboxName,
@@ -120,8 +122,11 @@ describe("Modal benchmark termination", () => {
       0
     );
     const sandboxes = fakeTerminationService([exact, exact, broader, mismatched, stopped]);
+    const onTerminatedAttempt = vi.fn();
 
-    await expect(terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes })).resolves.toEqual({
+    await expect(
+      terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes, onTerminatedAttempt })
+    ).resolves.toEqual({
       scopes: 1,
       discovered: 4,
       matched: 2,
@@ -147,6 +152,8 @@ describe("Modal benchmark termination", () => {
     });
     expect(exact.terminate).toHaveBeenCalledTimes(1);
     expect(stopped.terminate).not.toHaveBeenCalled();
+    expect(onTerminatedAttempt).toHaveBeenCalledOnce();
+    expect(onTerminatedAttempt).toHaveBeenCalledWith("newer-attempt");
     expect(broader.poll).not.toHaveBeenCalled();
     expect(broader.terminate).not.toHaveBeenCalled();
     expect(mismatched.poll).not.toHaveBeenCalled();
@@ -421,7 +428,8 @@ describe("Modal result collection", () => {
       "status.json",
       "worker.log",
       "result.json",
-      "public-eval-diagnostics.json"
+      "public-eval-diagnostics.json",
+      "recovery-lifecycle.json"
     ]);
     expect(MODAL_COLLECT_RESULT_FILES).not.toContain("failure-details.json");
   });
@@ -562,6 +570,39 @@ describe("Modal result collection", () => {
     ).toThrow(/unsanitized Modal worker log/u);
   });
 
+  it("collects only an exactly reconciled privacy-safe recovery lifecycle", () => {
+    const { state, record } = terminationState();
+    const document = createModalRecoveryLifecycleDocument(state.recovery_lifecycle);
+    const context = {
+      generation: record.generation,
+      attempt: record.attempt,
+      logical_run_id: state.logical_run_id,
+      attempt_id: record.attempt_id,
+      model_slug: record.slug,
+      config_fingerprint: state.fingerprints.config,
+      source_fingerprint: state.fingerprints.source,
+      image_fingerprint: state.fingerprints.image,
+      model_fingerprint: record.model_fingerprint
+    };
+    const files = { "recovery-lifecycle.json": `${JSON.stringify(document)}\n` };
+
+    expect(() => assertSanitizedModalCollectedFiles(files, context)).not.toThrow();
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          "recovery-lifecycle.json": JSON.stringify({
+            ...document,
+            summary: { ...document.summary, total_generations: 2 }
+          })
+        },
+        context
+      )
+    ).toThrow(/unsanitized Modal recovery lifecycle/u);
+    expect(() => assertSanitizedModalCollectedFiles(files, { ...context, attempt_id: "different-attempt" })).toThrow(
+      /mismatched attempt ID/u
+    );
+  });
+
   it("omits diagnostics unless an exact config supplies every injected secret value", () => {
     const files = {
       "status.json": "status",
@@ -685,6 +726,41 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
     }
   };
 }
+
+describe("Modal canonical recovery probe", () => {
+  it("reads durable transitions and completions independently of a stale mirrored status", () => {
+    const mount = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-recovery-probe-"));
+    const remoteRoot = "/data/logical-run/model-one";
+    const dataRoot = path.join(mount, "logical-run", "model-one");
+    const runRoot = path.join(dataRoot, "workspace", "target", ".ultrafuzz", "runs", "durable-run");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(dataRoot, "status.json"),
+      JSON.stringify({ updated_at: "2025-12-31T20:00:00.000Z", stage: "running" })
+    );
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      JSON.stringify({
+        status: "running",
+        created_at: "2026-01-01T00:00:00.000Z",
+        last_transition_at: "2026-01-01T00:09:50.000Z",
+        nodes: {
+          complete: { status: "succeeded", finished_at: "2026-01-01T00:09:45.000Z" },
+          pending: { status: "pending" }
+        }
+      })
+    );
+    const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
+
+    expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({
+      status: "running",
+      successful_nodes: 1,
+      total_nodes: 2,
+      last_transition_at: "2026-01-01T00:09:50.000Z",
+      last_success_at: "2026-01-01T00:09:45.000Z"
+    });
+  });
+});
 
 describe("Modal worker identity", () => {
   it("fails closed when non-resumable model work may have crossed the readiness boundary", () => {

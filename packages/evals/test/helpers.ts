@@ -11,7 +11,52 @@ import type {
   EvalRowResult,
   EvalSummary
 } from "../src/reporter.js";
-import type { EvalMatrixRow, EvalReportingPolicy, EvalRowScore, EvalSuiteSpec } from "../src/types.js";
+import type {
+  EvalMatrixRow,
+  EvalRecoveryEquivalence,
+  EvalRecoveryEquivalenceSummary,
+  EvalReportingPolicy,
+  EvalRowScore,
+  EvalSuiteSpec
+} from "../src/types.js";
+
+export function cleanRecoveryEquivalence(overrides: Partial<EvalRecoveryEquivalence> = {}): EvalRecoveryEquivalence {
+  return {
+    schema_version: "ultrafuzz.eval.recovery-equivalence.v1",
+    policy: { max_repeated_model_executions: 0 },
+    unique_model_backed_node_executions: 1,
+    repeated_model_backed_node_executions: 0,
+    recovery_reexecuted_model_backed_node_executions: 0,
+    infrastructure_only_recovery_generations: 0,
+    model_work_recovery_generations: 0,
+    no_progress_recovery_generations: 0,
+    recovery_generations: 0,
+    observed_node_attempts: 1,
+    observed_workflow_executions: 1,
+    observed_controller_invocations: 1,
+    classification: "clean",
+    reason: null,
+    ...overrides
+  };
+}
+
+export function recoveryEquivalenceSummary(
+  overrides: Partial<EvalRecoveryEquivalenceSummary> = {}
+): EvalRecoveryEquivalenceSummary {
+  return {
+    aggregate_non_comparable: "include",
+    included_row_count: 0,
+    excluded_row_count: 0,
+    classification_counts: {
+      clean: 0,
+      "infrastructure-recovered": 0,
+      "model-reexecuted-within-policy": 0,
+      "non-comparable": 0
+    },
+    non_comparable_variants: [],
+    ...overrides
+  };
+}
 
 export function testReportingPolicy(overrides: Partial<EvalReportingPolicy> = {}): EvalReportingPolicy {
   return {
