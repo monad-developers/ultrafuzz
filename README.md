@@ -72,9 +72,7 @@ because workspace package exports point at `dist/**` entrypoints.
 
 ## Evals
 
-Longitudinal results from the public benchmark suite — one line per target
-across candidate commits. See [Eval Suites](docs/reference/evals.md) and the
-[EVMBench integration](benchmarks/evmbench/README.md) for methodology.
+Longitudinal results from the public benchmark suite. See [Eval Suites](docs/reference/evals.md) for methodology.
 
 **Quality**
 
