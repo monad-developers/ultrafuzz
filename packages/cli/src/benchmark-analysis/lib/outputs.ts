@@ -151,6 +151,8 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     const row = lookup.get(rowId);
     return row ? [row] : [];
   });
+  const pairedRowIds = new Set(result.pairComparison.flatMap((pair) => [pair.ultrafuzz.rowId, pair.noFuzz.rowId]));
+  const includeCrossRowComparison = pairedRowIds.size < result.rowMetrics.length;
   const lines = [
     "# Row-level benchmark results",
     "",
@@ -271,7 +273,8 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
         `| ${markdownCell(pair.pair)} | ${markdownCell(pair.sharedRootCauseIds.join(", ") || "—")} | ${markdownCell(pair.ultrafuzzOnlyRootCauseIds.join(", ") || "—")} | ${markdownCell(pair.noFuzzOnlyRootCauseIds.join(", ") || "—")} |`
       );
     }
-  } else {
+  }
+  if (includeCrossRowComparison) {
     lines.push(
       "",
       "## Cross-row ranking",
@@ -329,28 +332,33 @@ export async function writeTableOutputs(result: AnalysisResult, outputDir: strin
     ground_truth_root_cause_ids: row.groundTruthRootCauseIds,
     canonical_labels: row.groundTruthLabels
   }));
-  const comparisonPath =
-    result.pairComparison.length > 0
-      ? await writeText(join(outputDir, "paired_row_comparison.csv"), toCsv(pairRows))
-      : await writeText(
-          join(outputDir, "row_comparison.csv"),
-          toCsv(
-            rankedRows(result).map((row, index) => ({
-              rank: index + 1,
-              row_id: row.rowId,
-              row_label: row.label,
-              condition: row.condition,
-              ground_truth_credits: row.distinctGroundTruthCredits,
-              precision: row.precision,
-              recall: row.recall,
-              f1: row.f1,
-              total_tokens_millions: row.totalTokensMillions
-            }))
-          )
-        );
+  const comparisonPaths: string[] = [];
+  if (result.pairComparison.length > 0) {
+    comparisonPaths.push(await writeText(join(outputDir, "paired_row_comparison.csv"), toCsv(pairRows)));
+  }
+  if (includeCrossRowComparison) {
+    comparisonPaths.push(
+      await writeText(
+        join(outputDir, "row_comparison.csv"),
+        toCsv(
+          rankedRows(result).map((row, index) => ({
+            rank: index + 1,
+            row_id: row.rowId,
+            row_label: row.label,
+            condition: row.condition,
+            ground_truth_credits: row.distinctGroundTruthCredits,
+            precision: row.precision,
+            recall: row.recall,
+            f1: row.f1,
+            total_tokens_millions: row.totalTokensMillions
+          }))
+        )
+      )
+    );
+  }
   return [
     await writeText(join(outputDir, "row_results_table.md"), lines.join("\n")),
-    comparisonPath,
+    ...comparisonPaths,
     await writeText(join(outputDir, "ground_truth_credits_by_row.csv"), toCsv(rootsByRow))
   ];
 }
@@ -374,7 +382,7 @@ export async function writeMethodOutputs(result: AnalysisResult, outputDir: stri
 - Input is discovered from \`handoff/current-state.json\`; no target, repository, or finding constants are compiled into the CLI.
 - Finding classifications and clusters come from the handoff's finalized \`instance-to-cluster.json\`.
 - Sets are benchmark rows and entities are globally adjudicated root-cause clusters.
-- Precision = TP / (TP + FP + duplicates); unresolved findings are excluded.
+- Precision = TP / (TP + FP + resolved duplicates); unresolved findings and unresolved duplicates are excluded.
 - Recall = distinct ground-truth TP credits / ${result.groundTruthCount}. Multi-root clusters contribute their explicit credit multiplicity.
 - Average, median, and sample standard deviation use finalized rows.
 - Compute cost is total tokens from each nested row \`run.json\`; reported USD values may be partial.

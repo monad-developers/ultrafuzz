@@ -494,8 +494,11 @@ export async function buildPairwiseChart(result: AnalysisResult, outputDir: stri
 }
 
 export async function buildComparisonChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
-  if (result.pairComparison.length > 0) return buildPairwiseChart(result, outputDir);
-  return buildCrossRowChart(result, outputDir);
+  const outputs: string[] = [];
+  if (result.pairComparison.length > 0) outputs.push(...(await buildPairwiseChart(result, outputDir)));
+  const pairedRowIds = new Set(result.pairComparison.flatMap((pair) => [pair.ultrafuzz.rowId, pair.noFuzz.rowId]));
+  if (pairedRowIds.size < result.rowMetrics.length) outputs.push(...(await buildCrossRowChart(result, outputDir)));
+  return outputs;
 }
 
 async function buildCrossRowChart(result: AnalysisResult, outputDir: string): Promise<string[]> {

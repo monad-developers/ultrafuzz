@@ -172,6 +172,9 @@ function rowMetrics(
       (record) => record.classification === "needs-human-review" && !record.isDuplicate
     ).length;
     const duplicateCount = rowRecords.filter((record) => record.isDuplicate).length;
+    const resolvedDuplicateCount = rowRecords.filter(
+      (record) => record.isDuplicate && record.classification !== "needs-human-review"
+    ).length;
     const detected = rowEntities.filter(
       (entity) => entity.classification === "true-positive" && entity.groundTruthTpCredits > 0
     );
@@ -183,7 +186,7 @@ function rowMetrics(
       )
       .filter((value, index, values) => values.indexOf(value) === index)
       .sort();
-    const resolved = truePositives + falsePositives + duplicateCount;
+    const resolved = truePositives + falsePositives + resolvedDuplicateCount;
     const precision = resolved > 0 ? truePositives / resolved : null;
     const recall = groundTruthCount > 0 ? distinctGroundTruthCredits / groundTruthCount : null;
     return {
@@ -198,6 +201,7 @@ function rowMetrics(
       falsePositives,
       needsHumanReview,
       duplicateCount,
+      resolvedDuplicateCount,
       distinctGroundTruthCredits,
       groundTruthRootCauseIds,
       groundTruthLabels,
@@ -250,7 +254,8 @@ function conditionAggregates(
     const truePositives = sum(rows.map((row) => row.truePositives ?? 0));
     const falsePositives = sum(rows.map((row) => row.falsePositives ?? 0));
     const duplicateCount = sum(rows.map((row) => row.duplicateCount ?? 0));
-    const resolved = truePositives + falsePositives + duplicateCount;
+    const resolvedDuplicateCount = sum(rows.map((row) => row.resolvedDuplicateCount ?? 0));
+    const resolved = truePositives + falsePositives + resolvedDuplicateCount;
     const pooledPrecision = resolved > 0 ? truePositives / resolved : null;
     const unionRecall = groundTruthCount > 0 ? distinctGroundTruthCredits / groundTruthCount : null;
     return {

@@ -78,6 +78,7 @@ export interface RowMetric extends Accounting {
   falsePositives: number | null;
   needsHumanReview: number | null;
   duplicateCount: number | null;
+  resolvedDuplicateCount: number | null;
   distinctGroundTruthCredits: number | null;
   groundTruthRootCauseIds: string[];
   groundTruthLabels: string[];
