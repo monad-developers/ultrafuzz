@@ -204,6 +204,41 @@ describe("recovery equivalence", () => {
     });
   });
 
+  it("fails closed when controller recovery lineage is unavailable", () => {
+    const root = evidenceRoot({
+      controllers: ["controller-1"],
+      attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
+    });
+    fs.rmSync(path.join(root, "events.jsonl"));
+
+    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
+      classification: "non-comparable",
+      observed_node_attempts: 1,
+      reason: "controller recovery lineage cannot be reconstructed"
+    });
+  });
+
+  it("fails closed when controller submission events are malformed", () => {
+    const root = evidenceRoot({
+      controllers: ["controller-1"],
+      attempts: [{ nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" }]
+    });
+    fs.writeFileSync(
+      path.join(root, "events.jsonl"),
+      `${JSON.stringify({
+        event_type: "workflow-submitted",
+        payload: { controller_invocation_id: "controller-1" }
+      })}\n`,
+      "utf8"
+    );
+
+    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
+      classification: "non-comparable",
+      observed_node_attempts: 1,
+      reason: "controller recovery lineage cannot be reconstructed"
+    });
+  });
+
   it("preserves the first recorded classification when later evidence changes", () => {
     const root = evidenceRoot({
       controllers: ["controller-1"],

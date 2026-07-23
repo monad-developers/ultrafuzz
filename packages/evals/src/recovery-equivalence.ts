@@ -85,6 +85,7 @@ const stateSchema = z.looseObject({
 });
 
 const eventSchema = z.looseObject({
+  event_id: z.string().min(1).optional(),
   timestamp: z.string().min(1),
   event_type: z.string().min(1),
   payload: z.unknown()
@@ -314,24 +315,27 @@ function isModelBackedNode(node: z.infer<typeof graphSchema>["nodes"][number]): 
 }
 
 function controllerInvocations(eventsPath: string): Array<{ id: string; at: string }> | undefined {
-  if (!fs.existsSync(eventsPath)) return [];
+  if (!fs.existsSync(eventsPath)) return undefined;
   try {
     assertRegularFileInside(path.dirname(eventsPath), eventsPath, "workflow event ledger");
     if (fs.statSync(eventsPath).size > MAX_RECOVERY_SOURCE_BYTES) return undefined;
     const observations = new Map<string, string>();
     for (const line of fs.readFileSync(eventsPath, "utf8").split(/\r?\n/u)) {
       if (line.trim().length === 0) continue;
-      const parsed = eventSchema.safeParse(JSON.parse(line) as unknown);
-      if (!parsed.success || !["workflow-submitted", "workflow-lifecycle-submitted"].includes(parsed.data.event_type)) {
+      const raw = JSON.parse(line) as unknown;
+      const rawRecord = recordValue(raw);
+      const eventType = stringField(rawRecord, "event_type");
+      if (eventType === undefined || !["workflow-submitted", "workflow-lifecycle-submitted"].includes(eventType)) {
         continue;
       }
+      const parsed = eventSchema.safeParse(raw);
+      if (!parsed.success) return undefined;
       const payload = recordValue(parsed.data.payload);
-      const id = stringField(payload, "controller_invocation_id");
+      const id = stringField(payload, "controller_invocation_id") ?? parsed.data.event_id;
       const at = stringField(payload, "controller_invoked_at") ?? parsed.data.timestamp;
-      if (id !== undefined && Number.isFinite(Date.parse(at))) {
-        const previous = observations.get(id);
-        observations.set(id, previous === undefined || at < previous ? at : previous);
-      }
+      if (id === undefined || !Number.isFinite(Date.parse(at))) return undefined;
+      const previous = observations.get(id);
+      observations.set(id, previous === undefined || at < previous ? at : previous);
     }
     return [...observations].map(([id, at]) => ({ id, at }));
   } catch {
