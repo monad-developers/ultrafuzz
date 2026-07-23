@@ -176,6 +176,30 @@ describe("recovery equivalence", () => {
     });
   });
 
+  it("does not infer model work from kindless nodes with explicit empty fanout", () => {
+    const root = evidenceRoot({ controllers: ["controller-1"] });
+    fs.writeFileSync(
+      path.join(root, "graph.json"),
+      JSON.stringify({ nodes: [{ id: "metadata", model_fanout: [] }] }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(root, "state.json"),
+      JSON.stringify({
+        status: "succeeded",
+        nodes: { metadata: { status: "succeeded", started_at: T0 } }
+      }),
+      "utf8"
+    );
+    fs.rmSync(path.join(root, "attempts.jsonl"));
+
+    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
+      classification: "clean",
+      unique_model_backed_node_executions: 0,
+      observed_node_attempts: 0
+    });
+  });
+
   it("reports ordinary executor retries without treating them as recovery", () => {
     const root = evidenceRoot({
       controllers: ["controller-1"],

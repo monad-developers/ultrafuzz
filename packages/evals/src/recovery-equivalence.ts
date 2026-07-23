@@ -311,7 +311,9 @@ function modelWorkMayHaveStarted(state: z.infer<typeof stateSchema>, modelNodeId
 
 function isModelBackedNode(node: z.infer<typeof graphSchema>["nodes"][number]): boolean {
   if (node.kind === "meta" || node.kind === "reference") return false;
-  return node.kind === "agentic" || node.kind === undefined || (node.model_fanout?.length ?? 0) > 0;
+  if (node.kind === "agentic") return true;
+  if ((node.model_fanout?.length ?? 0) > 0) return true;
+  return node.kind === undefined && node.model_fanout === undefined;
 }
 
 function controllerInvocations(eventsPath: string): Array<{ id: string; at: string }> | undefined {
