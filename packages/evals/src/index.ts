@@ -13,6 +13,7 @@ export * from "./reporter.js";
 export * from "./reporters/index.js";
 export * from "./runner.js";
 export * from "./scoring.js";
+export * from "./status.js";
 export * from "./suite.js";
 export * from "./types.js";
 export * from "./utils.js";

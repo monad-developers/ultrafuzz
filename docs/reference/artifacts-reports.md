@@ -374,6 +374,10 @@ target × variant × trial rows, and `runs.jsonl` appends launcher and observed
 workflow lifecycle snapshots for each row. Launcher completion is recorded
 separately from durable workflow completion; a detached row remains
 nonterminal until its referenced run's `state.json` reaches a terminal state.
+`ultrafuzz eval status <eval-run-id>` joins these artifacts read-only to show
+every matrix row's durable node completion and ETA. Its table and versioned
+JSON use only opaque row labels and disclosure-safe lifecycle, count, and
+timing fields.
 
 `ultrafuzz eval score` joins the latest record with the referenced run's
 durable `state.json` and cumulative `run.json` accounting. Each row in

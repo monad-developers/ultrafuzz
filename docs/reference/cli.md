@@ -28,6 +28,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz dashboard`            | Serve the local loopback dashboard and API for product state inspection and editing.                           |
 | `ultrafuzz eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                      |
 | `ultrafuzz eval run`             | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
+| `ultrafuzz eval status <id>`     | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                    |
 | `ultrafuzz eval score <id>`      | Score finished eval run reports against external ground truth.                                                 |
 | `ultrafuzz eval report <id>`     | Show the scored eval run variant ranking.                                                                      |
 | `ultrafuzz eval compare <id>`    | Compare scored eval variants against a baseline variant.                                                       |
@@ -250,6 +251,11 @@ ultrafuzz eval run \
   [--watch-timeout-seconds <seconds>] \
   [--no-watch] \
   [--json]
+ultrafuzz eval status <eval-run-id> \
+  [--project <path>] \
+  [--watch] \
+  [--interval <seconds>] \
+  [--json]
 ultrafuzz eval score <eval-run-id> [--project <path>] [--llm-judge] [--json]
 ultrafuzz eval report <eval-run-id> [--project <path>] [--json]
 ultrafuzz eval compare <eval-run-id> --baseline <variant-id> [--project <path>] [--json]
@@ -314,6 +320,27 @@ directory per target id under `--target-root`) against the pinned git refs;
 selection), polls them to a terminal state, and streams node telemetry to the
 configured provider. `--no-watch` launches detached without polling or
 telemetry streaming.
+
+`status` reads the eval matrix, its latest `runs.jsonl` records, and each
+linked durable `state.json` without synchronizing or changing workflow state.
+Every matrix row remains present in matrix order. Labels are deterministic
+opaque ordinals (`row-01`, `row-02`, …), including for private targets; neither
+table nor JSON output represents target identities, repositories, paths, refs,
+ground truth, findings, diagnostics, raw node output, provenance, or
+configuration.
+
+Progress is the count of durable nodes in `succeeded`, `failed`, `skipped`,
+`timed-out`, `reused-from-prior-run`, or `invalidated` divided by all planned
+nodes in durable state. The output always pairs available percentages with
+their completed/total counts. ETA uses observed terminal-node throughput from
+the durable workflow start through its latest checkpoint and is explicitly an
+estimate because node runtimes differ. ETA is typed as unavailable when no
+node has completed, timestamps are missing or invalid, or an incomplete row's
+checkpoint is more than five minutes old. `--watch` refreshes the whole matrix
+at the requested interval while at least one row is still pending, running,
+paused, or not yet launched; typed invalid or inaccessible rows remain visible
+without making the command poll forever. Combined with `--json`, watch mode
+emits one schema-versioned JSON object per line.
 
 `score` grades finished run reports against external ground truth resolved
 under `[eval].ground_truth_root`, deterministically by default and with the

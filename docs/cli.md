@@ -24,6 +24,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `dashboard`            | Serve the local loopback dashboard and API.                                                                               |
 | `eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                                 |
 | `eval run`             | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
+| `eval status <id>`     | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                               |
 | `eval score <id>`      | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
 | `eval report <id>`     | Show the scored eval run variant ranking.                                                                                 |
 | `eval compare <id>`    | Compare scored eval variants against a `--baseline` variant.                                                              |
@@ -90,7 +91,7 @@ explicit `--copy` selections for files you have reviewed.
 
 ## Eval Commands
 
-`eval plan | run | score | report | compare | bundle | analyze | history | publish` drive eval suites that
+`eval plan | run | status | score | report | compare | bundle | analyze | history | publish` drive eval suites that
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
@@ -104,6 +105,7 @@ Common flags:
 - `--row <row-id>` (run, repeatable)
 - `--watch-timeout-seconds <seconds>` (run)
 - `--no-watch` (run)
+- `--watch` and `--interval <seconds>` (status)
 - `--llm-judge` (score)
 - `--baseline <variant-id>` (compare variants within one run)
 - `--against <eval-run-id>` (compare releases with compatible lineage)
@@ -119,6 +121,12 @@ Common flags:
 Artifacts land under `.ultrafuzz/evals/runs/<eval-run-id>/`. See
 [Eval Suites](reference/evals.md) and the
 [CLI reference](reference/cli.md#eval) for full details.
+
+`eval status <eval-run-id>` is observational: it reads the entire matrix and
+linked durable state without synchronizing or changing any run. It uses
+deterministic opaque row labels in table and JSON output, counts every terminal
+node disposition as completed, and reports ETA as unavailable when completion
+or fresh timing evidence is insufficient.
 
 `eval bundle` exports only fixed-schema aggregate evidence for offline
 analysis. The self-contained directory is checksum-verified and excludes raw
