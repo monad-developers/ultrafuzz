@@ -6,6 +6,7 @@ import {
   finishModalRecoveryLifecycle,
   parseModalRecoveryLifecycleDocument,
   parseModalRecoveryLifecycleRecord,
+  parseModalRecoveryLifecycleRecords,
   startModalRecoveryLifecycle,
   summarizeModalRecoveryLifecycle,
   type ModalRecoveryLifecycleRecord,
@@ -62,9 +63,16 @@ describe("Modal recovery lifecycle", () => {
 
   it("replays start and terminal transitions idempotently and rejects conflicting replays", () => {
     const records: ModalRecoveryLifecycleRecord[] = [];
-    const start = startInput(1, "initial");
+    const start = {
+      ...startInput(1, "initial"),
+      nodeAttemptLedgerDigest: "e".repeat(64),
+      evaluationLineageDigest: "f".repeat(64)
+    };
     expect(startModalRecoveryLifecycle(records, start).changed).toBe(true);
     expect(startModalRecoveryLifecycle(records, start).changed).toBe(false);
+    expect(() => startModalRecoveryLifecycle(records, { ...start, evaluationLineageDigest: "0".repeat(64) })).toThrow(
+      /different data/u
+    );
 
     const terminal = {
       attemptId: start.attemptId,
@@ -74,6 +82,9 @@ describe("Modal recovery lifecycle", () => {
       modelWorkStarted: false,
       progressMade: false
     };
+    expect(() =>
+      finishModalRecoveryLifecycle(records, { ...terminal, nodeAttemptLedgerDigest: "0".repeat(64) })
+    ).toThrow(/conflicting attempt-ledger linkage/u);
     expect(finishModalRecoveryLifecycle(records, terminal).changed).toBe(true);
     expect(startModalRecoveryLifecycle(records, start).changed).toBe(false);
     expect(finishModalRecoveryLifecycle(records, terminal).changed).toBe(false);
@@ -90,6 +101,34 @@ describe("Modal recovery lifecycle", () => {
       workerExitCode: null
     });
     expect(records[1]?.worker_exit_code).toBeNull();
+
+    const enrichedStart = startInput(3, "post-model-resume");
+    startModalRecoveryLifecycle(records, enrichedStart);
+    finishModalRecoveryLifecycle(records, {
+      attemptId: enrichedStart.attemptId,
+      terminalReason: "succeeded",
+      finishedAt: "2026-07-20T00:03:30.000Z",
+      nodeAttemptLedgerDigest: "1".repeat(64),
+      evaluationLineageDigest: "2".repeat(64)
+    });
+    expect(startModalRecoveryLifecycle(records, enrichedStart).changed).toBe(false);
+  });
+
+  it("requires complete, append-ordered parent linkage", () => {
+    const parent = activeRecord(1, "initial");
+    const child = activeRecord(2, "post-model-resume");
+
+    expect(parseModalRecoveryLifecycleRecords([parent, child])).toEqual([parent, child]);
+    expect(() => parseModalRecoveryLifecycleRecords([child, parent])).toThrow(/parent must precede child/u);
+    expect(() => parseModalRecoveryLifecycleRecord({ ...child, parent_generation: undefined })).toThrow(
+      /recorded together/u
+    );
+    expect(() =>
+      parseModalRecoveryLifecycleRecords([
+        parent,
+        { ...child, parent_attempt_id: "missing-parent", parent_generation: 1 }
+      ])
+    ).toThrow(/parent must precede child/u);
   });
 
   it("derives measurable progress from durable transitions and node-count deltas", () => {

@@ -131,6 +131,7 @@ export interface ModalWorkerStatus {
   schema_version: typeof MODAL_WORKER_STATUS_SCHEMA_VERSION | typeof WORKER_RESULT_SCHEMA_VERSION;
   updated_at?: string;
   stage: string;
+  terminal: boolean;
   category: ModalWorkerStatusCategory;
   model_work_started: boolean;
   retryable: boolean;
@@ -275,13 +276,18 @@ const launchStateSchema = z
       attempts.add(key);
       attemptIds.add(attempt.attempt_id);
       const lifecycle = state.recovery_lifecycle.find((record) => record.attempt_id === attempt.attempt_id);
+      const expectedFingerprints = "fingerprints" in attempt ? attempt.fingerprints : state.fingerprints;
       if (lifecycle === undefined) {
         context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} is missing lifecycle` });
       } else if (
         lifecycle.logical_run_id !== state.logical_run_id ||
         lifecycle.model_slug !== attempt.slug ||
         lifecycle.generation !== attempt.generation ||
-        lifecycle.attempt !== attempt.attempt
+        lifecycle.attempt !== attempt.attempt ||
+        lifecycle.fingerprints.config !== expectedFingerprints.config ||
+        lifecycle.fingerprints.source !== expectedFingerprints.source ||
+        lifecycle.fingerprints.image !== expectedFingerprints.image ||
+        lifecycle.fingerprints.model !== attempt.model_fingerprint
       ) {
         context.addIssue({ code: "custom", message: `launch attempt ${attempt.attempt_id} has mismatched lifecycle` });
       }
@@ -493,6 +499,7 @@ export function parseModalWorkerStatus(
       schema_version: MODAL_WORKER_STATUS_SCHEMA_VERSION,
       updated_at: candidate.updated_at,
       stage: candidate.category,
+      terminal: candidate.stage === "terminal",
       category: candidate.category,
       model_work_started: candidate.model_work_started,
       retryable: candidate.retryable,
@@ -510,6 +517,7 @@ export function parseModalWorkerStatus(
   const status: ModalWorkerStatus = {
     schema_version: WORKER_RESULT_SCHEMA_VERSION,
     stage: contract.result_type,
+    terminal: contract.result_type === "terminal",
     category: workerResultCategory(contract),
     model_work_started: contract.model_work_started,
     retryable: workerResultCategory(contract) === "transient-operational-failure",
@@ -547,6 +555,12 @@ export function latestModalWorkerStatus(
     }
   }
   return latest;
+}
+
+export function isModalWorkerStatusTerminal(
+  status: ModalWorkerStatus | undefined
+): status is ModalWorkerStatus & { terminal: true } {
+  return status?.terminal === true;
 }
 
 function matchesWorkerAttempt(
@@ -804,6 +818,28 @@ export function markModalLaunchFailed(
   record.finished_at = now;
 }
 
+export function markModalLaunchFailedWithRecovery(
+  state: ModalLaunchState,
+  record: ModalLaunchRecord,
+  category: ModalLaunchFailureCategory,
+  input: {
+    now?: string;
+    modelWorkStarted: boolean | "unknown";
+    controllerRequested: boolean;
+  }
+): boolean {
+  markModalLaunchFailed(record, category, input.now);
+  return finishModalLaunchRecoveryLifecycle(state, record, {
+    terminalReason:
+      category === "transient-operational-failure" && record.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT
+        ? "recovery-budget-exhausted"
+        : "operational-failure",
+    finishedAt: record.finished_at!,
+    modelWorkStarted: input.modelWorkStarted,
+    controllerRequested: input.controllerRequested
+  });
+}
+
 export function modalWorkerLineage(state: ModalLaunchState, record: ModalLaunchRecord): ModalWorkerLineage {
   return parseModalWorkerLineage({
     schema_version: MODAL_WORKER_LINEAGE_SCHEMA_VERSION,
@@ -884,7 +920,7 @@ export function classifyModalRunnerStatus(input: {
   ) {
     return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
   }
-  if (input.modelWorkMayHaveStarted === true && (worker === undefined || worker.stage !== "terminal")) {
+  if (input.modelWorkMayHaveStarted === true && (worker === undefined || !isModalWorkerStatusTerminal(worker))) {
     return status("resume-required", input.postModelRecovery === "stop" ? "none" : "relaunch", true, false, 0);
   }
   if (input.launchFailure === "permanent-operational-failure") {
@@ -900,11 +936,12 @@ export function modalRecoveryTerminalReasonForWorkerStatus(input: {
   category: ModalRunnerStatusCategory | ModalWorkerStatusCategory;
   attempt: number;
   modelWorkStarted: boolean;
+  recoveryBudgetExhausted?: boolean;
 }): Exclude<ModalRecoveryTerminalReason, "active"> {
   if (input.category === "succeeded") return "succeeded";
   if (input.category === "genuine-task-outcome") return "genuine-worker-failure";
   if (
-    input.category === "permanent-operational-failure" &&
+    (input.recoveryBudgetExhausted === true || input.category === "transient-operational-failure") &&
     input.attempt >= MODAL_PRE_MODEL_RETRY_LIMIT &&
     !input.modelWorkStarted
   ) {

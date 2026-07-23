@@ -253,6 +253,43 @@ test("analysis bundle policy rejects non-allowlisted payload fields before creat
   assert.equal(fs.existsSync(output), false);
 });
 
+test("analysis recovery summaries reconcile active and terminal classifications exactly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-recovery-"));
+  const { recovery } = syntheticPayloads();
+
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: path.join(root, "misclassified"),
+        payloads: {
+          "recovery-summary": {
+            ...recovery,
+            terminal_classes: {
+              ...recovery.terminal_classes,
+              succeeded: 0,
+              "operational-failure": 1
+            }
+          }
+        }
+      }),
+    /schema validation failed/u
+  );
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: path.join(root, "active"),
+        payloads: {
+          "recovery-summary": {
+            ...recovery,
+            terminal_generations: 1,
+            active_generations: 1
+          }
+        }
+      }),
+    /schema validation failed/u
+  );
+});
+
 test("analysis bundle validation rejects modified payload bytes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-integrity-"));
   const output = path.join(root, "bundle");

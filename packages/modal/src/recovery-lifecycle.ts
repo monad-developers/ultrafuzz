@@ -157,6 +157,13 @@ export const modalRecoveryLifecycleRecordSchema = z
         message: "a worker generation cannot parent itself"
       });
     }
+    if ((record.parent_generation === undefined) !== (record.parent_attempt_id === undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["parent_attempt_id"],
+        message: "parent generation and attempt ID must be recorded together"
+      });
+    }
     if (record.parent_generation !== undefined && record.parent_generation > record.generation) {
       context.addIssue({
         code: "custom",
@@ -287,6 +294,20 @@ export function finishModalRecoveryLifecycle(
 ): ModalRecoveryLifecycleTransitionResult {
   const record = records.find((candidate) => candidate.attempt_id === input.attemptId);
   if (record === undefined) throw new Error(`Modal recovery generation ${input.attemptId} was not started`);
+  if (
+    input.nodeAttemptLedgerDigest !== undefined &&
+    record.node_attempt_ledger_digest !== "unknown" &&
+    record.node_attempt_ledger_digest !== input.nodeAttemptLedgerDigest
+  ) {
+    throw new Error(`Modal recovery generation ${input.attemptId} has conflicting attempt-ledger linkage`);
+  }
+  if (
+    input.evaluationLineageDigest !== undefined &&
+    record.evaluation_lineage_digest !== "unknown" &&
+    record.evaluation_lineage_digest !== input.evaluationLineageDigest
+  ) {
+    throw new Error(`Modal recovery generation ${input.attemptId} has conflicting evaluation-lineage linkage`);
+  }
   const candidate = parseModalRecoveryLifecycleRecord({
     ...record,
     terminal_reason: input.terminalReason,
@@ -318,14 +339,30 @@ export function parseModalRecoveryLifecycleRecord(value: unknown): ModalRecovery
 
 export function parseModalRecoveryLifecycleRecords(value: unknown): ModalRecoveryLifecycleRecord[] {
   const records = z.array(modalRecoveryLifecycleRecordSchema).max(100_000).parse(value);
-  const attemptIds = new Set<string>();
+  const attemptsById = new Map<string, ModalRecoveryLifecycleRecord>();
   const generationAttempts = new Set<string>();
   for (const record of records) {
-    if (attemptIds.has(record.attempt_id)) throw new Error(`duplicate Modal recovery attempt ID: ${record.attempt_id}`);
-    attemptIds.add(record.attempt_id);
+    if (attemptsById.has(record.attempt_id)) {
+      throw new Error(`duplicate Modal recovery attempt ID: ${record.attempt_id}`);
+    }
     const key = `${record.logical_run_id}\0${record.model_slug}\0${record.generation}\0${record.attempt}`;
     if (generationAttempts.has(key)) throw new Error("duplicate Modal recovery generation attempt");
     generationAttempts.add(key);
+    if (record.parent_attempt_id !== undefined) {
+      const parent = attemptsById.get(record.parent_attempt_id);
+      if (parent === undefined) {
+        throw new Error(`Modal recovery parent must precede child: ${record.parent_attempt_id}`);
+      }
+      if (
+        parent.logical_run_id !== record.logical_run_id ||
+        parent.model_slug !== record.model_slug ||
+        parent.generation !== record.parent_generation ||
+        (parent.generation === record.generation && parent.attempt >= record.attempt)
+      ) {
+        throw new Error(`Modal recovery generation ${record.attempt_id} has incompatible parent linkage`);
+      }
+    }
+    attemptsById.set(record.attempt_id, record);
   }
   return records;
 }
@@ -448,38 +485,46 @@ function sameModalRecoveryStart(
   existing: ModalRecoveryLifecycleRecord,
   candidate: ModalRecoveryLifecycleRecord
 ): boolean {
-  return isDeepStrictEqual(
-    {
-      schema_version: existing.schema_version,
-      logical_run_id: existing.logical_run_id,
-      model_slug: existing.model_slug,
-      generation: existing.generation,
-      attempt: existing.attempt,
-      attempt_id: existing.attempt_id,
-      parent_generation: existing.parent_generation,
-      parent_attempt_id: existing.parent_attempt_id,
-      trigger_action: existing.trigger_action,
-      start_reason: existing.start_reason,
-      launched_at: existing.launched_at,
-      fingerprints: existing.fingerprints,
-      node_counts_before: existing.node_counts_before
-    },
-    {
-      schema_version: candidate.schema_version,
-      logical_run_id: candidate.logical_run_id,
-      model_slug: candidate.model_slug,
-      generation: candidate.generation,
-      attempt: candidate.attempt,
-      attempt_id: candidate.attempt_id,
-      parent_generation: candidate.parent_generation,
-      parent_attempt_id: candidate.parent_attempt_id,
-      trigger_action: candidate.trigger_action,
-      start_reason: candidate.start_reason,
-      launched_at: candidate.launched_at,
-      fingerprints: candidate.fingerprints,
-      node_counts_before: candidate.node_counts_before
-    }
+  return (
+    isDeepStrictEqual(
+      {
+        schema_version: existing.schema_version,
+        logical_run_id: existing.logical_run_id,
+        model_slug: existing.model_slug,
+        generation: existing.generation,
+        attempt: existing.attempt,
+        attempt_id: existing.attempt_id,
+        parent_generation: existing.parent_generation,
+        parent_attempt_id: existing.parent_attempt_id,
+        trigger_action: existing.trigger_action,
+        start_reason: existing.start_reason,
+        launched_at: existing.launched_at,
+        fingerprints: existing.fingerprints,
+        node_counts_before: existing.node_counts_before
+      },
+      {
+        schema_version: candidate.schema_version,
+        logical_run_id: candidate.logical_run_id,
+        model_slug: candidate.model_slug,
+        generation: candidate.generation,
+        attempt: candidate.attempt,
+        attempt_id: candidate.attempt_id,
+        parent_generation: candidate.parent_generation,
+        parent_attempt_id: candidate.parent_attempt_id,
+        trigger_action: candidate.trigger_action,
+        start_reason: candidate.start_reason,
+        launched_at: candidate.launched_at,
+        fingerprints: candidate.fingerprints,
+        node_counts_before: candidate.node_counts_before
+      }
+    ) &&
+    sameModalRecoveryStartDigest(existing.node_attempt_ledger_digest, candidate.node_attempt_ledger_digest) &&
+    sameModalRecoveryStartDigest(existing.evaluation_lineage_digest, candidate.evaluation_lineage_digest)
   );
+}
+
+function sameModalRecoveryStartDigest(existing: string, candidate: string): boolean {
+  return candidate === "unknown" || existing === candidate;
 }
 
 function observedModalRecoveryProgress(

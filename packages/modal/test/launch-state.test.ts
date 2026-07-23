@@ -16,6 +16,7 @@ import {
   hasExactModalLaunchTags,
   latestModalWorkerStatus,
   markModalLaunchFailed,
+  markModalLaunchFailedWithRecovery,
   markModalLaunchReady,
   markModalSandboxCreated,
   modalLaunchTags,
@@ -68,6 +69,7 @@ function workerStatus(category: ModalWorkerStatus["category"], modelWorkStarted:
     schema_version: "ultrafuzz.modal.worker-status.v2",
     updated_at: "2026-01-01T00:00:00.000Z",
     stage: "fixture",
+    terminal: false,
     category,
     model_work_started: modelWorkStarted,
     retryable: category === "transient-operational-failure",
@@ -276,6 +278,21 @@ describe("Modal lineage", () => {
     });
   });
 
+  it("rejects lifecycle fingerprints that diverge from launch provenance", () => {
+    const state = launchState();
+    reserveModalLaunchAttempt({
+      state,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume"
+    });
+    state.recovery_lifecycle[0]!.fingerprints.source = "f".repeat(64);
+
+    expect(() => parseCompatibleModalLaunchState(state)).toThrow(/mismatched lifecycle/u);
+  });
+
   it("adapts legacy launch state files for inspection and guarded resume", async () => {
     const legacy = {
       schema_version: "ultrafuzz.modal.launch-state.v1",
@@ -419,6 +436,7 @@ describe("Modal runner status", () => {
       )
     ).toMatchObject({
       schema_version: WORKER_RESULT_SCHEMA_VERSION,
+      terminal: false,
       category: "model-work",
       model_work_started: true,
       generation: 1,
@@ -481,6 +499,7 @@ describe("Modal runner status", () => {
       schema_version: "ultrafuzz.modal.worker-status.v2",
       updated_at: "2026-01-01T00:00:00.000Z",
       stage: "preparing",
+      terminal: false,
       category: "preparing",
       model_work_started: false,
       retryable: true,
@@ -491,6 +510,18 @@ describe("Modal runner status", () => {
       node_counts: { running: 1 },
       error_code: "worker-live"
     });
+    expect(
+      parseModalWorkerStatus({
+        schema_version: "ultrafuzz.modal.worker-status.v2",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        stage: "terminal",
+        category: "succeeded",
+        model_work_started: true,
+        retryable: false,
+        generation: 1,
+        attempt: 1
+      })
+    ).toMatchObject({ stage: "succeeded", terminal: true, category: "succeeded" });
   });
 
   it("uses the newest exact-attempt contract after a split terminal write", () => {
@@ -503,6 +534,7 @@ describe("Modal runner status", () => {
     const terminal = workerResult({ generation: 4 });
 
     expect(latestModalWorkerStatus([partial, terminal], { generation: 1, attempt: 1 })).toMatchObject({
+      terminal: true,
       category: "succeeded",
       result_generation: 4
     });
@@ -530,6 +562,21 @@ describe("Modal runner status", () => {
         category: "permanent-operational-failure",
         attempt: 3,
         modelWorkStarted: false
+      })
+    ).toBe("operational-failure");
+    expect(
+      modalRecoveryTerminalReasonForWorkerStatus({
+        category: "transient-operational-failure",
+        attempt: 3,
+        modelWorkStarted: false
+      })
+    ).toBe("recovery-budget-exhausted");
+    expect(
+      modalRecoveryTerminalReasonForWorkerStatus({
+        category: "permanent-operational-failure",
+        attempt: 3,
+        modelWorkStarted: false,
+        recoveryBudgetExhausted: true
       })
     ).toBe("recovery-budget-exhausted");
     expect(
@@ -586,7 +633,7 @@ describe("Modal runner status", () => {
       classifyModalRunnerStatus({
         sandbox: "missing",
         attempt: 2,
-        workerStatus: { ...stalePartial, stage: "terminal" },
+        workerStatus: { ...stalePartial, terminal: true },
         postModelRecovery: "stop",
         modelWorkMayHaveStarted: true
       })
@@ -624,5 +671,27 @@ describe("Modal runner status", () => {
         launchFailure: "permanent-operational-failure"
       })
     ).toMatchObject({ category: "permanent-operational-failure", action: "none", retryable: false });
+
+    const recoveredState = launchState();
+    const recovered = reserveModalLaunchAttempt({
+      state: recoveredState,
+      model: MODEL,
+      modelFingerprint: fingerprintModalModel(MODEL),
+      volumeName: "volume-placeholder",
+      remoteRoot: "/data/logical-run/model-one",
+      workspaceMode: "resume",
+      now: "2026-01-01T00:01:00.000Z"
+    });
+    markModalLaunchFailedWithRecovery(recoveredState, recovered, "permanent-operational-failure", {
+      now: "2026-01-01T00:02:00.000Z",
+      modelWorkStarted: "unknown",
+      controllerRequested: true
+    });
+    expect(recoveredState.recovery_lifecycle[0]).toMatchObject({
+      terminal_reason: "operational-failure",
+      finished_at: "2026-01-01T00:02:00.000Z",
+      model_work_started: "unknown",
+      controller_requested: true
+    });
   });
 });

@@ -298,6 +298,32 @@ export const analysisRecoverySummarySchema = z
     if (value.resumptions !== value.start_reasons["post-model-resume"]) {
       ctx.addIssue({ code: "custom", path: ["resumptions"], message: "must match start reasons" });
     }
+    if (value.active_generations !== value.terminal_reasons.active) {
+      ctx.addIssue({ code: "custom", path: ["active_generations"], message: "must match active terminal reasons" });
+    }
+    const expectedTerminalClasses = {
+      active: value.terminal_reasons.active,
+      succeeded: value.terminal_reasons.succeeded,
+      "genuine-worker-failure": value.terminal_reasons["genuine-worker-failure"],
+      "operational-failure": value.terminal_reasons["operational-failure"],
+      "controller-rotation":
+        value.terminal_reasons["image-rollout"] +
+        value.terminal_reasons["stale-probe-rotation"] +
+        value.terminal_reasons["operator-request"],
+      timeout: value.terminal_reasons.timeout,
+      "resource-termination": value.terminal_reasons["resource-termination"],
+      "recovery-budget-exhausted": value.terminal_reasons["recovery-budget-exhausted"],
+      unknown: value.terminal_reasons.unknown
+    };
+    for (const [terminalClass, expected] of Object.entries(expectedTerminalClasses)) {
+      if (value.terminal_classes[terminalClass as keyof typeof value.terminal_classes] !== expected) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["terminal_classes", terminalClass],
+          message: "must reconcile with terminal reasons"
+        });
+      }
+    }
   });
 
 function manifestEntryForKind(kind: AnalysisBundleFileKind) {

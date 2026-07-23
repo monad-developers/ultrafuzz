@@ -121,8 +121,11 @@ describe("Modal benchmark termination", () => {
       0
     );
     const sandboxes = fakeTerminationService([exact, exact, broader, mismatched, stopped]);
+    const onTerminatedAttempt = vi.fn();
 
-    await expect(terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes })).resolves.toEqual({
+    await expect(
+      terminateModalBenchmarkSandboxes({ state, appId: "app-id", sandboxes, onTerminatedAttempt })
+    ).resolves.toEqual({
       scopes: 1,
       discovered: 4,
       matched: 2,
@@ -148,6 +151,8 @@ describe("Modal benchmark termination", () => {
     });
     expect(exact.terminate).toHaveBeenCalledTimes(1);
     expect(stopped.terminate).not.toHaveBeenCalled();
+    expect(onTerminatedAttempt).toHaveBeenCalledOnce();
+    expect(onTerminatedAttempt).toHaveBeenCalledWith("newer-attempt");
     expect(broader.poll).not.toHaveBeenCalled();
     expect(broader.terminate).not.toHaveBeenCalled();
     expect(mismatched.poll).not.toHaveBeenCalled();
