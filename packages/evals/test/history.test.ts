@@ -458,6 +458,35 @@ describe("longitudinal eval history", () => {
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
 
+    const forgedClean = summary([
+      rowScore(first.id),
+      rowScore(second.id, {
+        trial_id: "trial-2",
+        recovery_equivalence: cleanRecoveryEquivalence({
+          infrastructure_only_recovery_generations: 1,
+          no_progress_recovery_generations: 1,
+          recovery_generations: 1
+        })
+      })
+    ]);
+    expect(() =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: forgedClean,
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set(["bug-b"])]
+        ])
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
+
     const incompatible = summary(rows);
     incompatible.provenance!.scoring.ground_truth_sha256 = { "target-a": "f".repeat(64) };
     expect(() =>

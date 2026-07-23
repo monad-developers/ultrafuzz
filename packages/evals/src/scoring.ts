@@ -16,7 +16,12 @@ import {
 import { runIndependentJudgePanel } from "./evaluator/judge-panel.js";
 import { boundedResponseText } from "./reporters/http.js";
 import { buildEvalSummaryProvenance } from "./lineage.js";
-import { classifyRecoveryEquivalence, withRecordedRecoveryEquivalence } from "./recovery-equivalence.js";
+import {
+  classifyRecoveryEquivalence,
+  reconcileEvalRunRecords,
+  recoveryEquivalenceCanBeRecorded,
+  withRecordedRecoveryEquivalence
+} from "./recovery-equivalence.js";
 import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import {
   type EvalCompareValue,
@@ -129,13 +134,14 @@ export async function scoreEvalRun(input: ScoreEvalRunInput): Promise<EvalScoreS
   const suite = evalManifest.suite;
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
-  const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
+  const recordsByRow = reconcileEvalRunRecords(records);
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     if (record === undefined) continue;
+    const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
-    if (record.recovery_equivalence === undefined) {
+    if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
       appendJsonLine(path.join(root, "runs.jsonl"), recorded);
     }
   }

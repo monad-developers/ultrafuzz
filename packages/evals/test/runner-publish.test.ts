@@ -521,6 +521,7 @@ describe("runner", () => {
       final_status: "timed-out",
       workflow: { status: "running", terminal: false }
     });
+    expect(watched.record).not.toHaveProperty("recovery_equivalence");
     expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
     expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
   });
@@ -653,6 +654,33 @@ describe("eval publish (post-hoc replay)", () => {
     ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
   });
 
+  it("does not persist recovery evidence before a workflow is terminal", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const runsPath = path.join(evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as {
+      ultrafuzz_run_root: string;
+      recovery_equivalence?: unknown;
+      [key: string]: unknown;
+    };
+    fs.writeFileSync(runsPath, `${JSON.stringify({ ...record, recovery_equivalence: undefined })}\n`, "utf8");
+    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        evalProviderConfig: { provider: "none", providers: {} },
+        env: {}
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+
+    const records = readJsonLines<{ recovery_equivalence?: unknown }>(runsPath);
+    expect(records).toHaveLength(1);
+    expect(records[0]).not.toHaveProperty("recovery_equivalence");
+  });
+
   it("resolves a custom terminal report output from the run graph", async () => {
     const { projectRoot, evalRunRoot } = publishFixture();
     const record = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
@@ -725,7 +753,7 @@ describe("eval publish (post-hoc replay)", () => {
 
     const runsPath = path.join(evalRunRoot, "runs.jsonl");
     const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown>;
-    fs.appendFileSync(
+    fs.writeFileSync(
       runsPath,
       `${JSON.stringify({
         ...record,

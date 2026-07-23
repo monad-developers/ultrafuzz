@@ -259,7 +259,8 @@ export class BraintrustReporter implements EvalReporter {
         _is_merge: true,
         output: {
           status: result.status,
-          ...(result.runId !== undefined ? { run_id: result.runId } : {})
+          ...(result.runId !== undefined ? { run_id: result.runId } : {}),
+          ...(result.recoveryEquivalence === undefined ? {} : { recovery_equivalence: result.recoveryEquivalence })
         },
         metadata: {
           ...(result.graphFingerprint !== undefined ? { graph_fingerprint: result.graphFingerprint } : {}),
@@ -289,7 +290,8 @@ export class BraintrustReporter implements EvalReporter {
         true_positives: score.true_positives,
         false_positives: score.false_positives,
         missed: score.missed,
-        human_review_queue_count: score.human_review_queue_count
+        human_review_queue_count: score.human_review_queue_count,
+        recovery_equivalence: score.recovery_equivalence
       }
     }));
     events.push({
@@ -304,7 +306,7 @@ export class BraintrustReporter implements EvalReporter {
           [`${variant.variant_id}:f1_score`, variant.f1_score]
         ])
       ),
-      output: { variants: summary.variants },
+      output: { variants: summary.variants, recovery_equivalence: summary.recovery_equivalence },
       metadata: {
         ...(summary.provenance?.benchmark !== undefined
           ? {

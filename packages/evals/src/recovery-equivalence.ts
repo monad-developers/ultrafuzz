@@ -12,6 +12,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "./types.js";
+import { EvalError } from "./utils.js";
 
 export const RECOVERY_EQUIVALENCE_SCHEMA_VERSION = "ultrafuzz.eval.recovery-equivalence.v1" as const;
 
@@ -60,11 +61,86 @@ const recoveryEquivalenceSchema = z
         message: "cannot exceed all repeated model-backed node executions"
       });
     }
+    if (value.model_work_recovery_generations > value.recovery_reexecuted_model_backed_node_executions) {
+      context.addIssue({
+        code: "custom",
+        path: ["model_work_recovery_generations"],
+        message: "cannot exceed recovery model re-executions"
+      });
+    }
+    if (
+      value.observed_node_attempts <
+      value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["observed_node_attempts"],
+        message: "cannot be less than accounted model-backed node executions"
+      });
+    }
+    if (
+      value.unique_model_backed_node_executions + value.repeated_model_backed_node_executions > 0 &&
+      (value.observed_workflow_executions === 0 || value.observed_controller_invocations === 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["observed_workflow_executions"],
+        message: "model-backed executions require observed workflow and controller lineage"
+      });
+    }
     if ((value.classification === "non-comparable") !== (value.reason !== null)) {
       context.addIssue({
         code: "custom",
         path: ["reason"],
         message: "must be present exactly for non-comparable classifications"
+      });
+    }
+    if (
+      value.classification !== "non-comparable" &&
+      value.recovery_reexecuted_model_backed_node_executions > value.policy.max_repeated_model_executions
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["classification"],
+        message: "must be non-comparable when recovery model re-executions exceed the policy maximum"
+      });
+    }
+    if (
+      value.classification === "clean" &&
+      (value.recovery_generations !== 0 ||
+        value.recovery_reexecuted_model_backed_node_executions !== 0 ||
+        value.model_work_recovery_generations !== 0 ||
+        value.observed_workflow_executions > 1 ||
+        value.observed_controller_invocations > 1)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["classification"],
+        message: "clean classifications cannot contain recovery generations or recovery model re-executions"
+      });
+    }
+    if (
+      value.classification === "infrastructure-recovered" &&
+      (value.recovery_generations === 0 ||
+        value.model_work_recovery_generations !== 0 ||
+        value.recovery_reexecuted_model_backed_node_executions !== 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["classification"],
+        message: "infrastructure-recovered classifications require infrastructure-only recovery"
+      });
+    }
+    if (
+      value.classification === "model-reexecuted-within-policy" &&
+      (value.recovery_generations === 0 ||
+        value.model_work_recovery_generations === 0 ||
+        value.recovery_reexecuted_model_backed_node_executions === 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["classification"],
+        message: "model-reexecuted classifications require recovery model re-executions"
       });
     }
   });
@@ -121,6 +197,16 @@ export function classifyRecoveryEquivalence(input: {
   if (graph === undefined || state === undefined) {
     return nonComparable(policy, "execution lineage is unavailable");
   }
+  if (new Set(graph.nodes.map((node) => node.id)).size !== graph.nodes.length) {
+    return nonComparable(policy, "planned graph contains duplicate node identities");
+  }
+  if (
+    graph.nodes.some(
+      (node) => (node.kind === "meta" || node.kind === "reference") && (node.model_fanout?.length ?? 0) > 0
+    )
+  ) {
+    return nonComparable(policy, "planned graph model metadata is inconsistent");
+  }
   const modelNodeIds = new Set(graph.nodes.filter(isModelBackedNode).map((node) => node.id));
   const ledgerPath = path.join(runRoot, "attempts.jsonl");
   let replay: ReturnType<typeof replayNodeAttempts>;
@@ -143,21 +229,37 @@ export function classifyRecoveryEquivalence(input: {
   if (replay.entries.some((entry) => !graphNodeIds.has(entry.node_id))) {
     return nonComparable(policy, "node attempt lineage does not match the planned graph", replay.entries);
   }
-  if (replay.entries.length === 0 && modelWorkMayHaveStarted(state, modelNodeIds)) {
+  const observedModelNodeIds = new Set(
+    replay.entries.filter((entry) => modelNodeIds.has(entry.node_id)).map((entry) => entry.node_id)
+  );
+  if (modelWorkMayHaveStarted(state, modelNodeIds) && observedModelNodeIds.size === 0) {
     return nonComparable(policy, "model execution exposure cannot be reconstructed");
+  }
+  if ([...startedModelNodeIds(state, modelNodeIds)].some((nodeId) => !observedModelNodeIds.has(nodeId))) {
+    return nonComparable(policy, "model execution exposure is incomplete", replay.entries);
   }
 
   const controllerObservations = controllerInvocations(path.join(runRoot, "events.jsonl"));
   if (controllerObservations === undefined) {
     return nonComparable(policy, "controller recovery lineage cannot be reconstructed", replay.entries);
   }
+  const reconciledControllers = reconcileAttemptControllers(replay.entries, controllerObservations);
+  if (reconciledControllers === undefined) {
+    return nonComparable(policy, "controller recovery lineage cannot be reconciled", replay.entries);
+  }
   const generationsById = new Map<string, RecoveryGeneration>();
   for (const entry of replay.entries) {
-    const generationId = JSON.stringify([entry.controller_invocation_id, entry.workflow_execution_id]);
+    const controllerInvocationId = reconciledControllers.get(entry.attempt_id);
+    if (controllerInvocationId === undefined) {
+      return nonComparable(policy, "controller recovery lineage cannot be reconciled", replay.entries);
+    }
+    const generationId = JSON.stringify([controllerInvocationId, entry.workflow_execution_id]);
     const generation = generationsById.get(generationId) ?? {
       id: generationId,
-      controllerInvocationId: entry.controller_invocation_id,
-      firstObservedAt: entry.lifecycle.started_at,
+      controllerInvocationId,
+      firstObservedAt:
+        controllerObservations.find((observation) => observation.id === controllerInvocationId)?.at ??
+        entry.lifecycle.started_at,
       attempts: [],
       executedModelAttempts: []
     };
@@ -170,7 +272,7 @@ export function classifyRecoveryEquivalence(input: {
     }
     generationsById.set(generation.id, generation);
   }
-  const controllersWithAttempts = new Set<string>(replay.entries.map((entry) => entry.controller_invocation_id));
+  const controllersWithAttempts = new Set<string>(reconciledControllers.values());
   for (const observation of controllerObservations) {
     if (controllersWithAttempts.has(observation.id)) continue;
     const generationId = JSON.stringify([observation.id, null]);
@@ -239,7 +341,7 @@ export function classifyRecoveryEquivalence(input: {
     observed_workflow_executions: new Set(replay.entries.map((entry) => entry.workflow_execution_id)).size,
     observed_controller_invocations: new Set([
       ...controllerObservations.map((observation) => observation.id),
-      ...replay.entries.map((entry) => entry.controller_invocation_id)
+      ...reconciledControllers.values()
     ]).size,
     classification,
     reason
@@ -263,16 +365,57 @@ export function withRecordedRecoveryEquivalence(
   };
 }
 
+/**
+ * Collapse the append-only run ledger while rejecting any attempt to replace
+ * an already-recorded recovery classification for a row.
+ */
+export function reconcileEvalRunRecords(records: readonly EvalRunRecord[]): Map<string, EvalRunRecord> {
+  const recordsByRow = new Map<string, EvalRunRecord>();
+  const recoveryByRow = new Map<string, EvalRecoveryEquivalence>();
+  for (const record of records) {
+    const recovery =
+      record.recovery_equivalence === undefined
+        ? recoveryByRow.get(record.row_id)
+        : parseRecoveryEquivalence(record.recovery_equivalence);
+    const previous = recoveryByRow.get(record.row_id);
+    if (previous !== undefined && recovery !== undefined && JSON.stringify(previous) !== JSON.stringify(recovery)) {
+      throw new EvalError(
+        "EVAL_RECOVERY_EQUIVALENCE_CONFLICT",
+        `eval row ${record.row_id} has conflicting recorded recovery classifications`
+      );
+    }
+    if (recovery !== undefined) recoveryByRow.set(record.row_id, recovery);
+    recordsByRow.set(record.row_id, {
+      ...record,
+      ...(recovery === undefined ? {} : { recovery_equivalence: recovery })
+    });
+  }
+  return recordsByRow;
+}
+
+/** Recovery evidence is immutable only after the underlying workflow is terminal. */
+export function recoveryEquivalenceCanBeRecorded(record: EvalRunRecord): boolean {
+  if (record.ultrafuzz_run_root !== undefined) {
+    const state = readJsonSource(path.join(record.ultrafuzz_run_root, "state.json"), stateSchema);
+    if (state !== undefined) {
+      return isTerminalStatus(state.status);
+    }
+  }
+  return record.workflow?.terminal === true && isTerminalStatus(record.workflow.status);
+}
+
 export function recoveryEquivalenceIsPublishable(
   equivalence: EvalRecoveryEquivalence,
   policyInput: EvalRecoveryEquivalencePolicy | undefined
 ): boolean {
   const policy = resolveRecoveryEquivalencePolicy(policyInput);
+  const parsed = recoveryEquivalenceSchema.safeParse(equivalence);
+  if (!parsed.success) return false;
   return (
-    equivalence.policy.max_repeated_model_executions === policy.max_repeated_model_executions &&
-    equivalence.recovery_reexecuted_model_backed_node_executions <= policy.max_repeated_model_executions &&
-    equivalence.classification !== "non-comparable" &&
-    (policy.publication !== "clean" || equivalence.classification === "clean")
+    parsed.data.policy.max_repeated_model_executions === policy.max_repeated_model_executions &&
+    parsed.data.recovery_reexecuted_model_backed_node_executions <= policy.max_repeated_model_executions &&
+    parsed.data.classification !== "non-comparable" &&
+    (policy.publication !== "clean" || parsed.data.classification === "clean")
   );
 }
 
@@ -309,6 +452,24 @@ function modelWorkMayHaveStarted(state: z.infer<typeof stateSchema>, modelNodeId
   });
 }
 
+function startedModelNodeIds(
+  state: z.infer<typeof stateSchema>,
+  modelNodeIds: ReadonlySet<string>
+): ReadonlySet<string> {
+  return new Set(
+    [...modelNodeIds].filter((nodeId) => {
+      const node = state.nodes[nodeId];
+      return (
+        node?.started_at !== undefined || (node?.status !== undefined && !["pending", "skipped"].includes(node.status))
+      );
+    })
+  );
+}
+
+function isTerminalStatus(status: string | undefined): boolean {
+  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+}
+
 function isModelBackedNode(node: z.infer<typeof graphSchema>["nodes"][number]): boolean {
   if (node.kind === "meta" || node.kind === "reference") return false;
   if (node.kind === "agentic") return true;
@@ -336,13 +497,51 @@ function controllerInvocations(eventsPath: string): Array<{ id: string; at: stri
       const id = stringField(payload, "controller_invocation_id") ?? parsed.data.event_id;
       const at = stringField(payload, "controller_invoked_at") ?? parsed.data.timestamp;
       if (id === undefined || !Number.isFinite(Date.parse(at))) return undefined;
-      const previous = observations.get(id);
-      observations.set(id, previous === undefined || at < previous ? at : previous);
+      if (observations.has(id)) return undefined;
+      observations.set(id, at);
     }
     return [...observations].map(([id, at]) => ({ id, at }));
   } catch {
     return undefined;
   }
+}
+
+function reconcileAttemptControllers(
+  entries: readonly NodeAttemptLedgerEntry[],
+  observations: readonly { id: string; at: string }[]
+): Map<string, string> | undefined {
+  if (entries.length > 0 && observations.length === 0) return undefined;
+  const orderedObservations = [...observations].sort(
+    (left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id)
+  );
+  const observationIds = new Set(orderedObservations.map((observation) => observation.id));
+  const aliasesByObservation = new Map<string, string>();
+  const reconciled = new Map<string, string>();
+  for (const entry of [...entries].sort((left, right) =>
+    left.lifecycle.started_at.localeCompare(right.lifecycle.started_at)
+  )) {
+    if (
+      orderedObservations.some(
+        (observation) =>
+          observation.id === entry.controller_invocation_id && observation.at <= entry.lifecycle.started_at
+      )
+    ) {
+      reconciled.set(entry.attempt_id, entry.controller_invocation_id);
+      continue;
+    }
+    const observation = orderedObservations.filter((candidate) => candidate.at <= entry.lifecycle.started_at).at(-1);
+    if (observation === undefined) return undefined;
+    const alias = aliasesByObservation.get(observation.id);
+    if (alias === undefined || alias === entry.controller_invocation_id) {
+      aliasesByObservation.set(observation.id, entry.controller_invocation_id);
+      reconciled.set(entry.attempt_id, observation.id);
+    } else {
+      let syntheticId = JSON.stringify(["attempt-controller", entry.controller_invocation_id]);
+      while (observationIds.has(syntheticId)) syntheticId = `:${syntheticId}`;
+      reconciled.set(entry.attempt_id, syntheticId);
+    }
+  }
+  return reconciled;
 }
 
 function readJsonSource<T>(filePath: string, schema: z.ZodType<T>): T | undefined {

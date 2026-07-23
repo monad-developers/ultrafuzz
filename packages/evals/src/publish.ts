@@ -6,7 +6,12 @@ import type { EvalConfig } from "@ultrafuzz/config";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { NodeTelemetryPump, createTelemetryCursor } from "./node-telemetry.js";
-import { recoveryEquivalenceIsPublishable, withRecordedRecoveryEquivalence } from "./recovery-equivalence.js";
+import {
+  reconcileEvalRunRecords,
+  recoveryEquivalenceCanBeRecorded,
+  recoveryEquivalenceIsPublishable,
+  withRecordedRecoveryEquivalence
+} from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalRowResult } from "./reporter.js";
 import { EVAL_PROVIDER_NONE, createEvalReporters, resolveEvalProvider } from "./reporters/index.js";
 import {
@@ -67,13 +72,14 @@ export async function publishEvalRun(input: PublishEvalRunInput): Promise<Publis
   const suite = manifest.suite;
   const matrix = jsonFile<EvalMatrixRow[]>(path.join(root, "matrix.json"));
   const records = readJsonLines<EvalRunRecord>(path.join(root, "runs.jsonl"));
-  const recordsByRow = new Map(records.map((record) => [record.row_id, record]));
+  const recordsByRow = reconcileEvalRunRecords(records);
   for (const row of matrix) {
     const record = recordsByRow.get(row.id);
     if (record === undefined) continue;
+    const canRecordRecoveryEquivalence = recoveryEquivalenceCanBeRecorded(record);
     const recorded = withRecordedRecoveryEquivalence(record, suite);
     recordsByRow.set(row.id, recorded);
-    if (record.recovery_equivalence === undefined) {
+    if (record.recovery_equivalence === undefined && canRecordRecoveryEquivalence) {
       appendJsonLine(path.join(root, "runs.jsonl"), recorded);
     }
   }

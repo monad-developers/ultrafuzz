@@ -169,6 +169,25 @@ function scoreRunFixture(): {
 }
 
 describe("deterministic scorer math", () => {
+  it("does not persist a recovery snapshot while the workflow is running", async () => {
+    const fixture = scoreRunFixture();
+    const runsPath = path.join(fixture.evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as { ultrafuzz_run_root: string };
+    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
+
+    await scoreEvalRun({ projectRoot: fixture.projectRoot, evalRunId: fixture.evalRunId });
+
+    const records = fs
+      .readFileSync(runsPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { recovery_equivalence?: unknown });
+    expect(records).toHaveLength(1);
+    expect(records[0]).not.toHaveProperty("recovery_equivalence");
+  });
+
   it.each([
     ["include", 1, 0, 0],
     ["exclude", 0, 1, 0],
