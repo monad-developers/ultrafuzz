@@ -18,48 +18,56 @@
 <text x="60" y="184" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">24.88</text>
 <line x1="70" y1="104" x2="930" y2="104" stroke="#e5e7eb"/>
 <text x="60" y="109" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">33.17</text>
-<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="114,176.51 452.07,176.83 534.31,204.46 622.93,173.11 886,173.61"/>
+<polyline fill="none" stroke="#2563eb" stroke-width="2.5" points="114,176.51 418.98,176.83 493.17,204.46 573.12,173.11 810.44,173.61 886,216.82"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5"><title>stableswap-ng-vyper 953a397: 25.16</title>
 <circle cx="114" cy="176.51" r="5" fill="#2563eb"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16"><title>stableswap-ng-vyper 2051b64: 25.12</title>
-<circle cx="452.07" cy="176.83" r="5" fill="#2563eb"/></a>
+<circle cx="418.98" cy="176.83" r="5" fill="#2563eb"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06"><title>stableswap-ng-vyper 23ef040: 22.07</title>
-<circle cx="534.31" cy="204.46" r="5" fill="#2563eb"/></a>
+<circle cx="493.17" cy="204.46" r="5" fill="#2563eb"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98"><title>stableswap-ng-vyper 8483637: 25.53</title>
-<circle cx="622.93" cy="173.11" r="5" fill="#2563eb"/></a>
+<circle cx="573.12" cy="173.11" r="5" fill="#2563eb"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af"><title>stableswap-ng-vyper e03c176: 25.48</title>
-<circle cx="886" cy="173.61" r="5" fill="#2563eb"/></a>
-<polyline fill="none" stroke="#7c3aed" stroke-width="2.5" points="114,247.54 452.07,186.02 534.31,252.16 622.93,225.05 886,171.68"/>
+<circle cx="810.44" cy="173.61" r="5" fill="#2563eb"/></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889"><title>stableswap-ng-vyper da5d191: 20.7</title>
+<circle cx="886" cy="216.82" r="5" fill="#2563eb"/></a>
+<polyline fill="none" stroke="#7c3aed" stroke-width="2.5" points="114,247.54 418.98,186.02 493.17,252.16 573.12,225.05 810.44,171.68 886,234.12"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5"><title>venus-isolated-pools-hardhat 953a397: 17.3</title>
 <circle cx="114" cy="247.54" r="5" fill="#7c3aed"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16"><title>venus-isolated-pools-hardhat 2051b64: 24.1</title>
-<circle cx="452.07" cy="186.02" r="5" fill="#7c3aed"/></a>
+<circle cx="418.98" cy="186.02" r="5" fill="#7c3aed"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06"><title>venus-isolated-pools-hardhat 23ef040: 16.79</title>
-<circle cx="534.31" cy="252.16" r="5" fill="#7c3aed"/></a>
+<circle cx="493.17" cy="252.16" r="5" fill="#7c3aed"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98"><title>venus-isolated-pools-hardhat 8483637: 19.79</title>
-<circle cx="622.93" cy="225.05" r="5" fill="#7c3aed"/></a>
+<circle cx="573.12" cy="225.05" r="5" fill="#7c3aed"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af"><title>venus-isolated-pools-hardhat e03c176: 25.69</title>
-<circle cx="886" cy="171.68" r="5" fill="#7c3aed"/></a>
-<polyline fill="none" stroke="#0f766e" stroke-width="2.5" points="114,184.8 452.07,104 534.31,138.67 622.93,141.85 886,122.55"/>
+<circle cx="810.44" cy="171.68" r="5" fill="#7c3aed"/></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889"><title>venus-isolated-pools-hardhat da5d191: 18.79</title>
+<circle cx="886" cy="234.12" r="5" fill="#7c3aed"/></a>
+<polyline fill="none" stroke="#0f766e" stroke-width="2.5" points="114,184.8 418.98,104 493.17,138.67 573.12,141.85 810.44,122.55 886,105.45"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/953a397a860307d3061eef2cad69c80d09ef20f5"><title>very-liquid-vaults-foundry 953a397: 24.24</title>
 <circle cx="114" cy="184.8" r="5" fill="#0f766e"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/2051b642d9e31e9402ce1ec8a00b70cc27801f16"><title>very-liquid-vaults-foundry 2051b64: 33.17</title>
-<circle cx="452.07" cy="104" r="5" fill="#0f766e"/></a>
+<circle cx="418.98" cy="104" r="5" fill="#0f766e"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/23ef040e5ad66603354e3395f7eac77df9b76f06"><title>very-liquid-vaults-foundry 23ef040: 29.34</title>
-<circle cx="534.31" cy="138.67" r="5" fill="#0f766e"/></a>
+<circle cx="493.17" cy="138.67" r="5" fill="#0f766e"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98"><title>very-liquid-vaults-foundry 8483637: 28.99</title>
-<circle cx="622.93" cy="141.85" r="5" fill="#0f766e"/></a>
+<circle cx="573.12" cy="141.85" r="5" fill="#0f766e"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af"><title>very-liquid-vaults-foundry e03c176: 31.12</title>
-<circle cx="886" cy="122.55" r="5" fill="#0f766e"/></a>
+<circle cx="810.44" cy="122.55" r="5" fill="#0f766e"/></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889"><title>very-liquid-vaults-foundry da5d191: 33.01</title>
+<circle cx="886" cy="105.45" r="5" fill="#0f766e"/></a>
 <text x="114" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">953a397</text>
 <text x="114" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-21</text>
-<text x="452.07" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">2051b64</text>
-<text x="452.07" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="534.31" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">23ef040</text>
-<text x="534.31" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="622.93" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">8483637</text>
-<text x="622.93" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
-<text x="886" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">e03c176</text>
+<text x="418.98" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">2051b64</text>
+<text x="418.98" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="493.17" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">23ef040</text>
+<text x="493.17" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="573.12" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">8483637</text>
+<text x="573.12" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
+<text x="810.44" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">e03c176</text>
+<text x="810.44" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
+<text x="886" y="422" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">da5d191</text>
 <text x="886" y="438" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-23</text>
 <rect x="70" y="451" width="12" height="12" fill="#2563eb"/>
 <text x="88" y="462" font-family="system-ui, sans-serif" font-size="14" fill="#374151">stableswap-ng-vyper</text>
