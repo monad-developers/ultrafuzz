@@ -35,11 +35,17 @@ test("eval bundle exposes the privacy-safe offline export mode", async () => {
   const result = JSON.parse(stdout) as {
     command: string;
     ok: boolean;
-    data: { output_dir: string; omissions: { omissions: unknown[] } };
+    data: { output_dir: string; omissions: { omissions: Array<{ kind: string }> } };
   };
   assert.equal(result.command, "eval bundle");
   assert.equal(result.ok, true);
   assert.equal(result.data.output_dir, path.join(project, "analysis"));
-  assert.equal(result.data.omissions.omissions.length, 4);
+  assert.deepEqual(result.data.omissions.omissions.map(({ kind }) => kind).sort(), [
+    "accounting-summary",
+    "attempt-history",
+    "evaluation-metrics",
+    "recovery-summary",
+    "terminal-status"
+  ]);
   assert.doesNotThrow(() => validateAnalysisBundle(result.data.output_dir));
 });

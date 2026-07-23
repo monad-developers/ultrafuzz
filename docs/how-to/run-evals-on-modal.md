@@ -230,6 +230,29 @@ readiness marker. A restart adopts the exact tagged sandbox and completes that
 handshake; an uncertain termination is never followed by an automatic competing
 launch.
 
+For unattended recovery of resumable private rows, run the overseer with a
+separate durable recovery-state file:
+
+```bash
+pnpm exec ultrafuzz-modal overseer \
+  --config .ultrafuzz/modal/benchmark.json \
+  --state .ultrafuzz/modal/example-run/launch-state.json \
+  --recovery-state .ultrafuzz/modal/example-run/recovery-state.json
+```
+
+The overseer reads canonical workflow state from the persistent volume on every
+poll. Recent state transitions or completed nodes keep a live worker healthy
+even if its mirrored worker status is stale. `--resume-grace-seconds` controls
+the minimum time before a resumed worker can be classified as stalled;
+`--max-no-progress-generations` and the bounded backoff options limit repeated
+workers that complete no nodes. Exhausting that budget persists a typed terminal
+state and stops launching workers.
+
+An optional repeated `--image` selects a recovery image. A healthy worker keeps
+ownership when that selection changes; the new image is used after a natural
+recovery. Use `--force-rollout` only for an intentional immediate replacement.
+Rollouts are recorded separately and do not consume the workflow-failure budget.
+
 The launch command writes an ignored, sanitized launch-state file under
 `.ultrafuzz/modal/<run-id>/launch-state.json`. Use that file for status and
 collection:
@@ -260,7 +283,18 @@ Runner state (`live`, `exited`, or `missing`) describes the Modal sandbox. The
 runner combines that state with the exact-attempt worker snapshot to select a
 machine-readable action such as `succeeded`, `resume-required`,
 `transient-operational-failure`, `permanent-operational-failure`, or
-`incompatible-checkpoint`.
+`incompatible-checkpoint`. Each status row also reports a recovery summary
+derived from the launch state's append-only lifecycle records. The summary
+separates genuine worker failures from controller rotations and reports total,
+progress-making, no-progress, model-work, and resumed generations.
+
+Lifecycle records use typed start reasons and typed terminal reasons. Image
+rollouts, stale-probe rotations, and operator requests remain controller
+actions even when the terminated sandbox has a nonzero exit code; an exit code
+is retained only as supporting evidence. A terminal transition is write-once
+and idempotent. Older launch states are upgraded with unavailable lifecycle
+facts set to `unknown` rather than inferred from an attempt number or exit
+code.
 
 Persisted worker snapshots use this separate stable exit taxonomy:
 
@@ -284,7 +318,12 @@ pricing provenance, and a generic diagnostic code. They never contain
 source text, prompts, findings, provider output, exception text, or raw
 artifacts. By default, `collect` copies `status.json`, `result.json`, the generic
 worker lifecycle log, and an allowlisted `public-eval-diagnostics.json` when a
-public worker reached the post-eval gate. The diagnostic contains only row
+public worker reached the post-eval gate. It also writes
+`recovery-lifecycle.json` and a privacy-safe analysis bundle whose recovery
+totals are derived from those exact records. The lifecycle projection contains
+only typed reasons, timestamps, aggregate node counts, fingerprints, and
+hashed ledger/evaluation linkage; it excludes sandbox IDs, paths, logs,
+prompts, findings, and provider output. The diagnostic contains only row
 identities, terminal states, report-presence flags, diagnostic codes, exact
 launch lineage, and a bounded failed-node projection (node ID, status, timeout
 flag, and allowlisted failure category or code). It never contains messages,

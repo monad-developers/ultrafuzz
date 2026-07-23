@@ -12,6 +12,7 @@ import {
   type AnalysisAccountingSummary,
   type AnalysisAttemptHistory,
   type AnalysisEvaluationMetrics,
+  type AnalysisRecoverySummary,
   type AnalysisTerminalStatus
 } from "../src/index.js";
 
@@ -20,6 +21,7 @@ function syntheticPayloads(): {
   metrics: AnalysisEvaluationMetrics;
   accounting: AnalysisAccountingSummary;
   attempts: AnalysisAttemptHistory;
+  recovery: AnalysisRecoverySummary;
 } {
   return {
     terminal: {
@@ -92,6 +94,54 @@ function syntheticPayloads(): {
           finished_at: "2026-01-01T00:01:00.000Z"
         }
       ]
+    },
+    recovery: {
+      schema_version: ANALYSIS_BUNDLE_SCHEMA_VERSION,
+      total_generations: 2,
+      terminal_generations: 2,
+      active_generations: 0,
+      progress_generations: 1,
+      no_progress_generations: 1,
+      unknown_progress_generations: 0,
+      model_work_generations: 1,
+      no_model_work_generations: 1,
+      unknown_model_work_generations: 0,
+      genuine_failures: 0,
+      rotations: 1,
+      resumptions: 1,
+      start_reasons: {
+        initial: 1,
+        "pre-model-retry": 0,
+        "post-model-resume": 1,
+        "image-rollout": 0,
+        "stale-probe-rotation": 0,
+        "operator-restart": 0,
+        unknown: 0
+      },
+      terminal_reasons: {
+        active: 0,
+        succeeded: 1,
+        "genuine-worker-failure": 0,
+        "operational-failure": 0,
+        "image-rollout": 0,
+        "stale-probe-rotation": 1,
+        "operator-request": 0,
+        timeout: 0,
+        "resource-termination": 0,
+        "recovery-budget-exhausted": 0,
+        unknown: 0
+      },
+      terminal_classes: {
+        active: 0,
+        succeeded: 1,
+        "genuine-worker-failure": 0,
+        "operational-failure": 0,
+        "controller-rotation": 1,
+        timeout: 0,
+        "resource-termination": 0,
+        "recovery-budget-exhausted": 0,
+        unknown: 0
+      }
     }
   };
 }
@@ -108,7 +158,8 @@ test("analysis bundles are deterministic, self-contained, and checksum verified"
       "terminal-status": payloads.terminal,
       "evaluation-metrics": payloads.metrics,
       "accounting-summary": payloads.accounting,
-      "attempt-history": payloads.attempts
+      "attempt-history": payloads.attempts,
+      "recovery-summary": payloads.recovery
     }
   });
   const secondResult = writeAnalysisBundle({
@@ -117,7 +168,8 @@ test("analysis bundles are deterministic, self-contained, and checksum verified"
       "terminal-status": payloads.terminal,
       "evaluation-metrics": payloads.metrics,
       "accounting-summary": payloads.accounting,
-      "attempt-history": payloads.attempts
+      "attempt-history": payloads.attempts,
+      "recovery-summary": payloads.recovery
     }
   });
 
@@ -144,7 +196,8 @@ test("analysis bundles are deterministic, self-contained, and checksum verified"
       "terminal-status": payloads.terminal,
       "evaluation-metrics": payloads.metrics,
       "accounting-summary": payloads.accounting,
-      "attempt-history": payloads.attempts
+      "attempt-history": payloads.attempts,
+      "recovery-summary": payloads.recovery
     }
   });
   assert.deepEqual(repeated.manifest, firstResult.manifest);
@@ -198,6 +251,43 @@ test("analysis bundle policy rejects non-allowlisted payload fields before creat
     /schema validation failed/u
   );
   assert.equal(fs.existsSync(output), false);
+});
+
+test("analysis recovery summaries reconcile active and terminal classifications exactly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-analysis-recovery-"));
+  const { recovery } = syntheticPayloads();
+
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: path.join(root, "misclassified"),
+        payloads: {
+          "recovery-summary": {
+            ...recovery,
+            terminal_classes: {
+              ...recovery.terminal_classes,
+              succeeded: 0,
+              "operational-failure": 1
+            }
+          }
+        }
+      }),
+    /schema validation failed/u
+  );
+  assert.throws(
+    () =>
+      writeAnalysisBundle({
+        outputDir: path.join(root, "active"),
+        payloads: {
+          "recovery-summary": {
+            ...recovery,
+            terminal_generations: 1,
+            active_generations: 1
+          }
+        }
+      }),
+    /schema validation failed/u
+  );
 });
 
 test("analysis bundle validation rejects modified payload bytes", () => {
