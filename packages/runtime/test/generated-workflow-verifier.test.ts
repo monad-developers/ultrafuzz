@@ -21,10 +21,7 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.ok(workflowStart > verifierStart, source);
 
   const helper = source.slice(helperStart, verifierStart);
-  assert.match(
-    source,
-    /const \{ artifactContractDefinition, assertRegularFileInside, validateArtifactContract \} = await import/u
-  );
+  assert.match(source, /artifactContractDefinition,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContract/u);
   assert.match(source, /assertRegularFileInside\(artifactDir, artifactPath, failureMessage\)/u);
   assert.match(helper, /resolveRegularArtifactFile\(artifactDir, artifactPath, missingFailureMessage\)/u);
   assert.match(helper, /statSync\(resolvedPath\)\.size === 0/u);
@@ -256,6 +253,30 @@ test("generated Smithers verifier rejects in-root leaf and parent symlinks", () 
   const parentSymlink = path.join(root, "linked-parent");
   fs.symlinkSync(realDirectory, parentSymlink, "dir");
   assert.throws(() => assertRegularFileInside(root, path.join(parentSymlink, "Test.t.sol")), /symlink/u);
+});
+
+test("generated Smithers verifier publishes the complete validated set before task success", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(verifierStart >= 0, source);
+  assert.ok(workflowStart > verifierStart, source);
+  assert.match(source, /publishFileDurableExclusive/u);
+
+  const verifier = source.slice(verifierStart, workflowStart);
+  assert.match(verifier, /const publications = new Map<string, Buffer>\(\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, output\.path, bytes\)/u);
+  assert.match(verifier, /verifyGeneratedTestFiles\(artifactRoot, validation\.value\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, companion\.path, companion\.contents\)/u);
+  assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
+  assert.ok(
+    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
+  );
+  assert.ok(
+    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
+      verifier.indexOf("return { artifacts, primary_artifact: primary.path }")
+  );
 });
 
 function findRuntimePackageRoot(start: string): string {

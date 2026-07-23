@@ -26,7 +26,8 @@ import * as projectAgents from "../agents/index.ts";
 
 const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
-const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
+const { artifactContractDefinition, assertRegularFileInside, publishFileDurableExclusive, validateArtifactContract } =
+  await import(artifactsModule);
 const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
@@ -1143,6 +1144,7 @@ function resolveNonEmptyRegularArtifactFile(
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const publications = new Map<string, Buffer>();
   const artifacts = task.outputs.map((output) => {
     const canonicalPath = path.resolve(artifactDir, output.path);
     if (!isStrictlyInsideDirectory(artifactDir, canonicalPath)) {
@@ -1167,7 +1169,8 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     if (artifactRoot === undefined || resolvedPath === undefined) {
       throw new Error(failureMessage);
     }
-    const contents = readFileSync(resolvedPath, "utf8");
+    const bytes = readFileSync(resolvedPath);
+    const contents = bytes.toString("utf8");
     const validation = validateArtifactContract(output.contract, contents, output.path);
     if (!validation.ok) {
       throw new Error(
@@ -1176,14 +1179,17 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
           .join("; ")}`
       );
     }
+    rememberVerifiedPublication(publications, output.path, bytes);
     if (output.contract === "ultrafuzz/generated-tests@1") {
-      verifyGeneratedTestFiles(artifactRoot, validation.value);
+      for (const companion of verifyGeneratedTestFiles(artifactRoot, validation.value)) {
+        rememberVerifiedPublication(publications, companion.path, companion.contents);
+      }
     }
     return {
       path: output.path,
       contract: output.contract,
       contract_digest: output.contractDigest,
-      sha256: createHash("sha256").update(contents).digest("hex"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
       primary: output.primary
     };
   });
@@ -1191,24 +1197,40 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
   if (primary === undefined) {
     throw new Error("artifact-contract failure: primary artifact is missing");
   }
+  publishVerifiedArtifacts(artifactDir, publications);
   return { artifacts, primary_artifact: primary.path };
 }
 
-function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
+function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {
+  const previous = publications.get(relativePath);
+  if (previous !== undefined && !previous.equals(contents)) {
+    throw new Error(`artifact-contract failure: conflicting verified output path ${relativePath}`);
+  }
+  publications.set(relativePath, contents);
+}
+
+function publishVerifiedArtifacts(artifactDir: string, publications: ReadonlyMap<string, Buffer>): void {
+  for (const [relativePath, contents] of [...publications].sort(([left], [right]) => left.localeCompare(right))) {
+    publishFileDurableExclusive(artifactDir, relativePath, contents);
+  }
+}
+
+function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
   const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
-  for (const entry of entries) {
+  return entries.map((entry) => {
     const relativePath = entry.path ?? "";
     const artifactPath = path.resolve(artifactDir, relativePath);
     if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe generated test path ${relativePath}`);
     }
-    resolveNonEmptyRegularArtifactFile(
+    const resolvedPath = resolveNonEmptyRegularArtifactFile(
       artifactDir,
       artifactPath,
       `artifact-contract failure: generated test file is missing ${relativePath}`,
       `artifact-contract failure: generated test file is empty ${relativePath}`
     );
-  }
+    return { path: relativePath, contents: readFileSync(resolvedPath) };
+  });
 }
 
 export default smithers((ctx) => {

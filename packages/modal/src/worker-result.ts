@@ -35,7 +35,8 @@ export const WORKER_DIAGNOSTIC_CODES = [
   "dependency-unreachable",
   "genuine-evaluation-failure",
   "checkpoint-incompatible",
-  "public-eval-diagnostics-invalid"
+  "public-eval-diagnostics-invalid",
+  "terminal-run-non-resumable"
 ] as const;
 
 export type WorkerDiagnosticCode = (typeof WORKER_DIAGNOSTIC_CODES)[number];

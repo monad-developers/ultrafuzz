@@ -173,6 +173,83 @@ export function writeFileDurable(filePath: string, data: string | Uint8Array): v
   fsyncDirectory(path.dirname(filePath));
 }
 
+export interface DurablePublicationResult {
+  path: string;
+  sha256: string;
+  created: boolean;
+}
+
+/**
+ * Atomically publishes already-validated bytes without replacing an existing
+ * canonical artifact. A concurrent publisher is accepted only when it wrote
+ * the exact same bytes.
+ */
+export function publishFileDurableExclusive(
+  root: string,
+  relativePath: string,
+  data: string | Uint8Array
+): DurablePublicationResult {
+  const rootAbsolute = fs.realpathSync(root);
+  const destinationCandidate = prepareSafeFilePath(rootAbsolute, relativePath);
+  const destinationDirectory = fs.realpathSync(path.dirname(destinationCandidate));
+  assertPathInside(rootAbsolute, destinationDirectory, "published artifact directory");
+  const destination = path.join(destinationDirectory, path.basename(destinationCandidate));
+  const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data);
+  const digest = sha256Bytes(bytes);
+
+  if (fs.existsSync(destination)) {
+    assertPublishedBytes(rootAbsolute, destination, bytes);
+    return { path: destination, sha256: digest, created: false };
+  }
+
+  const temporary = path.join(
+    destinationDirectory,
+    `.${path.basename(destination)}.publish-${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`
+  );
+  let temporaryFd: number | undefined;
+  let temporaryIdentity: FileIdentity | undefined;
+  let linked = false;
+  try {
+    temporaryFd = fs.openSync(
+      temporary,
+      fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+      0o600
+    );
+    temporaryIdentity = fileIdentity(fs.fstatSync(temporaryFd, { bigint: true }));
+    fs.writeFileSync(temporaryFd, bytes);
+    fs.fsyncSync(temporaryFd);
+    fs.closeSync(temporaryFd);
+    temporaryFd = undefined;
+
+    try {
+      fs.linkSync(temporary, destination);
+      linked = true;
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) {
+        throw error;
+      }
+      assertPublishedBytes(rootAbsolute, destination, bytes);
+      return { path: destination, sha256: digest, created: false };
+    }
+
+    assertPublishedBytes(rootAbsolute, destination, bytes, temporaryIdentity);
+    return { path: destination, sha256: digest, created: true };
+  } catch (error) {
+    if (linked && temporaryIdentity !== undefined && !unlinkPublishedIfOwned(destination, temporaryIdentity)) {
+      throw new Error("failed to remove an incomplete published artifact", { cause: error });
+    }
+    throw error;
+  } finally {
+    if (temporaryFd !== undefined) {
+      fs.closeSync(temporaryFd);
+    }
+    if (fs.existsSync(temporary)) {
+      fs.unlinkSync(temporary);
+    }
+    fsyncDirectory(destinationDirectory);
+  }
+}
+
 export function writeJsonDurable(filePath: string, value: unknown): void {
   writeFileDurable(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
@@ -280,6 +357,65 @@ function assertRealPathInside(root: string, candidate: string, label: string): v
   const realRoot = fs.realpathSync(root);
   const realCandidate = fs.realpathSync(candidate);
   assertPathInside(realRoot, realCandidate, label);
+}
+
+interface FileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+function fileIdentity(stat: fs.BigIntStats): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameFileIdentity(left: FileIdentity, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function assertPublishedBytes(root: string, filePath: string, expected: Buffer, expectedIdentity?: FileIdentity): void {
+  assertRegularFileInside(root, filePath, "published artifact");
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const descriptorStat = fs.fstatSync(fd, { bigint: true });
+    const pathStat = fs.statSync(filePath, { bigint: true });
+    if (
+      descriptorStat.dev !== pathStat.dev ||
+      descriptorStat.ino !== pathStat.ino ||
+      (expectedIdentity !== undefined && !sameFileIdentity(expectedIdentity, descriptorStat))
+    ) {
+      throw new ArtifactPathError(
+        "published-file-changed",
+        `published artifact changed during validation: ${filePath}`
+      );
+    }
+    assertRegularFileInside(root, filePath, "published artifact");
+    if (!fs.readFileSync(fd).equals(expected)) {
+      throw new ArtifactPathError(
+        "existing-file-conflict",
+        `published artifact already exists with different contents: ${filePath}`
+      );
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function unlinkPublishedIfOwned(filePath: string, identity: FileIdentity): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    if (!sameFileIdentity(identity, fs.fstatSync(fd, { bigint: true }))) return true;
+    fs.unlinkSync(filePath);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ELOOP");
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+function isAlreadyExistsError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
 function fsyncDirectory(directory: string): void {
