@@ -22,7 +22,7 @@ import {
 import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
 import { safeEvalId } from "../src/utils.js";
-import { testRow, testSuite } from "./helpers.js";
+import { cleanRecoveryEquivalence, recoveryEquivalenceSummary, testRow, testSuite } from "./helpers.js";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const CANDIDATE = "1111111111111111111111111111111111111111";
@@ -131,6 +131,7 @@ function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRow
       usage: { status: "complete", reason: null },
       cost: { status: "complete", reason: null }
     },
+    recovery_equivalence: cleanRecoveryEquivalence(),
     ...overrides
   };
 }
@@ -145,6 +146,15 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
     scores_path: "/tmp/run-1-benchmark-smoke/scores.jsonl",
     summary_path: "/tmp/run-1-benchmark-smoke/summary.json",
     review_queue_path: "/tmp/run-1-benchmark-smoke/review.jsonl",
+    recovery_equivalence: recoveryEquivalenceSummary({
+      included_row_count: rows.length,
+      classification_counts: {
+        clean: rows.length,
+        "infrastructure-recovered": 0,
+        "model-reexecuted-within-policy": 0,
+        "non-comparable": 0
+      }
+    }),
     provenance: {
       availability: "available",
       candidate: { label: "v0.0.7", commit: CANDIDATE, dirty: false },
@@ -417,6 +427,65 @@ describe("longitudinal eval history", () => {
         }
       }
     });
+
+    const recovered = summary([
+      rowScore(first.id),
+      rowScore(second.id, {
+        trial_id: "trial-2",
+        recovery_equivalence: cleanRecoveryEquivalence({
+          classification: "infrastructure-recovered",
+          infrastructure_only_recovery_generations: 1,
+          no_progress_recovery_generations: 1,
+          recovery_generations: 1
+        })
+      })
+    ]);
+    expect(() =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: recovered,
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set(["bug-b"])]
+        ])
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
+
+    const forgedClean = summary([
+      rowScore(first.id),
+      rowScore(second.id, {
+        trial_id: "trial-2",
+        recovery_equivalence: cleanRecoveryEquivalence({
+          infrastructure_only_recovery_generations: 1,
+          no_progress_recovery_generations: 1,
+          recovery_generations: 1
+        })
+      })
+    ]);
+    expect(() =>
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: forgedClean,
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set(["bug-b"])]
+        ])
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
 
     const incompatible = summary(rows);
     incompatible.provenance!.scoring.ground_truth_sha256 = { "target-a": "f".repeat(64) };

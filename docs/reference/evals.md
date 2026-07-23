@@ -74,6 +74,38 @@ names/hashes, while payloads stay on disk unless the suite explicitly opts
 into `mode: upload`. Before an allowlisted payload is sent, its manifest and
 path containment, regular-file status, size, and SHA-256 digest are checked.
 
+### Recovery equivalence
+
+Each suite may declare how much model work a recovered row may repeat:
+
+```yaml
+recovery_equivalence:
+  max_repeated_model_executions: 1
+  aggregate_non_comparable: separate # include | exclude | separate
+  publication: comparable # comparable | clean
+```
+
+Ultrafuzz derives the row classification from the append-only node-attempt
+ledger and durable controller submissions. Normal retries within one workflow
+execution do not count as recovery re-execution. Re-running the same
+model-backed strategy attempt in a later controller generation does. The
+persisted row records unique and repeated model executions, infrastructure-only,
+model-work, and no-progress recovery generations, plus a reason whenever the
+evidence is non-comparable.
+
+`aggregate_non_comparable` controls the primary variant aggregates. `include`
+keeps every row, `exclude` removes non-comparable rows while reporting the
+excluded count, and `separate` additionally emits dedicated non-comparable
+variant aggregates. Individual rows and classification totals always remain
+visible. `publication: comparable` rejects non-comparable evidence;
+`publication: clean` also rejects otherwise comparable recovered rows. Public
+benchmark history requires clean rows.
+
+The classification is captured once in `runs.jsonl` and reused by later
+scoring, reporting, and publication. Re-scoring therefore cannot reinterpret
+the execution exposure after the fact. Missing, malformed, oversized, or
+graph-inconsistent execution ledgers fail closed as non-comparable.
+
 ## Architecture
 
 Reporting is **event-sourced from the run journal**, never wired inline into

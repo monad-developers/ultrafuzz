@@ -10,7 +10,7 @@ import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
 import { EVAL_RUN_SCHEMA_VERSION } from "../src/types.js";
 import { readJsonLines } from "../src/utils.js";
-import { RecordingReporter, testRow, testSuite, writeRunFixture } from "./helpers.js";
+import { RecordingReporter, cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
 
 const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:05:00.000Z";
@@ -521,6 +521,7 @@ describe("runner", () => {
       final_status: "timed-out",
       workflow: { status: "running", terminal: false }
     });
+    expect(watched.record).not.toHaveProperty("recovery_equivalence");
     expect(watched.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
     expect(watched.record.diagnostics.map((diagnostic) => diagnostic.code)).toContain("EVAL_ROW_WATCH_TIMEOUT");
   });
@@ -557,6 +558,12 @@ describe("eval publish (post-hoc replay)", () => {
         workflow_ids: [],
         started_at: T0,
         finished_at: T1,
+        recovery_equivalence: cleanRecoveryEquivalence({
+          unique_model_backed_node_executions: 0,
+          observed_node_attempts: 0,
+          observed_workflow_executions: 0,
+          observed_controller_invocations: 0
+        }),
         diagnostics: []
       })}\n`,
       "utf8"
@@ -647,6 +654,33 @@ describe("eval publish (post-hoc replay)", () => {
     ).rejects.toMatchObject({ code: "EVAL_PUBLISH_PROVIDER_REQUIRED" });
   });
 
+  it("does not persist recovery evidence before a workflow is terminal", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const runsPath = path.join(evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as {
+      ultrafuzz_run_root: string;
+      recovery_equivalence?: unknown;
+      [key: string]: unknown;
+    };
+    fs.writeFileSync(runsPath, `${JSON.stringify({ ...record, recovery_equivalence: undefined })}\n`, "utf8");
+    const statePath = path.join(record.ultrafuzz_run_root, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(statePath, JSON.stringify({ ...state, status: "running", finished_at: undefined }), "utf8");
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        evalProviderConfig: { provider: "none", providers: {} },
+        env: {}
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+
+    const records = readJsonLines<{ recovery_equivalence?: unknown }>(runsPath);
+    expect(records).toHaveLength(1);
+    expect(records[0]).not.toHaveProperty("recovery_equivalence");
+  });
+
   it("resolves a custom terminal report output from the run graph", async () => {
     const { projectRoot, evalRunRoot } = publishFixture();
     const record = JSON.parse(fs.readFileSync(path.join(evalRunRoot, "runs.jsonl"), "utf8")) as {
@@ -701,6 +735,49 @@ describe("eval publish (post-hoc replay)", () => {
     expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
       status: "non-publishable",
       diagnostics: [{ code: "TERMINAL_REPORT_NOT_PUBLISHABLE", contract: "ultrafuzz/report@1" }]
+    });
+  });
+
+  it("fails closed when the suite requires clean rows and recovery was observed", async () => {
+    const { projectRoot, evalRunRoot } = publishFixture();
+    const manifestPath = path.join(evalRunRoot, "eval.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      suite: ReturnType<typeof testSuite>;
+    };
+    manifest.suite.recovery_equivalence = {
+      max_repeated_model_executions: 0,
+      aggregate_non_comparable: "separate",
+      publication: "clean"
+    };
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest), "utf8");
+
+    const runsPath = path.join(evalRunRoot, "runs.jsonl");
+    const record = JSON.parse(fs.readFileSync(runsPath, "utf8")) as Record<string, unknown>;
+    fs.writeFileSync(
+      runsPath,
+      `${JSON.stringify({
+        ...record,
+        recovery_equivalence: cleanRecoveryEquivalence({
+          classification: "infrastructure-recovered",
+          infrastructure_only_recovery_generations: 1,
+          no_progress_recovery_generations: 1,
+          recovery_generations: 1
+        })
+      })}\n`,
+      "utf8"
+    );
+
+    await expect(
+      publishEvalRun({
+        projectRoot,
+        evalRunId: "eval-1",
+        evalProviderConfig: { provider: "none", providers: {} },
+        env: {}
+      })
+    ).rejects.toMatchObject({ code: "EVAL_OUTPUT_NON_PUBLISHABLE" });
+    expect(JSON.parse(fs.readFileSync(path.join(evalRunRoot, "publication-state.json"), "utf8"))).toMatchObject({
+      status: "non-publishable",
+      diagnostics: [{ code: "RECOVERY_EQUIVALENCE_NOT_PUBLISHABLE" }]
     });
   });
 });

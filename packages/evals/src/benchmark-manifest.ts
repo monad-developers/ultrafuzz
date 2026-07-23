@@ -444,6 +444,11 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       recall_threshold: 0.7,
       secondary: ["cumulative_unique_true_positives", "wall_clock_seconds", "cost_usd"]
     },
+    recovery_equivalence: {
+      max_repeated_model_executions: 0,
+      aggregate_non_comparable: "separate",
+      publication: "clean"
+    },
     reporting: {
       node_telemetry: true,
       heartbeat_interval_seconds: 60,

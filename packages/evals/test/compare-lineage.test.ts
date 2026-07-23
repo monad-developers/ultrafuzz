@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { compareEvalRuns } from "../src/scoring.js";
 import type { EvalScoreSummary, EvalSummaryProvenance } from "../src/types.js";
+import { recoveryEquivalenceSummary } from "./helpers.js";
 
 function provenance(cohort: string, policy: string, scoring: string): EvalSummaryProvenance {
   return {
@@ -77,6 +78,7 @@ function writeSummary(
     scores_path: path.join(root, "scores.jsonl"),
     summary_path: path.join(root, "summary.json"),
     review_queue_path: path.join(root, "review.jsonl"),
+    recovery_equivalence: recoveryEquivalenceSummary(),
     provenance: value
   };
   fs.writeFileSync(path.join(root, "summary.json"), `${JSON.stringify(summary)}\n`, "utf8");

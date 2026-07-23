@@ -207,7 +207,8 @@ export class LangSmithReporter implements EvalReporter {
       end_time: endTime,
       outputs: {
         status: result.status,
-        ...(result.runId !== undefined ? { run_id: result.runId } : {})
+        ...(result.runId !== undefined ? { run_id: result.runId } : {}),
+        ...(result.recoveryEquivalence === undefined ? {} : { recovery_equivalence: result.recoveryEquivalence })
       },
       ...(result.status === "failed" || result.status === "timed-out" ? { error: `row ${result.status}` } : {})
     });

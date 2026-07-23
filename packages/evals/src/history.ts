@@ -24,6 +24,7 @@ import {
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   parsePublicEvalDiagnostics
 } from "./public-diagnostics.js";
+import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
@@ -377,6 +378,21 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     }
     if (!input.matchedGroundTruthByRow.has(row.id)) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} is missing scoring evidence`);
+    }
+    let recoveryEquivalence;
+    try {
+      recoveryEquivalence = parseRecoveryEquivalence(score.recovery_equivalence);
+    } catch {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `eval row ${row.id} has invalid recovery-equivalence evidence`
+      );
+    }
+    if (recoveryEquivalence.classification !== "clean") {
+      throw new EvalError(
+        "EVAL_HISTORY_GENERATION_INCOMPLETE",
+        `eval row ${row.id} is not a clean recovery-equivalent observation`
+      );
     }
   }
 

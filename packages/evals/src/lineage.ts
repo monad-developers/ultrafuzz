@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 
 import { EVAL_JUDGE_PROMPT_VERSION } from "./evaluator/adjudicator-prompt.js";
-import { resolveJudgePanelConfig } from "./suite.js";
+import { resolveJudgePanelConfig, resolveRecoveryEquivalencePolicy } from "./suite.js";
 import type {
   EvalCandidateProvenance,
   EvalMatrixRow,
@@ -47,6 +47,7 @@ export function buildEvalRunProvenance(plan: EvalPlanValue, controller: EvalCont
     controller_mode: controller.watch ? ("watch" as const) : ("detached" as const),
     watch_timeout_seconds: controller.watchTimeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS,
     poll_interval_ms: controller.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS,
+    recovery_equivalence_fingerprint: sha256Identity(resolveRecoveryEquivalencePolicy(plan.suite.recovery_equivalence)),
     ...(benchmarkControls.length === 0 ? {} : { benchmark_execution_fingerprint: sha256Identity(benchmarkControls) })
   };
   const executionPolicy = {
