@@ -89,6 +89,7 @@ describe("eval status", () => {
           total_nodes: 4,
           progress_percent: 100,
           eta_remaining_seconds: 0,
+          eta_at: CHECKPOINT,
           eta_basis: "terminal"
         }
       ]
@@ -125,6 +126,7 @@ describe("eval status", () => {
       "inaccessible",
       "invalid-state",
       "zero-progress",
+      "empty-active",
       "stale-progress",
       "missing-timing"
     ];
@@ -132,6 +134,7 @@ describe("eval status", () => {
     const inaccessibleRoot = path.join(fixture.base, "missing-run");
     const invalidRoot = path.join(fixture.base, "invalid-run");
     const zeroRoot = path.join(fixture.base, "zero-run");
+    const emptyRoot = path.join(fixture.base, "empty-run");
     const staleRoot = path.join(fixture.base, "stale-run");
     const missingTimingRoot = path.join(fixture.base, "missing-timing-run");
     fs.mkdirSync(invalidRoot, { recursive: true });
@@ -140,6 +143,11 @@ describe("eval status", () => {
       runId: "run-zero",
       status: "running",
       nodes: ["running", "pending"]
+    });
+    writeState(emptyRoot, {
+      runId: "run-empty",
+      status: "running",
+      nodes: []
     });
     writeState(staleRoot, {
       runId: "run-stale",
@@ -161,6 +169,7 @@ describe("eval status", () => {
         record("inaccessible", "run-inaccessible", inaccessibleRoot),
         record("invalid-state", "run-invalid", invalidRoot),
         record("zero-progress", "run-zero", zeroRoot),
+        record("empty-active", "run-empty", emptyRoot),
         record("stale-progress", "run-stale", staleRoot),
         record("missing-timing", "run-missing-timing", missingTimingRoot)
       ]
@@ -182,6 +191,7 @@ describe("eval status", () => {
       "invalid",
       "running",
       "running",
+      "running",
       "running"
     ]);
     expect(snapshot.rows[0]).toMatchObject({
@@ -195,11 +205,18 @@ describe("eval status", () => {
       eta_unavailable_reason: "no-completed-nodes"
     });
     expect(snapshot.rows[5]).toMatchObject({
+      terminal: false,
+      executed_nodes: 0,
+      total_nodes: 0,
+      progress_percent: 0,
+      eta_unavailable_reason: "no-completed-nodes"
+    });
+    expect(snapshot.rows[6]).toMatchObject({
       progress_percent: 50,
       checkpoint_stale: true,
       eta_unavailable_reason: "checkpoint-stale"
     });
-    expect(snapshot.rows[6]).toMatchObject({
+    expect(snapshot.rows[7]).toMatchObject({
       progress_percent: 50,
       eta_unavailable_reason: "timing-unavailable"
     });
@@ -226,6 +243,7 @@ describe("calculateEvalEta", () => {
       calculateEvalEta({
         executedNodes: 2,
         totalNodes: 4,
+        terminal: false,
         startedAtMs: Date.parse(START),
         checkpointAtMs: Date.parse(CHECKPOINT),
         snapshotAtMs: SNAPSHOT.getTime(),
@@ -242,6 +260,7 @@ describe("calculateEvalEta", () => {
   it("returns typed unavailable estimates instead of inventing timing evidence", () => {
     const base = {
       totalNodes: 4,
+      terminal: false,
       startedAtMs: Date.parse(START),
       checkpointAtMs: Date.parse(CHECKPOINT),
       snapshotAtMs: SNAPSHOT.getTime(),
@@ -258,6 +277,29 @@ describe("calculateEvalEta", () => {
     expect(calculateEvalEta({ ...base, executedNodes: 1, checkpointStale: true })).toMatchObject({
       eta_remaining_seconds: null,
       eta_unavailable_reason: "checkpoint-stale"
+    });
+    expect(calculateEvalEta({ ...base, executedNodes: 0, totalNodes: 0 })).toMatchObject({
+      eta_remaining_seconds: null,
+      eta_unavailable_reason: "no-completed-nodes"
+    });
+  });
+
+  it("uses durable checkpoint time for rows with no remaining runtime", () => {
+    expect(
+      calculateEvalEta({
+        executedNodes: 1,
+        totalNodes: 4,
+        terminal: true,
+        startedAtMs: Date.parse(START),
+        checkpointAtMs: Date.parse(CHECKPOINT),
+        snapshotAtMs: SNAPSHOT.getTime(),
+        checkpointStale: false
+      })
+    ).toEqual({
+      eta_remaining_seconds: 0,
+      eta_at: CHECKPOINT,
+      eta_basis: "terminal",
+      eta_unavailable_reason: null
     });
   });
 });

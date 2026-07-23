@@ -53,6 +53,7 @@ export interface ReadEvalStatusInput {
 export interface CalculateEvalEtaInput {
   executedNodes: number;
   totalNodes: number;
+  terminal: boolean;
   startedAtMs: number | null;
   checkpointAtMs: number | null;
   snapshotAtMs: number;
@@ -139,13 +140,11 @@ export function calculateEvalEta(input: CalculateEvalEtaInput): EvalEta {
   if (!countsValid || !Number.isFinite(input.snapshotAtMs)) {
     return unavailableEta("timing-unavailable");
   }
-  if (input.executedNodes === input.totalNodes) {
-    return {
-      eta_remaining_seconds: 0,
-      eta_at: new Date(input.snapshotAtMs).toISOString(),
-      eta_basis: "terminal",
-      eta_unavailable_reason: null
-    };
+  if (input.totalNodes === 0) {
+    return input.terminal ? terminalEta(input) : unavailableEta("no-completed-nodes");
+  }
+  if (input.terminal || input.executedNodes === input.totalNodes) {
+    return terminalEta(input);
   }
   if (input.executedNodes === 0) {
     return unavailableEta("no-completed-nodes");
@@ -286,6 +285,7 @@ function statusForRecord(input: {
   const nodes = Object.values(rawState.nodes);
   const executedNodes = nodes.filter((node) => COMPLETED_NODE_STATUSES.has(node.status)).length;
   const totalNodes = nodes.length;
+  const terminal = TERMINAL_RUN_STATUSES.has(rawState.status);
   const checkpointAtMs = latestTimestamp([
     rawState.concurrency?.observed_at,
     rawState.controller_lease?.renewed_at,
@@ -303,6 +303,7 @@ function statusForRecord(input: {
   const eta = calculateEvalEta({
     executedNodes,
     totalNodes,
+    terminal,
     startedAtMs: timestamp(rawState.started_at),
     checkpointAtMs,
     snapshotAtMs: input.snapshotAtMs,
@@ -312,13 +313,31 @@ function statusForRecord(input: {
   return {
     row: input.row,
     status: rawState.status,
-    terminal: TERMINAL_RUN_STATUSES.has(rawState.status),
+    terminal,
     executed_nodes: executedNodes,
     total_nodes: totalNodes,
-    progress_percent: totalNodes === 0 ? 100 : Number(((executedNodes / totalNodes) * 100).toFixed(1)),
+    progress_percent:
+      totalNodes === 0 && !terminal
+        ? 0
+        : totalNodes === 0
+          ? 100
+          : Number(((executedNodes / totalNodes) * 100).toFixed(1)),
     checkpoint_age_seconds: checkpointAgeSeconds,
     checkpoint_stale: checkpointStale,
     ...eta
+  };
+}
+
+function terminalEta(input: Pick<CalculateEvalEtaInput, "checkpointAtMs" | "snapshotAtMs">): EvalEta {
+  const etaAt =
+    input.checkpointAtMs !== null && Number.isFinite(input.checkpointAtMs) && input.checkpointAtMs <= input.snapshotAtMs
+      ? input.checkpointAtMs
+      : input.snapshotAtMs;
+  return {
+    eta_remaining_seconds: 0,
+    eta_at: new Date(etaAt).toISOString(),
+    eta_basis: "terminal",
+    eta_unavailable_reason: null
   };
 }
 
