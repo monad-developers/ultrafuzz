@@ -23,6 +23,9 @@ output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
 max_parallel_nodes = 8
 keep_workspaces = false
+forge_guard_enabled = true
+forge_vmem_limit_kb = 12582912
+forge_rayon_threads = 1
 workspace_mode = "git-worktree"
 default_timeout_seconds = 1800
 workflow_deadline_seconds = 86400
@@ -86,6 +89,9 @@ empty path components, and dot components fail validation.
 | `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
 | `max_parallel_nodes`        | integer | Positive graph planning parallelism limit.                                  |
 | `keep_workspaces`           | boolean | Retain successful-run node workspaces instead of reaping them.              |
+| `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
+| `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
+| `forge_rayon_threads`       | integer | Default Forge Rayon worker count when the caller does not already set one.  |
 | `workspace_mode`            | string  | Must be `git-worktree`.                                                     |
 | `default_timeout_seconds`   | integer | Default node timeout in seconds.                                            |
 | `workflow_deadline_seconds` | integer | Maximum workflow wall time before the next synchronization cancels it.      |
@@ -95,6 +101,15 @@ Other workspace modes are outside the product contract.
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
 preserved by the workflow runner.
+
+The Forge guard is enabled by default. When Forge is installed, Ultrafuzz
+resolves the real executable before launch, writes an executable wrapper under
+the run directory, and places that wrapper ahead of Foundry on worker `PATH`.
+The memory limit and Rayon default are recorded in `config.resolved.toml` and
+`run.json`. Set `forge_guard_enabled = false` to opt out, or raise
+`forge_vmem_limit_kb` for intentionally larger jobs. A limited Forge process
+exits through the normal task command path, so its diagnostics remain task
+evidence without applying the limit to the workflow controller.
 
 Every submitted workflow starts a run-scoped recovery supervisor. The
 supervisor renews controller ownership through runner heartbeats and uses an

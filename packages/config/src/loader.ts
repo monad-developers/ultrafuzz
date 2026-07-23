@@ -36,6 +36,9 @@ const RUN_KEYS = [
   "max_parallel_agents",
   "max_parallel_nodes",
   "keep_workspaces",
+  "forge_guard_enabled",
+  "forge_vmem_limit_kb",
+  "forge_rayon_threads",
   "workspace_mode",
   "default_timeout_seconds",
   "workflow_deadline_seconds",
@@ -163,6 +166,27 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "boolean",
         assign: (value) => {
           runConfig.keepWorkspaces = value;
+        }
+      },
+      {
+        key: "forge_guard_enabled",
+        type: "boolean",
+        assign: (value) => {
+          runConfig.forgeGuardEnabled = value;
+        }
+      },
+      {
+        key: "forge_vmem_limit_kb",
+        type: "integer",
+        assign: (value) => {
+          runConfig.forgeVmemLimitKb = value;
+        }
+      },
+      {
+        key: "forge_rayon_threads",
+        type: "integer",
+        assign: (value) => {
+          runConfig.forgeRayonThreads = value;
         }
       },
       {

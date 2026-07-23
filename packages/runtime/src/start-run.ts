@@ -26,6 +26,7 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun } from "./plan-run.js";
+import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
@@ -79,17 +80,26 @@ export async function startRun(input: StartRunInput) {
 
   const submitDiagnostics: RuntimeDiagnostic[] = [];
   try {
+    const forgeGuard = prepareForgeGuardEnvironment({
+      layout: plan.layout,
+      config: plan.resolved_config,
+      env: input.env
+    });
+    persistForgeGuardMetadata(plan.layout, plan.resolved_config, forgeGuard.active);
     const submission = await submitSmithersWorkflow({
       compiled,
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
       keepWorkspaces: plan.resolved_config.run.keepWorkspaces,
       controllerLeaseSeconds: plan.resolved_config.run.controllerLeaseSeconds,
-      env: input.env,
-      environmentVariableNames: agentEnvironmentVariableNames(
-        plan.resolved_config,
-        compiled.tasks.map((task) => task.agentRef),
-        input.env
+      env: forgeGuard.env,
+      environmentVariableNames: mergeEnvironmentVariableNames(
+        agentEnvironmentVariableNames(
+          plan.resolved_config,
+          compiled.tasks.map((task) => task.agentRef),
+          forgeGuard.env
+        ),
+        forgeGuard.environmentVariableNames
       ),
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput
@@ -195,6 +205,12 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   const requestedConcurrency = input.maxConcurrency ?? resolved.config.run.maxParallelAgents;
   try {
+    const forgeGuard = prepareForgeGuardEnvironment({
+      layout: evidence.layout,
+      config: resolved.config,
+      env: input.env
+    });
+    persistForgeGuardMetadata(evidence.layout, resolved.config, forgeGuard.active);
     const controllerInvocation = appendEvent(evidence.layout, {
       eventType: "workflow-lifecycle-invoking",
       status: "running",
@@ -222,11 +238,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           : undefined,
       keepWorkspaces: resolved.config.run.keepWorkspaces,
       controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
-      env: input.env,
-      environmentVariableNames: agentEnvironmentVariableNames(
-        resolved.config,
-        linkedWorkflowAgentRefs(evidence.layout),
-        input.env
+      env: forgeGuard.env,
+      environmentVariableNames: mergeEnvironmentVariableNames(
+        agentEnvironmentVariableNames(resolved.config, linkedWorkflowAgentRefs(evidence.layout), forgeGuard.env),
+        forgeGuard.environmentVariableNames
       )
     });
     const workflowRunId =
@@ -441,6 +456,18 @@ function linkedWorkflowAgentRefs(layout: RunLayout): string[] {
   return (tasks?.tasks ?? [])
     .map((task) => task.agentRef)
     .filter((agentRef): agentRef is string => typeof agentRef === "string");
+}
+
+function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
+  const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
+  writeJsonDurable(layout.runMetadataPath, {
+    ...metadata,
+    forge_guard: forgeGuardMetadata(config, active)
+  });
+}
+
+function mergeEnvironmentVariableNames(...groups: readonly (readonly string[])[]): string[] {
+  return [...new Set(groups.flat())].sort();
 }
 
 function agentEnvironmentVariableNames(
