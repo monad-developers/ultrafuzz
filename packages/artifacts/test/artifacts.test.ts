@@ -271,6 +271,33 @@ test("validated artifact publication rejects symlinked canonical parents", () =>
   assert.equal(fs.existsSync(path.join(outside, "result.md")), false);
 });
 
+test("validated artifact publication falls back to an exclusive durable write when hard links are unsupported", () => {
+  const root = tempProject();
+  const expected = "verified artifact on a no-link volume\n";
+  const originalLinkSync = fs.linkSync;
+  fs.linkSync = (() => {
+    throw Object.assign(new Error("hard links are unsupported"), { code: "EPERM" });
+  }) as typeof fs.linkSync;
+  try {
+    const first = publishFileDurableExclusive(root, "nested/result.md", expected);
+    const replay = publishFileDurableExclusive(root, "nested/result.md", expected);
+    assert.equal(first.created, true);
+    assert.equal(replay.created, false);
+    assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+    assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(first.path)).filter((entry) => entry.includes(".publish-")),
+      []
+    );
+    assert.throws(
+      () => publishFileDurableExclusive(root, "nested/result.md", "different artifact\n"),
+      /different contents/u
+    );
+  } finally {
+    fs.linkSync = originalLinkSync;
+  }
+});
+
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const artifactPath = writeArtifact(layout, "node-a", "setup/project.md", "hello artifact\n");

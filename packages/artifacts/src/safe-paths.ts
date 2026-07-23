@@ -180,9 +180,10 @@ export interface DurablePublicationResult {
 }
 
 /**
- * Atomically publishes already-validated bytes without replacing an existing
- * canonical artifact. A concurrent publisher is accepted only when it wrote
- * the exact same bytes.
+ * Publishes already-validated bytes without replacing an existing canonical
+ * artifact. Hard-link-capable filesystems get an atomic publication boundary;
+ * filesystems that reject hard links get a durable O_EXCL descriptor write.
+ * A concurrent publisher is accepted only when it wrote the exact same bytes.
  */
 export function publishFileDurableExclusive(
   root: string,
@@ -225,6 +226,10 @@ export function publishFileDurableExclusive(
       fs.linkSync(temporary, destination);
       linked = true;
     } catch (error) {
+      if (isUnsupportedHardLinkError(error)) {
+        const created = publishFileDurableWithoutHardLink(rootAbsolute, destination, bytes);
+        return { path: destination, sha256: digest, created };
+      }
       if (!isAlreadyExistsError(error)) {
         throw error;
       }
@@ -247,6 +252,42 @@ export function publishFileDurableExclusive(
       fs.unlinkSync(temporary);
     }
     fsyncDirectory(destinationDirectory);
+  }
+}
+
+function publishFileDurableWithoutHardLink(root: string, filePath: string, bytes: Buffer): boolean {
+  let fd: number | undefined;
+  let identity: FileIdentity | undefined;
+  try {
+    try {
+      fd = fs.openSync(
+        filePath,
+        fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+        0o600
+      );
+    } catch (error) {
+      if (!isAlreadyExistsError(error)) throw error;
+      assertPublishedBytes(root, filePath, bytes);
+      return false;
+    }
+    identity = fileIdentity(fs.fstatSync(fd, { bigint: true }));
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    assertPublishedBytes(root, filePath, bytes, identity);
+    return true;
+  } catch (error) {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+      fd = undefined;
+    }
+    if (identity !== undefined && !unlinkPublishedIfOwned(filePath, identity)) {
+      throw new Error("failed to remove an incomplete published artifact", { cause: error });
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
@@ -416,6 +457,14 @@ function unlinkPublishedIfOwned(filePath: string, identity: FileIdentity): boole
 
 function isAlreadyExistsError(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "EEXIST";
+}
+
+function isUnsupportedHardLinkError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ["EPERM", "EXDEV", "ENOTSUP", "EOPNOTSUPP"].includes(String(error.code))
+  );
 }
 
 function fsyncDirectory(directory: string): void {
