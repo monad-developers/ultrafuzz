@@ -293,6 +293,7 @@ describe("Modal durable recovery policy", () => {
       row: rowState(),
       now: "2026-01-01T00:01:00.000Z",
       requestedImage: IMAGE_ONE,
+      complete: true,
       owner: {
         kind: "original",
         live: true,
@@ -309,6 +310,29 @@ describe("Modal durable recovery policy", () => {
     });
 
     expect(result).toMatchObject({ action: "keep", reason: "canonical-progress" });
+  });
+
+  it("accepts a terminal wrapper after its owner has stopped", () => {
+    const result = reconcileModalRecoveryRow({
+      row: rowState(),
+      now: "2026-01-01T00:01:00.000Z",
+      requestedImage: IMAGE_ONE,
+      complete: true,
+      owner: {
+        kind: "original",
+        live: false,
+        image: IMAGE_ONE,
+        launched_at: "2025-12-31T23:00:00.000Z"
+      },
+      canonical: progress({
+        successful_nodes: 1,
+        last_success_at: "2026-01-01T00:00:55.000Z",
+        last_transition_at: "2026-01-01T00:00:55.000Z"
+      }),
+      policy: POLICY
+    });
+
+    expect(result).toMatchObject({ action: "complete", reason: "complete", row: { status: "completed" } });
   });
 
   it("applies bounded exponential backoff between no-progress generations", () => {

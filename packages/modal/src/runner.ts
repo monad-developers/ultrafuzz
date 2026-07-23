@@ -1014,7 +1014,7 @@ export async function overseeModalBenchmarkOnce(
           row = decision.row;
           setModalRecoveryRow(recoveryState, row);
 
-          if (decision.action === "replace" || decision.action === "terminal") {
+          if (decision.action === "replace" || decision.action === "terminal" || decision.action === "complete") {
             if (resolution.owner?.live === true && resolution.sandbox !== undefined) {
               await terminateRecoveryOwner(resolution.sandbox);
             }
@@ -1026,7 +1026,11 @@ export async function overseeModalBenchmarkOnce(
               row = markModalRecoveryWorkerStopped(
                 row,
                 resolution.owner.generation,
-                decision.replacement_kind === "rollout" ? "rollout" : "stalled",
+                decision.action === "complete"
+                  ? "completed"
+                  : decision.replacement_kind === "rollout"
+                    ? "rollout"
+                    : "stalled",
                 observedAt
               );
               setModalRecoveryRow(recoveryState, row);

@@ -264,19 +264,19 @@ export function reconcileModalRecoveryRow(input: {
   const nowMs = requiredTimestamp(input.now, "recovery observation");
   const policy = recoveryPolicy(input.policy);
   let row = cloneRow(input.row);
-  if (input.complete === true) {
+  if (row.status === "completed") return decision("complete", "complete", row);
+
+  const progress = observeCanonicalProgress(row, input.canonical, input.owner, input.now, policy.staleAfterMs);
+  row = progress.row;
+  const owner = input.owner;
+  if (input.complete === true && !(owner?.live === true && progress.recent)) {
     row = { ...row, status: "completed" };
     delete row.next_eligible_at;
     delete row.pending_image;
     delete row.terminal;
     return decision("complete", "complete", row);
   }
-  if (row.status === "completed") return decision("complete", "complete", row);
-
-  const progress = observeCanonicalProgress(row, input.canonical, input.owner, input.now, policy.staleAfterMs);
-  row = progress.row;
   if (row.status === "terminal") return decision("terminal", "no-progress-budget-exhausted", row);
-  const owner = input.owner;
   const imageChanged = owner !== undefined && owner.image !== input.requestedImage;
   if (owner?.live === true && imageChanged && input.forceRollout === true) {
     row.status = "healthy";
