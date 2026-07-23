@@ -141,6 +141,7 @@ differences that were waived.
 ```
 ultrafuzz eval plan      # validate config + suite, print the matrix
 ultrafuzz eval run       # launch rows, poll to terminal state, stream telemetry
+ultrafuzz eval status    # observe every row's durable node progress and ETA
 ultrafuzz eval score     # grade reports against ground truth (optional --llm-judge)
 ultrafuzz eval report    # show the scored variant ranking
 ultrafuzz eval compare   # diff variants or release runs with compatible lineage
@@ -197,6 +198,16 @@ Grading never depends on a provider: scores are computed locally
 (deterministic matcher, optional LLM judge behind the generic `FindingJudge`
 type) and mirrored out. `provider = "none"` keeps the full
 plan → run → score → compare loop working offline.
+
+`eval status <eval-run-id>` is the read-only live view across a whole matrix.
+It derives node counts, row lifecycle state, checkpoint age, and estimated
+remaining time only from recorded eval links and durable run state. It never
+resumes, retries, synchronizes, collects, publishes, or otherwise changes a
+workflow. All rows use matrix-order opaque labels, and its versioned
+`ultrafuzz.eval.status.v1` JSON data is restricted to those labels, typed
+states, counts, percentages, timestamps, checkpoint freshness, and ETA
+availability. Private target metadata and execution-local details are not
+representable.
 
 Configure an independent judge panel at the root of the eval suite YAML selected
 by `--suite` or `[eval].eval_config`:
