@@ -5,7 +5,7 @@ import path from "node:path";
 
 import type { AnalysisCommandName } from "../types.js";
 import { analyzeArchive } from "./analysis.js";
-import { buildCostChart, buildPairwiseChart, buildScoreChart, buildUpSetChart } from "./charts.js";
+import { buildComparisonChart, buildCostChart, buildScoreChart, buildUpSetChart } from "./charts.js";
 import { writeMethodOutputs, writeProvenanceOutputs, writeScoreOutputs, writeTableOutputs } from "./outputs.js";
 
 export interface AnalysisOptions {
@@ -27,6 +27,7 @@ export interface AnalysisSummary {
   truePositiveInstances: number;
   falsePositiveInstances: number;
   needsHumanReviewInstances: number;
+  duplicateInstances: number;
   outputDirectory: string;
   outputs: string[];
 }
@@ -53,7 +54,7 @@ export async function runAnalysisCommand(
     outputs.push(...(await buildScoreChart(result, output)));
   }
   if (command === "cost" || command === "all") outputs.push(...(await buildCostChart(result, output)));
-  if (command === "pairwise" || command === "all") outputs.push(...(await buildPairwiseChart(result, output)));
+  if (command === "pairwise" || command === "all") outputs.push(...(await buildComparisonChart(result, output)));
   if (command === "table" || command === "all") outputs.push(...(await writeTableOutputs(result, output)));
   if (command === "all") outputs.push(...(await writeMethodOutputs(result, output)));
   const analysisManifestPath = path.join(output, "analysis_manifest.json");
@@ -97,9 +98,16 @@ export async function runAnalysisCommand(
     groundTruthTpCredits: result.entities
       .filter((entity) => entity.classification === "true-positive")
       .reduce((total, entity) => total + entity.groundTruthTpCredits, 0),
-    truePositiveInstances: result.records.filter((record) => record.classification === "true-positive").length,
-    falsePositiveInstances: result.records.filter((record) => record.classification === "false-positive").length,
-    needsHumanReviewInstances: result.records.filter((record) => record.classification === "needs-human-review").length,
+    truePositiveInstances: result.records.filter(
+      (record) => record.classification === "true-positive" && !record.isDuplicate
+    ).length,
+    falsePositiveInstances: result.records.filter(
+      (record) => record.classification === "false-positive" && !record.isDuplicate
+    ).length,
+    needsHumanReviewInstances: result.records.filter(
+      (record) => record.classification === "needs-human-review" && !record.isDuplicate
+    ).length,
+    duplicateInstances: result.records.filter((record) => record.isDuplicate).length,
     outputDirectory: output,
     outputs: outputs.map((file) => path.basename(file)).sort()
   };

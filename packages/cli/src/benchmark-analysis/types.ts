@@ -6,8 +6,10 @@ export type AnalysisCommandName = "upset" | "scores" | "provenance" | "table" | 
 
 export interface BenchmarkRow {
   rowId: string;
+  label: string;
   condition: string;
   variant: string;
+  order: number | null;
 }
 
 export interface Accounting {
@@ -49,6 +51,8 @@ export interface FindingRecord {
   stableIssueId: string;
   findingInstanceId: string;
   rootCauseClusterId: string;
+  duplicateOfFindingInstanceId: string | null;
+  isDuplicate: boolean;
   groundTruthTpCredits: number;
   sourceStrategies: string[];
 }
@@ -64,6 +68,7 @@ export interface FindingEntity {
 
 export interface RowMetric extends Accounting {
   rowId: string;
+  label: string;
   condition: string;
   valid: boolean;
   status: string;
@@ -72,6 +77,8 @@ export interface RowMetric extends Accounting {
   truePositives: number | null;
   falsePositives: number | null;
   needsHumanReview: number | null;
+  duplicateCount: number | null;
+  resolvedDuplicateCount: number | null;
   distinctGroundTruthCredits: number | null;
   groundTruthRootCauseIds: string[];
   groundTruthLabels: string[];
@@ -103,6 +110,7 @@ export interface ConditionAggregate {
   truePositives: number;
   falsePositives: number;
   needsHumanReview: number;
+  duplicateCount: number;
   distinctGroundTruthCredits: number;
   groundTruthRootCauseIds: string[];
   pooledPrecision: number | null;

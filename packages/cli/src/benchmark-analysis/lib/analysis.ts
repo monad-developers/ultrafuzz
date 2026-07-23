@@ -110,6 +110,10 @@ function rowOrder(rows: BenchmarkRow[]): string[] {
   const conditionOrder = new Map(["default", "no-fuzz"].map((condition, index) => [condition, index]));
   return [...rows]
     .sort((left, right) => {
+      if (left.order !== null || right.order !== null) {
+        const explicit = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
+        if (explicit !== 0) return explicit;
+      }
       const leftMatch = /^(.*?)([0-9]+)$/u.exec(left.rowId);
       const rightMatch = /^(.*?)([0-9]+)$/u.exec(right.rowId);
       const numeric =
@@ -158,9 +162,19 @@ function rowMetrics(
     if (!cost) throw new Error(`Missing accounting for ${row.rowId}`);
     const rowRecords = records.filter((record) => record.rowId === row.rowId);
     const rowEntities = entities.filter((entity) => entity.rows.has(row.rowId));
-    const truePositives = rowRecords.filter((record) => record.classification === "true-positive").length;
-    const falsePositives = rowRecords.filter((record) => record.classification === "false-positive").length;
-    const needsHumanReview = rowRecords.filter((record) => record.classification === "needs-human-review").length;
+    const truePositives = rowRecords.filter(
+      (record) => record.classification === "true-positive" && !record.isDuplicate
+    ).length;
+    const falsePositives = rowRecords.filter(
+      (record) => record.classification === "false-positive" && !record.isDuplicate
+    ).length;
+    const needsHumanReview = rowRecords.filter(
+      (record) => record.classification === "needs-human-review" && !record.isDuplicate
+    ).length;
+    const duplicateCount = rowRecords.filter((record) => record.isDuplicate).length;
+    const resolvedDuplicateCount = rowRecords.filter(
+      (record) => record.isDuplicate && record.classification !== "needs-human-review"
+    ).length;
     const detected = rowEntities.filter(
       (entity) => entity.classification === "true-positive" && entity.groundTruthTpCredits > 0
     );
@@ -172,11 +186,12 @@ function rowMetrics(
       )
       .filter((value, index, values) => values.indexOf(value) === index)
       .sort();
-    const resolved = truePositives + falsePositives;
+    const resolved = truePositives + falsePositives + resolvedDuplicateCount;
     const precision = resolved > 0 ? truePositives / resolved : null;
     const recall = groundTruthCount > 0 ? distinctGroundTruthCredits / groundTruthCount : null;
     return {
       rowId: row.rowId,
+      label: row.label,
       condition: row.condition,
       valid: true,
       status: "valid",
@@ -185,6 +200,8 @@ function rowMetrics(
       truePositives,
       falsePositives,
       needsHumanReview,
+      duplicateCount,
+      resolvedDuplicateCount,
       distinctGroundTruthCredits,
       groundTruthRootCauseIds,
       groundTruthLabels,
@@ -202,6 +219,7 @@ function conditionSummaries(metrics: RowMetric[], conditions: string[]): Conditi
     "findings",
     "truePositives",
     "distinctGroundTruthCredits",
+    "duplicateCount",
     "totalTokensMillions",
     "precision",
     "recall",
@@ -235,7 +253,9 @@ function conditionAggregates(
     const distinctGroundTruthCredits = sum(detected.map((entity) => entity.groundTruthTpCredits));
     const truePositives = sum(rows.map((row) => row.truePositives ?? 0));
     const falsePositives = sum(rows.map((row) => row.falsePositives ?? 0));
-    const resolved = truePositives + falsePositives;
+    const duplicateCount = sum(rows.map((row) => row.duplicateCount ?? 0));
+    const resolvedDuplicateCount = sum(rows.map((row) => row.resolvedDuplicateCount ?? 0));
+    const resolved = truePositives + falsePositives + resolvedDuplicateCount;
     const pooledPrecision = resolved > 0 ? truePositives / resolved : null;
     const unionRecall = groundTruthCount > 0 ? distinctGroundTruthCredits / groundTruthCount : null;
     return {
@@ -246,6 +266,7 @@ function conditionAggregates(
       truePositives,
       falsePositives,
       needsHumanReview: sum(rows.map((row) => row.needsHumanReview ?? 0)),
+      duplicateCount,
       distinctGroundTruthCredits,
       groundTruthRootCauseIds: detected.map((entity) => entity.entityId).sort(),
       pooledPrecision,
@@ -305,9 +326,18 @@ export async function analyzeArchive(archivePath: string): Promise<AnalysisResul
   const rowIds = asArray(manifest.rows).map((value) => requiredString(value, "row id"));
   if (rowIds.length === 0 || new Set(rowIds).size !== rowIds.length)
     throw new Error("Finding manifest has no unique rows");
+  const rowMetadata = asObject(manifest.rowMetadata);
   const rows = rowIds.map((rowId) => {
     const { variant } = archive.findRowArchive(rowId);
-    return { rowId, variant, condition: conditionLabel(variant) };
+    const metadata = asObject(rowMetadata[rowId]);
+    const rawOrder = metadata.order;
+    return {
+      rowId,
+      label: optionalString(metadata.label) ?? rowId,
+      variant,
+      condition: optionalString(metadata.condition) ?? conditionLabel(variant),
+      order: typeof rawOrder === "number" && Number.isFinite(rawOrder) ? rawOrder : null
+    };
   });
   const conditions = [...new Set(rows.map((row) => row.condition))];
 
@@ -356,6 +386,7 @@ export async function analyzeArchive(archivePath: string): Promise<AnalysisResul
     const severity = severityFor(source.severity, rawTitle);
     const rendered = findingLabel(rawTitle, severity, issueIndex);
     const rootCauseClusterId = requiredString(mapping.rootCauseClusterId, "root-cause cluster ID");
+    const duplicateOfFindingInstanceId = optionalString(mapping.duplicateOfFindingInstanceId);
     const matchedCandidateId = optionalString(mapping.matchedCandidateId);
     const matchedIdentity = matchedCandidateId ? (candidates.get(matchedCandidateId) ?? null) : null;
     if (matchedCandidateId && !matchedIdentity) throw new Error(`Unknown matched candidate ${matchedCandidateId}`);
@@ -385,6 +416,8 @@ export async function analyzeArchive(archivePath: string): Promise<AnalysisResul
       stableIssueId: requiredString(mapping.stableIssueId, "stable issue ID"),
       findingInstanceId,
       rootCauseClusterId,
+      duplicateOfFindingInstanceId,
+      isDuplicate: duplicateOfFindingInstanceId !== null,
       groundTruthTpCredits: creditByCluster.get(rootCauseClusterId) as number,
       sourceStrategies
     } satisfies FindingRecord;
@@ -392,6 +425,20 @@ export async function analyzeArchive(archivePath: string): Promise<AnalysisResul
 
   if (records.length !== sourceFindings.size) {
     throw new Error(`Final mapping covers ${records.length}/${sourceFindings.size} finding instances`);
+  }
+  const recordById = new Map(records.map((record) => [record.findingInstanceId, record]));
+  for (const record of records) {
+    if (record.duplicateOfFindingInstanceId === null) continue;
+    const target = recordById.get(record.duplicateOfFindingInstanceId);
+    if (
+      !target ||
+      target.findingInstanceId === record.findingInstanceId ||
+      target.rowId !== record.rowId ||
+      target.rootCauseClusterId !== record.rootCauseClusterId ||
+      target.classification !== record.classification
+    ) {
+      throw new Error(`Invalid duplicate target for ${record.findingInstanceId}`);
+    }
   }
   const rowCounts = asObject(manifest.rowCounts);
   for (const rowId of rowIds) {

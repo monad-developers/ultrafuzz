@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import type { AnalysisResult, PairComparison, Severity } from "../types.js";
+import type { AnalysisResult, PairComparison, RowMetric, Severity } from "../types.js";
 import { SEVERITY_ORDER } from "../types.js";
 import { intersectionGroups, orderedSetRows, severityCounts } from "./analysis.js";
 import { mean, sampleStdev } from "./stats.js";
@@ -16,8 +16,11 @@ const METRICS = ["precision", "recall", "f1"] as const;
 const METRIC_COLORS = { precision: "#222222", recall: "#777777", f1: "#c4c4c4" } as const;
 const CONDITION_STYLES = [
   { fill: "#111111", stroke: "#111111", square: false },
-  { fill: "#bdbdbd", stroke: "#444444", square: true },
-  { fill: "#ffffff", stroke: "#777777", square: false }
+  { fill: "#4d4d4d", stroke: "#333333", square: true },
+  { fill: "#858585", stroke: "#444444", square: false },
+  { fill: "#bdbdbd", stroke: "#555555", square: true },
+  { fill: "#e0e0e0", stroke: "#666666", square: false },
+  { fill: "#ffffff", stroke: "#777777", square: true }
 ] as const;
 
 function tickLabel(value: number): string {
@@ -65,6 +68,20 @@ interface PairwisePanel {
   value: (pair: PairComparison, condition: "ultrafuzz" | "no-fuzz") => number | null;
   format: (value: number) => string;
   formatTick: (value: number) => string;
+}
+
+interface RowComparisonPanel {
+  title: string;
+  note: string;
+  maximum: number;
+  divisions: number;
+  value: (row: RowMetric) => number | null;
+  format: (value: number) => string;
+  formatTick: (value: number) => string;
+}
+
+function rowLabel(result: AnalysisResult, rowId: string): string {
+  return result.rows.find((row) => row.rowId === rowId)?.label ?? rowId;
 }
 
 export async function buildUpSetChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
@@ -165,7 +182,13 @@ export async function buildUpSetChart(result: AnalysisResult, outputDir: string)
         );
       }
     }
-    parts.push(text(505, y + 5, rowId, { "font-size": 15, "font-weight": 650, "text-anchor": "end" }));
+    parts.push(
+      text(505, y + 5, rowLabel(result, rowId), {
+        "font-size": 15,
+        "font-weight": 650,
+        "text-anchor": "end"
+      })
+    );
     groups.forEach((group, groupIndex) => {
       const x = xAt(groupIndex);
       parts.push(circle(x, y, 4, { fill: "#d4d4d4" }));
@@ -205,8 +228,11 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
   const width = 1500;
   const rowTop = 235;
   const rowStep = 65;
+  const summaryConditions = result.conditions.filter(
+    (condition) => result.rows.filter((row) => row.condition === condition).length > 1
+  );
   const summaryTop = rowTop + result.rowOrder.length * rowStep + 45;
-  const plotBottom = summaryTop + result.conditions.length * rowStep + 20;
+  const plotBottom = summaryTop + summaryConditions.length * rowStep + 20;
   const height = plotBottom + 70;
   const plotLeft = 300;
   const plotRight = 1410;
@@ -226,10 +252,17 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     legendX += metric === "precision" ? 125 : 105;
   }
   parts.push(
-    text(60, 164, "Condition summary: bar = mean · diamond = median · whisker = ±1 sample SD", {
-      "font-size": 12,
-      fill: "#666"
-    })
+    text(
+      60,
+      164,
+      summaryConditions.length > 0
+        ? "Condition summary: bar = mean · diamond = median · whisker = ±1 sample SD"
+        : "Each independently configured row is shown once.",
+      {
+        "font-size": 12,
+        fill: "#666"
+      }
+    )
   );
 
   for (let tick = 0; tick <= 4; tick += 1) {
@@ -245,7 +278,13 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     if (index % 2 === 1) parts.push(rect(50, y - rowStep / 2, width - 100, rowStep, { fill: "#f5f5f5" }));
     const row = lookup.get(rowId);
     if (!row) return;
-    parts.push(text(270, y + 6, rowId, { "font-size": 16, "font-weight": 650, "text-anchor": "end" }));
+    parts.push(
+      text(270, y + 6, rowLabel(result, rowId), {
+        "font-size": 16,
+        "font-weight": 650,
+        "text-anchor": "end"
+      })
+    );
     const offsets = [-16, 0, 16];
     METRICS.forEach((metric, metricIndex) => {
       const value = row[metric];
@@ -260,7 +299,7 @@ export async function buildScoreChart(result: AnalysisResult, outputDir: string)
     });
   });
 
-  result.conditions.forEach((condition, index) => {
+  summaryConditions.forEach((condition, index) => {
     const y = summaryTop + index * rowStep;
     parts.push(rect(50, y - rowStep / 2, width - 100, rowStep, { fill: index % 2 ? "#e7e7e7" : "#eeeeee" }));
     const item = summary.get(condition);
@@ -454,6 +493,144 @@ export async function buildPairwiseChart(result: AnalysisResult, outputDir: stri
   return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
 }
 
+export async function buildComparisonChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
+  const outputs: string[] = [];
+  if (result.pairComparison.length > 0) outputs.push(...(await buildPairwiseChart(result, outputDir)));
+  const pairedRowIds = new Set(result.pairComparison.flatMap((pair) => [pair.ultrafuzz.rowId, pair.noFuzz.rowId]));
+  if (pairedRowIds.size < result.rowMetrics.length) outputs.push(...(await buildCrossRowChart(result, outputDir)));
+  return outputs;
+}
+
+async function buildCrossRowChart(result: AnalysisResult, outputDir: string): Promise<string[]> {
+  const rows = [...result.rowMetrics].sort(
+    (left, right) =>
+      (right.f1 ?? -1) - (left.f1 ?? -1) ||
+      (right.distinctGroundTruthCredits ?? -1) - (left.distinctGroundTruthCredits ?? -1) ||
+      left.totalTokensMillions - right.totalTokensMillions ||
+      left.rowId.localeCompare(right.rowId)
+  );
+  if (rows.length === 0) throw new Error("No benchmark rows are available for comparison");
+
+  const creditMaximum = niceAxisMaximum(Math.max(1, ...rows.map((row) => row.distinctGroundTruthCredits ?? 0)), 3);
+  const scoreMaximum = Math.min(1, niceAxisMaximum(Math.max(0.05, ...rows.map((row) => row.f1 ?? 0)), 4));
+  const tokenMaximum = niceAxisMaximum(Math.max(1, ...rows.map((row) => row.totalTokensMillions)), 4);
+  const panels: RowComparisonPanel[] = [
+    {
+      title: "Ground-truth TP credits",
+      note: "Higher is better",
+      maximum: creditMaximum,
+      divisions: 3,
+      value: (row) => row.distinctGroundTruthCredits,
+      format: (value) => value.toFixed(0),
+      formatTick: (value) => value.toFixed(0)
+    },
+    {
+      title: "F1 score",
+      note: "Higher is better",
+      maximum: scoreMaximum,
+      divisions: 4,
+      value: (row) => row.f1,
+      format: (value) => `${(value * 100).toFixed(1)}%`,
+      formatTick: (value) => tickLabel(value)
+    },
+    {
+      title: "Total tokens (millions)",
+      note: "Lower is better",
+      maximum: tokenMaximum,
+      divisions: 4,
+      value: (row) => row.totalTokensMillions,
+      format: (value) => value.toFixed(1),
+      formatTick: (value) => value.toFixed(0)
+    }
+  ];
+
+  const width = 1650;
+  const panelLeft = [360, 785, 1210];
+  const panelWidth = 360;
+  const rowTop = 245;
+  const rowStep = 82;
+  const axisTop = 195;
+  const axisBottom = rowTop + (rows.length - 1) * rowStep + 48;
+  const height = axisBottom + 105;
+  const parts: string[] = [];
+
+  parts.push(text(60, 58, "Cross-row benchmark comparison", { "font-size": 28, "font-weight": 650 }));
+  parts.push(
+    text(60, 90, `${rows.length} independently configured rows · finalized global adjudication`, {
+      "font-size": 15,
+      fill: "#666"
+    })
+  );
+  parts.push(
+    text(60, 122, "Rows are ranked by F1, then ground-truth credits, then compute cost.", {
+      "font-size": 12,
+      fill: "#777"
+    })
+  );
+
+  rows.forEach((row, index) => {
+    const y = rowTop + index * rowStep;
+    if (index % 2 === 1) parts.push(rect(45, y - 32, width - 90, 64, { fill: "#f5f5f5" }));
+    parts.push(
+      text(325, y + 6, `${index + 1}. ${row.label}`, {
+        "font-size": 15,
+        "font-weight": 650,
+        "text-anchor": "end"
+      })
+    );
+  });
+
+  panels.forEach((panel, panelIndex) => {
+    const left = panelLeft[panelIndex] ?? 360;
+    const right = left + panelWidth;
+    const xAt = (value: number) => left + (value / panel.maximum) * panelWidth;
+    parts.push(text(left, 154, panel.title, { "font-size": 17, "font-weight": 650 }));
+    parts.push(text(right, 177, panel.note, { "font-size": 12, fill: "#666", "text-anchor": "end" }));
+
+    for (let tick = 0; tick <= panel.divisions; tick += 1) {
+      const value = (panel.maximum * tick) / panel.divisions;
+      const x = xAt(value);
+      parts.push(line(x, axisTop, x, axisBottom, { stroke: tick === 0 ? "#999" : "#e1e1e1" }));
+      parts.push(
+        text(x, axisBottom + 28, panel.formatTick(value), {
+          "font-size": 11,
+          "text-anchor": "middle",
+          fill: "#666"
+        })
+      );
+    }
+
+    rows.forEach((row, rowIndex) => {
+      const y = rowTop + rowIndex * rowStep;
+      const value = panel.value(row);
+      if (value === null) {
+        parts.push(text((left + right) / 2, y + 5, "NA", { "font-size": 12, "text-anchor": "middle", fill: "#777" }));
+        return;
+      }
+      const x = xAt(value);
+      parts.push(line(left, y, x, y, { stroke: "#b5b5b5", "stroke-width": 2 }));
+      parts.push(circle(x, y, 8, { fill: "#111", stroke: "#111" }));
+      parts.push(
+        text(Math.min(right - 3, x + 12), y - 12, panel.format(value), {
+          "font-size": 11,
+          "font-weight": 600,
+          "text-anchor": x > right - 55 ? "end" : "start"
+        })
+      );
+    });
+  });
+
+  parts.push(
+    text(width - 55, height - 22, "Repeated findings are globally deduplicated before ground-truth crediting.", {
+      "font-size": 12,
+      "text-anchor": "end",
+      fill: "#777"
+    })
+  );
+  const svgPath = join(outputDir, "model_comparison.svg");
+  return writeSvgAndPng(svgDocument(width, height, parts.join("\n")), svgPath);
+}
+
 function pareto(rows: AnalysisResult["rowMetrics"]): AnalysisResult["rowMetrics"] {
   const sorted = [...rows].sort((left, right) => left.totalTokensMillions - right.totalTokensMillions);
   let best = -Infinity;
@@ -487,7 +664,7 @@ export async function buildCostChart(result: AnalysisResult, outputDir: string):
   parts.push(text(60, 90, "F1 score vs total tokens", { "font-size": 15, fill: "#666" }));
   result.conditions.forEach((condition, index) => {
     const style = CONDITION_STYLES[index % CONDITION_STYLES.length] ?? CONDITION_STYLES[0];
-    const x = 70 + index * 180;
+    const x = 70 + index * 220;
     parts.push(style.square ? markerSquare(x, 132, 8, style) : circle(x, 132, 8, style));
     parts.push(text(x + 18, 137, condition, { "font-size": 13 }));
   });
@@ -543,7 +720,12 @@ export async function buildCostChart(result: AnalysisResult, outputDir: string):
       const x = xAt(row.totalTokensMillions);
       const y = yAt(row.f1 ?? 0);
       parts.push(style.square ? markerSquare(x, y, 8, style) : circle(x, y, 8, style));
-      parts.push(text(x + 11, y + (rowIndex % 2 === 0 ? -10 : 20), row.rowId, { "font-size": 14, "font-weight": 650 }));
+      parts.push(
+        text(x + 11, y + (rowIndex % 2 === 0 ? -10 : 20), row.label, {
+          "font-size": 14,
+          "font-weight": 650
+        })
+      );
     });
     if (rows.length > 0) {
       const costs = rows.map((row) => row.totalTokensMillions);
