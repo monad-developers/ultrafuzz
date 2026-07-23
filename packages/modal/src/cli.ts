@@ -10,13 +10,14 @@ import {
   launchModalBenchmark,
   ModalTerminationError,
   modalBenchmarkStatus,
+  overseeModalBenchmarks,
   terminateModalBenchmark,
   terminateModalBenchmarkConfig,
   terminateModalImageBuild
 } from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
+  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -57,6 +58,44 @@ async function main(): Promise<void> {
   if (command === "status") {
     const rows = await modalBenchmarkStatus({ statePath: requiredOption(argv, "--state") });
     console.log(JSON.stringify(rows, null, 2));
+    return;
+  }
+  if (command === "overseer") {
+    const configPaths = options(argv, "--config");
+    const statePaths = options(argv, "--state");
+    const recoveryStatePaths = options(argv, "--recovery-state");
+    const recoveryImages = options(argv, "--image");
+    if (
+      configPaths.length === 0 ||
+      configPaths.length !== statePaths.length ||
+      configPaths.length !== recoveryStatePaths.length ||
+      recoveryImages.length > configPaths.length
+    ) {
+      throw new Error("overseer requires matching repeated --config, --state, and --recovery-state options");
+    }
+    const resumeGraceMs = millisecondsOption(argv, "--resume-grace-seconds");
+    const staleAfterMs = millisecondsOption(argv, "--stale-seconds");
+    const maxNoProgressGenerations = integerOption(argv, "--max-no-progress-generations");
+    const backoffBaseMs = millisecondsOption(argv, "--backoff-base-seconds");
+    const backoffMaxMs = millisecondsOption(argv, "--backoff-max-seconds");
+    const policy = {
+      ...(resumeGraceMs === undefined ? {} : { resumeGraceMs }),
+      ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+      ...(maxNoProgressGenerations === undefined ? {} : { maxNoProgressGenerations }),
+      ...(backoffBaseMs === undefined ? {} : { backoffBaseMs }),
+      ...(backoffMaxMs === undefined ? {} : { backoffMaxMs })
+    };
+    await overseeModalBenchmarks({
+      jobs: configPaths.map((configPath, index) => ({
+        configPath,
+        statePath: statePaths[index]!,
+        recoveryStatePath: recoveryStatePaths[index]!,
+        ...(recoveryImages[index] === undefined ? {} : { recoveryImage: recoveryImages[index] }),
+        ...(argv.includes("--force-rollout") ? { forceRollout: true } : {}),
+        policy
+      })),
+      pollMs: millisecondsOption(argv, "--poll-seconds") ?? 60_000
+    });
     return;
   }
   if (command === "terminate") {
@@ -157,6 +196,22 @@ function requiredOption(argv: string[], name: string): string {
 
 function options(argv: string[], name: string): string[] {
   return argv.flatMap((value, index) => (value === name && argv[index + 1] !== undefined ? [argv[index + 1]!] : []));
+}
+
+function millisecondsOption(argv: string[], name: string): number | undefined {
+  const seconds = integerOption(argv, name);
+  if (seconds === undefined) return undefined;
+  const milliseconds = seconds * 1_000;
+  if (!Number.isSafeInteger(milliseconds)) throw new Error(`${name} is too large`);
+  return milliseconds;
+}
+
+function integerOption(argv: string[], name: string): number | undefined {
+  const value = option(argv, name);
+  if (value === undefined) return undefined;
+  const integer = Number(value);
+  if (!Number.isSafeInteger(integer) || integer <= 0) throw new Error(`${name} must be a positive integer`);
+  return integer;
 }
 
 await main();

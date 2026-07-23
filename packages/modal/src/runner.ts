@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -31,7 +31,10 @@ import {
   DEFAULT_MODAL_APP,
   DEFAULT_MODAL_IMAGE,
   MODAL_BENCHMARK_SANDBOX_RESOURCES,
+  MODAL_OVERSEER_POLL_MS,
   MODAL_PRE_MODEL_RETRY_LIMIT,
+  MODAL_RECOVERY_LEASE_TIMEOUT_MS,
+  MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
   MODAL_SANDBOX_TIMEOUT_MS,
   type ModalLaunchMode,
   type ModalModelSpec,
@@ -89,6 +92,24 @@ import {
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
   type PublicEvalDiagnostics
 } from "./public-eval-diagnostics.js";
+import {
+  attachModalRecoverySandbox,
+  createModalRecoveryState,
+  markModalRecoveryWorkerLaunched,
+  markModalRecoveryWorkerStopped,
+  parseModalRecoveryState,
+  readModalRecoveryState,
+  reconcileModalRecoveryRow,
+  reserveModalRecoveryWorker,
+  writeModalRecoveryState,
+  type ModalRecoveryCanonicalProgress,
+  type ModalRecoveryDecision,
+  type ModalRecoveryOwner,
+  type ModalRecoveryPolicy,
+  type ModalRecoveryRowState,
+  type ModalRecoveryState,
+  type ModalRecoveryWorker
+} from "./recovery.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "ubuntu";
@@ -828,6 +849,686 @@ export async function modalBenchmarkStatus(input: {
   } finally {
     modal.close();
   }
+}
+
+export interface ModalOverseerJob {
+  configPath: string;
+  statePath: string;
+  recoveryStatePath: string;
+  recoveryImage?: string;
+  forceRollout?: boolean;
+  policy?: Partial<ModalRecoveryPolicy>;
+}
+
+export interface ModalRecoveryRowSnapshot {
+  slug: string;
+  status: ModalRecoveryRowState["status"];
+  action: ModalRecoveryDecision["action"] | "pending";
+  reason: ModalRecoveryDecision["reason"] | "recovery-lease";
+  no_progress_generations: number;
+  successful_nodes: number;
+  recovery_generation: number;
+  retry_after_ms: number;
+}
+
+export interface ModalOverseerSnapshot {
+  logical_run_id: string;
+  complete: boolean;
+  settled: boolean;
+  rows: ModalRecoveryRowSnapshot[];
+}
+
+export async function overseeModalBenchmarks(input: {
+  jobs: ModalOverseerJob[];
+  pollMs?: number;
+  env?: Record<string, string | undefined>;
+}): Promise<ModalOverseerSnapshot[]> {
+  if (input.jobs.length === 0) throw new Error("at least one Modal overseer job is required");
+  const pollMs = input.pollMs ?? MODAL_OVERSEER_POLL_MS;
+  if (!Number.isSafeInteger(pollMs) || pollMs <= 0) throw new Error("Modal overseer poll interval must be positive");
+  for (;;) {
+    const snapshots = [];
+    for (const job of input.jobs) {
+      snapshots.push(await overseeModalBenchmarkOnce({ ...job, env: input.env }));
+    }
+    console.log(JSON.stringify({ updated_at: new Date().toISOString(), jobs: snapshots }));
+    if (snapshots.every((snapshot) => snapshot.settled)) return snapshots;
+    await sleep(pollMs);
+  }
+}
+
+export async function overseeModalBenchmarkOnce(
+  input: ModalOverseerJob & {
+    env?: Record<string, string | undefined>;
+    now?: () => number;
+  }
+): Promise<ModalOverseerSnapshot> {
+  const configPath = path.resolve(input.configPath);
+  const statePath = path.resolve(input.statePath);
+  const recoveryStatePath = path.resolve(input.recoveryStatePath);
+  const config = loadModalBenchmarkConfig(configPath);
+  if (isPublicModalBenchmarkConfig(config)) {
+    throw new Error("public Modal benchmarks do not permit post-model recovery");
+  }
+  const now = input.now ?? Date.now;
+  const env = input.env ?? process.env;
+
+  return withModalLaunchStateLock(statePath, async () => {
+    const launchState = parseModalLaunchState(JSON.parse(await readFile(statePath, "utf8")) as unknown);
+    if (launchState.logical_run_id !== config.run_id) {
+      throw new Error(`launch state belongs to ${launchState.logical_run_id}, not ${config.run_id}`);
+    }
+    if (launchState.fingerprints.config !== fingerprintModalConfigFile(configPath)) {
+      throw new Error("incompatible Modal recovery configuration fingerprint");
+    }
+    const requestedImage = input.recoveryImage ?? launchState.image;
+    return withModalLaunchStateLock(recoveryStatePath, async () => {
+      let recoveryState = await readModalRecoveryState(recoveryStatePath);
+      if (recoveryState === undefined) {
+        recoveryState = createModalRecoveryState({
+          logicalRunId: launchState.logical_run_id,
+          launchGeneration: launchState.generation,
+          app: launchState.app,
+          slugs: launchState.launches.map((launch) => launch.slug)
+        });
+        await writeModalRecoveryState(recoveryStatePath, recoveryState);
+      }
+      assertModalRecoveryStateMatchesLaunch(recoveryState, launchState);
+
+      const modal = modalClient(env);
+      try {
+        const app = await modal.apps.fromName(launchState.app, { createIfMissing: false });
+        const image = await modal.images.fromName(requestedImage);
+        const rows: ModalRecoveryRowSnapshot[] = [];
+        for (const launch of launchState.launches) {
+          const model = config.models.find((candidate) => candidate.slug === launch.slug);
+          if (model === undefined || fingerprintModalModel(model) !== launch.model_fingerprint) {
+            throw new Error(`incompatible Modal recovery model for ${launch.slug}`);
+          }
+          const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
+          let row = recoveryState.rows.find((candidate) => candidate.slug === launch.slug)!;
+          let resolution = await resolveModalRecoveryOwner({
+            modal,
+            launchState,
+            launch,
+            row,
+            nowMs: now()
+          });
+          row = resolution.row;
+          setModalRecoveryRow(recoveryState, row);
+          const recoveryGeneration =
+            resolution.reserved?.worker.generation ??
+            (resolution.owner?.kind === "recovery" && resolution.owner.live ? resolution.owner.generation : undefined);
+          const recoverySandbox = resolution.reserved?.sandbox ?? resolution.sandbox;
+          if (recoveryGeneration !== undefined && recoverySandbox !== undefined) {
+            const worker = row.workers.find((candidate) => candidate.generation === recoveryGeneration);
+            if (worker === undefined || worker.attempt_id !== launch.attempt_id) {
+              throw new Error("Modal recovery worker does not match the current launch attempt");
+            }
+            const resolutionChanged = resolution.changed;
+            row = await finishReservedModalRecoveryWorker({
+              sandbox: recoverySandbox,
+              worker,
+              launchState,
+              launch,
+              statePath,
+              row,
+              recoveryState,
+              recoveryStatePath,
+              configPath,
+              auth: subscriptionAuthCopy(model, env),
+              now
+            });
+            resolution = {
+              row,
+              owner: recoveryOwner(row, recoveryGeneration, true),
+              sandbox: recoverySandbox,
+              changed: resolutionChanged
+            };
+          }
+          if (resolution.changed) await writeModalRecoveryState(recoveryStatePath, recoveryState);
+          if (resolution.pending) {
+            rows.push(recoverySnapshot(row, "pending", "recovery-lease"));
+            resolution.sandbox?.detach();
+            continue;
+          }
+
+          const inspected = await inspectModalRecoveryVolume(modal, app, image, volume, launch.remote_root);
+          const workerStatus = latestModalWorkerStatus(
+            [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
+            launch
+          );
+          const complete =
+            workerStatus !== undefined && ["succeeded", "genuine-task-outcome"].includes(workerStatus.category);
+          const observedAt = new Date(now()).toISOString();
+          const decision = reconcileModalRecoveryRow({
+            row,
+            now: observedAt,
+            requestedImage,
+            owner: resolution.owner,
+            canonical: inspected.canonical,
+            complete,
+            forceRollout: input.forceRollout,
+            policy: input.policy
+          });
+          row = decision.row;
+          setModalRecoveryRow(recoveryState, row);
+
+          if (decision.action === "replace" || decision.action === "terminal") {
+            if (resolution.owner?.live === true && resolution.sandbox !== undefined) {
+              await terminateRecoveryOwner(resolution.sandbox);
+            }
+            if (
+              resolution.owner?.kind === "recovery" &&
+              resolution.owner.live &&
+              resolution.owner.generation !== undefined
+            ) {
+              row = markModalRecoveryWorkerStopped(
+                row,
+                resolution.owner.generation,
+                decision.replacement_kind === "rollout" ? "rollout" : "stalled",
+                observedAt
+              );
+              setModalRecoveryRow(recoveryState, row);
+            }
+            await writeModalRecoveryState(recoveryStatePath, recoveryState);
+          } else if (decision.action === "launch") {
+            row = await launchModalRecoveryWorker({
+              modal,
+              app,
+              image,
+              volume,
+              config,
+              configPath,
+              launchState,
+              launch,
+              statePath,
+              model,
+              requestedImage,
+              row,
+              recoveryState,
+              recoveryStatePath,
+              env,
+              now
+            });
+          } else {
+            await writeModalRecoveryState(recoveryStatePath, recoveryState);
+            resolution.sandbox?.detach();
+          }
+          rows.push(recoverySnapshot(row, decision.action, decision.reason, decision.retry_after_ms));
+        }
+        return {
+          logical_run_id: launchState.logical_run_id,
+          complete: rows.every((row) => row.status === "completed"),
+          settled: rows.every((row) => row.status === "completed" || row.status === "terminal"),
+          rows
+        };
+      } finally {
+        modal.close();
+      }
+    });
+  });
+}
+
+interface ResolvedModalRecoveryOwner {
+  row: ModalRecoveryRowState;
+  owner?: ModalRecoveryOwner;
+  sandbox?: Sandbox;
+  pending?: boolean;
+  changed?: boolean;
+  reserved?: { worker: ModalRecoveryWorker; sandbox: Sandbox };
+}
+
+async function resolveModalRecoveryOwner(input: {
+  modal: ModalClient;
+  launchState: ModalLaunchState;
+  launch: ModalLaunchRecord;
+  row: ModalRecoveryRowState;
+  nowMs: number;
+}): Promise<ResolvedModalRecoveryOwner> {
+  let row = input.row;
+  const newestReserved = [...row.workers]
+    .filter((worker) => worker.phase === "reserved")
+    .sort((left, right) => right.generation - left.generation)[0];
+  if (newestReserved !== undefined) {
+    const sandbox = await runningRecoverySandbox(
+      input.modal,
+      newestReserved.sandbox_id,
+      input.launchState.app,
+      newestReserved.name
+    );
+    if (sandbox !== undefined) {
+      if (newestReserved.sandbox_id === undefined) {
+        row = attachModalRecoverySandbox(row, newestReserved.generation, sandbox.sandboxId);
+      }
+      return { row, changed: row !== input.row, reserved: { worker: newestReserved, sandbox } };
+    }
+    if (input.nowMs - Date.parse(newestReserved.reserved_at) < MODAL_RECOVERY_LEASE_TIMEOUT_MS) {
+      return { row, pending: true };
+    }
+    row = markModalRecoveryWorkerStopped(row, newestReserved.generation, "exited", new Date(input.nowMs).toISOString());
+  }
+
+  const live: Array<{ owner: ModalRecoveryOwner; sandbox: Sandbox }> = [];
+  const launchRecovery = row.workers.find((worker) => worker.attempt_id === input.launch.attempt_id);
+  if (launchRecovery === undefined) {
+    const original = await runningRecoverySandbox(
+      input.modal,
+      input.launch.sandbox_id,
+      input.launchState.app,
+      modalSandboxName(input.launchState.logical_run_id, input.launch)
+    );
+    if (original !== undefined) {
+      live.push({
+        owner: {
+          kind: "original",
+          live: true,
+          image: input.launchState.image,
+          launched_at: input.launch.launched_at ?? input.launch.reserved_at
+        },
+        sandbox: original
+      });
+    }
+  }
+  for (const worker of row.workers.filter((candidate) => candidate.phase === "launched")) {
+    const sandbox = await runningRecoverySandbox(input.modal, worker.sandbox_id, input.launchState.app, worker.name);
+    if (sandbox !== undefined) {
+      live.push({ owner: recoveryOwner(row, worker.generation, true), sandbox });
+    }
+  }
+  live.sort((left, right) => (right.owner.generation ?? 0) - (left.owner.generation ?? 0));
+  const selected = live[0];
+  for (const duplicate of live.slice(1)) {
+    await terminateRecoveryOwner(duplicate.sandbox);
+    if (duplicate.owner.kind === "recovery" && duplicate.owner.generation !== undefined) {
+      row = markModalRecoveryWorkerStopped(
+        row,
+        duplicate.owner.generation,
+        "rollout",
+        new Date(input.nowMs).toISOString()
+      );
+    }
+  }
+  if (selected !== undefined) {
+    return { row, owner: selected.owner, sandbox: selected.sandbox, changed: row !== input.row };
+  }
+
+  const latestWorker = [...row.workers]
+    .filter((worker) => worker.phase !== "reserved")
+    .sort((left, right) => right.generation - left.generation)[0];
+  if (latestWorker !== undefined) {
+    return {
+      row,
+      owner: recoveryOwner(row, latestWorker.generation, false),
+      changed: row !== input.row
+    };
+  }
+  return {
+    row,
+    owner: {
+      kind: "original",
+      live: false,
+      image: input.launchState.image,
+      launched_at: input.launch.launched_at ?? input.launch.reserved_at
+    },
+    changed: row !== input.row
+  };
+}
+
+async function finishReservedModalRecoveryWorker(input: {
+  sandbox: Sandbox;
+  worker: ModalRecoveryWorker;
+  launchState: ModalLaunchState;
+  launch: ModalLaunchRecord;
+  statePath: string;
+  row: ModalRecoveryRowState;
+  recoveryState: ModalRecoveryState;
+  recoveryStatePath: string;
+  configPath: string;
+  auth?: SubscriptionAuthCopy;
+  now: () => number;
+}): Promise<ModalRecoveryRowState> {
+  const published = await readOptionalModalSandboxText(input.sandbox.filesystem, REMOTE_LAUNCH_READY_PATH);
+  if (published !== undefined && published.trim() !== input.worker.attempt_id) {
+    throw new Error("incompatible Modal recovery readiness marker");
+  }
+  const currentWorker = input.row.workers.find((candidate) => candidate.generation === input.worker.generation);
+  if (currentWorker === undefined) throw new Error("Modal recovery worker reservation is missing");
+  if (published !== undefined && input.launch.phase === "launched" && currentWorker.phase === "launched") {
+    return input.row;
+  }
+  if (currentWorker.phase !== "reserved" && currentWorker.phase !== "launched") {
+    throw new Error(`cannot finish a ${currentWorker.phase} Modal recovery worker`);
+  }
+  if (input.launch.phase === "reserved") {
+    markModalSandboxCreated(input.launch, input.sandbox.sandboxId);
+    await writeModalLaunchState(input.statePath, input.launchState);
+  }
+  if (published === undefined) {
+    if (input.auth !== undefined) await access(input.auth.source);
+    await stageLaunchFiles(
+      input.sandbox,
+      input.configPath,
+      modalWorkerLineage(input.launchState, input.launch),
+      input.auth
+    );
+  }
+  const now = new Date(input.now()).toISOString();
+  if (input.launch.phase === "sandbox-created") {
+    markModalLaunchReady(input.launch, now);
+    await writeModalLaunchState(input.statePath, input.launchState);
+  } else if (input.launch.phase !== "launched") {
+    throw new Error(`cannot finish a ${input.launch.phase} Modal recovery launch`);
+  }
+  const row =
+    currentWorker.phase === "reserved"
+      ? markModalRecoveryWorkerLaunched(input.row, input.worker.generation, input.sandbox.sandboxId, now)
+      : input.row;
+  setModalRecoveryRow(input.recoveryState, row);
+  await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+  if (published === undefined) await publishLaunchReady(input.sandbox, input.worker.attempt_id);
+  return row;
+}
+
+async function launchModalRecoveryWorker(input: {
+  modal: ModalClient;
+  app: App;
+  image: Image;
+  volume: Volume;
+  config: ModalBenchmarkConfig;
+  configPath: string;
+  launchState: ModalLaunchState;
+  launch: ModalLaunchRecord;
+  statePath: string;
+  model: ModalModelSpec;
+  requestedImage: string;
+  row: ModalRecoveryRowState;
+  recoveryState: ModalRecoveryState;
+  recoveryStatePath: string;
+  env: Record<string, string | undefined>;
+  now: () => number;
+}): Promise<ModalRecoveryRowState> {
+  const auth = subscriptionAuthCopy(input.model, input.env);
+  if (auth !== undefined) await access(auth.source);
+  const secret = await input.modal.secrets.fromObject(secretValues(input.config, input.model, input.env));
+  const attemptId = randomUUID();
+  const record = reserveModalLaunchAttempt({
+    state: input.launchState,
+    model: input.model,
+    modelFingerprint: input.launch.model_fingerprint,
+    volumeName: input.launch.volume_name,
+    remoteRoot: input.launch.remote_root,
+    workspaceMode: "resume",
+    postModelRecovery: "relaunch",
+    now: new Date(input.now()).toISOString(),
+    attemptId
+  });
+  await writeModalLaunchState(input.statePath, input.launchState);
+  const nextGeneration = Math.max(0, ...input.row.workers.map((worker) => worker.generation)) + 1;
+  const name = modalSandboxName(input.launchState.logical_run_id, {
+    slug: record.slug,
+    generation: record.generation,
+    attempt: record.attempt,
+    attempt_id: attemptId
+  });
+  const reservedAt = new Date(input.now()).toISOString();
+  let row = reserveModalRecoveryWorker(input.row, {
+    attempt: record.attempt,
+    attemptId,
+    name,
+    image: input.requestedImage,
+    now: reservedAt
+  });
+  setModalRecoveryRow(input.recoveryState, row);
+  await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+  const worker = row.workers.find((candidate) => candidate.generation === nextGeneration)!;
+  let sandbox: Sandbox | undefined;
+  try {
+    sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
+      name,
+      command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : input.model.provider)],
+      timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+      workdir: "/opt/ultrafuzz",
+      env: {
+        ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,
+        ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
+        ULTRAFUZZ_MODAL_REMOTE_ROOT: record.remote_root,
+        ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
+      },
+      secrets: [secret],
+      volumes: { "/data": input.volume },
+      tags: modalLaunchTags(input.launchState, record)
+    });
+    markModalSandboxCreated(record, sandbox.sandboxId);
+    await writeModalLaunchState(input.statePath, input.launchState);
+    row = attachModalRecoverySandbox(row, worker.generation, sandbox.sandboxId);
+    setModalRecoveryRow(input.recoveryState, row);
+    await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+    row = await finishReservedModalRecoveryWorker({
+      sandbox,
+      worker: row.workers.find((candidate) => candidate.generation === worker.generation)!,
+      launchState: input.launchState,
+      launch: record,
+      statePath: input.statePath,
+      row,
+      recoveryState: input.recoveryState,
+      recoveryStatePath: input.recoveryStatePath,
+      configPath: input.configPath,
+      auth,
+      now: input.now
+    });
+    sandbox.detach();
+    return row;
+  } catch (error) {
+    if (sandbox !== undefined) await terminateRecoveryOwner(sandbox).catch(() => undefined);
+    row = markModalRecoveryWorkerStopped(row, worker.generation, "exited", new Date(input.now()).toISOString());
+    setModalRecoveryRow(input.recoveryState, row);
+    await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState).catch(() => undefined);
+    throw error;
+  }
+}
+
+function recoveryOwner(row: ModalRecoveryRowState, generation: number, live: boolean): ModalRecoveryOwner {
+  const worker = row.workers.find((candidate) => candidate.generation === generation);
+  if (worker === undefined) throw new Error(`recovery generation ${generation} is missing`);
+  return {
+    kind: "recovery",
+    live,
+    image: worker.image,
+    launched_at: worker.launched_at ?? worker.reserved_at,
+    generation
+  };
+}
+
+async function runningRecoverySandbox(
+  modal: ModalClient,
+  sandboxId: string | undefined,
+  appName: string,
+  name: string
+): Promise<Sandbox | undefined> {
+  let sandbox: Sandbox | undefined;
+  try {
+    sandbox =
+      sandboxId === undefined ? await modal.sandboxes.fromName(appName, name) : await modal.sandboxes.fromId(sandboxId);
+    const exitCode = await sandbox.poll();
+    if (exitCode === null) return sandbox;
+  } catch (error) {
+    sandbox?.detach();
+    if (error instanceof NotFoundError) return undefined;
+    throw error;
+  }
+  sandbox.detach();
+  return undefined;
+}
+
+async function terminateRecoveryOwner(sandbox: Sandbox): Promise<void> {
+  try {
+    await sandbox.terminate({ wait: true });
+  } catch (error) {
+    throw new Error("could not confirm Modal recovery owner termination", { cause: error });
+  }
+}
+
+interface InspectedModalRecoveryVolume {
+  files: Record<string, string>;
+  canonical?: ModalRecoveryCanonicalProgress;
+}
+
+async function inspectModalRecoveryVolume(
+  modal: ModalClient,
+  app: App,
+  image: Image,
+  volume: Volume,
+  remoteRoot: string
+): Promise<InspectedModalRecoveryVolume> {
+  const inspector = await modal.sandboxes.create(app, image, {
+    command: ["sleep", "300"],
+    cpu: 0.5,
+    memoryMiB: 2048,
+    timeoutMs: 5 * 60 * 1000,
+    volumes: { "/data": volume.withMountOptions({ readOnly: true }) },
+    tags: { purpose: "ultrafuzz-inspector" }
+  });
+  try {
+    const files: Record<string, string> = {};
+    for (const name of ["status.json", "result.json"]) {
+      const contents = await readOptionalModalSandboxText(inspector.filesystem, path.posix.join(remoteRoot, name));
+      if (contents !== undefined) files[name] = contents;
+    }
+    const processHandle = await inspector.exec(modalCanonicalRecoveryProbeCommand(remoteRoot));
+    const stdout = drainStream(processHandle.stdout);
+    const stderr = drainStream(processHandle.stderr);
+    const returnCode = await processHandle.wait();
+    const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+    if (returnCode !== 0) {
+      throw new Error(stderrText || stdoutText || `canonical recovery probe failed with exit code ${returnCode}`);
+    }
+    return { files, canonical: parseCanonicalRecoveryProgress(parseJson(stdoutText)) };
+  } finally {
+    await inspector.terminate({ wait: true });
+  }
+}
+
+export function modalCanonicalRecoveryProbeCommand(remoteRoot: string, resolvedMountRoot = "/data"): string[] {
+  const source = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[1];
+const runsRoot = path.join(root, "workspace", "target", ".ultrafuzz", "runs");
+let candidates = [];
+try {
+  for (const name of fs.readdirSync(runsRoot)) {
+    const statePath = path.join(runsRoot, name, "state.json");
+    try {
+      candidates.push({ statePath, modified: fs.statSync(statePath).mtimeMs });
+    } catch {}
+  }
+} catch {}
+if (candidates.length === 0) {
+  process.stdout.write("{}");
+  process.exit(0);
+}
+candidates.sort((left, right) => right.modified - left.modified);
+const state = JSON.parse(fs.readFileSync(candidates[0].statePath, "utf8"));
+const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
+const successful = new Set(["succeeded", "reused-from-prior-run"]);
+const successfulNodes = nodes.filter((node) => node && successful.has(node.status));
+const lastSuccessAt = successfulNodes
+  .map((node) => node.finished_at)
+  .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
+  .sort()
+  .at(-1);
+process.stdout.write(JSON.stringify({
+  status: typeof state.status === "string" ? state.status : "unknown",
+  successful_nodes: successfulNodes.length,
+  total_nodes: nodes.length,
+  last_transition_at: typeof state.last_transition_at === "string" ? state.last_transition_at : state.created_at,
+  ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
+}));`;
+  return ["node", "-e", source, resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot)];
+}
+
+function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalProgress | undefined {
+  const record = recoveryRecord(value);
+  const status = recoveryString(record, "status");
+  const successfulNodes = recoveryCount(record, "successful_nodes");
+  const totalNodes = recoveryCount(record, "total_nodes");
+  const lastTransitionAt = recoveryString(record, "last_transition_at");
+  const lastSuccessAt = recoveryString(record, "last_success_at");
+  if (
+    status === undefined ||
+    successfulNodes === undefined ||
+    totalNodes === undefined ||
+    successfulNodes > totalNodes ||
+    lastTransitionAt === undefined ||
+    !Number.isFinite(Date.parse(lastTransitionAt)) ||
+    (lastSuccessAt !== undefined && !Number.isFinite(Date.parse(lastSuccessAt)))
+  ) {
+    return undefined;
+  }
+  return {
+    status,
+    successful_nodes: successfulNodes,
+    total_nodes: totalNodes,
+    last_transition_at: lastTransitionAt,
+    ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
+  };
+}
+
+function recoveryRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function recoveryString(value: Record<string, unknown> | undefined, key: string): string | undefined {
+  const field = value?.[key];
+  return typeof field === "string" && field.trim() !== "" ? field : undefined;
+}
+
+function recoveryCount(value: Record<string, unknown> | undefined, key: string): number | undefined {
+  const field = value?.[key];
+  return typeof field === "number" && Number.isSafeInteger(field) && field >= 0 ? field : undefined;
+}
+
+function setModalRecoveryRow(state: ModalRecoveryState, row: ModalRecoveryRowState): void {
+  const index = state.rows.findIndex((candidate) => candidate.slug === row.slug);
+  if (index === -1) throw new Error(`recovery row ${row.slug} is missing`);
+  state.rows[index] = row;
+  parseModalRecoveryState(state);
+}
+
+function assertModalRecoveryStateMatchesLaunch(state: ModalRecoveryState, launch: ModalLaunchState): void {
+  if (
+    state.logical_run_id !== launch.logical_run_id ||
+    state.launch_generation !== launch.generation ||
+    state.app !== launch.app
+  ) {
+    throw new Error("Modal recovery state does not match launch ownership");
+  }
+  const launchSlugs = launch.launches.map((record) => record.slug).sort();
+  const recoverySlugs = state.rows.map((row) => row.slug).sort();
+  if (JSON.stringify(launchSlugs) !== JSON.stringify(recoverySlugs)) {
+    throw new Error("Modal recovery rows do not match launch state");
+  }
+}
+
+function recoverySnapshot(
+  row: ModalRecoveryRowState,
+  action: ModalRecoveryRowSnapshot["action"],
+  reason: ModalRecoveryRowSnapshot["reason"],
+  retryAfterMs = 0
+): ModalRecoveryRowSnapshot {
+  return {
+    slug: row.slug,
+    status: row.status,
+    action,
+    reason,
+    no_progress_generations: row.no_progress_generations,
+    successful_nodes: row.successful_nodes,
+    recovery_generation: Math.max(0, ...row.workers.map((worker) => worker.generation)),
+    retry_after_ms: retryAfterMs
+  };
 }
 
 export async function terminateModalBenchmark(input: {

@@ -1,8 +1,17 @@
 export const MODAL_BENCHMARK_SCHEMA_VERSION = "ultrafuzz.modal.benchmark.v1" as const;
 export const MODAL_LAUNCH_STATE_SCHEMA_VERSION = "ultrafuzz.modal.launch-state.v2" as const;
+export const MODAL_RECOVERY_STATE_SCHEMA_VERSION = "ultrafuzz.modal.recovery-state.v1" as const;
 export const MODAL_WORKER_LINEAGE_SCHEMA_VERSION = "ultrafuzz.modal.worker-lineage.v1" as const;
 export const MODAL_WORKER_STATUS_SCHEMA_VERSION = "ultrafuzz.modal.worker-status.v2" as const;
 export const MODAL_MAX_SANDBOX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MODAL_RECOVERY_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
+export const MODAL_OVERSEER_POLL_MS = 60 * 1000;
+export const MODAL_RECOVERY_RESUME_GRACE_MS = 15 * 60 * 1000;
+export const MODAL_RECOVERY_STALE_AFTER_MS = 30 * 60 * 1000;
+export const MODAL_RECOVERY_MAX_NO_PROGRESS_GENERATIONS = 3;
+export const MODAL_RECOVERY_BACKOFF_BASE_MS = 5 * 60 * 1000;
+export const MODAL_RECOVERY_BACKOFF_MAX_MS = 15 * 60 * 1000;
+export const MODAL_RECOVERY_LEASE_TIMEOUT_MS = 10 * 60 * 1000;
 export const EVAL_POST_WATCH_MARGIN_MS = 2 * 60 * 60 * 1000;
 export const MODAL_SANDBOX_TIMEOUT_MS = MODAL_MAX_SANDBOX_TIMEOUT_MS;
 export const EVAL_WATCH_TIMEOUT_SECONDS = (MODAL_SANDBOX_TIMEOUT_MS - EVAL_POST_WATCH_MARGIN_MS) / 1000;

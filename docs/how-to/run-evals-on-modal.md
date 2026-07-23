@@ -230,6 +230,29 @@ readiness marker. A restart adopts the exact tagged sandbox and completes that
 handshake; an uncertain termination is never followed by an automatic competing
 launch.
 
+For unattended recovery of resumable private rows, run the overseer with a
+separate durable recovery-state file:
+
+```bash
+pnpm exec ultrafuzz-modal overseer \
+  --config .ultrafuzz/modal/benchmark.json \
+  --state .ultrafuzz/modal/example-run/launch-state.json \
+  --recovery-state .ultrafuzz/modal/example-run/recovery-state.json
+```
+
+The overseer reads canonical workflow state from the persistent volume on every
+poll. Recent state transitions or completed nodes keep a live worker healthy
+even if its mirrored worker status is stale. `--resume-grace-seconds` controls
+the minimum time before a resumed worker can be classified as stalled;
+`--max-no-progress-generations` and the bounded backoff options limit repeated
+workers that complete no nodes. Exhausting that budget persists a typed terminal
+state and stops launching workers.
+
+An optional repeated `--image` selects a recovery image. A healthy worker keeps
+ownership when that selection changes; the new image is used after a natural
+recovery. Use `--force-rollout` only for an intentional immediate replacement.
+Rollouts are recorded separately and do not consume the workflow-failure budget.
+
 The launch command writes an ignored, sanitized launch-state file under
 `.ultrafuzz/modal/<run-id>/launch-state.json`. Use that file for status and
 collection:
