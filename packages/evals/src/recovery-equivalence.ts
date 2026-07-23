@@ -120,13 +120,7 @@ export function classifyRecoveryEquivalence(input: {
   if (graph === undefined || state === undefined) {
     return nonComparable(policy, "execution lineage is unavailable");
   }
-  const modelNodeIds = new Set(
-    graph.nodes
-      .filter(
-        (node) => (node.model_fanout === undefined && node.kind === "agentic") || (node.model_fanout?.length ?? 0) > 0
-      )
-      .map((node) => node.id)
-  );
+  const modelNodeIds = new Set(graph.nodes.filter(isModelBackedNode).map((node) => node.id));
   const ledgerPath = path.join(runRoot, "attempts.jsonl");
   let replay: ReturnType<typeof replayNodeAttempts>;
   try {
@@ -191,23 +185,26 @@ export function classifyRecoveryEquivalence(input: {
     (left, right) => left.firstObservedAt.localeCompare(right.firstObservedAt) || left.id.localeCompare(right.id)
   );
   const recoveryGenerations = generations.slice(1);
-  const infrastructureOnly = recoveryGenerations.filter(
-    (generation) => generation.executedModelAttempts.length === 0
-  ).length;
-  const modelWork = recoveryGenerations.length - infrastructureOnly;
   const noProgress = recoveryGenerations.filter((generation) => generation.attempts.length === 0).length;
 
   const seenModelStrategies = new Set<string>();
   let repeatedModelExecutions = 0;
-  generations.forEach((generation) => {
+  let modelWork = 0;
+  generations.forEach((generation, index) => {
     const priorStrategies = new Set(seenModelStrategies);
+    let generationRepeatedModelExecutions = 0;
     for (const entry of generation.executedModelAttempts) {
       if (priorStrategies.has(entry.strategy_attempt_id)) {
         repeatedModelExecutions += 1;
+        generationRepeatedModelExecutions += 1;
       }
       seenModelStrategies.add(entry.strategy_attempt_id);
     }
+    if (index > 0 && generationRepeatedModelExecutions > 0) {
+      modelWork += 1;
+    }
   });
+  const infrastructureOnly = recoveryGenerations.length - modelWork;
 
   const executedModelAttempts = generations.reduce(
     (total, generation) => total + generation.executedModelAttempts.length,
@@ -309,6 +306,11 @@ function modelWorkMayHaveStarted(state: z.infer<typeof stateSchema>, modelNodeId
       node?.started_at !== undefined || (node?.status !== undefined && !["pending", "skipped"].includes(node.status))
     );
   });
+}
+
+function isModelBackedNode(node: z.infer<typeof graphSchema>["nodes"][number]): boolean {
+  if (node.kind === "meta" || node.kind === "reference") return false;
+  return node.kind === "agentic" || node.kind === undefined || (node.model_fanout?.length ?? 0) > 0;
 }
 
 function controllerInvocations(eventsPath: string): Array<{ id: string; at: string }> | undefined {

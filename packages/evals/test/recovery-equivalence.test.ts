@@ -102,8 +102,8 @@ describe("recovery equivalence", () => {
       classification: "infrastructure-recovered",
       unique_model_backed_node_executions: 2,
       repeated_model_backed_node_executions: 0,
-      infrastructure_only_recovery_generations: 0,
-      model_work_recovery_generations: 1,
+      infrastructure_only_recovery_generations: 1,
+      model_work_recovery_generations: 0,
       recovery_generations: 1,
       reason: null
     });
@@ -151,6 +151,29 @@ describe("recovery equivalence", () => {
       repeated_model_backed_node_executions: 1
     });
     expect(forbidden.reason).toContain("exceeds policy maximum");
+  });
+
+  it("treats agentic nodes without explicit fanout as model-backed", () => {
+    const root = evidenceRoot({
+      controllers: ["controller-1", "controller-2"],
+      attempts: [
+        { nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-1" },
+        { nodeId: "model-a", strategyAttemptId: "model-a", controllerInvocationId: "controller-2" }
+      ]
+    });
+    fs.writeFileSync(
+      path.join(root, "graph.json"),
+      JSON.stringify({ nodes: [{ id: "model-a", kind: "agentic", model_fanout: [] }] }),
+      "utf8"
+    );
+
+    expect(classifyRecoveryEquivalence({ runRoot: root, policy: POLICY })).toMatchObject({
+      classification: "non-comparable",
+      unique_model_backed_node_executions: 1,
+      repeated_model_backed_node_executions: 1,
+      recovery_reexecuted_model_backed_node_executions: 1,
+      model_work_recovery_generations: 1
+    });
   });
 
   it("reports ordinary executor retries without treating them as recovery", () => {
