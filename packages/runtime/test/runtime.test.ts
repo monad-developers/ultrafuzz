@@ -188,6 +188,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "  fork)",
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
       "    ;;",
+      "  replay)",
+      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-replayed\"}'",
+      "    ;;",
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
       "      exit 0",
@@ -1070,9 +1073,18 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
   assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
   assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
+  assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
+  const fanIn = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "signal-analysis");
+  assert.equal(fanIn?.dependencyArtifactDirs.length, 2);
+  assert.ok(
+    fanIn?.dependencyArtifactDirs.every((directory) =>
+      directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
+    )
+  );
   assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
   assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
 });
@@ -5249,10 +5261,15 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   });
   assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
   assert.equal(resetResumed.value?.submitted, true);
+  const cloudGeneration = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json"), "utf8")
+  ) as { generation?: string; reset_node?: string };
+  assert.match(cloudGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
+  assert.equal(cloudGeneration.reset_node, "node:project-discovery");
 
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
+  assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
   assert.equal(replayed.value?.submitted, true);
 
   const missingFrame = await forkRun({ projectRoot: project, runId: run.value!.run_id, env });
@@ -5293,7 +5310,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
     commands,
-    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --frame 44 --reset-node node:project-discovery --label after-edit --format json/
+    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run-replayed --frame 44 --reset-node node:project-discovery --label after-edit --format json/
   );
   assert.match(
     commands,

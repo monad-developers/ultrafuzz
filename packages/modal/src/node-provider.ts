@@ -13,6 +13,7 @@ import {
   type Secret,
   type Volume
 } from "modal";
+import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
 const REMOTE_PROJECT_ARCHIVE = "/tmp/ultrafuzz-node-project.tgz";
@@ -57,10 +58,14 @@ export interface ModalNodeSandboxInput {
   run_id: string;
   task_id: string;
   attempt_id: string;
+  execution_generation: string;
   workflow_path: string;
+  prompt_path?: string;
   run_root: string;
   artifact_dir: string;
   workspace_dir: string;
+  dependency_artifact_dirs: string[];
+  project_archive_sha256?: string;
   resources: {
     cpu: number;
     memory_mib: number;
@@ -110,19 +115,21 @@ async function runModalNodeSandbox(
   const [tokenIdName, tokenSecretName] = options.credentialEnv;
   const tokenId = requiredCredential(env, tokenIdName);
   const tokenSecret = requiredCredential(env, tokenSecretName);
-  const archive = createModalNodeHandoffArchive(request.rootDir, input);
+  const archive = await createModalNodeHandoffArchive(request.rootDir, input);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
   const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
   try {
-    fs.writeFileSync(requestFile, `${JSON.stringify(input)}\n`, { mode: 0o600 });
+    fs.writeFileSync(requestFile, `${JSON.stringify({ ...input, project_archive_sha256: archive.sha256 })}\n`, {
+      mode: 0o600
+    });
     client =
       options.clientFactory?.({ tokenId, tokenSecret }) ??
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     const app = await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
-    const tags = modalNodeTags(request.runId, request.sandboxId);
+    const tags = modalNodeTags(request.runId, request.sandboxId, input.execution_generation);
     const volume = await client.volumes.fromName(modalNodeVolumeName(request.runId), { createIfMissing: true });
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
@@ -133,7 +140,7 @@ async function runModalNodeSandbox(
       const secret =
         Object.keys(credentialValues).length === 0 ? undefined : await client.secrets.fromObject(credentialValues);
       sandbox = await client.sandboxes.create(app, image, {
-        name: modalNodeSandboxName(request.runId, request.sandboxId),
+        name: modalNodeSandboxName(request.runId, request.sandboxId, input.execution_generation),
         command: ["sleep", String(Math.max(60, input.resources.timeout_seconds + 300))],
         cpu: input.resources.cpu,
         cpuLimit: input.resources.cpu,
@@ -163,7 +170,7 @@ async function runModalNodeSandbox(
           "--project-archive",
           REMOTE_PROJECT_ARCHIVE,
           "--data-root",
-          remoteAttemptRoot(request.runId, request.sandboxId)
+          remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation)
         ]);
         const stdout = processHandle.stdout.readText().catch(() => "");
         const stderr = processHandle.stderr.readText().catch(() => "");
@@ -246,8 +253,13 @@ export async function cleanupModalNodeRun(
       throw new Error("cloud cleanup refused because the run still has active node sandboxes");
     }
     for (const sandbox of active) {
-      await sandbox.terminate({ wait: true });
-      terminated += 1;
+      try {
+        await sandbox.terminate({ wait: true });
+        terminated += 1;
+      } catch (error) {
+        if ((await sandbox.poll()) === null) throw error;
+        sandbox.detach();
+      }
     }
     try {
       await client.volumes.delete(modalNodeVolumeName(controllerRunId));
@@ -282,6 +294,7 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     "run_id",
     "task_id",
     "attempt_id",
+    "execution_generation",
     "workflow_path",
     "run_root",
     "artifact_dir",
@@ -292,11 +305,29 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
       throw new Error(`cloud node ${key} is invalid`);
     }
   }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
+    throw new Error("cloud node execution generation is invalid");
+  }
   if (
     !Array.isArray(value.agent_credential_env) ||
     !value.agent_credential_env.every((entry) => typeof entry === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(entry))
   ) {
     throw new Error("cloud node credential environment configuration is invalid");
+  }
+  if (
+    !Array.isArray(value.dependency_artifact_dirs) ||
+    !value.dependency_artifact_dirs.every((entry) => typeof entry === "string" && entry.trim() !== "")
+  ) {
+    throw new Error("cloud node dependency artifact configuration is invalid");
+  }
+  if (value.prompt_path !== undefined && (typeof value.prompt_path !== "string" || value.prompt_path.trim() === "")) {
+    throw new Error("cloud node prompt path is invalid");
+  }
+  if (
+    value.project_archive_sha256 !== undefined &&
+    (typeof value.project_archive_sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.project_archive_sha256))
+  ) {
+    throw new Error("cloud node project archive digest is invalid");
   }
   if (value.operator_prompt !== undefined && typeof value.operator_prompt !== "string") {
     throw new Error("cloud node operator prompt is invalid");
@@ -304,11 +335,11 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   return value as unknown as ModalNodeSandboxInput;
 }
 
-export function modalNodeTags(runId: string, sandboxId: string): Record<string, string> {
+export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
   return {
     purpose: "ultrafuzz-node",
     run: boundedIdentity(runId),
-    attempt: boundedIdentity(sandboxId)
+    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`)
   };
 }
 
@@ -316,17 +347,29 @@ export function modalNodeVolumeName(runId: string): string {
   return `ultrafuzz-node-${boundedIdentity(runId)}`;
 }
 
-export function modalNodeSandboxName(runId: string, sandboxId: string): string {
-  return `ufz-${boundedIdentity(`${runId}-${sandboxId}`)}`;
+export function modalNodeSandboxName(runId: string, sandboxId: string, executionGeneration = "base"): string {
+  return `ufz-${boundedIdentity(`${runId}-${sandboxId}-${executionGeneration}`)}`;
 }
 
-export function createModalNodeHandoffArchive(
+export async function createModalNodeHandoffArchive(
   projectRoot: string,
   input: ModalNodeSandboxInput
-): { path: string; cleanup: () => void } {
+): Promise<{ path: string; sha256: string; cleanup: () => void }> {
   const root = fs.realpathSync(path.resolve(projectRoot));
   const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
   const runRoot = checkedPath(root, input.run_root, "run root");
+  const promptPath =
+    input.prompt_path === undefined ? undefined : checkedPath(root, input.prompt_path, "rendered prompt path");
+  const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
+    checkedPath(root, value, "dependency artifact directory")
+  );
+  const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
+  assertChildPath(runRoot, workflowPath, "workflow path");
+  if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
+  for (const dependencyArtifactDir of dependencyArtifactDirs) {
+    assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
+  }
+  assertChildPath(runRoot, artifactDir, "artifact directory");
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
   fs.chmodSync(temporaryRoot, 0o700);
   const staging = path.join(temporaryRoot, "project");
@@ -335,7 +378,7 @@ export function createModalNodeHandoffArchive(
   try {
     const baseArchive = path.join(temporaryRoot, "base.tar");
     execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], { cwd: root });
-    execFileSync("tar", ["-xf", baseArchive, "-C", staging]);
+    await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
     fs.rmSync(baseArchive, { force: true });
     assertSafeTree(staging);
     execFileSync("git", ["init", "--quiet"], { cwd: staging });
@@ -348,10 +391,15 @@ export function createModalNodeHandoffArchive(
     }
     assertSafeTree(staging);
 
-    copyTreeChecked(runRoot, path.join(staging, path.relative(root, runRoot)), {
-      exclude: new Set(["workspaces", "logs"])
-    });
+    fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
     copyFileChecked(root, workflowPath, path.join(staging, path.relative(root, workflowPath)));
+    if (promptPath !== undefined) {
+      copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
+    }
+    for (const dependencyArtifactDir of dependencyArtifactDirs) {
+      copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
+    }
+    fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     for (const relative of [
       ".smithers/package.json",
       ".smithers/agents/index.ts",
@@ -369,6 +417,7 @@ export function createModalNodeHandoffArchive(
     fs.chmodSync(archive, 0o600);
     return {
       path: archive,
+      sha256: sha256File(archive),
       cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
     };
   } catch (error) {
@@ -418,7 +467,7 @@ async function readModalNodeResult(
   request: NodeSandboxProviderRequest,
   input: ModalNodeSandboxInput
 ): Promise<ModalNodeResult | undefined> {
-  const attemptRoot = remoteAttemptRoot(request.runId, request.sandboxId);
+  const attemptRoot = remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
   const resultPath = path.posix.join(attemptRoot, "result.json");
   let parsed: unknown;
   try {
@@ -434,7 +483,7 @@ async function readModalNodeResult(
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
-    parsed.storage_lineage === `${input.run_id}/${input.attempt_id}`
+    parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}`
   ) {
     return parsed as unknown as ModalNodeResult;
   }
@@ -461,7 +510,7 @@ async function publishModalNodeResult(
     }
     const extracted = path.join(temporaryRoot, "extracted");
     fs.mkdirSync(extracted, { recursive: true });
-    execFileSync("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archive, "-C", extracted]);
+    await extractSafeTarArchive(archive, extracted, { gzip: true, label: "cloud node result" });
     assertSafeTree(extracted);
     const workspace = path.join(extracted, "workspace");
     if (fs.existsSync(workspace)) {
@@ -493,8 +542,12 @@ async function findLiveSandbox(
   return live[0];
 }
 
-function remoteAttemptRoot(runId: string, sandboxId: string): string {
-  return path.posix.join(REMOTE_DATA_ROOT, boundedIdentity(runId), boundedIdentity(sandboxId));
+function remoteAttemptRoot(runId: string, sandboxId: string, executionGeneration: string): string {
+  return path.posix.join(
+    REMOTE_DATA_ROOT,
+    boundedIdentity(runId),
+    boundedIdentity(`${sandboxId}:${executionGeneration}`)
+  );
 }
 
 function checkedPath(root: string, value: string, label: string, mustExist = true): string {
@@ -530,18 +583,23 @@ function checkedPath(root: string, value: string, label: string, mustExist = tru
   return resolved;
 }
 
-function copyTreeChecked(source: string, destination: string, options: { exclude: Set<string> }): void {
+function assertChildPath(parent: string, child: string, label: string): void {
+  if (child === parent || !child.startsWith(`${parent}${path.sep}`)) {
+    throw new Error(`${label} must stay inside the run root`);
+  }
+}
+
+function copyTreeChecked(source: string, destination: string): void {
   const stat = fs.lstatSync(source);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("cloud handoff source must be a directory");
   }
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    if (options.exclude.has(entry.name)) continue;
     const childSource = path.join(source, entry.name);
     const childDestination = path.join(destination, entry.name);
     if (entry.isDirectory()) {
-      copyTreeChecked(childSource, childDestination, options);
+      copyTreeChecked(childSource, childDestination);
     } else if (entry.isFile()) {
       const childStat = fs.lstatSync(childSource);
       if (childStat.nlink !== 1) throw new Error("cloud handoff files must not be hard-linked");
@@ -554,12 +612,13 @@ function copyTreeChecked(source: string, destination: string, options: { exclude
 }
 
 function copyFileChecked(root: string, source: string, destination: string): void {
-  const anchored = fs.realpathSync(source);
-  if (!anchored.startsWith(`${root}${path.sep}`)) throw new Error("cloud handoff file is outside the project");
-  const stat = fs.lstatSync(anchored);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+  const sourcePath = path.resolve(source);
+  const sourceStat = fs.lstatSync(sourcePath);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
     throw new Error("cloud handoff file must be a regular unlinked file");
   }
+  const anchored = fs.realpathSync(sourcePath);
+  if (!anchored.startsWith(`${root}${path.sep}`)) throw new Error("cloud handoff file is outside the project");
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.copyFileSync(anchored, destination);
 }

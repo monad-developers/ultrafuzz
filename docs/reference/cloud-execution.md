@@ -60,13 +60,24 @@ Cancellation terminates the current sandbox. Worker failures and timeouts are
 normalized to provider-scoped workflow errors, then Smithers applies the
 existing node retry policy with a fresh VM.
 
+`resume` keeps the same workflow run and execution generation, so live attempts
+are reattached and proven publications are reused. `--reset-node` advances a
+durable execution generation before resetting the selected node and its
+dependents; only tasks Smithers actually resets run again, and those tasks
+cannot reuse a pre-reset publication. `replay` and `fork` use the new workflow
+run ID returned by Smithers, which gives newly executed tasks a distinct
+provider namespace while preserving checkpoint lineage for completed tasks.
+
 ## Handoff Contract
 
 The cloud input is a clean immutable archive of the controller's committed
-`HEAD`, augmented only with the generated workflow, generated agent adapters,
-and durable run evidence needed by declared dependencies. Workspaces and logs
-are excluded. Symlinks, hard links, special files, traversal, and paths outside
-the project are rejected.
+`HEAD`, augmented only with the generated workflow, the current rendered
+prompt, generated agent adapters, and artifact directories of declared
+dependencies. Current-attempt output, unrelated sibling output, workspaces,
+logs, and other run evidence are excluded. Symlinks, hard links, special files,
+traversal, and paths outside the project are rejected. The controller records a
+SHA-256 identity for the archive and the worker verifies it before validated
+streaming extraction.
 
 Dependency artifacts keep their existing producer directories. Fan-in nodes
 receive the collection of those declared artifact snapshots; Ultrafuzz never

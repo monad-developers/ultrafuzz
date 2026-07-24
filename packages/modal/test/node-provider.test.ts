@@ -17,6 +17,7 @@ import {
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import { copySafeTree } from "../src/node-worker.js";
+import { extractSafeTarArchive } from "../src/safe-archive.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
 const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
@@ -28,43 +29,75 @@ describe("Modal node sandbox provider", () => {
     expect(tags).toEqual({
       purpose: "ultrafuzz-node",
       run: expect.stringMatching(/^run-with-spaces-[0-9a-f]{12}$/u),
-      attempt: expect.stringMatching(/^node-attempt-[0-9a-f]{12}$/u)
+      attempt: expect.stringMatching(/^node-attempt-base-[0-9a-f]{12}$/u)
     });
     expect(modalNodeVolumeName("run/with spaces")).toMatch(/^ultrafuzz-node-run-with-spaces-[0-9a-f]{12}$/u);
     expect(modalNodeSandboxName("run/with spaces", "node:attempt")).toMatch(
-      /^ufz-run-with-spaces-node-attempt-[0-9a-f]{12}$/u
+      /^ufz-run-with-spaces-node-attempt-bas-[0-9a-f]{12}$/u
     );
+    expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
   });
 
-  it("creates an immutable handoff from committed source plus declared run evidence", () => {
+  it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
-    const archive = createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
     try {
       const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
       expect(entries).toContain("./source.txt");
       expect(entries).toContain(`./${fixture.input.workflow_path}`);
+      expect(entries).toContain(`./${fixture.input.prompt_path}`);
+      for (const dependency of fixture.input.dependency_artifact_dirs) {
+        expect(entries).toContain(`./${dependency}/`);
+      }
       expect(entries).not.toContain("local-only-secret");
+      expect(entries).not.toContain("unrelated.txt");
+      expect(entries).not.toContain("stale.txt");
       expect(entries).not.toContain(`./${fixture.input.run_root}/workspaces/`);
       expect(entries).not.toContain(`./${fixture.input.run_root}/logs/`);
       expect(entries).not.toContain("./.git/logs/");
       expect(entries).not.toContain("./.git/hooks/");
+      expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
     } finally {
       archive.cleanup();
       fixture.cleanup();
     }
   });
 
-  it("rejects committed symlinks before building a cloud handoff archive", () => {
+  it("rejects committed symlinks before building a cloud handoff archive", async () => {
     const fixture = createProjectFixture();
     try {
       fs.symlinkSync("source.txt", path.join(fixture.root, "source-link.txt"));
       execFileSync("git", ["add", "source-link.txt"], { cwd: fixture.root });
       execFileSync("git", ["commit", "--quiet", "-m", "add symlink"], { cwd: fixture.root });
 
-      expect(() => createModalNodeHandoffArchive(fixture.root, fixture.input)).toThrow(/unsafe filesystem entry/u);
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /unsupported symlink entry/u
+      );
     } finally {
       fixture.cleanup();
+    }
+  });
+
+  it("rejects link entries before extracting a cloud result archive", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-archive-link-"));
+    const source = path.join(root, "source");
+    const destination = path.join(root, "destination");
+    const outside = path.join(root, "outside");
+    const archive = path.join(root, "result.tgz");
+    try {
+      fs.mkdirSync(source);
+      fs.mkdirSync(destination);
+      fs.mkdirSync(outside);
+      fs.symlinkSync(outside, path.join(source, "escape"), "dir");
+      execFileSync("tar", ["-czf", archive, "-C", source, "."]);
+
+      await expect(extractSafeTarArchive(archive, destination, { gzip: true, label: "test result" })).rejects.toThrow(
+        /unsupported symlink entry/u
+      );
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 
@@ -121,7 +154,7 @@ describe("Modal node sandbox provider", () => {
       ).resolves.toMatchObject({
         status: "finished",
         remoteRunId: "sandbox-one",
-        workspaceId: "run-one/attempt-one"
+        workspaceId: "run-one/attempt-one/base"
       });
       expect(client.sandboxes.create).not.toHaveBeenCalled();
       expect(sandbox.exec).not.toHaveBeenCalled();
@@ -271,6 +304,22 @@ describe("Modal node sandbox provider", () => {
     expect(forceClient.volumes.delete).toHaveBeenCalledWith(modalNodeVolumeName("controller-run"));
   });
 
+  it("treats a sandbox that finishes during forced cleanup as already terminated", async () => {
+    const sandbox = fakeSandbox(undefined);
+    sandbox.poll = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(0);
+    sandbox.terminate = vi.fn(async () => {
+      throw new Error("sandbox already stopped");
+    });
+    const client = fakeClient({ listed: [sandbox] });
+
+    await expect(cleanupModalNodeRun(providerOptions(client), "controller-run", { force: true })).resolves.toEqual({
+      terminated: 0,
+      volumeDeleted: true
+    });
+    expect(sandbox.detach).toHaveBeenCalledOnce();
+    expect(client.volumes.delete).toHaveBeenCalledOnce();
+  });
+
   it("fails without echoing configured credential identifiers", async () => {
     const fixture = createProjectFixture();
     const provider = createModalNodeSandboxProvider({
@@ -312,15 +361,25 @@ function createProjectFixture() {
   const root = path.join(temporaryRoot, "project");
   const runRoot = ".ultrafuzz/runs/run-one";
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
+  const dependencyArtifactDirs = [`${runRoot}/artifacts/dependency-one`, `${runRoot}/artifacts/dependency-two`];
   const workspaceDir = `${runRoot}/workspaces/attempt-one`;
   const workflowPath = `${runRoot}/smithers/workflow.tsx`;
+  const promptPath = `${runRoot}/prompts/attempt-one.md`;
   fs.mkdirSync(path.join(root, path.dirname(workflowPath)), { recursive: true });
+  fs.mkdirSync(path.join(root, path.dirname(promptPath)), { recursive: true });
   fs.mkdirSync(path.join(root, artifactDir), { recursive: true });
+  for (const dependency of dependencyArtifactDirs) {
+    fs.mkdirSync(path.join(root, dependency), { recursive: true });
+    fs.writeFileSync(path.join(root, dependency, "declared.txt"), `${dependency}\n`);
+  }
+  fs.mkdirSync(path.join(root, runRoot, "artifacts", "unrelated"), { recursive: true });
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });
   fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
   fs.writeFileSync(path.join(root, workflowPath), "export default {};\n");
+  fs.writeFileSync(path.join(root, promptPath), "rendered prompt\n");
   fs.writeFileSync(path.join(root, artifactDir, "stale.txt"), "stale\n");
+  fs.writeFileSync(path.join(root, runRoot, "artifacts", "unrelated", "unrelated.txt"), "unrelated\n");
   fs.writeFileSync(path.join(root, workspaceDir, "local.txt"), "excluded\n");
   fs.writeFileSync(path.join(root, runRoot, "logs", "local.log"), "excluded\n");
   execFileSync("git", ["init", "--quiet"], { cwd: root });
@@ -333,10 +392,13 @@ function createProjectFixture() {
     run_id: "run-one",
     task_id: "node:attempt-one",
     attempt_id: "attempt-one",
+    execution_generation: "base",
     workflow_path: workflowPath,
+    prompt_path: promptPath,
     run_root: runRoot,
     artifact_dir: artifactDir,
     workspace_dir: workspaceDir,
+    dependency_artifact_dirs: dependencyArtifactDirs,
     resources: {
       cpu: 2,
       memory_mib: 4096,
@@ -369,7 +431,7 @@ function createResultArchive() {
       status: "succeeded",
       artifact_archive: `/data/ultrafuzz-nodes/${tags.run}/${tags.attempt}/artifacts.tgz`,
       artifact_sha256: digest,
-      storage_lineage: "run-one/attempt-one"
+      storage_lineage: "run-one/attempt-one/base"
     }),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true })
   };

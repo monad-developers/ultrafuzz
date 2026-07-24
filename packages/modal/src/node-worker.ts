@@ -6,6 +6,7 @@ import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 import { parseModalNodeSandboxInput } from "./node-provider.js";
+import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROJECT_ROOT = "/workspace/project";
 
@@ -20,12 +21,10 @@ async function main(): Promise<void> {
   fs.mkdirSync(PROJECT_ROOT, { recursive: true, mode: 0o700 });
   fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
   try {
-    await runChecked(
-      "extract-handoff",
-      "tar",
-      ["--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", PROJECT_ROOT],
-      "/"
-    );
+    if (input.project_archive_sha256 === undefined || sha256File(archivePath) !== input.project_archive_sha256) {
+      throw new Error("cloud handoff archive digest mismatch");
+    }
+    await extractSafeTarArchive(archivePath, PROJECT_ROOT, { gzip: true, label: "cloud handoff" });
     assertSafeTree(PROJECT_ROOT);
     await runChecked(
       "install-smithers",
@@ -93,7 +92,7 @@ async function main(): Promise<void> {
         status: "succeeded",
         artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
         artifact_sha256: digest,
-        storage_lineage: `${input.run_id}/${input.attempt_id}`
+        storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`
       })}\n`,
       { mode: 0o600 }
     );

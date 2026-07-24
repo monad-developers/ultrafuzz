@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -132,6 +133,7 @@ export interface CompiledSmithersTask {
   };
   workspacePath: string;
   artifactDir: string;
+  dependencyArtifactDirs: readonly string[];
   renderedPromptPath?: string;
   execution: {
     mode: "local" | "cloud";
@@ -564,11 +566,18 @@ export async function runSmithersLifecycleCommand(input: {
       });
       resetStderr = resetResult.stderr;
       if (resetMarkerPath !== undefined) {
+        const appliedAt = new Date().toISOString();
         writeJsonDurable(resetMarkerPath, {
           schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
           smithers_run_id: input.smithersRunId,
           node_id: input.resetNode,
-          applied_at: new Date().toISOString()
+          applied_at: appliedAt
+        });
+        writeJsonDurable(path.join(path.dirname(input.resumeRecovery!.inputPath), "cloud-execution-generation.json"), {
+          schema_version: "ultrafuzz.cloud.execution-generation.v1",
+          generation: crypto.randomUUID(),
+          reset_node: input.resetNode,
+          applied_at: appliedAt
         });
       }
     }
@@ -692,7 +701,7 @@ export async function runSmithersLifecycleCommand(input: {
   });
   return {
     ...result,
-    ...(input.action === "fork" ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
+    ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
 }
 
@@ -849,7 +858,7 @@ function supervisorCommandArgs(controllerLeaseSeconds: number): string[] {
 
 function parseForkedRunId(stdout: string): string | undefined {
   const parsed = jsonField(stdout).json;
-  return firstStringField(parsed, ["forkedRunId", "runId", "workflow_run_id"]);
+  return firstStringField(parsed, ["forkedRunId", "replayedRunId", "runId", "workflow_run_id"]);
 }
 
 function firstStringField(value: unknown, keys: readonly string[]): string | undefined {
@@ -1153,6 +1162,9 @@ function compileTask(input: {
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
+  const dependencyArtifactDirs = input.dependencyAgenticAttemptIds.map((attemptId) =>
+    getNodeArtifactDir(input.runLayout, attemptId, { create: true })
+  );
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
@@ -1254,6 +1266,7 @@ function compileTask(input: {
     retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
     workspacePath,
     artifactDir,
+    dependencyArtifactDirs,
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
     execution,
     metadata
@@ -1400,6 +1413,9 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
           : executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt"),
       workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
       artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
+      dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
+        executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
+      ),
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
       sourceProjectRoot: compiled.projectRoot,

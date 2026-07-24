@@ -225,10 +225,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       env: input.env,
       environmentVariableNames: linkedWorkflowEnvironmentVariableNames(resolved.config, evidence.layout, input.env)
     });
-    const workflowRunId =
-      action === "fork" && lifecycleResult.workflowRunId !== undefined
-        ? lifecycleResult.workflowRunId
-        : evidence.smithersRunId;
+    const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
     if (workflowRunId !== evidence.smithersRunId) {
       updateLinkedWorkflowRunId(evidence.layout, workflowRunId);
     }
