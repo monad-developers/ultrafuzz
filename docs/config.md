@@ -86,6 +86,23 @@ quorum = 3
 panel_size = 4
 ```
 
+## Forge process guard
+
+Worker environments put a run-scoped Forge wrapper ahead of the installed
+Foundry binary by default:
+
+```toml
+[run]
+forge_guard_enabled = true
+forge_vmem_limit_kb = 12582912
+forge_rayon_threads = 1
+```
+
+The wrapper limits only Forge and its child processes. Raise the memory ceiling
+for larger validation jobs or set `forge_guard_enabled = false` to opt out.
+Resolved run config and run metadata record the configured limit and whether
+the wrapper was active.
+
 `ultrafuzz init` may create generated workflow adapter files. Those files are
 implementation plumbing for launching workflows; project configuration should
 stay in root `ultrafuzz.toml` and editable product surfaces under

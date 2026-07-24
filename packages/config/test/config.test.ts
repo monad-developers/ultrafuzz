@@ -37,6 +37,9 @@ describe("config loading and resolution", () => {
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
+    expect(resolved.value.run.forgeGuardEnabled).toBe(true);
+    expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
+    expect(resolved.value.run.forgeRayonThreads).toBe(1);
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
@@ -46,6 +49,9 @@ dynamic_strategies_enumerator = 5
 
 [run]
 max_parallel_agents = 2
+forge_guard_enabled = false
+forge_vmem_limit_kb = 16777216
+forge_rayon_threads = 3
 default_timeout_seconds = 1200
 workflow_deadline_seconds = 7200
 controller_lease_seconds = 45
@@ -92,6 +98,9 @@ config_dir = ".codex/team"
     expect(resolved.value.run.maxParallelAgents).toBe(11);
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(7200);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(45);
+    expect(resolved.value.run.forgeGuardEnabled).toBe(false);
+    expect(resolved.value.run.forgeVmemLimitKb).toBe(16_777_216);
+    expect(resolved.value.run.forgeRayonThreads).toBe(3);
     expect(resolved.value.triage).toEqual({ quorum: 2, panelSize: 4 });
     expect(resolved.value.models.default).toBe("project-model");
     expect(resolved.value.models.profiles["project-model"]?.agent).toBe("CodexAgent");
@@ -150,6 +159,9 @@ api_key_env = "OPENAI_API_KEY"
     const serialized = serializeRedactedResolvedConfigToml(defaultResolved.value);
     expect(serialized).toContain("[agents.CodexAgent]");
     expect(serialized).toContain('auth = "api-key"');
+    expect(serialized).toContain("forge_guard_enabled = true");
+    expect(serialized).toContain("forge_vmem_limit_kb = 12582912");
+    expect(serialized).toContain("forge_rayon_threads = 1");
   });
 
   it("loads ultrafuzz.toml from disk", async () => {

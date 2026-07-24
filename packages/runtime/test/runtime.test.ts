@@ -181,6 +181,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_KEEP_WORKTREES_LOG" ]; then',
       '  printf \'%s\\n\' "$SMITHERS_KEEP_WORKTREES" > "$SMITHERS_FAKE_KEEP_WORKTREES_LOG"',
       "fi",
+      'if [ -n "$SMITHERS_FAKE_FORGE_GUARD_LOG" ]; then',
+      '  command -v forge > "$SMITHERS_FAKE_FORGE_GUARD_LOG"',
+      "fi",
       'case "$1" in',
       "  fork)",
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
@@ -1503,6 +1506,48 @@ test("startRun maps keep_workspaces to the Smithers worktree retention environme
     assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
     assert.equal(fs.readFileSync(keepLog, "utf8"), keepWorkspaces ? "1\n" : "\n");
   }
+});
+
+test("startRun injects the configured Forge guard into the workflow environment and metadata", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const binDir = path.dirname(env.SMITHERS_BIN!);
+  const realForge = path.join(binDir, "forge");
+  fs.writeFileSync(realForge, "#!/bin/sh\nexit 0\n", "utf8");
+  fs.chmodSync(realForge, 0o755);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace("forge_vmem_limit_kb = 12582912", "forge_vmem_limit_kb = 16777216")
+      .replace("forge_rayon_threads = 1", "forge_rayon_threads = 2"),
+    "utf8"
+  );
+  const guardLog = path.join(project, "forge-guard.log");
+  env.SMITHERS_FAKE_FORGE_GUARD_LOG = guardLog;
+
+  const run = await startRun({ projectRoot: project, runId: "forge-guard", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const wrapper = path.join(run.value!.run_root, "safe-bin", "forge");
+  assert.equal(fs.readFileSync(guardLog, "utf8"), `${wrapper}\n`);
+  assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
+  assert.match(
+    fs.readFileSync(path.join(run.value!.run_root, "config.resolved.toml"), "utf8"),
+    /forge_vmem_limit_kb = 16777216/u
+  );
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    forge_guard?: Record<string, unknown>;
+  };
+  assert.deepEqual(metadata.forge_guard, {
+    enabled: true,
+    active: true,
+    virtual_memory_limit_kb: 16_777_216,
+    rayon_threads: 2
+  });
 });
 
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {

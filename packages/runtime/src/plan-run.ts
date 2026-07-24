@@ -56,6 +56,7 @@ import {
   sha256Stable
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
+import { forgeGuardMetadata } from "./forge-guard.js";
 
 export async function planRun(input: PlanRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -163,7 +164,8 @@ export async function planRun(input: PlanRunInput) {
       runMetadata: {
         mode: input.mode ?? "run",
         workflow_ids: [],
-        redacted_config_fingerprint: redactedConfigFingerprint
+        redacted_config_fingerprint: redactedConfigFingerprint,
+        forge_guard: forgeGuardMetadata(resolved.config, false)
       }
     });
   } catch (error) {
