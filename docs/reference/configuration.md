@@ -28,6 +28,15 @@ default_timeout_seconds = 1800
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 
+[execution]
+mode = "local"
+retention_days = 30
+
+[execution.resources]
+cpu = 4
+memory_mib = 8192
+timeout_seconds = 1800
+
 [models]
 default = "default"
 
@@ -62,6 +71,7 @@ Unknown TOML keys fail validation. Strategy execution behavior belongs in
 | `dynamic_strategies_enumerator` | Positive integer used by prompts that enumerate dynamic strategies. |
 | `[project]`                     | Project paths.                                                      |
 | `[run]`                         | Run output, parallelism, workspace, and timeout settings.           |
+| `[execution]`                   | Local or provider-backed execution and node resource defaults.      |
 | `[models]` and `[models.<id>]`  | Default model profile and model profile definitions.                |
 | `[permissions]`                 | Trusted local execution posture and materialization defaults.       |
 | `[invariants]`                  | Invariant prompt defaults.                                          |
@@ -102,6 +112,20 @@ atomic claim before taking over expired ownership, so completed work is not
 resubmitted. The workflow deadline is separate from per-node timeouts and is
 checked whenever run state is synchronized by status, inspect, reporting, or
 eval watchers.
+
+## Execution
+
+`execution.mode` defaults to `local`. Set it to `cloud`, select a supported
+provider, and configure that provider to place every expanded agentic attempt in
+a fresh sandbox. `retention_days` defaults to `30`. The default resource table
+sets `cpu`, `memory_mib`, and `timeout_seconds`; logical topology nodes may
+override any resource in `[execution.nodes.<node-id>.resources]`.
+
+Cloud provider configuration names credential variables but never stores their
+values. Missing credentials, unsupported provider/auth combinations, invalid
+resource bounds, and unknown override node IDs fail before workflow launch.
+See [Cloud Node Execution](cloud-execution.md) for the Modal configuration,
+handoff, retry, recovery, and cleanup contracts.
 
 ## Model Profiles
 

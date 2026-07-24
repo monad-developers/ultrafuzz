@@ -27,8 +27,10 @@ import {
 } from "./types.js";
 
 const positiveIntegerSchema = z.number().int().positive();
+const positiveNumberSchema = z.number().positive().finite();
 const timeoutSecondsSchema = z.number().int().min(1).max(MAX_TIMEOUT_SECONDS);
 const nonEmptyStringSchema = z.string().refine((value) => value.trim().length > 0);
+const environmentVariableNameSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u);
 const projectLocalPathSchema = z.string().superRefine((value, context) => {
   if (value.length === 0) {
     context.addIssue({ code: "custom", message: "CONFIG_PATH_EMPTY" });
@@ -66,6 +68,41 @@ const resolvedConfigValidationSchema = z
         workspaceMode: z.literal("git-worktree")
       })
       .passthrough(),
+    execution: z
+      .object({
+        mode: z.enum(["local", "cloud"]),
+        provider: z.literal("modal").optional(),
+        retentionDays: z.number().int().min(1).max(3650),
+        resources: z.object({
+          cpu: positiveNumberSchema.max(256),
+          memoryMiB: z.number().int().min(128).max(4_194_304),
+          timeoutSeconds: timeoutSecondsSchema
+        }),
+        nodes: z.record(
+          z.string(),
+          z.object({
+            resources: z.object({
+              cpu: positiveNumberSchema.max(256).optional(),
+              memoryMiB: z.number().int().min(128).max(4_194_304).optional(),
+              timeoutSeconds: timeoutSecondsSchema.optional()
+            })
+          })
+        ),
+        providers: z.object({
+          modal: z
+            .object({
+              app: nonEmptyStringSchema,
+              image: nonEmptyStringSchema,
+              region: nonEmptyStringSchema.optional(),
+              credentialEnv: z
+                .array(environmentVariableNameSchema)
+                .length(2)
+                .refine((names) => new Set(names).size === names.length)
+            })
+            .optional()
+        })
+      })
+      .passthrough(),
     invariants: z
       .object({
         propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
@@ -83,6 +120,7 @@ const resolvedConfigValidationSchema = z
 export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<ResolvedConfig> {
   const diagnostics: ConfigDiagnostic[] = [];
   const config = createDefaultResolvedConfig();
+  const environment = input.env ?? process.env;
 
   applyPromptMetadataLayer(config, createDefaultPromptMetadataLayer(), diagnostics);
   if (input.promptMetadata) {
@@ -91,14 +129,14 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   if (input.projectConfig) {
     applyProjectConfigLayer(config, input.projectConfig, diagnostics, "project-toml");
   }
-  applyEnvironmentOverrides(config, input.env ?? process.env, diagnostics);
+  applyEnvironmentOverrides(config, environment, diagnostics);
   if (input.runtimeOverrides) {
     applyRuntimeOverrides(config, input.runtimeOverrides, diagnostics);
   }
 
   syncDefaultModelProfile(config);
   sortConfig(config);
-  diagnostics.push(...validateResolvedConfig(config));
+  diagnostics.push(...validateResolvedConfig(config, environment));
 
   if (hasErrors(diagnostics)) {
     return fail(diagnostics);
@@ -106,13 +144,17 @@ export function resolveConfig(input: ResolveConfigInput = {}): ConfigResult<Reso
   return ok(config, diagnostics);
 }
 
-export function validateResolvedConfig(config: ResolvedConfig): ConfigDiagnostic[] {
+export function validateResolvedConfig(
+  config: ResolvedConfig,
+  env: Record<string, string | undefined> = process.env
+): ConfigDiagnostic[] {
   const diagnostics = schemaIssues(resolvedConfigValidationSchema, config).map((issue) =>
     resolvedConfigDiagnostic(issue, config)
   );
   diagnostics.push(...validateAgentConfigs(config.agents));
   diagnostics.push(...validateTriageConfig(config.triage));
   diagnostics.push(...validateModelProfiles(config));
+  diagnostics.push(...validateExecutionConfig(config, env));
   return diagnostics;
 }
 
@@ -139,6 +181,31 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     workflow_deadline_seconds: clone.run.workflowDeadlineSeconds,
     controller_lease_seconds: clone.run.controllerLeaseSeconds
   });
+  pushTable(lines, "execution", {
+    mode: clone.execution.mode,
+    provider: clone.execution.provider,
+    retention_days: clone.execution.retentionDays
+  });
+  pushTable(lines, tableName(["execution", "resources"]), {
+    cpu: clone.execution.resources.cpu,
+    memory_mib: clone.execution.resources.memoryMiB,
+    timeout_seconds: clone.execution.resources.timeoutSeconds
+  });
+  for (const [id, override] of Object.entries(clone.execution.nodes)) {
+    pushTable(lines, tableName(["execution", "nodes", id, "resources"]), {
+      cpu: override.resources.cpu,
+      memory_mib: override.resources.memoryMiB,
+      timeout_seconds: override.resources.timeoutSeconds
+    });
+  }
+  if (clone.execution.providers.modal !== undefined) {
+    pushTable(lines, tableName(["execution", "providers", "modal"]), {
+      app: clone.execution.providers.modal.app,
+      image: clone.execution.providers.modal.image,
+      region: clone.execution.providers.modal.region,
+      credential_env: clone.execution.providers.modal.credentialEnv
+    });
+  }
   pushTable(lines, "models", {
     default: clone.models.default === DEFAULT_MODEL_PROFILE_ID ? undefined : clone.models.default,
     synthesized_default: clone.models.synthesizedDefault || undefined
@@ -222,6 +289,102 @@ function applyPromptMetadataLayer(
   }
 }
 
+function applyExecutionConfig(config: ResolvedConfig, layer: NonNullable<ProjectConfigInput["execution"]>): void {
+  if (layer.mode !== undefined) {
+    config.execution.mode = layer.mode;
+  }
+  if (layer.provider !== undefined) {
+    config.execution.provider = layer.provider;
+  }
+  if (layer.retentionDays !== undefined) {
+    config.execution.retentionDays = layer.retentionDays;
+  }
+  if (layer.resources !== undefined) {
+    config.execution.resources = {
+      ...config.execution.resources,
+      ...definedOnly(layer.resources)
+    };
+  }
+  for (const [id, override] of Object.entries(layer.nodes ?? {})) {
+    config.execution.nodes[id] = {
+      resources: {
+        ...config.execution.nodes[id]?.resources,
+        ...definedOnly(override.resources ?? {})
+      }
+    };
+  }
+  if (layer.providers?.modal !== undefined) {
+    const current = config.execution.providers.modal;
+    const next = { ...current, ...definedOnly(layer.providers.modal) };
+    config.execution.providers.modal = next as NonNullable<ResolvedConfig["execution"]["providers"]["modal"]>;
+  }
+}
+
+function validateExecutionConfig(config: ResolvedConfig, env: Record<string, string | undefined>): ConfigDiagnostic[] {
+  const diagnostics: ConfigDiagnostic[] = [];
+  if (config.execution.mode === "local") {
+    if (config.execution.provider !== undefined) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER",
+          "execution.provider is only valid when execution.mode is cloud",
+          ["execution", "provider"],
+          "validation"
+        )
+      );
+    }
+    if (config.execution.providers.modal !== undefined) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS",
+          "cloud provider settings are only valid when execution.mode is cloud",
+          ["execution", "providers", "modal"],
+          "validation"
+        )
+      );
+    }
+    return diagnostics;
+  }
+
+  if (config.execution.provider === undefined) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_EXECUTION_PROVIDER_REQUIRED",
+        "cloud execution requires an execution provider",
+        ["execution", "provider"],
+        "validation"
+      )
+    );
+    return diagnostics;
+  }
+  const provider = config.execution.providers[config.execution.provider];
+  if (provider === undefined) {
+    diagnostics.push(
+      diagnostic(
+        "CONFIG_EXECUTION_PROVIDER_SETTINGS_REQUIRED",
+        "cloud execution requires settings for the selected provider",
+        ["execution", "providers", config.execution.provider],
+        "validation"
+      )
+    );
+    return diagnostics;
+  }
+  provider.credentialEnv.forEach((name, index) => {
+    const value = env[name];
+    if (value === undefined || value.trim() === "") {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_EXECUTION_CREDENTIAL_MISSING",
+          "a configured cloud credential environment variable is not set",
+          ["execution", "providers", config.execution.provider!, "credential_env", String(index)],
+          "validation"
+        )
+      );
+    }
+  });
+  return diagnostics;
+}
+
 function applyProjectConfigLayer(
   config: ResolvedConfig,
   layer: ProjectConfigInput,
@@ -239,6 +402,9 @@ function applyProjectConfigLayer(
   }
   if (layer.run) {
     applyRunConfig(config.run, layer.run);
+  }
+  if (layer.execution) {
+    applyExecutionConfig(config, layer.execution);
   }
   syncDefaultModelProfile(config);
   if (layer.models) {
@@ -519,6 +685,14 @@ function configPathSegment(segment: string): string {
       return "controller_lease_seconds";
     case "workspaceMode":
       return "workspace_mode";
+    case "retentionDays":
+      return "retention_days";
+    case "memoryMiB":
+      return "memory_mib";
+    case "timeoutSeconds":
+      return "timeout_seconds";
+    case "credentialEnv":
+      return "credential_env";
     case "propertyPriorityThreshold":
       return "property_priority_threshold";
     case "invariantTestingFuzzerTimeoutSeconds":
@@ -567,6 +741,9 @@ function sortConfig(config: ResolvedConfig): void {
   );
   config.eval.providers = Object.fromEntries(
     Object.entries(config.eval.providers).sort(([left], [right]) => left.localeCompare(right))
+  );
+  config.execution.nodes = Object.fromEntries(
+    Object.entries(config.execution.nodes).sort(([left], [right]) => left.localeCompare(right))
   );
 }
 

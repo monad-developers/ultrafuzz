@@ -6,6 +6,7 @@ import {
   loadProjectConfig,
   redactDiagnostics,
   resolveConfig,
+  validateExecutionNodeOverrides,
   type ResolvedConfig
 } from "@ultrafuzz/config";
 import { loadPromptCatalog, projectPromptDir } from "@ultrafuzz/prompts";
@@ -139,7 +140,9 @@ export function summarizeConfig(config: ResolvedConfig): ValidateProjectResult["
     ...(defaultProfile?.reasoning ? { default_reasoning: defaultProfile.reasoning } : {}),
     output_dir: config.run.outputDir,
     triage_quorum: config.triage.quorum,
-    triage_panel_size: config.triage.panelSize
+    triage_panel_size: config.triage.panelSize,
+    execution_mode: config.execution.mode,
+    ...(config.execution.provider === undefined ? {} : { execution_provider: config.execution.provider })
   };
 }
 
@@ -193,6 +196,15 @@ function validateTopologySurface(
       ...(topologyPath === undefined ? {} : { topologyPath }),
       requirePromptFiles: true
     });
+    const executionDiagnostics =
+      config === undefined
+        ? []
+        : configDiagnostics(
+            validateExecutionNodeOverrides(
+              config,
+              topology.nodes.map((node) => node.id)
+            )
+          );
     const expanded = expandTopology(topology, {
       projectRoot,
       requirePromptFiles: true,
@@ -200,8 +212,26 @@ function validateTopologySurface(
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,
       defaultModelProfileId: config?.models.default
     });
+    if (config?.execution.mode === "cloud") {
+      const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
+      for (const agentId of [...selectedAgents].sort()) {
+        if (config.agents[agentId]?.auth === "subscription") {
+          executionDiagnostics.push({
+            code: "CONFIG_EXECUTION_AGENT_AUTH_UNSUPPORTED",
+            message: "cloud execution requires API-key agent authentication configured by environment-variable name",
+            severity: "error",
+            source: "config",
+            path: `agents.${agentId}.auth`
+          });
+        }
+      }
+    }
     return {
-      posture: postureFromDiagnostics("topology", "YAML topology v1 loads, validates, and expands", []),
+      posture: postureFromDiagnostics(
+        "topology",
+        "YAML topology v1 loads, validates, and expands",
+        executionDiagnostics
+      ),
       summary: {
         path: pathToTopology,
         logical_nodes: topology.nodes.length,

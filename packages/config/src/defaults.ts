@@ -8,6 +8,7 @@ import type {
   AgentConfig,
   EvalConfig,
   EvalConfigInput,
+  ExecutionConfig,
   ModelProfile,
   PermissionConfig,
   ProjectConfigInput,
@@ -79,6 +80,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
   const run = requiredRecord(input.run, "run", filePath);
   const models = requiredRecord(input.models, "models", filePath);
   const agents = requiredRecord(input.agents, "agents", filePath);
+  const execution = requiredRecord(input.execution, "execution", filePath);
   const permissions = requiredRecord(input.permissions, "permissions", filePath);
   const invariants = requiredRecord(input.invariants, "invariants", filePath);
   const triage = requiredRecord(input.triage, "triage", filePath);
@@ -91,6 +93,7 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       ...(project.name !== undefined ? { name: project.name } : {})
     },
     run: normalizeRunConfig(run, filePath),
+    execution: normalizeExecutionConfig(execution, filePath),
     models: {
       default: models.default ?? DEFAULT_MODEL_PROFILE_ID,
       synthesizedDefault: required(models.synthesizedDefault, "models.synthesized_default", filePath),
@@ -122,6 +125,42 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
       panelSize: required(triage.panelSize, "triage.panel_size", filePath)
     },
     eval: normalizeEvalConfig(input.eval)
+  };
+}
+
+function normalizeExecutionConfig(
+  execution: NonNullable<ProjectConfigInput["execution"]>,
+  filePath: string
+): ExecutionConfig {
+  const resources = requiredRecord(execution.resources, "execution.resources", filePath);
+  return {
+    mode: required(execution.mode, "execution.mode", filePath),
+    ...(execution.provider !== undefined ? { provider: execution.provider } : {}),
+    retentionDays: required(execution.retentionDays, "execution.retention_days", filePath),
+    resources: {
+      cpu: required(resources.cpu, "execution.resources.cpu", filePath),
+      memoryMiB: required(resources.memoryMiB, "execution.resources.memory_mib", filePath),
+      timeoutSeconds: required(resources.timeoutSeconds, "execution.resources.timeout_seconds", filePath)
+    },
+    nodes: Object.fromEntries(
+      Object.entries(execution.nodes ?? {}).map(([id, override]) => [id, { resources: { ...override.resources } }])
+    ),
+    providers: {
+      ...(execution.providers?.modal === undefined
+        ? {}
+        : {
+            modal: {
+              app: required(execution.providers.modal.app, "execution.providers.modal.app", filePath),
+              image: required(execution.providers.modal.image, "execution.providers.modal.image", filePath),
+              ...(execution.providers.modal.region === undefined ? {} : { region: execution.providers.modal.region }),
+              credentialEnv: required(
+                execution.providers.modal.credentialEnv,
+                "execution.providers.modal.credential_env",
+                filePath
+              )
+            }
+          })
+    }
   };
 }
 
@@ -227,6 +266,15 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
     assertNumber(value.run[key], `run.${key}`, filePath);
   }
   assertBoolean(value.run.keepWorkspaces, "run.keepWorkspaces", filePath);
+  assertRecord(value.execution, "execution", filePath);
+  assertString(value.execution.mode, "execution.mode", filePath);
+  assertNumber(value.execution.retentionDays, "execution.retentionDays", filePath);
+  assertRecord(value.execution.resources, "execution.resources", filePath);
+  assertNumber(value.execution.resources.cpu, "execution.resources.cpu", filePath);
+  assertNumber(value.execution.resources.memoryMiB, "execution.resources.memoryMiB", filePath);
+  assertNumber(value.execution.resources.timeoutSeconds, "execution.resources.timeoutSeconds", filePath);
+  assertRecord(value.execution.nodes, "execution.nodes", filePath);
+  assertRecord(value.execution.providers, "execution.providers", filePath);
   assertRecord(value.models, "models", filePath);
   assertString(value.models.default, "models.default", filePath);
   assertBoolean(value.models.synthesizedDefault, "models.synthesizedDefault", filePath);

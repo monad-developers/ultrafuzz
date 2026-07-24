@@ -198,6 +198,7 @@ export async function planRun(input: PlanRunInput) {
     graph_fingerprint: graphFingerprint,
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
+    execution: resolved.config.execution,
     topology: validation.value.topology,
     rendered_prompts: renderedPrompts,
     policy_posture: Object.fromEntries(

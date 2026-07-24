@@ -71,6 +71,9 @@ importers:
       '@ultrafuzz/evals':
         specifier: workspace:*
         version: link:../evals
+      '@ultrafuzz/modal':
+        specifier: workspace:*
+        version: link:../modal
       '@ultrafuzz/runtime':
         specifier: workspace:*
         version: link:../runtime

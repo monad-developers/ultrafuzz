@@ -13,7 +13,7 @@ import {
   writeJsonDurable,
   type RunLayout
 } from "@ultrafuzz/artifacts";
-import type { ResolvedConfig } from "@ultrafuzz/config";
+import { resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -133,6 +133,22 @@ export interface CompiledSmithersTask {
   workspacePath: string;
   artifactDir: string;
   renderedPromptPath?: string;
+  execution: {
+    mode: "local" | "cloud";
+    provider?: "modal";
+    resources: {
+      cpu: number;
+      memoryMiB: number;
+      timeoutSeconds: number;
+    };
+    modal?: {
+      app: string;
+      image: string;
+      region?: string;
+      credentialEnv: string[];
+    };
+    agentCredentialEnv: string[];
+  };
   metadata: SmithersTaskMetadata;
 }
 
@@ -192,6 +208,15 @@ export interface SmithersTaskMetadata {
     milliseconds: number;
     seconds: number;
     heartbeatTimeoutMs: number;
+  };
+  execution: {
+    mode: "local" | "cloud";
+    provider?: "modal";
+    resources: {
+      cpu: number;
+      memoryMiB: number;
+      timeoutSeconds: number;
+    };
   };
 }
 
@@ -1129,6 +1154,26 @@ function compileTask(input: {
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
+  const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
+  const agent = input.config.agents[profile.agent];
+  const agentCredentialEnv =
+    input.config.execution.mode === "cloud" && agent?.auth === "api-key" && agent.apiKeyEnv !== undefined
+      ? [agent.apiKeyEnv]
+      : [];
+  const execution = {
+    mode: input.config.execution.mode,
+    ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
+    resources: executionResources,
+    ...(input.config.execution.providers.modal === undefined
+      ? {}
+      : {
+          modal: {
+            ...input.config.execution.providers.modal,
+            credentialEnv: [...input.config.execution.providers.modal.credentialEnv]
+          }
+        }),
+    agentCredentialEnv
+  } satisfies CompiledSmithersTask["execution"];
   const metadata: SmithersTaskMetadata = {
     schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
     run: {
@@ -1185,6 +1230,11 @@ function compileTask(input: {
       milliseconds: timeoutMs,
       seconds: Math.ceil(timeoutMs / 1000),
       heartbeatTimeoutMs
+    },
+    execution: {
+      mode: execution.mode,
+      ...(execution.provider === undefined ? {} : { provider: execution.provider }),
+      resources: execution.resources
     }
   };
   return {
@@ -1205,6 +1255,7 @@ function compileTask(input: {
     workspacePath,
     artifactDir,
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
+    execution,
     metadata
   };
 }
@@ -1343,17 +1394,24 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
-      promptPath: task.renderedPromptPath,
-      workspacePath: task.workspacePath,
-      artifactDir: task.artifactDir,
+      promptPath:
+        task.renderedPromptPath === undefined
+          ? undefined
+          : executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt"),
+      workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
+      artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
+      runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
+      workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
+      sourceProjectRoot: compiled.projectRoot,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,
-      metadata: task.metadata,
-      outputs: task.metadata.artifacts.outputs
+      metadata: executionMetadata(compiled.projectRoot, task),
+      outputs: task.metadata.artifacts.outputs,
+      execution: task.execution
     })),
     null,
     2
@@ -1363,6 +1421,37 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
     __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts")),
-    __ULTRAFUZZ_RUNTIME_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/runtime"))
+    __ULTRAFUZZ_RUNTIME_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/runtime")),
+    __ULTRAFUZZ_MODAL_MODULE__: JSON.stringify(
+      compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
+    )
   });
+}
+
+function executionMetadata(projectRoot: string, task: CompiledSmithersTask): SmithersTaskMetadata {
+  if (task.execution.mode === "local") return task.metadata;
+  return {
+    ...task.metadata,
+    workspace: {
+      ...task.metadata.workspace,
+      path: relativeProjectPath(projectRoot, task.metadata.workspace.path, "workspace metadata path")
+    },
+    artifacts: {
+      ...task.metadata.artifacts,
+      dir: relativeProjectPath(projectRoot, task.metadata.artifacts.dir, "artifact metadata directory"),
+      manifestPath: relativeProjectPath(projectRoot, task.metadata.artifacts.manifestPath, "artifact manifest path")
+    }
+  };
+}
+
+function executionPath(projectRoot: string, task: CompiledSmithersTask, value: string, label: string): string {
+  return task.execution.mode === "cloud" ? relativeProjectPath(projectRoot, value, label) : value;
+}
+
+function relativeProjectPath(projectRoot: string, value: string, label: string): string {
+  const relative = path.relative(projectRoot, value);
+  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must be a project child path`);
+  }
+  return relative.split(path.sep).join("/");
 }

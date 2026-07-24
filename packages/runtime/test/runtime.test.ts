@@ -826,6 +826,10 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
+  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
+    execution?: { mode?: string; retentionDays?: number };
+  };
+  assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
@@ -1008,6 +1012,65 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /validateArtifactContract/);
   assert.match(workflowSource, /candidate !== root && candidate\.startsWith/);
   assert.match(workflowSource, /isStrictlyInsideDirectory\(artifactDir, artifactPath\)/);
+});
+
+test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
+  const project = tempProject();
+  writeFanoutProject(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  plan.value!.resolved_config.execution = {
+    mode: "cloud",
+    provider: "modal",
+    retentionDays: 30,
+    resources: {
+      cpu: 4,
+      memoryMiB: 8192,
+      timeoutSeconds: 1800
+    },
+    nodes: {
+      "project-discovery": {
+        resources: {
+          cpu: 8,
+          memoryMiB: 16384
+        }
+      }
+    },
+    providers: {
+      modal: {
+        app: "ultrafuzz-test",
+        image: "ultrafuzz-test",
+        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+      }
+    }
+  };
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-cloud-nodes",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
+  assert.ok(discovery);
+  assert.deepEqual(discovery.execution.resources, {
+    cpu: 8,
+    memoryMiB: 16384,
+    timeoutSeconds: 1800
+  });
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY"]);
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(workflowSource, /<Sandbox/);
+  assert.match(workflowSource, /createModalNodeSandboxProvider/);
+  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
+  assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
+  assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
+  assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {

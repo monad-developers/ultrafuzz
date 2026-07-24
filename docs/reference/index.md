@@ -4,6 +4,7 @@ Reference pages describe Ultrafuzz's factual product surfaces.
 
 - [CLI Commands](cli.md)
 - [Configuration and Environment](configuration.md)
+- [Cloud Node Execution](cloud-execution.md)
 - [Topology YAML](topology-yaml.md)
 - [Prompt Variables](prompt-variables.md)
 - [Pinned References](references.md)

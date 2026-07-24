@@ -14,6 +14,15 @@ default_timeout_seconds = 1800
 workflow_deadline_seconds = 86400
 controller_lease_seconds = 30
 
+[execution]
+mode = "local"
+retention_days = 30
+
+[execution.resources]
+cpu = 4
+memory_mib = 8192
+timeout_seconds = 1800
+
 [models]
 synthesized_default = true
 
