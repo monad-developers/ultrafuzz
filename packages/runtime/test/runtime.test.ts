@@ -175,6 +175,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s\\n\' "$OPENAI_API_KEY" "$AWS_SECRET_ACCESS_KEY" "$FOUNDRY_PROFILE" > "$SMITHERS_FAKE_ENV_LOG"',
       "fi",
+      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
+      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      "fi",
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
       "fi",
@@ -187,6 +190,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'case "$1" in',
       "  fork)",
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
+      "    ;;",
+      "  replay)",
+      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-replayed\"}'",
       "    ;;",
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
@@ -829,6 +835,10 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
+  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
+    execution?: { mode?: string; retentionDays?: number };
+  };
+  assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
@@ -1011,6 +1021,75 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
   assert.match(workflowSource, /validateArtifactContract/);
   assert.match(workflowSource, /candidate !== root && candidate\.startsWith/);
   assert.match(workflowSource, /isStrictlyInsideDirectory\(artifactDir, artifactPath\)/);
+});
+
+test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
+  const project = tempProject();
+  writeFanoutProject(project);
+
+  const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  plan.value!.resolved_config.execution = {
+    mode: "cloud",
+    provider: "modal",
+    retentionDays: 30,
+    resources: {
+      cpu: 4,
+      memoryMiB: 8192,
+      timeoutSeconds: 1800
+    },
+    nodes: {
+      "project-discovery": {
+        resources: {
+          cpu: 8,
+          memoryMiB: 16384
+        }
+      }
+    },
+    providers: {
+      modal: {
+        app: "ultrafuzz-test",
+        image: "ultrafuzz-test",
+        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+      }
+    }
+  };
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-cloud-nodes",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
+  assert.ok(discovery);
+  assert.deepEqual(discovery.execution.resources, {
+    cpu: 8,
+    memoryMiB: 16384,
+    timeoutSeconds: 1800
+  });
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["OPENAI_API_KEY"]);
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  assert.match(workflowSource, /<Sandbox/);
+  assert.match(workflowSource, /createModalNodeSandboxProvider/);
+  assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
+  assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
+  assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
+  assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
+  assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
+  const fanIn = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "signal-analysis");
+  assert.equal(fanIn?.dependencyArtifactDirs.length, 2);
+  assert.ok(
+    fanIn?.dependencyArtifactDirs.every((directory) =>
+      directory.startsWith(path.join(project, ".ultrafuzz", "runs", "cloud-nodes", "artifacts"))
+    )
+  );
+  assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
+  assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -1577,6 +1656,39 @@ test("startRun forwards configured and explicitly allowed environment variables 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(environmentLog, "utf8"), "configured-agent-key||ci\n");
   assert.equal(fs.readFileSync(contextLog, "utf8"), "|||||\n");
+});
+
+test("startRun forwards cloud provider credentials through the Smithers environment filter", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    `${fs
+      .readFileSync(configPath, "utf8")
+      .replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+`,
+    "utf8"
+  );
+  const cloudEnvironmentLog = path.join(project, "smithers-cloud-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
+    OPENAI_API_KEY: "configured-agent-key",
+    UFZ_PROVIDER_ONE: "provider-one",
+    UFZ_PROVIDER_TWO: "provider-two"
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "cloud-environment", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
 });
 
 test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {
@@ -5194,10 +5306,15 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   });
   assert.equal(resetResumed.ok, true, JSON.stringify(resetResumed.diagnostics));
   assert.equal(resetResumed.value?.submitted, true);
+  const cloudGeneration = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json"), "utf8")
+  ) as { generation?: string; reset_node?: string };
+  assert.match(cloudGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
+  assert.equal(cloudGeneration.reset_node, "node:project-discovery");
 
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
-  assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run");
+  assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
   assert.equal(replayed.value?.submitted, true);
 
   const missingFrame = await forkRun({ projectRoot: project, runId: run.value!.run_id, env });
@@ -5238,7 +5355,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.match(commands, /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --format json/);
   assert.match(
     commands,
-    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --frame 44 --reset-node node:project-discovery --label after-edit --format json/
+    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run-replayed --frame 44 --reset-node node:project-discovery --label after-edit --format json/
   );
   assert.match(
     commands,
@@ -5365,10 +5482,24 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const localConfig = fs.readFileSync(configPath, "utf8");
+  fs.writeFileSync(
+    configPath,
+    `${localConfig.replace('[execution]\nmode = "local"', '[execution]\nmode = "cloud"\nprovider = "modal"')}
+
+[execution.providers.modal]
+app = "ultrafuzz-test"
+image = "ultrafuzz-test"
+credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+`,
+    "utf8"
+  );
 
   const binDir = path.join(project, "fake-bin");
   const smithers = path.join(binDir, "smithers");
   const logPath = path.join(project, "recovery-smithers.log");
+  const cloudEnvironmentLog = path.join(project, "recovery-cloud-environment.log");
   const markerPath = path.join(project, "initial-submission-attempted");
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(
@@ -5376,6 +5507,9 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
     [
       "#!/bin/sh",
       'printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"',
+      'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ] && [ "$1" = "up" ]; then',
+      '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
+      "fi",
       'if [ "$1" = "inspect" ]; then',
       '  printf \'%s\\n\' \'{"code":"RUN_NOT_FOUND","message":"Run not found"}\'',
       "  exit 1",
@@ -5394,11 +5528,16 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: logPath,
+    SMITHERS_FAKE_CLOUD_ENV_LOG: cloudEnvironmentLog,
+    UFZ_PROVIDER_ONE: "provider-one",
+    UFZ_PROVIDER_TWO: "provider-two",
     SMITHERS_FAKE_MARKER: markerPath
   };
 
   const initial = await startRun({ projectRoot: project, runId: "missing-workflow-run", env });
   assert.equal(initial.ok, false);
+  fs.writeFileSync(configPath, localConfig, "utf8");
+  fs.writeFileSync(cloudEnvironmentLog, "", "utf8");
 
   const resumed = await resumeRun({
     projectRoot: project,
@@ -5416,6 +5555,7 @@ test("resume re-submits persisted workflow evidence when the workflow run was ne
   assert.doesNotMatch(upCommands[1] ?? "", /--resume/u);
   assert.match(upCommands[1] ?? "", /--max-concurrency 8 --root /u);
   assert.match(upCommands[1] ?? "", /--log-dir .* --input /u);
+  assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
 
   const runRoot = path.join(project, ".ultrafuzz", "runs", "missing-workflow-run");
   const recovery = JSON.parse(fs.readFileSync(path.join(runRoot, "smithers", "recovery-submission.json"), "utf8")) as {

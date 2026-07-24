@@ -11,6 +11,8 @@ import {
   type AgentConfig,
   type ConfigDiagnostic,
   type ConfigResult,
+  type CloudExecutionProvider,
+  type ExecutionMode,
   type LoadedProjectConfig,
   type ModelProfile,
   type ProjectConfigInput,
@@ -22,6 +24,7 @@ const TOP_LEVEL_KEYS = new Set([
   "dynamic_strategies_enumerator",
   "project",
   "run",
+  "execution",
   "models",
   "agents",
   "permissions",
@@ -44,6 +47,11 @@ const RUN_KEYS = [
   "workflow_deadline_seconds",
   "controller_lease_seconds"
 ] as const;
+const EXECUTION_KEYS = ["mode", "provider", "retention_days", "resources", "nodes", "providers"] as const;
+const EXECUTION_RESOURCE_KEYS = ["cpu", "memory_mib", "timeout_seconds"] as const;
+const EXECUTION_NODE_KEYS = ["resources"] as const;
+const EXECUTION_PROVIDER_KEYS = ["modal"] as const;
+const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env"] as const;
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
@@ -214,6 +222,138 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
     readEnum(run, "workspace_mode", ["run", "workspace_mode"], diagnostics, normalizeWorkspaceMode, (value) => {
       runConfig.workspaceMode = value;
     });
+  }
+
+  const execution = readConfigTable(root, "execution", EXECUTION_KEYS, diagnostics);
+  if (execution) {
+    const executionConfig: NonNullable<ProjectConfigInput["execution"]> = {};
+    config.execution = executionConfig;
+    readEnum(execution, "mode", ["execution", "mode"], diagnostics, normalizeExecutionMode, (value) => {
+      executionConfig.mode = value;
+    });
+    readEnum(
+      execution,
+      "provider",
+      ["execution", "provider"],
+      diagnostics,
+      normalizeCloudExecutionProvider,
+      (value) => {
+        executionConfig.provider = value;
+      }
+    );
+    readInteger(execution, "retention_days", ["execution", "retention_days"], diagnostics, (value) => {
+      executionConfig.retentionDays = value;
+    });
+
+    const resources = readConfigTable(execution, "resources", EXECUTION_RESOURCE_KEYS, diagnostics, [
+      "execution",
+      "resources"
+    ]);
+    if (resources) {
+      executionConfig.resources = {};
+      readNumber(resources, "cpu", ["execution", "resources", "cpu"], diagnostics, (value) => {
+        executionConfig.resources!.cpu = value;
+      });
+      readInteger(resources, "memory_mib", ["execution", "resources", "memory_mib"], diagnostics, (value) => {
+        executionConfig.resources!.memoryMiB = value;
+      });
+      readInteger(resources, "timeout_seconds", ["execution", "resources", "timeout_seconds"], diagnostics, (value) => {
+        executionConfig.resources!.timeoutSeconds = value;
+      });
+    }
+
+    const nodes = readTable(execution, "nodes", ["execution", "nodes"], diagnostics);
+    if (nodes) {
+      executionConfig.nodes = {};
+      for (const [id, value] of Object.entries(nodes).sort()) {
+        if (!isPlainObject(value)) {
+          pushTypeDiagnostic(["execution", "nodes", id], "table", diagnostics);
+          continue;
+        }
+        const node = value as Record<string, unknown>;
+        collectUnknownKeys(node, new Set(EXECUTION_NODE_KEYS), ["execution", "nodes", id], diagnostics);
+        const override: NonNullable<NonNullable<ProjectConfigInput["execution"]>["nodes"]>[string] = {};
+        const nodeResources = readConfigTable(node, "resources", EXECUTION_RESOURCE_KEYS, diagnostics, [
+          "execution",
+          "nodes",
+          id,
+          "resources"
+        ]);
+        if (nodeResources) {
+          override.resources = {};
+          readNumber(nodeResources, "cpu", ["execution", "nodes", id, "resources", "cpu"], diagnostics, (value) => {
+            override.resources!.cpu = value;
+          });
+          readInteger(
+            nodeResources,
+            "memory_mib",
+            ["execution", "nodes", id, "resources", "memory_mib"],
+            diagnostics,
+            (value) => {
+              override.resources!.memoryMiB = value;
+            }
+          );
+          readInteger(
+            nodeResources,
+            "timeout_seconds",
+            ["execution", "nodes", id, "resources", "timeout_seconds"],
+            diagnostics,
+            (value) => {
+              override.resources!.timeoutSeconds = value;
+            }
+          );
+        }
+        executionConfig.nodes[id] = override;
+      }
+    }
+
+    const providers = readConfigTable(execution, "providers", EXECUTION_PROVIDER_KEYS, diagnostics, [
+      "execution",
+      "providers"
+    ]);
+    if (providers) {
+      executionConfig.providers = {};
+      const modal = readConfigTable(providers, "modal", MODAL_EXECUTION_PROVIDER_KEYS, diagnostics, [
+        "execution",
+        "providers",
+        "modal"
+      ]);
+      if (modal) {
+        const profile: NonNullable<NonNullable<NonNullable<ProjectConfigInput["execution"]>["providers"]>["modal"]> =
+          {};
+        readScalarFields(modal, ["execution", "providers", "modal"], diagnostics, [
+          {
+            key: "app",
+            type: "string",
+            assign: (value) => {
+              profile.app = value;
+            }
+          },
+          {
+            key: "image",
+            type: "string",
+            assign: (value) => {
+              profile.image = value;
+            }
+          },
+          {
+            key: "region",
+            type: "string",
+            assign: (value) => {
+              profile.region = value;
+            }
+          },
+          {
+            key: "credential_env",
+            type: "string-array",
+            assign: (value) => {
+              profile.credentialEnv = value;
+            }
+          }
+        ]);
+        executionConfig.providers.modal = profile;
+      }
+    }
   }
 
   const models = readTable(root, "models", ["models"], diagnostics);
@@ -503,11 +643,12 @@ function readConfigTable(
   table: Record<string, unknown>,
   key: string,
   allowedKeys: readonly string[],
-  diagnostics: ConfigDiagnostic[]
+  diagnostics: ConfigDiagnostic[],
+  path: string[] = [key]
 ): Record<string, unknown> | undefined {
-  const child = readTable(table, key, [key], diagnostics);
+  const child = readTable(table, key, path, diagnostics);
   if (child) {
-    collectUnknownKeys(child, new Set(allowedKeys), [key], diagnostics);
+    collectUnknownKeys(child, new Set(allowedKeys), path, diagnostics);
   }
   return child;
 }
@@ -585,6 +726,24 @@ function readInteger(
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
     pushTypeDiagnostic(path, "integer", diagnostics);
+    return;
+  }
+  assign(value);
+}
+
+function readNumber(
+  table: Record<string, unknown>,
+  key: string,
+  path: string[],
+  diagnostics: ConfigDiagnostic[],
+  assign: (value: number) => void
+): void {
+  const value = table[key];
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    pushTypeDiagnostic(path, "number", diagnostics);
     return;
   }
   assign(value);
@@ -685,6 +844,14 @@ function normalizeWorkspaceMode(value: string): WorkspaceMode | undefined {
     default:
       return undefined;
   }
+}
+
+function normalizeExecutionMode(value: string): ExecutionMode | undefined {
+  return value === "local" || value === "cloud" ? value : undefined;
+}
+
+function normalizeCloudExecutionProvider(value: string): CloudExecutionProvider | undefined {
+  return value === "modal" ? value : undefined;
 }
 
 function normalizeAgentAuthMode(value: string): AgentAuthMode | undefined {

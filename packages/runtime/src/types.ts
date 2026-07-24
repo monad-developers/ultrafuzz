@@ -82,6 +82,8 @@ export interface ValidateProjectResult {
     output_dir: string;
     triage_quorum: number;
     triage_panel_size: number;
+    execution_mode: "local" | "cloud";
+    execution_provider?: "modal";
   };
   topology?: {
     path: string;

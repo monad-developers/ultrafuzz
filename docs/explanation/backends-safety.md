@@ -39,6 +39,13 @@ Ultrafuzz records workspace metadata and run evidence so reviewers can inspect
 what happened after the workflow completes. It does not promise that a workspace
 is a security isolation boundary.
 
+When cloud node execution is enabled, every concrete agentic attempt runs in a
+fresh provider VM. The workflow engine's sandbox-provider interface is the
+backend boundary; provider lifecycle and durable publication live outside the
+topology compiler. The controller remains authoritative for graph expansion,
+meta nodes, artifact verification, reporting, resume, cancellation, and
+cleanup. See [Cloud Node Execution](../reference/cloud-execution.md).
+
 ## Trust Model
 
 Agents run under a trusted local execution model. Ultrafuzz does not maintain a

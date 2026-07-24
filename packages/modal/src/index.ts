@@ -2,6 +2,7 @@ export * from "./auth.js";
 export * from "./config.js";
 export * from "./defaults.js";
 export * from "./layout.js";
+export * from "./node-provider.js";
 export * from "./launch-state.js";
 export * from "./public-bundle.js";
 export * from "./public-eval-diagnostics.js";

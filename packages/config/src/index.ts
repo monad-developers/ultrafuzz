@@ -1,5 +1,6 @@
 export * from "./agents.js";
 export * from "./defaults.js";
+export * from "./execution.js";
 export * from "./loader.js";
 export * from "./model-profiles.js";
 export * from "./redaction.js";

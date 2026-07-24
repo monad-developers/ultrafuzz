@@ -240,14 +240,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
       env: forgeGuard.env,
       environmentVariableNames: mergeEnvironmentVariableNames(
-        agentEnvironmentVariableNames(resolved.config, linkedWorkflowAgentRefs(evidence.layout), forgeGuard.env),
+        linkedWorkflowEnvironmentVariableNames(resolved.config, evidence.layout, forgeGuard.env),
         forgeGuard.environmentVariableNames
       )
     });
-    const workflowRunId =
-      action === "fork" && lifecycleResult.workflowRunId !== undefined
-        ? lifecycleResult.workflowRunId
-        : evidence.smithersRunId;
+    const workflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
     if (workflowRunId !== evidence.smithersRunId) {
       updateLinkedWorkflowRunId(evidence.layout, workflowRunId);
     }
@@ -449,13 +446,37 @@ function updateLinkedWorkflowRunId(layout: RunLayout, workflowRunId: string): vo
   writeRunState(layout, state);
 }
 
-function linkedWorkflowAgentRefs(layout: RunLayout): string[] {
-  const tasks = readJsonIfExists<{ tasks?: Array<{ agentRef?: unknown }> }>(
-    path.join(layout.root, "smithers", "tasks.json")
+function linkedWorkflowEnvironmentVariableNames(
+  config: ResolvedConfig,
+  layout: RunLayout,
+  env: Record<string, string | undefined> | undefined
+): string[] {
+  const tasks = linkedWorkflowTasks(layout);
+  const names = agentEnvironmentVariableNames(
+    config,
+    tasks.map((task) => task.agentRef).filter((agentRef): agentRef is string => typeof agentRef === "string"),
+    env
   );
-  return (tasks?.tasks ?? [])
-    .map((task) => task.agentRef)
-    .filter((agentRef): agentRef is string => typeof agentRef === "string");
+  for (const task of tasks) {
+    const execution = objectRecord(task.execution);
+    pushEnvironmentVariableNames(names, execution.agentCredentialEnv);
+    const modal = objectRecord(execution.modal);
+    pushEnvironmentVariableNames(names, modal.credentialEnv);
+  }
+  return [...new Set(names)].sort();
+}
+
+function linkedWorkflowTasks(layout: RunLayout): Array<{
+  agentRef?: unknown;
+  execution?: unknown;
+}> {
+  const tasks = readJsonIfExists<{
+    tasks?: Array<{
+      agentRef?: unknown;
+      execution?: unknown;
+    }>;
+  }>(path.join(layout.root, "smithers", "tasks.json"));
+  return tasks?.tasks ?? [];
 }
 
 function persistForgeGuardMetadata(layout: RunLayout, config: ResolvedConfig, active: boolean): void {
@@ -480,6 +501,12 @@ function agentEnvironmentVariableNames(
     .filter(([agentRef, agent]) => activeAgentRefs.has(agentRef) && agent.auth === "api-key")
     .map(([, agent]) => agent.apiKeyEnv)
     .filter((name): name is string => name !== undefined);
+  if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
+    const provider = config.execution.providers[config.execution.provider];
+    if (provider !== undefined) {
+      pushEnvironmentVariableNames(names, provider.credentialEnv);
+    }
+  }
   const extra = env?.ULTRAFUZZ_AGENT_ENV_ALLOWLIST ?? process.env.ULTRAFUZZ_AGENT_ENV_ALLOWLIST;
   if (extra !== undefined && extra.trim() !== "") {
     for (const name of extra.split(",").map((value) => value.trim())) {
@@ -490,6 +517,18 @@ function agentEnvironmentVariableNames(
     }
   }
   return [...new Set(names)].sort();
+}
+
+function pushEnvironmentVariableNames(names: string[], value: unknown): void {
+  if (!Array.isArray(value)) {
+    return;
+  }
+  for (const name of value) {
+    if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error("workflow environment allowlist contains an invalid environment variable name");
+    }
+    names.push(name);
+  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {

@@ -81,6 +81,39 @@ export interface RunConfig {
   controllerLeaseSeconds: number;
 }
 
+export type ExecutionMode = "local" | "cloud";
+
+export type CloudExecutionProvider = "modal";
+
+export interface ExecutionResources {
+  cpu: number;
+  memoryMiB: number;
+  timeoutSeconds: number;
+}
+
+export interface ExecutionNodeOverride {
+  resources: Partial<ExecutionResources>;
+}
+
+export interface ModalExecutionProviderConfig {
+  app: string;
+  image: string;
+  region?: string;
+  /** Environment-variable names only. Credential values never enter resolved config. */
+  credentialEnv: string[];
+}
+
+export interface ExecutionConfig {
+  mode: ExecutionMode;
+  provider?: CloudExecutionProvider;
+  retentionDays: number;
+  resources: ExecutionResources;
+  nodes: Record<string, ExecutionNodeOverride>;
+  providers: {
+    modal?: ModalExecutionProviderConfig;
+  };
+}
+
 export interface ModelProfile {
   id: string;
   agent: string;
@@ -141,6 +174,7 @@ export interface ResolvedConfig {
   dynamicStrategiesEnumerator: number;
   project: ProjectConfig;
   run: RunConfig;
+  execution: ExecutionConfig;
   models: ModelsConfig;
   agents: Record<string, AgentConfig>;
   permissions: PermissionConfig;
@@ -159,6 +193,7 @@ export interface ProjectConfigInput {
   dynamicStrategiesEnumerator?: number;
   project?: Partial<ProjectConfig>;
   run?: Partial<RunConfig>;
+  execution?: ExecutionConfigInput;
   models?: {
     default?: string;
     synthesizedDefault?: boolean;
@@ -169,6 +204,17 @@ export interface ProjectConfigInput {
   invariants?: Partial<InvariantConfig>;
   triage?: Partial<TriageConfig>;
   eval?: EvalConfigInput;
+}
+
+export interface ExecutionConfigInput {
+  mode?: ExecutionMode;
+  provider?: CloudExecutionProvider;
+  retentionDays?: number;
+  resources?: Partial<ExecutionResources>;
+  nodes?: Record<string, { resources?: Partial<ExecutionResources> }>;
+  providers?: {
+    modal?: Partial<ModalExecutionProviderConfig>;
+  };
 }
 
 export interface EvalConfigInput {

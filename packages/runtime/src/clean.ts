@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { appendLineDurable, assertNoSymlinkComponents, safeResolveInside } from "@ultrafuzz/artifacts";
+import type { ModalExecutionProviderConfig } from "@ultrafuzz/config";
 import { isPathInside, validateCleanPolicy } from "@ultrafuzz/security";
 
 const CLEAN_AUDIT_SCHEMA_VERSION = "ultrafuzz.clean.audit.v1" as const;
@@ -43,6 +44,10 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
   }
 
   if (input.dryRun !== true) {
+    const cloudCleanup = await cleanupCloudRunStorage(input, planned);
+    if (cloudCleanup !== undefined) {
+      return runtimeFailure([cloudCleanup]);
+    }
     for (const removal of planned) {
       fs.rmSync(removal.absolutePath, { recursive: true, force: false });
     }
@@ -83,6 +88,107 @@ export async function cleanRun(input: CleanGeneratedInput): Promise<RuntimeResul
       selections: planned.map((removal) => removal.selection)
     }
   });
+}
+
+async function cleanupCloudRunStorage(
+  input: CleanGeneratedInput,
+  planned: PlannedRemoval[]
+): Promise<RuntimeDiagnostic | undefined> {
+  try {
+    const cloudRuns = cloudRunsForCleanup(planned);
+    if (cloudRuns.length === 0) return undefined;
+    const moduleName = "@ultrafuzz/modal";
+    const provider = (await import(moduleName)) as {
+      cleanupModalNodeRun(
+        options: {
+          app: string;
+          image: string;
+          region?: string;
+          credentialEnv: readonly string[];
+        },
+        controllerRunId: string,
+        cleanupOptions: { force: boolean }
+      ): Promise<unknown>;
+    };
+    for (const { runId, modal } of cloudRuns) {
+      await provider.cleanupModalNodeRun(
+        {
+          app: modal.app,
+          image: modal.image,
+          ...(modal.region === undefined ? {} : { region: modal.region }),
+          credentialEnv: modal.credentialEnv
+        },
+        `ultrafuzz-${runId}`,
+        { force: input.confirmed === true }
+      );
+    }
+    return undefined;
+  } catch (error) {
+    if (isRecord(error) && error.code === "MODAL_NODE_CLEANUP_REFUSED") {
+      return runtimeError(
+        "CLEAN_CLOUD_STORAGE_REFUSED",
+        "cloud run storage cleanup was refused because active sandboxes remain; rerun with --yes or --confirm to terminate them, or wait for them to finish; local evidence was preserved",
+        "clean",
+        ".ultrafuzz/runs"
+      );
+    }
+    return runtimeError(
+      "CLEAN_CLOUD_STORAGE_FAILED",
+      "cloud run storage cleanup failed; local evidence was preserved",
+      "clean",
+      ".ultrafuzz/runs"
+    );
+  }
+}
+
+function cloudRunsForCleanup(planned: PlannedRemoval[]): Array<{ runId: string; modal: ModalExecutionProviderConfig }> {
+  const runRoots = planned.flatMap((removal) => {
+    const match = /^runs\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(removal.selection);
+    if (match?.[1] !== undefined) {
+      return [{ runId: match[1], root: removal.absolutePath }];
+    }
+    if (removal.selection !== "runs") return [];
+    return fs
+      .readdirSync(removal.absolutePath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .map((entry) => ({ runId: entry.name, root: path.join(removal.absolutePath, entry.name) }));
+  });
+  return runRoots.flatMap(({ runId, root }) => {
+    const modal = readPersistedModalExecution(root);
+    return modal === undefined ? [] : [{ runId, modal }];
+  });
+}
+
+function readPersistedModalExecution(runRoot: string): ModalExecutionProviderConfig | undefined {
+  const planPath = path.join(runRoot, "plan.json");
+  if (!fs.existsSync(planPath)) return undefined;
+  assertNoSymlinkComponents(runRoot, planPath, "cloud cleanup plan");
+  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as unknown;
+  if (!isRecord(plan) || !isRecord(plan.execution) || plan.execution.mode !== "cloud") return undefined;
+  if (plan.execution.provider !== "modal") {
+    throw new Error("persisted cloud execution provider is unsupported");
+  }
+  const providers = plan.execution.providers;
+  const modal = isRecord(providers) ? providers.modal : undefined;
+  if (
+    !isRecord(modal) ||
+    typeof modal.app !== "string" ||
+    modal.app.trim() === "" ||
+    typeof modal.image !== "string" ||
+    modal.image.trim() === "" ||
+    (modal.region !== undefined && (typeof modal.region !== "string" || modal.region.trim() === "")) ||
+    !Array.isArray(modal.credentialEnv) ||
+    modal.credentialEnv.length !== 2 ||
+    new Set(modal.credentialEnv).size !== modal.credentialEnv.length ||
+    !modal.credentialEnv.every((name) => typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
+  ) {
+    throw new Error("persisted cloud cleanup configuration is invalid");
+  }
+  return modal as unknown as ModalExecutionProviderConfig;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export const cleanGenerated = cleanRun;

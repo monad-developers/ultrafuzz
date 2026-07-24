@@ -14,9 +14,11 @@ import {
   parseProjectConfigToml,
   redactDiagnostics,
   redactResolvedConfig,
+  resolveExecutionResources,
   resolveConfig,
   restoreRedactedConfig,
   serializeRedactedResolvedConfigToml,
+  validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
 
@@ -40,6 +42,133 @@ describe("config loading and resolution", () => {
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
     expect(resolved.value.run.forgeVmemLimitKb).toBe(12_582_912);
     expect(resolved.value.run.forgeRayonThreads).toBe(1);
+    expect(resolved.value.execution).toEqual({
+      mode: "local",
+      retentionDays: 30,
+      resources: {
+        cpu: 4,
+        memoryMiB: 8192,
+        timeoutSeconds: 1800
+      },
+      nodes: {},
+      providers: {}
+    });
+  });
+
+  it("resolves provider-neutral cloud resources and logical-node overrides without persisting credentials", () => {
+    const parsed = parseProjectConfigToml(`
+[execution]
+mode = "cloud"
+provider = "modal"
+retention_days = 45
+
+[execution.resources]
+cpu = 8
+memory_mib = 16384
+timeout_seconds = 3600
+
+[execution.nodes.project-discovery.resources]
+cpu = 16
+memory_mib = 32768
+
+[execution.providers.modal]
+app = "node-runs"
+image = "runner:stable"
+region = "region-a"
+credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+`);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const resolved = resolveConfig({
+      projectConfig: parsed.value,
+      env: {
+        CLOUD_CREDENTIAL_ONE: "first-secret-value",
+        CLOUD_CREDENTIAL_TWO: "second-secret-value"
+      }
+    });
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved.diagnostics, null, 2));
+    expect(resolveExecutionResources(resolved.value, "project-discovery")).toEqual({
+      cpu: 16,
+      memoryMiB: 32768,
+      timeoutSeconds: 3600
+    });
+    expect(resolveExecutionResources(resolved.value, "other-node")).toEqual({
+      cpu: 8,
+      memoryMiB: 16384,
+      timeoutSeconds: 3600
+    });
+    const serialized = serializeRedactedResolvedConfigToml(resolved.value);
+    expect(serialized).toContain("[execution.nodes.project-discovery.resources]");
+    expect(serialized).toContain('credential_env = ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]');
+    expect(serialized).not.toContain("first-secret-value");
+    expect(serialized).not.toContain("second-secret-value");
+    expect(validateExecutionNodeOverrides(resolved.value, ["project-discovery"])).toEqual([]);
+    expect(validateExecutionNodeOverrides(resolved.value, ["different-node"])[0]?.code).toBe(
+      "CONFIG_EXECUTION_NODE_UNKNOWN"
+    );
+  });
+
+  it("rejects incomplete cloud provider selection, credentials, resources, and misplaced local settings", () => {
+    const missingProvider = resolveConfig({
+      env: {},
+      projectConfig: { execution: { mode: "cloud" } }
+    });
+    expect(missingProvider.ok).toBe(false);
+    if (!missingProvider.ok) {
+      expect(missingProvider.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_PROVIDER_REQUIRED");
+    }
+
+    const missingCredential = resolveConfig({
+      env: { CLOUD_CREDENTIAL_ONE: "available" },
+      projectConfig: {
+        execution: {
+          mode: "cloud",
+          provider: "modal",
+          providers: {
+            modal: {
+              app: "node-runs",
+              image: "runner:stable",
+              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+            }
+          }
+        }
+      }
+    });
+    expect(missingCredential.ok).toBe(false);
+    if (!missingCredential.ok) {
+      expect(missingCredential.diagnostics.map((entry) => entry.code)).toContain("CONFIG_EXECUTION_CREDENTIAL_MISSING");
+      expect(missingCredential.diagnostics.map((entry) => entry.message).join("\n")).not.toContain(
+        "CLOUD_CREDENTIAL_TWO"
+      );
+    }
+
+    const invalidResource = resolveConfig({
+      env: {},
+      projectConfig: { execution: { resources: { cpu: 0 } } }
+    });
+    expect(invalidResource.ok).toBe(false);
+
+    const localProviderSettings = resolveConfig({
+      env: {},
+      projectConfig: {
+        execution: {
+          providers: {
+            modal: {
+              app: "node-runs",
+              image: "runner:stable",
+              credentialEnv: ["CLOUD_CREDENTIAL_ONE", "CLOUD_CREDENTIAL_TWO"]
+            }
+          }
+        }
+      }
+    });
+    expect(localProviderSettings.ok).toBe(false);
+    if (!localProviderSettings.ok) {
+      expect(localProviderSettings.diagnostics.map((entry) => entry.code)).toContain(
+        "CONFIG_EXECUTION_LOCAL_PROVIDER_SETTINGS"
+      );
+    }
   });
 
   it("applies defaults, prompt metadata, project TOML, env, then runtime overrides", () => {
