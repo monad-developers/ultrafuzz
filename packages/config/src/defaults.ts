@@ -197,6 +197,9 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     maxParallelAgents: required(run.maxParallelAgents, "run.max_parallel_agents", filePath),
     maxParallelNodes: required(run.maxParallelNodes, "run.max_parallel_nodes", filePath),
     keepWorkspaces: required(run.keepWorkspaces, "run.keep_workspaces", filePath),
+    forgeGuardEnabled: required(run.forgeGuardEnabled, "run.forge_guard_enabled", filePath),
+    forgeVmemLimitKb: required(run.forgeVmemLimitKb, "run.forge_vmem_limit_kb", filePath),
+    forgeRayonThreads: required(run.forgeRayonThreads, "run.forge_rayon_threads", filePath),
     workspaceMode: required(run.workspaceMode, "run.workspace_mode", filePath),
     defaultTimeoutSeconds: required(run.defaultTimeoutSeconds, "run.default_timeout_seconds", filePath),
     workflowDeadlineSeconds: required(run.workflowDeadlineSeconds, "run.workflow_deadline_seconds", filePath),
@@ -259,6 +262,8 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   for (const key of [
     "maxParallelAgents",
     "maxParallelNodes",
+    "forgeVmemLimitKb",
+    "forgeRayonThreads",
     "defaultTimeoutSeconds",
     "workflowDeadlineSeconds",
     "controllerLeaseSeconds"
@@ -266,6 +271,7 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
     assertNumber(value.run[key], `run.${key}`, filePath);
   }
   assertBoolean(value.run.keepWorkspaces, "run.keepWorkspaces", filePath);
+  assertBoolean(value.run.forgeGuardEnabled, "run.forgeGuardEnabled", filePath);
   assertRecord(value.execution, "execution", filePath);
   assertString(value.execution.mode, "execution.mode", filePath);
   assertNumber(value.execution.retentionDays, "execution.retentionDays", filePath);

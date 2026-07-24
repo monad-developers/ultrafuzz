@@ -123,7 +123,15 @@ async function cleanupCloudRunStorage(
       );
     }
     return undefined;
-  } catch (_error) {
+  } catch (error) {
+    if (isRecord(error) && error.code === "MODAL_NODE_CLEANUP_REFUSED") {
+      return runtimeError(
+        "CLEAN_CLOUD_STORAGE_REFUSED",
+        "cloud run storage cleanup was refused because active sandboxes remain; rerun with --yes or --confirm to terminate them, or wait for them to finish; local evidence was preserved",
+        "clean",
+        ".ultrafuzz/runs"
+      );
+    }
     return runtimeError(
       "CLEAN_CLOUD_STORAGE_FAILED",
       "cloud run storage cleanup failed; local evidence was preserved",

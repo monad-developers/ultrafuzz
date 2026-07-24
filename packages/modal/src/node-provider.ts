@@ -31,6 +31,15 @@ export interface ModalNodeSandboxProviderOptions {
   clientFactory?: (credentials: { tokenId: string; tokenSecret: string }) => ModalNodeClient;
 }
 
+export class ModalNodeCleanupRefusedError extends Error {
+  readonly code = "MODAL_NODE_CLEANUP_REFUSED";
+
+  constructor() {
+    super("cloud cleanup refused because the run still has active node sandboxes");
+    this.name = "ModalNodeCleanupRefusedError";
+  }
+}
+
 export interface NodeSandboxProviderRequest {
   runId: string;
   sandboxId: string;
@@ -250,7 +259,7 @@ export async function cleanupModalNodeRun(
     }
     if (active.length > 0 && cleanupOptions.force !== true) {
       active.forEach((sandbox) => sandbox.detach());
-      throw new Error("cloud cleanup refused because the run still has active node sandboxes");
+      throw new ModalNodeCleanupRefusedError();
     }
     for (const sandbox of active) {
       try {

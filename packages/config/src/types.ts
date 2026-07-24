@@ -72,6 +72,9 @@ export interface RunConfig {
   maxParallelAgents: number;
   maxParallelNodes: number;
   keepWorkspaces: boolean;
+  forgeGuardEnabled: boolean;
+  forgeVmemLimitKb: number;
+  forgeRayonThreads: number;
   workspaceMode: WorkspaceMode;
   defaultTimeoutSeconds: number;
   workflowDeadlineSeconds: number;

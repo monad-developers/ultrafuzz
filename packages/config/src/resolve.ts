@@ -62,6 +62,9 @@ const resolvedConfigValidationSchema = z
         outputDir: projectLocalPathSchema,
         maxParallelAgents: positiveIntegerSchema,
         maxParallelNodes: positiveIntegerSchema,
+        forgeGuardEnabled: z.boolean(),
+        forgeVmemLimitKb: positiveIntegerSchema,
+        forgeRayonThreads: positiveIntegerSchema,
         defaultTimeoutSeconds: timeoutSecondsSchema,
         workflowDeadlineSeconds: timeoutSecondsSchema,
         controllerLeaseSeconds: timeoutSecondsSchema,
@@ -176,6 +179,9 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
     max_parallel_agents: clone.run.maxParallelAgents,
     max_parallel_nodes: clone.run.maxParallelNodes,
     keep_workspaces: clone.run.keepWorkspaces,
+    forge_guard_enabled: clone.run.forgeGuardEnabled,
+    forge_vmem_limit_kb: clone.run.forgeVmemLimitKb,
+    forge_rayon_threads: clone.run.forgeRayonThreads,
     workspace_mode: clone.run.workspaceMode,
     default_timeout_seconds: clone.run.defaultTimeoutSeconds,
     workflow_deadline_seconds: clone.run.workflowDeadlineSeconds,
@@ -677,6 +683,12 @@ function configPathSegment(segment: string): string {
       return "max_parallel_agents";
     case "maxParallelNodes":
       return "max_parallel_nodes";
+    case "forgeGuardEnabled":
+      return "forge_guard_enabled";
+    case "forgeVmemLimitKb":
+      return "forge_vmem_limit_kb";
+    case "forgeRayonThreads":
+      return "forge_rayon_threads";
     case "defaultTimeoutSeconds":
       return "default_timeout_seconds";
     case "workflowDeadlineSeconds":

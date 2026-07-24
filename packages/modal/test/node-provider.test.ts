@@ -11,6 +11,7 @@ import {
   cleanupModalNodeRun,
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider,
+  ModalNodeCleanupRefusedError,
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
@@ -292,9 +293,13 @@ describe("Modal node sandbox provider", () => {
   it("requires force before deleting storage for a run with active sandboxes", async () => {
     const active = fakeSandbox(undefined);
     const refusedClient = fakeClient({ listed: [active] });
-    await expect(cleanupModalNodeRun(providerOptions(refusedClient), "controller-run")).rejects.toThrow(
-      "still has active"
-    );
+    const refused = cleanupModalNodeRun(providerOptions(refusedClient), "controller-run");
+    await expect(refused).rejects.toBeInstanceOf(ModalNodeCleanupRefusedError);
+    await expect(refused).rejects.toMatchObject({
+      name: "ModalNodeCleanupRefusedError",
+      code: "MODAL_NODE_CLEANUP_REFUSED",
+      message: "cloud cleanup refused because the run still has active node sandboxes"
+    });
     expect(refusedClient.volumes.delete).not.toHaveBeenCalled();
 
     const forceClient = fakeClient({ listed: [fakeSandbox(undefined)] });
