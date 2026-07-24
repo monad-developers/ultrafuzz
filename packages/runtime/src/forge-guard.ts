@@ -61,9 +61,10 @@ export function forgeGuardMetadata(config: ResolvedConfig, active: boolean): Rec
 }
 
 function resolveExecutableOnPath(name: string, pathValue: string, excludedDirectory: string): string | undefined {
+  const resolvedExcludedDirectory = comparablePath(excludedDirectory);
   for (const entry of pathValue.split(path.delimiter)) {
     const directory = path.resolve(entry.length > 0 ? entry : process.cwd());
-    if (directory === path.resolve(excludedDirectory)) {
+    if (comparablePath(directory) === resolvedExcludedDirectory) {
       continue;
     }
     const candidate = path.join(directory, name);
@@ -80,10 +81,18 @@ function resolveExecutableOnPath(name: string, pathValue: string, excludedDirect
   return undefined;
 }
 
+function comparablePath(value: string): string {
+  try {
+    return fs.realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
 function forgeGuardWrapper(): string {
   return [
-    "#!/usr/bin/env bash",
-    "set -euo pipefail",
+    "#!/bin/sh",
+    "set -eu",
     `ulimit -v "\${${FORGE_VMEM_LIMIT_ENV}:?}"`,
     `export RAYON_NUM_THREADS="\${RAYON_NUM_THREADS:-\${${FORGE_RAYON_THREADS_ENV}:?}}"`,
     `exec "\${${REAL_FORGE_ENV}:?}" "$@"`,

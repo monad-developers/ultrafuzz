@@ -30,7 +30,7 @@ function fixture(runId: string): {
   fs.mkdirSync(bin);
   fs.writeFileSync(
     forge,
-    ["#!/usr/bin/env bash", 'printf "%s|%s|%s\\n" "$(ulimit -v)" "$RAYON_NUM_THREADS" "$*"', "exit 23", ""].join("\n"),
+    ["#!/bin/sh", 'printf "%s|%s|%s\\n" "$(ulimit -v)" "$RAYON_NUM_THREADS" "$*"', "exit 23", ""].join("\n"),
     "utf8"
   );
   fs.chmodSync(forge, 0o755);
@@ -60,9 +60,10 @@ test("Forge guard creates a leading wrapper and preserves subprocess diagnostics
   assert.equal(prepared.env.PATH?.split(path.delimiter)[0], path.dirname(wrapper));
   assert.equal(fs.statSync(wrapper).mode & 0o777, 0o700);
   assert.equal(prepared.environmentVariableNames.length, 3);
+  assert.match(fs.readFileSync(wrapper, "utf8"), /^#!\/bin\/sh\nset -eu\n/u);
 
   const result = spawnSync(wrapper, ["test", "--match-test", "guard"], {
-    env: { ...process.env, ...prepared.env },
+    env: { ...process.env, ...prepared.env, PATH: path.dirname(wrapper) },
     encoding: "utf8"
   });
   assert.equal(result.status, 23);
@@ -81,4 +82,26 @@ test("Forge guard opt-out leaves PATH and the run directory unchanged", () => {
   assert.equal(prepared.env.PATH, input.pathValue);
   assert.deepEqual(prepared.environmentVariableNames, []);
   assert.equal(fs.existsSync(path.join(input.layout.root, "safe-bin")), false);
+});
+
+test("Forge guard excludes its run wrapper through a symlinked PATH entry", () => {
+  const input = fixture("symlinked-safe-bin");
+  prepareForgeGuardEnvironment({
+    layout: input.layout,
+    config: resolvedConfig(),
+    env: { PATH: input.pathValue }
+  });
+
+  const wrapper = path.join(input.layout.root, "safe-bin", "forge");
+  const safeBinAlias = path.join(input.root, "safe-bin-alias");
+  fs.symlinkSync(path.dirname(wrapper), safeBinAlias, "dir");
+  const prepared = prepareForgeGuardEnvironment({
+    layout: input.layout,
+    config: resolvedConfig(),
+    env: { PATH: `${safeBinAlias}${path.delimiter}${input.pathValue}` }
+  });
+
+  assert.equal(prepared.active, true);
+  assert.equal(Object.values(prepared.env).includes(fs.realpathSync(input.forge)), true);
+  assert.equal(Object.values(prepared.env).includes(fs.realpathSync(wrapper)), false);
 });
