@@ -165,6 +165,65 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("reports structured worker diagnostics when a fresh cloud worker fails", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined);
+    sandbox.exec = vi.fn(async () => ({
+      stdout: { readText: vi.fn(async () => "worker stdout\n") },
+      stderr: {
+        readText: vi.fn(
+          async () =>
+            '{"schema_version":"ultrafuzz.modal.node-worker-error.v1","message":"cloud worker phase run-workflow failed with code 7","phase":"run-workflow","command":"smithers","exit_code":7,"stderr":"workflow failed"}\n'
+        )
+      },
+      wait: vi.fn(async () => 7)
+    })) as never;
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/run-workflow.*workflow failed/u);
+      expect(sandbox.terminate).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses to publish cloud results through a symlinked project destination prefix", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ listed: [sandbox] });
+    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    const outside = path.join(path.dirname(fixture.root), "outside-artifacts");
+    try {
+      fixture.input.artifact_dir = "published-artifacts/attempt-one";
+      fs.mkdirSync(outside, { recursive: true });
+      fs.symlinkSync(outside, path.join(fixture.root, "published-artifacts"), "dir");
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/artifact directory is not an anchored project path/u);
+      expect(fs.existsSync(path.join(outside, "attempt-one", "finding.json"))).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("terminates a fresh sandbox when cancellation interrupts the worker", async () => {
     const fixture = createProjectFixture();
     const sandbox = fakeSandbox(undefined);

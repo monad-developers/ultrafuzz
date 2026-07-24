@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 import { parseModalNodeSandboxInput } from "./node-provider.js";
@@ -19,9 +20,15 @@ async function main(): Promise<void> {
   fs.mkdirSync(PROJECT_ROOT, { recursive: true, mode: 0o700 });
   fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
   try {
-    await runChecked("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", PROJECT_ROOT], "/");
+    await runChecked(
+      "extract-handoff",
+      "tar",
+      ["--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", PROJECT_ROOT],
+      "/"
+    );
     assertSafeTree(PROJECT_ROOT);
     await runChecked(
+      "install-smithers",
       "npm",
       [
         "install",
@@ -39,6 +46,7 @@ async function main(): Promise<void> {
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
     const smithers = path.join(PROJECT_ROOT, ".smithers", "node_modules", ".bin", "smithers");
     await runChecked(
+      "run-workflow",
       smithers,
       [
         "up",
@@ -76,7 +84,7 @@ async function main(): Promise<void> {
       copySafeTree(workspaceDir, path.join(staging, "workspace"));
     }
     const artifactArchive = path.join(publishing, "artifacts.tgz");
-    await runChecked("tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT);
+    await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT);
     const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
     fs.writeFileSync(
       path.join(publishing, "result.json"),
@@ -91,7 +99,7 @@ async function main(): Promise<void> {
     );
     fs.rmSync(dataRoot, { recursive: true, force: true });
     fs.renameSync(publishing, dataRoot);
-    await runChecked("sync", [], dataRoot);
+    await runChecked("sync-results", "sync", [], dataRoot);
   } catch (error) {
     fs.rmSync(publishing, { recursive: true, force: true });
     throw error;
@@ -99,6 +107,7 @@ async function main(): Promise<void> {
 }
 
 async function runChecked(
+  phase: string,
   command: string,
   args: string[],
   cwd: string,
@@ -107,15 +116,65 @@ async function runChecked(
   const child = spawn(command, args, {
     cwd,
     env: { ...process.env, ...env },
-    stdio: ["ignore", "ignore", "ignore"]
+    stdio: ["ignore", "pipe", "pipe"]
   });
+  const stdout = readBoundedText(child.stdout);
+  const stderr = readBoundedText(child.stderr);
   const exitCode = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code ?? 1));
   });
+  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
   if (exitCode !== 0) {
-    throw new Error("cloud worker operation failed");
+    throw new CloudWorkerCommandError(phase, path.basename(command), exitCode, stdoutText, stderrText);
   }
+}
+
+class CloudWorkerCommandError extends Error {
+  constructor(
+    readonly phase: string,
+    readonly command: string,
+    readonly exitCode: number,
+    readonly stdout: string,
+    readonly stderr: string
+  ) {
+    super(`cloud worker phase ${phase} failed with code ${exitCode}`);
+  }
+}
+
+function readBoundedText(stream: Readable | null, limit = 4_096): Promise<string> {
+  if (stream === null) return Promise.resolve("");
+  return new Promise((resolve, reject) => {
+    const chunks: string[] = [];
+    let length = 0;
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk: string) => {
+      if (length >= limit) return;
+      const remaining = limit - length;
+      chunks.push(chunk.slice(0, remaining));
+      length += Math.min(chunk.length, remaining);
+    });
+    stream.once("error", reject);
+    stream.once("end", () => resolve(chunks.join("")));
+  });
+}
+
+function workerErrorPayload(error: unknown): Record<string, unknown> {
+  if (error instanceof CloudWorkerCommandError) {
+    return {
+      schema_version: "ultrafuzz.modal.node-worker-error.v1",
+      message: error.message,
+      phase: error.phase,
+      command: error.command,
+      exit_code: error.exitCode,
+      ...(error.stdout.trim() === "" ? {} : { stdout: error.stdout.trim().slice(0, 2_000) }),
+      ...(error.stderr.trim() === "" ? {} : { stderr: error.stderr.trim().slice(0, 2_000) })
+    };
+  }
+  return {
+    schema_version: "ultrafuzz.modal.node-worker-error.v1",
+    message: error instanceof Error ? error.message : String(error)
+  };
 }
 
 function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, attemptId: string): void {
@@ -200,7 +259,8 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-  void main().catch(() => {
+  void main().catch((error: unknown) => {
+    process.stderr.write(`${JSON.stringify(workerErrorPayload(error))}\n`);
     process.exitCode = 1;
   });
 }

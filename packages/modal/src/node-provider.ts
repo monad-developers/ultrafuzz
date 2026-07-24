@@ -112,6 +112,7 @@ async function runModalNodeSandbox(
   const tokenSecret = requiredCredential(env, tokenSecretName);
   const archive = createModalNodeHandoffArchive(request.rootDir, input);
   const requestFile = path.join(path.dirname(archive.path), "request.json");
+  const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   let client: ModalNodeClient | undefined;
   let sandbox: Sandbox | undefined;
   try {
@@ -164,12 +165,12 @@ async function runModalNodeSandbox(
           "--data-root",
           remoteAttemptRoot(request.runId, request.sandboxId)
         ]);
-        const stdout = processHandle.stdout.readText();
-        const stderr = processHandle.stderr.readText();
-        const exitCode = await waitForProcess(processHandle.wait(), request.signal, sandbox);
-        await Promise.all([stdout, stderr]);
+        const stdout = processHandle.stdout.readText().catch(() => "");
+        const stderr = processHandle.stderr.readText().catch(() => "");
+        const exitCode = await waitForProcess(processHandle.wait(), request.signal, sandbox, executionDeadline);
+        const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
         if (exitCode !== 0) {
-          throw new Error(`cloud node worker exited with code ${exitCode}`);
+          throw new Error(formatWorkerExitMessage(exitCode, stdoutText, stderrText));
         }
       } else {
         request.heartbeat({
@@ -186,7 +187,7 @@ async function runModalNodeSandbox(
       });
     }
 
-    result ??= await waitForModalNodeResult(sandbox, request, input);
+    result ??= await waitForModalNodeResult(sandbox, request, input, executionDeadline);
     await publishModalNodeResult(sandbox, request.rootDir, input, result);
     request.heartbeat({
       stage: "published",
@@ -387,9 +388,9 @@ interface ModalNodeResult {
 async function waitForModalNodeResult(
   sandbox: Sandbox,
   request: NodeSandboxProviderRequest,
-  input: ModalNodeSandboxInput
+  input: ModalNodeSandboxInput,
+  deadline: number
 ): Promise<ModalNodeResult> {
-  const deadline = Date.now() + input.resources.timeout_seconds * 1000;
   for (;;) {
     if (request.signal?.aborted) {
       throw new Error("cloud node execution was cancelled");
@@ -501,9 +502,28 @@ function checkedPath(root: string, value: string, label: string, mustExist = tru
   if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
     throw new Error(`${label} must stay inside the project`);
   }
-  if (mustExist) {
-    const real = fs.realpathSync(resolved);
-    if (real !== resolved || !real.startsWith(`${root}${path.sep}`)) {
+  const parts = path.relative(root, resolved).split(path.sep);
+  let current = root;
+  for (const [index, part] of parts.entries()) {
+    current = path.join(current, part);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT" && !mustExist) {
+        return resolved;
+      }
+      throw new Error(`${label} is not an anchored project path`, { cause: error });
+    }
+    const isFinal = index === parts.length - 1;
+    if (stat.isSymbolicLink()) {
+      throw new Error(`${label} is not an anchored project path`);
+    }
+    const real = fs.realpathSync(current);
+    if (real !== current || (real !== root && !real.startsWith(`${root}${path.sep}`))) {
+      throw new Error(`${label} is not an anchored project path`);
+    }
+    if ((!isFinal || !mustExist) && !stat.isDirectory()) {
       throw new Error(`${label} is not an anchored project path`);
     }
   }
@@ -606,6 +626,21 @@ function normalizedModalNodeError(error: unknown, secretValues: readonly string[
   return new Error(`Modal node execution failed: ${sanitized}`);
 }
 
+function formatWorkerExitMessage(exitCode: number, stdout: string, stderr: string): string {
+  const details = [formatWorkerStream("stdout", stdout), formatWorkerStream("stderr", stderr)]
+    .filter((value) => value !== "")
+    .join("; ");
+  return details === ""
+    ? `cloud node worker exited with code ${exitCode}`
+    : `cloud node worker exited with code ${exitCode}: ${details}`;
+}
+
+function formatWorkerStream(label: string, value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "") return "";
+  return `${label}: ${trimmed.slice(0, 2_000)}`;
+}
+
 function boundedIdentity(value: string): string {
   const normalized =
     value
@@ -623,6 +658,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -630,28 +669,52 @@ function delay(ms: number): Promise<void> {
 async function waitForProcess(
   wait: Promise<number>,
   signal: AbortSignal | undefined,
-  sandbox: Sandbox
+  sandbox: Sandbox,
+  deadline: number
 ): Promise<number> {
-  if (signal === undefined) return wait;
-  if (signal.aborted) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    await sandbox.terminate({ wait: true }).catch(() => undefined);
+    throw new Error("cloud node execution timed out");
+  }
+  if (signal?.aborted) {
     await sandbox.terminate({ wait: true }).catch(() => undefined);
     throw new Error("cloud node execution was cancelled");
   }
   return new Promise<number>((resolve, reject) => {
+    let settled = false;
     const onAbort = () => {
+      if (settled) return;
+      cleanup();
       void sandbox
         .terminate({ wait: true })
         .catch(() => undefined)
         .finally(() => reject(new Error("cloud node execution was cancelled")));
     };
-    signal.addEventListener("abort", onAbort, { once: true });
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      cleanup();
+      void sandbox
+        .terminate({ wait: true })
+        .catch(() => undefined)
+        .finally(() => reject(new Error("cloud node execution timed out")));
+    }, remaining);
+    timeout.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
     void wait.then(
       (value) => {
-        signal.removeEventListener("abort", onAbort);
+        if (settled) return;
+        cleanup();
         resolve(value);
       },
       (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
+        if (settled) return;
+        cleanup();
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     );
