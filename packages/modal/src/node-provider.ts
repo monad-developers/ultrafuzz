@@ -67,6 +67,7 @@ export interface ModalNodeSandboxInput {
     timeout_seconds: number;
   };
   agent_credential_env: string[];
+  operator_prompt?: string;
 }
 
 interface ModalNodeClient {
@@ -296,6 +297,9 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   ) {
     throw new Error("cloud node credential environment configuration is invalid");
   }
+  if (value.operator_prompt !== undefined && typeof value.operator_prompt !== "string") {
+    throw new Error("cloud node operator prompt is invalid");
+  }
   return value as unknown as ModalNodeSandboxInput;
 }
 
@@ -332,6 +336,7 @@ export function createModalNodeHandoffArchive(
     execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], { cwd: root });
     execFileSync("tar", ["-xf", baseArchive, "-C", staging]);
     fs.rmSync(baseArchive, { force: true });
+    assertSafeTree(staging);
     execFileSync("git", ["init", "--quiet"], { cwd: staging });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Cloud"], { cwd: staging });
     execFileSync("git", ["config", "user.email", "cloud@invalid"], { cwd: staging });
@@ -340,6 +345,7 @@ export function createModalNodeHandoffArchive(
     for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG"]) {
       fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
     }
+    assertSafeTree(staging);
 
     copyTreeChecked(runRoot, path.join(staging, path.relative(root, runRoot)), {
       exclude: new Set(["workspaces", "logs"])
@@ -357,6 +363,7 @@ export function createModalNodeHandoffArchive(
         copyFileChecked(root, source, path.join(staging, relative));
       }
     }
+    assertSafeTree(staging);
     execFileSync("tar", ["-czf", archive, "-C", staging, "."]);
     fs.chmodSync(archive, 0o600);
     return {

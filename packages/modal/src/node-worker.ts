@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { parseModalNodeSandboxInput } from "./node-provider.js";
 
@@ -19,6 +20,7 @@ async function main(): Promise<void> {
   fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
   try {
     await runChecked("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archivePath, "-C", PROJECT_ROOT], "/");
+    assertSafeTree(PROJECT_ROOT);
     await runChecked(
       "npm",
       [
@@ -48,7 +50,11 @@ async function main(): Promise<void> {
         "--root",
         PROJECT_ROOT,
         "--input",
-        JSON.stringify({ cloud_worker: true, task_id: input.task_id }),
+        JSON.stringify({
+          cloud_worker: true,
+          task_id: input.task_id,
+          ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
+        }),
         "--format",
         "json"
       ],
@@ -118,12 +124,14 @@ function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, atte
   copySafeTree(mirror, artifactDir, true);
 }
 
-function copySafeTree(source: string, destination: string, onlyMissing = false): void {
-  const root = fs.realpathSync(source);
-  const rootStat = fs.lstatSync(root);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+export function copySafeTree(source: string, destination: string, onlyMissing = false): void {
+  const resolvedSource = path.resolve(source);
+  const sourceStat = fs.lstatSync(resolvedSource);
+  const root = fs.realpathSync(resolvedSource);
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink() || root !== resolvedSource) {
     throw new Error("cloud publication source is unsafe");
   }
+  assertSafeDirectoryTarget(destination);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     const sourcePath = path.join(root, entry.name);
@@ -138,6 +146,36 @@ function copySafeTree(source: string, destination: string, onlyMissing = false):
       fs.copyFileSync(sourcePath, destinationPath);
     } else {
       throw new Error("cloud publication excludes links and special files");
+    }
+  }
+}
+
+function assertSafeDirectoryTarget(destination: string): void {
+  const resolved = path.resolve(destination);
+  if (fs.existsSync(resolved)) {
+    const stat = fs.lstatSync(resolved);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(resolved) !== resolved) {
+      throw new Error("cloud publication destination is unsafe");
+    }
+    return;
+  }
+  const parent = path.dirname(resolved);
+  if (parent !== resolved) {
+    assertSafeDirectoryTarget(parent);
+  }
+}
+
+function assertSafeTree(root: string): void {
+  const resolvedRoot = path.resolve(root);
+  const rootStat = fs.lstatSync(resolvedRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || fs.realpathSync(resolvedRoot) !== resolvedRoot) {
+    throw new Error("cloud handoff archive root is unsafe");
+  }
+  for (const entry of fs.readdirSync(resolvedRoot, { recursive: true, withFileTypes: true })) {
+    const full = path.join(entry.parentPath, entry.name);
+    const stat = fs.lstatSync(full);
+    if ((!stat.isDirectory() && !stat.isFile()) || stat.isSymbolicLink() || (stat.isFile() && stat.nlink !== 1)) {
+      throw new Error("cloud handoff archive contains an unsafe filesystem entry");
     }
   }
 }
@@ -157,6 +195,12 @@ function requiredOption(name: string): string {
   return value;
 }
 
-void main().catch(() => {
-  process.exitCode = 1;
-});
+function isDirectExecution(): boolean {
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isDirectExecution()) {
+  void main().catch(() => {
+    process.exitCode = 1;
+  });
+}

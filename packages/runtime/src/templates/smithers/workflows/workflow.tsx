@@ -1168,10 +1168,11 @@ export default smithers((ctx) => {
       (task) => [task.id, task]
     )
   );
-  const operatorPrompt =
+  const operatorPromptInput =
     typeof ctx.input.operator_prompt === "string" && ctx.input.operator_prompt.length > 0
-      ? `${ctx.input.operator_prompt}\n\n`
-      : "";
+      ? ctx.input.operator_prompt
+      : undefined;
+  const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   const cloudWorker = ctx.input.cloud_worker === true;
   const selectedTaskSpecs = cloudWorker ? taskSpecs.filter((task) => task.id === ctx.input.task_id) : taskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
@@ -1205,7 +1206,8 @@ export default smithers((ctx) => {
                       memory_mib: task.execution.resources.memoryMiB,
                       timeout_seconds: task.execution.resources.timeoutSeconds
                     },
-                    agent_credential_env: task.execution.agentCredentialEnv
+                    agent_credential_env: task.execution.agentCredentialEnv,
+                    ...(operatorPromptInput === undefined ? {} : { operator_prompt: operatorPromptInput })
                   }}
                   output={outputs.task}
                   dependsOn={task.dependsOn}

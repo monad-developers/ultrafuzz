@@ -16,6 +16,7 @@ import {
   modalNodeVolumeName,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
+import { copySafeTree } from "../src/node-worker.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
 const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
@@ -51,6 +52,54 @@ describe("Modal node sandbox provider", () => {
     } finally {
       archive.cleanup();
       fixture.cleanup();
+    }
+  });
+
+  it("rejects committed symlinks before building a cloud handoff archive", () => {
+    const fixture = createProjectFixture();
+    try {
+      fs.symlinkSync("source.txt", path.join(fixture.root, "source-link.txt"));
+      execFileSync("git", ["add", "source-link.txt"], { cwd: fixture.root });
+      execFileSync("git", ["commit", "--quiet", "-m", "add symlink"], { cwd: fixture.root });
+
+      expect(() => createModalNodeHandoffArchive(fixture.root, fixture.input)).toThrow(/unsafe filesystem entry/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses to publish a symlinked artifact root from a worker", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-symlink-"));
+    try {
+      const outside = path.join(root, "outside");
+      const source = path.join(root, "artifact-root");
+      const destination = path.join(root, "published");
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, "secret.txt"), "must not publish\n");
+      fs.symlinkSync(outside, source, "dir");
+
+      expect(() => copySafeTree(source, destination)).toThrow(/cloud publication source is unsafe/u);
+      expect(fs.existsSync(path.join(destination, "secret.txt"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to publish through a symlinked worker destination", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-destination-symlink-"));
+    try {
+      const source = path.join(root, "source");
+      const outside = path.join(root, "outside");
+      const destination = path.join(root, "destination");
+      fs.mkdirSync(source, { recursive: true });
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(source, "finding.json"), '{"ok":true}\n');
+      fs.symlinkSync(outside, destination, "dir");
+
+      expect(() => copySafeTree(source, destination)).toThrow(/cloud publication destination is unsafe/u);
+      expect(fs.existsSync(path.join(outside, "finding.json"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
     }
   });
 
