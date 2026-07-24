@@ -1,7 +1,8 @@
 import type { ModalClient, Volume, VolumeFromNameParams } from "modal";
 
-// The Modal JavaScript SDK exposes the control-plane client but does not yet
-// expose a public named-volume filesystem-version option.
+// Verified against the generated control-plane enums shipped by the exact
+// modal@0.9.0 dependency pinned in this package. Re-verify both values before
+// upgrading Modal: the public SDK does not expose named-volume FS versions.
 const OBJECT_CREATION_TYPE_CREATE_IF_MISSING = 1;
 const VOLUME_FS_VERSION_V2 = 2;
 
