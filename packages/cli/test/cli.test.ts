@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import AdmZip from "adm-zip";
+
 import { runCli } from "../src/index.js";
 
 interface Capture {
@@ -631,4 +633,104 @@ test("report accepts populated accounting snapshots and preserves partial-pricin
   const estimatedReport = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(estimatedReport.code, 0, estimatedReport.stderr);
   assert.equal(accountingMismatchCount(parseJson(estimatedReport)), 0);
+});
+
+test("report bundle creates a portable ZIP without workspaces or stale report backups", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  writeSmallTopology(project);
+
+  const env = fakeSmithersEnv(project);
+  const run = await cli(project, ["run", "--run-id", "report-bundle", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runData = parseJson(run).data as { run_id: string; run_root: string };
+
+  const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
+  fs.mkdirSync(artifactDir, { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, "stdout.txt"), "generated stdout\n", "utf8");
+  fs.writeFileSync(path.join(artifactDir, "bad\\name.txt"), "unsafe archive path\n", "utf8");
+  const reportDir = writeFinalReportAccounting(runData.run_root, {
+    tokensUsed: "123",
+    estimatedSpend: "$0.46",
+    partialPricing: false
+  });
+  fs.writeFileSync(path.join(reportDir, "report.json.pre-old"), '{"stale":true}\n', "utf8");
+  const workspaceDir = path.join(runData.run_root, "workspaces", "project-discovery");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(path.join(workspaceDir, "large-cache.txt"), "do not bundle\n", "utf8");
+
+  const bundled = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  assert.equal(bundled.code, 0, bundled.stderr);
+  const body = parseJson(bundled);
+  assertNoSmithersSurface(body);
+  assert.match(JSON.stringify(body.diagnostics), /REPORT_BUNDLE_FILE_SKIPPED/u);
+  const data = body.data as { zip_path: string; bytes: number; sha256: string; entry_count: number };
+  assert.equal(fs.existsSync(data.zip_path), true);
+  assert.equal(data.bytes, fs.statSync(data.zip_path).size);
+  assert.match(data.sha256, /^[a-f0-9]{64}$/u);
+  assert.equal(data.entry_count > 0, true);
+
+  const zip = new AdmZip(data.zip_path);
+  const entries = zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory)
+    .map((entry) => entry.entryName)
+    .sort();
+  assert.equal(entries.includes("bundle-manifest.json"), true);
+  assert.equal(entries.includes("artifacts/final-report/report.md"), true);
+  assert.equal(entries.includes("artifacts/final-report/report.json"), true);
+  assert.equal(entries.includes("artifacts/project-discovery/stdout.txt"), true);
+  assert.equal(entries.includes("run.json"), true);
+  assert.equal(entries.includes("state.json"), true);
+  assert.equal(
+    entries.some((entry) => entry.startsWith("workspaces/")),
+    false
+  );
+  assert.equal(
+    entries.some((entry) => entry.includes("\\")),
+    false
+  );
+  assert.equal(entries.includes("artifacts/final-report/report.json.pre-old"), false);
+
+  const existing = await cli(project, ["report", "bundle", runData.run_id, "--json"]);
+  assert.equal(existing.code, 1);
+  assert.match(JSON.stringify(parseJson(existing).diagnostics), /already exists/u);
+
+  const forced = await cli(project, ["report", "bundle", runData.run_id, "--force", "--json"]);
+  assert.equal(forced.code, 0, forced.stderr);
+
+  const customPath = "attachments/custom-report-bundle.zip";
+  const custom = await cli(project, ["report", "bundle", runData.run_id, "--output", customPath, "--json"]);
+  assert.equal(custom.code, 0, custom.stderr);
+  const customData = parseJson(custom).data as { zip_path: string };
+  assert.equal(customData.zip_path, path.join(project, customPath));
+
+  const symlinkOutput = path.join(project, "attachments", "symlink-output.zip");
+  fs.symlinkSync(path.join(project, "missing-target.zip"), symlinkOutput);
+  const symlinkAttempt = await cli(project, [
+    "report",
+    "bundle",
+    runData.run_id,
+    "--output",
+    symlinkOutput,
+    "--force",
+    "--json"
+  ]);
+  assert.equal(symlinkAttempt.code, 1);
+  assert.match(JSON.stringify(parseJson(symlinkAttempt).diagnostics), /symlink/u);
+
+  const realOutputDir = path.join(project, "real-output");
+  const linkedOutputDir = path.join(project, "linked-output");
+  fs.mkdirSync(realOutputDir, { recursive: true });
+  fs.symlinkSync(realOutputDir, linkedOutputDir, "dir");
+  const linkedParentAttempt = await cli(project, [
+    "report",
+    "bundle",
+    runData.run_id,
+    "--output",
+    "linked-output/bundle.zip",
+    "--json"
+  ]);
+  assert.equal(linkedParentAttempt.code, 1);
+  assert.match(JSON.stringify(parseJson(linkedParentAttempt).diagnostics), /symlink/u);
 });
