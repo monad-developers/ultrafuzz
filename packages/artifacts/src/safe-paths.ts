@@ -219,8 +219,9 @@ export function publishFileDurableExclusive(
     temporaryIdentity = fileIdentity(fs.fstatSync(temporaryFd, { bigint: true }));
     fs.writeFileSync(temporaryFd, bytes);
     fs.fsyncSync(temporaryFd);
-    fs.closeSync(temporaryFd);
+    const descriptor = temporaryFd;
     temporaryFd = undefined;
+    fs.closeSync(descriptor);
 
     try {
       fs.linkSync(temporary, destination);
@@ -246,7 +247,8 @@ export function publishFileDurableExclusive(
     throw error;
   } finally {
     if (temporaryFd !== undefined) {
-      fs.closeSync(temporaryFd);
+      const descriptor = temporaryFd;
+      fs.closeSync(descriptor);
     }
     if (fs.existsSync(temporary)) {
       fs.unlinkSync(temporary);
@@ -273,21 +275,26 @@ function publishFileDurableWithoutHardLink(root: string, filePath: string, bytes
     identity = fileIdentity(fs.fstatSync(fd, { bigint: true }));
     fs.writeFileSync(fd, bytes);
     fs.fsyncSync(fd);
-    fs.closeSync(fd);
+    const descriptor = fd;
     fd = undefined;
+    fs.closeSync(descriptor);
     assertPublishedBytes(root, filePath, bytes, identity);
     return true;
   } catch (error) {
     if (fd !== undefined) {
-      fs.closeSync(fd);
+      const descriptor = fd;
       fd = undefined;
+      fs.closeSync(descriptor);
     }
     if (identity !== undefined && !unlinkPublishedIfOwned(filePath, identity)) {
       throw new Error("failed to remove an incomplete published artifact", { cause: error });
     }
     throw error;
   } finally {
-    if (fd !== undefined) fs.closeSync(fd);
+    if (fd !== undefined) {
+      const descriptor = fd;
+      fs.closeSync(descriptor);
+    }
   }
 }
 
@@ -445,9 +452,12 @@ function unlinkPublishedIfOwned(filePath: string, identity: FileIdentity): boole
   let fd: number | undefined;
   try {
     fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    if (!sameFileIdentity(identity, fs.fstatSync(fd, { bigint: true }))) return true;
+    const beforeUnlink = fs.fstatSync(fd, { bigint: true });
+    if (!sameFileIdentity(identity, beforeUnlink)) return true;
     fs.unlinkSync(filePath);
-    return true;
+    // A replacement between the identity check and unlink would remove a
+    // different inode and leave this descriptor's link count unchanged.
+    return fs.fstatSync(fd, { bigint: true }).nlink < beforeUnlink.nlink;
   } catch (error) {
     return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ELOOP");
   } finally {
