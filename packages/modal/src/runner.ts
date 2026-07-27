@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, closeSync, mkdtempSync, openSync, rmSync } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -23,7 +23,14 @@ import {
 } from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
 
-import { runnerApiKeyEnv, subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
+import {
+  prepareSubscriptionAuthCopy,
+  runnerApiKeyEnv,
+  runnerApiKeySourceEnv,
+  subscriptionAuthCopy,
+  type SubscriptionAuthCopy,
+  type SubscriptionAuthCopyEntry
+} from "./auth.js";
 import {
   fingerprintModalConfigFile,
   fingerprintModalModel,
@@ -281,15 +288,36 @@ export async function launchModalBenchmark(input: {
     auth: SubscriptionAuthCopy | undefined;
     secrets: Record<string, string>;
   }> = [];
-  for (const model of selected) {
-    const auth = subscriptionAuthCopy(model, env);
-    if (auth !== undefined) await access(auth.source);
-    prepared.push({ model, auth, secrets: secretValues(config, model, env) });
-  }
-  const modal = modalClient(env);
+  const preparedAuthCopies = new Set<SubscriptionAuthCopy>();
+  const preparedKimiAuth = new Map<string, SubscriptionAuthCopy>();
   try {
-    const app = await modal.apps.fromName(config.app_name, { createIfMissing: true });
-    const image = await modal.images.fromName(config.image_name);
+    for (const model of selected) {
+      let auth: SubscriptionAuthCopy | undefined;
+      if (model.provider === "kimi" && model.auth_mode === "subscription") {
+        auth = preparedKimiAuth.get(model.model);
+        if (auth === undefined) {
+          auth = await prepareSubscriptionAuthCopy(model, env);
+          if (auth !== undefined) preparedKimiAuth.set(model.model, auth);
+        }
+      } else {
+        auth = subscriptionAuthCopy(model, env);
+      }
+      if (auth !== undefined) {
+        preparedAuthCopies.add(auth);
+        for (const entry of subscriptionAuthEntries(auth)) await access(entry.source);
+      }
+      prepared.push({ model, auth, secrets: secretValues(config, model, env) });
+    }
+  } catch (error) {
+    await cleanupSubscriptionAuthCopies(preparedAuthCopies);
+    throw error;
+  }
+  let modal: ModalClient | undefined;
+  try {
+    const activeModal = modalClient(env);
+    modal = activeModal;
+    const app = await activeModal.apps.fromName(config.app_name, { createIfMissing: true });
+    const image = await activeModal.images.fromName(config.image_name);
     const fingerprints: ModalLineageFingerprints = {
       config: fingerprintModalConfigFile(configPath),
       source: fingerprintTrackedSource(repoRoot),
@@ -315,7 +343,7 @@ export async function launchModalBenchmark(input: {
         if (state.logical_run_id !== config.run_id) {
           throw new Error(`launch state belongs to ${state.logical_run_id}, not ${config.run_id}`);
         }
-        await assertNoLiveGeneration(modal, app, state);
+        await assertNoLiveGeneration(activeModal, app, state);
         const generationStartReason: ModalRecoveryStartReason =
           state.fingerprints.image === fingerprints.image ? "operator-restart" : "image-rollout";
         const terminalReason: ModalRecoveryTerminalReason =
@@ -361,12 +389,13 @@ export async function launchModalBenchmark(input: {
       }
 
       for (const entry of prepared) {
-        await launchOrResumeModel({ modal, app, image, config, configPath, statePath, state, ...entry });
+        await launchOrResumeModel({ modal: activeModal, app, image, config, configPath, statePath, state, ...entry });
       }
       return state;
     });
   } finally {
-    modal.close();
+    modal?.close();
+    await cleanupSubscriptionAuthCopies(preparedAuthCopies);
   }
 }
 
@@ -664,11 +693,61 @@ async function stageLaunchFiles(
     await sandbox.filesystem.copyFromLocal(lineagePath, REMOTE_LINEAGE_PATH);
     await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH]);
     if (auth !== undefined) {
-      await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(auth.destination)]);
-      await sandbox.filesystem.copyFromLocal(auth.source, auth.destination);
-      await runChecked(sandbox, ["chmod", "600", auth.destination]);
+      for (const entry of subscriptionAuthEntries(auth)) {
+        await stageSubscriptionAuthEntry(sandbox, entry);
+      }
     }
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+function subscriptionAuthEntries(auth: SubscriptionAuthCopy): SubscriptionAuthCopyEntry[] {
+  return auth.entries ?? [{ source: auth.source, destination: auth.destination }];
+}
+
+async function cleanupSubscriptionAuthCopies(copies: Iterable<SubscriptionAuthCopy>): Promise<void> {
+  await Promise.all([...copies].map(async (auth) => auth.cleanup?.()));
+}
+
+async function stageSubscriptionAuthEntry(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry): Promise<void> {
+  await access(entry.source);
+  const source = await lstat(entry.source);
+  await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(entry.destination)]);
+  if (source.isDirectory()) {
+    await stageSubscriptionAuthDirectory(sandbox, entry);
+  } else if (source.isFile()) {
+    await sandbox.filesystem.copyFromLocal(entry.source, entry.destination);
+  } else {
+    throw new Error(`subscription auth source must be a file or directory: ${entry.source}`);
+  }
+  await runChecked(sandbox, ["chmod", "-R", "go-rwx", entry.destination]);
+}
+
+async function stageSubscriptionAuthDirectory(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry): Promise<void> {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ultrafuzz-modal-auth-"));
+  const archivePath = path.join(temporary, "auth-entry.tgz");
+  const remoteArchive = `${entry.destination}.tgz-${randomUUID()}`;
+  const pending = `${entry.destination}.pending-${randomUUID()}`;
+  try {
+    execFileSync("tar", ["-C", entry.source, "-czf", archivePath, "."], { stdio: "ignore" });
+    await sandbox.filesystem.copyFromLocal(archivePath, remoteArchive);
+    await runChecked(sandbox, ["rm", "-rf", pending]);
+    await runChecked(sandbox, ["install", "-d", "-m", "700", pending]);
+    await runChecked(sandbox, [
+      "tar",
+      "--no-same-owner",
+      "--no-same-permissions",
+      "-xzf",
+      remoteArchive,
+      "-C",
+      pending
+    ]);
+    await runChecked(sandbox, ["rm", "-rf", entry.destination]);
+    await runChecked(sandbox, ["mv", pending, entry.destination]);
+  } finally {
+    await runChecked(sandbox, ["rm", "-f", remoteArchive]).catch(() => undefined);
+    await runChecked(sandbox, ["rm", "-rf", pending]).catch(() => undefined);
     await rm(temporary, { recursive: true, force: true });
   }
 }
@@ -873,7 +952,7 @@ function modalRecoveryAnalysisSummary(records: ModalLaunchState["recovery_lifecy
 }
 
 export function modalImageBuildCommand(): string {
-  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
@@ -1067,19 +1146,24 @@ export async function overseeModalBenchmarkOnce(
               throw new Error("Modal recovery worker does not match the current launch attempt");
             }
             const resolutionChanged = resolution.changed;
-            row = await finishReservedModalRecoveryWorker({
-              sandbox: recoverySandbox,
-              worker,
-              launchState,
-              launch,
-              statePath,
-              row,
-              recoveryState,
-              recoveryStatePath,
-              configPath,
-              auth: subscriptionAuthCopy(model, env),
-              now
-            });
+            const auth = await prepareSubscriptionAuthCopy(model, env);
+            try {
+              row = await finishReservedModalRecoveryWorker({
+                sandbox: recoverySandbox,
+                worker,
+                launchState,
+                launch,
+                statePath,
+                row,
+                recoveryState,
+                recoveryStatePath,
+                configPath,
+                auth,
+                now
+              });
+            } finally {
+              await auth?.cleanup?.();
+            }
             resolution = {
               row,
               owner: recoveryOwner(row, recoveryGeneration, true),
@@ -1353,83 +1437,87 @@ async function launchModalRecoveryWorker(input: {
   env: Record<string, string | undefined>;
   now: () => number;
 }): Promise<ModalRecoveryRowState> {
-  const auth = subscriptionAuthCopy(input.model, input.env);
+  const auth = await prepareSubscriptionAuthCopy(input.model, input.env);
   if (auth !== undefined) await access(auth.source);
-  const secret = await input.modal.secrets.fromObject(secretValues(input.config, input.model, input.env));
-  const attemptId = randomUUID();
-  const record = reserveModalLaunchAttempt({
-    state: input.launchState,
-    model: input.model,
-    modelFingerprint: input.launch.model_fingerprint,
-    volumeName: input.launch.volume_name,
-    remoteRoot: input.launch.remote_root,
-    workspaceMode: "resume",
-    postModelRecovery: "relaunch",
-    now: new Date(input.now()).toISOString(),
-    attemptId
-  });
-  await writeModalLaunchState(input.statePath, input.launchState);
-  const nextGeneration = Math.max(0, ...input.row.workers.map((worker) => worker.generation)) + 1;
-  const name = modalSandboxName(input.launchState.logical_run_id, {
-    slug: record.slug,
-    generation: record.generation,
-    attempt: record.attempt,
-    attempt_id: attemptId
-  });
-  const reservedAt = new Date(input.now()).toISOString();
-  let row = reserveModalRecoveryWorker(input.row, {
-    attempt: record.attempt,
-    attemptId,
-    name,
-    image: input.requestedImage,
-    now: reservedAt
-  });
-  setModalRecoveryRow(input.recoveryState, row);
-  await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
-  const worker = row.workers.find((candidate) => candidate.generation === nextGeneration)!;
-  let sandbox: Sandbox | undefined;
   try {
-    sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
-      name,
-      command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : input.model.provider)],
-      timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
-      workdir: "/opt/ultrafuzz",
-      env: {
-        ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,
-        ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
-        ULTRAFUZZ_MODAL_REMOTE_ROOT: record.remote_root,
-        ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
-      },
-      secrets: [secret],
-      volumes: { "/data": input.volume },
-      tags: modalLaunchTags(input.launchState, record)
+    const secret = await input.modal.secrets.fromObject(secretValues(input.config, input.model, input.env));
+    const attemptId = randomUUID();
+    const record = reserveModalLaunchAttempt({
+      state: input.launchState,
+      model: input.model,
+      modelFingerprint: input.launch.model_fingerprint,
+      volumeName: input.launch.volume_name,
+      remoteRoot: input.launch.remote_root,
+      workspaceMode: "resume",
+      postModelRecovery: "relaunch",
+      now: new Date(input.now()).toISOString(),
+      attemptId
     });
-    markModalSandboxCreated(record, sandbox.sandboxId);
     await writeModalLaunchState(input.statePath, input.launchState);
-    row = attachModalRecoverySandbox(row, worker.generation, sandbox.sandboxId);
+    const nextGeneration = Math.max(0, ...input.row.workers.map((worker) => worker.generation)) + 1;
+    const name = modalSandboxName(input.launchState.logical_run_id, {
+      slug: record.slug,
+      generation: record.generation,
+      attempt: record.attempt,
+      attempt_id: attemptId
+    });
+    const reservedAt = new Date(input.now()).toISOString();
+    let row = reserveModalRecoveryWorker(input.row, {
+      attempt: record.attempt,
+      attemptId,
+      name,
+      image: input.requestedImage,
+      now: reservedAt
+    });
     setModalRecoveryRow(input.recoveryState, row);
     await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
-    row = await finishReservedModalRecoveryWorker({
-      sandbox,
-      worker: row.workers.find((candidate) => candidate.generation === worker.generation)!,
-      launchState: input.launchState,
-      launch: record,
-      statePath: input.statePath,
-      row,
-      recoveryState: input.recoveryState,
-      recoveryStatePath: input.recoveryStatePath,
-      configPath: input.configPath,
-      auth,
-      now: input.now
-    });
-    sandbox.detach();
-    return row;
-  } catch (error) {
-    if (sandbox !== undefined) await terminateRecoveryOwner(sandbox).catch(() => undefined);
-    row = markModalRecoveryWorkerStopped(row, worker.generation, "exited", new Date(input.now()).toISOString());
-    setModalRecoveryRow(input.recoveryState, row);
-    await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState).catch(() => undefined);
-    throw error;
+    const worker = row.workers.find((candidate) => candidate.generation === nextGeneration)!;
+    let sandbox: Sandbox | undefined;
+    try {
+      sandbox = await createModalBenchmarkSandbox(input.modal.sandboxes, input.app, input.image, {
+        name,
+        command: ["bash", "-lc", modalWorkerEntrypointCommand(auth === undefined ? undefined : input.model.provider)],
+        timeoutMs: MODAL_RECOVERY_SANDBOX_TIMEOUT_MS,
+        workdir: "/opt/ultrafuzz",
+        env: {
+          ULTRAFUZZ_MODAL_RUN_ID: input.launchState.logical_run_id,
+          ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
+          ULTRAFUZZ_MODAL_REMOTE_ROOT: record.remote_root,
+          ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(record.remote_root)
+        },
+        secrets: [secret],
+        volumes: { "/data": input.volume },
+        tags: modalLaunchTags(input.launchState, record)
+      });
+      markModalSandboxCreated(record, sandbox.sandboxId);
+      await writeModalLaunchState(input.statePath, input.launchState);
+      row = attachModalRecoverySandbox(row, worker.generation, sandbox.sandboxId);
+      setModalRecoveryRow(input.recoveryState, row);
+      await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState);
+      row = await finishReservedModalRecoveryWorker({
+        sandbox,
+        worker: row.workers.find((candidate) => candidate.generation === worker.generation)!,
+        launchState: input.launchState,
+        launch: record,
+        statePath: input.statePath,
+        row,
+        recoveryState: input.recoveryState,
+        recoveryStatePath: input.recoveryStatePath,
+        configPath: input.configPath,
+        auth,
+        now: input.now
+      });
+      sandbox.detach();
+      return row;
+    } catch (error) {
+      if (sandbox !== undefined) await terminateRecoveryOwner(sandbox).catch(() => undefined);
+      row = markModalRecoveryWorkerStopped(row, worker.generation, "exited", new Date(input.now()).toISOString());
+      setModalRecoveryRow(input.recoveryState, row);
+      await writeModalRecoveryState(input.recoveryStatePath, input.recoveryState).catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    await auth?.cleanup?.();
   }
 }
 
@@ -1976,10 +2064,10 @@ export async function collectModalBenchmark(input: {
           const contents = files[MODAL_PUBLIC_RESULT_FILE];
           if (contents === undefined) throw new Error(`public benchmark result is not ready for ${launch.slug}`);
           if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
-          const bundle = parsePublicBenchmarkBundle(JSON.parse(contents) as unknown, [
-            requiredEnv(collectionEnv, runnerApiKeyEnv(configuredModel.provider)),
-            requiredEnv(collectionEnv, publicCollection!.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
-          ]);
+          const bundle = parsePublicBenchmarkBundle(
+            JSON.parse(contents) as unknown,
+            publicBenchmarkCollectionSecretValues(publicCollection!.config, configuredModel, collectionEnv)
+          );
           assertPublicBenchmarkBundleLineage({
             bundle,
             config: publicCollection!.config,
@@ -1999,6 +2087,17 @@ export async function collectModalBenchmark(input: {
   } finally {
     modal.close();
   }
+}
+
+export function publicBenchmarkCollectionSecretValues(
+  config: PublicModalBenchmarkConfig,
+  model: ModalModelSpec,
+  env: Record<string, string | undefined>
+): string[] {
+  return [
+    requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider)),
+    requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+  ];
 }
 
 export function hasExactPublicDiagnosticCollectionConfig(input: {
@@ -2224,7 +2323,13 @@ function secretValues(
   env: Record<string, string | undefined>
 ): Record<string, string> {
   const names = secretEnvNames(config, model);
-  return Object.fromEntries([...names].map((name) => [name, requiredEnv(env, name)]));
+  const runnerEnv = model.auth_mode === "api-key" ? runnerApiKeyEnv(model.provider) : undefined;
+  return Object.fromEntries(
+    [...names].map((name) => [
+      name,
+      name === runnerEnv ? requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider)) : requiredEnv(env, name)
+    ])
+  );
 }
 
 function availableSecretValues(
@@ -2232,8 +2337,9 @@ function availableSecretValues(
   model: ModalModelSpec,
   env: Record<string, string | undefined>
 ): string[] {
+  const runnerEnv = model.auth_mode === "api-key" ? runnerApiKeyEnv(model.provider) : undefined;
   return [...secretEnvNames(config, model)]
-    .map((name) => env[name])
+    .map((name) => (name === runnerEnv ? firstEnv(env, runnerApiKeySourceEnv(model.provider)) : env[name]))
     .filter((value): value is string => value !== undefined && value !== "");
 }
 
@@ -2253,6 +2359,20 @@ function requiredEnv(env: Record<string, string | undefined>, name: string): str
   const value = env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
   return value;
+}
+
+function requiredAnyEnv(env: Record<string, string | undefined>, names: readonly string[]): string {
+  const value = firstEnv(env, names);
+  if (value !== undefined) return value;
+  throw new Error(`${names.join(" or ")} is required`);
+}
+
+function firstEnv(env: Record<string, string | undefined>, names: readonly string[]): string | undefined {
+  for (const name of names) {
+    const value = env[name];
+    if (value !== undefined && value.trim() !== "") return value;
+  }
+  return undefined;
 }
 
 function selectModels(config: ModalBenchmarkConfig, slugs: string[] | undefined): ModalModelSpec[] {

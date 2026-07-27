@@ -34,18 +34,31 @@ For subscription auth, log in before launching:
 ```bash
 codex login
 claude auth login
+kimi login
 ```
 
 By default the runner reads `CODEX_HOME/auth.json` (normally
 `~/.codex/auth.json`) and `CLAUDE_CONFIG_DIR/.credentials.json` (normally
-`~/.claude/.credentials.json`). API-key auth is also supported per model; only
-the named host environment variable is forwarded through a Modal Secret.
+`~/.claude/.credentials.json`). Kimi subscription auth reads the current Kimi
+Code home from `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`, or `~/.kimi-code`, and stages
+only `config.toml`, the selected file-backed OAuth credential, and `device_id`
+into `/run/ultrafuzz-auth/kimi` for the worker. Before sandbox fan-out, the
+launcher refreshes a near-expiry token under Kimi Code's cross-process OAuth
+lock, atomically persists it on the host, and creates one immutable snapshot.
+This prevents concurrent workers from rotating copies of the same refresh
+token. Note that this persists the rotated token back to your real host Kimi
+Code credential (`~/.kimi-code/credentials/kimi-code.json`), mirroring the Kimi
+CLI itself: launching a benchmark can rotate your local Kimi login token.
+API-key auth is also supported per model; Kimi accepts either
+`KIMI_API_KEY` or `MOONSHOT_API_KEY` on the launcher host, exposes the value to
+the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
+`api_key` config field.
 
 ## Create a private runtime config
 
-The six-model matrix is built in, so `models` may be omitted. The default is
-one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, and Claude
-Opus 4.8, with `loops` fixed to `1`.
+The seven-model matrix is built in, so `models` may be omitted. The default is
+one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, Claude Opus
+4.8, and Kimi K3, with `loops` fixed to `1`.
 
 ```json
 {
@@ -111,10 +124,10 @@ smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
-checked-in EVMBench target with GPT-5.6 Luna at `high` and Claude Sonnet 5 at
-`high` by default. Dispatch inputs `openai_model`, `openai_reasoning`,
-`anthropic_model`, and `anthropic_reasoning` provide explicit overrides. The
-full lane retains the production strategy set, including invariant,
+checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at
+`high`, and Kimi K3 at `max` by default. Dispatch inputs `openai_model`,
+`openai_reasoning`, `anthropic_model`, `anthropic_reasoning`, `kimi_model`, and
+`kimi_reasoning` provide explicit overrides. The full lane retains the production strategy set, including invariant,
 differential, and dynamic strategies, with all three disable flags set to
 `false`. Push events can never select this lane.
 
@@ -131,11 +144,11 @@ lanes resolve to one trial. Increase it only deliberately: benchmark work and
 cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
-Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY`;
-automatic smoke runs do not. Public rows score from their local artifacts and
-do not require a Braintrust reporting key. Modal receives only the provider
-credential needed by a pair plus the OpenAI judge credential. It never receives
-a GitHub token.
+Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
+either `KIMI_API_KEY` or `MOONSHOT_API_KEY`; automatic smoke runs do not.
+Public rows score from their local artifacts and do not require a Braintrust
+reporting key. Modal receives only the provider credential needed by a pair plus
+the OpenAI judge credential. It never receives a GitHub token.
 
 The worker verifies the exact candidate and target commits, obtains EVMBench
 labels from the pinned public Frontier Evals revision, and uses the versioned

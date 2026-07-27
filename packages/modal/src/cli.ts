@@ -17,7 +17,7 @@ import {
 } from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic]";
+  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic|kimi]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -179,7 +179,9 @@ function modalLaunchMode(argv: string[]): ModalLaunchMode {
 
 function requiredProvider(argv: string[]): ModelProvider {
   const value = requiredOption(argv, "--provider");
-  if (value !== "openai" && value !== "anthropic") throw new Error("--provider must be openai or anthropic");
+  if (value !== "openai" && value !== "anthropic" && value !== "kimi") {
+    throw new Error("--provider must be openai, anthropic, or kimi");
+  }
   return value;
 }
 

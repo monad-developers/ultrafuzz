@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@11.1.1",
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "benchmark:evmbench": "pnpm --filter @ultrafuzz/evmbench benchmark",

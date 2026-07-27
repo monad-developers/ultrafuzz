@@ -24,7 +24,7 @@ import {
   reserveModalLaunchAttempt,
   writeModalLaunchState
 } from "../src/launch-state.js";
-import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH } from "../src/layout.js";
+import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
@@ -48,6 +48,7 @@ import {
   modalTerminationScopesForConfig,
   modalVolumeRelativeRoot,
   modalWorkerEntrypointCommand,
+  publicBenchmarkCollectionSecretValues,
   readOptionalModalSandboxText,
   replaceSanitizedModalCollectedFiles,
   selectModalCollectedEvidence,
@@ -335,6 +336,7 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
     expect(standaloneDockerfile).toContain("crytic/echidna");
     expect(standaloneDockerfile).toContain("crytic/medusa");
+    expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
   it("archives tracked files only", () => {
@@ -627,6 +629,28 @@ describe("Modal result collection", () => {
     expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
   });
 
+  it("uses Moonshot API keys as Kimi public collection redaction secrets", () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "kimi-k3",
+      model: "kimi-k3",
+      provider: "kimi",
+      agent: "KimiAgent",
+      reasoning: "max",
+      auth_mode: "api-key"
+    };
+
+    expect(
+      publicBenchmarkCollectionSecretValues(config, model, {
+        MOONSHOT_API_KEY: "moonshot-secret",
+        OPENAI_API_KEY: "judge-secret"
+      })
+    ).toEqual(["moonshot-secret", "judge-secret"]);
+    expect(() => publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })).toThrow(
+      /KIMI_API_KEY or MOONSHOT_API_KEY/u
+    );
+  });
+
   it("atomically replaces allowlisted files and removes a stale terminal artifact", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-collect-"));
     const output = path.join(root, "model-one");
@@ -786,6 +810,7 @@ describe("Modal worker identity", () => {
 
   it("makes the compiled source tree readable by the non-root worker", () => {
     expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
   it("stages as root and executes the worker as the non-root image user", () => {
@@ -801,12 +826,23 @@ describe("Modal worker identity", () => {
     expect(command).toContain("if (( SECONDS >= staging_deadline ))");
     expect(command.match(/wait_for_staged_input '\/run\//gu)).toHaveLength(4);
     expect(() => execFileSync("bash", ["-n", "-c", command])).not.toThrow();
+
+    const kimi = modalWorkerEntrypointCommand("kimi");
+    expect(kimi).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/kimi'");
+    expect(kimi).toContain("wait_for_staged_input '/run/ultrafuzz-auth/kimi/config.toml'");
+    expect(kimi).not.toContain("/run/ultrafuzz-auth/claude/.credentials.json");
+    expect(() => execFileSync("bash", ["-n", "-c", kimi])).not.toThrow();
   });
 
   it("publishes worker readiness only after launch state and all staged inputs are durable", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-staging-"));
     const configPath = path.join(root, "benchmark.json");
     const statePath = path.join(root, "launch-state.json");
+    const kimiAuthRoot = path.join(root, "kimi-code");
+    fs.mkdirSync(path.join(kimiAuthRoot, "credentials"), { recursive: true });
+    fs.writeFileSync(path.join(kimiAuthRoot, "config.toml"), '[providers."managed:kimi-code"]\n');
+    fs.writeFileSync(path.join(kimiAuthRoot, "credentials", "kimi-code.json"), "{}\n");
+    fs.writeFileSync(path.join(kimiAuthRoot, "device_id"), "device-one\n");
     fs.writeFileSync(configPath, "{}\n", { mode: 0o600 });
     const state = createModalLaunchState({
       logicalRunId: "logical-run",
@@ -831,19 +867,19 @@ describe("Modal worker identity", () => {
     markModalSandboxCreated(record, "sandbox-one");
     await writeModalLaunchState(statePath, state);
 
-    const copied: string[] = [];
+    const copied: Array<{ localPath: string; remotePath: string }> = [];
     let readinessObservedDurableState = false;
     const sandbox = {
       filesystem: {
         readText: vi.fn(async () => {
           throw new SandboxFilesystemNotFoundError("missing");
         }),
-        copyFromLocal: vi.fn(async (_localPath: string, remotePath: string) => {
+        copyFromLocal: vi.fn(async (localPath: string, remotePath: string) => {
           if (remotePath === REMOTE_LAUNCH_READY_PATH) {
             const persisted = await readModalLaunchState(statePath);
             readinessObservedDurableState = persisted?.launches[0]?.phase === "launched";
           }
-          copied.push(remotePath);
+          copied.push({ localPath, remotePath });
         })
       },
       exec: vi.fn(async () => ({
@@ -855,9 +891,43 @@ describe("Modal worker identity", () => {
       detach: vi.fn()
     } as unknown as Sandbox;
 
-    await finishReservedModalLaunch({ configPath, statePath, state }, record, sandbox);
+    await finishReservedModalLaunch(
+      {
+        configPath,
+        statePath,
+        state,
+        auth: {
+          source: kimiAuthRoot,
+          destination: remoteAuthPath("kimi"),
+          entries: [
+            {
+              source: path.join(kimiAuthRoot, "config.toml"),
+              destination: "/run/ultrafuzz-auth/kimi/config.toml"
+            },
+            {
+              source: path.join(kimiAuthRoot, "credentials", "kimi-code.json"),
+              destination: "/run/ultrafuzz-auth/kimi/credentials/kimi-code.json"
+            },
+            {
+              source: path.join(kimiAuthRoot, "device_id"),
+              destination: "/run/ultrafuzz-auth/kimi/device_id"
+            }
+          ]
+        }
+      },
+      record,
+      sandbox
+    );
 
-    expect(copied).toEqual([REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH, REMOTE_LAUNCH_READY_PATH]);
+    expect(copied.map((entry) => entry.remotePath)).toEqual([
+      REMOTE_CONFIG_PATH,
+      REMOTE_LINEAGE_PATH,
+      "/run/ultrafuzz-auth/kimi/config.toml",
+      "/run/ultrafuzz-auth/kimi/credentials/kimi-code.json",
+      "/run/ultrafuzz-auth/kimi/device_id",
+      REMOTE_LAUNCH_READY_PATH
+    ]);
+    expect(copied.some((entry) => entry.localPath === path.join(kimiAuthRoot, "credentials"))).toBe(false);
     expect(readinessObservedDurableState).toBe(true);
     expect((await readModalLaunchState(statePath))?.launches[0]?.phase).toBe("launched");
     expect(sandbox.detach).toHaveBeenCalledTimes(1);

@@ -12,6 +12,7 @@ export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: numbe
   const selectedProfile = modelProfileToml(model);
   const codex = agentToml(model, "CodexAgent", "openai");
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
+  const kimi = agentToml(model, "KimiAgent", "kimi");
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
 
@@ -38,6 +39,8 @@ ${selectedProfile}
 ${codex}
 
 ${claude}
+
+${kimi}
 
 [permissions]
 trust_model = "skip-permissions"
@@ -79,11 +82,15 @@ function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"]
   const selected = selectedModel.agent === agent;
   const auth = selected ? selectedModel.auth_mode : "subscription";
   if (auth === "api-key") {
-    return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(
-      provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"
-    )}`;
+    return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
   return `[agents.${agent}]\nauth = "subscription"\nconfig_dir = ${tomlString(remoteAuthDir(provider))}`;
+}
+
+function apiKeyEnv(provider: ModelProvider): string {
+  if (provider === "openai") return "OPENAI_API_KEY";
+  if (provider === "anthropic") return "ANTHROPIC_API_KEY";
+  return "KIMI_API_KEY";
 }
 
 function tomlString(value: string): string {

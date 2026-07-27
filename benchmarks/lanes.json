@@ -39,6 +39,12 @@
         "agent": "ClaudeAgent",
         "model": "claude-sonnet-5",
         "reasoning": "high"
+      },
+      {
+        "id": "benchmark-full-kimi-k3-max",
+        "agent": "KimiAgent",
+        "model": "kimi-k3",
+        "reasoning": "max"
       }
     ],
     "judge_profile": {

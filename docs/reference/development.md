@@ -2,6 +2,11 @@
 
 Ultrafuzz is a TypeScript workspace managed with `pnpm`.
 
+The supported host runtime is Node.js `22.19` or newer. This satisfies the
+pinned pnpm 11 toolchain, Smithers 0.29.0's Node 22 declaration, and the exact
+Kimi Code 0.29.1 CLI used by the adapter contract tests. Smithers' executable
+and those contract tests run with Bun 1.3+. The Modal image uses Node.js 22.23.
+
 ## Workspace Checks
 
 ```bash
@@ -68,6 +73,7 @@ script. It must be selected explicitly, once per provider:
 ```bash
 pnpm --filter @ultrafuzz/modal smoke -- --provider openai
 pnpm --filter @ultrafuzz/modal smoke -- --provider anthropic
+pnpm --filter @ultrafuzz/modal smoke -- --provider kimi
 ```
 
 Do not add the smoke to `test`, gate it on an environment variable, or replace

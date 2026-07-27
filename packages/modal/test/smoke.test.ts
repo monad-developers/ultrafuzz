@@ -82,7 +82,8 @@ describe("Modal smoke orchestration", () => {
 describe("provider-isolated smoke entrypoints", () => {
   it.each([
     ["openai", "anthropic"],
-    ["anthropic", "openai"]
+    ["anthropic", "openai"],
+    ["kimi", "openai"]
   ] as const)("stages only %s subscription auth", (selected, unselected) => {
     const fresh = modalSmokeEntrypointCommand(selected, "fresh");
     const resume = modalSmokeEntrypointCommand(selected, "resume");
