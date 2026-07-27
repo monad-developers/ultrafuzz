@@ -127,7 +127,6 @@ function sourceUsesPinnedBranch(): boolean {
     return false;
   }
 }
-
 function readCloudExecutionGeneration(): string {
   const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
   if (runRoot === undefined) return "base";
@@ -397,8 +396,8 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
     throw new Error(`source-isolation failure: final worktree ${task.attemptId} is not pinned`);
   }
 
-  const proofRoot = path.resolve(process.cwd(), task.runRoot, "source-proofs");
-  const runRoot = realpathSync(path.resolve(process.cwd(), task.runRoot));
+  const runRoot = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir, "..", ".."));
+  const proofRoot = path.resolve(runRoot, "source-proofs");
   if (!isStrictlyInsideDirectory(runRoot, proofRoot)) {
     throw new Error(`source-isolation failure: unsafe proof root ${task.attemptId}`);
   }

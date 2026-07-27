@@ -72,6 +72,8 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /git\(\["remote"\]\)/u);
   assert.match(source, /source-isolation failure/u);
   assert.match(source, /"source-proofs"/u);
+  assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
+  assert.doesNotMatch(source.slice(proofStart, workflowStart), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
 });
 
