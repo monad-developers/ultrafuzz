@@ -374,7 +374,7 @@ describe("public Modal benchmark configuration", () => {
       >;
     };
     expect(Object.hasOwn(workflow.on, "push")).toBe(true);
-    expect(workflow.on.push.branches).toEqual(["**"]);
+    expect(workflow.on.push.branches).toEqual(["main"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
@@ -866,7 +866,7 @@ describe("public Modal benchmark configuration", () => {
     const producer = parse(fs.readFileSync(path.join(workspace, ".github/workflows/eval-benchmarks.yml"), "utf8")) as {
       on: { push: { branches: string[]; "paths-ignore": string[] } };
     };
-    expect(producer.on.push.branches).toEqual(["**"]);
+    expect(producer.on.push.branches).toEqual(["main"]);
     expect(producer.on.push["paths-ignore"]).toEqual(["benchmarks/history.json", "docs/assets/eval-history/**"]);
 
     const publisher = fs.readFileSync(path.join(workspace, "scripts/ci/publish-eval-history-cas.mjs"), "utf8");
