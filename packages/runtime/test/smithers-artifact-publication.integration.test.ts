@@ -47,12 +47,7 @@ test("verified ignored artifacts survive a real successful Smithers worktree rea
       ["up", workflowPath, "--detach", "--run-id", runId, "--root", root, "--input", "{}", "--format", "json"],
       {
         cwd: root,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          SMITHERS_KEEP_WORKTREES: "",
-          SMITHERS_POST_FAILURE: "0"
-        }
+        encoding: "utf8"
       }
     );
 
