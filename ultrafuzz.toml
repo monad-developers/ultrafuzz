@@ -41,6 +41,14 @@ reasoning = "xhigh"
 agent = "ClaudeAgent"
 model = "claude-opus-4-8"
 
+# Opt-in Kimi profile. Select it per node/group in .ultrafuzz/topology.yml
+# (model_profiles = ["kimi"]), or for a one-off run with `--agent KimiAgent`.
+# `kimi-k3` is a local Kimi Code alias for model k3 at max effort.
+[models.kimi]
+agent = "KimiAgent"
+model = "kimi-k3"
+reasoning = "max"
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
@@ -54,6 +62,13 @@ api_key_env = "OPENAI_API_KEY"
 # Per permissions.trust_model below, this agent runs with Claude Code's permission
 # checks bypassed, so tasks get unattended filesystem and shell access inside their
 # worktree. That is set in .smithers/agents/claude.ts, not here.
+auth = "subscription"
+
+[agents.KimiAgent]
+# "subscription" uses your logged-in Kimi Code CLI from KIMI_CODE_HOME or
+# ~/.kimi-code. Switch to "api-key" to bill against a Kimi/Moonshot-compatible
+# API key instead (reads KIMI_API_KEY unless api_key_env names another variable,
+# such as MOONSHOT_API_KEY).
 auth = "subscription"
 
 [permissions]

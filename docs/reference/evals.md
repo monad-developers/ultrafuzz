@@ -193,15 +193,15 @@ strategies cover time, external dependencies, externalized accounting, and
 lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled
 strategy families. The full lane selects every checked-in EVMBench target, pins
-GPT-5.6 Luna `high` plus Claude Sonnet 5 `high`, sets the same one strategy loop,
-and explicitly leaves all three disable flags off so the complete topology is
-included. Both default to one trial per variant and use GPT-5.6 Sol `xhigh` as
-an independent judge. Public Modal pairs contain one runner variant. Repository
-variables may override the smoke OpenAI model and reasoning level, while full
-workflow dispatch inputs may override either runner. These overrides retain
-the lane's fixed provider count, target selection, and topology. Publication
-validates every pair as an exact projection of the candidate commit's trusted
-lane policy before merging its observations.
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max`, sets the same
+one strategy loop, and explicitly leaves all three disable flags off so the
+complete topology is included. Both default to one trial per variant and use
+GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
+runner variant. Repository variables may override the smoke OpenAI model and
+reasoning level, while full workflow dispatch inputs may override any full-lane
+runner. These overrides retain the lane's fixed provider count, target
+selection, and topology. Publication validates every pair as an exact projection
+of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for
 every target row. The smoke workflow profile and selected strategy IDs are part
 of the execution-policy fingerprint, so its charts cannot mix with full or

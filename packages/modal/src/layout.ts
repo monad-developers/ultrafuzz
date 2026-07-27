@@ -34,9 +34,13 @@ export function resolvePersistentRemoteRoot(remoteRoot: string, resolvedMountRoo
 }
 
 export function remoteAuthDir(provider: ModelProvider): string {
-  return provider === "openai" ? "/run/ultrafuzz-auth/codex" : "/run/ultrafuzz-auth/claude";
+  if (provider === "openai") return "/run/ultrafuzz-auth/codex";
+  if (provider === "anthropic") return "/run/ultrafuzz-auth/claude";
+  return "/run/ultrafuzz-auth/kimi";
 }
 
 export function remoteAuthPath(provider: ModelProvider): string {
-  return path.posix.join(remoteAuthDir(provider), provider === "openai" ? "auth.json" : ".credentials.json");
+  if (provider === "openai") return path.posix.join(remoteAuthDir(provider), "auth.json");
+  if (provider === "anthropic") return path.posix.join(remoteAuthDir(provider), ".credentials.json");
+  return path.posix.join(remoteAuthDir(provider), "config.toml");
 }

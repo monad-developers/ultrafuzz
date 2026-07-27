@@ -12,6 +12,7 @@ packages:
   - "packages/modal"
   - "packages/cli"
 allowBuilds:
+  "@moonshot-ai/kimi-code": false
   "@parcel/watcher": false
   "@smithers-orchestrator/jj-linux-arm64": false
   "@smithers-orchestrator/jj-linux-x64": false
@@ -19,4 +20,5 @@ allowBuilds:
   esbuild: true
   koffi: false
   msgpackr-extract: false
+  node-pty: false
   protobufjs: true

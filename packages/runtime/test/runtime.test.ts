@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
+import * as ts from "typescript";
 
 import type { RunState } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
@@ -34,8 +36,69 @@ import {
   validateProject
 } from "../src/index.js";
 
+const runningUnderBun = typeof process.versions.bun === "string";
+
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+}
+
+async function loadGeneratedKimiAgent(project: string): Promise<{
+  KimiCode029Agent: new (options: Record<string, unknown>) => {
+    issuedSessionId?: string;
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      args: string[];
+      env?: Record<string, string>;
+      cleanup?: () => Promise<void>;
+      benignStderrPatterns: RegExp[];
+    }>;
+    createOutputInterpreter(): {
+      onStdoutLine?: (line: string) => unknown;
+      onStderrLine?: (line: string) => unknown;
+      onExit?: (result: unknown) => unknown;
+    };
+  };
+}> {
+  const fixture = path.join(project, "kimi-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const kimiSource = fs
+    .readFileSync(path.join(agentsDir, "kimi.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"');
+  fs.writeFileSync(path.join(fixture, "kimi.mjs"), transpile(kimiSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  const kimiModule = (await import(pathToFileURL(path.join(fixture, "kimi.mjs")).href)) as {
+    KimiCode029Agent: new (options: Record<string, unknown>) => {
+      issuedSessionId?: string;
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        args: string[];
+        env?: Record<string, string>;
+        cleanup?: () => Promise<void>;
+        benignStderrPatterns: RegExp[];
+      }>;
+      createOutputInterpreter(): {
+        onStdoutLine?: (line: string) => unknown;
+        onStderrLine?: (line: string) => unknown;
+        onExit?: (result: unknown) => unknown;
+      };
+    };
+  };
+  return { KimiCode029Agent: kimiModule.KimiCode029Agent };
 }
 
 function shellQuote(value: string): string {
@@ -708,7 +771,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], "0.28.0");
+  assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -732,14 +795,17 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
+  assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|Kimi)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -758,6 +824,25 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(claudeAgentText, /function readStringTable/);
   assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
+  const kimiAgentText = fs.readFileSync(path.join(project, ".smithers/agents/kimi.ts"), "utf8");
+  assert.match(kimiAgentText, /KimiAgent/);
+  assert.match(kimiAgentText, /createKimiAgent/);
+  assert.match(kimiAgentText, /KIMI_API_KEY/);
+  assert.match(kimiAgentText, /MOONSHOT_API_KEY/);
+  assert.match(kimiAgentText, /KIMI_CODE_HOME/);
+  assert.match(kimiAgentText, /KIMI_SHARE_DIR/);
+  assert.match(kimiAgentText, /--add-dir/);
+  assert.match(kimiAgentText, /--prompt/);
+  assert.match(kimiAgentText, /--output-format/);
+  assert.match(kimiAgentText, /configDir/);
+  assert.doesNotMatch(kimiAgentText, /=\s*createKimiAgent\(\)/);
+  assert.doesNotMatch(kimiAgentText, /--yolo/);
+  assert.doesNotMatch(kimiAgentText, /--auto/);
+  assert.doesNotMatch(kimiAgentText, /--print/);
+  assert.doesNotMatch(kimiAgentText, /--work-dir/);
+  assert.doesNotMatch(kimiAgentText, /--thinking/);
+  assert.doesNotMatch(kimiAgentText, /--no-thinking/);
+  assert.doesNotMatch(kimiAgentText, /final-message-only/);
 
   const validate = await validateProject({ projectRoot: project, env: {} });
   assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
@@ -768,6 +853,335 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
+
+test(
+  "generated Kimi adapter narrows the pinned Smithers 0.29.0 command to Kimi Code 0.29.1",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = path.join(project, "kimi-source");
+    fs.mkdirSync(path.join(sourceConfig, "credentials"), { recursive: true });
+    fs.writeFileSync(
+      path.join(sourceConfig, "config.toml"),
+      `default_model = "kimi-k3"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+oauth = { storage = "file", key = "oauth/kimi-code" }
+
+[models.kimi-k3]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+support_efforts = [ "low", "high", "max" ]
+default_effort = "high"
+`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(sourceConfig, "credentials", "kimi-code.json"),
+      JSON.stringify({
+        access_token: "fresh-token",
+        refresh_token: "refresh-token",
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        expires_in: 3600
+      }),
+      "utf8"
+    );
+    fs.writeFileSync(path.join(sourceConfig, "device_id"), "test-device\n", "utf8");
+    fs.writeFileSync(path.join(sourceConfig, "session_index.jsonl"), '{"unrelated":true}\n', "utf8");
+    fs.mkdirSync(path.join(sourceConfig, "sessions"));
+    fs.writeFileSync(path.join(sourceConfig, "sessions", "unrelated.json"), "{}\n", "utf8");
+
+    const options = {
+      model: "kimi-k3",
+      configDir: sourceConfig,
+      ultrafuzzAuthMode: "subscription",
+      ultrafuzzReasoningEffort: "max",
+      extraArgs: ["--add-dir", "/workspace/extra"]
+    };
+
+    const smithersModule = (await import(
+      pathToFileURL(
+        fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+      ).href
+    )) as {
+      KimiAgent: new (options: Record<string, unknown>) => {
+        buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+          args: string[];
+          cleanup?: () => Promise<void>;
+        }>;
+      };
+    };
+    const pinnedBase = new smithersModule.KimiAgent(options);
+    const pinnedCommand = await pinnedBase.buildCommand({
+      prompt: "Pinned Smithers contract",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.29.0");
+    assert.ok(pinnedCommand.args.includes("--final-message-only"));
+    assert.ok(pinnedCommand.args.includes("--print"));
+    assert.ok(pinnedCommand.args.includes("--work-dir"));
+    assert.ok(pinnedCommand.args.includes("--thinking"));
+    assert.ok(pinnedCommand.args.includes("--session"));
+    await pinnedCommand.cleanup?.();
+
+    const agents = [new KimiCode029Agent(options), new KimiCode029Agent(options)];
+    const commands = await Promise.all(
+      agents.map((agent) => agent.buildCommand({ prompt: "Return the result", cwd: "/workspace/target", options: {} }))
+    );
+
+    const isolatedDirs = commands.map((command) => command.env?.KIMI_SHARE_DIR);
+    assert.ok(isolatedDirs.every((directory): directory is string => typeof directory === "string"));
+    assert.notEqual(isolatedDirs[0], isolatedDirs[1]);
+
+    for (const command of commands) {
+      assert.deepEqual(command.args, [
+        "--output-format",
+        "text",
+        "--model",
+        "kimi-k3",
+        "--add-dir",
+        "/workspace/extra",
+        "--prompt",
+        "Return the result"
+      ]);
+      assert.equal(command.args.includes("--session"), false);
+      assert.equal(command.env?.KIMI_CODE_HOME, command.env?.KIMI_SHARE_DIR);
+      const isolated = command.env?.KIMI_SHARE_DIR;
+      assert.ok(isolated);
+      assert.match(fs.readFileSync(path.join(isolated, "config.toml"), "utf8"), /default_effort = "max"/u);
+      assert.equal(fs.readFileSync(path.join(isolated, "device_id"), "utf8"), "test-device\n");
+      const isolatedCredentials = JSON.parse(
+        fs.readFileSync(path.join(isolated, "credentials", "kimi-code.json"), "utf8")
+      ) as { access_token?: string };
+      assert.equal(isolatedCredentials.access_token, "fresh-token");
+      assert.equal(fs.existsSync(path.join(isolated, "session_index.jsonl")), false);
+      assert.equal(fs.existsSync(path.join(isolated, "sessions")), false);
+      assert.ok(
+        command.benignStderrPatterns.some((pattern) => pattern.test("To resume this session: kimi -r session-1234"))
+      );
+    }
+
+    const resumeSession = "00000000-0000-0000-0000-000000000105";
+    const resumed = await new KimiCode029Agent(options).buildCommand({
+      prompt: "Resume",
+      cwd: "/workspace/target",
+      options: { resumeSession }
+    });
+    // Assert the full resume argv so the contract also locks the ABSENCE of a
+    // conflicting --continue: a real resume must carry only the specific
+    // --session, never continue-latest alongside it.
+    assert.deepEqual(resumed.args, [
+      "--output-format",
+      "text",
+      "--session",
+      resumeSession,
+      "--model",
+      "kimi-k3",
+      "--add-dir",
+      "/workspace/extra",
+      "--prompt",
+      "Resume"
+    ]);
+    assert.ok(!resumed.args.includes("--continue"));
+
+    const recoverable = new KimiCode029Agent(options);
+    const recoveryCommand = await recoverable.buildCommand({
+      prompt: "Recover",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    assert.ok(recoveryCommand.env?.KIMI_CODE_HOME);
+    const cliSession = "00000000-0000-0000-0000-000000000106";
+    const recoveryBucket = "wd_target_000000000106";
+    const recoverySessionDir = path.join(recoveryCommand.env.KIMI_CODE_HOME, "sessions", recoveryBucket, cliSession);
+    fs.mkdirSync(path.join(recoverySessionDir, "agents", "main"), { recursive: true });
+    fs.writeFileSync(
+      path.join(recoverySessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: {
+            homedir: path.join(recoverySessionDir, "agents", "main"),
+            type: "agent",
+            parentAgentId: null
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(recoveryCommand.env.KIMI_CODE_HOME, "session_index.jsonl"),
+      `${JSON.stringify({
+        sessionId: cliSession,
+        sessionDir: recoverySessionDir,
+        workDir: "/workspace/target"
+      })}\n`,
+      "utf8"
+    );
+    const interpreter = recoverable.createOutputInterpreter();
+    const completed = interpreter.onExit?.({
+      command: "kimi",
+      args: recoveryCommand.args,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false
+    }) as Array<{ type?: string; resume?: string }>;
+    assert.equal(completed.find((event) => event.type === "completed")?.resume, cliSession);
+    await recoveryCommand.cleanup?.();
+
+    const persistedSessionDir = path.join(sourceConfig, "sessions", recoveryBucket, cliSession);
+    assert.equal(fs.existsSync(path.join(persistedSessionDir, "state.json")), true);
+    const persistedState = JSON.parse(fs.readFileSync(path.join(persistedSessionDir, "state.json"), "utf8")) as {
+      agents?: { main?: { homedir?: string } };
+    };
+    assert.equal(persistedState.agents?.main?.homedir, path.join(persistedSessionDir, "agents", "main"));
+
+    const resumedCaptured = await new KimiCode029Agent(options).buildCommand({
+      prompt: "Resume captured",
+      cwd: "/workspace/target",
+      options: { resumeSession: cliSession }
+    });
+    assert.ok(resumedCaptured.env?.KIMI_CODE_HOME);
+    assert.deepEqual(resumedCaptured.args, [
+      "--output-format",
+      "text",
+      "--session",
+      cliSession,
+      "--model",
+      "kimi-k3",
+      "--add-dir",
+      "/workspace/extra",
+      "--prompt",
+      "Resume captured"
+    ]);
+    const resumedSessionDir = path.join(resumedCaptured.env.KIMI_CODE_HOME, "sessions", recoveryBucket, cliSession);
+    assert.equal(fs.existsSync(path.join(resumedSessionDir, "state.json")), true);
+    const resumedState = JSON.parse(fs.readFileSync(path.join(resumedSessionDir, "state.json"), "utf8")) as {
+      agents?: { main?: { homedir?: string } };
+    };
+    assert.equal(resumedState.agents?.main?.homedir, path.join(resumedSessionDir, "agents", "main"));
+
+    await Promise.all(commands.map(async (command) => command.cleanup?.()));
+    await resumed.cleanup?.();
+    await resumedCaptured.cleanup?.();
+    assert.ok(isolatedDirs.every((directory) => !fs.existsSync(directory)));
+
+    const apiKeyAgent = new KimiCode029Agent({
+      model: "kimi-k3",
+      ultrafuzzAuthMode: "api-key",
+      ultrafuzzReasoningEffort: "low",
+      apiKey: "test-key"
+    });
+    const apiKeyCommand = await apiKeyAgent.buildCommand({
+      prompt: "API key smoke",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    const apiKeyConfigDir = apiKeyCommand.env?.KIMI_SHARE_DIR;
+    assert.ok(apiKeyConfigDir);
+    assert.equal(apiKeyCommand.env?.KIMI_CODE_HOME, apiKeyConfigDir);
+    const apiKeyConfig = fs.readFileSync(path.join(apiKeyConfigDir, "config.toml"), "utf8");
+    assert.match(apiKeyConfig, /default_model = "kimi-k3"/);
+    assert.match(apiKeyConfig, /\[providers\."ultrafuzz-kimi-api"\]\ntype = "kimi"\napi_key = "test-key"/);
+    assert.match(apiKeyConfig, /base_url = "https:\/\/api\.moonshot\.ai\/v1"/);
+    assert.match(apiKeyConfig, /\[models\."kimi-k3"\]/);
+    assert.match(apiKeyConfig, /model = "k3"/);
+    assert.match(apiKeyConfig, /default_effort = "low"/);
+    assert.equal(fs.existsSync(path.join(apiKeyConfigDir, "credentials")), false);
+    assert.equal(fs.existsSync(path.join(apiKeyConfigDir, "device_id")), false);
+    await apiKeyCommand.cleanup?.();
+    assert.equal(fs.existsSync(apiKeyConfigDir), false);
+
+    await assert.rejects(
+      new KimiCode029Agent({
+        ...options,
+        ultrafuzzReasoningEffort: "xhigh"
+      }).buildCommand({
+        prompt: "Unsupported effort",
+        cwd: "/workspace/target",
+        options: {}
+      }),
+      /reasoning/u
+    );
+  }
+);
+
+const localKimiCode =
+  process.env.ULTRAFUZZ_KIMI_BIN ??
+  fs.realpathSync(path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs"));
+test(
+  "generated Kimi API config and argv match the real Kimi Code 0.29.1 surface",
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  async () => {
+    assert.equal(execFileSync(localKimiCode, ["--version"], { encoding: "utf8" }).trim(), "0.29.1");
+    const help = execFileSync(localKimiCode, ["--help"], { encoding: "utf8" });
+    for (const option of ["--session", "--continue", "--model", "--prompt", "--output-format", "--add-dir", "--yolo"]) {
+      assert.match(help, new RegExp(option, "u"));
+    }
+    assert.doesNotMatch(help, /--final-message-only/u);
+    assert.doesNotMatch(help, /--print/u);
+    assert.doesNotMatch(help, /--work-dir/u);
+    assert.doesNotMatch(help, /--thinking/u);
+
+    const project = tempProject();
+    assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const previousBaseUrl = process.env.KIMI_BASE_URL;
+    process.env.KIMI_BASE_URL = "https://127.0.0.1:9/v1";
+    let command: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>>;
+    try {
+      command = await new KimiCode029Agent({
+        model: "kimi-k3",
+        ultrafuzzAuthMode: "api-key",
+        ultrafuzzReasoningEffort: "max",
+        apiKey: "contract-test-key"
+      }).buildCommand({
+        prompt: "Contract only",
+        cwd: project,
+        options: {}
+      });
+    } finally {
+      if (previousBaseUrl === undefined) delete process.env.KIMI_BASE_URL;
+      else process.env.KIMI_BASE_URL = previousBaseUrl;
+    }
+    assert.ok(command.env?.KIMI_CODE_HOME);
+    execFileSync(localKimiCode, ["doctor", "config", path.join(command.env.KIMI_CODE_HOME, "config.toml")], {
+      encoding: "utf8"
+    });
+    const parserArgs = [...command.args];
+    const modelIndex = parserArgs.indexOf("--model");
+    assert.notEqual(modelIndex, -1);
+    parserArgs[modelIndex + 1] = "missing-model-for-contract";
+    const parsed = spawnSync(localKimiCode, parserArgs, {
+      cwd: project,
+      env: {
+        ...process.env,
+        KIMI_CODE_HOME: command.env.KIMI_CODE_HOME,
+        KIMI_SHARE_DIR: command.env.KIMI_CODE_HOME,
+        NO_PROXY: "127.0.0.1,localhost"
+      },
+      encoding: "utf8",
+      timeout: 5_000
+    });
+    assert.equal(parsed.error, undefined);
+    assert.notEqual(parsed.status, 0);
+    assert.match(`${parsed.stdout}\n${parsed.stderr}`, /not configured|config\.invalid/u);
+    assert.doesNotMatch(
+      `${parsed.stdout}\n${parsed.stderr}`,
+      /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
+    );
+    await command.cleanup?.();
+  }
+);
 
 test("validate rejects unknown agent references before launch", async () => {
   const project = tempProject();
@@ -792,6 +1206,31 @@ test("validate rejects unknown agent references before launch", async () => {
   });
   assert.equal(run.ok, false);
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
+});
+
+test("validate ignores unused opt-in model profiles in older agent registries", async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  writeSmallTopology(project);
+  fs.writeFileSync(
+    path.join(project, ".smithers/agents/index.ts"),
+    'export { createCodexAgent } from "./codex";\n' +
+      "export const agentFactories = { CodexAgent: createCodexAgent };\n",
+    "utf8"
+  );
+
+  const validate = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(validate.ok, true, JSON.stringify(validate.diagnostics));
+
+  const kimiRun = await startRun({
+    projectRoot: project,
+    runId: "missing-kimi-agent",
+    agent: "KimiAgent",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(kimiRun.ok, false);
+  assert.ok(kimiRun.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_REFERENCE_UNKNOWN"));
 });
 
 test("init and run layout reject symlinked project-owned roots before writes", async () => {
@@ -1271,7 +1710,7 @@ test("init reports an agent registry that does not export a generated agent", as
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  // Simulate a project scaffolded before ClaudeAgent existed: the registry
+  // Simulate a project scaffolded before ClaudeAgent and KimiAgent existed: the registry
   // predates the adapter, and init preserves project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
@@ -1285,9 +1724,10 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 1, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 2, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
-  assert.match(stale[0]?.message ?? "", /ClaudeAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
 
   // A registry that names the agent without registering its factory is still
   // stale: nothing resolves it, since generated adapters export only factories.
@@ -1301,8 +1741,9 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 1, JSON.stringify(named.diagnostics));
-  assert.match(namedStale[0]?.message ?? "", /ClaudeAgent/);
+  assert.equal(namedStale.length, 2, JSON.stringify(named.diagnostics));
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
 
   // A registry that exports every generated agent stays quiet.
   const regenerated = initProject({ projectRoot: project, force: true });
@@ -1922,10 +2363,10 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
   };
-  manifest.dependencies["smithers-orchestrator"] = "0.27.0";
+  manifest.dependencies["smithers-orchestrator"] = "0.28.0";
   manifest.dependencies["custom-agent-package"] = "1.2.3";
   fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeFakeInstalledSmithers(project, { version: "0.27.0" });
+  writeFakeInstalledSmithers(project, { version: "0.28.0" });
   const installer = writeFakeNpmInstaller(project);
 
   const run = await startRun({
@@ -1941,7 +2382,7 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
   const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
     dependencies: Record<string, string>;
   };
-  assert.equal(migrated.dependencies["smithers-orchestrator"], "0.28.0");
+  assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
 });
@@ -2010,7 +2451,7 @@ test("generated workflow dependencies require exact runner versions while allowi
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
       dependencies: {
-        "smithers-orchestrator": "0.28.0",
+        "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
         zod: "4.4.3",
         "custom-agent-package": "1.2.3"
       },
@@ -5650,7 +6091,7 @@ test(
       operatorPrompt: "graph smoke"
     });
 
-    const graphJson = execFileSync(
+    const graphProcess = spawnSync(
       "smithers",
       [
         "graph",
@@ -5667,6 +6108,10 @@ test(
       ],
       { cwd: project, encoding: "utf8", maxBuffer: 1024 * 1024 * 16 }
     );
+    if (graphProcess.status !== 0 || graphProcess.stdout.trim() === "") {
+      throw graphProcess.error ?? new Error(graphProcess.stderr || "smithers graph failed");
+    }
+    const graphJson = graphProcess.stdout;
     const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };
     assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
     assert.equal(

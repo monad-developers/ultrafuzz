@@ -22,7 +22,7 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
-  it("defaults to the six benchmark models and one loop", () => {
+  it("defaults to the seven benchmark models and one loop", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 
     expect(config.loops).toBe(1);
@@ -33,7 +33,8 @@ describe("Modal benchmark config", () => {
       "gpt-5.6-terra",
       "gpt-5.6-luna",
       "claude-fable-5",
-      "claude-opus-4-8"
+      "claude-opus-4-8",
+      "kimi-k3"
     ]);
   });
 
@@ -60,6 +61,49 @@ describe("Modal benchmark config", () => {
         models: [{ ...DEFAULT_BENCHMARK_MODELS[0], agent: "ClaudeAgent" }]
       })
     ).toThrow(/provider and agent/u);
+  });
+
+  it("accepts Kimi K3 model configs with the Kimi agent", () => {
+    const config = parseModalBenchmarkConfig({
+      ...minimalConfig(),
+      models: [
+        {
+          slug: "kimi-k3",
+          model: "kimi-k3",
+          provider: "kimi",
+          agent: "KimiAgent",
+          reasoning: "max",
+          auth_mode: "subscription"
+        }
+      ]
+    });
+
+    expect(config.models[0]).toEqual({
+      slug: "kimi-k3",
+      model: "kimi-k3",
+      provider: "kimi",
+      agent: "KimiAgent",
+      reasoning: "max",
+      auth_mode: "subscription"
+    });
+  });
+
+  it("rejects Kimi reasoning values that Kimi Code 0.29.1 cannot execute", () => {
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        models: [
+          {
+            slug: "kimi-k3",
+            model: "kimi-k3",
+            provider: "kimi",
+            agent: "KimiAgent",
+            reasoning: "xhigh",
+            auth_mode: "api-key"
+          }
+        ]
+      })
+    ).toThrow(/Kimi reasoning must be low, high, or max/u);
   });
 
   it("accepts audit Markdown conversion and temporary judge credentials", () => {

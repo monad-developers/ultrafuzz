@@ -22,7 +22,13 @@ const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MODEL_KEYS = ["model", "provider", "reasoning"];
 const PROVIDER_AGENT = {
   openai: "CodexAgent",
-  anthropic: "ClaudeAgent"
+  anthropic: "ClaudeAgent",
+  kimi: "KimiAgent"
+};
+const AGENT_PROVIDER = {
+  CodexAgent: "openai",
+  ClaudeAgent: "anthropic",
+  KimiAgent: "kimi"
 };
 
 const [candidateCommit, repository, generation, outputDirectory, mode] = process.argv.slice(2);
@@ -161,7 +167,7 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   let requested;
   if (configured === undefined || configured === "") {
     requested = checkedInProfiles.map((profile) => ({
-      provider: profile.agent === "CodexAgent" ? "openai" : "anthropic",
+      provider: providerForAgent(profile.agent),
       model: profile.model,
       reasoning: profile.reasoning
     }));
@@ -174,7 +180,7 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   }
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
-  const expectedProviders = benchmarkMode === "smoke" ? ["openai"] : ["openai", "anthropic"];
+  const expectedProviders = benchmarkMode === "smoke" ? ["openai"] : ["openai", "anthropic", "kimi"];
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
   const providers = validated.map((entry) => entry.provider);
   if (
@@ -224,7 +230,7 @@ function validateModelEntry(entry, index) {
   if (JSON.stringify(keys) !== JSON.stringify(MODEL_KEYS)) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}] must contain only model, provider, and reasoning`);
   }
-  if (entry.provider !== "openai" && entry.provider !== "anthropic") {
+  if (!(entry.provider in PROVIDER_AGENT)) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}].provider is invalid`);
   }
   if (typeof entry.model !== "string" || !SAFE_MODEL.test(entry.model) || /(?:^|[-_.:/])latest$/iu.test(entry.model)) {
@@ -233,7 +239,16 @@ function validateModelEntry(entry, index) {
   if (typeof entry.reasoning !== "string" || !SAFE_REASONING.test(entry.reasoning)) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}].reasoning is unsafe`);
   }
+  if (entry.provider === "kimi" && !["low", "high", "max"].includes(entry.reasoning)) {
+    throw new Error(`BENCHMARK_MODELS_JSON[${index}].reasoning is unsupported for Kimi`);
+  }
   return { provider: entry.provider, model: entry.model, reasoning: entry.reasoning };
+}
+
+function providerForAgent(agent) {
+  const provider = AGENT_PROVIDER[agent];
+  if (provider === undefined) throw new Error(`benchmark lane model profile agent is unsupported: ${agent}`);
+  return provider;
 }
 
 function boundedSafeId(value, identity, maxLength = 128) {

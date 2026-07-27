@@ -53,13 +53,14 @@ async function main(): Promise<void> {
 
 async function assertProviderAuth(selected: ModelProvider): Promise<void> {
   await access(remoteAuthPath(selected), constants.R_OK);
-  const other: ModelProvider = selected === "openai" ? "anthropic" : "openai";
-  try {
-    await access(remoteAuthPath(other), constants.F_OK);
-  } catch {
-    return;
+  for (const other of modelProviders().filter((provider) => provider !== selected)) {
+    try {
+      await access(remoteAuthPath(other), constants.F_OK);
+    } catch {
+      continue;
+    }
+    throw new Error("unselected provider auth was staged");
   }
-  throw new Error("unselected provider auth was staged");
 }
 
 async function completeUnitOnce(): Promise<boolean> {
@@ -102,8 +103,12 @@ async function flushWrites(): Promise<void> {
 
 function providerOption(argv: string[]): ModelProvider {
   const value = requiredOption(argv, "--provider");
-  if (value !== "openai" && value !== "anthropic") throw new Error("provider is invalid");
-  return value;
+  if (!modelProviders().includes(value as ModelProvider)) throw new Error("provider is invalid");
+  return value as ModelProvider;
+}
+
+function modelProviders(): ModelProvider[] {
+  return ["openai", "anthropic", "kimi"];
 }
 
 function phaseOption(argv: string[]): "fresh" | "resume" {

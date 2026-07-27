@@ -29,6 +29,16 @@ on:
         required: true
         default: high
         type: string
+      kimi_model:
+        description: Kimi runner model for the full EVMBench run
+        required: true
+        default: kimi-k3
+        type: string
+      kimi_reasoning:
+        description: Kimi runner reasoning effort for the full EVMBench run
+        required: true
+        default: max
+        type: string
 
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
@@ -82,10 +92,11 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
         run: |
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
-            required+=(ANTHROPIC_API_KEY)
+            required+=(ANTHROPIC_API_KEY KIMI_API_KEY)
           fi
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -100,6 +111,8 @@ jobs:
           BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || 'high' }}
           BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
+          BENCHMARK_KIMI_MODEL: ${{ inputs.kimi_model || 'kimi-k3' }}
+          BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
@@ -114,9 +127,12 @@ jobs:
               --arg openai_reasoning "$BENCHMARK_OPENAI_REASONING" \
               --arg anthropic_model "$BENCHMARK_ANTHROPIC_MODEL" \
               --arg anthropic_reasoning "$BENCHMARK_ANTHROPIC_REASONING" \
+              --arg kimi_model "$BENCHMARK_KIMI_MODEL" \
+              --arg kimi_reasoning "$BENCHMARK_KIMI_REASONING" \
               '[
                 {provider: "openai", model: $openai_model, reasoning: $openai_reasoning},
-                {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning}
+                {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning},
+                {provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}
               ]')"
           fi
           export BENCHMARK_MODELS_JSON
@@ -160,6 +176,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -256,6 +273,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
         run: |
           control_timeout_seconds="$(jq -er \
             '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
@@ -457,6 +475,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {
