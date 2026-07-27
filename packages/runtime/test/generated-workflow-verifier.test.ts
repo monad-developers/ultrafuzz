@@ -53,6 +53,28 @@ test("generated Smithers workflow prefers its relocatable task prompt path", () 
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
 });
 
+test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const proofStart = source.indexOf("function preservePinnedSourceProof");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(proofStart > preparationStart, source);
+  assert.ok(workflowStart > proofStart, source);
+  assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
+  assert.match(source, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/u);
+  assert.match(source, /if \(!usesPinnedSource\) return/u);
+  assert.match(source, /preservePinnedSourceProof\(task\)/u);
+  assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
+  assert.match(source, /git\(\["rev-parse", pinnedSourceRef\]\)/u);
+  assert.match(source, /git\(\["rev-list", "--all"\]\)/u);
+  assert.match(source, /git\(\["cat-file", "--batch-all-objects", "--batch-check=%\(objecttype\)"\]\)/u);
+  assert.match(source, /git\(\["remote"\]\)/u);
+  assert.match(source, /source-isolation failure/u);
+  assert.match(source, /"source-proofs"/u);
+  assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
+});
+
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
