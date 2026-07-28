@@ -122,6 +122,8 @@ function promptForTask(
   let prompt: string;
   if (typeof inputTask?.prompt === "string") {
     prompt = inputTask.prompt;
+  } else if (task.prompt.length > 0) {
+    prompt = task.prompt;
   } else {
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
     prompt = promptPath ? readFileSync(promptPath, "utf8") : "";

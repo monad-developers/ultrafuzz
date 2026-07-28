@@ -102,8 +102,7 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "queued",
   "waiting-approval",
   "waiting-event",
-  "waiting-timer",
-  "waiting-quota"
+  "waiting-timer"
 ]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
@@ -1679,6 +1678,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
+      prompt: task.renderedPromptPath === undefined ? "" : fs.readFileSync(task.renderedPromptPath, "utf8"),
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined

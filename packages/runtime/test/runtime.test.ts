@@ -2783,6 +2783,11 @@ ${`${marker} `.repeat(2000)}
   ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   assert.match(smithersInput.tasks?.[0]?.prompt_path ?? "", /prompt\.rendered\.md$/);
+  const workflowSource = fs.readFileSync(
+    path.join(project, ".smithers", "workflows", "ultrafuzz-compact-input-run.tsx"),
+    "utf8"
+  );
+  assert.match(workflowSource, new RegExp(marker));
 });
 
 test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
@@ -6717,8 +6722,7 @@ test("resume suppresses duplicate submissions for every active workflow run stat
     "retrying",
     "waiting-approval",
     "waiting-event",
-    "waiting-timer",
-    "waiting-quota"
+    "waiting-timer"
   ]) {
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
@@ -6742,6 +6746,31 @@ test("resume suppresses duplicate submissions for every active workflow run stat
     assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json/u);
     assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
   }
+});
+
+test("resume re-submits a quota-waiting workflow after credentials change", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-quota-resume-run",
+      status: "waiting-quota",
+      state: "waiting-quota",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "quota-resume-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: "quota-resume-run", env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-quota-resume-run --format json/u);
+  assert.match(commands, /^up .*--resume ultrafuzz-quota-resume-run/mu);
 });
 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
