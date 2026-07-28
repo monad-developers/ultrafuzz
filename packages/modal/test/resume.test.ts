@@ -47,6 +47,7 @@ describe("Modal durable evaluation resume", () => {
       "--project",
       "/workspace/target",
       "--force",
+      "--retry-failed",
       "--json"
     ]);
   });

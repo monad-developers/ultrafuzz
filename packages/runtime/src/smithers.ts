@@ -459,6 +459,7 @@ export async function runSmithersLifecycleCommand(input: {
   forkFrame?: number;
   resetNode?: string;
   force?: boolean;
+  retryFailed?: boolean;
   label?: string;
   resumeRecovery?: {
     runRoot: string;
@@ -536,6 +537,30 @@ export async function runSmithersLifecycleCommand(input: {
         command: inspection.command,
         alreadyRunning: true
       };
+    }
+    if (input.retryFailed === true && smithersSnapshotRunStateIsFailed(inspection)) {
+      const failedNodeId = smithersSnapshotFailedNodeIds(inspection)[0];
+      if (failedNodeId !== undefined) {
+        const retryResult = await execSmithersCli({
+          args: [
+            "retry-task",
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--node-id",
+            failedNodeId,
+            "--deps",
+            "--force",
+            "--format",
+            "json"
+          ],
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        });
+        return retryResult;
+      }
     }
   }
 
@@ -777,6 +802,39 @@ function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | u
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
   const state = smithersSnapshotRunState(snapshot);
   return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+}
+
+function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
+  const state = smithersSnapshotRunState(snapshot);
+  return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
+}
+
+function smithersSnapshotFailedNodeIds(snapshot: SmithersCommandSnapshot): string[] {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
+  const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
+  const failedNodeIds = new Set<string>();
+  for (const collection of collections) {
+    const entries = Array.isArray(collection)
+      ? collection
+      : isObjectRecord(collection)
+        ? Object.entries(collection).map(([id, value]) =>
+            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
+          )
+        : [];
+    for (const entry of entries) {
+      if (!isObjectRecord(entry)) continue;
+      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
+      const nodeId = [entry.id, entry.nodeId, entry.node_id].find(
+        (value): value is string => typeof value === "string" && value.trim() !== ""
+      );
+      if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
+        failedNodeIds.add(nodeId);
+      }
+    }
+  }
+  return [...failedNodeIds];
 }
 
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {

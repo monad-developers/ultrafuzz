@@ -29,13 +29,10 @@ export interface ModalResumeCheckpointCounts {
 }
 
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
-  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--json"];
+  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
 }
 
-export function modalDurableRunNeedsResume(
-  state: ModalResumeRunState,
-  counts: ModalResumeCheckpointCounts
-): boolean {
+export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
   if (!isTerminalRunStatus(state.status)) return true;
   return counts.remaining > 0 && counts.failed === 0;
 }

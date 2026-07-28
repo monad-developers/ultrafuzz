@@ -424,6 +424,7 @@ export interface WorkflowLifecycleInput {
   forkFrame?: number;
   resetNode?: string;
   force?: boolean;
+  retryFailed?: boolean;
   label?: string;
   env?: Record<string, string | undefined>;
 }
