@@ -5393,6 +5393,7 @@ test("resume keeps an already-running linked workflow attached without launching
     runId: "active-lifecycle-run",
     maxConcurrency: 8,
     force: true,
+    retryFailed: true,
     env
   });
   assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
@@ -5402,6 +5403,45 @@ test("resume keeps an already-running linked workflow attached without launching
     forcedCommands,
     /up .*ultrafuzz-active-lifecycle-run\.tsx --resume ultrafuzz-active-lifecycle-run --run-id ultrafuzz-active-lifecycle-run --force --detach --max-concurrency 8 --format json/u
   );
+});
+
+test("resume retries one failed workflow task before continuing a terminal unfinished run", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-terminal-retry-run",
+      status: "failed",
+      state: "failed",
+      steps: [
+        { id: "node:project-discovery", state: "failed", attempt: 1 },
+        { id: "node:strategy", state: "pending", attempt: 0 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "terminal-retry-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "terminal-retry-run",
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
+  assert.match(
+    commands,
+    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --deps --force --format json/u
+  );
+  assert.doesNotMatch(commands, /^up /mu);
 });
 
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {
