@@ -25,7 +25,11 @@ nodes:
 `,
       3
     );
-    const parsed = YAML.parse(updated) as any;
+    const parsed = YAML.parse(updated) as {
+      defaults: { strategy_loops: number };
+      groups: { strategies: { defaults: { loops: number } } };
+      nodes: Array<{ loops?: number }>;
+    };
     expect(parsed.defaults.strategy_loops).toBe(3);
     expect(parsed.groups.strategies.defaults.loops).toBe(3);
     expect(parsed.nodes[1].loops).toBe(1);
