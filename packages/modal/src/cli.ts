@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   if (command === "smoke") {
     const provider = requiredProvider(argv);
     const { runRealModalSmoke } = await import("./smoke-modal.js");
-    const result = await runRealModalSmoke(provider);
+    const result = await runRealModalSmoke(provider, { imageName: option(argv, "--image") });
     console.log(JSON.stringify(result, null, 2));
     if (result.status !== "passed") process.exitCode = 1;
     return;

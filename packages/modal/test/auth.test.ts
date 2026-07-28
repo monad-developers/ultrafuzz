@@ -1,12 +1,15 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
+  kimiSubscriptionCredentialFileName,
   localSubscriptionAuthPath,
   prepareSubscriptionAuthCopy,
+  reconcileKimiSubscriptionAuthCredential,
   refreshKimiSubscriptionAuth,
   runnerApiKeySourceEnv,
   subscriptionAuthCopy
@@ -115,8 +118,194 @@ describe("runtime-only subscription auth", () => {
     expect(fs.existsSync(path.join(source, "oauth", "kimi-code.lock"))).toBe(false);
   });
 
-  it("snapshots only the Kimi Code files needed by a Modal worker", async () => {
+  it("uses a persisted Kimi provider OAuth host for refresh unless an env override is present", async () => {
+    const urls: string[] = [];
+    const refreshResponse = () =>
+      new Response(
+        JSON.stringify({
+          access_token: "fresh-access",
+          refresh_token: "fresh-refresh",
+          expires_in: 900
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    const fetchImpl: typeof fetch = async (input) => {
+      urls.push(String(input));
+      return refreshResponse();
+    };
+
+    const scopedCredential = await refreshKimiSubscriptionAuth(
+      kimiAuthFixture({
+        oauthHost: "https://auth.persisted.example",
+        oauthKey: "oauth/scoped-kimi-code"
+      }),
+      "kimi-k3",
+      {},
+      { fetch: fetchImpl, now: () => 2_000_000_000 }
+    );
+    await refreshKimiSubscriptionAuth(
+      kimiAuthFixture({ oauthHost: "https://auth.persisted.example" }),
+      "kimi-k3",
+      { KIMI_OAUTH_HOST: "https://auth.env.example/" },
+      { fetch: fetchImpl, now: () => 2_000_000_000 }
+    );
+    await refreshKimiSubscriptionAuth(
+      kimiAuthFixture({ oauthHost: "https://auth.persisted.example" }),
+      "kimi-k3",
+      {
+        KIMI_CODE_OAUTH_HOST: "https://auth.code.example",
+        KIMI_OAUTH_HOST: "https://auth.env.example"
+      },
+      { fetch: fetchImpl, now: () => 2_000_000_000 }
+    );
+
+    expect(urls).toEqual([
+      "https://auth.persisted.example/api/oauth/token",
+      "https://auth.env.example/api/oauth/token",
+      "https://auth.code.example/api/oauth/token"
+    ]);
+    expect(path.basename(scopedCredential)).toBe("scoped-kimi-code.json");
+    expect(
+      fs.existsSync(path.join(path.dirname(path.dirname(scopedCredential)), "oauth", "scoped-kimi-code.lock"))
+    ).toBe(false);
+  });
+
+  it("rejects unsafe Kimi OAuth refresh hosts before sending refresh tokens", async () => {
+    const source = kimiAuthFixture();
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error("fetch must not be called");
+    };
+
+    for (const host of [
+      "http://auth.kimi.example",
+      "https://user:pass@auth.kimi.example",
+      "https://auth.kimi.example/token?leak=1",
+      "https://auth.kimi.example/token#fragment"
+    ]) {
+      await expect(
+        refreshKimiSubscriptionAuth(source, "kimi-k3", { KIMI_CODE_OAUTH_HOST: host }, { fetch: fetchImpl })
+      ).rejects.toThrow(/Kimi OAuth host must be an HTTPS URL without credentials, a query, or a fragment/u);
+    }
+
+    await expect(
+      refreshKimiSubscriptionAuth(
+        kimiAuthFixture({ fresh: true, oauthHost: "http://auth.kimi.example" }),
+        "kimi-k3",
+        {},
+        {
+          fetch: fetchImpl
+        }
+      )
+    ).rejects.toThrow(/Kimi OAuth host must be an HTTPS URL without credentials, a query, or a fragment/u);
+  });
+
+  it("ignores access-only Modal Kimi credentials during host reconciliation", async () => {
     const source = kimiAuthFixture({ fresh: true });
+    const credentialFile = await kimiSubscriptionCredentialFileName("kimi-k3", { KIMI_CODE_HOME: source });
+
+    expect(credentialFile).toBe("kimi-code.json");
+    await expect(
+      reconcileKimiSubscriptionAuthCredential(
+        "kimi-k3",
+        `${JSON.stringify({
+          access_token: "remote-access",
+          expires_at: 2_020_000,
+          expires_in: 900,
+          token_type: "Bearer",
+          scope: "openid"
+        })}\n`,
+        { KIMI_CODE_HOME: source }
+      )
+    ).resolves.toBe(false);
+
+    const token = JSON.parse(fs.readFileSync(path.join(source, "credentials", credentialFile), "utf8")) as {
+      access_token?: string;
+      refresh_token?: string;
+      expires_at?: number;
+    };
+    expect(token).toMatchObject({
+      access_token: "old-access",
+      refresh_token: "old-refresh",
+      expires_at: 2_010_000
+    });
+  });
+
+  it("does not overwrite a newer host Kimi refresh token with stale Modal state", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+
+    await expect(
+      reconcileKimiSubscriptionAuthCredential(
+        "kimi-k3",
+        `${JSON.stringify({
+          access_token: "stale-remote-access",
+          refresh_token: "stale-remote-refresh",
+          expires_at: 2_009_970,
+          expires_in: 900
+        })}\n`,
+        { KIMI_CODE_HOME: source }
+      )
+    ).resolves.toBe(false);
+
+    const token = JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8")) as {
+      access_token?: string;
+      refresh_token?: string;
+    };
+    expect(token.access_token).toBe("old-access");
+    expect(token.refresh_token).toBe("old-refresh");
+  });
+
+  it("promotes a refreshed Modal Kimi token only when it descends from the staged host token", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const sourceRefreshTokenSha256 = createHash("sha256").update("old-refresh").digest("hex");
+
+    await expect(
+      reconcileKimiSubscriptionAuthCredential(
+        "kimi-k3",
+        `${JSON.stringify({
+          access_token: "remote-successor-access",
+          refresh_token: "remote-successor-refresh",
+          expires_at: 2_020_000,
+          expires_in: 900
+        })}\n`,
+        { KIMI_CODE_HOME: source },
+        os.homedir(),
+        { sourceRefreshTokenSha256 }
+      )
+    ).resolves.toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
+      access_token: "remote-successor-access",
+      refresh_token: "remote-successor-refresh",
+      expires_at: 2_020_000
+    });
+
+    await expect(
+      reconcileKimiSubscriptionAuthCredential(
+        "kimi-k3",
+        `${JSON.stringify({
+          access_token: "unrelated-remote-access",
+          refresh_token: "unrelated-remote-refresh",
+          expires_at: 2_030_000,
+          expires_in: 900
+        })}\n`,
+        { KIMI_CODE_HOME: source },
+        os.homedir(),
+        { sourceRefreshTokenSha256 }
+      )
+    ).resolves.toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
+      access_token: "remote-successor-access",
+      refresh_token: "remote-successor-refresh",
+      expires_at: 2_020_000
+    });
+  });
+
+  it("snapshots only the Kimi Code files needed by a Modal worker", async () => {
+    const credentialFile = "scoped-kimi-code.json";
+    const source = kimiAuthFixture({
+      fresh: true,
+      oauthHost: "https://auth.persisted.example",
+      oauthKey: "oauth/scoped-kimi-code"
+    });
     fs.appendFileSync(
       path.join(source, "config.toml"),
       `
@@ -143,18 +332,24 @@ model = "unrelated"
     expect(prepared).toBeDefined();
     expect(prepared?.source).not.toBe(source);
     expect(fs.existsSync(path.join(prepared!.source, "config.toml"))).toBe(true);
-    expect(fs.existsSync(path.join(prepared!.source, "credentials", "kimi-code.json"))).toBe(true);
+    expect(fs.existsSync(path.join(prepared!.source, "credentials", credentialFile))).toBe(true);
     expect(fs.existsSync(path.join(prepared!.source, "device_id"))).toBe(true);
     expect(fs.existsSync(path.join(prepared!.source, "credentials", "unrelated-provider.json"))).toBe(false);
     expect(fs.existsSync(path.join(prepared!.source, "session_index.jsonl"))).toBe(false);
     expect(fs.existsSync(path.join(prepared!.source, "sessions"))).toBe(false);
     const snapshotCredentials = JSON.parse(
-      fs.readFileSync(path.join(prepared!.source, "credentials", "kimi-code.json"), "utf8")
-    ) as { access_token?: string; refresh_token?: string };
+      fs.readFileSync(path.join(prepared!.source, "credentials", credentialFile), "utf8")
+    ) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
     expect(snapshotCredentials.access_token).toBe("old-access");
-    expect(snapshotCredentials.refresh_token).toBe("");
+    expect(snapshotCredentials.refresh_token).toBe("old-refresh");
+    expect(snapshotCredentials.expires_at).toBe(2_010_000);
+    const sourceCredentials = JSON.parse(fs.readFileSync(path.join(source, "credentials", credentialFile), "utf8")) as {
+      refresh_token?: string;
+    };
+    expect(sourceCredentials.refresh_token).toBe("old-refresh");
     const snapshotConfig = fs.readFileSync(path.join(prepared!.source, "config.toml"), "utf8");
     expect(snapshotConfig).toContain('[providers."managed:kimi-code"]');
+    expect(snapshotConfig).toContain('oauth_host = "https://auth.persisted.example"');
     expect(snapshotConfig).toContain("[models.kimi-k3]");
     expect(snapshotConfig).not.toContain("unrelated");
     expect(snapshotConfig).not.toContain("do-not-copy");
@@ -162,6 +357,68 @@ model = "unrelated"
     const snapshot = prepared!.source;
     await prepared?.cleanup?.();
     expect(fs.existsSync(snapshot)).toBe(false);
+  });
+
+  it("keeps refreshable 15-minute Kimi worker snapshots for normal row durations", async () => {
+    const source = kimiAuthFixture({ fresh: true, expiresAt: 2_000_900, expiresIn: 900 });
+
+    const prepared = await prepareSubscriptionAuthCopy(
+      { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
+      { KIMI_CODE_HOME: source },
+      "/unused",
+      { now: () => 2_000_000_000 }
+    );
+
+    const snapshotCredentials = JSON.parse(
+      fs.readFileSync(path.join(prepared!.source, "credentials", "kimi-code.json"), "utf8")
+    ) as { refresh_token?: string; expires_at?: number; expires_in?: number };
+    expect(snapshotCredentials).toMatchObject({
+      refresh_token: "old-refresh",
+      expires_at: 2_000_900,
+      expires_in: 900
+    });
+    await prepared?.cleanup?.();
+  });
+
+  it("refreshes near-expiry 15-minute Kimi credentials before Modal worker staging", async () => {
+    const source = kimiAuthFixture({ fresh: true, expiresAt: 2_000_400, expiresIn: 900 });
+    let refreshes = 0;
+    const fetchImpl: typeof fetch = async () => {
+      refreshes += 1;
+      return new Response(
+        JSON.stringify({
+          access_token: "refreshed-access",
+          refresh_token: "refreshed-refresh",
+          expires_in: 900,
+          token_type: "Bearer",
+          scope: "openid"
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    };
+
+    const prepared = await prepareSubscriptionAuthCopy(
+      { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
+      { KIMI_CODE_HOME: source },
+      "/unused",
+      { fetch: fetchImpl, now: () => 2_000_000_000 }
+    );
+
+    expect(refreshes).toBe(1);
+    const snapshotCredentials = JSON.parse(
+      fs.readFileSync(path.join(prepared!.source, "credentials", "kimi-code.json"), "utf8")
+    ) as { access_token?: string; refresh_token?: string; expires_at?: number; expires_in?: number };
+    expect(snapshotCredentials).toMatchObject({
+      access_token: "refreshed-access",
+      refresh_token: "refreshed-refresh",
+      expires_at: 2_000_900,
+      expires_in: 900
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8"))).toMatchObject({
+      access_token: "refreshed-access",
+      refresh_token: "refreshed-refresh"
+    });
+    await prepared?.cleanup?.();
   });
 
   it("materializes the default kimi-k3 alias from Kimi Code managed k3 config", async () => {
@@ -183,9 +440,20 @@ model = "unrelated"
   });
 });
 
-function kimiAuthFixture(options: { fresh?: boolean; includeKimiK3Alias?: boolean } = {}): string {
+function kimiAuthFixture(
+  options: {
+    fresh?: boolean;
+    includeKimiK3Alias?: boolean;
+    expiresAt?: number;
+    expiresIn?: number;
+    oauthHost?: string;
+    oauthKey?: string;
+  } = {}
+): string {
   const source = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-auth-test-"));
   fs.mkdirSync(path.join(source, "credentials"), { recursive: true });
+  const oauthKey = options.oauthKey ?? "oauth/kimi-code";
+  const tokenName = path.posix.basename(oauthKey.trim());
   const kimiK3Alias =
     options.includeKimiK3Alias === false
       ? ""
@@ -204,7 +472,7 @@ default_effort = "max"
 [providers."managed:kimi-code"]
 type = "kimi"
 base_url = "https://api.kimi.com/coding/v1"
-oauth = { storage = "file", key = "oauth/kimi-code" }
+oauth = { storage = "file", key = ${JSON.stringify(oauthKey)}${options.oauthHost === undefined ? "" : `, oauth_host = ${JSON.stringify(options.oauthHost)}`} }
 ${kimiK3Alias}
 [models."kimi-code/k3"]
 provider = "managed:kimi-code"
@@ -215,12 +483,12 @@ default_effort = "max"
 `
   );
   fs.writeFileSync(
-    path.join(source, "credentials", "kimi-code.json"),
+    path.join(source, "credentials", `${tokenName}.json`),
     `${JSON.stringify({
       access_token: "old-access",
       refresh_token: "old-refresh",
-      expires_at: options.fresh ? 2_010_000 : 1_999_999,
-      expires_in: 3600
+      expires_at: options.expiresAt ?? (options.fresh ? 2_010_000 : 1_999_999),
+      expires_in: options.expiresIn ?? 3600
     })}\n`,
     { mode: 0o600 }
   );

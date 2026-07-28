@@ -77,7 +77,7 @@ const commonBenchmarkConfig = {
     })
     .strict(),
   node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
-  loops: z.literal(1).default(1),
+  loops: z.number().int().positive().max(256).default(3),
   models: z
     .array(modelSchema)
     .min(1)

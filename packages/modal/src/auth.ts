@@ -1,5 +1,5 @@
 import os from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, cp, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -69,6 +69,10 @@ export async function prepareSubscriptionAuthCopy(
       mode: 0o600
     });
     await mkdir(path.join(snapshot, "credentials"), { recursive: true, mode: 0o700 });
+    // Modal workers share one Kimi auth home per row. The refresh token is
+    // deliberately staged into that shared home so long-running rows can refresh
+    // under Kimi Code's OAuth lock instead of racing independent credential
+    // copies.
     await writeFile(
       path.join(snapshot, "credentials", path.basename(credentialPath)),
       `${JSON.stringify(kimiWorkerOAuthSnapshot(token), null, 2)}\n`,
@@ -96,11 +100,13 @@ export async function refreshKimiSubscriptionAuth(
   options: KimiSubscriptionAuthPreparationOptions = {}
 ): Promise<string> {
   const config = kimiConfig(await readFile(path.join(source, "config.toml"), "utf8"));
-  const credentialPath = kimiCredentialPath(source, config, model);
+  const credential = kimiCredentialRef(source, config, model);
+  const credentialPath = credential.path;
+  const oauthHost = kimiOAuthHost(env, credential.oauthHost);
   await access(credentialPath, constants.R_OK | constants.W_OK);
   await access(path.join(source, "device_id"), constants.R_OK);
 
-  const release = await acquireKimiRefreshLock(source);
+  const release = await acquireKimiRefreshLock(source, credential.lockName);
   try {
     const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
     const now = Math.floor((options.now?.() ?? Date.now()) / 1000);
@@ -110,7 +116,6 @@ export async function refreshKimiSubscriptionAuth(
       throw new Error("Kimi subscription token is near expiry and has no refresh token; run `kimi login`");
     }
     const fetchImpl = options.fetch ?? fetch;
-    const oauthHost = (env.KIMI_CODE_OAUTH_HOST ?? env.KIMI_OAUTH_HOST ?? "https://auth.kimi.com").replace(/\/+$/u, "");
     const response = await fetchImpl(`${oauthHost}/api/oauth/token`, {
       method: "POST",
       headers: {
@@ -145,6 +150,45 @@ export async function refreshKimiSubscriptionAuth(
     };
     await writeJsonAtomic(credentialPath, next);
     return credentialPath;
+  } finally {
+    await release();
+  }
+}
+
+export async function kimiSubscriptionCredentialFileName(
+  model: string,
+  env: Record<string, string | undefined> = process.env,
+  home = os.homedir()
+): Promise<string> {
+  const source = localSubscriptionAuthPath("kimi", env, home);
+  const config = kimiConfig(await readFile(path.join(source, "config.toml"), "utf8"));
+  return path.basename(kimiCredentialPath(source, config, model));
+}
+
+export async function reconcileKimiSubscriptionAuthCredential(
+  model: string,
+  remoteCredential: string,
+  env: Record<string, string | undefined> = process.env,
+  home = os.homedir(),
+  options: { sourceRefreshTokenSha256?: string } = {}
+): Promise<boolean> {
+  const source = localSubscriptionAuthPath("kimi", env, home);
+  const config = kimiConfig(await readFile(path.join(source, "config.toml"), "utf8"));
+  const credential = kimiCredentialRef(source, config, model);
+  const credentialPath = credential.path;
+  const remoteToken = kimiOAuthToken(remoteCredential, `Modal volume ${path.basename(credentialPath)}`, {
+    requireRefreshToken: false
+  });
+  if (remoteToken.refresh_token.trim() === "") return false;
+  await access(credentialPath, constants.R_OK | constants.W_OK);
+  await access(path.join(source, "device_id"), constants.R_OK);
+
+  const release = await acquireKimiRefreshLock(source, credential.lockName);
+  try {
+    const localToken = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath);
+    if (!shouldReplaceKimiCredential(localToken, remoteToken, options)) return false;
+    await writeJsonAtomic(credentialPath, remoteToken);
+    return true;
   } finally {
     await release();
   }
@@ -209,6 +253,14 @@ function kimiConfig(text: string): KimiConfig {
 }
 
 function kimiCredentialPath(source: string, config: KimiConfig, model: string): string {
+  return kimiCredentialRef(source, config, model).path;
+}
+
+function kimiCredentialRef(
+  source: string,
+  config: KimiConfig,
+  model: string
+): { path: string; lockName: string; oauthHost?: string } {
   const { providerName, provider } = kimiModelProvider(config, model);
   const oauth = provider.oauth;
   if (!isRecord(oauth) || oauth.storage !== "file" || typeof oauth.key !== "string") {
@@ -218,7 +270,11 @@ function kimiCredentialPath(source: string, config: KimiConfig, model: string): 
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(tokenName)) {
     throw new Error(`Kimi subscription provider ${providerName} has an unsafe OAuth credential key`);
   }
-  return path.join(source, "credentials", `${tokenName}.json`);
+  return {
+    path: path.join(source, "credentials", `${tokenName}.json`),
+    lockName: tokenName,
+    oauthHost: kimiPersistedOAuthHost(providerName, oauth)
+  };
 }
 
 function kimiSnapshotConfig(config: KimiConfig, model: string): string {
@@ -254,29 +310,31 @@ function kimiModelProvider(
   return { modelConfig, providerName, provider };
 }
 
-function kimiWorkerOAuthSnapshot(token: KimiOAuthToken): KimiOAuthToken {
-  return {
-    ...token,
-    refresh_token: ""
-  };
+function kimiWorkerOAuthSnapshot(token: KimiOAuthToken): Record<string, unknown> {
+  return { ...token };
 }
 
-function kimiOAuthToken(text: string, credentialPath: string): KimiOAuthToken {
+function kimiOAuthToken(
+  text: string,
+  credentialPath: string,
+  options: { requireRefreshToken?: boolean } = {}
+): KimiOAuthToken {
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;
   } catch {
     throw new Error(`Kimi subscription credentials are invalid JSON: ${credentialPath}`);
   }
+  const refreshToken = isRecord(value) && typeof value.refresh_token === "string" ? value.refresh_token : "";
   if (
     !isRecord(value) ||
     typeof value.access_token !== "string" ||
-    typeof value.refresh_token !== "string" ||
-    typeof value.expires_at !== "number"
+    typeof value.expires_at !== "number" ||
+    ((options.requireRefreshToken ?? true) && typeof value.refresh_token !== "string")
   ) {
     throw new Error(`Kimi subscription credentials have an unsupported shape: ${credentialPath}`);
   }
-  return value as KimiOAuthToken;
+  return { ...value, refresh_token: refreshToken } as KimiOAuthToken;
 }
 
 function kimiOAuthRefresh(value: unknown): {
@@ -307,9 +365,60 @@ function kimiOAuthRefresh(value: unknown): {
   };
 }
 
-async function acquireKimiRefreshLock(source: string): Promise<() => Promise<void>> {
+function kimiPersistedOAuthHost(providerName: string, oauth: Record<string, unknown>): string | undefined {
+  const value = oauth.oauth_host ?? oauth.oauthHost;
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`Kimi subscription provider ${providerName} has an invalid OAuth host`);
+  }
+  return value;
+}
+
+function kimiOAuthHost(env: Record<string, string | undefined>, persistedOAuthHost?: string): string {
+  const value = env.KIMI_CODE_OAUTH_HOST ?? env.KIMI_OAUTH_HOST ?? persistedOAuthHost ?? "https://auth.kimi.com";
+  const normalized = value.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch (error) {
+    throw new Error(`Kimi OAuth host is invalid: ${value}`, { cause: error });
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new Error("Kimi OAuth host must be an HTTPS URL without credentials, a query, or a fragment");
+  }
+  return normalized.replace(/\/+$/u, "");
+}
+
+function shouldReplaceKimiCredential(
+  localToken: KimiOAuthToken,
+  remoteToken: KimiOAuthToken,
+  options: { sourceRefreshTokenSha256?: string } = {}
+): boolean {
+  const localHasRefresh = localToken.refresh_token.trim() !== "";
+  const remoteHasRefresh = remoteToken.refresh_token.trim() !== "";
+  if (remoteHasRefresh && !localHasRefresh) return true;
+  if (!remoteHasRefresh) return false;
+  if (remoteToken.refresh_token === localToken.refresh_token) {
+    return remoteToken.expires_at > localToken.expires_at;
+  }
+  if (options.sourceRefreshTokenSha256 === undefined) return false;
+  if (kimiRefreshTokenSha256(localToken.refresh_token) !== options.sourceRefreshTokenSha256) return false;
+  return remoteToken.expires_at > localToken.expires_at;
+}
+
+function kimiRefreshTokenSha256(refreshToken: string): string {
+  return createHash("sha256").update(refreshToken).digest("hex");
+}
+
+async function acquireKimiRefreshLock(source: string, lockName = "kimi-code"): Promise<() => Promise<void>> {
   const oauthDir = path.join(source, "oauth");
-  const target = path.join(oauthDir, "kimi-code");
+  const target = path.join(oauthDir, lockName);
   await mkdir(oauthDir, { recursive: true, mode: 0o700 });
   const targetHandle = await open(target, "a", 0o600);
   await targetHandle.close();

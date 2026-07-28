@@ -143,9 +143,7 @@ async function runModalNodeSandbox(
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
     if (sandbox === undefined) {
-      const credentialValues = Object.fromEntries(
-        input.agent_credential_env.map((name) => [name, requiredCredential(env, name)])
-      );
+      const credentialValues = agentCredentialValues(env, input.agent_credential_env);
       const secret =
         Object.keys(credentialValues).length === 0 ? undefined : await client.secrets.fromObject(credentialValues);
       sandbox = await client.sandboxes.create(app, image, {
@@ -221,10 +219,7 @@ async function runModalNodeSandbox(
     throw normalizedModalNodeError(error, [
       tokenId,
       tokenSecret,
-      ...input.agent_credential_env.flatMap((name) => {
-        const value = env[name];
-        return value === undefined ? [] : [value];
-      })
+      ...agentCredentialRedactionValues(env, input.agent_credential_env)
     ]);
   } finally {
     archive.cleanup();
@@ -414,6 +409,7 @@ export async function createModalNodeHandoffArchive(
       ".smithers/agents/index.ts",
       ".smithers/agents/codex.ts",
       ".smithers/agents/claude.ts",
+      ".smithers/agents/kimi.ts",
       ".smithers/agents/toml.ts"
     ]) {
       const source = path.join(root, relative);
@@ -668,6 +664,56 @@ function requiredCredential(env: Record<string, string | undefined>, name: strin
     throw new Error("a configured cloud credential is unavailable");
   }
   return value;
+}
+
+function agentCredentialValues(
+  env: Record<string, string | undefined>,
+  names: readonly string[]
+): Record<string, string> {
+  const values: Record<string, string> = {};
+  const hasCanonicalKimiName = names.includes("KIMI_API_KEY");
+  for (const name of names) {
+    if (name === "KIMI_API_KEY") {
+      values.KIMI_API_KEY = requiredAnyCredential(env, ["KIMI_API_KEY", "MOONSHOT_API_KEY"]);
+      continue;
+    }
+    if (name === "MOONSHOT_API_KEY" && hasCanonicalKimiName) {
+      // Kimi Code receives the selected Kimi/Moonshot key through the
+      // generated provider config, sourced from canonical KIMI_API_KEY.
+      continue;
+    }
+    if (name === "KIMI_BASE_URL") {
+      const value = env.KIMI_BASE_URL;
+      if (value !== undefined && value.trim() !== "") values.KIMI_BASE_URL = value;
+      continue;
+    }
+    values[name] = requiredCredential(env, name);
+  }
+  return values;
+}
+
+function requiredAnyCredential(env: Record<string, string | undefined>, names: readonly string[]): string {
+  for (const name of names) {
+    const value = env[name];
+    if (value !== undefined && value.trim() !== "") return value;
+  }
+  throw new Error("a configured cloud credential is unavailable");
+}
+
+function agentCredentialRedactionValues(env: Record<string, string | undefined>, names: readonly string[]): string[] {
+  const values = new Set<string>();
+  for (const name of names) {
+    if (name === "KIMI_API_KEY") {
+      for (const sourceName of ["KIMI_API_KEY", "MOONSHOT_API_KEY"]) {
+        const value = env[sourceName];
+        if (value !== undefined && value.trim() !== "") values.add(value);
+      }
+    } else {
+      const value = env[name];
+      if (value !== undefined && value.trim() !== "") values.add(value);
+    }
+  }
+  return [...values];
 }
 
 function validateProviderOptions(options: ModalNodeSandboxProviderOptions): void {

@@ -474,6 +474,56 @@ describe("model profile and triage validation", () => {
     );
   });
 
+  it("rejects Kimi reasoning values that Kimi Code cannot execute", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-invalid": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+        path: ["models", "kimi-invalid", "reasoning"]
+      })
+    );
+  });
+
+  it("rejects whitespace-padded Kimi reasoning values instead of normalizing them away", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-padded": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: " max "
+            }
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+        path: ["models", "kimi-padded", "reasoning"]
+      })
+    );
+  });
+
   it("redacts sensitive diagnostic messages", () => {
     const redacted = redactDiagnostics([
       {

@@ -110,13 +110,20 @@ variable. The provider uses Kimi Code's open-platform default
 `https://api.moonshot.ai/v1`; `KIMI_BASE_URL` may select another compatible
 HTTPS endpoint. Its `kimi-k3` alias maps to upstream model `k3`.
 
-In subscription mode Ultrafuzz gives each Kimi invocation a separate temporary
-Kimi Code home containing `config.toml`, the selected provider credential, and
-`device_id`, then removes it when the invocation finishes. Modal launchers
+In subscription mode Ultrafuzz gives each Kimi invocation a separate runtime
+Kimi Code home with symlinked `config.toml`, `device_id`, and auth entries,
+while Kimi session files live under a durable session home. Modal launchers
 first refresh and atomically persist a near-expiry host OAuth token under the
-same `.kimi-code/oauth/kimi-code.lock` used by Kimi Code, and only then snapshot
-those three inputs once for fan-out. Concurrent sandboxes therefore never
-receive independent copies of the same rotatable refresh token.
+same `.kimi-code/oauth/kimi-code.lock` used by Kimi Code. Workers then stage a
+refreshable snapshot into a durable per-row auth home and point each invocation
+at that home, so long rows refresh one shared Modal credential instead of racing
+independent copies. If the selected provider persists a scoped `oauthHost` (or
+`oauth_host` in older layouts), Ultrafuzz refreshes against that host unless
+`KIMI_CODE_OAUTH_HOST` or `KIMI_OAUTH_HOST` overrides it. When collection or
+resume inspects the row, Ultrafuzz only promotes a refreshed Modal credential
+back to the host if it descends from the token staged for that row.
+Subscription launches intentionally allow only one Kimi row at a time; use
+API-key auth or serial launches for multi-Kimi comparisons.
 
 Kimi Code CLI 0.29.1 uses prompt mode (`--prompt`) and does not accept the
 older Smithers adapter flags `--print`, `--work-dir`, `--thinking`,
@@ -124,10 +131,10 @@ older Smithers adapter flags `--print`, `--work-dir`, `--thinking`,
 therefore runs the 0.29.1-compatible command surface. It also omits Smithers'
 synthetic `--session` on fresh runs, preserves a known session on a real
 resume, records the session ID created by the CLI for recovery, and supplies
-the supported `--yolo` switch for unattended execution under Ultrafuzz's
-`skip-permissions` trust model. Kimi reasoning is limited to `low`, `high`, or
-`max`; the selected value is written to the executed model's `default_effort`,
-and any other value is rejected.
+no prompt-mode `--yolo`/`--auto` flag because Kimi Code rejects those flags
+with `--prompt`. Kimi reasoning is limited to `low`, `high`, or `max`; the
+selected value is written to the executed model's `default_effort` and
+`[thinking].effort`, and any other value is rejected.
 
 Default triage requires quorum `3` from a panel size of `4`:
 

@@ -1238,10 +1238,7 @@ function compileTask(input: {
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
-  const agentCredentialEnv =
-    input.config.execution.mode === "cloud" && agent?.auth === "api-key" && agent.apiKeyEnv !== undefined
-      ? [agent.apiKeyEnv]
-      : [];
+  const agentCredentialEnv = cloudAgentCredentialEnv(input.config.execution.mode, profile.agent, agent);
   const execution = {
     mode: input.config.execution.mode,
     ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
@@ -1341,6 +1338,17 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+function cloudAgentCredentialEnv(
+  executionMode: ResolvedConfig["execution"]["mode"],
+  agentRef: string,
+  agent: ResolvedConfig["agents"][string] | undefined
+): string[] {
+  if (executionMode !== "cloud" || agent?.auth !== "api-key" || agent.apiKeyEnv === undefined) return [];
+  const names = [agent.apiKeyEnv];
+  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY", "KIMI_BASE_URL");
+  return names;
 }
 
 function nodeAttemptsFor(node: ExpandedNode): NodeAttemptProvenance[] {

@@ -42,8 +42,15 @@ const RESULT_PATH = `${MODAL_SMOKE_DATA_ROOT}/result.json`;
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 3 * 60 * 1000;
 
-export async function runRealModalSmoke(provider: ModelProvider): Promise<ModalSmokeResult> {
-  const driver = new RealModalSmokeDriver();
+export interface RealModalSmokeOptions {
+  imageName?: string;
+}
+
+export async function runRealModalSmoke(
+  provider: ModelProvider,
+  options: RealModalSmokeOptions = {}
+): Promise<ModalSmokeResult> {
+  const driver = new RealModalSmokeDriver(options);
   try {
     return await runModalSmoke(provider, driver);
   } catch {
@@ -64,6 +71,8 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   private readonly sandboxes = new Map<string, Sandbox>();
   private namePrefix = "";
 
+  constructor(private readonly options: RealModalSmokeOptions = {}) {}
+
   async prepare(provider: ModelProvider): Promise<ModalSmokePrepared> {
     this.failureStage = "prepare";
     this.modal = new ModalClient();
@@ -75,11 +84,11 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
     if (this.auth === undefined) throw new Error("smoke auth is unavailable");
     await access(this.auth.source);
     this.app = await this.modal.apps.fromName(DEFAULT_MODAL_APP, { createIfMissing: false });
-    this.image = await this.modal.images.fromName(DEFAULT_MODAL_IMAGE);
+    this.image = await this.modal.images.fromName(this.options.imageName ?? DEFAULT_MODAL_IMAGE);
     this.volume = await this.modal.volumes.ephemeral();
     this.namePrefix = `ultrafuzz-smoke-${provider}-${randomUUID().slice(0, 8)}`;
     return {
-      imageName: DEFAULT_MODAL_IMAGE,
+      imageName: this.options.imageName ?? DEFAULT_MODAL_IMAGE,
       entryPath: MODAL_SMOKE_ENTRY_PATH,
       volumeIdentity: this.volume.volumeId
     };
@@ -138,8 +147,11 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   async terminate(launch: ModalSmokeLaunch): Promise<void> {
     this.failureStage = "fresh-terminate";
     const sandbox = this.sandboxFor(launch);
-    await sandbox.terminate({ wait: true });
-    this.sandboxes.delete(sandbox.sandboxId);
+    try {
+      await sandbox.terminate({ wait: true });
+    } finally {
+      this.sandboxes.delete(sandbox.sandboxId);
+    }
   }
 
   async waitForCompletion(launch: ModalSmokeLaunch): Promise<ModalSmokeCompletion> {

@@ -32,6 +32,7 @@ import {
   type OperationalFailureCategory,
   type TerminalDisposition
 } from "./terminal-disposition.js";
+import { topologyWithStrategyLoops } from "./topology-config.js";
 import {
   emptyWorkerCheckpoint,
   readWorkerCheckpoint,
@@ -399,9 +400,7 @@ async function configureTarget(target: string): Promise<void> {
   );
   await writeFile(path.join(target, "ultrafuzz.toml"), modalTargetToml(MODEL, CONFIG.node_timeout_seconds));
   const topologyPath = path.join(target, ".ultrafuzz/topology.yml");
-  const topology = (await readFile(topologyPath, "utf8")).replace(/^(\s+loops:)\s*\d+\s*$/gmu, "$1 1");
-  const loops = [...topology.matchAll(/^\s+loops:\s*(\d+)\s*$/gmu)].map((match) => Number(match[1]));
-  if (loops.length === 0 || loops.some((value) => value !== 1)) throw new Error("failed to enforce loops=1");
+  const topology = topologyWithStrategyLoops(await readFile(topologyPath, "utf8"), CONFIG.loops);
   await writeFile(topologyPath, topology);
 }
 

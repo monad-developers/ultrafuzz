@@ -94,6 +94,45 @@ describe("Modal benchmark launch guardrails", () => {
       /Modal benchmark launch config .*missing configured target\(s\).*expected 3, found 1/u
     );
   });
+
+  it("rejects whitespace-padded Kimi reasoning during CI model matrix preparation", () => {
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-kimi-"));
+    roots.push(output);
+
+    let failure: unknown;
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          path.join(path.resolve("."), "scripts/ci/prepare-modal-benchmarks.mjs"),
+          candidate,
+          repository,
+          "12345-1",
+          output,
+          "full"
+        ],
+        {
+          cwd: path.resolve("."),
+          env: {
+            ...process.env,
+            BENCHMARK_MODELS_JSON: JSON.stringify([
+              { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" },
+              { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" },
+              { provider: "kimi", model: "kimi-k3", reasoning: " max " }
+            ])
+          }
+        }
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeDefined();
+    const stderr = Buffer.isBuffer((failure as { stderr?: unknown }).stderr)
+      ? String((failure as { stderr: Buffer }).stderr)
+      : String(failure);
+    expect(stderr).toMatch(/reasoning is unsafe|unsupported for Kimi/u);
+  });
 });
 
 interface LaunchTarget {
