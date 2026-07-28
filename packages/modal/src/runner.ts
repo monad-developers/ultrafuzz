@@ -1538,8 +1538,25 @@ candidates.sort((left, right) => right.modified - left.modified);
 const state = JSON.parse(fs.readFileSync(candidates[0].statePath, "utf8"));
 const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
 const successful = new Set(["succeeded", "reused-from-prior-run"]);
-const successfulNodes = nodes.filter((node) => node && successful.has(node.status));
+const logical = new Map();
+for (const node of nodes) {
+  if (!node || typeof node !== "object" || typeof node.status !== "string") continue;
+  const logicalId =
+    typeof node.logical_id === "string" && node.logical_id.trim()
+      ? node.logical_id
+      : typeof node.logical_node_id === "string" && node.logical_node_id.trim()
+        ? node.logical_node_id
+        : typeof node.node_id === "string" && node.node_id.trim()
+          ? node.node_id
+          : undefined;
+  if (logicalId === undefined) continue;
+  const group = logical.get(logicalId) || [];
+  group.push(node);
+  logical.set(logicalId, group);
+}
+const successfulNodes = Array.from(logical.values()).filter((group) => group.every((node) => successful.has(node.status)));
 const lastSuccessAt = successfulNodes
+  .flat()
   .map((node) => node.finished_at)
   .filter((value) => typeof value === "string" && Number.isFinite(Date.parse(value)))
   .sort()
@@ -1547,7 +1564,7 @@ const lastSuccessAt = successfulNodes
 process.stdout.write(JSON.stringify({
   status: typeof state.status === "string" ? state.status : "unknown",
   successful_nodes: successfulNodes.length,
-  total_nodes: nodes.length,
+  total_nodes: logical.size,
   last_transition_at: typeof state.last_transition_at === "string" ? state.last_transition_at : state.created_at,
   ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
 }));`;
