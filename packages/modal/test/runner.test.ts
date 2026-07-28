@@ -804,8 +804,25 @@ describe("Modal canonical recovery probe", () => {
         created_at: "2026-01-01T00:00:00.000Z",
         last_transition_at: "2026-01-01T00:09:50.000Z",
         nodes: {
-          complete: { status: "succeeded", finished_at: "2026-01-01T00:09:45.000Z" },
-          pending: { status: "pending" }
+          "complete-0": {
+            node_id: "complete-0",
+            logical_node_id: "complete",
+            status: "succeeded",
+            finished_at: "2026-01-01T00:09:40.000Z"
+          },
+          "complete-1": {
+            node_id: "complete-1",
+            logical_node_id: "complete",
+            status: "succeeded",
+            finished_at: "2026-01-01T00:09:45.000Z"
+          },
+          "pending-0": {
+            node_id: "pending-0",
+            logical_node_id: "pending",
+            status: "succeeded",
+            finished_at: "2026-01-01T00:09:30.000Z"
+          },
+          "pending-1": { node_id: "pending-1", logical_node_id: "pending", status: "pending" }
         }
       })
     );
