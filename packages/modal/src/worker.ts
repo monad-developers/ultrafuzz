@@ -17,6 +17,7 @@ import {
 import {
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
+  modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
   repairModalEvalRunRecord,
@@ -217,6 +218,7 @@ async function resumeExistingEvaluation(
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
   if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
+    const stateBeforeResume = state;
     const resumeRunId = state.run_id;
     await runBenchmarkExecutionOnce(
       () =>
@@ -226,7 +228,7 @@ async function resumeExistingEvaluation(
         }),
       () => inspectTerminalDisposition(workspace.target)
     );
-    state = await waitForTerminalRun(workspace, writer);
+    state = await waitForTerminalRun(workspace, writer, stateBeforeResume);
     disposition = await terminalDispositionForState(workspace, state);
   }
   await repairModalEvalRunRecord(workspace, state, disposition);
@@ -248,9 +250,11 @@ async function terminalDispositionForState(
 
 async function waitForTerminalRun(
   workspace: ModalResumeWorkspace,
-  writer: WorkerResultWriter
+  writer: WorkerResultWriter,
+  stateBeforeResume: ModalResumeRunState
 ): Promise<ModalResumeRunState> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
+  let resumeObserved = false;
   while (Date.now() < deadline) {
     await runChecked(["node", CLI, "inspect", workspace.productRunId, "--project", workspace.target, "--json"], {
       label: "sync resumed run",
@@ -259,7 +263,8 @@ async function waitForTerminalRun(
     const state = await durableRunState(workspace.target, workspace.productRunId);
     if (state !== undefined) {
       await reportProgress(workspace.target, writer);
-      if (isTerminalRunStatus(state.status)) return state;
+      resumeObserved ||= modalDurableRunAdvanced(stateBeforeResume, state);
+      if (resumeObserved && isTerminalRunStatus(state.status)) return state;
     }
     await sleep(60_000);
   }

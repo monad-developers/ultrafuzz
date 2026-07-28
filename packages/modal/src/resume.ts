@@ -37,8 +37,26 @@ export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: M
   return counts.failed > 0 || counts.remaining > 0;
 }
 
+export function modalDurableRunAdvanced(before: ModalResumeRunState, after: ModalResumeRunState): boolean {
+  if (before.run_id !== after.run_id) return false;
+  if (
+    before.status !== after.status ||
+    before.started_at !== after.started_at ||
+    before.finished_at !== after.finished_at
+  ) {
+    return true;
+  }
+  return JSON.stringify(nodeStatuses(before.nodes)) !== JSON.stringify(nodeStatuses(after.nodes));
+}
+
 function isTerminalRunStatus(status: string | undefined): boolean {
   return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+}
+
+function nodeStatuses(nodes: ModalResumeRunState["nodes"]): Array<[string, string | undefined]> {
+  return Object.entries(nodes ?? {})
+    .map(([nodeId, node]) => [nodeId, node.status] as [string, string | undefined])
+    .sort(([left], [right]) => left.localeCompare(right));
 }
 
 export function modalEvalRunCommand(input: {
