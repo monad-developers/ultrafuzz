@@ -565,6 +565,54 @@ export async function runSmithersLifecycleCommand(input: {
         return retryResult;
       }
       if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
+        if (!isCompatibleSmithersRunId(input.smithersRunId)) {
+          assertRegularFileInside(
+            input.resumeRecovery.runRoot,
+            input.resumeRecovery.inputPath,
+            "persisted workflow input"
+          );
+          assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+          fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
+          assertNoSymlinkComponents(
+            input.resumeRecovery.runRoot,
+            input.resumeRecovery.logsDir,
+            "workflow log directory"
+          );
+          const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
+          const recovery = await execSmithersCli({
+            args: [
+              "up",
+              input.workflowPath,
+              "--detach",
+              "--run-id",
+              replacementRunId,
+              ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+              "--root",
+              input.projectRoot,
+              "--log-dir",
+              input.resumeRecovery.logsDir,
+              "--input",
+              fs.readFileSync(input.resumeRecovery.inputPath, "utf8"),
+              "--format",
+              "json",
+              ...supervisorCommandArgs(input.controllerLeaseSeconds)
+            ],
+            projectRoot: input.projectRoot,
+            env: input.env,
+            environmentVariableNames: input.environmentVariableNames,
+            keepWorkspaces: input.keepWorkspaces
+          });
+          writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+            schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+            smithers_run_id: replacementRunId,
+            recovery: "incompatible-workflow-run-id",
+            command: recovery.command,
+            stdout: redactedEvidenceText(recovery.stdout),
+            stderr: redactedEvidenceText(recovery.stderr),
+            submitted_at: new Date().toISOString()
+          });
+          return { ...recovery, workflowRunId: replacementRunId };
+        }
         const timeline = await execSmithersCli({
           args: ["timeline", input.smithersRunId, "--json"],
           projectRoot: input.projectRoot,
@@ -870,6 +918,14 @@ function latestSmithersTimelineFrame(value: unknown): number | undefined {
       : [];
   });
   return frameNumbers.length === 0 ? undefined : Math.max(...frameNumbers);
+}
+
+function isCompatibleSmithersRunId(value: string): boolean {
+  return /^[a-z0-9_-]{1,64}$/u.test(value);
+}
+
+function compatibleRecoveryRunId(value: string): string {
+  return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {

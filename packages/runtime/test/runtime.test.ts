@@ -6308,6 +6308,48 @@ test("resume rewinds a run-level render failure before continuing unfinished wor
   assert.doesNotMatch(commands, /retry-task/u);
 });
 
+test("resume transfers an incompatible legacy workflow ID to a valid durable lineage", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = `legacy-${"x".repeat(56)}`;
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId,
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ufz-recovery-[a-f0-9]{32}$/u);
+  const replacementRunId = resumed.value!.workflow_run_id;
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`inspect ${workflowRunId} --format json`, "u"));
+  assert.match(commands, new RegExp(`up .* --detach --run-id ${replacementRunId}`, "u"));
+  assert.doesNotMatch(commands, /timeline|rewind|retry-task/u);
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    workflow?: { run_id?: string };
+  };
+  assert.equal(metadata.workflow?.run_id, replacementRunId);
+});
+
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
