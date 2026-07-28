@@ -17,6 +17,7 @@ import {
 import {
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
+  modalDurableRunNeedsResume,
   modalEvalRunCommand,
   repairModalEvalRunRecord,
   type ModalResumeRunState,
@@ -214,7 +215,8 @@ async function resumeExistingEvaluation(
   let state = await durableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
   let disposition = await terminalDispositionForState(workspace, state);
-  if (!isTerminalRunStatus(state.status)) {
+  const checkpoint = await readWorkerCheckpoint(workspace.target);
+  if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
     const resumeRunId = state.run_id;
     await runBenchmarkExecutionOnce(
       () =>
