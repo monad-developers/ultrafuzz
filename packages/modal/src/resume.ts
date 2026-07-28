@@ -34,7 +34,7 @@ export function modalDurableResumeCommand(cliPath: string, runId: string, projec
 
 export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
   if (!isTerminalRunStatus(state.status)) return true;
-  return counts.remaining > 0 && counts.failed === 0;
+  return counts.failed > 0 || counts.remaining > 0;
 }
 
 function isTerminalRunStatus(status: string | undefined): boolean {
