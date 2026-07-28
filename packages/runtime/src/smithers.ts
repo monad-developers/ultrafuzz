@@ -364,7 +364,9 @@ function smithersInputDocument(
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
-      ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
+      ...(task.renderedPromptPath
+        ? { prompt_path: executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt") }
+        : {})
     }))
   };
 }

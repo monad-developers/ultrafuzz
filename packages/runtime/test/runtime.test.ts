@@ -30,6 +30,7 @@ import {
   planRun,
   pauseRun,
   replayRun,
+  repairMissingRenderedPromptsForRun,
   resumeRun,
   startRun,
   syncRun,
@@ -1525,6 +1526,21 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+});
+
+test("repairs only missing rendered prompts from compatible persisted run metadata", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "prompt-repair", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const promptPath = path.join(plan.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md");
+  const expected = fs.readFileSync(promptPath, "utf8");
+  fs.rmSync(promptPath);
+
+  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 1);
+  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
+  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 0);
 });
 
 test("plan uses an eval topology override without replacing the project topology", async () => {

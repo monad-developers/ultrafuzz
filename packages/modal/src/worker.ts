@@ -3,6 +3,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { access, appendFile, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { repairMissingRenderedPromptsForRun } from "@ultrafuzz/runtime";
+
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
@@ -211,6 +213,11 @@ async function resumeExistingEvaluation(
   evalRunId: string;
   terminalDisposition: TerminalDisposition | undefined;
 }> {
+  const repairedPrompts = await repairMissingRenderedPromptsForRun({
+    projectRoot: workspace.target,
+    runId: workspace.productRunId
+  });
+  if (repairedPrompts > 0) await flushVolume();
   modelWorkStarted = true;
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
   let state = await durableRunState(workspace.target, workspace.productRunId);

@@ -7,6 +7,7 @@ import {
   artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
+  layoutForRunRoot,
   updateNodeState,
   writeArtifactManifest,
   writeJsonDurable,
@@ -20,6 +21,7 @@ import {
 } from "@ultrafuzz/config";
 import {
   loadPromptCatalog,
+  RENDERED_PROMPT_FILE,
   renderPrompt,
   writeRenderedPrompt,
   type PromptCatalog,
@@ -224,6 +226,126 @@ export async function planRun(input: PlanRunInput) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+export async function repairMissingRenderedPromptsForRun(input: {
+  projectRoot: string;
+  runId: string;
+}): Promise<number> {
+  const projectRoot = path.resolve(input.projectRoot);
+  const resolved = await loadResolvedProject({ projectRoot });
+  if (resolved.config === undefined) {
+    throw new Error("cannot repair rendered prompts without a valid resolved configuration");
+  }
+  const runRoot = path.join(outputRootForConfig(projectRoot, resolved.config), input.runId);
+  const layout = layoutForRunRoot(runRoot, input.runId);
+  const graph = readPersistedPlannedGraph(layout.graphPath);
+  const plan = readPersistedPromptPlan(path.join(layout.root, "plan.json"));
+  if (plan.run_id !== input.runId || plan.config_fingerprint !== sha256Stable(resolved.config)) {
+    throw new Error("cannot repair rendered prompts from incompatible run configuration");
+  }
+
+  const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
+  const missingAttempts = new Set<string>();
+  for (const [attemptId] of expectedByAttempt) {
+    const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+    if (!fs.existsSync(promptPath)) {
+      missingAttempts.add(attemptId);
+      continue;
+    }
+    const stat = fs.lstatSync(promptPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`cannot repair unsafe rendered prompt for ${attemptId}`);
+    }
+  }
+  if (missingAttempts.size === 0) return 0;
+
+  const rendered = renderPromptsForPlan({
+    catalog: loadPromptCatalog({ projectRoot }),
+    graph,
+    layout,
+    projectRoot,
+    resolvedConfig: resolved.config,
+    runId: input.runId,
+    attemptIds: missingAttempts
+  });
+  const repairedAttempts = new Set(rendered.map((entry) => entry.attempt_id).filter((value) => value !== undefined));
+  if (
+    repairedAttempts.size !== missingAttempts.size ||
+    [...missingAttempts].some((attemptId) => !repairedAttempts.has(attemptId))
+  ) {
+    for (const entry of rendered) fs.rmSync(entry.rendered_prompt_path, { force: true });
+    throw new Error("rendered prompt repair did not reproduce every missing task input");
+  }
+  for (const entry of rendered) {
+    const attemptId = entry.attempt_id!;
+    const expected = expectedByAttempt.get(attemptId)!;
+    const expectedPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+    if (
+      path.resolve(entry.rendered_prompt_path) !== path.resolve(expectedPath) ||
+      entry.prompt_id !== expected.prompt_id ||
+      entry.prompt_path !== expected.prompt_path ||
+      JSON.stringify(entry.variables_used) !== JSON.stringify(expected.variables_used)
+    ) {
+      for (const candidate of rendered) fs.rmSync(candidate.rendered_prompt_path, { force: true });
+      throw new Error(`rendered prompt repair did not match persisted task metadata for ${attemptId}`);
+    }
+  }
+  appendEvent(layout, {
+    eventType: "rendered-prompts-repaired",
+    status: "succeeded",
+    payload: { count: rendered.length }
+  });
+  return rendered.length;
+}
+
+interface PersistedPromptPlanEntry {
+  attempt_id: string;
+  prompt_id: string;
+  prompt_path: string;
+  variables_used: string[];
+}
+
+function readPersistedPromptPlan(planPath: string): {
+  run_id: string;
+  config_fingerprint: string;
+  rendered_prompts: PersistedPromptPlanEntry[];
+} {
+  const value = JSON.parse(fs.readFileSync(planPath, "utf8")) as Record<string, unknown>;
+  if (
+    typeof value.run_id !== "string" ||
+    typeof value.config_fingerprint !== "string" ||
+    !Array.isArray(value.rendered_prompts)
+  ) {
+    throw new Error("persisted run plan is missing rendered prompt metadata");
+  }
+  const entries = value.rendered_prompts.map((entry) => {
+    const candidate = entry as Record<string, unknown>;
+    if (
+      typeof candidate.attempt_id !== "string" ||
+      typeof candidate.prompt_id !== "string" ||
+      typeof candidate.prompt_path !== "string" ||
+      !Array.isArray(candidate.variables_used) ||
+      !candidate.variables_used.every((item) => typeof item === "string")
+    ) {
+      throw new Error("persisted rendered prompt metadata is invalid");
+    }
+    return {
+      attempt_id: candidate.attempt_id,
+      prompt_id: candidate.prompt_id,
+      prompt_path: candidate.prompt_path,
+      variables_used: candidate.variables_used
+    };
+  });
+  return { run_id: value.run_id, config_fingerprint: value.config_fingerprint, rendered_prompts: entries };
+}
+
+function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
+  const value = JSON.parse(fs.readFileSync(graphPath, "utf8")) as Partial<PlannedGraph>;
+  if (value.schema_version !== "1.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
+    throw new Error("persisted planned graph is invalid");
+  }
+  return value as PlannedGraph;
 }
 
 export function transformPromptCatalogForRun(
@@ -438,6 +560,7 @@ function renderPromptsForPlan(input: {
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
+  attemptIds?: ReadonlySet<string>;
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
@@ -449,6 +572,7 @@ function renderPromptsForPlan(input: {
     }
     const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
     for (const attempt of promptAttemptsForNode(node, input.layout)) {
+      if (input.attemptIds !== undefined && !input.attemptIds.has(attempt.attemptId)) continue;
       const result = renderPrompt({
         prompt: {
           id: promptEntry.id,
