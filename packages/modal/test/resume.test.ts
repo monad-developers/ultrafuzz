@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   locateModalResumeWorkspace,
+  modalDurableContinuationCommand,
+  modalDurableReplayCommand,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
@@ -51,6 +53,49 @@ describe("Modal durable evaluation resume", () => {
       "--retry-failed",
       "--json"
     ]);
+  });
+
+  it("replays a terminal checkpoint with unfinished rows but no failed logical rows", () => {
+    expect(modalDurableReplayCommand("/opt/tool/cli.js", "durable-run-one", "/workspace/target")).toEqual([
+      "node",
+      "/opt/tool/cli.js",
+      "replay",
+      "durable-run-one",
+      "--project",
+      "/workspace/target",
+      "--json"
+    ]);
+    expect(
+      modalDurableContinuationCommand(
+        "/opt/tool/cli.js",
+        "durable-run-one",
+        "/workspace/target",
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toEqual(modalDurableReplayCommand("/opt/tool/cli.js", "durable-run-one", "/workspace/target"));
+  });
+
+  it("retries failed logical rows and reattaches nonterminal runs", () => {
+    const expected = modalDurableResumeCommand("/opt/tool/cli.js", "durable-run-one", "/workspace/target");
+    expect(
+      modalDurableContinuationCommand(
+        "/opt/tool/cli.js",
+        "durable-run-one",
+        "/workspace/target",
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 58, failed: 1, remaining: 0 }
+      )
+    ).toEqual(expected);
+    expect(
+      modalDurableContinuationCommand(
+        "/opt/tool/cli.js",
+        "durable-run-one",
+        "/workspace/target",
+        { run_id: "durable-run-one", status: "running" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toEqual(expected);
   });
 
   it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {

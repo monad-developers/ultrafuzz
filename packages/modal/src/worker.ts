@@ -18,7 +18,7 @@ import {
 } from "./layout.js";
 import {
   locateModalResumeWorkspace,
-  modalDurableResumeCommand,
+  modalDurableContinuationCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
@@ -229,10 +229,13 @@ async function resumeExistingEvaluation(
     const resumeRunId = state.run_id;
     await runBenchmarkExecutionOnce(
       () =>
-        runChecked(modalDurableResumeCommand(CLI, resumeRunId, workspace.target), {
-          label: "resume durable run",
-          failureCategory: "unreachable"
-        }),
+        runChecked(
+          modalDurableContinuationCommand(CLI, resumeRunId, workspace.target, stateBeforeResume, checkpoint.counts),
+          {
+            label: "resume durable run",
+            failureCategory: "unreachable"
+          }
+        ),
       () => inspectTerminalDisposition(workspace.target)
     );
     state = await waitForTerminalRun(workspace, writer, stateBeforeResume);
