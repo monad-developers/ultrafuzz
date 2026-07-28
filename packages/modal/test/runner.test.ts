@@ -668,11 +668,17 @@ describe("Modal result collection", () => {
       "status.json": "status"
     });
 
-    const selected = selectModalCollectedEvidence(files, config, config.models[0], {
-      OPENAI_API_KEY: "opaque-secret"
+    const modalConfig = {
+      ...config,
+      public_benchmark: { ...config.public_benchmark, node_execution: "modal" as const }
+    };
+    const selected = selectModalCollectedEvidence(files, modalConfig, modalConfig.models[0], {
+      OPENAI_API_KEY: "opaque-secret",
+      MODAL_TOKEN_ID: "opaque-modal-id",
+      MODAL_TOKEN_SECRET: "opaque-modal-secret"
     });
     expect(selected.files).toBe(files);
-    expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
+    expect(selected.forbiddenSecretValues).toEqual(["opaque-modal-id", "opaque-modal-secret", "opaque-secret"]);
   });
 
   it("uses Moonshot API keys as Kimi public collection redaction secrets", () => {

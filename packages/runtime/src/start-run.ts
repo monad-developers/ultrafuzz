@@ -16,6 +16,8 @@ import {
 import type { ResolvedConfig } from "@ultrafuzz/config";
 
 import {
+  type CancelRunInput,
+  type CancelRunValue,
   type PlannedGraph,
   type PauseRunInput,
   type PauseRunValue,
@@ -30,6 +32,7 @@ import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
+  requestSmithersCancel,
   requestSmithersPause,
   runSmithersLifecycleCommand,
   smithersDiagnostic,
@@ -183,6 +186,39 @@ export async function pauseRun(input: PauseRunInput) {
   }
 }
 
+export async function cancelRun(input: CancelRunInput) {
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  if (!evidence.ok) {
+    return runtimeFailure<CancelRunValue>(evidence.diagnostics);
+  }
+  try {
+    await requestSmithersCancel({
+      smithersRunId: evidence.smithersRunId,
+      projectRoot,
+      env: input.env
+    });
+    updateRunStatus(evidence.layout, "canceled");
+    appendEvent(evidence.layout, {
+      eventType: "workflow-cancel-requested",
+      status: "canceled",
+      payload: {
+        action: "cancel",
+        workflow_run_id: evidence.smithersRunId
+      }
+    });
+    return runtimeResult(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      action: "cancel" as const,
+      status: "canceled" as const,
+      submitted: true as const
+    });
+  } catch (error) {
+    return runtimeFailure<CancelRunValue>([smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED")]);
+  }
+}
+
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
   if (action === "fork" && input.forkFrame === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>([
@@ -235,14 +271,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       force: input.force,
       retryFailed: input.retryFailed,
       label: input.label,
-      resumeRecovery:
-        action === "resume"
-          ? {
-              runRoot: evidence.layout.root,
-              inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
-              logsDir: path.join(evidence.layout.root, "smithers", "logs")
-            }
-          : undefined,
+      resumeRecovery: {
+        runRoot: evidence.layout.root,
+        inputPath: path.join(evidence.layout.root, "smithers", "input.json"),
+        logsDir: path.join(evidence.layout.root, "smithers", "logs")
+      },
       keepWorkspaces: resolved.config.run.keepWorkspaces,
       controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
       env: forgeGuard.env,
@@ -433,9 +466,12 @@ export async function readLinkedWorkflowEvidence(
 function updateLinkedWorkflowRunId(layout: RunLayout, workflowRunId: string): void {
   const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath) ?? {};
   const existingWorkflow = objectRecord(metadata.workflow);
+  const workflowIds = Array.isArray(metadata.workflow_ids)
+    ? metadata.workflow_ids.filter((value): value is string => typeof value === "string" && value.length > 0)
+    : [];
   writeJsonDurable(layout.runMetadataPath, {
     ...metadata,
-    workflow_ids: [workflowRunId],
+    workflow_ids: [...new Set([...workflowIds, workflowRunId])],
     workflow: {
       ...existingWorkflow,
       run_id: workflowRunId

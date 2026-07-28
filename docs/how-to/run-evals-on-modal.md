@@ -144,11 +144,13 @@ differential, and dynamic strategies, with all three disable flags set to
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
 sequential agent stages may each use two 1,800-second attempts, with ten minutes
-left for workflow transitions and final synchronization. Full-lane rows retain
-the 3,600-second bound. The smoke admits all three
-rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
-waves. Smoke uses four-way workflow concurrency; full uses eight-way concurrency
-so production rows can progress without serializing their agent work.
+left for workflow transitions and final synchronization. The explicitly gated
+cloud-node acceptance smoke instead has a 7,200-second watchdog for its forced
+pause and recovery, while full-lane rows retain the 3,600-second bound. The smoke
+admits all three rows at a time; the full lane admits 20, keeping each checked-in
+cohort to two row waves. Smoke uses four-way workflow concurrency; full uses
+eight-way concurrency so production rows can progress without serializing their
+agent work.
 Scoring remains independent of the runner and always uses GPT-5.6 Sol at
 `xhigh`.
 
@@ -381,6 +383,55 @@ against benchmark or model code deliberately encoding a credential. Do not use
 volume and use the ordinary sanitized aggregate collection path instead.
 
 ## Run the opt-in real-Modal smoke
+
+### Three-target cloud-node acceptance
+
+To validate per-node cloud execution rather than merely running the whole
+benchmark worker on Modal, dispatch **Modal Eval Benchmarks** on the candidate
+commit with `cloud_node_e2e` enabled. The workflow fixes the lane to the three
+checked-in Ultrafuzz-bench smoke targets and injects Modal credentials into the
+outer controller only; nested attempt VMs receive only the selected agent key.
+
+This gated lane deliberately exercises the recovery contract in every target:
+
+- the smoke-context controller detaches once after its immutable upload, and
+  the retry must reattach to that same live VM or reuse its proven publication;
+- one strategy VM is terminated once, and its replacement must use the same
+  handoff and dependency digests; and
+- after at least one node succeeds while another provider VM remains live, the
+  controller first requests a graceful stop, then selects exactly one live VM,
+  suspends the worker's dedicated process group (including agent, package
+  manager, and archive children), and detaches its provider call. Smithers can
+  therefore reach `paused` without draining that VM. A new `ultrafuzz resume`
+  controller must reattach the same provider ID and resume the suspended
+  process group; the proof requires a post-resume reattachment transition, not
+  only a sticky historical `resumed` flag.
+
+Publication is rejected unless all three rows finish and score, all seven
+agentic attempts per row have distinct Modal sandbox IDs, the global
+2 CPU/4096 MiB resources and 4 CPU/8192 MiB `smoke-context` override are both
+requested and provider-confirmed, the four-parent dedupe fan-in is proven by
+exact producer attempt IDs and dependency digests, every downstream handoff
+also contains the immutable artifact snapshots of all transitive ancestors,
+only incomplete controlled work receives a replacement VM, and normal reports
+remain available.
+Sanitized evidence is included at `cloud/<row-id>/evidence.json` in the public
+result bundle. The bundle header records cloud node execution and acceptance
+mode, so offline unpacking rejects a cloud-acceptance bundle if any row's cloud
+evidence is removed. The pinned Foundry checkout's initialized recursive
+submodules are included at their exact gitlink revisions in every node
+handoff. After the bundle is durably sealed, every nested run volume, attempt
+VM, read-only inspector, and volume initializer is cleaned; a cleanup failure
+fails the lane and is retried on resume. The incomplete-run recovery workflow
+derives the exact smoke/full plan artifact and nested controller IDs, so
+cancellation and timeout clean the same resources even when the outer worker
+never produced a launch-state artifact.
+
+The ordinary push smoke and full dispatch keep node execution local inside the
+outer Modal worker. This expensive acceptance lane runs only when the explicit
+dispatch input is enabled.
+
+### Provider authentication smoke
 
 The smoke is a dedicated cloud command, not part of `test`, and has no
 environment toggle. Build and publish the current production image first, then

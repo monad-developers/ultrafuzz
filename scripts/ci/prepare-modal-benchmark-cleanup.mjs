@@ -1,7 +1,9 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { boundedEvalId, safeEvalId } from "../../packages/evals/dist/index.js";
 import {
   readAutomaticPublicationManifest,
   validateAutomaticPairConfig,
@@ -56,12 +58,14 @@ export function prepareModalBenchmarkCleanup(input) {
     trialsPerVariant: dimensions.trialsPerVariant,
     maxParallelEvalRows: dimensions.maxParallelEvalRows,
     maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
-    controlTimeoutSeconds: dimensions.controlTimeoutSeconds
+    controlTimeoutSeconds: dimensions.controlTimeoutSeconds,
+    nodeExecution: dimensions.nodeExecution ?? "local"
   });
 
   const configs = new Set();
   const states = new Set();
   const modelSlugs = new Set();
+  const nestedControllerRunIds = new Set();
   const rows = [];
   for (const [index, value] of manifest.pairs.entries()) {
     const configPath = value.config_path;
@@ -91,17 +95,86 @@ export function prepareModalBenchmarkCleanup(input) {
         generation: input.expectedGeneration,
         mode: input.expectedMode,
         benchmark: manifest.benchmark,
-        targets: manifest.targets
+        targets: manifest.targets,
+        nodeExecution: manifest.execution.node_execution ?? "local"
       },
       modelSlugs
     );
     configs.add(configPath);
     states.add(statePath);
-    rows.push(`${configPath}\t${statePath}`);
+    const controllerRunIds =
+      (manifest.execution.node_execution ?? "local") === "modal"
+        ? modalNodeControllerRunIds(manifest, config, model, dimensions)
+        : [];
+    for (const controllerRunId of controllerRunIds) {
+      if (nestedControllerRunIds.has(controllerRunId)) {
+        throw new Error(`incomplete benchmark pair ${index} duplicates a nested controller run ID`);
+      }
+      nestedControllerRunIds.add(controllerRunId);
+    }
+    rows.push(`${configPath}\t${statePath}${controllerRunIds.length === 0 ? "" : `\t${controllerRunIds.join(",")}`}`);
   }
 
   fs.writeFileSync(input.outputPath, `${rows.join("\n")}\n`, { flag: "wx", mode: 0o600 });
   return { imageName: manifest.image_name, rows };
+}
+
+export function readCleanupNodeExecution(manifestPath) {
+  const absoluteManifestPath = path.resolve(manifestPath);
+  assertBoundedRegularFile(absoluteManifestPath, "incomplete benchmark manifest");
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(absoluteManifestPath, "utf8"));
+  } catch (error) {
+    throw new Error("incomplete benchmark manifest must contain valid JSON", { cause: error });
+  }
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("incomplete benchmark manifest must be an object");
+  }
+  const execution = manifest.execution;
+  if (execution === null || typeof execution !== "object" || Array.isArray(execution)) {
+    throw new Error("incomplete benchmark manifest execution must be an object");
+  }
+  const keys = Object.keys(execution);
+  if (
+    keys.some((key) => !["mode", "dry_run", "node_execution", "acceptance_e2e"].includes(key)) ||
+    execution.mode !== "modal" ||
+    execution.dry_run !== false
+  ) {
+    throw new Error("incomplete benchmark manifest execution is invalid");
+  }
+  const nodeExecution = execution.node_execution ?? "local";
+  const acceptanceE2e = execution.acceptance_e2e ?? false;
+  if (
+    (nodeExecution !== "local" && nodeExecution !== "modal") ||
+    typeof acceptanceE2e !== "boolean" ||
+    acceptanceE2e !== (nodeExecution === "modal")
+  ) {
+    throw new Error("incomplete benchmark manifest cloud-node execution is invalid");
+  }
+  return nodeExecution;
+}
+
+function modalNodeControllerRunIds(manifest, config, model, dimensions) {
+  const evalRunId = boundedEvalId([config.run_id, model.slug], 128);
+  const suiteId = `${manifest.benchmark}-${manifest.mode}`;
+  const controllerRunIds = [];
+  for (const target of manifest.targets) {
+    for (let trial = 1; trial <= dimensions.trialsPerVariant; trial += 1) {
+      const rowId = safeEvalId([target.id, model.slug, `trial-${trial}`]);
+      const rowRunId = safeEvalId([suiteId, rowId]);
+      const productRunId = boundedEvalId([evalRunId, rowRunId], 118);
+      const projectRoot = path.join("/tmp/ultrafuzz-public-workspace", "targets", target.id);
+      const suffix = createHash("sha256").update(path.resolve(projectRoot)).digest("hex").slice(0, 12);
+      const base = `ultrafuzz-${productRunId}`;
+      const prefix = base.slice(0, 128 - suffix.length - 1).replace(/[-.]+$/u, "");
+      controllerRunIds.push(`${prefix || "ultrafuzz"}-${suffix}`);
+    }
+  }
+  if (controllerRunIds.length !== manifest.matrix_rows_per_pair) {
+    throw new Error("incomplete benchmark nested controller count does not match the validated matrix");
+  }
+  return controllerRunIds;
 }
 
 function assertBoundedRegularFile(filePath, label) {
@@ -145,6 +218,7 @@ function main(args) {
     candidateCommit: expectedCandidate,
     benchmark
   });
+  const nodeExecution = readCleanupNodeExecution(manifestPath);
   prepareModalBenchmarkCleanup({
     manifestPath,
     outputPath,
@@ -152,7 +226,7 @@ function main(args) {
     expectedRepository,
     expectedGeneration,
     expectedMode,
-    policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
+    policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode, nodeExecution)
   });
 }
 

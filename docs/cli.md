@@ -15,6 +15,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                              |
 | `status <run-id>`      | Show a concise health verdict, progress, throughput, and gating nodes.                                                    |
 | `pause <run-id>`       | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
+| `cancel <run-id>`      | Cancel the linked workflow and terminate its active owned cloud attempts.                                                 |
 | `resume <run-id>`      | Resume a linked run after product checks.                                                                                 |
 | `replay <run-id>`      | Replay a linked run after product checks.                                                                                 |
 | `fork <run-id>`        | Fork a linked run after product checks.                                                                                   |
@@ -60,6 +61,8 @@ selects another agent, backend-specific reasoning is cleared, including when
   blocked, stalled, quota-parked, paused, or finished.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
+- `cancel <run-id>` cancels the exact linked controller; cloud providers
+  terminate both newly created and reattached owned attempts.
 - `resume <run-id>` continues a paused run using the existing linked workflow.
 
 ## Reference Commands

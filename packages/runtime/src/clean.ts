@@ -8,6 +8,7 @@ import { isPathInside, validateCleanPolicy } from "@ultrafuzz/security";
 const CLEAN_AUDIT_SCHEMA_VERSION = "ultrafuzz.clean.audit.v1" as const;
 
 import type { CleanGeneratedInput, CleanGeneratedValue, RuntimeDiagnostic, RuntimeResult } from "./types.js";
+import { smithersRunIdForProject } from "./smithers.js";
 import { hasRuntimeErrors, policyDiagnostics, runtimeError, runtimeFailure, runtimeResult } from "./utils.js";
 
 interface PlannedRemoval {
@@ -110,17 +111,19 @@ async function cleanupCloudRunStorage(
         cleanupOptions: { force: boolean }
       ): Promise<unknown>;
     };
-    for (const { runId, modal } of cloudRuns) {
-      await provider.cleanupModalNodeRun(
-        {
-          app: modal.app,
-          image: modal.image,
-          ...(modal.region === undefined ? {} : { region: modal.region }),
-          credentialEnv: modal.credentialEnv
-        },
-        `ultrafuzz-${runId}`,
-        { force: input.confirmed === true }
-      );
+    for (const { modal, controllerRunIds } of cloudRuns) {
+      for (const controllerRunId of controllerRunIds) {
+        await provider.cleanupModalNodeRun(
+          {
+            app: modal.app,
+            image: modal.image,
+            ...(modal.region === undefined ? {} : { region: modal.region }),
+            credentialEnv: modal.credentialEnv
+          },
+          controllerRunId,
+          { force: input.confirmed === true }
+        );
+      }
     }
     return undefined;
   } catch (error) {
@@ -141,7 +144,9 @@ async function cleanupCloudRunStorage(
   }
 }
 
-function cloudRunsForCleanup(planned: PlannedRemoval[]): Array<{ runId: string; modal: ModalExecutionProviderConfig }> {
+function cloudRunsForCleanup(
+  planned: PlannedRemoval[]
+): Array<{ runId: string; modal: ModalExecutionProviderConfig; controllerRunIds: string[] }> {
   const runRoots = planned.flatMap((removal) => {
     const match = /^runs\/([A-Za-z0-9][A-Za-z0-9._-]*)$/u.exec(removal.selection);
     if (match?.[1] !== undefined) {
@@ -155,8 +160,54 @@ function cloudRunsForCleanup(planned: PlannedRemoval[]): Array<{ runId: string; 
   });
   return runRoots.flatMap(({ runId, root }) => {
     const modal = readPersistedModalExecution(root);
-    return modal === undefined ? [] : [{ runId, modal }];
+    return modal === undefined ? [] : [{ runId, modal, controllerRunIds: controllerRunIdsForCleanup(root, runId) }];
   });
+}
+
+export function controllerRunIdsForCleanup(runRoot: string, productRunId: string): string[] {
+  const projectRoot = fs.realpathSync(path.resolve(runRoot, "../../.."));
+  const controllerRunIds = new Set<string>([smithersRunIdForProject(projectRoot, productRunId, true)]);
+  const metadataPath = path.join(runRoot, "run.json");
+  if (fs.existsSync(metadataPath)) {
+    assertNoSymlinkComponents(runRoot, metadataPath, "cloud cleanup run metadata");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as unknown;
+    if (!isRecord(metadata)) throw new Error("persisted cloud cleanup run metadata is invalid");
+    const workflow = isRecord(metadata.workflow) ? metadata.workflow : undefined;
+    for (const value of [...(Array.isArray(metadata.workflow_ids) ? metadata.workflow_ids : []), workflow?.run_id]) {
+      if (value === undefined) continue;
+      if (!validControllerRunId(value)) {
+        throw new Error("persisted cloud cleanup controller identity is invalid");
+      }
+      controllerRunIds.add(value);
+    }
+  }
+
+  const attemptsRoot = path.join(runRoot, "cloud-execution", "attempts");
+  if (fs.existsSync(attemptsRoot)) {
+    assertNoSymlinkComponents(runRoot, attemptsRoot, "cloud cleanup attempt evidence");
+    const attemptsStat = fs.lstatSync(attemptsRoot);
+    if (!attemptsStat.isDirectory() || attemptsStat.isSymbolicLink()) {
+      throw new Error("persisted cloud cleanup attempt evidence is unsafe");
+    }
+    for (const entry of fs.readdirSync(attemptsRoot, { withFileTypes: true })) {
+      if (!entry.name.endsWith(".json")) continue;
+      if (!entry.isFile() || entry.isSymbolicLink()) {
+        throw new Error("persisted cloud cleanup attempt evidence is unsafe");
+      }
+      const evidencePath = path.join(attemptsRoot, entry.name);
+      assertNoSymlinkComponents(runRoot, evidencePath, "cloud cleanup attempt evidence");
+      const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8")) as unknown;
+      if (!isRecord(evidence) || !validControllerRunId(evidence.controller_run_id)) {
+        throw new Error("persisted cloud cleanup attempt evidence is invalid");
+      }
+      controllerRunIds.add(evidence.controller_run_id);
+    }
+  }
+  return [...controllerRunIds].sort();
+}
+
+function validControllerRunId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u.test(value);
 }
 
 function readPersistedModalExecution(runRoot: string): ModalExecutionProviderConfig | undefined {

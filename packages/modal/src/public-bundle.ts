@@ -13,7 +13,7 @@ import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
 
-export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
+export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -75,6 +75,439 @@ const bundleLineageSchema = z.strictObject({
   image_fingerprint: sha256,
   model_fingerprint: sha256
 });
+const bundleExecutionSchema = z.discriminatedUnion("mode", [
+  z.strictObject({
+    mode: z.literal("local"),
+    acceptance_e2e: z.literal(false)
+  }),
+  z.strictObject({
+    mode: z.literal("cloud"),
+    provider: z.literal("modal"),
+    acceptance_e2e: z.boolean()
+  })
+]);
+
+const cloudAttemptState = z.enum([
+  "prepared",
+  "queued",
+  "launching",
+  "running",
+  "publishing",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "provider-unknown"
+]);
+const smokeCloudDependencies = {
+  "smoke-context": [],
+  "time-warp-sequences": ["smoke-context"],
+  "external-dependency-boundaries": ["smoke-context"],
+  "externalized-state-accounting": ["smoke-context"],
+  "lifecycle-view-boundaries": ["smoke-context"],
+  "dedupe-findings": [
+    "smoke-context",
+    "time-warp-sequences",
+    "external-dependency-boundaries",
+    "externalized-state-accounting",
+    "lifecycle-view-boundaries"
+  ],
+  "final-report": [
+    "smoke-context",
+    "time-warp-sequences",
+    "external-dependency-boundaries",
+    "externalized-state-accounting",
+    "lifecycle-view-boundaries",
+    "dedupe-findings"
+  ]
+} as const;
+const cloudIdentity = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+const publicCloudAttemptSchema = z.strictObject({
+  logical_node_id: safeId,
+  task_id: cloudIdentity,
+  attempt_id: cloudIdentity,
+  execution_generation: safeId,
+  state: z.literal("succeeded"),
+  requested_resources: z.strictObject({
+    cpu: z.number().positive().finite(),
+    memory_mib: z.number().int().positive(),
+    timeout_seconds: z.number().int().positive()
+  }),
+  resolved_resources: z.strictObject({
+    cpu: z.number().positive().finite(),
+    memory_mib: z.number().int().positive(),
+    timeout_seconds: z.number().int().positive()
+  }),
+  resource_confirmation: z.enum(["provider-create-accepted", "provider-reattached"]),
+  handoff_sha256: sha256,
+  request_sha256: sha256,
+  dependency_inputs: z
+    .array(
+      z.strictObject({
+        logical_node_id: safeId,
+        attempt_id: cloudIdentity,
+        sha256
+      })
+    )
+    .max(64),
+  provider_execution_ids: z.array(cloudIdentity).min(1).max(16),
+  retry_index: z.number().int().nonnegative().max(15),
+  executed: z.literal(true),
+  resumed: z.boolean(),
+  reused: z.boolean(),
+  storage_lineage: z.string().min(1).max(2_048),
+  output_sha256: sha256,
+  publication_artifact_sha256: sha256,
+  cleanup_state: z.literal("terminated"),
+  transitions: z
+    .array(
+      z.strictObject({
+        state: cloudAttemptState,
+        at: z.string().datetime({ offset: true }),
+        provider_execution_id: cloudIdentity.optional()
+      })
+    )
+    .min(1)
+    .max(128)
+});
+const publicCloudEvidenceSchema = z
+  .strictObject({
+    schema_version: z.literal("ultrafuzz.modal.public-cloud-evidence.v1"),
+    row_id: safeId,
+    run_id: safeId,
+    controller_run_id: cloudIdentity,
+    provider: z.literal("modal"),
+    acceptance_e2e: z.boolean(),
+    controlled_faults: z
+      .array(
+        z.strictObject({
+          fault: z.enum(["detach", "interrupt"]),
+          task_id: cloudIdentity,
+          attempt_id: cloudIdentity,
+          execution_generation: safeId,
+          claimed_at: z.string().datetime({ offset: true })
+        })
+      )
+      .max(2),
+    resume: z
+      .strictObject({
+        action: z.literal("resume"),
+        submitted: z.literal(true),
+        pause_request_status: z.literal("pause-requested"),
+        pause_requested_at: z.string().datetime({ offset: true }),
+        pause_status: z.literal("paused"),
+        pause_detach_attempt_ids: z.array(cloudIdentity).length(1),
+        pause_detach_claims: z.record(
+          cloudIdentity,
+          z.strictObject({
+            controller_run_id: cloudIdentity,
+            task_id: cloudIdentity,
+            attempt_id: cloudIdentity,
+            provider_execution_id: cloudIdentity,
+            provider_state_at_detach: z.literal("live"),
+            claimed_at: z.string().datetime({ offset: true })
+          })
+        ),
+        completed_attempt_ids_before_pause: z.array(cloudIdentity).min(1).max(64),
+        live_attempt_ids_before_pause: z.array(cloudIdentity).min(1).max(64),
+        attempt_states_before_pause: z.record(cloudIdentity, cloudAttemptState),
+        attempt_provider_execution_ids_before_pause: z.record(cloudIdentity, z.array(cloudIdentity).min(1).max(16)),
+        completed_attempt_ids_before_resume: z.array(cloudIdentity).min(1).max(64),
+        live_attempt_ids_before_resume: z.array(cloudIdentity).min(1).max(64),
+        attempt_states_before_resume: z.record(cloudIdentity, cloudAttemptState),
+        provider_execution_ids_before_resume: z.array(cloudIdentity).min(1).max(128),
+        attempt_provider_execution_ids_before_resume: z.record(cloudIdentity, z.array(cloudIdentity).min(1).max(16)),
+        invoked_at: z.string().datetime({ offset: true })
+      })
+      .optional(),
+    attempts: z.array(publicCloudAttemptSchema).min(1).max(2_048)
+  })
+  .superRefine((value, context) => {
+    if (
+      value.acceptance_e2e &&
+      (value.resume === undefined || value.attempts.length !== 7 || value.controlled_faults.length !== 2)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "cloud acceptance evidence requires controlled fault and resume proof with exactly seven attempts"
+      });
+    }
+    if (!value.acceptance_e2e && (value.resume !== undefined || value.controlled_faults.length !== 0)) {
+      context.addIssue({
+        code: "custom",
+        message: "non-acceptance cloud evidence must not claim controlled fault or resume proof"
+      });
+    }
+    const logical = new Set<string>();
+    const providerIds = new Set<string>();
+    for (const attempt of value.attempts) {
+      if (logical.has(attempt.logical_node_id)) {
+        context.addIssue({ code: "custom", message: "cloud evidence repeats a logical node" });
+      }
+      logical.add(attempt.logical_node_id);
+      if (JSON.stringify(attempt.requested_resources) !== JSON.stringify(attempt.resolved_resources)) {
+        context.addIssue({ code: "custom", message: "cloud evidence resolved resources do not match the request" });
+      }
+      if (
+        new Set(attempt.dependency_inputs.map((dependency) => dependency.logical_node_id)).size !==
+        attempt.dependency_inputs.length
+      ) {
+        context.addIssue({ code: "custom", message: "cloud evidence repeats a dependency producer" });
+      }
+      if (attempt.retry_index !== Math.max(0, attempt.provider_execution_ids.length - 1)) {
+        context.addIssue({ code: "custom", message: "cloud evidence retry index does not match provider executions" });
+      }
+      for (const providerId of attempt.provider_execution_ids) {
+        if (providerIds.has(providerId)) {
+          context.addIssue({ code: "custom", message: "cloud evidence reuses a provider execution" });
+        }
+        providerIds.add(providerId);
+      }
+    }
+    const attemptsByLogicalNode = new Map(value.attempts.map((attempt) => [attempt.logical_node_id, attempt]));
+    for (const attempt of value.attempts) {
+      for (const dependency of attempt.dependency_inputs) {
+        const producer = attemptsByLogicalNode.get(dependency.logical_node_id);
+        if (
+          producer === undefined ||
+          producer.attempt_id !== dependency.attempt_id ||
+          producer.publication_artifact_sha256 !== dependency.sha256
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: `cloud evidence producer identity is invalid or producer publication digest is mismatched for ${attempt.logical_node_id}`
+          });
+        }
+      }
+    }
+    if (!value.acceptance_e2e || value.resume === undefined) return;
+    const attemptsByNode = new Map(value.attempts.map((attempt) => [attempt.logical_node_id, attempt]));
+    const attemptsById = new Map(value.attempts.map((attempt) => [attempt.attempt_id, attempt]));
+    if (
+      attemptsByNode.size !== Object.keys(smokeCloudDependencies).length ||
+      attemptsById.size !== value.attempts.length ||
+      Object.keys(smokeCloudDependencies).some((nodeId) => !attemptsByNode.has(nodeId))
+    ) {
+      context.addIssue({ code: "custom", message: "cloud acceptance topology is not the exact smoke topology" });
+      return;
+    }
+    for (const [nodeId, dependencies] of Object.entries(smokeCloudDependencies)) {
+      const attempt = attemptsByNode.get(nodeId)!;
+      const actualDependencies = attempt.dependency_inputs.map((dependency) => dependency.logical_node_id).sort();
+      if (JSON.stringify(actualDependencies) !== JSON.stringify([...dependencies].sort())) {
+        context.addIssue({ code: "custom", message: `cloud acceptance fan-in is invalid for ${nodeId}` });
+      }
+      for (const dependency of attempt.dependency_inputs) {
+        if (attemptsByNode.get(dependency.logical_node_id)?.attempt_id !== dependency.attempt_id) {
+          context.addIssue({ code: "custom", message: `cloud acceptance producer identity is invalid for ${nodeId}` });
+        }
+      }
+      const expectedCpu = nodeId === "smoke-context" ? 4 : 2;
+      const expectedMemory = nodeId === "smoke-context" ? 8_192 : 4_096;
+      if (
+        attempt.requested_resources.cpu !== expectedCpu ||
+        attempt.requested_resources.memory_mib !== expectedMemory ||
+        attempt.requested_resources.timeout_seconds !== 1_800
+      ) {
+        context.addIssue({ code: "custom", message: `cloud acceptance resources are invalid for ${nodeId}` });
+      }
+      const expectedExecutions = nodeId === "external-dependency-boundaries" ? 2 : 1;
+      if (attempt.provider_execution_ids.length !== expectedExecutions) {
+        context.addIssue({ code: "custom", message: `cloud acceptance replacement count is invalid for ${nodeId}` });
+      }
+    }
+    const faults = new Map(value.controlled_faults.map((fault) => [fault.fault, fault]));
+    const detachAttempt = attemptsByNode.get("smoke-context")!;
+    const interruptAttempt = attemptsByNode.get("external-dependency-boundaries")!;
+    const detach = faults.get("detach");
+    const interrupt = faults.get("interrupt");
+    if (
+      faults.size !== 2 ||
+      detach === undefined ||
+      interrupt === undefined ||
+      detach.task_id !== detachAttempt.task_id ||
+      detach.attempt_id !== detachAttempt.attempt_id ||
+      detach.execution_generation !== detachAttempt.execution_generation ||
+      interrupt.task_id !== interruptAttempt.task_id ||
+      interrupt.attempt_id !== interruptAttempt.attempt_id ||
+      interrupt.execution_generation !== interruptAttempt.execution_generation
+    ) {
+      context.addIssue({ code: "custom", message: "cloud acceptance controlled fault identities are invalid" });
+    } else {
+      assertControlledFaultTransitions(detachAttempt, detach, "detach", context);
+      assertControlledFaultTransitions(interruptAttempt, interrupt, "interrupt", context);
+    }
+    const contextAttempt = attemptsByNode.get("smoke-context")!;
+    if (!contextAttempt.resumed && !contextAttempt.reused) {
+      context.addIssue({ code: "custom", message: "cloud acceptance did not prove controller reattachment" });
+    }
+    const resume = value.resume;
+    if (!sameStringSet(resume.pause_detach_attempt_ids, Object.keys(resume.pause_detach_claims))) {
+      context.addIssue({ code: "custom", message: "cloud acceptance pause detach claim summary is inconsistent" });
+    }
+    for (const attemptId of resume.pause_detach_attempt_ids) {
+      const attempt = attemptsById.get(attemptId);
+      const claim = resume.pause_detach_claims[attemptId];
+      const beforeResumeIds = resume.attempt_provider_execution_ids_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        claim === undefined ||
+        claim.controller_run_id !== value.controller_run_id ||
+        claim.task_id !== attempt.task_id ||
+        claim.attempt_id !== attemptId ||
+        Date.parse(claim.claimed_at) < Date.parse(resume.pause_requested_at) ||
+        !resume.live_attempt_ids_before_resume.includes(attemptId) ||
+        resume.attempt_states_before_resume[attemptId] !== "provider-unknown" ||
+        beforeResumeIds === undefined ||
+        !beforeResumeIds.includes(claim.provider_execution_id) ||
+        !attempt.provider_execution_ids.includes(claim.provider_execution_id) ||
+        attempt.resource_confirmation !== "provider-reattached" ||
+        !attempt.transitions.some(
+          (transition) =>
+            transition.state === "running" &&
+            transition.provider_execution_id === claim.provider_execution_id &&
+            Date.parse(transition.at) >= Math.max(Date.parse(claim.claimed_at), Date.parse(resume.invoked_at))
+        )
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "cloud acceptance did not reattach the provider deliberately detached after pause request"
+        });
+      }
+    }
+    for (const attemptId of [
+      ...resume.pause_detach_attempt_ids,
+      ...Object.keys(resume.attempt_states_before_pause),
+      ...Object.keys(resume.attempt_states_before_resume),
+      ...Object.keys(resume.attempt_provider_execution_ids_before_pause),
+      ...Object.keys(resume.attempt_provider_execution_ids_before_resume)
+    ]) {
+      if (!attemptsById.has(attemptId)) {
+        context.addIssue({ code: "custom", message: "cloud acceptance resume evidence names an unknown attempt" });
+      }
+    }
+    const liveStates = new Set(["queued", "launching", "running", "publishing", "provider-unknown"]);
+    for (const attemptId of resume.completed_attempt_ids_before_pause) {
+      const attempt = attemptsById.get(attemptId);
+      const beforeIds = resume.attempt_provider_execution_ids_before_pause[attemptId];
+      const beforeResumeIds = resume.attempt_provider_execution_ids_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        resume.attempt_states_before_pause[attemptId] !== "succeeded" ||
+        resume.attempt_states_before_resume[attemptId] !== "succeeded" ||
+        beforeIds === undefined ||
+        beforeResumeIds === undefined ||
+        !sameStringSet(beforeResumeIds, beforeIds) ||
+        !sameStringSet(beforeIds, attempt.provider_execution_ids)
+      ) {
+        context.addIssue({ code: "custom", message: "cloud acceptance repeated completed work across pause" });
+      }
+    }
+    for (const attemptId of resume.live_attempt_ids_before_pause) {
+      const attempt = attemptsById.get(attemptId);
+      const beforeIds = resume.attempt_provider_execution_ids_before_pause[attemptId];
+      const beforeResumeIds = resume.attempt_provider_execution_ids_before_resume[attemptId];
+      const beforeResumeState = resume.attempt_states_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        !liveStates.has(resume.attempt_states_before_pause[attemptId] ?? "") ||
+        beforeIds === undefined ||
+        beforeResumeIds === undefined ||
+        (!liveStates.has(beforeResumeState ?? "") && beforeResumeState !== "succeeded") ||
+        beforeIds.some((providerId) => !beforeResumeIds.includes(providerId)) ||
+        beforeResumeIds.some((providerId) => !attempt.provider_execution_ids.includes(providerId)) ||
+        (attempt.logical_node_id !== "external-dependency-boundaries" &&
+          (beforeIds.length !== beforeResumeIds.length || beforeIds.length !== attempt.provider_execution_ids.length))
+      ) {
+        context.addIssue({ code: "custom", message: "cloud acceptance duplicated or lost live work across pause" });
+      }
+    }
+    for (const attemptId of resume.live_attempt_ids_before_resume) {
+      const attempt = attemptsById.get(attemptId);
+      const beforeIds = resume.attempt_provider_execution_ids_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        !liveStates.has(resume.attempt_states_before_resume[attemptId] ?? "") ||
+        beforeIds === undefined ||
+        beforeIds.some((providerId) => !attempt.provider_execution_ids.includes(providerId)) ||
+        (attempt.logical_node_id !== "external-dependency-boundaries" &&
+          beforeIds.length !== attempt.provider_execution_ids.length)
+      ) {
+        context.addIssue({ code: "custom", message: "cloud acceptance duplicated or lost live work after pause" });
+      }
+    }
+    for (const attemptId of resume.completed_attempt_ids_before_resume) {
+      const attempt = attemptsById.get(attemptId);
+      const beforeIds = resume.attempt_provider_execution_ids_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        beforeIds === undefined ||
+        !sameStringSet(beforeIds, attempt.provider_execution_ids)
+      ) {
+        context.addIssue({ code: "custom", message: "cloud acceptance repeated completed work after resume" });
+      }
+    }
+    const providerIdsBeforeResume = Object.values(resume.attempt_provider_execution_ids_before_resume).flat();
+    if (!sameStringSet(providerIdsBeforeResume, resume.provider_execution_ids_before_resume)) {
+      context.addIssue({
+        code: "custom",
+        message: "cloud acceptance resume provider identity summary is inconsistent"
+      });
+    }
+  });
+
+function assertControlledFaultTransitions(
+  attempt: z.infer<typeof publicCloudAttemptSchema>,
+  fault: z.infer<typeof publicCloudEvidenceSchema>["controlled_faults"][number],
+  kind: "detach" | "interrupt",
+  context: z.RefinementCtx
+): void {
+  const firstProviderId = attempt.provider_execution_ids[0];
+  const secondProviderId = attempt.provider_execution_ids[1];
+  const claimedAt = Date.parse(fault.claimed_at);
+  const preFault = attempt.transitions.some(
+    (transition) =>
+      transition.provider_execution_id === firstProviderId &&
+      (transition.state === "launching" || transition.state === "running") &&
+      Date.parse(transition.at) <= claimedAt
+  );
+  const terminalAfterFault = attempt.transitions.some(
+    (transition) =>
+      ["failed", "cancelled", "provider-unknown"].includes(transition.state) && Date.parse(transition.at) >= claimedAt
+  );
+  const resumedSameProvider = attempt.transitions.some(
+    (transition) =>
+      kind === "detach" &&
+      transition.provider_execution_id === firstProviderId &&
+      transition.state === "running" &&
+      Date.parse(transition.at) >= claimedAt
+  );
+  const launchedReplacement =
+    kind === "interrupt" &&
+    secondProviderId !== undefined &&
+    secondProviderId !== firstProviderId &&
+    attempt.transitions.some(
+      (transition) =>
+        transition.provider_execution_id === secondProviderId &&
+        (transition.state === "launching" || transition.state === "running") &&
+        Date.parse(transition.at) >= claimedAt
+    );
+  if (!preFault || !terminalAfterFault || (kind === "detach" ? !resumedSameProvider : !launchedReplacement)) {
+    context.addIssue({ code: "custom", message: `cloud acceptance ${kind} transition proof is invalid` });
+  }
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return (
+    new Set(left).size === left.length &&
+    new Set(right).size === right.length &&
+    left.length === right.length &&
+    JSON.stringify([...left].sort()) === JSON.stringify([...right].sort())
+  );
+}
 
 const bundleSchema = z.strictObject({
   schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION),
@@ -88,6 +521,7 @@ const bundleSchema = z.strictObject({
   candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
   eval_run_id: safeId,
   lineage: bundleLineageSchema,
+  execution: bundleExecutionSchema,
   status: bundleStatus,
   executed_case_count: caseCount,
   graded_case_count: caseCount,
@@ -125,6 +559,7 @@ export function createPublicBenchmarkBundle(input: {
     ModalWorkerLineage,
     "logical_run_id" | "generation" | "attempt" | "attempt_id" | "fingerprints" | "model_fingerprint"
   >;
+  execution?: PublicBenchmarkBundle["execution"];
   files: PublicBenchmarkBundleSource[];
   forbiddenSecretValues?: readonly string[];
   createdAt?: string;
@@ -168,6 +603,7 @@ export function createPublicBenchmarkBundle(input: {
         image_fingerprint: input.lineage.fingerprints.image,
         model_fingerprint: input.lineage.model_fingerprint
       },
+      execution: input.execution ?? { mode: "local", acceptance_e2e: false },
       ...metadata,
       created_at: input.createdAt ?? new Date().toISOString(),
       files
@@ -311,6 +747,12 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
+  assertPublicCloudEvidence(
+    parsed.execution,
+    matrixRows,
+    contentsByPath,
+    parsed.targets.map((target) => target.id)
+  );
   assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
@@ -321,6 +763,64 @@ export function parsePublicBenchmarkBundle(
   });
   assertPublicBenchmarkBundleMetadata(parsed, expectedMetadata);
   return parsed;
+}
+
+function assertPublicCloudEvidence(
+  execution: PublicBenchmarkBundle["execution"],
+  matrixRows: Map<string, PublicBundleMatrixRow>,
+  contentsByPath: Map<string, Buffer>,
+  expectedTargetIds: string[]
+): void {
+  const cloudPaths = [...contentsByPath.keys()].filter((bundlePath) => bundlePath.startsWith("cloud/"));
+  if (execution.mode === "local") {
+    if (cloudPaths.length > 0) {
+      throw new Error("local public benchmark bundle must not contain cloud evidence");
+    }
+    return;
+  }
+  if (cloudPaths.length !== matrixRows.size) {
+    throw new Error("public benchmark bundle cloud evidence row set does not match the matrix");
+  }
+  if (
+    execution.acceptance_e2e &&
+    (matrixRows.size !== expectedTargetIds.length ||
+      JSON.stringify([...new Set([...matrixRows.values()].map((row) => row.target_id))].sort()) !==
+        JSON.stringify([...expectedTargetIds].sort()))
+  ) {
+    throw new Error("public benchmark bundle cloud acceptance target set is not the exact checked-in smoke cohort");
+  }
+  const allProviderIds = new Set<string>();
+  const runIds = new Set<string>();
+  for (const rowId of matrixRows.keys()) {
+    const bundlePath = `cloud/${rowId}/evidence.json`;
+    const contents = contentsByPath.get(bundlePath);
+    if (contents === undefined) throw new Error(`public benchmark bundle is missing ${bundlePath}`);
+    let evidence;
+    try {
+      evidence = publicCloudEvidenceSchema.parse(JSON.parse(contents.toString("utf8")) as unknown);
+    } catch (error) {
+      const details =
+        error instanceof z.ZodError
+          ? [...new Set(error.issues.map((issue) => issue.message))].join("; ")
+          : "invalid JSON";
+      throw new Error(`public benchmark bundle cloud evidence is invalid: ${rowId}: ${details}`, { cause: error });
+    }
+    if (evidence.row_id !== rowId || runIds.has(evidence.run_id)) {
+      throw new Error(`public benchmark bundle cloud evidence identity is invalid: ${rowId}`);
+    }
+    if (evidence.acceptance_e2e !== execution.acceptance_e2e) {
+      throw new Error(`public benchmark bundle cloud acceptance mode is inconsistent: ${rowId}`);
+    }
+    runIds.add(evidence.run_id);
+    for (const attempt of evidence.attempts) {
+      for (const providerId of attempt.provider_execution_ids) {
+        if (allProviderIds.has(providerId)) {
+          throw new Error("public benchmark bundle reuses a Modal sandbox across matrix rows");
+        }
+        allProviderIds.add(providerId);
+      }
+    }
+  }
 }
 
 function assertSmokeFindingFloor(
@@ -832,6 +1332,7 @@ function isAllowedBundlePath(value: string): boolean {
     "eval/review/new-findings.jsonl"
   ]);
   if (evalFiles.has(value)) return true;
+  if (/^cloud\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/evidence\.json$/u.test(value)) return true;
   return /^reports\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:report\.md|report\.json|findings\.normalized\.json)$/u.test(
     value
   );

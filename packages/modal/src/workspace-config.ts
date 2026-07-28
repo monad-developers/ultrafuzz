@@ -8,11 +8,55 @@ import {
 } from "./defaults.js";
 import { remoteAuthDir } from "./layout.js";
 
-export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number): string {
+export interface ModalTargetCloudExecution {
+  app: string;
+  image: string;
+  providerCredentialEnv?: readonly [string, string];
+  resourceOverrideNodeId: string;
+}
+
+export function modalTargetToml(
+  model: ModalModelSpec,
+  nodeTimeoutSeconds: number,
+  cloud?: ModalTargetCloudExecution,
+  options: { smokeWorkflow?: boolean } = {}
+): string {
   const selectedProfile = modelProfileToml(model);
+  const smokeCoordinationProfile =
+    options.smokeWorkflow === true
+      ? `
+[models.smoke-coordination]
+${modelProfileToml(model, "medium")}
+`
+      : "";
   const codex = agentToml(model, "CodexAgent", "openai");
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
   const kimi = agentToml(model, "KimiAgent", "kimi");
+  const providerCredentialEnv = cloud?.providerCredentialEnv ?? ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"];
+  const execution =
+    cloud === undefined
+      ? ""
+      : `
+[execution]
+mode = "cloud"
+provider = "modal"
+retention_days = 30
+
+[execution.resources]
+cpu = 2
+memory_mib = 4096
+timeout_seconds = ${nodeTimeoutSeconds}
+
+[execution.providers.modal]
+app = ${tomlString(cloud.app)}
+image = ${tomlString(cloud.image)}
+credential_env = [${providerCredentialEnv.map(tomlString).join(", ")}]
+
+[execution.nodes.${cloud.resourceOverrideNodeId}.resources]
+cpu = 4
+memory_mib = 8192
+timeout_seconds = ${nodeTimeoutSeconds}
+`;
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
 
@@ -26,6 +70,7 @@ max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
 keep_workspaces = true
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}
+${execution}
 
 [models]
 synthesized_default = false
@@ -36,6 +81,7 @@ ${selectedProfile}
 [models.benchmark]
 ${selectedProfile}
 
+${smokeCoordinationProfile}
 ${codex}
 
 ${claude}
@@ -72,10 +118,10 @@ export function capModalTargetTopologyTimeouts(topologyPath: string, maximumSeco
   fs.writeFileSync(topologyPath, capped, "utf8");
 }
 
-function modelProfileToml(model: ModalModelSpec): string {
+function modelProfileToml(model: ModalModelSpec, reasoning: ModalModelSpec["reasoning"] = model.reasoning): string {
   return `agent = ${tomlString(model.agent)}
 model = ${tomlString(model.model)}
-reasoning = ${tomlString(model.reasoning)}`;
+reasoning = ${tomlString(reasoning)}`;
 }
 
 function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"], provider: ModelProvider): string {

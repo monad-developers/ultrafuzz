@@ -68,6 +68,7 @@ The CLI product surface consists of:
 | `references update`    | Rewrite the project reference catalog to newer pinned commits when requested.                                              |
 | `ps`                   | List Ultrafuzz runs and linked workflow status.                                                                            |
 | `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                               |
+| `cancel <run-id>`      | Cancel the linked workflow and terminate active owned cloud attempts.                                                      |
 | `resume <run-id>`      | Delegate resume for the linked workflow after product checks.                                                              |
 | `replay <run-id>`      | Delegate replay for the linked workflow after product checks.                                                              |
 | `fork <run-id>`        | Delegate fork for the linked workflow after product checks.                                                                |
@@ -329,7 +330,7 @@ and output manifest digests. Attempt counts and terminal summaries MUST derive
 from the ledger. Failure categories MUST remain separate from raw diagnostics,
 and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
-`status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
+`status`, `pause`, `cancel`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
 linked workflow identity or lifecycle evidence.
 

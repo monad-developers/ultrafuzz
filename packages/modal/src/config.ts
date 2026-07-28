@@ -107,6 +107,8 @@ const publicBenchmarkConfigSchema = z
       .object({
         benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
         lane: z.enum(["smoke", "full"]).default("smoke"),
+        node_execution: z.enum(["local", "modal"]).default("local"),
+        acceptance_e2e: z.boolean().default(false),
         runner_model_profile: safeId,
         candidate_repository: httpsUrl,
         candidate_commit: fullSha,
@@ -122,6 +124,18 @@ const publicBenchmarkConfigSchema = z
         code: "custom",
         path: ["models"],
         message: "public benchmarks must configure exactly their selected runner model profile"
+      });
+    }
+    if (
+      config.public_benchmark.acceptance_e2e &&
+      (config.public_benchmark.node_execution !== "modal" ||
+        config.public_benchmark.lane !== "smoke" ||
+        config.public_benchmark.benchmark !== "ultrafuzz-bench")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["public_benchmark", "acceptance_e2e"],
+        message: "cloud acceptance E2E requires the ultrafuzz-bench smoke lane with Modal node execution"
       });
     }
   });

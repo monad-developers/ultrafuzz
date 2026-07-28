@@ -19,6 +19,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                   |
 | `ultrafuzz status <run-id>`      | Show a concise health verdict, progress counts, throughput, and gating nodes.                                  |
 | `ultrafuzz pause <run-id>`       | Gracefully pause an active run after its in-flight tasks finish.                                               |
+| `ultrafuzz cancel <run-id>`      | Cancel the linked workflow and terminate active owned cloud attempts.                                          |
 | `ultrafuzz resume <run-id>`      | Delegate resume for the linked workflow run after product checks.                                              |
 | `ultrafuzz replay <run-id>`      | Delegate replay for the linked workflow run after product checks.                                              |
 | `ultrafuzz fork <run-id>`        | Delegate fork for the linked workflow run after product checks.                                                |
@@ -136,6 +137,7 @@ ultrafuzz ps [--project <path>] [--json]
 ultrafuzz inspect <run-id> [--project <path>] [--json]
 ultrafuzz status <run-id> [--project <path>] [--window <minutes>] [--json]
 ultrafuzz pause <run-id> [--project <path>] [--json]
+ultrafuzz cancel <run-id> [--project <path>] [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
   [--reset-node <workflow-node-id>] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
@@ -148,11 +150,13 @@ ultrafuzz fork <run-id> \
   [--json]
 ```
 
-`status`, `pause`, `resume`, `replay`, and `fork` operate on the workflow run
+`status`, `pause`, `cancel`, `resume`, `replay`, and `fork` operate on the workflow run
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
 and maps workflow details into the stable Ultrafuzz JSON envelope. `pause`
 requests a graceful stop: no new tasks are scheduled, in-flight tasks finish,
-and the run settles in the resumable `paused` state. `resume` reports
+and the run settles in the resumable `paused` state. `cancel` submits
+cancellation to that exact controller and records the product run as canceled.
+`resume` reports
 `submitted: false` instead of
 launching a duplicate continuation when the linked workflow is still in an
 active state (running, in-progress, started, queued, retrying, or waiting).

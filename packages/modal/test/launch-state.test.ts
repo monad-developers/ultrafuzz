@@ -467,6 +467,20 @@ describe("Modal runner status", () => {
     expect(
       parseModalWorkerStatus(
         workerResult({
+          model_work_started: true,
+          exit_category: "sandbox-exited",
+          diagnostic_code: "public-cloud-cleanup-incomplete"
+        })
+      )
+    ).toMatchObject({
+      category: "cleanup-required",
+      model_work_started: true,
+      retryable: false,
+      error_code: "public-cloud-cleanup-incomplete"
+    });
+    expect(
+      parseModalWorkerStatus(
+        workerResult({
           exit_category: "genuine-evaluation-failure",
           diagnostic_code: "genuine-evaluation-failure"
         })
@@ -633,6 +647,14 @@ describe("Modal runner status", () => {
         postModelRecovery: "stop"
       })
     ).toMatchObject({ category: "resume-required", action: "none", model_work_started: true, retryable: false });
+    expect(
+      classifyModalRunnerStatus({
+        sandbox: "exited",
+        attempt: 1,
+        workerStatus: workerStatus("cleanup-required", true),
+        postModelRecovery: "stop"
+      })
+    ).toMatchObject({ category: "resume-required", action: "relaunch", model_work_started: true, retryable: true });
     expect(
       classifyModalRunnerStatus({
         sandbox: "missing",

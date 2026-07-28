@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,9 +15,13 @@ import {
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
+  modalNodeVolumeSubpath,
+  modalNodeWorkerLaunchScript,
+  modalNodeWorkerSignalScript,
+  readCloudAttemptEvidence,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
-import { copySafeTree } from "../src/node-worker.js";
+import { assertNoCredentialValuesInTree, copySafeTree } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
@@ -39,9 +43,63 @@ describe("Modal node sandbox provider", () => {
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
   });
 
+  it("pauses and resumes the real worker process group including child work", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-process-group-"));
+    const ready = path.join(root, "ready");
+    const processGroup = path.join(root, "worker.pgid");
+    const counter = path.join(root, "counter");
+    fs.writeFileSync(ready, "");
+    const launch = modalNodeWorkerLaunchScript(
+      ["bash", "-lc", `while :; do printf x >> '${counter}'; sleep 0.05; done`],
+      ready,
+      processGroup
+    );
+    const wrapper = spawn("bash", ["-lc", launch], { stdio: "ignore" });
+    try {
+      await waitForCondition(
+        () => fs.existsSync(processGroup) && fs.existsSync(counter) && fs.statSync(counter).size >= 3
+      );
+      execFileSync("bash", ["-lc", modalNodeWorkerSignalScript("STOP", processGroup)]);
+      await testDelay(150);
+      const pausedSize = fs.statSync(counter).size;
+      await testDelay(250);
+      expect(fs.statSync(counter).size).toBe(pausedSize);
+      execFileSync("bash", ["-lc", modalNodeWorkerSignalScript("CONT", processGroup)]);
+      await waitForCondition(() => fs.statSync(counter).size > pausedSize);
+    } finally {
+      if (fs.existsSync(processGroup)) {
+        const pgid = fs.readFileSync(processGroup, "utf8").trim();
+        if (/^[1-9][0-9]*$/u.test(pgid)) {
+          try {
+            process.kill(-Number(pgid), "SIGTERM");
+          } catch {
+            // The process group may already have exited.
+          }
+        }
+      }
+      wrapper.kill("SIGTERM");
+      await new Promise<void>((resolve) => {
+        if (wrapper.exitCode !== null) resolve();
+        else wrapper.once("close", () => resolve());
+      });
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
+    fs.writeFileSync(
+      path.join(fixture.root, fixture.input.dependency_artifact_dirs[0]!, ".env"),
+      "DEPENDENCY_SECRET=must-not-cross\n"
+    );
+    fs.mkdirSync(path.join(fixture.root, fixture.input.dependency_artifact_dirs[1]!, ".ssh"), {
+      recursive: true
+    });
+    fs.writeFileSync(
+      path.join(fixture.root, fixture.input.dependency_artifact_dirs[1]!, ".ssh", "id_rsa"),
+      "must-not-cross\n"
+    );
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
     try {
       const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
@@ -59,9 +117,86 @@ describe("Modal node sandbox provider", () => {
       expect(entries).not.toContain(`./${fixture.input.run_root}/logs/`);
       expect(entries).not.toContain("./.git/logs/");
       expect(entries).not.toContain("./.git/hooks/");
+      expect(entries).not.toContain(`./${fixture.input.dependency_artifact_dirs[0]}/.env`);
+      expect(entries).not.toContain(`./${fixture.input.dependency_artifact_dirs[1]}/.ssh/id_rsa`);
       expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
     } finally {
       archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("includes initialized recursive submodules at the exact committed gitlink revisions", async () => {
+    const fixture = createProjectFixture();
+    const repositories = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-submodules-"));
+    const leaf = path.join(repositories, "leaf");
+    const parent = path.join(repositories, "parent");
+    try {
+      initializeGitRepository(leaf, "leaf.txt", "leaf source\n");
+      initializeGitRepository(parent, "parent.txt", "parent source\n");
+      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", leaf, "nested/leaf"], {
+        cwd: parent
+      });
+      execFileSync("git", ["commit", "--quiet", "-am", "add nested submodule"], { cwd: parent });
+      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "add", parent, "vendor/parent"], {
+        cwd: fixture.root
+      });
+      execFileSync("git", ["commit", "--quiet", "-am", "add recursive submodule"], { cwd: fixture.root });
+      execFileSync("git", ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], {
+        cwd: fixture.root
+      });
+
+      const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      try {
+        const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" }).trim().split("\n");
+        expect(entries).toContain("./vendor/parent/parent.txt");
+        expect(entries).toContain("./vendor/parent/nested/leaf/leaf.txt");
+        expect(
+          entries.some((entry) => entry === "./vendor/parent/.git" || entry.startsWith("./vendor/parent/.git/"))
+        ).toBe(false);
+      } finally {
+        archive.cleanup();
+      }
+      execFileSync("git", ["checkout", "--quiet", "HEAD^"], {
+        cwd: path.join(fixture.root, "vendor", "parent")
+      });
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /revision does not match the committed gitlink/u
+      );
+    } finally {
+      fs.rmSync(repositories, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("excludes tracked credential and agent-auth paths from immutable handoffs", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const sensitive = [
+        ".env",
+        ".npmrc",
+        "credentials.json",
+        ".ssh/id_rsa",
+        ".smithers/private-auth.json",
+        ".config/gh/hosts.yml"
+      ];
+      for (const relative of [...sensitive, ".env.example"]) {
+        const destination = path.join(fixture.root, relative);
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.writeFileSync(destination, `tracked ${relative}\n`);
+      }
+      execFileSync("git", ["add", "--", ...sensitive, ".env.example"], { cwd: fixture.root });
+      execFileSync("git", ["commit", "--quiet", "-m", "tracked auth fixtures"], { cwd: fixture.root });
+
+      const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+      try {
+        const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" }).trim().split("\n");
+        for (const relative of sensitive) expect(entries).not.toContain(`./${relative}`);
+        expect(entries).toContain("./.env.example");
+      } finally {
+        archive.cleanup();
+      }
+    } finally {
       fixture.cleanup();
     }
   });
@@ -98,6 +233,19 @@ describe("Modal node sandbox provider", () => {
         /unsupported symlink entry/u
       );
       expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects credential values in publication file names and contents before archival", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-credentials-"));
+    try {
+      fs.writeFileSync(path.join(root, "safe.txt"), "prefix-injected-agent-secret-suffix");
+      expect(() => assertNoCredentialValuesInTree(root, ["injected-agent-secret"])).toThrow(/injected credential/u);
+      fs.writeFileSync(path.join(root, "safe.txt"), "safe output");
+      fs.writeFileSync(path.join(root, "injected-agent-secret.txt"), "safe output");
+      expect(() => assertNoCredentialValuesInTree(root, ["injected-agent-secret"])).toThrow(/injected credential/u);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -178,12 +326,30 @@ describe("Modal node sandbox provider", () => {
   it("recovers a published result before starting a replacement worker", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
-    const sandbox = fakeSandbox(result);
-    const client = fakeClient({ created: sandbox });
-    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    const interrupted = fakeSandbox(undefined, undefined, "sandbox-original");
+    interrupted.filesystem.readText = vi.fn(async () => {
+      const error = new Error("provider connection unavailable");
+      error.name = "InternalFailure";
+      throw error;
+    });
+    const firstClient = fakeClient({ listed: [interrupted] });
+    const inspector = fakeSandbox(result, undefined, "sandbox-inspector");
+    const recoveryClient = fakeClient({ created: inspector });
     try {
       await expect(
-        provider.run({
+        createModalNodeSandboxProvider(providerOptions(firstClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/provider connection unavailable/u);
+      expect(interrupted.terminate).not.toHaveBeenCalled();
+      expect(interrupted.detach).toHaveBeenCalledOnce();
+
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(recoveryClient)).run({
           runId: "controller-run",
           sandboxId: "node:attempt",
           input: fixture.input,
@@ -191,9 +357,213 @@ describe("Modal node sandbox provider", () => {
           heartbeat: vi.fn()
         })
       ).resolves.toMatchObject({ status: "finished" });
+      expect(recoveryClient.sandboxes.create).toHaveBeenCalledOnce();
+      expect(recoveryClient.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          blockNetwork: true,
+          tags: expect.objectContaining({ purpose: "ultrafuzz-node-inspector" })
+        })
+      );
+      expect(recoveryClient.sandboxes.create.mock.calls[0]?.[2]).not.toHaveProperty("secrets");
+      expect(inspector.exec).not.toHaveBeenCalled();
+      expect(inspector.filesystem.copyFromLocal).not.toHaveBeenCalled();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        provider_execution_ids: ["sandbox-original"],
+        retry_index: 0,
+        resumed: true,
+        reused: true
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("honors a post-pause detach request only after proving the targeted sandbox is live", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-live-at-pause");
+    const client = fakeClient({ created: sandbox });
+    const acceptanceRoot = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "acceptance");
+    fs.mkdirSync(acceptanceRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(acceptanceRoot, "pause-detach-request.json"),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.cloud-acceptance-pause-detach-request.v1",
+        controller_run_id: "controller-run",
+        run_id: fixture.input.run_id,
+        targets: [
+          {
+            attempt_id: fixture.input.attempt_id,
+            provider_execution_id: "sandbox-live-at-pause"
+          }
+        ],
+        requested_at: "2026-07-24T00:00:00.000Z"
+      })}\n`
+    );
+    const baseOptions = providerOptions(client);
+    sandbox.exec.mockResolvedValue({ wait: vi.fn(async () => 0) });
+    const provider = createModalNodeSandboxProvider({
+      ...baseOptions,
+      env: { ...baseOptions.env, ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE: "1" }
+    });
+    try {
+      const run = provider.run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        heartbeat: vi.fn()
+      });
+      await expect(run).rejects.toThrow(/acceptance pause detached a live cloud node sandbox/u);
+      expect(sandbox.poll).toHaveBeenCalled();
+      expect(sandbox.terminate).not.toHaveBeenCalled();
+      expect(sandbox.detach).toHaveBeenCalledOnce();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "provider-unknown",
+        provider_execution_ids: ["sandbox-live-at-pause"],
+        cleanup_state: "pending"
+      });
+      const claimPath = fs.readdirSync(acceptanceRoot).find((name) => name.startsWith("pause-detach-claim-"));
+      expect(claimPath).toBeDefined();
+      expect(JSON.parse(fs.readFileSync(path.join(acceptanceRoot, claimPath!), "utf8"))).toMatchObject({
+        schema_version: "ultrafuzz.modal.cloud-acceptance-pause-detach-claim.v1",
+        controller_run_id: "controller-run",
+        run_id: fixture.input.run_id,
+        attempt_id: fixture.input.attempt_id,
+        provider_execution_id: "sandbox-live-at-pause",
+        provider_state_at_detach: "live"
+      });
+      const result = createResultArchive();
+      try {
+        sandbox.setResult(result);
+        const recoveryOptions = providerOptions(fakeClient({ listed: [sandbox] }));
+        await expect(
+          createModalNodeSandboxProvider({
+            ...recoveryOptions,
+            env: { ...recoveryOptions.env, ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE: "1" }
+          }).run({
+            runId: "controller-run",
+            sandboxId: "node:attempt",
+            input: fixture.input,
+            rootDir: fixture.root,
+            heartbeat: vi.fn()
+          })
+        ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-live-at-pause" });
+        expect(sandbox.exec).toHaveBeenCalledWith(["bash", "-lc", expect.stringContaining("kill -CONT")]);
+        const evidence = readCloudAttemptEvidence(fixture.root, fixture.input);
+        expect(evidence).toMatchObject({
+          state: "succeeded",
+          resource_confirmation: "provider-reattached",
+          provider_execution_ids: ["sandbox-live-at-pause"],
+          resumed: true
+        });
+        expect(
+          evidence.transitions.some(
+            (transition) =>
+              transition.state === "running" && transition.provider_execution_id === "sandbox-live-at-pause"
+          )
+        ).toBe(true);
+        const releasePath = fs.readdirSync(acceptanceRoot).find((name) => name.startsWith("pause-detach-release-"));
+        expect(releasePath).toBeDefined();
+        expect(JSON.parse(fs.readFileSync(path.join(acceptanceRoot, releasePath!), "utf8"))).toMatchObject({
+          schema_version: "ultrafuzz.modal.cloud-acceptance-pause-detach-release.v1",
+          controller_run_id: "controller-run",
+          attempt_id: fixture.input.attempt_id,
+          provider_execution_id: "sandbox-live-at-pause"
+        });
+      } finally {
+        result.cleanup();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a stale controlled-fault marker instead of consuming it for another generation", async () => {
+    const fixture = createProjectFixture();
+    fixture.input.task_id = "node:smoke-context";
+    fixture.input.attempt_id = "smoke-context-attempt";
+    const identity = `${fixture.input.task_id}:${fixture.input.attempt_id}`;
+    const acceptanceRoot = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "acceptance");
+    fs.mkdirSync(acceptanceRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(acceptanceRoot, `detach-${boundedTestIdentity(identity)}.json`),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.cloud-acceptance-fault.v1",
+        fault: "detach",
+        task_id: fixture.input.task_id,
+        attempt_id: fixture.input.attempt_id,
+        execution_generation: "stale-generation",
+        claimed_at: "2026-07-24T00:00:00.000Z"
+      })}\n`
+    );
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-stale-fault");
+    const options = providerOptions(fakeClient({ created: sandbox }));
+    try {
+      await expect(
+        createModalNodeSandboxProvider({
+          ...options,
+          env: { ...options.env, ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE: "1" }
+        }).run({
+          runId: "controller-run",
+          sandboxId: "node:smoke-context",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/fault marker conflicts with the current attempt identity/u);
+      expect(sandbox.terminate).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("recovers a finished sandbox publication by persisted provider ID when listings omit finished sandboxes", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const stopped = fakeSandbox(undefined, undefined, "sandbox-uncommitted");
+    const providerFailure = new Error("provider connection unavailable after remote publication");
+    providerFailure.name = "InternalFailure";
+    stopped.filesystem.readText.mockRejectedValueOnce(providerFailure);
+    const inspector = fakeSandbox(result, undefined, "sandbox-inspector");
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [stopped] }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/remote publication/u);
+      stopped.poll.mockResolvedValue(0);
+      const client = fakeClient({
+        fromIds: { "sandbox-uncommitted": stopped },
+        created: inspector
+      });
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(client)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-uncommitted" });
+      expect(client.sandboxes.fromId).toHaveBeenCalledWith("sandbox-uncommitted");
+      expect(client.sandboxes.list).toHaveBeenCalled();
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
-      expect(sandbox.exec).not.toHaveBeenCalled();
-      expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
+      expect(client.sandboxes.create.mock.calls[0]?.[2]).toMatchObject({
+        tags: expect.objectContaining({ purpose: "ultrafuzz-node-inspector" })
+      });
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        provider_execution_ids: ["sandbox-uncommitted"],
+        reused: true
+      });
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -202,30 +572,36 @@ describe("Modal node sandbox provider", () => {
 
   it("reports structured worker diagnostics when a fresh cloud worker fails", async () => {
     const fixture = createProjectFixture();
-    const sandbox = fakeSandbox(undefined);
-    sandbox.exec = vi.fn(async () => ({
-      stdout: { readText: vi.fn(async () => "worker stdout\n") },
-      stderr: {
-        readText: vi.fn(
-          async () =>
-            '{"schema_version":"ultrafuzz.modal.node-worker-error.v1","message":"cloud worker phase run-workflow failed with code 7","phase":"run-workflow","command":"smithers","exit_code":7,"stderr":"workflow failed"}\n'
-        )
-      },
-      wait: vi.fn(async () => 7)
-    })) as never;
+    const sandbox = fakeSandbox(undefined, {
+      schema_version: "ultrafuzz.modal.node-worker-error.v1",
+      message: "cloud worker phase run-workflow failed with code 7",
+      phase: "run-workflow",
+      command: "smithers",
+      exit_code: 7,
+      stderr: `workflow failed ${"agent-key-value"}`
+    });
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
     try {
-      await expect(
-        provider.run({
-          runId: "controller-run",
-          sandboxId: "node:attempt",
-          input: fixture.input,
-          rootDir: fixture.root,
-          heartbeat: vi.fn()
-        })
-      ).rejects.toThrow(/run-workflow.*workflow failed/u);
+      const run = provider.run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        heartbeat: vi.fn()
+      });
+      await expect(run).rejects.toThrow(/run-workflow.*workflow failed/u);
+      await expect(run).rejects.not.toThrow(/agent-key-value/u);
       expect(sandbox.terminate).toHaveBeenCalledOnce();
+      expect(sandbox.exec).not.toHaveBeenCalled();
+      expect(client.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          command: ["bash", "-lc", expect.stringMatching(/while .*ready-.*setsid .*node-worker/u)]
+        })
+      );
+      expect(JSON.stringify(readCloudAttemptEvidence(fixture.root, fixture.input))).not.toContain("agent-key-value");
     } finally {
       fixture.cleanup();
     }
@@ -390,17 +766,10 @@ describe("Modal node sandbox provider", () => {
   it("terminates a fresh sandbox when cancellation interrupts the worker", async () => {
     const fixture = createProjectFixture();
     const sandbox = fakeSandbox(undefined);
-    sandbox.filesystem.readText = vi.fn(async () => {
-      throw new SandboxFilesystemNotFoundError("not found");
-    });
-    sandbox.exec = vi.fn(async () => ({
-      stdout: { readText: vi.fn(async () => "") },
-      stderr: { readText: vi.fn(async () => "") },
-      wait: vi.fn(() => new Promise<number>(() => undefined))
-    })) as never;
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
     const controller = new AbortController();
+    const heartbeat = vi.fn();
     try {
       const running = provider.run({
         runId: "controller-run",
@@ -408,13 +777,663 @@ describe("Modal node sandbox provider", () => {
         input: fixture.input,
         rootDir: fixture.root,
         signal: controller.signal,
-        heartbeat: vi.fn()
+        heartbeat
       });
-      await vi.waitFor(() => expect(sandbox.exec).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(heartbeat).toHaveBeenCalledWith(expect.objectContaining({ stage: "running" })));
       controller.abort();
       await expect(running).rejects.toThrow("cancelled");
       expect(sandbox.terminate).toHaveBeenCalled();
+      expect(sandbox.exec).not.toHaveBeenCalled();
     } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("terminates an owned reattached sandbox when cancellation interrupts the resumed controller", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-reattached-cancel");
+    const providerFailure = new Error("provider connection unavailable before controller detach");
+    providerFailure.name = "InternalFailure";
+    sandbox.filesystem.readText.mockRejectedValueOnce(providerFailure);
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/provider connection unavailable/u);
+      sandbox.filesystem.readText.mockReset();
+      sandbox.filesystem.readText.mockRejectedValue(new SandboxFilesystemNotFoundError("not found"));
+      const controller = new AbortController();
+      const heartbeat = vi.fn();
+      const resumed = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] }))).run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        signal: controller.signal,
+        heartbeat
+      });
+      await vi.waitFor(() => expect(heartbeat).toHaveBeenCalledWith(expect.objectContaining({ stage: "running" })));
+      controller.abort();
+      await expect(resumed).rejects.toThrow(/cancelled/u);
+      expect(sandbox.terminate).toHaveBeenCalledOnce();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "cancelled",
+        cleanup_state: "terminated",
+        provider_execution_ids: ["sandbox-reattached-cancel"]
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("aborts publication before replacing local output when cancellation arrives during download", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result, undefined, "sandbox-publication-cancel");
+    const controller = new AbortController();
+    sandbox.filesystem.copyToLocal = vi.fn(async (_remote: string, local: string) => {
+      fs.copyFileSync(result.archive, local);
+      controller.abort();
+    });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn(),
+          signal: controller.signal
+        })
+      ).rejects.toThrow(/cancelled during publication/u);
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"), "utf8")).toBe("stale\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"))).toBe(false);
+      expect(sandbox.terminate).toHaveBeenCalledOnce();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "cancelled",
+        cleanup_state: "terminated"
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("terminates a failed live sandbox before launching one controlled replacement", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-crash-window");
+    const createClient = fakeClient({ created: sandbox });
+    const uploadFailure = new Error("provider connection unavailable during immutable upload");
+    uploadFailure.name = "InternalFailure";
+    sandbox.filesystem.copyFromLocal.mockRejectedValueOnce(uploadFailure);
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(createClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/immutable upload/u);
+      expect(createClient.sandboxes.create).toHaveBeenCalledTimes(2);
+      expect(createClient.sandboxes.create).toHaveBeenNthCalledWith(
+        1,
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          blockNetwork: true,
+          tags: expect.objectContaining({ purpose: "ultrafuzz-node-volume-init" }),
+          volumes: { "/data": expect.anything() }
+        })
+      );
+      expect(createClient.sandboxes.create).toHaveBeenNthCalledWith(
+        2,
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          volumes: {
+            "/data": {
+              subPath: modalNodeVolumeSubpath("controller-run", "node:attempt", "base")
+            }
+          }
+        })
+      );
+      expect(sandbox.terminate).not.toHaveBeenCalled();
+      expect(sandbox.detach).toHaveBeenCalledOnce();
+      const attemptsRoot = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "attempts");
+      const evidencePath = path.join(attemptsRoot, fs.readdirSync(attemptsRoot)[0]!);
+      const failedEvidence = JSON.parse(fs.readFileSync(evidencePath, "utf8")) as {
+        state: string;
+        updated_at: string;
+        transitions: Array<{ state: string; at: string }>;
+      };
+      failedEvidence.state = "failed";
+      failedEvidence.updated_at = new Date().toISOString();
+      failedEvidence.transitions.push({ state: "failed", at: failedEvidence.updated_at });
+      fs.writeFileSync(evidencePath, `${JSON.stringify(failedEvidence)}\n`);
+
+      const result = createResultArchive();
+      const replacement = fakeSandbox(result, undefined, "sandbox-controlled-replacement");
+      const inspector = fakeSandbox(undefined, undefined, "sandbox-failed-attempt-inspector");
+      const resumedClient = fakeClient({ listed: [sandbox], created: [inspector, replacement] });
+      try {
+        await expect(
+          createModalNodeSandboxProvider(providerOptions(resumedClient)).run({
+            runId: "controller-run",
+            sandboxId: "node:attempt",
+            input: fixture.input,
+            rootDir: fixture.root,
+            heartbeat: vi.fn()
+          })
+        ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-controlled-replacement" });
+        expect(sandbox.terminate).toHaveBeenCalledOnce();
+        expect(sandbox.detach).toHaveBeenCalledTimes(2);
+        expect(replacement.filesystem.copyFromLocal).toHaveBeenCalled();
+        expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+          state: "succeeded",
+          provider_execution_ids: ["sandbox-crash-window", "sandbox-controlled-replacement"],
+          retry_index: 1
+        });
+      } finally {
+        result.cleanup();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("reattaches to the deterministic winner when a concurrent controller wins sandbox creation", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const winner = fakeSandbox(result, undefined, "sandbox-concurrent-winner");
+    const alreadyExists = new Error("sandbox name already exists");
+    alreadyExists.name = "AlreadyExistsError";
+    const client = fakeClient({ named: winner, createError: alreadyExists });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(client)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({
+        status: "finished",
+        remoteRunId: "sandbox-concurrent-winner"
+      });
+      expect(client.sandboxes.fromName).toHaveBeenCalledWith(
+        "ultrafuzz-test",
+        modalNodeSandboxName("controller-run", "node:attempt", "base")
+      );
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        provider_execution_ids: ["sandbox-concurrent-winner"],
+        resumed: true,
+        cleanup_state: "terminated"
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("reattaches to a deterministic volume initializer won by a concurrent controller", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const initializer = fakeSandbox(undefined, undefined, "sandbox-initializer-winner");
+    initializer.poll.mockResolvedValue(0);
+    const alreadyExists = new Error("initializer name already exists");
+    alreadyExists.name = "AlreadyExistsError";
+    const worker = fakeSandbox(result, undefined, "sandbox-after-initializer");
+    const client = fakeClient({
+      created: worker,
+      named: initializer,
+      initializerCreateError: alreadyExists
+    });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(client)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-after-initializer" });
+      expect(client.sandboxes.fromName).toHaveBeenCalledWith("ultrafuzz-test", expect.stringMatching(/^ufz-init-/u));
+      expect(initializer.wait).toHaveBeenCalled();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        provider_execution_ids: ["sandbox-after-initializer"]
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("uses a uniquely named initializer when the SDK omits a finished concurrent winner", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const alreadyExists = new Error("initializer name already exists");
+    alreadyExists.name = "AlreadyExistsError";
+    const worker = fakeSandbox(result, undefined, "sandbox-after-finished-initializer");
+    const client = fakeClient({
+      created: worker,
+      initializerCreateError: alreadyExists
+    });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(client)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-after-finished-initializer" });
+      expect(client.sandboxes.fromName).toHaveBeenCalledWith("ultrafuzz-test", expect.stringMatching(/^ufz-init-/u));
+      expect(client.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ name: expect.stringMatching(/^ufz-init-recover-/u) })
+      );
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("serializes concurrent publication and lets only the publication winner terminate the shared VM", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const firstView = fakeSandbox(result, undefined, "sandbox-publication-winner");
+    const secondView = fakeSandbox(result, undefined, "sandbox-publication-winner");
+    try {
+      const request = {
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        heartbeat: vi.fn()
+      };
+      const [first, second] = await Promise.all([
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [firstView] }))).run(request),
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [secondView] }))).run(request)
+      ]);
+
+      expect(first).toMatchObject({ status: "finished", remoteRunId: "sandbox-publication-winner" });
+      expect(second).toMatchObject({ status: "finished", remoteRunId: "sandbox-publication-winner" });
+      expect(firstView.terminate.mock.calls.length + secondView.terminate.mock.calls.length).toBe(1);
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        provider_execution_ids: ["sandbox-publication-winner"],
+        publication_artifact_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u)
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("repairs an abandoned pre-publication handoff staging directory after controller loss", async () => {
+    const fixture = createProjectFixture();
+    const handoffIdentity = boundedTestIdentity(
+      `controller-run:${fixture.input.task_id}:${fixture.input.attempt_id}:${fixture.input.execution_generation}`
+    );
+    const handoffParent = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "handoffs");
+    const abandoned = path.join(handoffParent, `.${handoffIdentity}.pending-crashed-controller`);
+    fs.mkdirSync(abandoned, { recursive: true });
+    fs.writeFileSync(path.join(abandoned, "project.tgz"), "partial");
+    const result = createResultArchive();
+    try {
+      await expect(
+        createModalNodeSandboxProvider(
+          providerOptions(fakeClient({ created: fakeSandbox(result, undefined, "sandbox-after-crash") }))
+        ).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(fs.existsSync(abandoned)).toBe(false);
+      expect(fs.existsSync(path.join(handoffParent, handoffIdentity, "manifest.json"))).toBe(true);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects dependency mutation instead of silently reusing a stale immutable handoff", async () => {
+    const fixture = createProjectFixture();
+    const interrupted = fakeSandbox(undefined, undefined, "sandbox-original");
+    interrupted.filesystem.readText = vi.fn(async () => {
+      const error = new Error("provider connection unavailable");
+      error.name = "InternalFailure";
+      throw error;
+    });
+    const firstClient = fakeClient({ listed: [interrupted] });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(firstClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/provider connection unavailable/u);
+      const before = readCloudAttemptEvidence(fixture.root, fixture.input);
+      fs.writeFileSync(
+        path.join(fixture.root, fixture.input.dependency_artifact_dirs[0]!, "declared.txt"),
+        "mutated after first launch\n"
+      );
+
+      const secondClient = fakeClient({});
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(secondClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/dependency evidence changed/u);
+      expect(secondClient.sandboxes.create).not.toHaveBeenCalled();
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        handoff_sha256: before.handoff_sha256,
+        request_sha256: before.request_sha256,
+        dependency_inputs: before.dependency_inputs
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects a mutated durable request instead of rebinding an immutable handoff", async () => {
+    const fixture = createProjectFixture();
+    const interrupted = fakeSandbox(undefined, undefined, "sandbox-request-binding");
+    const providerFailure = new Error("provider connection unavailable after launch");
+    providerFailure.name = "InternalFailure";
+    interrupted.filesystem.readText = vi.fn(async () => {
+      throw providerFailure;
+    });
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [interrupted] }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/provider connection unavailable/u);
+      const handoffRoot = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "handoffs");
+      const requestPath = path.join(
+        handoffRoot,
+        fs.readdirSync(handoffRoot).find((entry) => !entry.startsWith("."))!,
+        "request.json"
+      );
+      fs.writeFileSync(requestPath, '{"mutated":true}\n');
+
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({}))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/immutable cloud handoff is incomplete/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("does not let a stale durable worker failure poison a successful replacement", async () => {
+    const fixture = createProjectFixture();
+    const failed = fakeSandbox(
+      undefined,
+      {
+        schema_version: "ultrafuzz.modal.node-worker-error.v1",
+        message: "first VM failed",
+        exit_code: 9
+      },
+      "sandbox-failed"
+    );
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ created: failed }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/first VM failed/u);
+
+      const inspector = fakeSandbox(undefined, undefined, "sandbox-inspector");
+      const result = createResultArchive();
+      const replacement = fakeSandbox(result, undefined, "sandbox-replacement");
+      try {
+        await expect(
+          createModalNodeSandboxProvider(
+            providerOptions(fakeClient({ listed: [failed], created: [inspector, replacement] }))
+          ).run({
+            runId: "controller-run",
+            sandboxId: "node:attempt",
+            input: fixture.input,
+            rootDir: fixture.root,
+            heartbeat: vi.fn()
+          })
+        ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-replacement" });
+        expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+          state: "succeeded",
+          provider_execution_ids: ["sandbox-failed", "sandbox-replacement"],
+          retry_index: 1
+        });
+      } finally {
+        result.cleanup();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("republishes a proven remote result when local successful artifacts were modified", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    try {
+      await createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(result)] }))).run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        heartbeat: vi.fn()
+      });
+      fs.writeFileSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"), '{"tampered":true}\n');
+      const inspector = fakeSandbox(result, undefined, "sandbox-inspector");
+      const recoveryClient = fakeClient({ created: inspector });
+
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(recoveryClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(recoveryClient.sandboxes.create).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"), "utf8")).toBe(
+        '{"ok":true}\n'
+      );
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("does not reuse successful evidence across a forked controller run namespace", async () => {
+    const fixture = createProjectFixture();
+    const originalResult = createResultArchive();
+    const forkResult = createResultArchive("controller-fork");
+    try {
+      await createModalNodeSandboxProvider(
+        providerOptions(fakeClient({ listed: [fakeSandbox(originalResult, undefined, "sandbox-original")] }))
+      ).run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        heartbeat: vi.fn()
+      });
+      const originalEvidence = readCloudAttemptEvidence(fixture.root, fixture.input, "controller-run");
+      fs.writeFileSync(
+        path.join(fixture.root, fixture.input.dependency_artifact_dirs[0]!, "declared.txt"),
+        "fork dependency state\n"
+      );
+
+      const forkSandbox = fakeSandbox(forkResult, undefined, "sandbox-fork");
+      const forkClient = fakeClient({ created: forkSandbox });
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(forkClient)).run({
+          runId: "controller-fork",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-fork" });
+
+      expect(forkClient.sandboxes.create).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ tags: modalNodeTags("controller-fork", "node:attempt") })
+      );
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input, "controller-run")).toMatchObject({
+        controller_run_id: "controller-run",
+        provider_execution_ids: ["sandbox-original"]
+      });
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input, "controller-fork")).toMatchObject({
+        controller_run_id: "controller-fork",
+        provider_execution_ids: ["sandbox-fork"]
+      });
+      const forkEvidence = readCloudAttemptEvidence(fixture.root, fixture.input, "controller-fork");
+      expect(forkEvidence.handoff_sha256).not.toBe(originalEvidence.handoff_sha256);
+      expect(forkEvidence.dependency_inputs).not.toEqual(originalEvidence.dependency_inputs);
+    } finally {
+      originalResult.cleanup();
+      forkResult.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("reconciles provider cleanup before reusing a proven local publication", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result, undefined, "sandbox-cleanup-retry");
+    sandbox.terminate.mockRejectedValueOnce(new Error("provider cleanup unavailable"));
+    try {
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] }))).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        cleanup_state: "failed"
+      });
+
+      const cleanupClient = fakeClient({ listed: [sandbox] });
+      await expect(
+        createModalNodeSandboxProvider(providerOptions(cleanupClient)).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({
+        status: "finished",
+        output: { summary: "cloud attempt reused after provider cleanup reconciliation" }
+      });
+      expect(cleanupClient.sandboxes.create).not.toHaveBeenCalled();
+      expect(cleanupClient.images.fromName).not.toHaveBeenCalled();
+      expect(cleanupClient.volumes.fromName).not.toHaveBeenCalled();
+      expect(sandbox.terminate).toHaveBeenCalledTimes(2);
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "succeeded",
+        cleanup_state: "terminated",
+        reused: true
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("enforces configured cloud retention on provider access before reusing the controller namespace", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-after-retention");
+    const originalWriteText = sandbox.filesystem.writeText;
+    sandbox.filesystem.writeText = vi.fn(async (value: string, remotePath: string) => {
+      await originalWriteText(value, remotePath);
+      sandbox.setResult(result);
+    });
+    const client = fakeClient({ created: sandbox });
+    const policyPath = path.join(
+      fixture.root,
+      fixture.input.run_root,
+      "cloud-execution",
+      "retention",
+      `${boundedTestIdentity("controller-run")}.json`
+    );
+    fs.mkdirSync(path.dirname(policyPath), { recursive: true });
+    fs.writeFileSync(
+      policyPath,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.cloud-retention.v1",
+        controller_run_id: "controller-run",
+        retention_days: 7,
+        updated_at: "2026-01-01T00:00:00.000Z",
+        expires_at: "2026-01-08T00:00:00.000Z",
+        enforcement: "provider-access"
+      })}\n`
+    );
+    try {
+      await expect(
+        createModalNodeSandboxProvider({ ...providerOptions(client), retentionDays: 14 }).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "sandbox-after-retention" });
+      expect(client.volumes.delete).toHaveBeenCalledWith(modalNodeVolumeName("controller-run"));
+      const renewed = JSON.parse(fs.readFileSync(policyPath, "utf8")) as {
+        retention_days: number;
+        expires_at: string;
+      };
+      expect(renewed.retention_days).toBe(14);
+      expect(Date.parse(renewed.expires_at)).toBeGreaterThan(Date.now() + 13 * 24 * 60 * 60 * 1000);
+    } finally {
+      result.cleanup();
       fixture.cleanup();
     }
   });
@@ -438,6 +1457,20 @@ describe("Modal node sandbox provider", () => {
     expect(forceClient.volumes.delete).toHaveBeenCalledWith(modalNodeVolumeName("controller-run"));
   });
 
+  it("deletes the exact run volume even when the provider app is already absent", async () => {
+    const appMissing = new Error("app not found");
+    appMissing.name = "NotFoundError";
+    const client = fakeClient({ appError: appMissing });
+
+    await expect(cleanupModalNodeRun(providerOptions(client), "controller-run", { force: true })).resolves.toEqual({
+      terminated: 0,
+      volumeDeleted: true
+    });
+    expect(client.apps.fromName).toHaveBeenCalledWith("ultrafuzz-test", { createIfMissing: false });
+    expect(client.sandboxes.list).not.toHaveBeenCalled();
+    expect(client.volumes.delete).toHaveBeenCalledWith(modalNodeVolumeName("controller-run"));
+  });
+
   it("treats a sandbox that finishes during forced cleanup as already terminated", async () => {
     const sandbox = fakeSandbox(undefined);
     sandbox.poll = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(0);
@@ -451,6 +1484,28 @@ describe("Modal node sandbox provider", () => {
       volumeDeleted: true
     });
     expect(sandbox.detach).toHaveBeenCalledOnce();
+    expect(client.volumes.delete).toHaveBeenCalledOnce();
+  });
+
+  it("forced cleanup terminates attempts, inspectors, and volume initializers before deleting storage", async () => {
+    const attempt = fakeSandbox(undefined, undefined, "sandbox-attempt");
+    const inspector = fakeSandbox(undefined, undefined, "sandbox-inspector");
+    const initializer = fakeSandbox(undefined, undefined, "sandbox-initializer");
+    const client = fakeClient({
+      listedByPurpose: {
+        "ultrafuzz-node": [attempt],
+        "ultrafuzz-node-inspector": [inspector],
+        "ultrafuzz-node-volume-init": [initializer]
+      }
+    });
+
+    await expect(cleanupModalNodeRun(providerOptions(client), "controller-run", { force: true })).resolves.toEqual({
+      terminated: 3,
+      volumeDeleted: true
+    });
+    expect(attempt.terminate).toHaveBeenCalledOnce();
+    expect(inspector.terminate).toHaveBeenCalledOnce();
+    expect(initializer.terminate).toHaveBeenCalledOnce();
     expect(client.volumes.delete).toHaveBeenCalledOnce();
   });
 
@@ -488,6 +1543,37 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
     },
     clientFactory: () => client as never
   };
+}
+
+function boundedTestIdentity(value: string): string {
+  const normalized =
+    value
+      .replace(/[^A-Za-z0-9_-]+/gu, "-")
+      .replace(/^-+|-+$/gu, "")
+      .slice(0, 32) || "run";
+  return `${normalized}-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 12)}`;
+}
+
+function initializeGitRepository(root: string, fileName: string, contents: string): void {
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, fileName), contents);
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
+  execFileSync("git", ["add", "--", fileName], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for test condition");
+    await testDelay(20);
+  }
+}
+
+function testDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function createProjectFixture() {
@@ -549,7 +1635,7 @@ function createProjectFixture() {
   };
 }
 
-function createResultArchive() {
+function createResultArchive(controllerRunId = "controller-run", sandboxId = "node:attempt") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
@@ -559,7 +1645,7 @@ function createResultArchive() {
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
-  const tags = modalNodeTags("controller-run", "node:attempt");
+  const tags = modalNodeTags(controllerRunId, sandboxId);
   return {
     archive,
     result: JSON.stringify({
@@ -573,57 +1659,129 @@ function createResultArchive() {
   };
 }
 
-function fakeSandbox(result: ReturnType<typeof createResultArchive> | undefined) {
+function fakeSandbox(
+  result: ReturnType<typeof createResultArchive> | undefined,
+  failure?: Record<string, unknown>,
+  sandboxId = "sandbox-one"
+) {
+  const remoteText = new Map<string, string>();
+  let currentResult = result;
   return {
-    sandboxId: "sandbox-one",
-    poll: vi.fn(async () => null),
+    sandboxId,
+    setResult: (next: ReturnType<typeof createResultArchive>) => {
+      currentResult = next;
+    },
+    poll: vi.fn(async () => (failure === undefined ? null : Number(failure.exit_code ?? 1))),
+    wait: vi.fn(async () => (failure === undefined ? 0 : Number(failure.exit_code ?? 1))),
     terminate: vi.fn(async () => undefined),
     detach: vi.fn(),
     exec: vi.fn(),
     filesystem: {
-      readText: vi.fn(async () => {
-        if (result === undefined) throw new SandboxFilesystemNotFoundError("not found");
-        return result.result;
+      readText: vi.fn(async (remotePath: string) => {
+        if (remotePath.endsWith("/result.json") && currentResult !== undefined) return currentResult.result;
+        if (remotePath.endsWith("/error.json") && failure !== undefined) return JSON.stringify(failure);
+        const value = remoteText.get(remotePath);
+        if (value !== undefined) return value;
+        throw new SandboxFilesystemNotFoundError("not found");
       }),
-      copyFromLocal: vi.fn(async () => undefined),
+      writeText: vi.fn(async (value: string, remotePath: string) => {
+        remoteText.set(remotePath, value);
+      }),
+      copyFromLocal: vi.fn(async (local: string, remotePath: string) => {
+        if (remotePath.endsWith(".json")) remoteText.set(remotePath, fs.readFileSync(local, "utf8"));
+      }),
       copyToLocal: vi.fn(async (_remote: string, local: string) => {
-        if (result === undefined) throw new Error("result is unavailable");
-        fs.copyFileSync(result.archive, local);
+        if (currentResult === undefined) throw new Error("result is unavailable");
+        fs.copyFileSync(currentResult.archive, local);
       })
     }
   } as unknown as Sandbox & {
     poll: ReturnType<typeof vi.fn>;
+    wait: ReturnType<typeof vi.fn>;
     terminate: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
     exec: ReturnType<typeof vi.fn>;
+    setResult: (next: ReturnType<typeof createResultArchive>) => void;
     filesystem: {
       readText: ReturnType<typeof vi.fn>;
+      writeText: ReturnType<typeof vi.fn>;
       copyFromLocal: ReturnType<typeof vi.fn>;
       copyToLocal: ReturnType<typeof vi.fn>;
     };
   };
 }
 
-function fakeClient(options: { listed?: Sandbox[]; created?: Sandbox }) {
+function fakeClient(options: {
+  listed?: Sandbox[];
+  listedByPurpose?: Record<string, Sandbox[]>;
+  fromIds?: Record<string, Sandbox>;
+  created?: Sandbox | Sandbox[];
+  named?: Sandbox;
+  createError?: Error;
+  initializerCreateError?: Error;
+  appError?: Error;
+}) {
   const listed = options.listed ?? [];
+  const created = Array.isArray(options.created)
+    ? [...options.created]
+    : options.created === undefined
+      ? []
+      : [options.created];
+  let initializerCreateError = options.initializerCreateError;
   return {
     apps: {
-      fromName: vi.fn(async () => ({ appId: "app-one" }))
+      fromName: vi.fn(async () => {
+        if (options.appError !== undefined) throw options.appError;
+        return { appId: "app-one" };
+      })
     },
     images: {
       fromName: vi.fn(async () => ({}))
     },
     volumes: {
-      fromName: vi.fn(async () => ({})),
+      fromName: vi.fn(async () => ({
+        withMountOptions: vi.fn((mountOptions: Record<string, unknown>) => mountOptions)
+      })),
       delete: vi.fn(async () => undefined)
     },
     secrets: {
       fromObject: vi.fn(async () => ({}))
     },
     sandboxes: {
-      create: vi.fn(async () => options.created ?? fakeSandbox(undefined)),
-      list: vi.fn(async function* () {
-        for (const sandbox of listed) yield sandbox;
+      create: vi.fn(async (_app: unknown, _image: unknown, createOptions: Record<string, unknown>) => {
+        const tags = createOptions.tags as Record<string, string> | undefined;
+        if (tags?.purpose === "ultrafuzz-node-volume-init") {
+          if (initializerCreateError !== undefined) {
+            const error = initializerCreateError;
+            initializerCreateError = undefined;
+            throw error;
+          }
+          const initializer = fakeSandbox(undefined, undefined, "sandbox-volume-initializer");
+          initializer.poll.mockResolvedValue(0);
+          return initializer;
+        }
+        if (options.createError !== undefined) throw options.createError;
+        return created.shift() ?? fakeSandbox(undefined);
+      }),
+      fromId: vi.fn(async (sandboxId: string) => {
+        const sandbox = options.fromIds?.[sandboxId];
+        if (sandbox !== undefined) return sandbox;
+        const error = new Error("sandbox not found");
+        error.name = "NotFoundError";
+        throw error;
+      }),
+      fromName: vi.fn(async () => {
+        if (options.named !== undefined) return options.named;
+        const error = new Error("named sandbox not found");
+        error.name = "NotFoundError";
+        throw error;
+      }),
+      list: vi.fn(async function* (params: { tags: Record<string, string> }) {
+        const purpose = params.tags.purpose;
+        const matches =
+          (purpose === undefined ? undefined : options.listedByPurpose?.[purpose]) ??
+          (purpose === "ultrafuzz-node" ? listed : []);
+        for (const sandbox of matches) yield sandbox;
       })
     },
     close: vi.fn()

@@ -156,6 +156,7 @@ export interface CompiledSmithersTask {
   execution: {
     mode: "local" | "cloud";
     provider?: "modal";
+    retentionDays: number;
     resources: {
       cpu: number;
       memoryMiB: number;
@@ -232,6 +233,7 @@ export interface SmithersTaskMetadata {
   execution: {
     mode: "local" | "cloud";
     provider?: "modal";
+    retentionDays: number;
     resources: {
       cpu: number;
       memoryMiB: number;
@@ -292,7 +294,11 @@ export interface SmithersCommandSnapshot {
 export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSmithersWorkflow {
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
-  const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
+  const smithersRunId = smithersRunIdForProject(
+    projectRoot,
+    input.runLayout.runId,
+    input.config.execution.mode === "cloud"
+  );
   const agenticAttemptsByNodeId = new Map<string, string[]>();
   const attemptsByNodeId = new Map<string, string[]>();
   for (const node of input.graph.nodes.filter((candidate) => candidate.kind !== "meta")) {
@@ -325,7 +331,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
           dependencyAgenticAttemptIds: node.dependsOn.flatMap(
             (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
-          )
+          ),
+          handoffAttemptIds: dependencyAttemptClosure(input.graph, node.id, attemptsByNodeId)
         })
       )
   );
@@ -368,6 +375,34 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
   writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
   return compiled;
+}
+
+export function smithersRunIdForProject(projectRoot: string, runId: string, cloud: boolean): string {
+  const base = `ultrafuzz-${runId}`;
+  if (!cloud) return base;
+  const canonicalProjectRoot = fs.realpathSync(path.resolve(projectRoot));
+  const suffix = crypto.createHash("sha256").update(canonicalProjectRoot).digest("hex").slice(0, 12);
+  const prefix = base.slice(0, 128 - suffix.length - 1).replace(/[-.]+$/u, "") || "ultrafuzz";
+  return `${prefix}-${suffix}`;
+}
+
+function dependencyAttemptClosure(
+  graph: ExpandedGraph,
+  nodeId: string,
+  attemptsByNodeId: ReadonlyMap<string, readonly string[]>
+): string[] {
+  const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const visited = new Set<string>();
+  const attempts: string[] = [];
+  const visit = (dependencyId: string): void => {
+    if (visited.has(dependencyId)) return;
+    visited.add(dependencyId);
+    const dependency = nodesById.get(dependencyId);
+    for (const ancestorId of dependency?.dependsOn ?? []) visit(ancestorId);
+    attempts.push(...(attemptsByNodeId.get(dependencyId) ?? []));
+  };
+  for (const dependencyId of nodesById.get(nodeId)?.dependsOn ?? []) visit(dependencyId);
+  return [...new Set(attempts)];
 }
 
 function smithersInputDocument(
@@ -499,12 +534,14 @@ export async function runSmithersLifecycleCommand(input: {
   alreadyRunning?: boolean;
 }> {
   let preResumeStderr = "";
+  let resumeInspection: SmithersCommandSnapshot | undefined;
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json"],
       projectRoot: input.projectRoot,
       env: input.env
     });
+    resumeInspection = inspection;
     if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
       assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
       assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
@@ -667,8 +704,45 @@ export async function runSmithersLifecycleCommand(input: {
       input.resumeRecovery === undefined
         ? undefined
         : path.join(path.dirname(input.resumeRecovery.inputPath), "reset-node-applied.json");
+    const executionGenerationPath =
+      input.resumeRecovery === undefined
+        ? undefined
+        : path.join(path.dirname(input.resumeRecovery.inputPath), "cloud-execution-generation.json");
     let resetStderr = "";
-    if (!resetNodeMarkerMatches(resetMarkerPath, input.smithersRunId, input.resetNode)) {
+    let resetMarker = readResetNodeMarker(
+      resetMarkerPath,
+      executionGenerationPath,
+      input.smithersRunId,
+      input.resetNode
+    );
+    if (
+      resetMarker?.phase === "prepared" &&
+      resetMarker.previous_node_state !== undefined &&
+      resetMarker.previous_node_state !== "pending" &&
+      resumeInspection !== undefined &&
+      smithersSnapshotNodeState(resumeInspection, input.resetNode) === "pending"
+    ) {
+      resetMarker = { ...resetMarker, phase: "applied", applied_at: new Date().toISOString() };
+      writeJsonDurable(resetMarkerPath!, resetMarker);
+    }
+    if (resetMarker?.phase !== "applied") {
+      if (resetMarker === undefined && resetMarkerPath !== undefined && executionGenerationPath !== undefined) {
+        const preparedAt = new Date().toISOString();
+        const executionGeneration = crypto.randomUUID();
+        const previousNodeState =
+          resumeInspection === undefined ? undefined : smithersSnapshotNodeState(resumeInspection, input.resetNode);
+        writeCloudExecutionGeneration(executionGenerationPath, executionGeneration, input.resetNode, preparedAt);
+        resetMarker = {
+          schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
+          smithers_run_id: input.smithersRunId,
+          node_id: input.resetNode,
+          execution_generation: executionGeneration,
+          phase: "prepared",
+          prepared_at: preparedAt,
+          ...(previousNodeState === undefined ? {} : { previous_node_state: previousNodeState })
+        };
+        writeJsonDurable(resetMarkerPath, resetMarker);
+      }
       const resetResult = await execSmithersCli({
         args: [
           "timetravel",
@@ -688,18 +762,11 @@ export async function runSmithersLifecycleCommand(input: {
         keepWorkspaces: input.keepWorkspaces
       });
       resetStderr = resetResult.stderr;
-      if (resetMarkerPath !== undefined) {
+      if (resetMarkerPath !== undefined && executionGenerationPath !== undefined && resetMarker !== undefined) {
         const appliedAt = new Date().toISOString();
         writeJsonDurable(resetMarkerPath, {
-          schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
-          smithers_run_id: input.smithersRunId,
-          node_id: input.resetNode,
-          applied_at: appliedAt
-        });
-        writeJsonDurable(path.join(path.dirname(input.resumeRecovery!.inputPath), "cloud-execution-generation.json"), {
-          schema_version: "ultrafuzz.cloud.execution-generation.v1",
-          generation: crypto.randomUUID(),
-          reset_node: input.resetNode,
+          ...resetMarker,
+          phase: "applied",
           applied_at: appliedAt
         });
       }
@@ -767,6 +834,14 @@ export async function runSmithersLifecycleCommand(input: {
     const forkedRunId = parseForkedRunId(forkResult.stdout);
     if (forkedRunId === undefined) {
       throw new Error("workflow fork did not return a forked workflow run ID");
+    }
+    if (input.resetNode !== undefined && input.resumeRecovery !== undefined) {
+      writeCloudExecutionGeneration(
+        path.join(path.dirname(input.resumeRecovery.inputPath), "cloud-execution-generation.json"),
+        crypto.randomUUID(),
+        input.resetNode,
+        new Date().toISOString()
+      );
     }
     const resumeCommand = [
       "up",
@@ -977,16 +1052,98 @@ function compatibleRecoveryRunId(value: string): string {
   return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
-function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
-  if (markerPath === undefined || !fs.existsSync(markerPath)) {
-    return false;
+interface SmithersResetNodeMarker {
+  schema_version: typeof SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION;
+  smithers_run_id: string;
+  node_id: string;
+  execution_generation: string;
+  phase: "prepared" | "applied";
+  prepared_at: string;
+  previous_node_state?: string;
+  applied_at?: string;
+}
+
+function readResetNodeMarker(
+  markerPath: string | undefined,
+  executionGenerationPath: string | undefined,
+  smithersRunId: string,
+  nodeId: string
+): SmithersResetNodeMarker | undefined {
+  if (
+    markerPath === undefined ||
+    executionGenerationPath === undefined ||
+    !fs.existsSync(markerPath) ||
+    !fs.existsSync(executionGenerationPath)
+  ) {
+    return undefined;
   }
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
-    return isObjectRecord(parsed) && parsed.smithers_run_id === smithersRunId && parsed.node_id === nodeId;
+    const marker: unknown = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    const generation: unknown = JSON.parse(fs.readFileSync(executionGenerationPath, "utf8"));
+    if (
+      isObjectRecord(marker) &&
+      marker.schema_version === SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION &&
+      marker.smithers_run_id === smithersRunId &&
+      marker.node_id === nodeId &&
+      typeof marker.execution_generation === "string" &&
+      isObjectRecord(generation) &&
+      generation.schema_version === "ultrafuzz.cloud.execution-generation.v1" &&
+      generation.generation === marker.execution_generation &&
+      generation.reset_node === nodeId
+    ) {
+      const phase = marker.phase === undefined ? "applied" : marker.phase;
+      const preparedAt = typeof marker.prepared_at === "string" ? marker.prepared_at : marker.applied_at;
+      if (
+        (phase !== "prepared" && phase !== "applied") ||
+        typeof preparedAt !== "string" ||
+        !Number.isFinite(Date.parse(preparedAt)) ||
+        (phase === "applied" &&
+          (typeof marker.applied_at !== "string" || !Number.isFinite(Date.parse(marker.applied_at))))
+      ) {
+        return undefined;
+      }
+      return {
+        schema_version: SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION,
+        smithers_run_id: smithersRunId,
+        node_id: nodeId,
+        execution_generation: marker.execution_generation,
+        phase,
+        prepared_at: preparedAt,
+        ...(typeof marker.previous_node_state === "string"
+          ? { previous_node_state: marker.previous_node_state.toLowerCase() }
+          : {}),
+        ...(typeof marker.applied_at === "string" ? { applied_at: marker.applied_at } : {})
+      };
+    }
+    return undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+function smithersSnapshotNodeState(snapshot: SmithersCommandSnapshot, nodeId: string): string | undefined {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  for (const collection of [data.nodes, data.steps]) {
+    if (!Array.isArray(collection)) continue;
+    const match = collection.find((entry) => isObjectRecord(entry) && (entry.nodeId === nodeId || entry.id === nodeId));
+    if (isObjectRecord(match) && typeof match.state === "string") return match.state.toLowerCase();
+  }
+  return undefined;
+}
+
+function writeCloudExecutionGeneration(
+  filePath: string,
+  generation: string,
+  resetNode: string,
+  appliedAt: string
+): void {
+  writeJsonDurable(filePath, {
+    schema_version: "ultrafuzz.cloud.execution-generation.v1",
+    generation,
+    reset_node: resetNode,
+    applied_at: appliedAt
+  });
 }
 
 function jsonHasErrorCode(value: unknown, code: string): boolean {
@@ -1413,6 +1570,7 @@ function compileTask(input: {
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
+  handoffAttemptIds: readonly string[];
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -1425,7 +1583,7 @@ function compileTask(input: {
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
-  const dependencyArtifactDirs = input.dependencyAgenticAttemptIds.map((attemptId) =>
+  const dependencyArtifactDirs = input.handoffAttemptIds.map((attemptId) =>
     getNodeArtifactDir(input.runLayout, attemptId, { create: true })
   );
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
@@ -1435,6 +1593,7 @@ function compileTask(input: {
   const execution = {
     mode: input.config.execution.mode,
     ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
+    retentionDays: input.config.execution.retentionDays,
     resources: executionResources,
     ...(input.config.execution.providers.modal === undefined
       ? {}
@@ -1506,6 +1665,7 @@ function compileTask(input: {
     execution: {
       mode: execution.mode,
       ...(execution.provider === undefined ? {} : { provider: execution.provider }),
+      retentionDays: execution.retentionDays,
       resources: execution.resources
     }
   };

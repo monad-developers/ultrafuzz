@@ -15,7 +15,9 @@ const successfulJobs = [
 
 describe("trusted Modal benchmark publication qualification", () => {
   it("accepts a successful default-branch push as smoke", () => {
-    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), successfulJobs, repository)).toEqual({
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), successfulJobs, artifacts("smoke"), repository)
+    ).toEqual({
       eligible: true,
       candidateCommit: candidate,
       benchmarkMode: "smoke",
@@ -24,9 +26,25 @@ describe("trusted Modal benchmark publication qualification", () => {
   });
 
   it("accepts a successful manual run as full", () => {
-    expect(qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, repository)).toEqual(
-      expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "full" })
-    );
+    expect(
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("full"),
+        repository
+      )
+    ).toEqual(expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "full" }));
+  });
+
+  it("classifies a manual cloud-node acceptance run from its immutable smoke plan", () => {
+    expect(
+      qualifyModalBenchmarkPublication(
+        event({ event: "workflow_dispatch" }),
+        successfulJobs,
+        artifacts("smoke"),
+        repository
+      )
+    ).toEqual(expect.objectContaining({ eligible: true, candidateCommit: candidate, benchmarkMode: "smoke" }));
   });
 
   it("skips incomplete producers whose paid jobs did not both succeed", () => {
@@ -38,9 +56,9 @@ describe("trusted Modal benchmark publication qualification", () => {
         ]
       }
     ];
-    expect(qualifyModalBenchmarkPublication(event({ event: "push" }), skippedJobs, repository)).toEqual(
-      expect.objectContaining({ eligible: false })
-    );
+    expect(
+      qualifyModalBenchmarkPublication(event({ event: "push" }), skippedJobs, artifacts("smoke"), repository)
+    ).toEqual(expect.objectContaining({ eligible: false }));
     expect(
       qualifyModalBenchmarkPublication(
         event({ event: "push" }),
@@ -52,6 +70,7 @@ describe("trusted Modal benchmark publication qualification", () => {
             ]
           }
         ],
+        artifacts("smoke"),
         repository
       )
     ).toEqual(expect.objectContaining({ eligible: false }));
@@ -69,8 +88,22 @@ describe("trusted Modal benchmark publication qualification", () => {
     ];
     for (const mutation of mutations) {
       expect(
-        qualifyModalBenchmarkPublication(event(mutation), successfulJobs, repository),
+        qualifyModalBenchmarkPublication(event(mutation), successfulJobs, artifacts("smoke"), repository),
         JSON.stringify(mutation)
+      ).toEqual(expect.objectContaining({ eligible: false }));
+    }
+  });
+
+  it("fails closed when the exact plan lane is missing, duplicated, expired, or ambiguous", () => {
+    const invalidArtifacts = [
+      [],
+      [...artifacts("smoke"), ...artifacts("full")],
+      [...artifacts("smoke"), { ...artifacts("smoke")[0] }],
+      artifacts("smoke").map((artifact, index) => (index === 0 ? { ...artifact, expired: true } : artifact))
+    ];
+    for (const value of invalidArtifacts) {
+      expect(
+        qualifyModalBenchmarkPublication(event({ event: "workflow_dispatch" }), successfulJobs, value, repository)
       ).toEqual(expect.objectContaining({ eligible: false }));
     }
   });
@@ -86,7 +119,17 @@ function event(overrides: Record<string, unknown>) {
       head_repository: { full_name: repository },
       head_branch: "main",
       head_sha: candidate,
+      id: 12345,
+      run_attempt: 2,
       ...overrides
     }
   };
+}
+
+function artifacts(mode: "smoke" | "full") {
+  return [
+    { name: `modal-benchmark-plan-${mode}-12345-2`, expired: false },
+    { name: `modal-benchmark-launch-${mode}-12345-2`, expired: false },
+    { name: `public-benchmark-results-${mode}-12345-2`, expired: false }
+  ];
 }

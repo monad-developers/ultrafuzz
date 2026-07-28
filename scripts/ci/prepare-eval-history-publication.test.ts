@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   automaticProducerPolicyDimensions,
+  assertAutomaticCloudEvidence,
   assertPublicBenchmarkBundleMatrixScope,
   readAutomaticPublicationManifest,
   summarizePublicBenchmarkBundlePublication,
@@ -118,6 +119,61 @@ describe("trusted automatic eval-history publication handoff", () => {
       mutate(manifest);
       expect(() => validateAutomaticPublicationManifest(manifest, smokeContext()), label).toThrow();
     }
+  });
+
+  it("requires acceptance cloud evidence for every trusted row only in the cloud-node lane", () => {
+    const targetIds = smokeTargets().map((target) => target.id);
+    const modelSlug = smokeManifest().pairs[0]!.model_slug;
+    const pair = smokeManifest().pairs[0]!.pair;
+    const bundle = bundleWithMatrix(matrixRows(targetIds, modelSlug));
+    expect(() =>
+      assertAutomaticCloudEvidence(bundle, { nodeExecution: "local", matrixRowsPerPair: 3 }, pair)
+    ).not.toThrow();
+    const cloudBundle = {
+      ...bundle,
+      execution: { mode: "cloud", provider: "modal", acceptance_e2e: true }
+    };
+    expect(() =>
+      assertAutomaticCloudEvidence(cloudBundle, { nodeExecution: "modal", matrixRowsPerPair: 3 }, pair)
+    ).toThrow(/exact cloud-node evidence/u);
+
+    const cloudFiles = matrixRows(targetIds, modelSlug).map((row) => ({
+      path: `cloud/${row.id}/evidence.json`,
+      contents_base64: Buffer.from(`${JSON.stringify({ row_id: row.id, acceptance_e2e: true })}\n`, "utf8").toString(
+        "base64"
+      )
+    }));
+    expect(() =>
+      assertAutomaticCloudEvidence(
+        { ...cloudBundle, files: [...cloudBundle.files, ...cloudFiles] },
+        { nodeExecution: "modal", matrixRowsPerPair: 3 },
+        pair
+      )
+    ).not.toThrow();
+    expect(() =>
+      assertAutomaticCloudEvidence(
+        {
+          ...bundle,
+          execution: cloudBundle.execution,
+          files: [
+            ...cloudBundle.files,
+            ...cloudFiles.map((file, index) =>
+              index === 0
+                ? {
+                    ...file,
+                    contents_base64: Buffer.from(
+                      `${JSON.stringify({ row_id: targetIds[0], acceptance_e2e: false })}\n`,
+                      "utf8"
+                    ).toString("base64")
+                  }
+                : file
+            )
+          ]
+        },
+        { nodeExecution: "modal", matrixRowsPerPair: 3 },
+        pair
+      )
+    ).toThrow(/acceptance E2E proof/u);
   });
 
   it("requires the exact full provider set, ordering, and unique control paths", () => {
@@ -509,6 +565,7 @@ function fullTargets() {
 
 function bundleWithMatrix(matrix: Array<Record<string, string>>) {
   return {
+    execution: { mode: "local", acceptance_e2e: false },
     files: [
       {
         path: "eval/matrix.json",

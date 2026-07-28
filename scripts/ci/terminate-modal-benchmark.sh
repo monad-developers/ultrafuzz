@@ -30,6 +30,47 @@ if [ ! -d "$candidate_source" ] || ! git -C "$candidate_source" rev-parse --is-i
   exit 1
 fi
 
+validated_pair_list="$(mktemp)"
+trap 'rm -f "$validated_pair_list"' EXIT
+chmod 600 "$validated_pair_list"
+declare -A seen_nested_controller_ids=()
+validated_pair_count=0
+while IFS= read -r pair_line || [ -n "$pair_line" ]; do
+  IFS=$'\t' read -r config state nested_controller_ids extra_field <<< "$pair_line"
+  expected_line="${config:-}"$'\t'"${state:-}"
+  if [ -n "${nested_controller_ids:-}" ]; then
+    expected_line+=$'\t'"$nested_controller_ids"
+  fi
+  if [ -n "${extra_field:-}" ] || [ "$pair_line" != "$expected_line" ] || \
+    [[ ! "${config:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || \
+    [[ ! "${state:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    echo "Modal cleanup pair list is invalid" >&2
+    exit 1
+  fi
+  if [ -n "${nested_controller_ids:-}" ]; then
+    IFS=',' read -r -a controller_ids <<< "$nested_controller_ids"
+    [ "${#controller_ids[@]}" -gt 0 ] || {
+      echo "Modal cleanup nested controller list is invalid" >&2
+      exit 1
+    }
+    for controller_id in "${controller_ids[@]}"; do
+      if [[ ! "$controller_id" =~ ^ultrafuzz-[A-Za-z0-9][A-Za-z0-9._-]{0,117}$ ]] || \
+        [ -n "${seen_nested_controller_ids[$controller_id]:-}" ]; then
+        echo "Modal cleanup nested controller identity is invalid or duplicated" >&2
+        exit 1
+      fi
+      seen_nested_controller_ids["$controller_id"]=true
+    done
+  fi
+  printf '%s\n' "$pair_line" >> "$validated_pair_list"
+  validated_pair_count=$((validated_pair_count + 1))
+done < "$cleanup_pair_list"
+if [ "$validated_pair_count" -eq 0 ]; then
+  echo "Modal cleanup pair list is empty" >&2
+  exit 1
+fi
+cleanup_pair_list="$validated_pair_list"
+
 termination_failed=false
 terminate_scope() {
   local label="$1"
@@ -41,7 +82,7 @@ terminate_scope() {
 }
 
 if [ "$state_available" = true ]; then
-  while IFS=$'\t' read -r _config state; do
+  while IFS=$'\t' read -r _config state _nested_controller_ids; do
     [ -n "$state" ] || continue
     state_path="$benchmark_state/$state"
     if [ -f "$state_path" ] && [ ! -L "$state_path" ] && \
@@ -63,6 +104,16 @@ for pass in 1 2; do
     terminate_scope "eval config $config pass $pass" terminate \
       --config "$benchmark_plan/$config" \
       --repo-root "$candidate_source"
+  done < "$cleanup_pair_list"
+  while IFS=$'\t' read -r config _state nested_controller_ids; do
+    [ -n "$nested_controller_ids" ] || continue
+    IFS=',' read -r -a controller_ids <<< "$nested_controller_ids"
+    for controller_id in "${controller_ids[@]}"; do
+      terminate_scope "nested node controller $controller_id from $config pass $pass" cleanup-node-run \
+        --app ultrafuzz-evals \
+        --image "$image_name" \
+        --run-id "$controller_id"
+    done
   done < "$cleanup_pair_list"
   if [ "$pass" -eq 1 ]; then
     sleep 20

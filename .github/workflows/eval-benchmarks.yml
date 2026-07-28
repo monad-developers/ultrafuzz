@@ -9,6 +9,11 @@ on:
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
+      cloud_node_e2e:
+        description: Run the three-target smoke lane with every agentic attempt in a fresh Modal sandbox
+        required: true
+        default: false
+        type: boolean
       openai_model:
         description: OpenAI runner model for the full EVMBench run
         required: true
@@ -41,7 +46,8 @@ on:
         type: string
 
 env:
-  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+  BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && !inputs.cloud_node_e2e && 'full' || 'smoke' }}
+  BENCHMARK_NODE_EXECUTION: ${{ github.event_name == 'workflow_dispatch' && inputs.cloud_node_e2e && 'modal' || 'local' }}
   BENCHMARK_CANDIDATE: ${{ github.event_name == 'push' && github.event.after || github.sha }}
 
 permissions:
@@ -49,7 +55,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: modal-eval-${{ github.event_name == 'workflow_dispatch' && inputs.cloud_node_e2e && 'cloud-node-e2e' || github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -142,7 +148,8 @@ jobs:
             "${{ github.server_url }}/${{ github.repository }}" \
             "$generation" \
             "$BENCHMARK_CONTROL" \
-            "$BENCHMARK_MODE"
+            "$BENCHMARK_MODE" \
+            "$BENCHMARK_NODE_EXECUTION"
 
       - name: Validate Modal benchmark launch guardrails
         run: |
@@ -301,7 +308,7 @@ jobs:
               > "$BENCHMARK_CONTROL/failures/launch-control-unavailable.json"
           fi
 
-      - name: Wait for Modal compute and retry only pre-model launch failures
+      - name: Wait for Modal compute and recover resumable failures
         if: steps.launch_control.outputs.available == 'true'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -437,7 +444,7 @@ jobs:
                 live)
                   all_terminal=false
                   ;;
-                transient-operational-failure)
+                transient-operational-failure|resume-required)
                   all_terminal=false
                   if [ ! -f "$BENCHMARK_CONTROL/$config" ]; then
                     jq -n \

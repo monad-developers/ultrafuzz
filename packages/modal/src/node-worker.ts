@@ -76,6 +76,14 @@ async function main(): Promise<void> {
     const artifactDir = anchoredProjectPath(input.artifact_dir);
     const workspaceDir = anchoredProjectPath(input.workspace_dir);
     mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
+    const credentialValues = input.agent_credential_env.flatMap((name) => {
+      const value = process.env[name];
+      return value === undefined || value === "" ? [] : [value];
+    });
+    assertNoCredentialValuesInTree(artifactDir, credentialValues);
+    if (fs.existsSync(workspaceDir)) {
+      assertNoCredentialValuesInTree(workspaceDir, credentialValues);
+    }
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     copySafeTree(artifactDir, path.join(staging, "artifacts"));
@@ -84,7 +92,7 @@ async function main(): Promise<void> {
     }
     const artifactArchive = path.join(publishing, "artifacts.tgz");
     await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT);
-    const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
+    const digest = sha256File(artifactArchive);
     fs.writeFileSync(
       path.join(publishing, "result.json"),
       `${JSON.stringify({
@@ -98,7 +106,7 @@ async function main(): Promise<void> {
     );
     fs.rmSync(dataRoot, { recursive: true, force: true });
     fs.renameSync(publishing, dataRoot);
-    await runChecked("sync-results", "sync", [], dataRoot);
+    await runChecked("sync-results", "sync", [], "/data");
   } catch (error) {
     fs.rmSync(publishing, { recursive: true, force: true });
     throw error;
@@ -208,6 +216,42 @@ export function copySafeTree(source: string, destination: string, onlyMissing = 
   }
 }
 
+export function assertNoCredentialValuesInTree(root: string, credentialValues: readonly string[]): void {
+  const values = [...new Set(credentialValues.filter((value) => value.length > 0))].map((value) =>
+    Buffer.from(value, "utf8")
+  );
+  if (values.length === 0) return;
+  assertSafeTree(root);
+  for (const entry of fs.readdirSync(root, { recursive: true, withFileTypes: true })) {
+    if (values.some((value) => Buffer.from(entry.name, "utf8").includes(value))) {
+      throw new Error("cloud publication contains an injected credential value");
+    }
+    if (!entry.isFile()) continue;
+    const filePath = path.join(entry.parentPath, entry.name);
+    if (fileContainsCredentialValue(filePath, values)) {
+      throw new Error("cloud publication contains an injected credential value");
+    }
+  }
+}
+
+function fileContainsCredentialValue(filePath: string, credentialValues: readonly Buffer[]): boolean {
+  const descriptor = fs.openSync(filePath, "r");
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  const longest = Math.max(...credentialValues.map((value) => value.byteLength));
+  let carry = Buffer.alloc(0);
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, null);
+      if (bytesRead === 0) return false;
+      const contents = Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+      if (credentialValues.some((value) => contents.includes(value))) return true;
+      carry = contents.subarray(Math.max(0, contents.byteLength - longest + 1));
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function assertSafeDirectoryTarget(destination: string): void {
   const resolved = path.resolve(destination);
   if (fs.existsSync(resolved)) {
@@ -247,10 +291,51 @@ function anchoredProjectPath(value: string): string {
 }
 
 function requiredOption(name: string): string {
-  const index = process.argv.indexOf(name);
-  const value = index < 0 ? undefined : process.argv[index + 1];
+  const value = optionValue(name);
   if (value === undefined || value.trim() === "") throw new Error("cloud worker option is missing");
   return value;
+}
+
+function optionValue(name: string): string | undefined {
+  const index = process.argv.indexOf(name);
+  return index < 0 ? undefined : process.argv[index + 1];
+}
+
+function sanitizedWorkerErrorPayload(error: unknown): Record<string, unknown> {
+  const payload = workerErrorPayload(error);
+  const requestPath = optionValue("--request");
+  const values: string[] = [];
+  if (requestPath !== undefined) {
+    try {
+      const input = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+      for (const name of input.agent_credential_env) {
+        const value = process.env[name];
+        if (value !== undefined && value !== "") values.push(value);
+      }
+    } catch {
+      // The controller performs another redaction pass; an unreadable request must not mask the original failure.
+    }
+  }
+  let serialized = JSON.stringify(payload);
+  for (const value of values.sort((left, right) => right.length - left.length)) {
+    serialized = serialized.replaceAll(value, "[credential]");
+  }
+  return JSON.parse(serialized) as Record<string, unknown>;
+}
+
+function publishWorkerFailure(payload: Record<string, unknown>): void {
+  const dataRoot = optionValue("--data-root");
+  if (dataRoot === undefined || dataRoot.trim() === "") return;
+  try {
+    if (fs.existsSync(path.join(dataRoot, "result.json"))) return;
+    fs.mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
+    const destination = path.join(dataRoot, "error.json");
+    const pending = `${destination}.pending-${process.pid}`;
+    fs.writeFileSync(pending, `${JSON.stringify(payload)}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(pending, destination);
+  } catch {
+    // stderr remains the fallback when durable storage itself is unavailable.
+  }
 }
 
 function isDirectExecution(): boolean {
@@ -259,7 +344,9 @@ function isDirectExecution(): boolean {
 
 if (isDirectExecution()) {
   void main().catch((error: unknown) => {
-    process.stderr.write(`${JSON.stringify(workerErrorPayload(error))}\n`);
+    const payload = sanitizedWorkerErrorPayload(error);
+    publishWorkerFailure(payload);
+    process.stderr.write(`${JSON.stringify(payload)}\n`);
     process.exitCode = 1;
   });
 }

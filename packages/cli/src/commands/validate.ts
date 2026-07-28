@@ -1,15 +1,27 @@
-import { Command } from "@oclif/core";
+import path from "node:path";
+
+import { Command, Flags } from "@oclif/core";
 import { validateProject } from "@ultrafuzz/runtime";
 
 import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
 
 export default class Validate extends Command {
   static override summary = "Validate config, topology, prompts, paths, and agent registry";
-  static override flags = globalFlags;
+  static override flags = {
+    ...globalFlags,
+    topology: Flags.string({
+      summary: "Topology YAML override, resolved relative to the project root"
+    })
+  };
 
   async run(): Promise<void> {
     const { flags } = await this.parse(Validate);
-    const result = await validateProject({ projectRoot: projectRoot(flags), env: cliIo().env });
+    const root = projectRoot(flags);
+    const result = await validateProject({
+      projectRoot: root,
+      ...(flags.topology === undefined ? {} : { topologyPath: path.resolve(root, flags.topology) }),
+      env: cliIo().env
+    });
     emitCommandResult(
       this,
       "validate",

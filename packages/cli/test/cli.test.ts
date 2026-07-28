@@ -252,6 +252,60 @@ test("init and validate emit schema-versioned launch JSON", async () => {
   assert.equal("repository_mutation" in posture, false);
 });
 
+test("validate accepts a topology override relative to the project root", async () => {
+  const project = tempProject();
+  assert.equal((await cli(project, ["init", "--force"])).code, 0);
+  fs.copyFileSync(path.join(project, ".ultrafuzz", "topology.yml"), path.join(project, "smoke-topology.yml"));
+  fs.writeFileSync(path.join(project, ".ultrafuzz", "topology.yml"), "invalid: [\n", "utf8");
+
+  const defaultValidation = await cli(project, ["validate", "--json"]);
+  assert.notEqual(defaultValidation.code, 0);
+
+  const overrideValidation = await cli(project, ["validate", "--topology", "smoke-topology.yml", "--json"]);
+  assert.equal(overrideValidation.code, 0, overrideValidation.stderr);
+});
+
+function writeCloudAttemptEvidenceFixture(runRoot: string): void {
+  const directory = path.join(runRoot, "cloud-execution", "attempts");
+  const at = "2026-07-24T00:00:00.000Z";
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, "fixture.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.cloud-attempt-evidence.v1",
+      controller_run_id: `ultrafuzz-${path.basename(runRoot)}`,
+      run_id: path.basename(runRoot),
+      task_id: "node:project-discovery",
+      attempt_id: "project-discovery",
+      execution_generation: "base",
+      provider: "modal",
+      state: "succeeded",
+      requested_resources: { cpu: 2, memory_mib: 4096, timeout_seconds: 900 },
+      resolved_resources: { cpu: 2, memory_mib: 4096, timeout_seconds: 900 },
+      resource_confirmation: "provider-create-accepted",
+      handoff_sha256: "1".repeat(64),
+      request_sha256: "2".repeat(64),
+      dependency_inputs: [],
+      provider_execution_ids: ["sb-cli-fixture"],
+      retry_index: 0,
+      executed: true,
+      resumed: false,
+      reused: false,
+      storage_lineage: `${path.basename(runRoot)}/project-discovery/base`,
+      output_sha256: "3".repeat(64),
+      publication_artifact_sha256: "4".repeat(64),
+      cleanup_state: "terminated",
+      created_at: at,
+      updated_at: at,
+      transitions: [
+        { state: "prepared", at },
+        { state: "launching", at, provider_execution_id: "sb-cli-fixture" },
+        { state: "succeeded", at }
+      ]
+    })}\n`
+  );
+}
+
 test("run, ps, status, inspect, report, materialize, clean, and lifecycle commands expose product workflow evidence", async () => {
   const project = tempProject();
   assert.equal((await cli(project, ["init", "--force"])).code, 0);
@@ -297,6 +351,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(psData.runs[0]?.ultrafuzz_run_id, "cli-run");
   assert.equal("smithers" in (psBody.data as Record<string, unknown>), false);
 
+  writeCloudAttemptEvidenceFixture(runData.run_root);
   const inspect = await cli(project, ["inspect", runData.run_id, "--json"], env);
   assert.equal(inspect.code, 0, inspect.stderr);
   const inspectBody = parseJson(inspect);
@@ -304,11 +359,21 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   const inspectData = inspectBody.data as {
     metadata: { workflow: { run_id: string } };
     workflow: { run_id: string; inspect: { ok: boolean }; events: { ok: boolean } };
+    cloud_attempts: Array<{ task_id: string; provider_execution_ids: string[] }>;
   };
   assert.equal(inspectData.metadata.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.run_id, "ultrafuzz-cli-run");
   assert.equal(inspectData.workflow.inspect.ok, true);
   assert.equal(inspectData.workflow.events.ok, true);
+  assert.equal(inspectData.cloud_attempts[0]?.task_id, "node:project-discovery");
+  assert.deepEqual(inspectData.cloud_attempts[0]?.provider_execution_ids, ["sb-cli-fixture"]);
+  const inspectText = await cli(project, ["inspect", runData.run_id], env);
+  assert.equal(inspectText.code, 0, inspectText.stderr);
+  assert.match(inspectText.stdout, /Cloud attempts: 1/u);
+  assert.match(inspectText.stdout, /vm=sb-cli-fixture/u);
+  assert.match(inspectText.stdout, /requested=2cpu\/4096MiB\/900s/u);
+  assert.match(inspectText.stdout, /resolved=2cpu\/4096MiB\/900s/u);
+  assert.match(inspectText.stdout, /resource_confirmation=provider-create-accepted/u);
 
   const status = await cli(project, ["status", runData.run_id, "--window", "5", "--json"], env);
   assert.equal(status.code, 0, status.stderr);
@@ -489,6 +554,15 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(pauseData.action, "pause");
   assert.equal(pauseData.status, "pause-requested");
   assert.equal(pauseData.submitted, true);
+
+  const cancel = await cli(project, ["cancel", runData.run_id, "--json"], env);
+  assert.equal(cancel.code, 0, cancel.stderr);
+  const cancelBody = parseJson(cancel);
+  assertNoSmithersSurface(cancelBody);
+  const cancelData = cancelBody.data as { action: string; status: string; submitted: boolean };
+  assert.equal(cancelData.action, "cancel");
+  assert.equal(cancelData.status, "canceled");
+  assert.equal(cancelData.submitted, true);
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {

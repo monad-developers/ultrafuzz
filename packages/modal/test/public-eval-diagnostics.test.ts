@@ -47,6 +47,8 @@ const CONFIG: PublicModalBenchmarkConfig = {
   public_benchmark: {
     benchmark: "ultrafuzz-bench",
     lane: "smoke",
+    node_execution: "local",
+    acceptance_e2e: false,
     runner_model_profile: MODEL.slug,
     candidate_repository: "https://github.com/monad-developers/ultrafuzz",
     candidate_commit: "a".repeat(40),

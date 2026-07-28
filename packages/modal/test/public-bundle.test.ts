@@ -52,7 +52,7 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v3");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
     expect(bundle).toMatchObject({
       status: "succeeded",
@@ -176,6 +176,153 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("requires strict sanitized cloud evidence for every matrix row and globally unique Modal sandboxes", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-cloud-"));
+    const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1"];
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      execution: { mode: "cloud", provider: "modal", acceptance_e2e: false },
+      files: [...completePublicSources(root, rowIds), ...cloudPublicSources(root, rowIds)]
+    });
+    expect(() => parsePublicBenchmarkBundle(bundle)).not.toThrow();
+
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        files: bundle.files.filter((file) => file.path !== `cloud/${rowIds[1]}/evidence.json`)
+      })
+    ).toThrow(/cloud evidence row set/u);
+
+    const secondPath = `cloud/${rowIds[1]}/evidence.json`;
+    const second = JSON.parse(bundleFileText(bundle, secondPath)) as {
+      attempts: Array<{ provider_execution_ids: string[] }>;
+    };
+    second.attempts[0]!.provider_execution_ids = ["sb-row-0"];
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, secondPath, `${JSON.stringify(second)}\n`))
+    ).toThrow(/reuses a Modal sandbox/u);
+
+    const firstPath = `cloud/${rowIds[0]}/evidence.json`;
+    const first = JSON.parse(bundleFileText(bundle, firstPath)) as Record<string, unknown>;
+    first.dependency_path = "/private/controller/path";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, firstPath, `${JSON.stringify(first)}\n`))
+    ).toThrow(/cloud evidence is invalid/u);
+  });
+
+  it("validates exact smoke topology, resource, replacement, and pause-resume proof offline", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-cloud-acceptance-"));
+    const rowIds = ["target-alpha-runner-trial-1", "target-beta-runner-trial-1", "target-gamma-runner-trial-1"];
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      execution: { mode: "cloud", provider: "modal", acceptance_e2e: true },
+      files: [...completePublicSources(root, rowIds), ...cloudAcceptancePublicSources(root, rowIds)]
+    });
+    expect(() => parsePublicBenchmarkBundle(bundle)).not.toThrow();
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        files: bundle.files.filter((file) => !file.path.startsWith("cloud/"))
+      })
+    ).toThrow(/cloud evidence row set/u);
+
+    const evidencePath = `cloud/${rowIds[0]}/evidence.json`;
+    const wrongProducer = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      attempts: Array<{
+        logical_node_id: string;
+        dependency_inputs: Array<{ attempt_id: string }>;
+      }>;
+    };
+    wrongProducer.attempts.find(
+      (attempt) => attempt.logical_node_id === "final-report"
+    )!.dependency_inputs[0]!.attempt_id = "unknown-attempt";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, evidencePath, `${JSON.stringify(wrongProducer)}\n`))
+    ).toThrow(/producer identity/u);
+
+    const wrongProducerDigest = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      attempts: Array<{
+        logical_node_id: string;
+        dependency_inputs: Array<{ sha256: string }>;
+      }>;
+    };
+    wrongProducerDigest.attempts.find(
+      (attempt) => attempt.logical_node_id === "final-report"
+    )!.dependency_inputs[0]!.sha256 = "a".repeat(64);
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, evidencePath, `${JSON.stringify(wrongProducerDigest)}\n`)
+      )
+    ).toThrow(/producer publication/u);
+
+    const wrongFaultIdentity = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      controlled_faults: Array<{ fault: string; execution_generation: string }>;
+    };
+    wrongFaultIdentity.controlled_faults.find((fault) => fault.fault === "interrupt")!.execution_generation =
+      "unrelated-generation";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, evidencePath, `${JSON.stringify(wrongFaultIdentity)}\n`))
+    ).toThrow(/controlled fault identities/u);
+
+    const noReplacementTransition = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      attempts: Array<{ logical_node_id: string; transitions: Array<{ state: string }> }>;
+    };
+    const interrupted = noReplacementTransition.attempts.find(
+      (attempt) => attempt.logical_node_id === "external-dependency-boundaries"
+    )!;
+    interrupted.transitions = interrupted.transitions.filter((transition) => transition.state !== "failed");
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, evidencePath, `${JSON.stringify(noReplacementTransition)}\n`)
+      )
+    ).toThrow(/interrupt transition proof/u);
+
+    const repeatedCompleted = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      resume: { attempt_provider_execution_ids_before_pause: Record<string, string[]> };
+    };
+    repeatedCompleted.resume.attempt_provider_execution_ids_before_pause["smoke-context-attempt"] = [
+      "sb-0-context",
+      "sb-unexpected"
+    ];
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, evidencePath, `${JSON.stringify(repeatedCompleted)}\n`))
+    ).toThrow(/repeated completed work/u);
+
+    const noPostResumeReattach = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      attempts: Array<{
+        logical_node_id: string;
+        transitions: Array<{ state: string; at: string; provider_execution_id?: string }>;
+      }>;
+    };
+    const detachedAttempt = noPostResumeReattach.attempts.find(
+      (attempt) => attempt.logical_node_id === "time-warp-sequences"
+    )!;
+    detachedAttempt.transitions = detachedAttempt.transitions.filter((transition) => transition.state !== "running");
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, evidencePath, `${JSON.stringify(noPostResumeReattach)}\n`)
+      )
+    ).toThrow(/did not reattach the provider deliberately detached/u);
+
+    const wrongPauseTask = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      resume: { pause_detach_claims: Record<string, { task_id: string }> };
+    };
+    wrongPauseTask.resume.pause_detach_claims["time-warp-sequences-attempt"]!.task_id = "node:unrelated";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, evidencePath, `${JSON.stringify(wrongPauseTask)}\n`))
+    ).toThrow(/did not reattach the provider deliberately detached/u);
+
+    const noLiveProviderAtResume = JSON.parse(bundleFileText(bundle, evidencePath)) as {
+      resume: { live_attempt_ids_before_resume: string[] };
+    };
+    noLiveProviderAtResume.resume.live_attempt_ids_before_resume = [];
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, evidencePath, `${JSON.stringify(noLiveProviderAtResume)}\n`)
+      )
+    ).toThrow(/cloud evidence is invalid/u);
   });
 
   it("fails the smoke no-regression gate when any target row has no finding", () => {
@@ -622,9 +769,249 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
   return sources;
 }
 
+function cloudPublicSources(root: string, rowIds: string[]): Array<{ path: string; root: string; source: string }> {
+  return rowIds.map((rowId, index) => {
+    const at = "2026-07-24T00:00:00.000Z";
+    const source = path.join(root, "cloud-source", rowId, "evidence.json");
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(
+      source,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.public-cloud-evidence.v1",
+        row_id: rowId,
+        run_id: `run-${index}`,
+        controller_run_id: `ultrafuzz-run-${index}`,
+        provider: "modal",
+        acceptance_e2e: false,
+        controlled_faults: [],
+        attempts: [
+          {
+            logical_node_id: "smoke-context",
+            task_id: `node:smoke-context:${index}`,
+            attempt_id: `smoke-context-${index}`,
+            execution_generation: "base",
+            state: "succeeded",
+            requested_resources: { cpu: 4, memory_mib: 8_192, timeout_seconds: 1_800 },
+            resolved_resources: { cpu: 4, memory_mib: 8_192, timeout_seconds: 1_800 },
+            resource_confirmation: "provider-create-accepted",
+            handoff_sha256: (index + 1).toString(16).repeat(64),
+            request_sha256: (index + 3).toString(16).repeat(64),
+            dependency_inputs: [],
+            provider_execution_ids: [`sb-row-${index}`],
+            retry_index: 0,
+            executed: true,
+            resumed: false,
+            reused: false,
+            storage_lineage: `run-${index}/smoke-context/base`,
+            output_sha256: "f".repeat(64),
+            publication_artifact_sha256: "e".repeat(64),
+            cleanup_state: "terminated",
+            transitions: [
+              { state: "prepared", at },
+              { state: "launching", at, provider_execution_id: `sb-row-${index}` },
+              { state: "succeeded", at }
+            ]
+          }
+        ]
+      })}\n`
+    );
+    return { path: `cloud/${rowId}/evidence.json`, root, source };
+  });
+}
+
+function cloudAcceptancePublicSources(
+  root: string,
+  rowIds: string[]
+): Array<{ path: string; root: string; source: string }> {
+  const dependencies = {
+    "smoke-context": [],
+    "time-warp-sequences": ["smoke-context"],
+    "external-dependency-boundaries": ["smoke-context"],
+    "externalized-state-accounting": ["smoke-context"],
+    "lifecycle-view-boundaries": ["smoke-context"],
+    "dedupe-findings": [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries"
+    ],
+    "final-report": [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries",
+      "dedupe-findings"
+    ]
+  } as const;
+  const nodeIds = Object.keys(dependencies) as Array<keyof typeof dependencies>;
+  return rowIds.map((rowId, rowIndex) => {
+    const at = "2026-07-24T00:00:00.000Z";
+    const providerId = (nodeId: string, replacement = false) =>
+      `sb-${rowIndex}-${nodeId}${replacement ? "-replacement" : ""}`;
+    const source = path.join(root, "cloud-acceptance-source", rowId, "evidence.json");
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    fs.writeFileSync(
+      source,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.public-cloud-evidence.v1",
+        row_id: rowId,
+        run_id: `run-${rowIndex}`,
+        controller_run_id: `ultrafuzz-run-${rowIndex}`,
+        provider: "modal",
+        acceptance_e2e: true,
+        controlled_faults: [
+          {
+            fault: "detach",
+            task_id: "node:smoke-context",
+            attempt_id: "smoke-context-attempt",
+            execution_generation: "base",
+            claimed_at: "2026-07-24T00:00:10.000Z"
+          },
+          {
+            fault: "interrupt",
+            task_id: "node:external-dependency-boundaries",
+            attempt_id: "external-dependency-boundaries-attempt",
+            execution_generation: "base",
+            claimed_at: "2026-07-24T00:00:10.000Z"
+          }
+        ],
+        resume: {
+          action: "resume",
+          submitted: true,
+          pause_request_status: "pause-requested",
+          pause_requested_at: "2026-07-24T00:00:30.000Z",
+          pause_status: "paused",
+          pause_detach_attempt_ids: ["time-warp-sequences-attempt"],
+          pause_detach_claims: {
+            "time-warp-sequences-attempt": {
+              controller_run_id: `ultrafuzz-run-${rowIndex}`,
+              task_id: "node:time-warp-sequences",
+              attempt_id: "time-warp-sequences-attempt",
+              provider_execution_id: providerId("time-warp"),
+              provider_state_at_detach: "live",
+              claimed_at: "2026-07-24T00:00:45.000Z"
+            }
+          },
+          completed_attempt_ids_before_pause: ["smoke-context-attempt"],
+          live_attempt_ids_before_pause: ["time-warp-sequences-attempt"],
+          attempt_states_before_pause: {
+            "smoke-context-attempt": "succeeded",
+            "time-warp-sequences-attempt": "running"
+          },
+          attempt_provider_execution_ids_before_pause: {
+            "smoke-context-attempt": [providerId("context")],
+            "time-warp-sequences-attempt": [providerId("time-warp")]
+          },
+          completed_attempt_ids_before_resume: ["smoke-context-attempt"],
+          live_attempt_ids_before_resume: ["time-warp-sequences-attempt"],
+          attempt_states_before_resume: {
+            "smoke-context-attempt": "succeeded",
+            "time-warp-sequences-attempt": "provider-unknown"
+          },
+          provider_execution_ids_before_resume: [providerId("context"), providerId("time-warp")],
+          attempt_provider_execution_ids_before_resume: {
+            "smoke-context-attempt": [providerId("context")],
+            "time-warp-sequences-attempt": [providerId("time-warp")]
+          },
+          invoked_at: "2026-07-24T00:01:00.000Z"
+        },
+        attempts: nodeIds.map((nodeId, nodeIndex) => {
+          const providerExecutionIds =
+            nodeId === "external-dependency-boundaries"
+              ? [providerId(nodeId), providerId(nodeId, true)]
+              : [
+                  nodeId === "smoke-context"
+                    ? providerId("context")
+                    : nodeId === "time-warp-sequences"
+                      ? providerId("time-warp")
+                      : providerId(nodeId)
+                ];
+          return {
+            logical_node_id: nodeId,
+            task_id: `node:${nodeId}`,
+            attempt_id: `${nodeId}-attempt`,
+            execution_generation: "base",
+            state: "succeeded",
+            requested_resources: {
+              cpu: nodeId === "smoke-context" ? 4 : 2,
+              memory_mib: nodeId === "smoke-context" ? 8_192 : 4_096,
+              timeout_seconds: 1_800
+            },
+            resolved_resources: {
+              cpu: nodeId === "smoke-context" ? 4 : 2,
+              memory_mib: nodeId === "smoke-context" ? 8_192 : 4_096,
+              timeout_seconds: 1_800
+            },
+            resource_confirmation:
+              nodeId === "time-warp-sequences" ? "provider-reattached" : "provider-create-accepted",
+            handoff_sha256: (nodeIndex + 1).toString(16).repeat(64),
+            request_sha256: (nodeIndex + 8).toString(16).repeat(64),
+            dependency_inputs: dependencies[nodeId].map((dependencyNodeId) => ({
+              logical_node_id: dependencyNodeId,
+              attempt_id: `${dependencyNodeId}-attempt`,
+              sha256: "e".repeat(64)
+            })),
+            provider_execution_ids: providerExecutionIds,
+            retry_index: providerExecutionIds.length - 1,
+            executed: true,
+            resumed: nodeId === "smoke-context" || nodeId === "time-warp-sequences",
+            reused: false,
+            storage_lineage: `run-${rowIndex}/${nodeId}/base`,
+            output_sha256: "f".repeat(64),
+            publication_artifact_sha256: "e".repeat(64),
+            cleanup_state: "terminated",
+            transitions: [
+              { state: "prepared", at },
+              {
+                state: "launching",
+                at,
+                provider_execution_id: providerExecutionIds[0]
+              },
+              ...(nodeId === "smoke-context" || nodeId === "external-dependency-boundaries"
+                ? [{ state: "failed", at: "2026-07-24T00:00:20.000Z" }]
+                : []),
+              ...(providerExecutionIds.length > 1
+                ? [
+                    {
+                      state: "launching",
+                      at: "2026-07-24T00:00:30.000Z",
+                      provider_execution_id: providerExecutionIds[1]
+                    }
+                  ]
+                : []),
+              ...(nodeId === "smoke-context"
+                ? [
+                    {
+                      state: "running",
+                      at: "2026-07-24T00:00:30.000Z",
+                      provider_execution_id: providerExecutionIds[0]
+                    }
+                  ]
+                : []),
+              ...(nodeId === "time-warp-sequences"
+                ? [
+                    {
+                      state: "running",
+                      at: "2026-07-24T00:02:00.000Z",
+                      provider_execution_id: providerId("time-warp")
+                    }
+                  ]
+                : []),
+              { state: "succeeded", at }
+            ]
+          };
+        })
+      })}\n`
+    );
+    return { path: `cloud/${rowId}/evidence.json`, root, source };
+  });
+}
+
 function realisticMatrix(rowIds: string[]) {
   return rowIds.map((id, index) => {
-    const targetId = `target-${index + 1}`;
+    const targetId = rowIds.length === 3 ? id.replace(/-runner-trial-\d+$/u, "") : `target-${index + 1}`;
     const framework = index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper";
     return {
       id,

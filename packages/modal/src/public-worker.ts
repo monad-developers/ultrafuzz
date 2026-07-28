@@ -11,6 +11,7 @@ import {
   BENCHMARK_FULL_MAX_PARALLEL_TARGETS,
   BENCHMARK_SMOKE_MAX_PARALLEL_RUNS,
   BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS,
+  BENCHMARK_SMOKE_WORKFLOW_PATH,
   boundedEvalId,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
@@ -40,6 +41,12 @@ import {
   type PublicEvalDiagnostics,
   writePublicEvalDiagnosticsAtomic
 } from "./public-eval-diagnostics.js";
+import {
+  cleanupModalNodeRun,
+  parseCloudAttemptEvidence,
+  type CloudAttemptEvidence,
+  type ModalNodeSandboxProviderOptions
+} from "./node-provider.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "./workspace-config.js";
 import { emptyWorkerCheckpoint, runWithTerminalPersistence, WorkerResultWriter } from "./worker-result.js";
 import { OperationalDispositionError } from "./terminal-disposition.js";
@@ -55,6 +62,7 @@ export const PUBLIC_BENCHMARK_MAX_PARALLEL_WORKFLOW_NODES = BENCHMARK_SMOKE_MAX_
 export const PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_WORKFLOW_NODES = BENCHMARK_FULL_MAX_PARALLEL_TARGETS;
 export const PUBLIC_BENCHMARK_PREPARATION_PARALLELISM = 8;
 export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
+export const PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS = 65 * 60;
 export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
 export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
@@ -64,11 +72,26 @@ export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
 export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
 export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 60 * 60;
 
+export function publicBenchmarkValidationTopologyPath(
+  controlRoot: string,
+  lane: PublicModalBenchmarkConfig["public_benchmark"]["lane"]
+): string | undefined {
+  return lane === "smoke" ? path.join(controlRoot, BENCHMARK_SMOKE_WORKFLOW_PATH) : undefined;
+}
+
 export class PublicEvalDiagnosticsBuildError extends Error {
   override readonly name = "PublicEvalDiagnosticsBuildError";
 
   constructor(cause: unknown) {
     super("public eval diagnostics could not be built", { cause });
+  }
+}
+
+export class PublicCloudCleanupIncompleteError extends Error {
+  override readonly name = "PublicCloudCleanupIncompleteError";
+
+  constructor(cause: unknown) {
+    super("public cloud benchmark cleanup is incomplete", { cause });
   }
 }
 const PUBLIC_EVAL_RUN_ID_MAX_LENGTH = 128;
@@ -109,7 +132,9 @@ export async function runPublicBenchmarkWorker(input: {
         ? "checkpoint-incompatible"
         : error instanceof PublicEvalDiagnosticsBuildError
           ? "public-eval-diagnostics-invalid"
-          : undefined,
+          : error instanceof PublicCloudCleanupIncompleteError
+            ? "public-cloud-cleanup-incomplete"
+            : undefined,
     run: async () => {
       await input.preflight({
         workspaceEvidencePaths: [legacyPersistentWorkRoot, bundlePath, diagnosticsPath],
@@ -131,16 +156,21 @@ export async function runPublicBenchmarkWorker(input: {
       assertPublicWorkerInput(input.config, input.model);
       const forbiddenSecretValues = [
         requiredEnv(runnerApiKeyEnv(input.model.provider)),
-        requiredEnv(input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+        requiredEnv(input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY"),
+        ...(input.config.public_benchmark.node_execution === "modal"
+          ? [requiredEnv("MODAL_TOKEN_ID"), requiredEnv("MODAL_TOKEN_SECRET")]
+          : [])
       ];
       if (fs.existsSync(bundlePath)) {
+        let bundle: PublicBenchmarkBundle;
         try {
-          const bundle = readPublicBenchmarkBundle(bundlePath, forbiddenSecretValues);
+          bundle = readPublicBenchmarkBundle(bundlePath, forbiddenSecretValues);
           assertPublicWorkerBundleLineage(bundle, input.config, input.model, input.lineage);
-          return "finished";
         } catch {
           throw input.checkpointIncompatibleError("persisted public benchmark bundle is invalid");
         }
+        await cleanupPublicCloudBundleRunsForWorker(input.config, bundle);
+        return "finished";
       }
       await rm(workRoot, { recursive: true, force: true });
       await mkdir(workRoot, { recursive: true, mode: 0o700 });
@@ -185,7 +215,10 @@ export async function runPublicBenchmarkWorker(input: {
                 publicEvalCommandTimeoutSeconds({
                   matrixRows: prepared.matrixRows,
                   maxParallelRuns: prepared.maxParallelRuns,
-                  rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds
+                  rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds,
+                  rowLaunchSeconds: input.config.public_benchmark.acceptance_e2e
+                    ? PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS
+                    : 0
                 }) * 1000,
               timeoutCategory: "model-work-timeout",
               publicDiagnosticSecretValues: forbiddenSecretValues
@@ -241,6 +274,14 @@ export async function runPublicBenchmarkWorker(input: {
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
         lineage: input.lineage,
+        execution:
+          input.config.public_benchmark.node_execution === "modal"
+            ? {
+                mode: "cloud",
+                provider: "modal",
+                acceptance_e2e: input.config.public_benchmark.acceptance_e2e
+              }
+            : { mode: "local", acceptance_e2e: false },
         files: publicBundleSources(
           prepared.controlRoot,
           prepared.evalRunId,
@@ -248,11 +289,14 @@ export async function runPublicBenchmarkWorker(input: {
             root: input.dataRoot,
             source: diagnosticsPath
           },
-          input.config.public_benchmark.lane
+          input.config.public_benchmark.lane,
+          input.config.public_benchmark.node_execution,
+          input.config.public_benchmark.acceptance_e2e
         ),
         forbiddenSecretValues
       });
       await writePublicBundleAtomic(bundlePath, bundle);
+      await cleanupPublicCloudBundleRunsForWorker(input.config, bundle);
       return "finished";
     }
   });
@@ -291,11 +335,16 @@ export function publicEvalCommandTimeoutSeconds(input: {
   matrixRows: number;
   maxParallelRuns: number;
   rowWatchSeconds: number;
+  rowLaunchSeconds?: number;
 }): number {
   const waves = publicEvalMatrixWaves(input.matrixRows, input.maxParallelRuns);
   assertPositiveSafeInteger("row watch seconds", input.rowWatchSeconds);
+  const rowLaunchSeconds = input.rowLaunchSeconds ?? 0;
+  if (!Number.isSafeInteger(rowLaunchSeconds) || rowLaunchSeconds < 0) {
+    throw new Error("row launch seconds must be a non-negative safe integer");
+  }
   return checkedTimeoutSeconds(
-    waves * input.rowWatchSeconds + PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
+    waves * (rowLaunchSeconds + input.rowWatchSeconds) + PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
     "public eval command timeout"
   );
 }
@@ -459,6 +508,7 @@ async function preparePublicBenchmark(
     }
   });
   const suite = preparePublicEvalSuite(baseSuite, scope.lane);
+  const validationTopologyPath = publicBenchmarkValidationTopologyPath(controlRoot, scope.lane);
   const profile = suite.model_profiles[scope.runner_model_profile];
   if (profile?.model !== model.model || profile.agent !== model.agent || profile.reasoning !== model.reasoning) {
     throw new Error("public benchmark config and checked-in runner profile disagree");
@@ -475,9 +525,22 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
-    await writeFile(path.join(destination, "ultrafuzz.toml"), modalTargetToml(model, config.node_timeout_seconds), {
-      mode: 0o600
-    });
+    await writeFile(
+      path.join(destination, "ultrafuzz.toml"),
+      modalTargetToml(
+        model,
+        config.node_timeout_seconds,
+        scope.node_execution === "modal"
+          ? {
+              app: config.app_name,
+              image: config.image_name,
+              resourceOverrideNodeId: scope.lane === "smoke" ? "smoke-context" : "project-discovery"
+            }
+          : undefined,
+        { smokeWorkflow: scope.lane === "smoke" }
+      ),
+      { mode: 0o600 }
+    );
     capModalTargetTopologyTimeouts(
       path.join(destination, ".ultrafuzz", "topology.yml"),
       Math.min(config.node_timeout_seconds, scope.max_runtime_seconds)
@@ -488,12 +551,23 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
-    await runCommand(["node", CLI, "validate", "--project", destination, "--json"], {
-      cwd: controlRoot,
-      logPath,
-      timeoutMs: 5 * 60 * 1000,
-      signal
-    });
+    await runCommand(
+      [
+        "node",
+        CLI,
+        "validate",
+        "--project",
+        destination,
+        ...(validationTopologyPath === undefined ? [] : ["--topology", validationTopologyPath]),
+        "--json"
+      ],
+      {
+        cwd: controlRoot,
+        logPath,
+        timeoutMs: 5 * 60 * 1000,
+        signal
+      }
+    );
   });
   if (scope.benchmark === "evmbench") {
     await materializeEvmbenchGroundTruth(
@@ -708,7 +782,9 @@ export function publicBundleSources(
   controlRoot: string,
   evalRunId: string,
   diagnostics: { root: string; source: string },
-  lane: "smoke" | "full" = "full"
+  lane: "smoke" | "full" = "full",
+  nodeExecution: "local" | "modal" = "local",
+  acceptanceE2e = false
 ): PublicBenchmarkBundleSource[] {
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
   const sources: PublicBenchmarkBundleSource[] = [
@@ -782,8 +858,699 @@ export function publicBundleSources(
         source: candidate.source
       });
     }
+    if (nodeExecution === "modal") {
+      const cloudEvidence = buildPublicCloudEvidence(record, row.id, lane, acceptanceE2e);
+      const generatedRoot = path.join(evalRoot, "cloud-evidence");
+      const generatedPath = path.join(generatedRoot, `${row.id}.json`);
+      writeJsonAtomicSync(generatedPath, cloudEvidence);
+      sources.push({
+        path: `cloud/${row.id}/evidence.json`,
+        root: generatedRoot,
+        source: generatedPath
+      });
+    }
   }
   return sources;
+}
+
+const SMOKE_CLOUD_NODES = [
+  "smoke-context",
+  "time-warp-sequences",
+  "external-dependency-boundaries",
+  "externalized-state-accounting",
+  "lifecycle-view-boundaries",
+  "dedupe-findings",
+  "final-report"
+] as const;
+
+interface PublicCloudEvidence {
+  schema_version: "ultrafuzz.modal.public-cloud-evidence.v1";
+  row_id: string;
+  run_id: string;
+  controller_run_id: string;
+  provider: "modal";
+  acceptance_e2e: boolean;
+  controlled_faults: Array<{
+    fault: "detach" | "interrupt";
+    task_id: string;
+    attempt_id: string;
+    execution_generation: string;
+    claimed_at: string;
+  }>;
+  resume?: {
+    action: "resume";
+    submitted: true;
+    pause_request_status: "pause-requested";
+    pause_requested_at: string;
+    pause_status: "paused";
+    pause_detach_attempt_ids: string[];
+    pause_detach_claims: Record<
+      string,
+      {
+        controller_run_id: string;
+        task_id: string;
+        attempt_id: string;
+        provider_execution_id: string;
+        provider_state_at_detach: "live";
+        claimed_at: string;
+      }
+    >;
+    completed_attempt_ids_before_pause: string[];
+    live_attempt_ids_before_pause: string[];
+    attempt_states_before_pause: Record<string, string>;
+    attempt_provider_execution_ids_before_pause: Record<string, string[]>;
+    completed_attempt_ids_before_resume: string[];
+    live_attempt_ids_before_resume: string[];
+    attempt_states_before_resume: Record<string, string>;
+    provider_execution_ids_before_resume: string[];
+    attempt_provider_execution_ids_before_resume: Record<string, string[]>;
+    invoked_at: string;
+  };
+  attempts: Array<{
+    logical_node_id: string;
+    task_id: string;
+    attempt_id: string;
+    execution_generation: string;
+    state: "succeeded";
+    requested_resources: CloudAttemptEvidence["requested_resources"];
+    resolved_resources: CloudAttemptEvidence["requested_resources"];
+    resource_confirmation: NonNullable<CloudAttemptEvidence["resource_confirmation"]>;
+    handoff_sha256: string;
+    request_sha256: string;
+    dependency_inputs: Array<{ logical_node_id: string; attempt_id: string; sha256: string }>;
+    provider_execution_ids: string[];
+    retry_index: number;
+    executed: true;
+    resumed: boolean;
+    reused: boolean;
+    storage_lineage: string;
+    output_sha256: string;
+    publication_artifact_sha256: string;
+    cleanup_state: "terminated";
+    transitions: Array<{
+      state: CloudAttemptEvidence["state"];
+      at: string;
+      provider_execution_id?: string;
+    }>;
+  }>;
+}
+
+function buildPublicCloudEvidence(
+  record: EvalRunRecord,
+  rowId: string,
+  lane: "smoke" | "full",
+  acceptanceE2e: boolean
+): PublicCloudEvidence {
+  if (record.ultrafuzz_run_root === undefined || record.ultrafuzz_run_id === undefined) {
+    throw new Error(`public benchmark row ${rowId} is missing cloud run identity`);
+  }
+  const attemptsDirectory = path.join(record.ultrafuzz_run_root, "cloud-execution", "attempts");
+  const entries = fs.existsSync(attemptsDirectory) ? fs.readdirSync(attemptsDirectory, { withFileTypes: true }) : [];
+  if (
+    entries.length === 0 ||
+    entries.some((entry) => !entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json"))
+  ) {
+    throw new Error(`public benchmark row ${rowId} has incomplete cloud attempt evidence`);
+  }
+  const attempts = entries
+    .map((entry) =>
+      parseCloudAttemptEvidence(
+        JSON.parse(fs.readFileSync(path.join(attemptsDirectory, entry.name), "utf8")) as unknown
+      )
+    )
+    .sort((left, right) => left.task_id.localeCompare(right.task_id));
+  if (attempts.some((attempt) => attempt.run_id !== record.ultrafuzz_run_id)) {
+    throw new Error(`public benchmark row ${rowId} cloud run identity does not match`);
+  }
+  const controllerRunIds = [...new Set(attempts.map((attempt) => attempt.controller_run_id))];
+  if (controllerRunIds.length !== 1) {
+    throw new Error(`public benchmark row ${rowId} spans multiple controller run identities`);
+  }
+  if (lane !== "smoke") {
+    throw new Error("public cloud evidence currently requires the bounded smoke topology");
+  }
+  if (attempts.length !== SMOKE_CLOUD_NODES.length) {
+    throw new Error(`public benchmark row ${rowId} must have exactly seven cloud attempts`);
+  }
+  const identified = new Map<string, CloudAttemptEvidence>();
+  for (const attempt of attempts) {
+    const matches = SMOKE_CLOUD_NODES.filter(
+      (nodeId) => attempt.task_id.includes(nodeId) || attempt.attempt_id.includes(nodeId)
+    );
+    if (matches.length !== 1 || identified.has(matches[0]!)) {
+      throw new Error(`public benchmark row ${rowId} cloud attempt topology is invalid`);
+    }
+    identified.set(matches[0]!, attempt);
+  }
+  const expectedDependencies: Record<(typeof SMOKE_CLOUD_NODES)[number], Array<(typeof SMOKE_CLOUD_NODES)[number]>> = {
+    "smoke-context": [],
+    "time-warp-sequences": ["smoke-context"],
+    "external-dependency-boundaries": ["smoke-context"],
+    "externalized-state-accounting": ["smoke-context"],
+    "lifecycle-view-boundaries": ["smoke-context"],
+    "dedupe-findings": [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries"
+    ],
+    "final-report": [
+      "smoke-context",
+      "time-warp-sequences",
+      "external-dependency-boundaries",
+      "externalized-state-accounting",
+      "lifecycle-view-boundaries",
+      "dedupe-findings"
+    ]
+  };
+  const providerIds = new Set<string>();
+  const sanitizedAttempts = SMOKE_CLOUD_NODES.map((logicalNodeId) => {
+    const attempt = identified.get(logicalNodeId);
+    if (attempt === undefined) throw new Error(`public benchmark row ${rowId} is missing ${logicalNodeId}`);
+    if (
+      attempt.state !== "succeeded" ||
+      !attempt.executed ||
+      attempt.provider_execution_ids.length === 0 ||
+      attempt.storage_lineage === undefined ||
+      attempt.output_sha256 === undefined ||
+      attempt.publication_artifact_sha256 === undefined ||
+      attempt.resolved_resources === undefined ||
+      attempt.resource_confirmation === undefined ||
+      attempt.cleanup_state !== "terminated"
+    ) {
+      throw new Error(`public benchmark row ${rowId} cloud attempt ${logicalNodeId} is incomplete`);
+    }
+    const dependencies = attempt.dependency_inputs.map((dependency) => {
+      const producer = [...identified.entries()].find(
+        ([, candidate]) => candidate.attempt_id === dependency.producer_attempt_id
+      );
+      if (producer === undefined) {
+        throw new Error(`public benchmark row ${rowId} cloud attempt ${logicalNodeId} has unknown dependency input`);
+      }
+      if (dependency.sha256 !== producer[1].publication_artifact_sha256) {
+        throw new Error(
+          `public benchmark row ${rowId} cloud attempt ${logicalNodeId} has a dependency publication digest mismatch`
+        );
+      }
+      return {
+        logical_node_id: producer[0],
+        attempt_id: dependency.producer_attempt_id,
+        sha256: dependency.sha256
+      };
+    });
+    const actualDependencyNodes = dependencies.map((dependency) => dependency.logical_node_id).sort();
+    if (JSON.stringify(actualDependencyNodes) !== JSON.stringify([...expectedDependencies[logicalNodeId]].sort())) {
+      throw new Error(`public benchmark row ${rowId} cloud attempt ${logicalNodeId} has invalid fan-in evidence`);
+    }
+    const expectedCpu = logicalNodeId === "smoke-context" ? 4 : 2;
+    const expectedMemory = logicalNodeId === "smoke-context" ? 8_192 : 4_096;
+    if (
+      attempt.requested_resources.cpu !== expectedCpu ||
+      attempt.requested_resources.memory_mib !== expectedMemory ||
+      attempt.requested_resources.timeout_seconds !== 1_800 ||
+      attempt.resolved_resources.cpu !== expectedCpu ||
+      attempt.resolved_resources.memory_mib !== expectedMemory ||
+      attempt.resolved_resources.timeout_seconds !== 1_800
+    ) {
+      throw new Error(`public benchmark row ${rowId} cloud attempt ${logicalNodeId} has invalid resources`);
+    }
+    for (const providerId of attempt.provider_execution_ids) {
+      if (providerIds.has(providerId)) {
+        throw new Error(`public benchmark row ${rowId} reuses a Modal sandbox across attempts`);
+      }
+      providerIds.add(providerId);
+    }
+    return {
+      logical_node_id: logicalNodeId,
+      task_id: attempt.task_id,
+      attempt_id: attempt.attempt_id,
+      execution_generation: attempt.execution_generation,
+      state: "succeeded" as const,
+      requested_resources: attempt.requested_resources,
+      resolved_resources: attempt.resolved_resources,
+      resource_confirmation: attempt.resource_confirmation,
+      handoff_sha256: attempt.handoff_sha256,
+      request_sha256: attempt.request_sha256,
+      dependency_inputs: dependencies,
+      provider_execution_ids: attempt.provider_execution_ids,
+      retry_index: attempt.retry_index,
+      executed: true as const,
+      resumed: attempt.resumed,
+      reused: attempt.reused,
+      storage_lineage: attempt.storage_lineage,
+      output_sha256: attempt.output_sha256,
+      publication_artifact_sha256: attempt.publication_artifact_sha256,
+      cleanup_state: "terminated" as const,
+      transitions: attempt.transitions
+    };
+  });
+
+  let resume: PublicCloudEvidence["resume"];
+  let controlledFaults: PublicCloudEvidence["controlled_faults"] = [];
+  if (acceptanceE2e) {
+    const context = identified.get("smoke-context")!;
+    const interrupted = identified.get("external-dependency-boundaries")!;
+    if (
+      (!context.resumed && !context.reused) ||
+      context.provider_execution_ids.length !== 1 ||
+      interrupted.provider_execution_ids.length !== 2 ||
+      interrupted.retry_index !== 1 ||
+      SMOKE_CLOUD_NODES.filter((nodeId) => nodeId !== "external-dependency-boundaries").some(
+        (nodeId) => identified.get(nodeId)!.provider_execution_ids.length !== 1
+      )
+    ) {
+      throw new Error(`public benchmark row ${rowId} did not prove reattach and replacement semantics`);
+    }
+    controlledFaults = readAcceptanceFaultMarkers(record.ultrafuzz_run_root, rowId, identified);
+    const rawResume = parseAcceptanceResume(
+      JSON.parse(
+        fs.readFileSync(path.join(record.ultrafuzz_run_root, "cloud-execution", "acceptance", "resume.json"), "utf8")
+      ) as unknown,
+      record.ultrafuzz_run_id
+    );
+    if (
+      !rawResume.submitted ||
+      rawResume.pause_request_status !== "pause-requested" ||
+      rawResume.pause_status !== "paused"
+    ) {
+      throw new Error(`public benchmark row ${rowId} did not submit a new controller after pause`);
+    }
+    if (rawResume.live_attempt_ids_before_pause.length === 0) {
+      throw new Error(`public benchmark row ${rowId} did not pause with a live cloud attempt`);
+    }
+    const liveStates = new Set(["queued", "launching", "running", "publishing", "provider-unknown"]);
+    for (const liveAttemptId of rawResume.live_attempt_ids_before_pause) {
+      const live = attempts.find((attempt) => attempt.attempt_id === liveAttemptId);
+      const beforeIds = rawResume.attempt_provider_execution_ids_before_pause[liveAttemptId];
+      const beforeResumeIds = rawResume.attempt_provider_execution_ids_before_resume[liveAttemptId];
+      const beforeResumeState = rawResume.attempt_states_before_resume[liveAttemptId];
+      if (
+        live === undefined ||
+        beforeIds === undefined ||
+        beforeResumeIds === undefined ||
+        !liveStates.has(rawResume.attempt_states_before_pause[liveAttemptId] ?? "") ||
+        (!liveStates.has(beforeResumeState ?? "") && beforeResumeState !== "succeeded") ||
+        beforeIds.some((id) => !beforeResumeIds.includes(id)) ||
+        beforeResumeIds.some((id) => !live.provider_execution_ids.includes(id))
+      ) {
+        throw new Error(`public benchmark row ${rowId} duplicated or lost a live attempt across pause`);
+      }
+      const isControlledReplacement = live === interrupted;
+      if (
+        !isControlledReplacement &&
+        (beforeResumeIds.length !== beforeIds.length || live.provider_execution_ids.length !== beforeIds.length)
+      ) {
+        throw new Error(`public benchmark row ${rowId} duplicated a live attempt after resume`);
+      }
+    }
+    for (const completedAttemptId of rawResume.completed_attempt_ids_before_pause) {
+      const completed = attempts.find((attempt) => attempt.attempt_id === completedAttemptId);
+      const beforeIds = rawResume.attempt_provider_execution_ids_before_pause[completedAttemptId];
+      const beforeResumeIds = rawResume.attempt_provider_execution_ids_before_resume[completedAttemptId];
+      if (
+        completed === undefined ||
+        beforeIds === undefined ||
+        beforeResumeIds === undefined ||
+        rawResume.attempt_states_before_pause[completedAttemptId] !== "succeeded" ||
+        rawResume.attempt_states_before_resume[completedAttemptId] !== "succeeded" ||
+        JSON.stringify([...beforeResumeIds].sort()) !== JSON.stringify([...beforeIds].sort()) ||
+        JSON.stringify([...completed.provider_execution_ids].sort()) !== JSON.stringify([...beforeIds].sort())
+      ) {
+        throw new Error(`public benchmark row ${rowId} repeated a completed attempt across pause`);
+      }
+    }
+    for (const liveAttemptId of rawResume.live_attempt_ids_before_resume) {
+      const live = attempts.find((attempt) => attempt.attempt_id === liveAttemptId);
+      const beforeIds = rawResume.attempt_provider_execution_ids_before_resume[liveAttemptId];
+      if (
+        live === undefined ||
+        beforeIds === undefined ||
+        !liveStates.has(rawResume.attempt_states_before_resume[liveAttemptId] ?? "") ||
+        beforeIds.some((id) => !live.provider_execution_ids.includes(id)) ||
+        (live !== interrupted && beforeIds.length !== live.provider_execution_ids.length)
+      ) {
+        throw new Error(`public benchmark row ${rowId} duplicated or lost a live attempt after resume`);
+      }
+    }
+    for (const completedAttemptId of rawResume.completed_attempt_ids_before_resume) {
+      const completed = attempts.find((attempt) => attempt.attempt_id === completedAttemptId);
+      const beforeIds = rawResume.attempt_provider_execution_ids_before_resume[completedAttemptId];
+      if (
+        completed === undefined ||
+        beforeIds === undefined ||
+        JSON.stringify([...completed.provider_execution_ids].sort()) !== JSON.stringify([...beforeIds].sort())
+      ) {
+        throw new Error(`public benchmark row ${rowId} repeated a completed attempt after resume`);
+      }
+    }
+    if (rawResume.completed_attempt_ids_before_resume.length === 0) {
+      throw new Error(`public benchmark row ${rowId} resumed before any attempt completed`);
+    }
+    for (const attemptId of rawResume.pause_detach_attempt_ids) {
+      const attempt = attempts.find((candidate) => candidate.attempt_id === attemptId);
+      const claim = rawResume.pause_detach_claims[attemptId];
+      const beforeResumeIds = rawResume.attempt_provider_execution_ids_before_resume[attemptId];
+      if (
+        attempt === undefined ||
+        claim === undefined ||
+        claim.controller_run_id !== controllerRunIds[0] ||
+        claim.task_id !== attempt.task_id ||
+        claim.attempt_id !== attemptId ||
+        Date.parse(claim.claimed_at) < Date.parse(rawResume.pause_requested_at) ||
+        !rawResume.live_attempt_ids_before_resume.includes(attemptId) ||
+        rawResume.attempt_states_before_resume[attemptId] !== "provider-unknown" ||
+        beforeResumeIds === undefined ||
+        !beforeResumeIds.includes(claim.provider_execution_id) ||
+        !attempt.provider_execution_ids.includes(claim.provider_execution_id) ||
+        attempt.resource_confirmation !== "provider-reattached" ||
+        !attempt.transitions.some(
+          (transition) =>
+            transition.state === "running" &&
+            transition.provider_execution_id === claim.provider_execution_id &&
+            Date.parse(transition.at) >= Math.max(Date.parse(claim.claimed_at), Date.parse(rawResume.invoked_at))
+        )
+      ) {
+        throw new Error(`public benchmark row ${rowId} did not reattach the live provider detached for pause`);
+      }
+    }
+    for (const attemptId of [
+      ...Object.keys(rawResume.attempt_states_before_pause),
+      ...Object.keys(rawResume.attempt_states_before_resume),
+      ...Object.keys(rawResume.attempt_provider_execution_ids_before_pause),
+      ...Object.keys(rawResume.attempt_provider_execution_ids_before_resume)
+    ]) {
+      if (!attempts.some((attempt) => attempt.attempt_id === attemptId)) {
+        throw new Error(`public benchmark row ${rowId} resume evidence names an unknown attempt`);
+      }
+    }
+    resume = {
+      action: "resume",
+      submitted: true,
+      pause_request_status: "pause-requested",
+      pause_requested_at: rawResume.pause_requested_at,
+      pause_status: "paused",
+      pause_detach_attempt_ids: rawResume.pause_detach_attempt_ids,
+      pause_detach_claims: rawResume.pause_detach_claims,
+      completed_attempt_ids_before_pause: rawResume.completed_attempt_ids_before_pause,
+      live_attempt_ids_before_pause: rawResume.live_attempt_ids_before_pause,
+      attempt_states_before_pause: rawResume.attempt_states_before_pause,
+      attempt_provider_execution_ids_before_pause: rawResume.attempt_provider_execution_ids_before_pause,
+      completed_attempt_ids_before_resume: rawResume.completed_attempt_ids_before_resume,
+      live_attempt_ids_before_resume: rawResume.live_attempt_ids_before_resume,
+      attempt_states_before_resume: rawResume.attempt_states_before_resume,
+      provider_execution_ids_before_resume: rawResume.provider_execution_ids_before_resume,
+      attempt_provider_execution_ids_before_resume: rawResume.attempt_provider_execution_ids_before_resume,
+      invoked_at: rawResume.invoked_at
+    };
+  }
+  return {
+    schema_version: "ultrafuzz.modal.public-cloud-evidence.v1",
+    row_id: rowId,
+    run_id: record.ultrafuzz_run_id,
+    controller_run_id: controllerRunIds[0]!,
+    provider: "modal",
+    acceptance_e2e: acceptanceE2e,
+    controlled_faults: controlledFaults,
+    ...(resume === undefined ? {} : { resume }),
+    attempts: sanitizedAttempts
+  };
+}
+
+interface AcceptanceResumeEvidence {
+  submitted: boolean;
+  pause_request_status: string;
+  pause_requested_at: string;
+  pause_status: string;
+  pause_detach_attempt_ids: string[];
+  pause_detach_claims: Record<
+    string,
+    {
+      controller_run_id: string;
+      task_id: string;
+      attempt_id: string;
+      provider_execution_id: string;
+      provider_state_at_detach: "live";
+      claimed_at: string;
+    }
+  >;
+  completed_attempt_ids_before_pause: string[];
+  live_attempt_ids_before_pause: string[];
+  attempt_states_before_pause: Record<string, string>;
+  attempt_provider_execution_ids_before_pause: Record<string, string[]>;
+  completed_attempt_ids_before_resume: string[];
+  live_attempt_ids_before_resume: string[];
+  attempt_states_before_resume: Record<string, string>;
+  provider_execution_ids_before_resume: string[];
+  attempt_provider_execution_ids_before_resume: Record<string, string[]>;
+  invoked_at: string;
+}
+
+function parseAcceptanceResume(value: unknown, runId: string): AcceptanceResumeEvidence {
+  if (
+    !record(value) ||
+    value.schema_version !== "ultrafuzz.cloud-acceptance-resume.v1" ||
+    value.run_id !== runId ||
+    value.action !== "resume" ||
+    typeof value.submitted !== "boolean" ||
+    value.pause_request_status !== "pause-requested" ||
+    typeof value.pause_requested_at !== "string" ||
+    !Number.isFinite(Date.parse(value.pause_requested_at)) ||
+    value.pause_status !== "paused" ||
+    !stringArray(value.pause_detach_attempt_ids) ||
+    value.pause_detach_attempt_ids.length !== 1 ||
+    !record(value.pause_detach_claims) ||
+    !Object.values(value.pause_detach_claims).every(
+      (claim) =>
+        record(claim) &&
+        typeof claim.controller_run_id === "string" &&
+        typeof claim.task_id === "string" &&
+        typeof claim.attempt_id === "string" &&
+        typeof claim.provider_execution_id === "string" &&
+        claim.provider_state_at_detach === "live" &&
+        typeof claim.claimed_at === "string" &&
+        Number.isFinite(Date.parse(claim.claimed_at))
+    ) ||
+    !stringArray(value.completed_attempt_ids_before_pause) ||
+    !stringArray(value.live_attempt_ids_before_pause) ||
+    !record(value.attempt_states_before_pause) ||
+    !Object.values(value.attempt_states_before_pause).every(
+      (state) => typeof state === "string" && state.length > 0 && state.length <= 64
+    ) ||
+    !record(value.attempt_provider_execution_ids_before_pause) ||
+    !Object.values(value.attempt_provider_execution_ids_before_pause).every(stringArray) ||
+    !stringArray(value.completed_attempt_ids_before_resume) ||
+    !stringArray(value.live_attempt_ids_before_resume) ||
+    !record(value.attempt_states_before_resume) ||
+    !Object.values(value.attempt_states_before_resume).every(
+      (state) => typeof state === "string" && state.length > 0 && state.length <= 64
+    ) ||
+    !stringArray(value.provider_execution_ids_before_resume) ||
+    !record(value.attempt_provider_execution_ids_before_resume) ||
+    !Object.values(value.attempt_provider_execution_ids_before_resume).every(stringArray) ||
+    typeof value.invoked_at !== "string" ||
+    !Number.isFinite(Date.parse(value.invoked_at))
+  ) {
+    throw new Error("cloud acceptance resume evidence is invalid");
+  }
+  const evidence = value as unknown as AcceptanceResumeEvidence;
+  if (
+    !sameStringSet(evidence.pause_detach_attempt_ids, Object.keys(evidence.pause_detach_claims)) ||
+    evidence.completed_attempt_ids_before_pause.some((attemptId) =>
+      evidence.live_attempt_ids_before_pause.includes(attemptId)
+    ) ||
+    evidence.completed_attempt_ids_before_resume.some((attemptId) =>
+      evidence.live_attempt_ids_before_resume.includes(attemptId)
+    ) ||
+    !sameStringSet(
+      Object.values(evidence.attempt_provider_execution_ids_before_resume).flat(),
+      evidence.provider_execution_ids_before_resume
+    )
+  ) {
+    throw new Error("cloud acceptance resume identity evidence is inconsistent");
+  }
+  return evidence;
+}
+
+function readAcceptanceFaultMarkers(
+  runRoot: string,
+  rowId: string,
+  identified: Map<string, CloudAttemptEvidence>
+): PublicCloudEvidence["controlled_faults"] {
+  const directory = path.join(runRoot, "cloud-execution", "acceptance");
+  const values = fs
+    .readdirSync(directory)
+    .filter((name) => /^(?:detach|interrupt)-.*\.json$/u.test(name))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")) as unknown);
+  const markers = values.flatMap((value) => {
+    if (
+      !record(value) ||
+      value.schema_version !== "ultrafuzz.modal.cloud-acceptance-fault.v1" ||
+      (value.fault !== "detach" && value.fault !== "interrupt") ||
+      typeof value.task_id !== "string" ||
+      typeof value.attempt_id !== "string" ||
+      typeof value.execution_generation !== "string" ||
+      typeof value.claimed_at !== "string" ||
+      !Number.isFinite(Date.parse(value.claimed_at))
+    ) {
+      return [];
+    }
+    const fault: "detach" | "interrupt" = value.fault;
+    return [
+      {
+        fault,
+        task_id: value.task_id,
+        attempt_id: value.attempt_id,
+        execution_generation: value.execution_generation,
+        claimed_at: value.claimed_at
+      }
+    ];
+  });
+  if (markers.length !== 2 || new Set(markers.map((marker) => marker.fault)).size !== 2) {
+    throw new Error(`public benchmark row ${rowId} is missing controlled cloud fault evidence`);
+  }
+  const expected = {
+    detach: identified.get("smoke-context"),
+    interrupt: identified.get("external-dependency-boundaries")
+  } as const;
+  for (const marker of markers) {
+    const attempt = expected[marker.fault];
+    if (
+      attempt === undefined ||
+      marker.task_id !== attempt.task_id ||
+      marker.attempt_id !== attempt.attempt_id ||
+      marker.execution_generation !== attempt.execution_generation
+    ) {
+      throw new Error(`public benchmark row ${rowId} controlled cloud fault identity is invalid`);
+    }
+    assertAcceptanceFaultTransitions(attempt, marker, rowId);
+  }
+  return markers.sort((left, right) => left.fault.localeCompare(right.fault));
+}
+
+function assertAcceptanceFaultTransitions(
+  attempt: CloudAttemptEvidence,
+  marker: PublicCloudEvidence["controlled_faults"][number],
+  rowId: string
+): void {
+  const firstProviderId = attempt.provider_execution_ids[0];
+  const secondProviderId = attempt.provider_execution_ids[1];
+  const claimedAt = Date.parse(marker.claimed_at);
+  const preFault = attempt.transitions.some(
+    (transition) =>
+      transition.provider_execution_id === firstProviderId &&
+      (transition.state === "launching" || transition.state === "running") &&
+      Date.parse(transition.at) <= claimedAt
+  );
+  const terminalAfterFault = attempt.transitions.some(
+    (transition) =>
+      ["failed", "cancelled", "provider-unknown"].includes(transition.state) && Date.parse(transition.at) >= claimedAt
+  );
+  const continued =
+    marker.fault === "detach"
+      ? attempt.transitions.some(
+          (transition) =>
+            transition.provider_execution_id === firstProviderId &&
+            transition.state === "running" &&
+            Date.parse(transition.at) >= claimedAt
+        )
+      : secondProviderId !== undefined &&
+        secondProviderId !== firstProviderId &&
+        attempt.transitions.some(
+          (transition) =>
+            transition.provider_execution_id === secondProviderId &&
+            (transition.state === "launching" || transition.state === "running") &&
+            Date.parse(transition.at) >= claimedAt
+        );
+  if (!preFault || !terminalAfterFault || !continued) {
+    throw new Error(`public benchmark row ${rowId} controlled ${marker.fault} transition proof is invalid`);
+  }
+}
+
+function writeJsonAtomicSync(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  fs.renameSync(temporary, filePath);
+}
+
+function stringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((entry) => typeof entry === "string" && entry.length > 0 && entry.length <= 512) &&
+    new Set(value).size === value.length
+  );
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return (
+    new Set(left).size === left.length &&
+    new Set(right).size === right.length &&
+    left.length === right.length &&
+    JSON.stringify([...left].sort()) === JSON.stringify([...right].sort())
+  );
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export async function cleanupPublicCloudBundleRuns(
+  config: PublicModalBenchmarkConfig,
+  bundle: PublicBenchmarkBundle,
+  cleanup: (
+    options: ModalNodeSandboxProviderOptions,
+    controllerRunId: string,
+    cleanupOptions: { force?: boolean }
+  ) => Promise<unknown> = cleanupModalNodeRun
+): Promise<void> {
+  if (config.public_benchmark.node_execution !== "modal") return;
+  const controllerRunIds = [
+    ...new Set(
+      bundle.files
+        .filter((file) => /^cloud\/[^/]+\/evidence\.json$/u.test(file.path))
+        .map((file) => {
+          const value = JSON.parse(Buffer.from(file.contents_base64, "base64").toString("utf8")) as unknown;
+          if (!record(value) || typeof value.controller_run_id !== "string" || value.controller_run_id.length === 0) {
+            throw new Error("public cloud evidence has invalid cleanup identity");
+          }
+          return value.controller_run_id;
+        })
+    )
+  ];
+  if (controllerRunIds.length === 0) throw new Error("public cloud benchmark bundle has no cleanup identities");
+  const options: ModalNodeSandboxProviderOptions = {
+    app: config.app_name,
+    image: config.image_name,
+    credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+  };
+  const failures: Error[] = [];
+  for (const controllerRunId of controllerRunIds) {
+    try {
+      await cleanup(options, controllerRunId, { force: true });
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "one or more public cloud benchmark runs could not be cleaned");
+  }
+}
+
+export async function cleanupPublicCloudBundleRunsForWorker(
+  config: PublicModalBenchmarkConfig,
+  bundle: PublicBenchmarkBundle,
+  cleanup: (
+    config: PublicModalBenchmarkConfig,
+    bundle: PublicBenchmarkBundle
+  ) => Promise<void> = cleanupPublicCloudBundleRuns
+): Promise<void> {
+  try {
+    await cleanup(config, bundle);
+  } catch (error) {
+    throw new PublicCloudCleanupIncompleteError(error);
+  }
 }
 
 async function mapLimitStable<T>(

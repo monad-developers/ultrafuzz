@@ -1,15 +1,29 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { prepareModalBenchmarkCleanup } from "./prepare-modal-benchmark-cleanup.mjs";
+import { boundedEvalId, safeEvalId } from "../../packages/evals/dist/index.js";
+import { prepareModalBenchmarkCleanup, readCleanupNodeExecution } from "./prepare-modal-benchmark-cleanup.mjs";
 
 const roots: string[] = [];
 const candidate = "a".repeat(40);
 const repository = "https://github.com/monad-developers/ultrafuzz";
 const modelSlug = "benchmark-smoke-gpt-5-6-luna-high";
 const pairId = `ultrafuzz-bench-${modelSlug}`;
+const unscopedNestedControllerRunIds = cleanupTargets().map((target) => {
+  const evalRunId = boundedEvalId(["ci-12345-2-smoke-ultrafuzz-bench-openai", modelSlug], 128);
+  const rowId = safeEvalId([target.id, modelSlug, "trial-1"]);
+  const rowRunId = safeEvalId(["ultrafuzz-bench-smoke", rowId]);
+  return `ultrafuzz-${boundedEvalId([evalRunId, rowRunId], 118)}`;
+});
+const nestedControllerRunIds = unscopedNestedControllerRunIds.map((base, index) => {
+  const target = cleanupTargets()[index]!;
+  const projectRoot = path.resolve("/tmp/ultrafuzz-public-workspace", "targets", target.id);
+  const suffix = createHash("sha256").update(projectRoot).digest("hex").slice(0, 12);
+  return `${base.slice(0, 128 - suffix.length - 1).replace(/[-.]+$/u, "")}-${suffix}`;
+});
 
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
@@ -23,6 +37,32 @@ describe("cancelled Modal benchmark cleanup preparation", () => {
       rows: [`${pairId}.json\t${pairId}.state.json`]
     });
     expect(fs.readFileSync(fixture.outputPath, "utf8")).toBe(`${pairId}.json\t${pairId}.state.json\n`);
+  });
+
+  it("derives every exact nested Modal controller ID from the validated cloud matrix", () => {
+    const fixture = cleanupFixture({ nodeExecution: "modal" });
+    const row = `${pairId}.json\t${pairId}.state.json\t${nestedControllerRunIds.join(",")}`;
+    expect(readCleanupNodeExecution(fixture.manifestPath)).toBe("modal");
+    expect(prepareModalBenchmarkCleanup(fixture.input)).toEqual({
+      imageName: `ufz-runner-${candidate}`,
+      rows: [row]
+    });
+    expect(fs.readFileSync(fixture.outputPath, "utf8")).toBe(`${row}\n`);
+  });
+
+  it("rejects malformed or inconsistent cloud-node execution before selecting cleanup policy", () => {
+    for (const execution of [
+      { mode: "modal", dry_run: false, node_execution: "other", acceptance_e2e: false },
+      { mode: "modal", dry_run: false, node_execution: "modal", acceptance_e2e: false },
+      { mode: "local", dry_run: false, node_execution: "modal", acceptance_e2e: true },
+      { mode: "modal", dry_run: false, node_execution: "modal", acceptance_e2e: true, extra: true }
+    ]) {
+      const fixture = cleanupFixture();
+      const manifest = JSON.parse(fs.readFileSync(fixture.manifestPath, "utf8")) as CleanupManifest;
+      manifest.execution = execution;
+      fs.writeFileSync(fixture.manifestPath, `${JSON.stringify(manifest)}\n`);
+      expect(() => readCleanupNodeExecution(fixture.manifestPath)).toThrow();
+    }
   });
 
   it("rejects manifest identity drift, unsafe paths, and non-regular controls", () => {
@@ -76,7 +116,13 @@ interface CleanupManifest {
   generation: string;
   mode: string;
   benchmark: string;
-  execution: { mode: string; dry_run: boolean };
+  execution: {
+    mode: string;
+    dry_run: boolean;
+    node_execution?: string;
+    acceptance_e2e?: boolean;
+    extra?: boolean;
+  };
   image_name: string;
   targets: Array<{ id: string; repository: string; revision: string; framework: string }>;
   matrix_rows_per_pair: number;
@@ -115,6 +161,8 @@ interface CleanupConfig {
     candidate_commit: string;
     targets?: Array<{ id: string; repository: string; revision: string; framework: string }>;
     max_runtime_seconds: number;
+    node_execution?: string;
+    acceptance_e2e?: boolean;
   };
   models: Array<{
     slug: string;
@@ -126,7 +174,8 @@ interface CleanupConfig {
   }>;
 }
 
-function cleanupFixture() {
+function cleanupFixture(options: { nodeExecution?: "local" | "modal" } = {}) {
+  const nodeExecution = options.nodeExecution ?? "local";
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-cleanup-"));
   roots.push(root);
   const manifestPath = path.join(root, "manifest.json");
@@ -137,11 +186,14 @@ function cleanupFixture() {
     generation: "12345-2",
     mode: "smoke",
     benchmark: "ultrafuzz-bench",
-    execution: { mode: "modal", dry_run: false },
+    execution:
+      nodeExecution === "modal"
+        ? { mode: "modal", dry_run: false, node_execution: "modal", acceptance_e2e: true }
+        : { mode: "modal", dry_run: false },
     image_name: `ufz-runner-${candidate}`,
     targets: cleanupTargets(),
     matrix_rows_per_pair: 3,
-    control_timeout_seconds: 8_400,
+    control_timeout_seconds: nodeExecution === "modal" ? 15_900 : 19_800,
     concurrency: {
       max_parallel_eval_rows_per_sandbox: 3,
       max_parallel_workflow_nodes_per_row: 4,
@@ -183,7 +235,8 @@ function cleanupFixture() {
       candidate_repository: repository,
       candidate_commit: candidate,
       targets: cleanupTargets(),
-      max_runtime_seconds: 3600
+      max_runtime_seconds: nodeExecution === "modal" ? 7200 : 15_000,
+      ...(nodeExecution === "modal" ? { node_execution: "modal", acceptance_e2e: true } : {})
     },
     models: [
       {
@@ -215,7 +268,8 @@ function cleanupFixture() {
         trialsPerVariant: 1,
         maxParallelEvalRows: 3,
         maxParallelWorkflowNodes: 4,
-        controlTimeoutSeconds: 8_400
+        controlTimeoutSeconds: nodeExecution === "modal" ? 15_900 : 19_800,
+        nodeExecution
       }
     }
   };

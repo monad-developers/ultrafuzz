@@ -8,13 +8,21 @@ import { DEFAULT_BENCHMARK_MODELS } from "../src/defaults.js";
 import { capModalTargetTopologyTimeouts, modalTargetToml } from "../src/workspace-config.js";
 
 describe("Modal target model profiles", () => {
+  const cloud = {
+    app: "ultrafuzz-e2e",
+    image: "ufz-runner-candidate",
+    resourceOverrideNodeId: "smoke-context"
+  } as const;
+
   it("overrides both explicit default and benchmark profiles with the selected model", () => {
     const model = DEFAULT_BENCHMARK_MODELS[4]!;
-    const config = modalTargetToml(model, 7_200);
+    const config = modalTargetToml(model, 7_200, cloud, { smokeWorkflow: true });
 
     expect(config).toContain(`[models.default]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).toContain(`[models.benchmark]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
-    expect(config).not.toContain("[models.smoke-coordination]");
+    expect(config).toContain(
+      `[models.smoke-coordination]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"\nreasoning = "medium"`
+    );
     expect(config).not.toContain('model = "gpt-5.5"');
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("max_parallel_nodes = 32");
@@ -30,7 +38,8 @@ describe("Modal target model profiles", () => {
         reasoning: "low",
         auth_mode: "api-key"
       },
-      900
+      900,
+      cloud
     );
 
     expect(config).toContain('[agents.ClaudeAgent]\nauth = "api-key"\napi_key_env = "ANTHROPIC_API_KEY"');
@@ -69,6 +78,34 @@ describe("Modal target model profiles", () => {
     );
 
     expect(config).toContain('[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"');
+  });
+
+  it("keeps ordinary benchmark target execution local unless the gated cloud lane opts in", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800);
+
+    expect(config).not.toContain("[execution]");
+  });
+
+  it("declares the coordination profile for a locally executed smoke workflow", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, undefined, {
+      smokeWorkflow: true
+    });
+
+    expect(config).toContain("[models.smoke-coordination]");
+    expect(config).not.toContain("[execution]");
+  });
+
+  it("runs benchmark attempts through the real Modal node provider with an observable resource override", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[0]!, 1_800, cloud);
+
+    expect(config).toContain('[execution]\nmode = "cloud"\nprovider = "modal"\nretention_days = 30');
+    expect(config).toContain("[execution.resources]\ncpu = 2\nmemory_mib = 4096\ntimeout_seconds = 1800");
+    expect(config).toContain(
+      '[execution.providers.modal]\napp = "ultrafuzz-e2e"\nimage = "ufz-runner-candidate"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]'
+    );
+    expect(config).toContain(
+      "[execution.nodes.smoke-context.resources]\ncpu = 4\nmemory_mib = 8192\ntimeout_seconds = 1800"
+    );
   });
 
   it("caps explicit group and node timeouts to the public benchmark node budget", () => {

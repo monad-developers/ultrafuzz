@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { isPublicModalBenchmarkConfig, parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import {
+  PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS,
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
@@ -20,6 +21,7 @@ import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from ".
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const SAFE_BASENAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const GENERATION = /^([1-9][0-9]*)-([1-9][0-9]*)$/u;
+const PUBLIC_CLOUD_ACCEPTANCE_MAX_RUNTIME_SECONDS = 7200;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 
 export function validateModalBenchmarkLaunch(input) {
@@ -48,7 +50,8 @@ export function validateModalBenchmarkLaunch(input) {
     );
   }
   assertModalDispatchMode(rawManifest, manifestPath);
-  const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode);
+  const nodeExecution = isRecord(rawManifest.execution) ? (rawManifest.execution.node_execution ?? "local") : "local";
+  const dimensions = modalBenchmarkPolicyDimensions(policyRoot, mode, nodeExecution);
   assertConfiguredTargetCoverage(rawManifest, manifestPath, dimensions);
   const [producerRunId, producerRunAttempt] = generationParts(rawManifest.generation, manifestPath);
   const manifest = readAutomaticPublicationManifest(manifestPath, {
@@ -64,7 +67,8 @@ export function validateModalBenchmarkLaunch(input) {
     maxParallelEvalRows: dimensions.maxParallelEvalRows,
     maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
     maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
-    controlTimeoutSeconds: dimensions.controlTimeoutSeconds
+    controlTimeoutSeconds: dimensions.controlTimeoutSeconds,
+    nodeExecution
   });
 
   validatePairConfigs(manifest, path.dirname(manifestPath), manifestPath, dimensions);
@@ -186,7 +190,8 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
         mode: manifest.mode,
         benchmark: manifest.benchmark,
         targets: dimensions.targets,
-        maxRuntimeSeconds: dimensions.maxRuntimeSeconds
+        maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
+        nodeExecution: dimensions.nodeExecution
       },
       usedModelSlugs
     );
@@ -213,7 +218,13 @@ function assertConfigDispatchMode(config, configPath, manifestPath) {
   }
 }
 
-export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
+export function modalBenchmarkPolicyDimensions(policyRoot, mode, nodeExecution = "local") {
+  if (nodeExecution !== "local" && nodeExecution !== "modal") {
+    throw new Error("Modal benchmark node execution must be local or modal");
+  }
+  if (nodeExecution === "modal" && mode !== "smoke") {
+    throw new Error("Modal node execution is restricted to the smoke lane");
+  }
   const benchmark = mode === "smoke" ? "ultrafuzz-bench" : "evmbench";
   const cohortPath = path.join(
     policyRoot,
@@ -235,7 +246,8 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const trialsPerVariant = lane.trials_per_variant;
   const expectedMatrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
-  const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
+  const maxRuntimeSeconds =
+    nodeExecution === "modal" ? PUBLIC_CLOUD_ACCEPTANCE_MAX_RUNTIME_SECONDS : publicBenchmarkMaxRuntimeSeconds(mode);
   const matrixWaves = Math.ceil(expectedMatrixRowsPerPair / maxParallelEvalRows);
   const targets = selectedTargets.map((target) => ({
     id: target.id,
@@ -245,6 +257,7 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   }));
   return {
     mode,
+    nodeExecution,
     benchmark,
     cohortPath,
     lanesPath,
@@ -258,6 +271,7 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
     maxRuntimeSeconds,
     controlTimeoutSeconds:
       matrixWaves * maxRuntimeSeconds +
+      (nodeExecution === "modal" ? matrixWaves * PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS : 0) +
       PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
       matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
       PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +

@@ -33,7 +33,7 @@ const ROOT_KEYS = [
   "pairs"
 ];
 const PAIR_KEYS = ["pair", "benchmark", "mode", "lane", "model_slug", "provider", "config_path", "state_path"];
-const EXECUTION_KEYS = ["mode", "dry_run"];
+const EXECUTION_KEYS = ["mode", "dry_run", "node_execution", "acceptance_e2e"];
 const TARGET_KEYS = ["id", "repository", "revision", "framework"];
 const CONCURRENCY_KEYS = [
   "max_parallel_eval_rows_per_sandbox",
@@ -62,7 +62,10 @@ export function validateAutomaticPublicationManifest(value, context) {
   if (manifest.mode !== expected.mode || manifest.benchmark !== expected.benchmark) {
     throw new Error("benchmark manifest mode or benchmark does not match the triggering workflow");
   }
-  validateExecution(manifest.execution);
+  const execution = validateExecution(manifest.execution);
+  if ((execution.node_execution ?? "local") !== expected.nodeExecution) {
+    throw new Error("benchmark manifest node execution does not match the trusted lane");
+  }
   if (manifest.image_name !== `ufz-runner-${expected.candidateCommit}`) {
     throw new Error("benchmark manifest image name does not match the candidate commit");
   }
@@ -126,7 +129,7 @@ export function validateAutomaticPublicationManifest(value, context) {
     generation: expected.generation,
     mode: expected.mode,
     benchmark: expected.benchmark,
-    execution: { mode: "modal", dry_run: false },
+    execution,
     image_name: manifest.image_name,
     targets,
     matrix_rows_per_pair: expected.matrixRowsPerPair,
@@ -178,15 +181,26 @@ export async function prepareAutomaticPublication(input) {
     import("../../packages/modal/dist/launch-state.js")
   ]);
   const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
-  const producerPolicy = automaticProducerPolicyDimensions(
-    readJsonRegular(manifestPath, MAX_MANIFEST_BYTES, "benchmark manifest"),
-    controlRoot
+  const rawManifest = readJsonRegular(manifestPath, MAX_MANIFEST_BYTES, "benchmark manifest");
+  const rawExecution = validateExecution(
+    rawManifest !== null && typeof rawManifest === "object" && !Array.isArray(rawManifest)
+      ? rawManifest.execution
+      : undefined
   );
+  const producerPolicy = automaticProducerPolicyDimensions(rawManifest, controlRoot);
   const context = publicationExpectations({
     ...input,
-    ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy)
+    nodeExecution: rawExecution.node_execution ?? "local",
+    ...benchmarkPolicyDimensions(
+      policyRoot,
+      identity,
+      evalModule,
+      workerModule,
+      producerPolicy,
+      rawExecution.node_execution ?? "local"
+    )
   });
-  const manifest = readAutomaticPublicationManifest(manifestPath, context);
+  const manifest = validateAutomaticPublicationManifest(rawManifest, context);
   const { loadModalBenchmarkConfig, fingerprintModalConfigFile, fingerprintModalModel } = configModule;
   const sourceFingerprint = launchStateModule.fingerprintTrackedSource(policyRoot);
   const usedModelSlugs = new Set();
@@ -215,6 +229,7 @@ export async function prepareAutomaticPublication(input) {
       `public benchmark bundle ${pair.pair}`
     );
     const bundle = bundleModule.readPublicBenchmarkBundle(bundlePath);
+    assertAutomaticCloudEvidence(bundle, context, pair.pair);
     const expectedEvalRunId = workerModule.publicEvalRunId(config.run_id, model.slug);
     const mismatches = [
       bundle.benchmark === context.benchmark ? undefined : "benchmark",
@@ -327,6 +342,13 @@ function publicationExpectations(input) {
   }
   const trialsPerVariant = positiveSafeInteger(input.trialsPerVariant ?? 1, "benchmark trials per variant");
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
+  const nodeExecution = input.nodeExecution ?? "local";
+  if (nodeExecution !== "local" && nodeExecution !== "modal") {
+    throw new Error("benchmark node execution must be local or modal");
+  }
+  if (nodeExecution === "modal" && !smoke) {
+    throw new Error("Modal node execution is restricted to the smoke lane");
+  }
   const maxParallelEvalRows = positiveSafeInteger(
     input.maxParallelEvalRows ?? (smoke ? 3 : 20),
     "maximum parallel eval rows"
@@ -336,7 +358,7 @@ function publicationExpectations(input) {
     "maximum parallel workflow nodes"
   );
   const maxRuntimeSeconds = positiveSafeInteger(
-    input.maxRuntimeSeconds ?? defaultMaxRuntimeSeconds(input.mode),
+    input.maxRuntimeSeconds ?? (nodeExecution === "modal" ? 7_200 : defaultMaxRuntimeSeconds(input.mode)),
     "maximum runtime"
   );
   const controlTimeoutSeconds = positiveSafeInteger(
@@ -354,6 +376,7 @@ function publicationExpectations(input) {
     generation: `${producerRunId}-${producerRunAttempt}`,
     mode: input.mode,
     benchmark: smoke ? "ultrafuzz-bench" : "evmbench",
+    nodeExecution,
     providers,
     targetIds,
     targets,
@@ -370,10 +393,31 @@ function publicationExpectations(input) {
 }
 
 function validateExecution(value) {
-  const execution = strictRecord(value, "benchmark execution", EXECUTION_KEYS);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("benchmark execution must be an object");
+  }
+  const keys = Object.keys(value);
+  if (keys.some((key) => !EXECUTION_KEYS.includes(key)) || !keys.includes("mode") || !keys.includes("dry_run")) {
+    throw new Error(`benchmark execution may contain only ${EXECUTION_KEYS.join(", ")}`);
+  }
+  const execution = value;
   if (execution.mode !== "modal" || execution.dry_run !== false) {
     throw new Error("benchmark manifest execution must be Modal with dry-run disabled");
   }
+  const nodeExecution = execution.node_execution ?? "local";
+  const acceptanceE2e = execution.acceptance_e2e ?? false;
+  if (
+    (nodeExecution !== "local" && nodeExecution !== "modal") ||
+    typeof acceptanceE2e !== "boolean" ||
+    acceptanceE2e !== (nodeExecution === "modal")
+  ) {
+    throw new Error("benchmark manifest cloud-node acceptance execution is invalid");
+  }
+  return {
+    mode: "modal",
+    dry_run: false,
+    ...(nodeExecution === "modal" ? { node_execution: nodeExecution, acceptance_e2e: acceptanceE2e } : {})
+  };
 }
 
 function validateManifestTargets(value, expected) {
@@ -414,7 +458,14 @@ function validateConcurrency(value, expected) {
   }
 }
 
-function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy) {
+function benchmarkPolicyDimensions(
+  policyRoot,
+  identity,
+  evalModule,
+  workerModule,
+  producerPolicy,
+  nodeExecution = "local"
+) {
   const cohortPath = path.join(
     policyRoot,
     "benchmarks",
@@ -450,10 +501,11 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPol
   const candidatePolicy = trustedCandidateRuntimePolicyDimensions(policyRoot, identity.mode);
   const maxParallelEvalRows = candidatePolicy.maxParallelEvalRows;
   const maxParallelWorkflowNodes = candidatePolicy.maxParallelWorkflowNodes;
-  const maxRuntimeSeconds = candidatePolicy.maxRuntimeSeconds;
+  const maxRuntimeSeconds = nodeExecution === "modal" ? 7_200 : candidatePolicy.maxRuntimeSeconds;
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
   const controlTimeoutSeconds =
     waves * maxRuntimeSeconds +
+    (nodeExecution === "modal" ? waves * workerModule.PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS : 0) +
     candidatePolicy.evalCleanupSeconds +
     waves * candidatePolicy.scorePerWaveTimeoutSeconds +
     candidatePolicy.reportTimeoutSeconds +
@@ -699,6 +751,9 @@ function checkedProduct(left, right, label) {
 }
 
 export function validateAutomaticPairConfig(config, model, pair, context, usedModelSlugs) {
+  const nodeExecution = context.nodeExecution ?? "local";
+  const maxRuntimeSeconds =
+    context.maxRuntimeSeconds ?? (nodeExecution === "modal" ? 7_200 : defaultMaxRuntimeSeconds(context.mode));
   const expectedRunId = `ci-${context.generation}-${context.mode}-${context.benchmark}-${pair.provider}`;
   const expectedAgent = PROVIDER_AGENT[pair.provider];
   if (expectedAgent === undefined) {
@@ -742,9 +797,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     context.targets === undefined || JSON.stringify(scope.targets) === JSON.stringify(context.targets)
       ? undefined
       : "target selection",
-    scope.max_runtime_seconds === (context.maxRuntimeSeconds ?? defaultMaxRuntimeSeconds(context.mode))
-      ? undefined
-      : "maximum runtime",
+    (scope.node_execution ?? "local") === nodeExecution ? undefined : "node execution",
+    (scope.acceptance_e2e ?? false) === (nodeExecution === "modal") ? undefined : "cloud acceptance mode",
+    scope.max_runtime_seconds === maxRuntimeSeconds ? undefined : "maximum runtime",
     config.braintrust.project === "ultrafuzz-public-benchmarks" ? undefined : "reporting project",
     config.braintrust.api_key_env === "BRAINTRUST_API_KEY" ? undefined : "reporting credential name",
     config.braintrust.judge_api_key_env === "OPENAI_API_KEY" ? undefined : "judge credential name",
@@ -823,6 +878,69 @@ export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
     throw new Error(
       `public benchmark bundle ${pair} matrix does not match the trusted target set: ${problems.join("; ")}`
     );
+  }
+}
+
+export function assertAutomaticCloudEvidence(bundle, expected, pair) {
+  const cloudFiles = bundle.files.filter((file) => file.path.startsWith("cloud/"));
+  if (expected.nodeExecution !== "modal") {
+    if (
+      bundle.execution?.mode !== "local" ||
+      bundle.execution?.acceptance_e2e !== false ||
+      Object.keys(bundle.execution).some((key) => !["mode", "acceptance_e2e"].includes(key))
+    ) {
+      throw new Error(`public benchmark bundle ${pair} execution mode does not match the trusted local lane`);
+    }
+    if (cloudFiles.length > 0) {
+      throw new Error(`public benchmark bundle ${pair} has cloud evidence outside the trusted cloud-node lane`);
+    }
+    return;
+  }
+  if (
+    bundle.execution?.mode !== "cloud" ||
+    bundle.execution?.provider !== "modal" ||
+    bundle.execution?.acceptance_e2e !== true ||
+    Object.keys(bundle.execution).some((key) => !["mode", "provider", "acceptance_e2e"].includes(key))
+  ) {
+    throw new Error(`public benchmark bundle ${pair} execution mode does not match the trusted cloud-node lane`);
+  }
+  const expectedRows = positiveSafeInteger(expected.matrixRowsPerPair, "benchmark cloud evidence row count");
+  const matrix = bundleFileJson(bundle, "eval/matrix.json", pair);
+  if (!Array.isArray(matrix) || matrix.length !== expectedRows) {
+    throw new Error(`public benchmark bundle ${pair} cannot bind cloud evidence to its trusted matrix`);
+  }
+  const expectedPaths = new Set(
+    matrix.map((row, index) => {
+      if (typeof row !== "object" || row === null || Array.isArray(row)) {
+        throw new Error(`public benchmark bundle ${pair} matrix row ${index} must be an object`);
+      }
+      return `cloud/${safeLowerId(row.id, `public benchmark bundle ${pair} matrix row ${index} ID`)}/evidence.json`;
+    })
+  );
+  if (
+    expectedPaths.size !== expectedRows ||
+    cloudFiles.length !== expectedRows ||
+    cloudFiles.some((file) => !expectedPaths.has(file.path))
+  ) {
+    throw new Error(`public benchmark bundle ${pair} is missing exact cloud-node evidence for every matrix row`);
+  }
+  for (const file of cloudFiles) {
+    let evidence;
+    try {
+      evidence = JSON.parse(Buffer.from(file.contents_base64, "base64").toString("utf8"));
+    } catch (error) {
+      throw new Error(`public benchmark bundle ${pair} cloud-node evidence is invalid`, { cause: error });
+    }
+    const rowId = file.path.split("/")[1];
+    if (
+      typeof evidence !== "object" ||
+      evidence === null ||
+      Array.isArray(evidence) ||
+      evidence.acceptance_e2e !== true ||
+      evidence.row_id !== rowId
+    ) {
+      throw new Error(`public benchmark bundle ${pair} cloud-node evidence is not acceptance E2E proof`);
+    }
   }
 }
 

@@ -169,7 +169,13 @@ describe("Modal benchmark config", () => {
       ]
     });
 
-    expect("public_benchmark" in config && config.public_benchmark.max_runtime_seconds).toBe(3_600);
+    expect(
+      "public_benchmark" in config && {
+        nodeExecution: config.public_benchmark.node_execution,
+        acceptanceE2e: config.public_benchmark.acceptance_e2e,
+        maxRuntimeSeconds: config.public_benchmark.max_runtime_seconds
+      }
+    ).toEqual({ nodeExecution: "local", acceptanceE2e: false, maxRuntimeSeconds: 3_600 });
     expect(() =>
       parseModalBenchmarkConfig({
         ...config,
@@ -192,6 +198,15 @@ describe("Modal benchmark config", () => {
         models: [{ ...config.models[0]!, slug: "different-profile" }]
       })
     ).toThrow(/selected runner model profile/u);
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...config,
+        public_benchmark: {
+          ...config.public_benchmark,
+          acceptance_e2e: true
+        }
+      })
+    ).toThrow(/cloud acceptance E2E/u);
   });
 
   it("fingerprints exact configuration bytes and every model field", () => {

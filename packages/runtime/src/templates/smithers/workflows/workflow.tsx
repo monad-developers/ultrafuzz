@@ -98,7 +98,8 @@ const cloudProvider =
         app: modalExecution.app,
         image: modalExecution.image,
         ...(modalExecution.region === undefined ? {} : { region: modalExecution.region }),
-        credentialEnv: modalExecution.credentialEnv
+        credentialEnv: modalExecution.credentialEnv,
+        retentionDays: taskSpecs.find((task) => task.execution.mode === "cloud")!.execution.retentionDays
       });
 const cloudExecutionGeneration = readCloudExecutionGeneration();
 const untrustedContentBoundary =

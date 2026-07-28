@@ -44,12 +44,17 @@ jobs:
           PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           jobs_path="$RUNNER_TEMP/modal-benchmark-producer-jobs.json"
+          artifacts_path="$RUNNER_TEMP/modal-benchmark-producer-artifacts.json"
           gh api \
             "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/attempts/$PRODUCER_RUN_ATTEMPT/jobs?per_page=100" \
             > "$jobs_path"
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/artifacts?per_page=100" \
+            > "$artifacts_path"
           node scripts/ci/qualify-modal-benchmark-publication.mjs \
             "$GITHUB_EVENT_PATH" \
             "$jobs_path" \
+            "$artifacts_path" \
             "$GITHUB_OUTPUT" \
             "$GITHUB_REPOSITORY"
 

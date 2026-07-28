@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
@@ -18,8 +18,11 @@ import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src
 import {
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
+  cleanupPublicCloudBundleRuns,
+  cleanupPublicCloudBundleRunsForWorker,
   materializeBakedCandidate,
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
+  PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS,
   PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
@@ -27,6 +30,7 @@ import {
   PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS,
   type PublicEvalDiagnosticsBuildError,
   publicBenchmarkMaxParallelEvalRows,
+  publicBenchmarkValidationTopologyPath,
   publicBenchmarkWorkRoot,
   publicBundleSources,
   publicEvalCommandTimeoutSeconds,
@@ -54,6 +58,13 @@ it("keeps high-fanout public benchmark work off the persistent Modal volume", ()
   expect(() => publicBenchmarkWorkRoot(path.join(workRoot, "nested"))).toThrow(/persistent volume/u);
 });
 
+it("validates smoke targets against the candidate-owned smoke topology", () => {
+  expect(publicBenchmarkValidationTopologyPath("/candidate", "smoke")).toBe(
+    path.join("/candidate", "benchmarks", "smoke-benchmark.yml")
+  );
+  expect(publicBenchmarkValidationTopologyPath("/candidate", "full")).toBeUndefined();
+});
+
 it("recognizes and cleans the legacy persistent public workspace without treating local work as durable", async () => {
   const dataRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-preflight-"));
   const model: ModalModelSpec = {
@@ -76,6 +87,8 @@ it("recognizes and cleans the legacy persistent public workspace without treatin
     public_benchmark: {
       benchmark: "ultrafuzz-bench",
       lane: "smoke",
+      node_execution: "local",
+      acceptance_e2e: false,
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
@@ -150,6 +163,8 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
     public_benchmark: {
       benchmark: "evmbench",
       lane: "full",
+      node_execution: "local",
+      acceptance_e2e: false,
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
@@ -427,6 +442,15 @@ it("budgets the public eval subprocess for every queued matrix wave plus cleanup
       rowWatchSeconds: 3_600
     })
   ).toBe(3_900);
+  expect(PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS).toBe(65 * 60);
+  expect(
+    publicEvalCommandTimeoutSeconds({
+      matrixRows: 3,
+      maxParallelRuns: 2,
+      rowWatchSeconds: 3_600,
+      rowLaunchSeconds: PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS
+    })
+  ).toBe(15_300);
 });
 
 it("rejects invalid public eval timeout dimensions", () => {
@@ -579,6 +603,124 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
 });
 
+it("publishes strict sanitized seven-node Modal acceptance evidence for every smoke row", () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-cloud-evidence-"));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = "eval-cloud-acceptance";
+  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  const runRoot = path.join(root, "target-run");
+  const reportRoot = path.join(runRoot, "artifacts/final-report");
+  const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
+  const rowId = "target-a-runner-trial-1";
+  const runId = "target-run";
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.mkdirSync(reportRoot, { recursive: true });
+  fs.mkdirSync(dedupeRoot, { recursive: true });
+  fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
+  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
+  const record = {
+    row_id: rowId,
+    ultrafuzz_run_id: runId,
+    ultrafuzz_run_root: runRoot,
+    report_json_path: path.join(reportRoot, "report.json"),
+    final_status: "succeeded",
+    workflow: { status: "succeeded", terminal: true }
+  };
+  fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(record)}\n`);
+  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+  writeCloudAcceptanceFixture(runRoot, runId);
+
+  const cloud = publicBundleSources(
+    controlRoot,
+    evalRunId,
+    { root, source: diagnosticsPath },
+    "smoke",
+    "modal",
+    true
+  ).find((source) => source.path === `cloud/${rowId}/evidence.json`);
+  expect(cloud).toBeDefined();
+  const evidence = JSON.parse(fs.readFileSync(cloud!.source, "utf8")) as {
+    attempts: Array<{
+      logical_node_id: string;
+      requested_resources: { cpu: number; memory_mib: number };
+      dependency_inputs: Array<Record<string, unknown>>;
+      provider_execution_ids: string[];
+    }>;
+    resume: { completed_attempt_ids_before_resume: string[] };
+  };
+  expect(evidence.attempts).toHaveLength(7);
+  expect(evidence.attempts.find((attempt) => attempt.logical_node_id === "smoke-context")).toMatchObject({
+    requested_resources: { cpu: 4, memory_mib: 8192 }
+  });
+  expect(
+    evidence.attempts.find((attempt) => attempt.logical_node_id === "dedupe-findings")?.dependency_inputs
+  ).toHaveLength(5);
+  expect(
+    evidence.attempts.find((attempt) => attempt.logical_node_id === "external-dependency-boundaries")
+      ?.provider_execution_ids
+  ).toHaveLength(2);
+  expect(evidence.resume.completed_attempt_ids_before_resume).toEqual(["smoke-context-attempt"]);
+  expect(fs.readFileSync(cloud!.source, "utf8")).not.toContain("dependency/artifact/path");
+
+  fs.rmSync(path.join(runRoot, "cloud-execution", "acceptance", "resume.json"));
+  expect(() =>
+    publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke", "modal", true)
+  ).toThrow(/resume\.json|ENOENT/u);
+});
+
+it("cleans every nested cloud run with the exact Smithers controller prefix and aggregates failures", async () => {
+  const config = {
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "candidate-image",
+    public_benchmark: { node_execution: "modal" }
+  } as PublicModalBenchmarkConfig;
+  const cloudFile = (row: string, runId: string) => ({
+    path: `cloud/${row}/evidence.json`,
+    contents_base64: Buffer.from(JSON.stringify({ run_id: runId, controller_run_id: `controller-${runId}` })).toString(
+      "base64"
+    )
+  });
+  const bundle = {
+    files: [cloudFile("row-a", "run-a"), cloudFile("row-b", "run-b")]
+  } as PublicBenchmarkBundle;
+  const cleanup = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("first cleanup failed"))
+    .mockResolvedValueOnce({ terminated: 0, volumeDeleted: true });
+
+  await expect(cleanupPublicCloudBundleRuns(config, bundle, cleanup)).rejects.toThrow(/could not be cleaned/u);
+  expect(cleanup).toHaveBeenNthCalledWith(
+    1,
+    expect.objectContaining({
+      app: "ultrafuzz-benchmarks",
+      image: "candidate-image",
+      credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+    }),
+    "controller-run-a",
+    { force: true }
+  );
+  expect(cleanup).toHaveBeenNthCalledWith(2, expect.anything(), "controller-run-b", { force: true });
+});
+
+it("classifies sealed-bundle cleanup failure as cleanup-only resumable work", async () => {
+  const config = {
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "candidate-image",
+    public_benchmark: { node_execution: "modal" }
+  } as PublicModalBenchmarkConfig;
+  const bundle = { files: [] } as unknown as PublicBenchmarkBundle;
+  const failure = new Error("private Modal cleanup detail");
+
+  await expect(
+    cleanupPublicCloudBundleRunsForWorker(config, bundle, async () => {
+      throw failure;
+    })
+  ).rejects.toEqual(expect.objectContaining({ name: "PublicCloudCleanupIncompleteError", cause: failure }));
+});
+
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
   const model: ModalModelSpec = {
     slug: "benchmark-smoke-gpt-5-6-luna-high",
@@ -604,6 +746,8 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     public_benchmark: {
       benchmark: "evmbench",
       lane: "smoke",
+      node_execution: "local",
+      acceptance_e2e: false,
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
@@ -702,6 +846,8 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
     public_benchmark: {
       benchmark: "ultrafuzz-bench",
       lane: "smoke",
+      node_execution: "local",
+      acceptance_e2e: false,
       runner_model_profile: model.slug,
       candidate_repository: "https://github.com/monad-developers/ultrafuzz",
       candidate_commit: "a".repeat(40),
@@ -793,6 +939,191 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
     path.join(runRoot, "smithers", "tasks.json"),
     `${JSON.stringify({
       tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
+    })}\n`
+  );
+}
+
+function writeCloudAcceptanceFixture(runRoot: string, runId: string): void {
+  const nodes = [
+    ["smoke-context", []],
+    ["time-warp-sequences", ["smoke-context"]],
+    ["external-dependency-boundaries", ["smoke-context"]],
+    ["externalized-state-accounting", ["smoke-context"]],
+    ["lifecycle-view-boundaries", ["smoke-context"]],
+    [
+      "dedupe-findings",
+      [
+        "smoke-context",
+        "time-warp-sequences",
+        "external-dependency-boundaries",
+        "externalized-state-accounting",
+        "lifecycle-view-boundaries"
+      ]
+    ],
+    [
+      "final-report",
+      [
+        "smoke-context",
+        "time-warp-sequences",
+        "external-dependency-boundaries",
+        "externalized-state-accounting",
+        "lifecycle-view-boundaries",
+        "dedupe-findings"
+      ]
+    ]
+  ] as const;
+  const attemptsRoot = path.join(runRoot, "cloud-execution", "attempts");
+  const acceptanceRoot = path.join(runRoot, "cloud-execution", "acceptance");
+  fs.mkdirSync(attemptsRoot, { recursive: true });
+  fs.mkdirSync(acceptanceRoot, { recursive: true });
+  for (const [index, [nodeId, dependencies]] of nodes.entries()) {
+    const replacement = nodeId === "external-dependency-boundaries";
+    const providerExecutionIds = replacement ? [`sb-${index}-original`, `sb-${index}-replacement`] : [`sb-${index}`];
+    const at = "2026-07-24T00:00:00.000Z";
+    fs.writeFileSync(
+      path.join(attemptsRoot, `${index}.json`),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.cloud-attempt-evidence.v1",
+        controller_run_id: `ultrafuzz-${runId}`,
+        run_id: runId,
+        task_id: `node:${nodeId}`,
+        attempt_id: `${nodeId}-attempt`,
+        execution_generation: "base",
+        provider: "modal",
+        state: "succeeded",
+        requested_resources: {
+          cpu: nodeId === "smoke-context" ? 4 : 2,
+          memory_mib: nodeId === "smoke-context" ? 8_192 : 4_096,
+          timeout_seconds: 1_800
+        },
+        resolved_resources: {
+          cpu: nodeId === "smoke-context" ? 4 : 2,
+          memory_mib: nodeId === "smoke-context" ? 8_192 : 4_096,
+          timeout_seconds: 1_800
+        },
+        resource_confirmation: nodeId === "time-warp-sequences" ? "provider-reattached" : "provider-create-accepted",
+        handoff_sha256: (index + 1).toString(16).repeat(64),
+        request_sha256: (index + 8).toString(16).repeat(64),
+        dependency_inputs: dependencies.map((dependencyNodeId, dependencyIndex) => ({
+          path: `dependency/artifact/path/${dependencyIndex}`,
+          producer_attempt_id: `${dependencyNodeId}-attempt`,
+          sha256: "e".repeat(64)
+        })),
+        provider_execution_ids: providerExecutionIds,
+        retry_index: providerExecutionIds.length - 1,
+        executed: true,
+        resumed: nodeId === "smoke-context" || nodeId === "time-warp-sequences",
+        reused: false,
+        storage_lineage: `${runId}/${nodeId}-attempt/base`,
+        output_sha256: "f".repeat(64),
+        publication_artifact_sha256: "e".repeat(64),
+        cleanup_state: "terminated",
+        created_at: at,
+        updated_at: at,
+        transitions: [
+          { state: "prepared", at },
+          { state: "launching", at, provider_execution_id: providerExecutionIds[0] },
+          ...(nodeId === "smoke-context" || nodeId === "external-dependency-boundaries"
+            ? [{ state: "failed", at: "2026-07-24T00:00:20.000Z" }]
+            : []),
+          ...(providerExecutionIds.length > 1
+            ? [
+                {
+                  state: "launching",
+                  at: "2026-07-24T00:00:30.000Z",
+                  provider_execution_id: providerExecutionIds[1]
+                }
+              ]
+            : []),
+          ...(nodeId === "smoke-context"
+            ? [
+                {
+                  state: "running",
+                  at: "2026-07-24T00:00:30.000Z",
+                  provider_execution_id: "sb-0"
+                }
+              ]
+            : []),
+          ...(nodeId === "time-warp-sequences"
+            ? [
+                {
+                  state: "running",
+                  at: "2026-07-24T00:02:00.000Z",
+                  provider_execution_id: "sb-1"
+                }
+              ]
+            : []),
+          { state: "succeeded", at }
+        ]
+      })}\n`
+    );
+  }
+  fs.writeFileSync(
+    path.join(acceptanceRoot, "detach-smoke.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.modal.cloud-acceptance-fault.v1",
+      fault: "detach",
+      task_id: "node:smoke-context",
+      attempt_id: "smoke-context-attempt",
+      execution_generation: "base",
+      claimed_at: "2026-07-24T00:00:10.000Z"
+    })}\n`
+  );
+  fs.writeFileSync(
+    path.join(acceptanceRoot, "interrupt-strategy.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.modal.cloud-acceptance-fault.v1",
+      fault: "interrupt",
+      task_id: "node:external-dependency-boundaries",
+      attempt_id: "external-dependency-boundaries-attempt",
+      execution_generation: "base",
+      claimed_at: "2026-07-24T00:00:10.000Z"
+    })}\n`
+  );
+  fs.writeFileSync(
+    path.join(acceptanceRoot, "resume.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.cloud-acceptance-resume.v1",
+      run_id: runId,
+      workflow_run_id: `ultrafuzz-${runId}`,
+      action: "resume",
+      submitted: true,
+      pause_request_status: "pause-requested",
+      pause_requested_at: "2026-07-24T00:00:30.000Z",
+      pause_status: "paused",
+      pause_detach_attempt_ids: ["time-warp-sequences-attempt"],
+      pause_detach_claims: {
+        "time-warp-sequences-attempt": {
+          controller_run_id: `ultrafuzz-${runId}`,
+          task_id: "node:time-warp-sequences",
+          attempt_id: "time-warp-sequences-attempt",
+          provider_execution_id: "sb-1",
+          provider_state_at_detach: "live",
+          claimed_at: "2026-07-24T00:00:45.000Z"
+        }
+      },
+      completed_attempt_ids_before_pause: ["smoke-context-attempt"],
+      live_attempt_ids_before_pause: ["time-warp-sequences-attempt"],
+      attempt_states_before_pause: {
+        "smoke-context-attempt": "succeeded",
+        "time-warp-sequences-attempt": "running"
+      },
+      attempt_provider_execution_ids_before_pause: {
+        "smoke-context-attempt": ["sb-0"],
+        "time-warp-sequences-attempt": ["sb-1"]
+      },
+      completed_attempt_ids_before_resume: ["smoke-context-attempt"],
+      live_attempt_ids_before_resume: ["time-warp-sequences-attempt"],
+      attempt_states_before_resume: {
+        "smoke-context-attempt": "succeeded",
+        "time-warp-sequences-attempt": "provider-unknown"
+      },
+      provider_execution_ids_before_resume: ["sb-0", "sb-1"],
+      attempt_provider_execution_ids_before_resume: {
+        "smoke-context-attempt": ["sb-0"],
+        "time-warp-sequences-attempt": ["sb-1"]
+      },
+      invoked_at: "2026-07-24T00:01:00.000Z"
     })}\n`
   );
 }

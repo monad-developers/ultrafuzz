@@ -743,7 +743,13 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
             ULTRAFUZZ_MODAL_RUN_ID: input.state.logical_run_id,
             ULTRAFUZZ_MODAL_MODEL: JSON.stringify(input.model),
             ULTRAFUZZ_MODAL_REMOTE_ROOT: remoteRoot,
-            ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot)
+            ULTRAFUZZ_MODAL_VOLUME_RELATIVE_ROOT: modalVolumeRelativeRoot(remoteRoot),
+            ...(isPublicModalBenchmarkConfig(input.config) && input.config.public_benchmark.acceptance_e2e
+              ? {
+                  ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE: "1",
+                  ULTRAFUZZ_AGENT_ENV_ALLOWLIST: "ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE"
+                }
+              : {})
           },
           secrets: [secret],
           volumes: { "/data": volume },
@@ -2679,6 +2685,13 @@ function availableSecretValues(
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
   const names = new Set<string>();
+  if (isPublicModalBenchmarkConfig(config) && config.public_benchmark.node_execution === "modal") {
+    // A real cloud-node E2E worker needs provider credentials in addition to
+    // model and judge credentials. They remain Modal Secrets and are included
+    // in the exact-value publication redaction set.
+    names.add("MODAL_TOKEN_ID");
+    names.add("MODAL_TOKEN_SECRET");
+  }
   if (isPublicModalBenchmarkConfig(config)) {
     names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
   } else {

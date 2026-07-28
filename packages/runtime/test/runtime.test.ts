@@ -22,6 +22,7 @@ import {
   ARTIFACT_RECONCILIATION_GRACE_MS,
   ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
   ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
+  cancelRun,
   forkRun,
   getRunHealth,
   getRunStatus,
@@ -2006,6 +2007,71 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
   assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]);
 });
 
+test("cloud compilation scopes controller ownership per project and hands every ancestor artifact to fan-in nodes", async () => {
+  const firstProject = tempProject();
+  const secondProject = tempProject();
+  initProject({ projectRoot: firstProject, force: true });
+  const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
+  const plan = await planRun({
+    projectRoot: firstProject,
+    topologyPath: smokeTopology,
+    runId: "cloud-closure",
+    runtimeOverrides: {
+      models: {
+        profiles: {
+          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+        }
+      }
+    },
+    env: {}
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  plan.value!.resolved_config.execution = {
+    mode: "cloud",
+    provider: "modal",
+    retentionDays: 30,
+    resources: { cpu: 2, memoryMiB: 4096, timeoutSeconds: 1800 },
+    nodes: {},
+    providers: {
+      modal: {
+        app: "ultrafuzz-test",
+        image: "ultrafuzz-test",
+        credentialEnv: ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
+      }
+    }
+  };
+  const { compileSmithersWorkflow, smithersRunIdForProject } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: firstProject,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-cloud-closure",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const finalReport = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "final-report");
+  assert.equal(finalReport?.dependencyArtifactDirs.length, 6);
+  assert.deepEqual(finalReport?.dependencyArtifactDirs.map((directory) => path.basename(directory)).sort(), [
+    "dedupe-findings",
+    "external-dependency-boundaries",
+    "externalized-state-accounting",
+    "lifecycle-view-boundaries",
+    "smoke-context",
+    "time-warp-sequences"
+  ]);
+  assert.equal(
+    smithersRunIdForProject(firstProject, "same-product-run", true),
+    smithersRunIdForProject(firstProject, "same-product-run", true)
+  );
+  assert.notEqual(
+    smithersRunIdForProject(firstProject, "same-product-run", true),
+    smithersRunIdForProject(secondProject, "same-product-run", true)
+  );
+  assert.equal(smithersRunIdForProject(firstProject, "same-product-run", false), "ultrafuzz-same-product-run");
+});
+
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
   const project = tempProject();
   writeFanoutProject(project);
@@ -2256,12 +2322,18 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   const list = await listRuns({ projectRoot: project, env: fakeSmithersEnv(project) });
   assert.equal(list.value?.product_runs.length, 1);
   assert.equal(list.value?.runs[0]?.workflow_run_id, "ultrafuzz-smithers-run");
+  writeCloudAttemptEvidenceFixture(run.value!.run_root);
   const status = await getRunStatus({ projectRoot: project, runId: run.value!.run_id, env: fakeSmithersEnv(project) });
   assert.equal(status.value?.status, "running");
   assert.equal(status.value?.metadata?.workflow_ids instanceof Array, true);
   assert.equal(status.value?.workflow?.run_id, "ultrafuzz-smithers-run");
   assert.equal(status.value?.workflow?.inspect.ok, true);
   assert.equal(status.value?.workflow?.events.ok, true);
+  assert.equal(status.value?.cloud_attempts.length, 1);
+  assert.equal(status.value?.cloud_attempts[0]?.task_id, "node:project-discovery");
+  assert.equal(status.value?.cloud_attempts[0]?.state, "succeeded");
+  assert.deepEqual(status.value?.cloud_attempts[0]?.provider_execution_ids, ["sb-fixture"]);
+  assert.equal(status.value?.cloud_attempts[0]?.cleanup_state, "terminated");
 
   const smithersTasks = JSON.parse(
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "tasks.json"), "utf8")
@@ -2454,6 +2526,32 @@ test("pauseRun requires explicit workflow confirmation before persisting paused 
     status: string;
   };
   assert.equal(state.status, "running");
+});
+
+test("cancelRun submits cancellation for the linked controller and persists a canceled product run", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "cancel-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const canceled = await cancelRun({ projectRoot: project, runId: "cancel-run", env });
+
+  assert.equal(canceled.ok, true, JSON.stringify(canceled.diagnostics));
+  assert.deepEqual(canceled.value, {
+    run_id: "cancel-run",
+    workflow_run_id: "ultrafuzz-cancel-run",
+    action: "cancel",
+    status: "canceled",
+    submitted: true
+  });
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    status: string;
+  };
+  assert.equal(state.status, "canceled");
+  assert.match(fs.readFileSync(path.join(run.value!.run_root, "events.jsonl"), "utf8"), /workflow-cancel-requested/u);
+  assert.match(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /cancel ultrafuzz-cancel-run --format json/u);
 });
 
 test("workflow synchronization preserves the paused run state", async () => {
@@ -6370,6 +6468,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   ) as { generation?: string; reset_node?: string };
   assert.match(cloudGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
   assert.equal(cloudGeneration.reset_node, "node:project-discovery");
+  const resetExecutionGeneration = cloudGeneration.generation;
 
   const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
@@ -6397,7 +6496,17 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     workflow_ids?: string[];
   };
   assert.equal(metadata.workflow?.run_id, "ultrafuzz-lifecycle-run-forked");
-  assert.deepEqual(metadata.workflow_ids, ["ultrafuzz-lifecycle-run-forked"]);
+  assert.deepEqual(metadata.workflow_ids, [
+    "ultrafuzz-lifecycle-run",
+    "ultrafuzz-lifecycle-run-replayed",
+    "ultrafuzz-lifecycle-run-forked"
+  ]);
+  const forkGeneration = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json"), "utf8")
+  ) as { generation?: string; reset_node?: string };
+  assert.match(forkGeneration.generation ?? "", /^[0-9a-f-]{36}$/u);
+  assert.notEqual(forkGeneration.generation, resetExecutionGeneration);
+  assert.equal(forkGeneration.reset_node, "node:project-discovery");
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(
     commands,
@@ -6791,6 +6900,7 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   const run = await startRun({ projectRoot: project, runId: "reset-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
+  const generationPath = path.join(run.value!.run_root, "smithers", "cloud-execution-generation.json");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const detached = await resumeRun({
@@ -6804,6 +6914,10 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
   assert.equal(detached.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
   assert.match(detached.diagnostics[0]?.message ?? "", /without repeating the reset/u);
   assert.equal(fs.existsSync(markerPath), true, "reset marker must persist after a failed continuation");
+  const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as { execution_generation?: string };
+  const generation = JSON.parse(fs.readFileSync(generationPath, "utf8")) as { generation?: string };
+  assert.match(marker.execution_generation ?? "", /^[0-9a-f-]{36}$/u);
+  assert.equal(marker.execution_generation, generation.generation);
   const failedCommands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(failedCommands, /^timetravel /mu);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
@@ -6824,6 +6938,101 @@ test("resume --reset-node does not repeat a committed reset after a failed conti
     retriedCommands,
     /up .*ultrafuzz-reset-lifecycle-run\.tsx --resume ultrafuzz-reset-lifecycle-run --run-id ultrafuzz-reset-lifecycle-run --force --detach( --max-concurrency \d+)? --format json/u
   );
+});
+
+test("resume --reset-node does not trust a reset marker without its matching durable generation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-reset-crash-window",
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "reset-crash-window", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const markerPath = path.join(run.value!.run_root, "smithers", "reset-node-applied.json");
+  fs.writeFileSync(
+    markerPath,
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.smithers.reset-node.v1",
+      smithers_run_id: "ultrafuzz-reset-crash-window",
+      node_id: "node:project-discovery",
+      execution_generation: crypto.randomUUID(),
+      applied_at: new Date().toISOString()
+    })}\n`
+  );
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "reset-crash-window",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.match(
+    fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"),
+    /^timetravel /mu,
+    "a marker cannot commit reset state before its matching execution generation"
+  );
+});
+
+test("resume --reset-node completes a prepared reset only after Smithers durably shows the node rewound", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-reset-prepared";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "reset-prepared", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const generation = crypto.randomUUID();
+  const smithersRoot = path.join(run.value!.run_root, "smithers");
+  fs.writeFileSync(
+    path.join(smithersRoot, "cloud-execution-generation.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.cloud.execution-generation.v1",
+      generation,
+      reset_node: "node:project-discovery",
+      applied_at: "2026-07-24T00:00:00.000Z"
+    })}\n`
+  );
+  fs.writeFileSync(
+    path.join(smithersRoot, "reset-node-applied.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.smithers.reset-node.v1",
+      smithers_run_id: workflowRunId,
+      node_id: "node:project-discovery",
+      execution_generation: generation,
+      phase: "prepared",
+      prepared_at: "2026-07-24T00:00:00.000Z",
+      previous_node_state: "failed"
+    })}\n`
+  );
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "reset-prepared",
+    resetNode: "node:project-discovery",
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.doesNotMatch(commands, /^timetravel /mu, "the observed failed-to-pending reset must not be repeated");
+  assert.match(commands, /^up .* --resume /mu);
 });
 
 test("resume re-submits persisted workflow evidence when the workflow run was never created", async () => {
@@ -6894,7 +7103,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
     env
   });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
-  assert.equal(resumed.value?.workflow_run_id, "ultrafuzz-missing-workflow-run");
+  assert.match(resumed.value?.workflow_run_id ?? "", /^ultrafuzz-missing-workflow-run-[0-9a-f]{12}$/u);
 
   const commands = fs.readFileSync(logPath, "utf8").split("\n");
   const upCommands = commands.filter((line) => line.startsWith("up "));
@@ -6991,6 +7200,48 @@ test(
     );
   }
 );
+
+function writeCloudAttemptEvidenceFixture(runRoot: string): void {
+  const directory = path.join(runRoot, "cloud-execution", "attempts");
+  const at = "2026-07-24T00:00:00.000Z";
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, "fixture.json"),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.cloud-attempt-evidence.v1",
+      controller_run_id: `ultrafuzz-${path.basename(runRoot)}`,
+      run_id: path.basename(runRoot),
+      task_id: "node:project-discovery",
+      attempt_id: "project-discovery",
+      execution_generation: "base",
+      provider: "modal",
+      state: "succeeded",
+      requested_resources: { cpu: 2, memory_mib: 4096, timeout_seconds: 900 },
+      resolved_resources: { cpu: 2, memory_mib: 4096, timeout_seconds: 900 },
+      resource_confirmation: "provider-create-accepted",
+      handoff_sha256: "1".repeat(64),
+      request_sha256: "2".repeat(64),
+      dependency_inputs: [],
+      provider_execution_ids: ["sb-fixture"],
+      retry_index: 0,
+      executed: true,
+      resumed: false,
+      reused: false,
+      storage_lineage: `${path.basename(runRoot)}/project-discovery/base`,
+      output_sha256: "3".repeat(64),
+      publication_artifact_sha256: "4".repeat(64),
+      cleanup_state: "terminated",
+      created_at: at,
+      updated_at: at,
+      transitions: [
+        { state: "prepared", at },
+        { state: "launching", at, provider_execution_id: "sb-fixture" },
+        { state: "succeeded", at }
+      ]
+    })}\n`,
+    "utf8"
+  );
+}
 
 function realSmithersGraphUnavailable(): string | false {
   try {

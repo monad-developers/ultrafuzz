@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { cleanRun, initProject, planRun } from "../src/index.js";
+import { cleanRun, controllerRunIdsForCleanup, initProject, planRun } from "../src/index.js";
+import { smithersRunIdForProject } from "../src/smithers.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-clean-"));
@@ -128,4 +129,33 @@ test("cleanRun rejects missing confirmation, non-generated paths, state files, m
   });
   assert.equal(symlink.ok, false);
   assert.ok(symlink.diagnostics.some((diagnostic) => diagnostic.code === "CLEAN_SELECTION_SYMLINK"));
+});
+
+test("cloud cleanup resolves original, replay, fork, and evidence-only controller namespaces", () => {
+  const project = tempProject();
+  const runRoot = path.join(project, ".ultrafuzz", "runs", "cleanup-lineage");
+  const attemptsRoot = path.join(runRoot, "cloud-execution", "attempts");
+  const originalController = smithersRunIdForProject(project, "cleanup-lineage", true);
+  fs.mkdirSync(attemptsRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    `${JSON.stringify({
+      workflow_ids: [originalController, "ultrafuzz-cleanup-lineage-replayed", "ultrafuzz-cleanup-lineage-forked"],
+      workflow: { run_id: "ultrafuzz-cleanup-lineage-forked" }
+    })}\n`
+  );
+  fs.writeFileSync(
+    path.join(attemptsRoot, "attempt.json"),
+    `${JSON.stringify({ controller_run_id: "ultrafuzz-cleanup-lineage-orphan-replay" })}\n`
+  );
+
+  assert.deepEqual(
+    controllerRunIdsForCleanup(runRoot, "cleanup-lineage"),
+    [
+      originalController,
+      "ultrafuzz-cleanup-lineage-forked",
+      "ultrafuzz-cleanup-lineage-orphan-replay",
+      "ultrafuzz-cleanup-lineage-replayed"
+    ].sort()
+  );
 });

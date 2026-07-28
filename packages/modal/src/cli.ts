@@ -3,6 +3,7 @@
 import path from "node:path";
 
 import type { ModalLaunchMode, ModelProvider } from "./defaults.js";
+import { cleanupModalNodeRun } from "./node-provider.js";
 import { extractPublicBenchmarkBundle, readPublicBenchmarkBundle } from "./public-bundle.js";
 import {
   buildModalImage,
@@ -17,7 +18,7 @@ import {
 } from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic|kimi]";
+  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|cleanup-node-run|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic|kimi]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -136,6 +137,25 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (command === "cleanup-node-run") {
+    const app = safeCleanupIdentity(requiredOption(argv, "--app"), "--app", 128);
+    const image = safeCleanupIdentity(requiredOption(argv, "--image"), "--image", 128);
+    const controllerRunId = safeCleanupIdentity(requiredOption(argv, "--run-id"), "--run-id", 128);
+    if (!controllerRunId.startsWith("ultrafuzz-")) {
+      throw new Error("--run-id must be an exact Ultrafuzz controller run ID");
+    }
+    const result = await cleanupModalNodeRun(
+      {
+        app,
+        image,
+        credentialEnv: ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
+      },
+      controllerRunId,
+      { force: true }
+    );
+    console.log(JSON.stringify(result));
+    return;
+  }
   if (command === "collect") {
     const includePublicResults = argv.includes("--public-results");
     const configPath = option(argv, "--config");
@@ -158,6 +178,7 @@ async function main(): Promise<void> {
       JSON.stringify({
         benchmark: bundle.benchmark,
         lane: bundle.lane,
+        execution: bundle.execution,
         model_slug: bundle.model_slug,
         candidate_commit: bundle.candidate_commit,
         eval_run_id: bundle.eval_run_id
@@ -214,6 +235,13 @@ function integerOption(argv: string[], name: string): number | undefined {
   const integer = Number(value);
   if (!Number.isSafeInteger(integer) || integer <= 0) throw new Error(`${name} must be a positive integer`);
   return integer;
+}
+
+function safeCleanupIdentity(value: string, name: string, maxLength: number): string {
+  if (value.length > maxLength || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value)) {
+    throw new Error(`${name} must be an exact safe Modal cleanup identity`);
+  }
+  return value;
 }
 
 await main();

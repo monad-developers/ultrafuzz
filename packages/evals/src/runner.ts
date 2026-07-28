@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { readRunState, writeJsonDurable, type RunState } from "@ultrafuzz/artifacts";
 import type { EvalConfig, RuntimeConfigOverrides } from "@ultrafuzz/config";
-import { startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
+import { pauseRun, resumeRun, startRun, syncRun, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { BENCHMARK_SMOKE_WORKFLOW_PROFILE } from "./benchmark-manifest.js";
 import { evalWorkflowLifecycle, isTerminalWorkflowStatus } from "./efficiency.js";
@@ -300,6 +300,92 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
     ...benchmarkModelProfileOverrides(input.row, runnerProfile),
     ...(input.env !== undefined ? { env: input.env } : {})
   });
+  if (result.ok && result.value !== undefined && input.env?.ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE === "1") {
+    const beforePause = await waitForCloudAcceptanceBoundary(result.value.run_root);
+    const pauseRequestedAt = new Date().toISOString();
+    const pauseRequested = await requestCloudAcceptancePause({
+      projectRoot: input.row.target.path,
+      runId: result.value.run_id,
+      ...(input.env !== undefined ? { env: input.env } : {})
+    });
+    const detachRequest = writeCloudAcceptancePauseDetachRequest(
+      result.value.run_root,
+      result.value.run_id,
+      pauseRequested.workflowRunId,
+      beforePause
+    );
+    const detached = await waitForCloudAcceptancePauseDetach(
+      result.value.run_root,
+      detachRequest.targets.map((target) => target.attempt_id),
+      pauseRequested.workflowRunId
+    );
+    const paused = await waitForCloudAcceptancePause({
+      projectRoot: input.row.target.path,
+      runId: result.value.run_id,
+      ...(input.env !== undefined ? { env: input.env } : {})
+    });
+    const beforeResume = cloudAttemptSnapshot(result.value.run_root);
+    if (
+      beforeResume.completedAttemptIds.length === 0 ||
+      detached.some(
+        (claim) =>
+          !beforeResume.liveAttemptIds.includes(claim.attempt_id) ||
+          beforeResume.attemptStates[claim.attempt_id] !== "provider-unknown" ||
+          !beforeResume.attemptProviderExecutionIds[claim.attempt_id]?.includes(claim.provider_execution_id)
+      )
+    ) {
+      throw new EvalError(
+        "EVAL_CLOUD_ACCEPTANCE_PAUSE_INVALID",
+        "cloud acceptance pause did not preserve completed work and a deliberately detached live provider",
+        { runId: result.value.run_id }
+      );
+    }
+    const resumeInvokedAt = new Date().toISOString();
+    const resumed = await resumeRun({
+      projectRoot: input.row.target.path,
+      runId: result.value.run_id,
+      ...(input.env !== undefined ? { env: input.env } : {})
+    });
+    if (!resumed.ok || resumed.value === undefined) {
+      throw new EvalError("EVAL_CLOUD_ACCEPTANCE_RESUME_FAILED", "cloud acceptance resume invocation failed", {
+        runId: result.value.run_id,
+        diagnostics: resumed.diagnostics
+      });
+    }
+    if (!resumed.value.submitted) {
+      throw new EvalError(
+        "EVAL_CLOUD_ACCEPTANCE_RESUME_NOT_SUBMITTED",
+        "cloud acceptance resume did not start a new controller after the pause boundary",
+        { runId: result.value.run_id, workflowRunId: resumed.value.workflow_run_id }
+      );
+    }
+    writeJsonDurable(path.join(result.value.run_root, "cloud-execution", "acceptance", "resume.json"), {
+      schema_version: "ultrafuzz.cloud-acceptance-resume.v1",
+      run_id: result.value.run_id,
+      workflow_run_id: resumed.value.workflow_run_id,
+      action: resumed.value.action,
+      submitted: resumed.value.submitted,
+      pause_request_status: pauseRequested.status,
+      pause_requested_at: pauseRequestedAt,
+      pause_status: paused.status,
+      pause_detach_attempt_ids: detached.map((claim) => claim.attempt_id).sort(),
+      pause_detach_claims: Object.fromEntries(
+        detached
+          .map((claim): [string, CloudAcceptancePauseDetachClaim] => [claim.attempt_id, claim])
+          .sort(([left], [right]) => left.localeCompare(right))
+      ),
+      completed_attempt_ids_before_pause: beforePause.completedAttemptIds,
+      live_attempt_ids_before_pause: beforePause.liveAttemptIds,
+      attempt_states_before_pause: beforePause.attemptStates,
+      attempt_provider_execution_ids_before_pause: beforePause.attemptProviderExecutionIds,
+      completed_attempt_ids_before_resume: beforeResume.completedAttemptIds,
+      live_attempt_ids_before_resume: beforeResume.liveAttemptIds,
+      attempt_states_before_resume: beforeResume.attemptStates,
+      provider_execution_ids_before_resume: beforeResume.providerExecutionIds,
+      attempt_provider_execution_ids_before_resume: beforeResume.attemptProviderExecutionIds,
+      invoked_at: resumeInvokedAt
+    });
+  }
   if (result.ok && result.value) {
     return {
       ok: true,
@@ -313,6 +399,250 @@ export const runtimeRowLauncher: RowLauncher = async (input) => {
   }
   return { ok: false, workflowIds: [], diagnostics: result.diagnostics };
 };
+
+interface CloudAttemptSnapshot {
+  completedAttemptIds: string[];
+  liveAttemptIds: string[];
+  providerExecutionIds: string[];
+  attemptProviderExecutionIds: Record<string, string[]>;
+  attemptStates: Record<string, string>;
+}
+
+interface CloudAcceptancePauseDetachTarget {
+  attempt_id: string;
+  provider_execution_id: string;
+}
+
+interface CloudAcceptancePauseDetachClaim extends CloudAcceptancePauseDetachTarget {
+  controller_run_id: string;
+  task_id: string;
+  provider_state_at_detach: "live";
+  claimed_at: string;
+}
+
+async function waitForCloudAcceptanceBoundary(
+  runRoot: string,
+  timeoutMs = 30 * 60 * 1000
+): Promise<CloudAttemptSnapshot> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const snapshot = cloudAttemptSnapshot(runRoot);
+    if (snapshot.completedAttemptIds.length > 0 && cloudAcceptancePauseDetachTargets(snapshot).length > 0) {
+      return snapshot;
+    }
+    if (Date.now() >= deadline) {
+      throw new EvalError(
+        "EVAL_CLOUD_ACCEPTANCE_RESUME_TIMEOUT",
+        "cloud acceptance did not reach a completed-plus-live pause boundary",
+        { runRoot, timeoutMs }
+      );
+    }
+    await sleep(1_000);
+  }
+}
+
+function cloudAttemptSnapshot(runRoot: string): CloudAttemptSnapshot {
+  const attemptsDirectory = path.join(runRoot, "cloud-execution", "attempts");
+  const attempts = fs.existsSync(attemptsDirectory)
+    ? fs
+        .readdirSync(attemptsDirectory)
+        .filter((name) => name.endsWith(".json"))
+        .flatMap((name) => {
+          try {
+            const value = JSON.parse(fs.readFileSync(path.join(attemptsDirectory, name), "utf8")) as unknown;
+            return isRecordValue(value) ? [value] : [];
+          } catch {
+            return [];
+          }
+        })
+    : [];
+  const completedAttemptIds = attempts
+    .filter((attempt) => attempt.state === "succeeded" && typeof attempt.attempt_id === "string")
+    .map((attempt) => attempt.attempt_id as string)
+    .sort();
+  const liveStates = new Set(["queued", "launching", "running", "publishing", "provider-unknown"]);
+  const liveAttemptIds = attempts
+    .filter(
+      (attempt) =>
+        typeof attempt.attempt_id === "string" &&
+        typeof attempt.state === "string" &&
+        liveStates.has(attempt.state) &&
+        Array.isArray(attempt.provider_execution_ids) &&
+        attempt.provider_execution_ids.length > 0
+    )
+    .map((attempt) => attempt.attempt_id as string)
+    .sort();
+  const providerExecutionIds = [
+    ...new Set(
+      attempts.flatMap((attempt) =>
+        Array.isArray(attempt.provider_execution_ids)
+          ? attempt.provider_execution_ids.filter((value): value is string => typeof value === "string")
+          : []
+      )
+    )
+  ].sort();
+  const attemptProviderExecutionIds = Object.fromEntries(
+    attempts
+      .filter(
+        (attempt) =>
+          typeof attempt.attempt_id === "string" &&
+          Array.isArray(attempt.provider_execution_ids) &&
+          attempt.provider_execution_ids.length > 0 &&
+          attempt.provider_execution_ids.every((value) => typeof value === "string")
+      )
+      .map((attempt): [string, string[]] => [
+        attempt.attempt_id as string,
+        [...(attempt.provider_execution_ids as string[])].sort()
+      ])
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+  const attemptStates = Object.fromEntries(
+    attempts
+      .filter((attempt) => typeof attempt.attempt_id === "string" && typeof attempt.state === "string")
+      .map((attempt): [string, string] => [attempt.attempt_id as string, attempt.state as string])
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
+  return {
+    completedAttemptIds,
+    liveAttemptIds,
+    providerExecutionIds,
+    attemptProviderExecutionIds,
+    attemptStates
+  };
+}
+
+async function requestCloudAcceptancePause(input: {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}): Promise<{ status: "pause-requested"; workflowRunId: string }> {
+  const paused = await pauseRun(input);
+  if (!paused.ok || paused.value === undefined) {
+    throw new EvalError("EVAL_CLOUD_ACCEPTANCE_PAUSE_FAILED", "cloud acceptance pause invocation failed", {
+      runId: input.runId,
+      diagnostics: paused.diagnostics
+    });
+  }
+  if (paused.value.status !== "pause-requested" || !paused.value.submitted) {
+    throw new EvalError(
+      "EVAL_CLOUD_ACCEPTANCE_PAUSE_NOT_REQUESTED",
+      "cloud acceptance controller reached paused state before a live provider could be detached",
+      { runId: input.runId, status: paused.value.status }
+    );
+  }
+  return { status: "pause-requested", workflowRunId: paused.value.workflow_run_id };
+}
+
+async function waitForCloudAcceptancePause(input: {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}): Promise<{ status: "paused" }> {
+  const deadline = Date.now() + 30 * 60 * 1000;
+  for (;;) {
+    const paused = await pauseRun(input);
+    if (!paused.ok || paused.value === undefined) {
+      throw new EvalError("EVAL_CLOUD_ACCEPTANCE_PAUSE_FAILED", "cloud acceptance pause invocation failed", {
+        runId: input.runId,
+        diagnostics: paused.diagnostics
+      });
+    }
+    if (paused.value.status === "paused") return { status: "paused" };
+    if (Date.now() >= deadline) {
+      throw new EvalError("EVAL_CLOUD_ACCEPTANCE_PAUSE_TIMEOUT", "cloud acceptance controller did not pause", {
+        runId: input.runId
+      });
+    }
+    await sleep(2_000);
+  }
+}
+
+function cloudAcceptancePauseDetachTargets(snapshot: CloudAttemptSnapshot): CloudAcceptancePauseDetachTarget[] {
+  return snapshot.liveAttemptIds.flatMap((attemptId) => {
+    const providerExecutionIds = snapshot.attemptProviderExecutionIds[attemptId];
+    if (providerExecutionIds?.length !== 1) return [];
+    return [{ attempt_id: attemptId, provider_execution_id: providerExecutionIds[0]! }];
+  });
+}
+
+function writeCloudAcceptancePauseDetachRequest(
+  runRoot: string,
+  runId: string,
+  controllerRunId: string,
+  snapshot: CloudAttemptSnapshot
+): { targets: CloudAcceptancePauseDetachTarget[] } {
+  const targets = cloudAcceptancePauseDetachTargets(snapshot).slice(0, 1);
+  if (targets.length === 0) {
+    throw new EvalError(
+      "EVAL_CLOUD_ACCEPTANCE_DETACH_TARGET_MISSING",
+      "cloud acceptance pause boundary has no unambiguously identified live provider",
+      { runId }
+    );
+  }
+  const request = {
+    schema_version: "ultrafuzz.modal.cloud-acceptance-pause-detach-request.v1",
+    controller_run_id: controllerRunId,
+    run_id: runId,
+    targets,
+    requested_at: new Date().toISOString()
+  };
+  writeJsonDurable(path.join(runRoot, "cloud-execution", "acceptance", "pause-detach-request.json"), request);
+  return request;
+}
+
+async function waitForCloudAcceptancePauseDetach(
+  runRoot: string,
+  targetAttemptIds: string[],
+  controllerRunId: string,
+  timeoutMs = 5 * 60 * 1000
+): Promise<CloudAcceptancePauseDetachClaim[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const directory = path.join(runRoot, "cloud-execution", "acceptance");
+    const claims = fs.existsSync(directory)
+      ? fs
+          .readdirSync(directory)
+          .filter((name) => /^pause-detach-claim-.*\.json$/u.test(name))
+          .flatMap((name) => {
+            try {
+              const value = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")) as unknown;
+              if (
+                isRecordValue(value) &&
+                value.schema_version === "ultrafuzz.modal.cloud-acceptance-pause-detach-claim.v1" &&
+                value.controller_run_id === controllerRunId &&
+                typeof value.task_id === "string" &&
+                typeof value.attempt_id === "string" &&
+                targetAttemptIds.includes(value.attempt_id) &&
+                typeof value.provider_execution_id === "string" &&
+                value.provider_state_at_detach === "live" &&
+                typeof value.claimed_at === "string" &&
+                Number.isFinite(Date.parse(value.claimed_at))
+              ) {
+                return [value as unknown as CloudAcceptancePauseDetachClaim];
+              }
+            } catch {
+              // The provider publishes claims durably; a partial or unrelated file is never evidence.
+            }
+            return [];
+          })
+      : [];
+    const snapshot = cloudAttemptSnapshot(runRoot);
+    const detached = claims.filter(
+      (claim) =>
+        snapshot.attemptStates[claim.attempt_id] === "provider-unknown" &&
+        snapshot.attemptProviderExecutionIds[claim.attempt_id]?.includes(claim.provider_execution_id)
+    );
+    if (detached.length > 0) return detached;
+    if (Date.now() >= deadline) {
+      throw new EvalError(
+        "EVAL_CLOUD_ACCEPTANCE_DETACH_TIMEOUT",
+        "cloud acceptance pause did not detach a targeted live provider",
+        { runRoot, targetAttemptIds, timeoutMs }
+      );
+    }
+    await sleep(500);
+  }
+}
 
 export function benchmarkTopologyTransform(row: Pick<EvalMatrixRow, "workflow_input">): {
   topologyTransform?: { strategyLoops?: number; excludedNodeIds?: string[] };

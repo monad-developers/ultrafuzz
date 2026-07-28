@@ -13,6 +13,7 @@ import {
 } from "@ultrafuzz/artifacts";
 
 import type {
+  CloudAttemptStatus,
   QueryRunEventsValue,
   RunHealthValue,
   RunHealthVerdict,
@@ -84,6 +85,20 @@ export async function getRunStatus(input: {
       }
     ]);
   }
+  let cloudAttempts: CloudAttemptStatus[];
+  try {
+    cloudAttempts = readCloudAttemptStatuses(layout.root);
+  } catch (error) {
+    return runtimeFailure<RunStatusValue>([
+      {
+        code: "CLOUD_ATTEMPT_EVIDENCE_INVALID",
+        message: error instanceof Error ? error.message : String(error),
+        severity: "error",
+        source: "runtime",
+        path: path.join(layout.root, "cloud-execution", "attempts")
+      }
+    ]);
+  }
   const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
   const syncDiagnostics = sync.ok
     ? sync.diagnostics
@@ -120,6 +135,7 @@ export async function getRunStatus(input: {
       ...(state ? { state } : {}),
       events,
       attempts: summarizeNodeAttempts(replayNodeAttempts(layout).entries),
+      cloud_attempts: cloudAttempts,
       graph: readJsonIfExists(layout.graphPath),
       metadata: publicRunMetadata(metadata),
       ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})
@@ -132,6 +148,189 @@ export async function getRunStatus(input: {
         ]
       : syncDiagnostics
   );
+}
+
+function readCloudAttemptStatuses(runRoot: string): CloudAttemptStatus[] {
+  const directory = path.join(runRoot, "cloud-execution", "attempts");
+  if (!fs.existsSync(directory)) return [];
+  const directoryStat = fs.lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    throw new Error("cloud attempt evidence directory is unsafe");
+  }
+  assertPathInside(runRoot, directory, "cloud attempt evidence directory");
+  assertNoSymlinkComponents(runRoot, directory, "cloud attempt evidence directory");
+  const attempts = fs.readdirSync(directory, { withFileTypes: true }).map((entry) => {
+    if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".json")) {
+      throw new Error(`cloud attempt evidence entry is unsafe: ${entry.name}`);
+    }
+    const filePath = path.join(directory, entry.name);
+    assertPathInside(directory, filePath, "cloud attempt evidence file");
+    assertNoSymlinkComponents(directory, filePath, "cloud attempt evidence file");
+    return parseCloudAttemptStatus(JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown);
+  });
+  attempts.sort(
+    (left, right) =>
+      left.task_id.localeCompare(right.task_id) ||
+      left.attempt_id.localeCompare(right.attempt_id) ||
+      left.execution_generation.localeCompare(right.execution_generation)
+  );
+  return attempts;
+}
+
+function parseCloudAttemptStatus(value: unknown): CloudAttemptStatus {
+  if (!record(value) || value.schema_version !== "ultrafuzz.cloud-attempt-evidence.v1") {
+    throw new Error("cloud attempt evidence schema is invalid");
+  }
+  const states: CloudAttemptStatus["state"][] = [
+    "prepared",
+    "queued",
+    "launching",
+    "running",
+    "publishing",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "provider-unknown"
+  ];
+  const cleanups: CloudAttemptStatus["cleanup_state"][] = ["pending", "terminated", "not-created", "failed"];
+  const requiredStrings = ["run_id", "task_id", "attempt_id", "execution_generation", "provider"] as const;
+  if (requiredStrings.some((field) => !boundedNonemptyString(value[field], 512))) {
+    throw new Error("cloud attempt evidence identity is invalid");
+  }
+  if (typeof value.state !== "string" || !states.includes(value.state as CloudAttemptStatus["state"])) {
+    throw new Error("cloud attempt evidence state is invalid");
+  }
+  if (
+    !record(value.requested_resources) ||
+    !positiveFinite(value.requested_resources.cpu) ||
+    !positiveInteger(value.requested_resources.memory_mib) ||
+    !positiveInteger(value.requested_resources.timeout_seconds)
+  ) {
+    throw new Error("cloud attempt evidence resources are invalid");
+  }
+  if (
+    value.resolved_resources !== undefined &&
+    (!record(value.resolved_resources) ||
+      !positiveFinite(value.resolved_resources.cpu) ||
+      !positiveInteger(value.resolved_resources.memory_mib) ||
+      !positiveInteger(value.resolved_resources.timeout_seconds))
+  ) {
+    throw new Error("cloud attempt resolved resources are invalid");
+  }
+  if (
+    value.resource_confirmation !== undefined &&
+    value.resource_confirmation !== "provider-create-accepted" &&
+    value.resource_confirmation !== "provider-reattached"
+  ) {
+    throw new Error("cloud attempt resource confirmation is invalid");
+  }
+  if (!sha256String(value.handoff_sha256) || !sha256String(value.request_sha256)) {
+    throw new Error("cloud attempt evidence input identity is invalid");
+  }
+  if (
+    !Array.isArray(value.dependency_inputs) ||
+    !value.dependency_inputs.every(
+      (entry) =>
+        record(entry) &&
+        boundedNonemptyString(entry.path, 2_048) &&
+        sha256String(entry.sha256) &&
+        boundedNonemptyString(entry.producer_attempt_id, 512)
+    )
+  ) {
+    throw new Error("cloud attempt dependency evidence is invalid");
+  }
+  const providerExecutionIds = value.provider_execution_ids;
+  if (
+    !Array.isArray(providerExecutionIds) ||
+    !providerExecutionIds.every((entry) => boundedNonemptyString(entry, 512)) ||
+    new Set(providerExecutionIds).size !== providerExecutionIds.length
+  ) {
+    throw new Error("cloud attempt provider execution identity is invalid");
+  }
+  if (
+    !Number.isSafeInteger(value.retry_index) ||
+    (value.retry_index as number) < 0 ||
+    value.retry_index !== Math.max(0, providerExecutionIds.length - 1) ||
+    typeof value.executed !== "boolean" ||
+    typeof value.resumed !== "boolean" ||
+    typeof value.reused !== "boolean"
+  ) {
+    throw new Error("cloud attempt execution flags are invalid");
+  }
+  if (
+    providerExecutionIds.length > 0 &&
+    (value.resolved_resources === undefined || value.resource_confirmation === undefined)
+  ) {
+    throw new Error("cloud attempt provider resources are missing");
+  }
+  if (
+    typeof value.cleanup_state !== "string" ||
+    !cleanups.includes(value.cleanup_state as CloudAttemptStatus["cleanup_state"]) ||
+    !dateTimeString(value.created_at) ||
+    !dateTimeString(value.updated_at)
+  ) {
+    throw new Error("cloud attempt lifecycle evidence is invalid");
+  }
+  if (
+    (value.storage_lineage !== undefined && !boundedNonemptyString(value.storage_lineage, 2_048)) ||
+    (value.output_sha256 !== undefined && !sha256String(value.output_sha256)) ||
+    (value.publication_artifact_sha256 !== undefined && !sha256String(value.publication_artifact_sha256)) ||
+    (value.publication_workspace_sha256 !== undefined && !sha256String(value.publication_workspace_sha256)) ||
+    (value.terminal_reason !== undefined && !boundedNonemptyString(value.terminal_reason, 4_096))
+  ) {
+    throw new Error("cloud attempt terminal evidence is invalid");
+  }
+  if (
+    !Array.isArray(value.transitions) ||
+    value.transitions.length === 0 ||
+    !value.transitions.every(
+      (transition) =>
+        record(transition) &&
+        typeof transition.state === "string" &&
+        states.includes(transition.state as CloudAttemptStatus["state"]) &&
+        dateTimeString(transition.at) &&
+        (transition.provider_execution_id === undefined ||
+          (boundedNonemptyString(transition.provider_execution_id, 512) &&
+            providerExecutionIds.includes(transition.provider_execution_id)))
+    )
+  ) {
+    throw new Error("cloud attempt transition evidence is invalid");
+  }
+  if (
+    value.state === "succeeded" &&
+    (value.executed !== true ||
+      providerExecutionIds.length === 0 ||
+      !boundedNonemptyString(value.storage_lineage, 2_048) ||
+      !sha256String(value.output_sha256) ||
+      !sha256String(value.publication_artifact_sha256))
+  ) {
+    throw new Error("cloud attempt successful publication evidence is incomplete");
+  }
+  return value as unknown as CloudAttemptStatus;
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundedNonemptyString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength;
+}
+
+function positiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function positiveInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function sha256String(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function dateTimeString(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 export async function getRunHealth(input: {

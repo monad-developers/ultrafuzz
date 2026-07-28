@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { loadBenchmarkCohortManifest, loadBenchmarkLanesManifest } from "../../packages/evals/dist/index.js";
 import { parseModalBenchmarkConfig } from "../../packages/modal/dist/config.js";
 import {
+  PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS,
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS,
   PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
@@ -16,6 +17,7 @@ import {
 } from "../../packages/modal/dist/public-worker.js";
 
 const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
+const PUBLIC_CLOUD_ACCEPTANCE_MAX_RUNTIME_SECONDS = 7200;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -31,13 +33,20 @@ const AGENT_PROVIDER = {
   KimiAgent: "kimi"
 };
 
-const [candidateCommit, repository, generation, outputDirectory, mode] = process.argv.slice(2);
+const [candidateCommit, repository, generation, outputDirectory, mode, requestedNodeExecution = "local"] =
+  process.argv.slice(2);
 if (!/^[0-9a-f]{40}$/.test(candidateCommit ?? "")) throw new Error("candidate commit must be a full lowercase SHA");
 if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? "")) {
   throw new Error("candidate repository must be a canonical public GitHub URL");
 }
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(generation ?? "")) throw new Error("generation is invalid");
 if (mode !== "smoke" && mode !== "full") throw new Error("benchmark mode must be smoke or full");
+if (requestedNodeExecution !== "local" && requestedNodeExecution !== "modal") {
+  throw new Error("benchmark node execution must be local or modal");
+}
+if (requestedNodeExecution === "modal" && mode !== "smoke") {
+  throw new Error("real Modal node execution is restricted to the gated smoke acceptance lane");
+}
 if (!outputDirectory) throw new Error("output directory is required");
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -71,13 +80,16 @@ const targets = selectedTargets.map((target) => ({
 const models = benchmarkModels(mode, lane.model_profiles);
 const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
 const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
+const publicMaxRuntimeSeconds =
+  requestedNodeExecution === "modal" ? PUBLIC_CLOUD_ACCEPTANCE_MAX_RUNTIME_SECONDS : maxRuntimeSeconds;
 if (!Number.isSafeInteger(maxParallelEvalRows) || maxParallelEvalRows <= 0) {
   throw new Error(`invalid ${mode} maximum parallel eval rows`);
 }
 const matrixRowsPerPair = selectedTargets.length * lane.trials_per_variant;
 const matrixWaves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
 const controlTimeoutSeconds =
-  matrixWaves * maxRuntimeSeconds +
+  matrixWaves * publicMaxRuntimeSeconds +
+  (requestedNodeExecution === "modal" ? matrixWaves * PUBLIC_BENCHMARK_CLOUD_ACCEPTANCE_CONTROL_SECONDS : 0) +
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
   matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +
@@ -101,11 +113,13 @@ for (const model of models) {
     public_benchmark: {
       benchmark,
       lane: mode,
+      node_execution: requestedNodeExecution,
+      acceptance_e2e: requestedNodeExecution === "modal",
       runner_model_profile: model.slug,
       candidate_repository: repository,
       candidate_commit: candidateCommit,
       targets,
-      max_runtime_seconds: maxRuntimeSeconds
+      max_runtime_seconds: publicMaxRuntimeSeconds
     },
     braintrust: {
       project: "ultrafuzz-public-benchmarks",
@@ -141,7 +155,9 @@ const manifest = {
   benchmark,
   execution: {
     mode: "modal",
-    dry_run: false
+    dry_run: false,
+    node_execution: requestedNodeExecution,
+    acceptance_e2e: requestedNodeExecution === "modal"
   },
   image_name: imageName,
   targets,

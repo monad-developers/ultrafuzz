@@ -33,8 +33,8 @@ local dashboard plus final report for review.
    run evidence under `.ultrafuzz/runs/**`.
 5. `ultrafuzz ps`, `ultrafuzz status <run-id>`, and `ultrafuzz inspect <run-id>`
    Show product run evidence, concise health, and linked workflow status.
-6. `ultrafuzz pause|resume|replay|fork <run-id>`
-   Pause, resume, replay, or fork a linked run.
+6. `ultrafuzz pause|cancel|resume|replay|fork <run-id>`
+   Pause, cancel, resume, replay, or fork a linked run.
 7. `ultrafuzz report <run-id>`
    Shows the agent-written final report artifact when the run has produced one.
 8. `ultrafuzz materialize <run-id>` and `ultrafuzz clean <run-id>`

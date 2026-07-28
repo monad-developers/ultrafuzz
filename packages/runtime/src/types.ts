@@ -237,10 +237,62 @@ export interface WorkflowCommandSummary {
   has_json: boolean;
 }
 
+export interface CloudAttemptStatus {
+  schema_version: "ultrafuzz.cloud-attempt-evidence.v1";
+  run_id: string;
+  task_id: string;
+  attempt_id: string;
+  execution_generation: string;
+  provider: string;
+  state:
+    | "prepared"
+    | "queued"
+    | "launching"
+    | "running"
+    | "publishing"
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "provider-unknown";
+  requested_resources: {
+    cpu: number;
+    memory_mib: number;
+    timeout_seconds: number;
+  };
+  resolved_resources?: {
+    cpu: number;
+    memory_mib: number;
+    timeout_seconds: number;
+  };
+  resource_confirmation?: "provider-create-accepted" | "provider-reattached";
+  handoff_sha256: string;
+  request_sha256: string;
+  dependency_inputs: Array<{ path: string; producer_attempt_id: string; sha256: string }>;
+  provider_execution_ids: string[];
+  retry_index: number;
+  executed: boolean;
+  resumed: boolean;
+  reused: boolean;
+  storage_lineage?: string;
+  output_sha256?: string;
+  publication_artifact_sha256?: string;
+  publication_workspace_sha256?: string;
+  terminal_reason?: string;
+  cleanup_state: "pending" | "terminated" | "not-created" | "failed";
+  created_at: string;
+  updated_at: string;
+  transitions: Array<{
+    state: CloudAttemptStatus["state"];
+    at: string;
+    provider_execution_id?: string;
+  }>;
+}
+
 export interface RunStatusValue extends RunListEntry {
   state?: RunState;
   events: number;
   attempts: NodeAttemptLedgerSummary;
+  cloud_attempts: CloudAttemptStatus[];
   graph?: unknown;
   metadata?: Record<string, unknown>;
   workflow?: {
@@ -450,6 +502,20 @@ export interface PauseRunValue {
   action: "pause";
   status: "pause-requested" | "paused";
   submitted: boolean;
+}
+
+export interface CancelRunInput {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}
+
+export interface CancelRunValue {
+  run_id: string;
+  workflow_run_id: string;
+  action: "cancel";
+  status: "canceled";
+  submitted: true;
 }
 
 export interface SyncRunInput {

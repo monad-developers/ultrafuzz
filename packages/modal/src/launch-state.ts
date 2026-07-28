@@ -123,6 +123,7 @@ export type ModalWorkerStatusCategory =
   | "succeeded"
   | "genuine-task-outcome"
   | "resume-required"
+  | "cleanup-required"
   | "transient-operational-failure"
   | "permanent-operational-failure"
   | "incompatible-checkpoint";
@@ -385,6 +386,7 @@ const workerStatusSchema = z
       "succeeded",
       "genuine-task-outcome",
       "resume-required",
+      "cleanup-required",
       "transient-operational-failure",
       "permanent-operational-failure",
       "incompatible-checkpoint"
@@ -590,6 +592,7 @@ function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatus
   if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
   if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
   if (contract.diagnostic_code === "public-eval-diagnostics-invalid") return "permanent-operational-failure";
+  if (contract.diagnostic_code === "public-cloud-cleanup-incomplete") return "cleanup-required";
   if (contract.exit_category === "live") return contract.model_work_started ? "model-work" : "preparing";
   if (contract.exit_category === "authentication-failure") return "permanent-operational-failure";
   if (contract.model_work_started) return "resume-required";
@@ -926,6 +929,9 @@ export function classifyModalRunnerStatus(input: {
   }
   if (worker?.category === "permanent-operational-failure") {
     return status("permanent-operational-failure", "none", worker.model_work_started, false, 0);
+  }
+  if (worker?.category === "cleanup-required") {
+    return status("resume-required", "relaunch", true, true, 0);
   }
   if (
     worker?.model_work_started === true ||
