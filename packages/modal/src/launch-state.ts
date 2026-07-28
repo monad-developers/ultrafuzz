@@ -564,11 +564,15 @@ export function isModalWorkerStatusTerminal(
 }
 
 export function isModalWorkerStatusComplete(
-  status: ModalWorkerStatus | undefined
+  status: ModalWorkerStatus | undefined,
+  expectedSucceeded: number | undefined
 ): status is ModalWorkerStatus & { terminal: true; category: "succeeded" } {
   return (
+    Number.isSafeInteger(expectedSucceeded) &&
+    expectedSucceeded! > 0 &&
     status?.terminal === true &&
     status.category === "succeeded" &&
+    status.node_counts?.succeeded === expectedSucceeded &&
     status.node_counts?.failed === 0 &&
     status.node_counts.remaining === 0
   );

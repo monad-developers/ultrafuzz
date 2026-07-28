@@ -1450,7 +1450,7 @@ export async function overseeModalBenchmarkOnce(
             [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
             launch
           );
-          const complete = isModalWorkerStatusComplete(workerStatus);
+          const complete = isModalWorkerStatusComplete(workerStatus, inspected.canonical?.total_nodes);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
             row,
