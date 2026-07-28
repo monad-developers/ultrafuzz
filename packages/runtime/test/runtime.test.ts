@@ -2319,6 +2319,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
+  assert.match(workflowSource, /lstatSync\(candidate\)/);
+  assert.match(workflowSource, /function isMissingPathError/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
   assert.match(workflowSource, /function canonicalEmptyArtifact/);
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);

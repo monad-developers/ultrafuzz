@@ -6,6 +6,7 @@
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -247,6 +248,14 @@ function resetTaskArtifactContents(
     throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
   }
   const parent = realpathSync(path.dirname(candidate));
+  try {
+    lstatSync(candidate);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
   const anchoredRoot = realpathSync(candidate);
   if (anchoredRoot !== path.join(parent, attemptId)) {
     throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
@@ -267,6 +276,10 @@ function resetTaskArtifactContents(
     if (candidate === preservedInput) continue;
     rmSync(candidate, { recursive: true, force: true });
   }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDir: string): string[] {
