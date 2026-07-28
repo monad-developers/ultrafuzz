@@ -65,6 +65,23 @@ export async function ensurePersistentWorkerLineage(input: {
     return;
   }
 
+  if (persisted !== undefined && samePersistentWorkspace(persisted, input.lineage)) {
+    if (input.lineage.attempt < persisted.attempt) {
+      throw new CheckpointIncompatibleError("persisted lineage attempt is newer than the requested attempt");
+    }
+    if (input.lineage.attempt === persisted.attempt) {
+      if (input.lineage.attempt_id !== persisted.attempt_id) {
+        throw new CheckpointIncompatibleError("persisted lineage attempt identity does not match");
+      }
+      throw new CheckpointIncompatibleError("persisted lineage attempt does not match the requested attempt");
+    }
+    if (input.lineage.workspace_mode !== "resume") {
+      throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
+    }
+    await writeJsonAtomic(input.lineagePath, input.lineage);
+    return;
+  }
+
   if (persisted !== undefined) {
     if (input.lineage.workspace_mode !== "fresh" || input.lineage.generation <= persisted.generation) {
       throw new CheckpointIncompatibleError("persisted lineage does not match the requested generation");
@@ -82,6 +99,16 @@ export async function ensurePersistentWorkerLineage(input: {
   }
   if (input.lineage.workspace_mode === "fresh") await clearPaths(input.freshCleanupPaths);
   await writeJsonAtomic(input.lineagePath, input.lineage);
+}
+
+function samePersistentWorkspace(left: ModalWorkerLineage, right: ModalWorkerLineage): boolean {
+  return (
+    left.logical_run_id === right.logical_run_id &&
+    left.generation === right.generation &&
+    left.fingerprints.config === right.fingerprints.config &&
+    left.fingerprints.source === right.fingerprints.source &&
+    left.model_fingerprint === right.model_fingerprint
+  );
 }
 
 function samePersistentGeneration(left: ModalWorkerLineage, right: ModalWorkerLineage): boolean {

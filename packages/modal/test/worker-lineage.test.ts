@@ -48,6 +48,47 @@ describe("persistent Modal worker lineage", () => {
     await expect(ensure(fixture, first)).rejects.toThrow(/newer than the requested attempt/u);
   });
 
+  it("allows a newer resume attempt to roll forward the worker image for the same workspace", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    fs.mkdirSync(fixture.workspace, { recursive: true });
+    fs.writeFileSync(path.join(fixture.workspace, "progress"), "preserved\n");
+    fs.writeFileSync(fixture.bundle, "validated bundle\n");
+    const rollout = {
+      ...first,
+      attempt: 2,
+      attempt_id: "attempt-2",
+      workspace_mode: "resume" as const,
+      fingerprints: { ...first.fingerprints, image: "e".repeat(64) }
+    };
+
+    await ensure(fixture, rollout);
+
+    expect(fs.readFileSync(path.join(fixture.workspace, "progress"), "utf8")).toBe("preserved\n");
+    expect(fs.readFileSync(fixture.bundle, "utf8")).toBe("validated bundle\n");
+    expect(JSON.parse(fs.readFileSync(fixture.lineagePath, "utf8"))).toMatchObject({
+      attempt: 2,
+      attempt_id: "attempt-2",
+      workspace_mode: "resume",
+      fingerprints: { image: "e".repeat(64) }
+    });
+  });
+
+  it("rejects same-generation image changes that are not recovery resumes", async () => {
+    const fixture = lineageFixture();
+    const first = lineage();
+    await ensure(fixture, first);
+    const recreated = {
+      ...first,
+      attempt: 2,
+      attempt_id: "attempt-2",
+      fingerprints: { ...first.fingerprints, image: "e".repeat(64) }
+    };
+
+    await expect(ensure(fixture, recreated)).rejects.toThrow(/does not match the requested generation/u);
+  });
+
   it("clears stale evidence only for a newer explicit fresh generation", async () => {
     const fixture = lineageFixture();
     const first = lineage();
