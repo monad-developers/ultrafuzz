@@ -6321,7 +6321,7 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
       '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" >> "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
       'if [ "$1" = "inspect" ]; then',
-      '  printf \'%s\\n\' \'{"code":"RUN_NOT_FOUND","message":"Run not found"}\'',
+      "  printf '%s\\n' '{\"code\":\"INSPECT_FAILED\",\"message\":\"No Smithers run history found at /workspace/target/smithers.db. Run '\\''smithers up <workflow>'\\'' to start a run first.\"}'",
       "  exit 1",
       "fi",
       'if [ "$1" = "up" ] && [ ! -f "$SMITHERS_FAKE_MARKER" ]; then',
