@@ -39,13 +39,7 @@ export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: M
 
 export function modalDurableRunAdvanced(before: ModalResumeRunState, after: ModalResumeRunState): boolean {
   if (before.run_id !== after.run_id) return false;
-  if (
-    before.status !== after.status ||
-    before.started_at !== after.started_at ||
-    before.finished_at !== after.finished_at
-  ) {
-    return true;
-  }
+  if (before.status !== after.status) return true;
   return JSON.stringify(nodeStatuses(before.nodes)) !== JSON.stringify(nodeStatuses(after.nodes));
 }
 

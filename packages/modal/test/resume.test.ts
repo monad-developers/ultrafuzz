@@ -92,6 +92,7 @@ describe("Modal durable evaluation resume", () => {
       }
     };
     expect(modalDurableRunAdvanced(before, structuredClone(before))).toBe(false);
+    expect(modalDurableRunAdvanced(before, { ...before, finished_at: T2 })).toBe(false);
     expect(
       modalDurableRunAdvanced(before, {
         ...before,
