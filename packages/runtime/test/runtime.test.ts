@@ -292,14 +292,20 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string }
+  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timeline?: unknown }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
+  const timelinePath = path.join(project, "fake-smithers-timeline.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
+  fs.writeFileSync(
+    timelinePath,
+    `${JSON.stringify(input.timeline ?? { timeline: { frames: [] } }, null, 2)}\n`,
+    "utf8"
+  );
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
@@ -319,6 +325,12 @@ function fakeLifecycleSmithersEnv(
       "    ;;",
       "  events)",
       '    cat "$SMITHERS_FAKE_EVENTS"',
+      "    ;;",
+      "  timeline)",
+      '    cat "$SMITHERS_FAKE_TIMELINE"',
+      "    ;;",
+      "  rewind)",
+      "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  up)",
       '    if [ -n "$SMITHERS_FAKE_FAIL_UP" ]; then',
@@ -342,6 +354,7 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
+    SMITHERS_FAKE_TIMELINE: timelinePath,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
 }
@@ -354,6 +367,7 @@ function workflowInspect(input: {
   workflowRunId: string;
   status?: string;
   state?: string;
+  error?: unknown;
   includeVerifierSteps?: boolean;
   steps: Array<{ id: string; state: string; attempt?: number }>;
 }): unknown {
@@ -377,6 +391,7 @@ function workflowInspect(input: {
         id: input.workflowRunId,
         workflow: input.workflowRunId,
         status: input.status ?? "finished",
+        ...(input.error === undefined ? {} : { error: input.error }),
         started: "2026-07-03T00:00:00.000Z",
         finished: input.status === "running" ? undefined : "2026-07-03T00:00:02.000Z"
       },
@@ -6252,6 +6267,45 @@ test("resume retries one failed workflow task before continuing a terminal unfin
     /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --deps --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
+});
+
+test("resume rewinds a run-level render failure before continuing unfinished work", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-render-recovery-run",
+      status: "failed",
+      state: "failed",
+      error: { code: "WORKFLOW_RENDER_FAILED", cause: { code: "ENOENT" } },
+      steps: [{ id: "node:project-discovery", state: "pending", attempt: 0 }]
+    }),
+    timeline: { timeline: { frames: [{ frameNo: 2 }, { frameNo: 4 }] } }
+  });
+  const run = await startRun({ projectRoot: project, runId: "render-recovery-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "render-recovery-run",
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /timeline ultrafuzz-render-recovery-run --json/u);
+  assert.match(commands, /rewind ultrafuzz-render-recovery-run 4 --yes --json/u);
+  assert.match(
+    commands,
+    /up .*ultrafuzz-render-recovery-run\.tsx --resume ultrafuzz-render-recovery-run --run-id ultrafuzz-render-recovery-run --force --detach --max-concurrency 8 --format json/u
+  );
+  assert.doesNotMatch(commands, /retry-task/u);
 });
 
 test("resume suppresses duplicate submissions for every active workflow run state", async () => {

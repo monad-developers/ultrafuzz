@@ -32,23 +32,6 @@ export function modalDurableResumeCommand(cliPath: string, runId: string, projec
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
 }
 
-export function modalDurableReplayCommand(cliPath: string, runId: string, projectRoot: string): string[] {
-  return ["node", cliPath, "replay", runId, "--project", projectRoot, "--json"];
-}
-
-export function modalDurableContinuationCommand(
-  cliPath: string,
-  runId: string,
-  projectRoot: string,
-  state: ModalResumeRunState,
-  counts: ModalResumeCheckpointCounts
-): string[] {
-  if (isTerminalRunStatus(state.status) && counts.failed === 0 && counts.remaining > 0) {
-    return modalDurableReplayCommand(cliPath, runId, projectRoot);
-  }
-  return modalDurableResumeCommand(cliPath, runId, projectRoot);
-}
-
 export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
   if (!isTerminalRunStatus(state.status)) return true;
   return counts.failed > 0 || counts.remaining > 0;

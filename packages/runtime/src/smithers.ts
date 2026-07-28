@@ -480,6 +480,7 @@ export async function runSmithersLifecycleCommand(input: {
   recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
+  let preResumeStderr = "";
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json"],
@@ -562,6 +563,22 @@ export async function runSmithersLifecycleCommand(input: {
           keepWorkspaces: input.keepWorkspaces
         });
         return retryResult;
+      }
+      if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
+        const timeline = await execSmithersCli({
+          args: ["timeline", input.smithersRunId, "--json"],
+          projectRoot: input.projectRoot,
+          env: input.env
+        });
+        const latestFrame = latestSmithersTimelineFrame(jsonField(timeline.stdout).json);
+        if (latestFrame !== undefined) {
+          const rewind = await execSmithersCli({
+            args: ["rewind", input.smithersRunId, String(latestFrame), "--yes", "--json"],
+            projectRoot: input.projectRoot,
+            env: input.env
+          });
+          preResumeStderr = [timeline.stderr, rewind.stderr].filter((value) => value.length > 0).join("\n");
+        }
       }
     }
   }
@@ -730,6 +747,7 @@ export async function runSmithersLifecycleCommand(input: {
   });
   return {
     ...result,
+    stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
     ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
 }
@@ -837,6 +855,21 @@ function smithersSnapshotFailedNodeIds(snapshot: SmithersCommandSnapshot): strin
     }
   }
   return [...failedNodeIds];
+}
+
+function latestSmithersTimelineFrame(value: unknown): number | undefined {
+  const parsed = isObjectRecord(value) ? value : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const timeline = isObjectRecord(data.timeline) ? data.timeline : data;
+  const frames = Array.isArray(timeline.frames) ? timeline.frames : [];
+  const frameNumbers = frames.flatMap((frame) => {
+    if (!isObjectRecord(frame)) return [];
+    const frameNumber = frame.frameNo ?? frame.frame_no ?? frame.frame;
+    return typeof frameNumber === "number" && Number.isSafeInteger(frameNumber) && frameNumber >= 0
+      ? [frameNumber]
+      : [];
+  });
+  return frameNumbers.length === 0 ? undefined : Math.max(...frameNumbers);
 }
 
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
