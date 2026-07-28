@@ -1221,7 +1221,7 @@ export default smithers((ctx) => {
                   provider={cloudProvider}
                   input={{
                     schema_version: "ultrafuzz.modal.node.v1",
-                    run_id: "__ULTRAFUZZ_RUN_ID__",
+                    run_id: __ULTRAFUZZ_RUN_ID_LITERAL__,
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
