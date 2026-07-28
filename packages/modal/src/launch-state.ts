@@ -563,6 +563,17 @@ export function isModalWorkerStatusTerminal(
   return status?.terminal === true;
 }
 
+export function isModalWorkerStatusComplete(
+  status: ModalWorkerStatus | undefined
+): status is ModalWorkerStatus & { terminal: true; category: "succeeded" } {
+  return (
+    status?.terminal === true &&
+    status.category === "succeeded" &&
+    status.node_counts?.failed === 0 &&
+    status.node_counts.remaining === 0
+  );
+}
+
 function matchesWorkerAttempt(
   status: Pick<ModalWorkerStatus, "generation" | "attempt">,
   expected: { generation: number; attempt: number } | undefined

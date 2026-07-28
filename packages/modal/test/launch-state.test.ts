@@ -14,6 +14,7 @@ import {
   fingerprintModalImage,
   fingerprintTrackedSource,
   hasExactModalLaunchTags,
+  isModalWorkerStatusComplete,
   latestModalWorkerStatus,
   markModalLaunchFailed,
   markModalLaunchFailedWithRecovery,
@@ -539,6 +540,27 @@ describe("Modal runner status", () => {
       result_generation: 4
     });
     expect(latestModalWorkerStatus([terminal], { generation: 1, attempt: 2 })).toBeUndefined();
+  });
+
+  it("completes recovery only for a clean terminal worker result", () => {
+    expect(isModalWorkerStatusComplete(parseModalWorkerStatus(workerResult()))).toBe(true);
+    expect(
+      isModalWorkerStatusComplete(
+        parseModalWorkerStatus(
+          workerResult({
+            counts: { succeeded: 1, failed: 1, remaining: 0 },
+            exit_category: "genuine-evaluation-failure",
+            diagnostic_code: "genuine-evaluation-failure"
+          })
+        )
+      )
+    ).toBe(false);
+    expect(
+      isModalWorkerStatusComplete(
+        parseModalWorkerStatus(workerResult({ counts: { succeeded: 1, failed: 0, remaining: 1 } }))
+      )
+    ).toBe(false);
+    expect(isModalWorkerStatusComplete(workerStatus("succeeded", true))).toBe(false);
   });
 
   it("keeps live and genuine outcomes as no-ops while relaunching interrupted model work", () => {

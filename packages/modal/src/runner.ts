@@ -62,6 +62,7 @@ import {
   fingerprintTrackedSource,
   finishModalLaunchRecoveryLifecycle,
   hasExactModalLaunchTags,
+  isModalWorkerStatusComplete,
   isModalWorkerStatusTerminal,
   isTransientModalError,
   latestModalWorkerStatus,
@@ -1447,8 +1448,7 @@ export async function overseeModalBenchmarkOnce(
             [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
             launch
           );
-          const complete =
-            workerStatus !== undefined && ["succeeded", "genuine-task-outcome"].includes(workerStatus.category);
+          const complete = isModalWorkerStatusComplete(workerStatus);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
             row,
