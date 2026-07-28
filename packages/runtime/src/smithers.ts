@@ -483,7 +483,7 @@ export async function runSmithersLifecycleCommand(input: {
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
       assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
       assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
       fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
@@ -751,6 +751,16 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
     jsonHasErrorCode(snapshot.json, code) ||
     [snapshot.stdout, snapshot.stderr, snapshot.error ?? ""].some((value) => value.includes(code))
   );
+}
+
+function smithersSnapshotHasMissingRunHistory(snapshot: SmithersCommandSnapshot): boolean {
+  const evidence = [
+    snapshot.stdout,
+    snapshot.stderr,
+    snapshot.error ?? "",
+    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
+  ].join("\n");
+  return evidence.includes("No Smithers run history found") || evidence.includes("No workflow run history found");
 }
 
 function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
