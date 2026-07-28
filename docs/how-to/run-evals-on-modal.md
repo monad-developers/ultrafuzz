@@ -14,7 +14,10 @@ committed.
 At launch time the runner copies the config to `/run/ultrafuzz-config` inside
 the sandbox. Subscription credentials are copied directly from the host to
 `/run/ultrafuzz-auth`; they are never placed in a Modal Secret, image,
-environment variable, persistent volume, launch-state file, or log.
+environment variable, launch-state file, or log. Kimi is the exception for
+same-volume resume: after the host token is refreshed, a refreshable snapshot of
+the selected Kimi Code credential is staged into a private per-row auth
+directory on the Modal Volume.
 
 Non-secret run state is stored under `/data/<run-id>/<model>/workspace` on a
 private Modal Volume. This preserves Ultrafuzz state, generated tests, reports,
@@ -42,23 +45,30 @@ By default the runner reads `CODEX_HOME/auth.json` (normally
 `~/.claude/.credentials.json`). Kimi subscription auth reads the current Kimi
 Code home from `KIMI_CODE_HOME`, `KIMI_SHARE_DIR`, or `~/.kimi-code`, and stages
 only `config.toml`, the selected file-backed OAuth credential, and `device_id`
-into `/run/ultrafuzz-auth/kimi` for the worker. Before sandbox fan-out, the
-launcher refreshes a near-expiry token under Kimi Code's cross-process OAuth
-lock, atomically persists it on the host, and creates one immutable snapshot.
-This prevents concurrent workers from rotating copies of the same refresh
-token. Note that this persists the rotated token back to your real host Kimi
-Code credential (`~/.kimi-code/credentials/kimi-code.json`), mirroring the Kimi
-CLI itself: launching a benchmark can rotate your local Kimi login token.
+for the worker. Before sandbox fan-out, the launcher refreshes a near-expiry
+token under Kimi Code's cross-process OAuth lock and atomically persists it on
+the host. Each worker then stages the selected credential into the row's durable
+`kimi-code-auth` directory, and Kimi invocations keep their session homes under
+the row's durable `kimi-code-sessions` directory while symlinking config and auth
+from runtime-only snapshots. Modal workers refresh one shared row credential
+under Kimi Code's OAuth lock; host reconciliation only promotes a refreshed
+Modal credential if it descends from the host token staged for that row.
 API-key auth is also supported per model; Kimi accepts either
 `KIMI_API_KEY` or `MOONSHOT_API_KEY` on the launcher host, exposes the value to
 the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
 `api_key` config field.
 
+For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
+auth or serial launches when comparing multiple Kimi profiles, so OAuth
+refresh-token rotation remains single-writer.
+
 ## Create a private runtime config
 
 The seven-model matrix is built in, so `models` may be omitted. The default is
 one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, Claude Opus
-4.8, and Kimi K3, with `loops` fixed to `1`.
+4.8, and Kimi K3, with the default production strategy loop count `loops = 3`.
+Public CI launch configs intentionally set `loops = 1` for their smoke and full
+lanes.
 
 ```json
 {
@@ -146,6 +156,8 @@ cost multiply across every selected target, runner model, and trial.
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
 Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
 either `KIMI_API_KEY` or `MOONSHOT_API_KEY`; automatic smoke runs do not.
+Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
+should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust
 reporting key. Modal receives only the provider credential needed by a pair plus
 the OpenAI judge credential. It never receives a GitHub token.

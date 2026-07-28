@@ -497,10 +497,26 @@ function agentEnvironmentVariableNames(
   env: Record<string, string | undefined> | undefined
 ): string[] {
   const activeAgentRefs = new Set(agentRefs);
-  const names = Object.entries(config.agents)
-    .filter(([agentRef, agent]) => activeAgentRefs.has(agentRef) && agent.auth === "api-key")
-    .map(([, agent]) => agent.apiKeyEnv)
-    .filter((name): name is string => name !== undefined);
+  const names: string[] = [];
+  for (const [agentRef, agent] of Object.entries(config.agents)) {
+    if (!activeAgentRefs.has(agentRef)) continue;
+    if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {
+      names.push(agent.apiKeyEnv);
+      if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+    }
+    if (agentRef === "KimiAgent") {
+      names.push("KIMI_BASE_URL");
+      if (agent.auth === "subscription") {
+        names.push(
+          "KIMI_CODE_HOME",
+          "KIMI_SHARE_DIR",
+          "ULTRAFUZZ_KIMI_SESSION_HOME",
+          "ULTRAFUZZ_KIMI_SHARED_AUTH_HOME",
+          "ULTRAFUZZ_MODAL_REMOTE_ROOT"
+        );
+      }
+    }
+  }
   if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
     const provider = config.execution.providers[config.execution.provider];
     if (provider !== undefined) {

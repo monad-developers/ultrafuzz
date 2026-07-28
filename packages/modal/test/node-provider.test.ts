@@ -48,6 +48,7 @@ describe("Modal node sandbox provider", () => {
       expect(entries).toContain("./source.txt");
       expect(entries).toContain(`./${fixture.input.workflow_path}`);
       expect(entries).toContain(`./${fixture.input.prompt_path}`);
+      expect(entries).toContain("./.smithers/agents/kimi.ts");
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
       }
@@ -230,6 +231,134 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("binds Moonshot fallback credentials into the canonical Kimi API-key secret", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        MOONSHOT_API_KEY: "moonshot-key-value"
+      }
+    });
+    fixture.input.agent_credential_env = ["KIMI_API_KEY"];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({ KIMI_API_KEY: "moonshot-key-value" });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        KIMI_API_KEY: "kimi-key-value"
+      }
+    });
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({ KIMI_API_KEY: "kimi-key-value" });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("binds a compiled Moonshot fallback list into Kimi Code's canonical API-key secret", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        MOONSHOT_API_KEY: "moonshot-key-value"
+      }
+    });
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({ KIMI_API_KEY: "moonshot-key-value" });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("forwards optional Kimi API base URLs into cloud-node workers", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ created: sandbox });
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      env: {
+        [PROVIDER_ID_ENV]: "provider-id-value",
+        [PROVIDER_SECRET_ENV]: "provider-secret-value",
+        KIMI_API_KEY: "kimi-key-value",
+        KIMI_BASE_URL: "https://kimi.example.invalid/v1"
+      }
+    });
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"];
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(client.secrets.fromObject).toHaveBeenCalledWith({
+        KIMI_API_KEY: "kimi-key-value",
+        KIMI_BASE_URL: "https://kimi.example.invalid/v1"
+      });
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("refuses to publish cloud results through a symlinked project destination prefix", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
@@ -372,6 +501,7 @@ function createProjectFixture() {
   const promptPath = `${runRoot}/prompts/attempt-one.md`;
   fs.mkdirSync(path.join(root, path.dirname(workflowPath)), { recursive: true });
   fs.mkdirSync(path.join(root, path.dirname(promptPath)), { recursive: true });
+  fs.mkdirSync(path.join(root, ".smithers", "agents"), { recursive: true });
   fs.mkdirSync(path.join(root, artifactDir), { recursive: true });
   for (const dependency of dependencyArtifactDirs) {
     fs.mkdirSync(path.join(root, dependency), { recursive: true });
@@ -381,6 +511,7 @@ function createProjectFixture() {
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });
   fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
+  fs.writeFileSync(path.join(root, ".smithers", "agents", "kimi.ts"), "export const createKimiAgent = () => ({});\n");
   fs.writeFileSync(path.join(root, workflowPath), "export default {};\n");
   fs.writeFileSync(path.join(root, promptPath), "rendered prompt\n");
   fs.writeFileSync(path.join(root, artifactDir, "stale.txt"), "stale\n");

@@ -22,10 +22,10 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
-  it("defaults to the seven benchmark models and one loop", () => {
+  it("defaults to the seven benchmark models and production strategy loops", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 
-    expect(config.loops).toBe(1);
+    expect(config.loops).toBe(3);
     expect(config.models).toEqual(DEFAULT_BENCHMARK_MODELS);
     expect(config.models.map((model) => model.model)).toEqual([
       "gpt-5.5",
@@ -99,6 +99,24 @@ describe("Modal benchmark config", () => {
             provider: "kimi",
             agent: "KimiAgent",
             reasoning: "xhigh",
+            auth_mode: "api-key"
+          }
+        ]
+      })
+    ).toThrow(/Kimi reasoning must be low, high, or max/u);
+  });
+
+  it("rejects whitespace-padded Kimi reasoning values", () => {
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        models: [
+          {
+            slug: "kimi-k3",
+            model: "kimi-k3",
+            provider: "kimi",
+            agent: "KimiAgent",
+            reasoning: " max ",
             auth_mode: "api-key"
           }
         ]

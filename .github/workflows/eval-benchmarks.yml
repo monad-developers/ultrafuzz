@@ -93,6 +93,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
@@ -177,6 +178,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -274,6 +276,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           control_timeout_seconds="$(jq -er \
             '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
@@ -476,6 +479,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {

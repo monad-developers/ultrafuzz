@@ -6,7 +6,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import path from "node:path";
@@ -44,9 +47,11 @@ const KIMI_CODE_029_VALUE_FLAGS = new Set([
   "--prompt"
 ]);
 const KIMI_CODE_029_BOOLEAN_FLAGS = new Set(["--continue"]);
-const KIMI_CONFIG_SEED_ENTRIES = ["config.toml", "credentials", "device_id"] as const;
+const KIMI_CONFIG_SEED_FILES = ["config.toml", "device_id"] as const;
+const KIMI_SHARED_AUTH_LOCK_TIMEOUT_MS = 120_000;
 const KIMI_REASONING_EFFORTS = ["low", "high", "max"] as const;
 const KIMI_K3_MANAGED_ALIAS = "kimi-code/k3";
+const KIMI_SESSION_INVOCATIONS_DIR = ".ultrafuzz-invocations";
 
 export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgent {
   const reasoningEffort = kimiReasoningEffort(options.reasoningEffort);
@@ -58,10 +63,10 @@ export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgen
 }
 
 export class KimiCode029Agent extends SmithersKimiAgent {
-  private activeConfigDir: string | undefined;
+  private activeRuntimeHome: string | undefined;
 
   constructor(options: KimiCode029Options) {
-    super(options);
+    super({ ...options });
   }
 
   override createOutputInterpreter(): KimiOutputInterpreter {
@@ -77,7 +82,7 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         return base.onStderrLine?.(line) ?? [];
       },
       onExit: (result) => {
-        this.issuedSessionId ??= sessionIdFromIndex(this.activeConfigDir);
+        this.issuedSessionId ??= sessionIdFromIndex(this.activeRuntimeHome);
         return base.onExit?.(result) ?? [];
       }
     };
@@ -95,49 +100,68 @@ export class KimiCode029Agent extends SmithersKimiAgent {
           )
         : undefined;
     const configuredSourceDir = opts.configDir;
-    if (apiKeyConfigDir !== undefined) opts.configDir = apiKeyConfigDir;
-    // Build through the pinned Smithers adapter so its credential checks,
-    // prompt construction, and error classifiers remain intact, then narrow
-    // the obsolete argv and synthetic session surface for Kimi Code 0.29.1.
+    const buildOnlyConfigDir =
+      apiKeyConfigDir === undefined && configuredSourceDir !== undefined
+        ? createKimiBuildOnlyConfigDir(configuredSourceDir)
+        : undefined;
+    const commandConfigDir = apiKeyConfigDir ?? buildOnlyConfigDir;
+    if (commandConfigDir !== undefined) opts.configDir = commandConfigDir;
+    // Build through the pinned Smithers adapter so its prompt construction and
+    // error classifiers remain intact, then narrow the obsolete argv and
+    // synthetic session surface for Kimi Code 0.29.1.
+    // Subscription credentials are deliberately withheld until after Smithers
+    // builds argv because Smithers 0.29.0 refreshes OAuth files without Kimi
+    // Code's cross-process lock. The executed CLI receives the real shared
+    // auth home below, where Kimi Code coordinates refreshes itself.
     let command: KimiCommand;
     try {
       command = await super.buildCommand(params);
     } catch (error) {
       if (apiKeyConfigDir !== undefined) rmSync(apiKeyConfigDir, { recursive: true, force: true });
+      if (buildOnlyConfigDir !== undefined) rmSync(buildOnlyConfigDir, { recursive: true, force: true });
       throw error;
     } finally {
       opts.configDir = configuredSourceDir;
+      if (buildOnlyConfigDir !== undefined) rmSync(buildOnlyConfigDir, { recursive: true, force: true });
     }
-    let isolatedConfigDir: string | undefined;
+    let executionConfigDir: string | undefined;
+    let runtimeHome: string | undefined;
     let sessionStoreDir: string | undefined;
     try {
       sessionStoreDir = kimiSessionStoreDir(configuredSourceDir, apiKeyConfigDir);
-      isolatedConfigDir =
-        apiKeyConfigDir ?? (configuredSourceDir === undefined ? undefined : isolateKimiConfigDir(configuredSourceDir));
-      if (isolatedConfigDir !== undefined && sessionStoreDir !== undefined) {
-        seedKimiSessionState(sessionStoreDir, isolatedConfigDir, knownSession);
-      }
-      if (isolatedConfigDir !== undefined && apiKeyConfigDir === undefined) {
+      const sharedAuthDir =
+        apiKeyConfigDir !== undefined || configuredSourceDir === undefined
+          ? undefined
+          : materializeKimiSharedAuthHome(configuredSourceDir);
+      executionConfigDir =
+        apiKeyConfigDir ??
+        (configuredSourceDir === undefined ? undefined : isolateKimiConfigDir(configuredSourceDir, sharedAuthDir));
+      if (executionConfigDir !== undefined && apiKeyConfigDir === undefined) {
         applyKimiReasoningConfig(
-          path.join(isolatedConfigDir, "config.toml"),
+          path.join(executionConfigDir, "config.toml"),
           opts.model ?? this.model,
           opts.ultrafuzzReasoningEffort
         );
       }
+      if (executionConfigDir !== undefined && sessionStoreDir !== undefined) {
+        runtimeHome = createKimiRuntimeHome(executionConfigDir, sessionStoreDir);
+        seedKimiSessionState(sessionStoreDir, runtimeHome, knownSession);
+      }
     } catch (error) {
       await command.cleanup?.();
-      if (isolatedConfigDir !== undefined) rmSync(isolatedConfigDir, { recursive: true, force: true });
+      if (runtimeHome !== undefined) rmSync(runtimeHome, { recursive: true, force: true });
+      if (executionConfigDir !== undefined) rmSync(executionConfigDir, { recursive: true, force: true });
       throw error;
     }
     this.issuedSessionId = knownSession;
-    this.activeConfigDir = isolatedConfigDir;
-    const cleanup = combineCleanup(command.cleanup, isolatedConfigDir, sessionStoreDir, () => {
-      this.activeConfigDir = undefined;
+    this.activeRuntimeHome = runtimeHome;
+    const cleanup = combineCleanup(command.cleanup, runtimeHome, sessionStoreDir, executionConfigDir, () => {
+      this.activeRuntimeHome = undefined;
     });
     return {
       ...command,
       args: kimiCode029Args(command.args, knownSession),
-      env: kimiCommandEnv(command.env, isolatedConfigDir),
+      env: kimiCommandEnv(command.env, runtimeHome),
       cleanup,
       benignStderrPatterns: [
         ...(command.benignStderrPatterns ?? []),
@@ -256,6 +280,7 @@ function createKimiApiKeyConfigDir(
     "",
     "[thinking]",
     "enabled = true",
+    `effort = ${tomlString(reasoningEffort)}`,
     ""
   ];
   try {
@@ -291,18 +316,181 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function isolateKimiConfigDir(source: string): string {
+function materializeKimiSharedAuthHome(source: string): string {
+  const explicit = process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME?.trim();
+  if (explicit === undefined || explicit === "") return source;
+  const shared = resolveConfigDir(explicit);
+  if (path.resolve(shared) === path.resolve(source)) return source;
+  return withKimiSharedAuthLock(shared, () => {
+    mkdirSync(shared, { recursive: true, mode: 0o700 });
+    for (const name of KIMI_CONFIG_SEED_FILES) copyKimiSeedFile(source, shared, name);
+    copyKimiCredentialsIfNewer(source, shared);
+    ensureKimiOAuthLockTargets(source, shared);
+    return shared;
+  });
+}
+
+function withKimiSharedAuthLock<T>(sharedHome: string, callback: () => T): T {
+  mkdirSync(path.dirname(sharedHome), { recursive: true, mode: 0o700 });
+  const lockDir = `${sharedHome}.lock`;
+  const start = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) throw error;
+      if (Date.now() - start > KIMI_SHARED_AUTH_LOCK_TIMEOUT_MS) {
+        throw new Error(`timed out acquiring shared Kimi auth lock: ${lockDir}`);
+      }
+      sleepSync(100);
+    }
+  }
+  try {
+    return callback();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+}
+
+function copyKimiSeedFile(source: string, target: string, name: (typeof KIMI_CONFIG_SEED_FILES)[number]): void {
+  const sourcePath = path.join(source, name);
+  if (!existsSync(sourcePath)) return;
+  cpSync(sourcePath, path.join(target, name), { force: true });
+}
+
+function createKimiBuildOnlyConfigDir(source: string): string {
+  const buildOnly = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-build-"));
+  try {
+    for (const name of KIMI_CONFIG_SEED_FILES) copyKimiSeedFile(source, buildOnly, name);
+    return buildOnly;
+  } catch (error) {
+    rmSync(buildOnly, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function copyKimiCredentialsIfNewer(source: string, target: string): void {
+  for (const name of kimiCredentialFileNames(source)) {
+    const sourcePath = path.join(source, "credentials", name);
+    if (!existsSync(sourcePath)) continue;
+    const targetPath = path.join(target, "credentials", name);
+    if (kimiCredentialShouldReplace(sourcePath, targetPath)) {
+      mkdirSync(path.dirname(targetPath), { recursive: true, mode: 0o700 });
+      cpSync(sourcePath, targetPath, { force: true });
+    }
+  }
+}
+
+function kimiCredentialFileNames(home: string): string[] {
+  let config = "";
+  try {
+    config = readFileSync(path.join(home, "config.toml"), "utf8");
+  } catch {
+    return existsSync(path.join(home, "credentials", "kimi-code.json")) ? ["kimi-code.json"] : [];
+  }
+  const names = new Set<string>();
+  for (const match of config.matchAll(/\bkey\s*=\s*"oauth\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})"/gu)) {
+    names.add(`${match[1]}.json`);
+  }
+  if (names.size === 0 && existsSync(path.join(home, "credentials", "kimi-code.json"))) names.add("kimi-code.json");
+  return [...names].sort();
+}
+
+function kimiOAuthLockNames(home: string): string[] {
+  return kimiCredentialFileNames(home).map((name) => name.replace(/\.json$/u, ""));
+}
+
+function kimiCredentialShouldReplace(sourcePath: string, targetPath: string): boolean {
+  if (!existsSync(targetPath)) return true;
+  const source = kimiCredentialMetadata(sourcePath);
+  const target = kimiCredentialMetadata(targetPath);
+  if (source.refreshToken !== undefined && target.refreshToken === undefined) return true;
+  if (source.refreshToken === undefined && target.refreshToken !== undefined) return false;
+  if (
+    source.refreshToken !== undefined &&
+    target.refreshToken !== undefined &&
+    source.refreshToken !== target.refreshToken
+  ) {
+    return false;
+  }
+  const sourceExpiresAt = source.expiresAt;
+  const targetExpiresAt = target.expiresAt;
+  if (targetExpiresAt === undefined) return true;
+  if (sourceExpiresAt === undefined) return false;
+  return sourceExpiresAt > targetExpiresAt;
+}
+
+function kimiCredentialMetadata(filePath: string): { refreshToken?: string; expiresAt?: number } {
+  try {
+    const value = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+    if (!isRecord(value)) return {};
+    const refreshToken = typeof value.refresh_token === "string" ? value.refresh_token.trim() : "";
+    return {
+      ...(refreshToken === "" ? {} : { refreshToken }),
+      ...(typeof value.expires_at === "number" ? { expiresAt: value.expires_at } : {})
+    };
+  } catch {
+    return {};
+  }
+}
+
+function ensureKimiOAuthLockTargets(source: string, target: string): void {
+  const names = kimiOAuthLockNames(source);
+  if (names.length === 0) names.push("kimi-code");
+  const oauthDir = path.join(target, "oauth");
+  mkdirSync(oauthDir, { recursive: true, mode: 0o700 });
+  for (const name of names) {
+    writeFileSync(path.join(oauthDir, name), "", { flag: "a", mode: 0o600 });
+  }
+}
+
+function isolateKimiConfigDir(source: string, authHome = source): string {
   const isolated = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-"));
   try {
-    for (const name of KIMI_CONFIG_SEED_ENTRIES) {
+    for (const name of KIMI_CONFIG_SEED_FILES) {
       const entry = path.join(source, name);
       if (existsSync(entry)) cpSync(entry, path.join(isolated, name), { recursive: true });
     }
+    symlinkKimiAuthDir(authHome, isolated, "credentials");
+    symlinkKimiAuthDir(authHome, isolated, "oauth");
     return isolated;
   } catch (error) {
     rmSync(isolated, { recursive: true, force: true });
     throw error;
   }
+}
+
+function symlinkKimiAuthDir(authHome: string, isolated: string, name: "credentials" | "oauth"): void {
+  const source = path.join(authHome, name);
+  if (!existsSync(source)) return;
+  symlinkSync(source, path.join(isolated, name), "dir");
+}
+
+function createKimiRuntimeHome(configHome: string, sessionStoreDir: string): string {
+  mkdirSync(sessionStoreDir, { recursive: true, mode: 0o700 });
+  const invocationRoot = path.join(sessionStoreDir, KIMI_SESSION_INVOCATIONS_DIR);
+  mkdirSync(invocationRoot, { recursive: true, mode: 0o700 });
+  const runtimeHome = mkdtempSync(path.join(invocationRoot, "home-"));
+  try {
+    for (const name of KIMI_CONFIG_SEED_FILES) symlinkKimiRuntimeEntry(configHome, runtimeHome, name);
+    symlinkKimiRuntimeEntry(configHome, runtimeHome, "credentials", "dir");
+    symlinkKimiRuntimeEntry(configHome, runtimeHome, "oauth", "dir");
+    return runtimeHome;
+  } catch (error) {
+    rmSync(runtimeHome, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function symlinkKimiRuntimeEntry(configHome: string, runtimeHome: string, name: string, type?: "dir"): void {
+  const source = path.join(configHome, name);
+  if (!existsSync(source)) return;
+  symlinkSync(source, path.join(runtimeHome, name), type);
+}
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function kimiSessionStoreDir(
@@ -325,15 +513,47 @@ interface KimiSessionIndexEntry {
 
 function seedKimiSessionState(sourceHome: string, targetHome: string, sessionId: string | undefined): void {
   if (sessionId === undefined) return;
-  const entry = effectiveKimiSessionEntries(sourceHome).get(sessionId);
-  if (entry === undefined) return;
-  copyKimiSessionEntry(sourceHome, targetHome, entry);
+  for (const home of kimiSessionSourceHomes(sourceHome)) {
+    const entry = effectiveKimiSessionEntries(home).get(sessionId);
+    if (entry === undefined) continue;
+    copyKimiSessionEntry(home, targetHome, entry);
+    return;
+  }
 }
 
 function persistKimiSessionState(sourceHome: string, targetHome: string): void {
+  if (path.resolve(sourceHome) === path.resolve(targetHome)) return;
   const entries = effectiveKimiSessionEntries(sourceHome);
   if (entries.size === 0) return;
   for (const entry of entries.values()) copyKimiSessionEntry(sourceHome, targetHome, entry);
+}
+
+function kimiSessionSourceHomes(storeHome: string): string[] {
+  const invocationRoot = path.join(storeHome, KIMI_SESSION_INVOCATIONS_DIR);
+  const homes: Array<{ home: string; mtimeMs: number }> = [];
+  try {
+    for (const entry of readdirSync(invocationRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const home = path.join(invocationRoot, entry.name);
+      homes.push({ home, mtimeMs: kimiSessionHomeMtime(home) });
+    }
+  } catch {
+    // No abandoned invocation homes exist yet.
+  }
+  homes.sort((left, right) => right.mtimeMs - left.mtimeMs || left.home.localeCompare(right.home));
+  return [...homes.map((entry) => entry.home), storeHome];
+}
+
+function kimiSessionHomeMtime(home: string): number {
+  try {
+    return statSync(path.join(home, "session_index.jsonl")).mtimeMs;
+  } catch {
+    try {
+      return statSync(home).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }
 }
 
 function effectiveKimiSessionEntries(home: string): Map<string, KimiSessionIndexEntry> {
@@ -464,7 +684,38 @@ function applyKimiReasoningConfig(
   } else {
     lines[start + 1 + effortIndex] = rendered;
   }
+  applyKimiThinkingConfig(lines, reasoningEffort);
   writeFileSync(configPath, lines.join("\n"), { encoding: "utf8", mode: 0o600 });
+}
+
+function applyKimiThinkingConfig(lines: string[], reasoningEffort: KimiReasoningEffort): void {
+  const { start, end } = ensureKimiThinkingSection(lines);
+  let sectionEnd = end;
+  const initialSection = lines.slice(start + 1, sectionEnd);
+  const enabledIndex = initialSection.findIndex((line) => /^\s*enabled\s*=/u.test(line));
+  if (enabledIndex === -1) {
+    lines.splice(start + 1, 0, "enabled = true");
+    sectionEnd += 1;
+  } else {
+    lines[start + 1 + enabledIndex] = "enabled = true";
+  }
+  const section = lines.slice(start + 1, sectionEnd);
+  const effortIndex = section.findIndex((line) => /^\s*effort\s*=/u.test(line));
+  const rendered = `effort = ${tomlString(reasoningEffort)}`;
+  if (effortIndex === -1) {
+    lines.splice(sectionEnd, 0, rendered);
+  } else {
+    lines[start + 1 + effortIndex] = rendered;
+  }
+}
+
+function ensureKimiThinkingSection(lines: string[]): { start: number; end: number } {
+  const existing = findKimiSection(lines, "[thinking]");
+  if (existing.start !== -1) return existing;
+  if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+  const start = lines.length;
+  lines.push("[thinking]");
+  return { start, end: lines.length };
 }
 
 function ensureKimiModelSection(lines: string[], alias: string): { start: number; end: number } {
@@ -481,6 +732,11 @@ function ensureKimiModelSection(lines: string[], alias: string): { start: number
 function findKimiModelSection(lines: string[], alias: string): { start: number; end: number } {
   const headers = new Set([`[models.${tomlString(alias)}]`]);
   if (/^[A-Za-z0-9_-]+$/u.test(alias)) headers.add(`[models.${alias}]`);
+  return findKimiSection(lines, headers);
+}
+
+function findKimiSection(lines: string[], headerOrHeaders: string | Set<string>): { start: number; end: number } {
+  const headers = typeof headerOrHeaders === "string" ? new Set([headerOrHeaders]) : headerOrHeaders;
   const start = lines.findIndex((line) => headers.has(line.trim()));
   if (start === -1) return { start: -1, end: -1 };
   let end = lines.length;
@@ -533,8 +789,9 @@ function kimiCommandEnv(
 
 function combineCleanup(
   baseCleanup: (() => Promise<void>) | undefined,
-  isolatedConfigDir: string | undefined,
+  runtimeHome: string | undefined,
   sessionStoreDir: string | undefined,
+  executionConfigDir: string | undefined,
   afterCleanup: () => void
 ): (() => Promise<void>) | undefined {
   return async () => {
@@ -542,16 +799,22 @@ function combineCleanup(
       await baseCleanup?.();
     } finally {
       try {
-        if (isolatedConfigDir !== undefined && sessionStoreDir !== undefined) {
-          persistKimiSessionState(isolatedConfigDir, sessionStoreDir);
+        if (runtimeHome !== undefined && sessionStoreDir !== undefined) {
+          persistKimiSessionState(runtimeHome, sessionStoreDir);
         }
       } finally {
         try {
-          if (isolatedConfigDir !== undefined) {
-            rmSync(isolatedConfigDir, { recursive: true, force: true });
+          if (runtimeHome !== undefined) {
+            rmSync(runtimeHome, { recursive: true, force: true });
           }
         } finally {
-          afterCleanup();
+          try {
+            if (executionConfigDir !== undefined) {
+              rmSync(executionConfigDir, { recursive: true, force: true });
+            }
+          } finally {
+            afterCleanup();
+          }
         }
       }
     }
@@ -602,4 +865,8 @@ function requiredSessionId(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return isRecord(error) && error.code === code;
 }

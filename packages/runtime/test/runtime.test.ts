@@ -241,6 +241,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       'if [ -n "$SMITHERS_FAKE_CLOUD_ENV_LOG" ]; then',
       '  printf \'%s|%s\\n\' "$UFZ_PROVIDER_ONE" "$UFZ_PROVIDER_TWO" > "$SMITHERS_FAKE_CLOUD_ENV_LOG"',
       "fi",
+      'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
+      '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
+      "fi",
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
       "fi",
@@ -868,6 +871,10 @@ test(
       path.join(sourceConfig, "config.toml"),
       `default_model = "kimi-k3"
 
+[thinking]
+enabled = false
+effort = "high"
+
 [providers."managed:kimi-code"]
 type = "kimi"
 base_url = "https://api.kimi.com/coding/v1"
@@ -955,7 +962,11 @@ default_effort = "high"
       assert.equal(command.env?.KIMI_CODE_HOME, command.env?.KIMI_SHARE_DIR);
       const isolated = command.env?.KIMI_SHARE_DIR;
       assert.ok(isolated);
-      assert.match(fs.readFileSync(path.join(isolated, "config.toml"), "utf8"), /default_effort = "max"/u);
+      const isolatedConfigText = fs.readFileSync(path.join(isolated, "config.toml"), "utf8");
+      assert.match(isolatedConfigText, /default_effort = "max"/u);
+      assert.match(isolatedConfigText, /\[thinking\]\nenabled = true\neffort = "max"/u);
+      assert.doesNotMatch(isolatedConfigText, /enabled = false/u);
+      assert.doesNotMatch(isolatedConfigText, /effort = "high"/u);
       assert.equal(fs.readFileSync(path.join(isolated, "device_id"), "utf8"), "test-device\n");
       const isolatedCredentials = JSON.parse(
         fs.readFileSync(path.join(isolated, "credentials", "kimi-code.json"), "utf8")
@@ -966,6 +977,109 @@ default_effort = "high"
       assert.ok(
         command.benignStderrPatterns.some((pattern) => pattern.test("To resume this session: kimi -r session-1234"))
       );
+    }
+
+    const previousSharedAuthHome = process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME;
+    const sharedAuthHome = path.join(project, "shared-kimi-auth");
+    const sourceCredentialPath = path.join(sourceConfig, "credentials", "kimi-code.json");
+    fs.mkdirSync(path.join(sharedAuthHome, "credentials"), { recursive: true });
+    fs.writeFileSync(
+      path.join(sharedAuthHome, "credentials", "kimi-code.json"),
+      `${JSON.stringify({
+        access_token: "stale-shared-access",
+        expires_at: Math.floor(Date.now() / 1000) + 7200,
+        expires_in: 7200
+      })}\n`,
+      "utf8"
+    );
+    process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = sharedAuthHome;
+    let sharedAuthCommand: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>> | undefined;
+    try {
+      sharedAuthCommand = await new KimiCode029Agent(options).buildCommand({
+        prompt: "Shared auth",
+        cwd: "/workspace/target",
+        options: {}
+      });
+      assert.ok(sharedAuthCommand.env?.KIMI_CODE_HOME);
+      const isolatedCredentials = path.join(sharedAuthCommand.env.KIMI_CODE_HOME, "credentials");
+      assert.equal(fs.lstatSync(isolatedCredentials).isSymbolicLink(), true);
+      assert.equal(fs.realpathSync(isolatedCredentials), path.join(sharedAuthHome, "credentials"));
+      assert.equal(fs.existsSync(path.join(sharedAuthHome, "oauth", "kimi-code")), true);
+      assert.equal(
+        JSON.parse(fs.readFileSync(path.join(sharedAuthHome, "credentials", "kimi-code.json"), "utf8")).refresh_token,
+        "refresh-token"
+      );
+    } finally {
+      if (previousSharedAuthHome === undefined) delete process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME;
+      else process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = previousSharedAuthHome;
+      await sharedAuthCommand?.cleanup?.();
+    }
+
+    fs.writeFileSync(
+      path.join(sharedAuthHome, "credentials", "kimi-code.json"),
+      `${JSON.stringify({
+        access_token: "rotated-shared-access",
+        refresh_token: "rotated-shared-refresh",
+        expires_at: Math.floor(Date.now() / 1000) + 60,
+        expires_in: 900
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      sourceCredentialPath,
+      `${JSON.stringify({
+        access_token: "ancestor-source-access",
+        refresh_token: "refresh-token",
+        expires_at: Math.floor(Date.now() / 1000) + 7200,
+        expires_in: 900
+      })}\n`,
+      "utf8"
+    );
+    process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = sharedAuthHome;
+    let rotatedSharedAuthCommand:
+      Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>> | undefined;
+    try {
+      rotatedSharedAuthCommand = await new KimiCode029Agent(options).buildCommand({
+        prompt: "Shared rotated auth",
+        cwd: "/workspace/target",
+        options: {}
+      });
+      assert.equal(
+        JSON.parse(fs.readFileSync(path.join(sharedAuthHome, "credentials", "kimi-code.json"), "utf8")).refresh_token,
+        "rotated-shared-refresh"
+      );
+    } finally {
+      if (previousSharedAuthHome === undefined) delete process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME;
+      else process.env.ULTRAFUZZ_KIMI_SHARED_AUTH_HOME = previousSharedAuthHome;
+      await rotatedSharedAuthCommand?.cleanup?.();
+    }
+
+    fs.writeFileSync(
+      sourceCredentialPath,
+      `${JSON.stringify({
+        access_token: "expired-source-access",
+        refresh_token: "source-refresh-must-not-rotate",
+        expires_at: 1,
+        expires_in: 1
+      })}\n`,
+      "utf8"
+    );
+    const previousOauthHost = process.env.KIMI_OAUTH_HOST;
+    process.env.KIMI_OAUTH_HOST = "https://127.0.0.1:9";
+    let expiredSourceCommand: Awaited<ReturnType<InstanceType<typeof KimiCode029Agent>["buildCommand"]>> | undefined;
+    try {
+      expiredSourceCommand = await new KimiCode029Agent(options).buildCommand({
+        prompt: "Expired source should not refresh during build",
+        cwd: "/workspace/target",
+        options: {}
+      });
+      assert.equal(expiredSourceCommand.args.includes("--session"), false);
+      const sourceToken = JSON.parse(fs.readFileSync(sourceCredentialPath, "utf8")) as { refresh_token?: string };
+      assert.equal(sourceToken.refresh_token, "source-refresh-must-not-rotate");
+    } finally {
+      if (previousOauthHost === undefined) delete process.env.KIMI_OAUTH_HOST;
+      else process.env.KIMI_OAUTH_HOST = previousOauthHost;
+      await expiredSourceCommand?.cleanup?.();
     }
 
     const resumeSession = "00000000-0000-0000-0000-000000000105";
@@ -1070,9 +1184,61 @@ default_effort = "high"
     };
     assert.equal(resumedState.agents?.main?.homedir, path.join(resumedSessionDir, "agents", "main"));
 
+    const abandoned = new KimiCode029Agent(options);
+    const abandonedCommand = await abandoned.buildCommand({
+      prompt: "Abandoned before cleanup",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    assert.ok(abandonedCommand.env?.KIMI_CODE_HOME);
+    const abandonedHome = abandonedCommand.env.KIMI_CODE_HOME;
+    assert.match(path.relative(sourceConfig, abandonedHome), /^\.ultrafuzz-invocations\//u);
+    const crashSession = "00000000-0000-0000-0000-000000000107";
+    const crashBucket = "wd_target_000000000107";
+    const abandonedSessionDir = path.join(abandonedHome, "sessions", crashBucket, crashSession);
+    fs.mkdirSync(path.join(abandonedSessionDir, "agents", "main"), { recursive: true });
+    fs.writeFileSync(
+      path.join(abandonedSessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: {
+            homedir: path.join(abandonedSessionDir, "agents", "main"),
+            type: "agent",
+            parentAgentId: null
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(abandonedHome, "session_index.jsonl"),
+      `${JSON.stringify({
+        sessionId: crashSession,
+        sessionDir: abandonedSessionDir,
+        workDir: "/workspace/target"
+      })}\n`,
+      "utf8"
+    );
+    const crashResumed = await new KimiCode029Agent(options).buildCommand({
+      prompt: "Resume abandoned",
+      cwd: "/workspace/target",
+      options: { resumeSession: crashSession }
+    });
+    assert.ok(crashResumed.env?.KIMI_CODE_HOME);
+    assert.notEqual(crashResumed.env.KIMI_CODE_HOME, abandonedHome);
+    const crashResumedSessionDir = path.join(crashResumed.env.KIMI_CODE_HOME, "sessions", crashBucket, crashSession);
+    assert.equal(fs.existsSync(path.join(crashResumedSessionDir, "state.json")), true);
+    const crashResumedState = JSON.parse(fs.readFileSync(path.join(crashResumedSessionDir, "state.json"), "utf8")) as {
+      agents?: { main?: { homedir?: string } };
+    };
+    assert.equal(crashResumedState.agents?.main?.homedir, path.join(crashResumedSessionDir, "agents", "main"));
+
     await Promise.all(commands.map(async (command) => command.cleanup?.()));
     await resumed.cleanup?.();
     await resumedCaptured.cleanup?.();
+    await abandonedCommand.cleanup?.();
+    await crashResumed.cleanup?.();
     assert.ok(isolatedDirs.every((directory) => !fs.existsSync(directory)));
 
     const apiKeyAgent = new KimiCode029Agent({
@@ -1096,6 +1262,7 @@ default_effort = "high"
     assert.match(apiKeyConfig, /\[models\."kimi-k3"\]/);
     assert.match(apiKeyConfig, /model = "k3"/);
     assert.match(apiKeyConfig, /default_effort = "low"/);
+    assert.match(apiKeyConfig, /\[thinking\]\nenabled = true\neffort = "low"/u);
     assert.equal(fs.existsSync(path.join(apiKeyConfigDir, "credentials")), false);
     assert.equal(fs.existsSync(path.join(apiKeyConfigDir, "device_id")), false);
     await apiKeyCommand.cleanup?.();
@@ -1117,7 +1284,7 @@ default_effort = "high"
 
 const localKimiCode =
   process.env.ULTRAFUZZ_KIMI_BIN ??
-  fs.realpathSync(path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs"));
+  path.join(process.cwd(), "node_modules", "@moonshot-ai", "kimi-code", "dist", "main.mjs");
 test(
   "generated Kimi API config and argv match the real Kimi Code 0.29.1 surface",
   { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
@@ -1180,6 +1347,84 @@ test(
       /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
     );
     await command.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi subscription path reflects real Kimi Code 0.29.1 rejecting near-refresh access-only credentials",
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-frozen-auth-"));
+    try {
+      fs.mkdirSync(path.join(home, "credentials"), { recursive: true });
+      fs.writeFileSync(
+        path.join(home, "config.toml"),
+        `default_model = "kimi-k3"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+api_key = ""
+base_url = "https://127.0.0.1:9/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[models.kimi-k3]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]
+support_efforts = [ "low", "high", "max" ]
+default_effort = "max"
+
+[thinking]
+enabled = true
+`,
+        "utf8"
+      );
+      fs.writeFileSync(path.join(home, "device_id"), "00000000-0000-0000-0000-000000000105\n", "utf8");
+      fs.writeFileSync(
+        path.join(home, "credentials", "kimi-code.json"),
+        `${JSON.stringify({
+          access_token: "contract-access-token",
+          expires_at: Math.floor(Date.now() / 1000) + 60,
+          expires_in: 900,
+          token_type: "Bearer",
+          scope: "openid"
+        })}\n`,
+        "utf8"
+      );
+      execFileSync(localKimiCode, ["doctor", "config", path.join(home, "config.toml")], { encoding: "utf8" });
+      const parsed = spawnSync(
+        localKimiCode,
+        ["--output-format", "text", "--model", "kimi-k3", "--prompt", "Contract only"],
+        {
+          cwd: home,
+          env: {
+            ...process.env,
+            KIMI_CODE_HOME: home,
+            KIMI_SHARE_DIR: home,
+            NO_PROXY: "127.0.0.1,localhost"
+          },
+          encoding: "utf8",
+          timeout: 5_000
+        }
+      );
+      assert.equal(parsed.error, undefined);
+      assert.notEqual(parsed.status, 0);
+      assert.match(`${parsed.stdout}\n${parsed.stderr}`, /login_required|refresh_token|no-refresh-token/u);
+      assert.doesNotMatch(
+        `${parsed.stdout}\n${parsed.stderr}`,
+        /Cannot combine|unknown option|--final-message-only|--yolo/u
+      );
+      const credential = JSON.parse(fs.readFileSync(path.join(home, "credentials", "kimi-code.json"), "utf8")) as {
+        refresh_token?: string;
+      };
+      assert.equal(credential.refresh_token, undefined);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   }
 );
 
@@ -1529,6 +1774,54 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   );
   assert.doesNotMatch(workflowSource, new RegExp(`"promptPath": ${JSON.stringify(project)}`, "u"));
   assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
+});
+
+test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fallback credentials", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        '[agents.KimiAgent]\nauth = "subscription"',
+        '[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"'
+      ),
+    "utf8"
+  );
+
+  const plan = await planRun({ projectRoot: project, runId: "cloud-kimi-nodes", agent: "KimiAgent", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  plan.value!.resolved_config.execution = {
+    mode: "cloud",
+    provider: "modal",
+    retentionDays: 30,
+    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
+    nodes: {},
+    providers: {
+      modal: {
+        app: "ultrafuzz-test",
+        image: "ultrafuzz-test",
+        credentialEnv: ["ULTRAFUZZ_TEST_PROVIDER_ID", "ULTRAFUZZ_TEST_PROVIDER_SECRET"]
+      }
+    }
+  };
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-cloud-kimi-nodes",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const discovery = compiled.tasks.find((task) => task.metadata.node.logicalNodeId === "project-discovery");
+  assert.ok(discovery);
+  assert.equal(discovery.agentRef, "KimiAgent");
+  assert.deepEqual(discovery.execution.agentCredentialEnv, ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"]);
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
@@ -2130,6 +2423,66 @@ credential_env = ["UFZ_PROVIDER_ONE", "UFZ_PROVIDER_TWO"]
 
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.equal(fs.readFileSync(cloudEnvironmentLog, "utf8"), "provider-one|provider-two\n");
+});
+
+test("startRun forwards Kimi-specific runtime environment without exposing unrelated secrets", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const kimiEnvironmentLog = path.join(project, "smithers-kimi-environment.log");
+  const env = {
+    ...fakeSmithersEnv(project),
+    SMITHERS_FAKE_KIMI_ENV_LOG: kimiEnvironmentLog,
+    KIMI_BASE_URL: "https://kimi.example.invalid/v1",
+    ULTRAFUZZ_KIMI_SHARED_AUTH_HOME: "/data/run/kimi-code-auth",
+    ULTRAFUZZ_KIMI_SESSION_HOME: "/data/run/kimi-code-sessions",
+    ULTRAFUZZ_MODAL_REMOTE_ROOT: "/data/run",
+    AWS_SECRET_ACCESS_KEY: "unrelated-host-key"
+  };
+
+  const run = await startRun({ projectRoot: project, runId: "kimi-subscription-environment", agent: "KimiAgent", env });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(
+    fs.readFileSync(kimiEnvironmentLog, "utf8"),
+    "||https://kimi.example.invalid/v1|/data/run/kimi-code-auth|/data/run/kimi-code-sessions|/data/run\n"
+  );
+});
+
+test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const configPath = path.join(project, "ultrafuzz.toml");
+  fs.writeFileSync(
+    configPath,
+    fs
+      .readFileSync(configPath, "utf8")
+      .replace(
+        '[agents.KimiAgent]\nauth = "subscription"',
+        '[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"'
+      ),
+    "utf8"
+  );
+  const kimiEnvironmentLog = path.join(project, "smithers-kimi-api-environment.log");
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "kimi-api-environment",
+    agent: "KimiAgent",
+    env: {
+      ...fakeSmithersEnv(project),
+      SMITHERS_FAKE_KIMI_ENV_LOG: kimiEnvironmentLog,
+      MOONSHOT_API_KEY: "moonshot-fallback-key",
+      KIMI_BASE_URL: "https://kimi.example.invalid/v1"
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(
+    fs.readFileSync(kimiEnvironmentLog, "utf8"),
+    "|moonshot-fallback-key|https://kimi.example.invalid/v1|||\n"
+  );
 });
 
 test("startRun keeps operational input usable while redacting durable workflow evidence", async () => {

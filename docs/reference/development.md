@@ -62,7 +62,7 @@ pnpm --filter @ultrafuzz/modal typecheck
 pnpm --filter @ultrafuzz/modal build
 ```
 
-These tests also validate the exact three-target automatic smoke and two-model full
+These tests also validate the exact three-target automatic smoke and three-provider full
 EVMBench configuration, the fixed Sol judge, one-hour row budget, immutable
 image naming, hash-manifested public bundles, and the Modal-only benchmark
 workflow. They make no cloud or model calls.
