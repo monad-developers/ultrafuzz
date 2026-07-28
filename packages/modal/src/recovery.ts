@@ -96,6 +96,20 @@ export const DEFAULT_MODAL_RECOVERY_POLICY: Readonly<ModalRecoveryPolicy> = {
   backoffMaxMs: MODAL_RECOVERY_BACKOFF_MAX_MS
 };
 
+export function modalRecoveryPolicyForNodeTimeout(
+  nodeTimeoutSeconds: number,
+  overrides: Partial<ModalRecoveryPolicy> = {}
+): ModalRecoveryPolicy {
+  if (!Number.isSafeInteger(nodeTimeoutSeconds) || nodeTimeoutSeconds <= 0) {
+    throw new Error("Modal node timeout must be a positive integer");
+  }
+  const policy = recoveryPolicy(overrides);
+  return {
+    ...policy,
+    staleAfterMs: Math.max(policy.staleAfterMs, nodeTimeoutSeconds * 1_000 + policy.resumeGraceMs)
+  };
+}
+
 export type ModalRecoveryAction = "keep" | "wait" | "launch" | "replace" | "complete" | "terminal" | "defer-rollout";
 
 export interface ModalRecoveryDecision {

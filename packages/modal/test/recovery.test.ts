@@ -5,6 +5,7 @@ import {
   markModalRecoveryWorkerLaunched,
   markModalRecoveryWorkerStopped,
   modalRecoveryBackoffMs,
+  modalRecoveryPolicyForNodeTimeout,
   parseModalRecoveryState,
   reconcileModalRecoveryRow,
   reserveModalRecoveryWorker,
@@ -25,6 +26,17 @@ const IMAGE_ONE = "recovery-image-one";
 const IMAGE_TWO = "recovery-image-two";
 
 describe("Modal durable recovery policy", () => {
+  it("does not classify a live owner as stale before the configured node timeout", () => {
+    expect(modalRecoveryPolicyForNodeTimeout(120, POLICY)).toMatchObject({
+      resumeGraceMs: 10_000,
+      staleAfterMs: 130_000
+    });
+    expect(modalRecoveryPolicyForNodeTimeout(120, { ...POLICY, staleAfterMs: 180_000 })).toMatchObject({
+      staleAfterMs: 180_000
+    });
+    expect(() => modalRecoveryPolicyForNodeTimeout(0, POLICY)).toThrow("positive integer");
+  });
+
   it("keeps one live worker when canonical progress is recent even if the mirrored status is stale", () => {
     let row = rowState();
     row = reserveWorker(row, 1, "2026-01-01T00:00:00.000Z");

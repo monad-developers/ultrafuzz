@@ -125,6 +125,7 @@ import {
   createModalRecoveryState,
   markModalRecoveryWorkerLaunched,
   markModalRecoveryWorkerStopped,
+  modalRecoveryPolicyForNodeTimeout,
   parseModalRecoveryState,
   readModalRecoveryState,
   reconcileModalRecoveryRow,
@@ -1356,6 +1357,7 @@ export async function overseeModalBenchmarkOnce(
   }
   const now = input.now ?? Date.now;
   const env = input.env ?? process.env;
+  const recoveryPolicy = modalRecoveryPolicyForNodeTimeout(config.node_timeout_seconds, input.policy);
 
   return withModalLaunchStateLock(statePath, async () => {
     const launchState = parseModalLaunchState(JSON.parse(await readFile(statePath, "utf8")) as unknown);
@@ -1458,7 +1460,7 @@ export async function overseeModalBenchmarkOnce(
             canonical: inspected.canonical,
             complete,
             forceRollout: input.forceRollout,
-            policy: input.policy
+            policy: recoveryPolicy
           });
           row = decision.row;
           setModalRecoveryRow(recoveryState, row);
