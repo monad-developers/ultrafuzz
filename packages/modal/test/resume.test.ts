@@ -53,7 +53,7 @@ describe("Modal durable evaluation resume", () => {
     ]);
   });
 
-  it("resumes terminal operational checkpoints that still have unfinished logical rows", () => {
+  it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "failed" },
@@ -71,7 +71,7 @@ describe("Modal durable evaluation resume", () => {
         { run_id: "durable-run-one", status: "failed" },
         { succeeded: 58, failed: 1, remaining: 0 }
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       modalDurableRunNeedsResume(
         { run_id: "durable-run-one", status: "succeeded" },
