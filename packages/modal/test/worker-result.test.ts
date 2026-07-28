@@ -229,6 +229,26 @@ describe("sanitized worker result contracts", () => {
     expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });
   });
 
+  it("counts durable state logical_node_id rows once across loop attempts", async () => {
+    const root = await temporaryRoot();
+    const runRoot = path.join(root, ".ultrafuzz", "runs", "run-one");
+    fs.mkdirSync(runRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify({
+        nodes: {
+          "strategy-0": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-0" },
+          "strategy-1": { ...taskNode("succeeded"), logical_node_id: "strategy", node_id: "strategy-1" },
+          "strategy-2": { ...taskNode("running"), logical_node_id: "strategy", node_id: "strategy-2" },
+          setup: { ...taskNode("succeeded"), logical_node_id: "setup", node_id: "setup" },
+          review: { ...taskNode("failed"), logical_node_id: "review", node_id: "review" }
+        }
+      })}\n`
+    );
+
+    expect((await readWorkerCheckpoint(root)).counts).toEqual({ succeeded: 1, failed: 1, remaining: 1 });
+  });
+
   it("propagates checkpoint storage failures instead of reporting an empty successful snapshot", async () => {
     const root = await temporaryRoot();
     const runsRoot = path.join(root, ".ultrafuzz", "runs");

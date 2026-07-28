@@ -434,7 +434,7 @@ function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {
     if (node === undefined) continue;
     const status = node.status;
     if (typeof status !== "string") continue;
-    const logicalId = typeof node.logical_id === "string" && node.logical_id.trim() !== "" ? node.logical_id : nodeId;
+    const logicalId = checkpointLogicalId(nodeId, node);
     logical.set(logicalId, [...(logical.get(logicalId) ?? []), status]);
   }
 
@@ -447,6 +447,14 @@ function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {
     else remaining += 1;
   }
   return { succeeded, failed, remaining };
+}
+
+function checkpointLogicalId(nodeId: string, node: Record<string, unknown>): string {
+  for (const field of ["logical_id", "logical_node_id"] as const) {
+    const value = node[field];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return nodeId;
 }
 
 function aggregateUsage(metadata: Record<string, unknown> | undefined): AggregateUsage | null {
