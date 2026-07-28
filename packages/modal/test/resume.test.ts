@@ -8,6 +8,7 @@ import {
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
   NonResumableTerminalRunError,
+  modalDurableRunNeedsResume,
   repairModalEvalRunRecord
 } from "../src/resume.js";
 
@@ -48,6 +49,33 @@ describe("Modal durable evaluation resume", () => {
       "/workspace/target",
       "--json"
     ]);
+  });
+
+  it("resumes terminal operational checkpoints that still have unfinished logical rows", () => {
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "running" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 58, failed: 1, remaining: 0 }
+      )
+    ).toBe(false);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "succeeded" },
+        { succeeded: 59, failed: 0, remaining: 0 }
+      )
+    ).toBe(false);
   });
 
   it("locates one exact linked durable run and rejects ambiguity", async () => {

@@ -35,8 +35,26 @@ export class NonResumableTerminalRunError extends Error {
   }
 }
 
+export interface ModalResumeCheckpointCounts {
+  succeeded: number;
+  failed: number;
+  remaining: number;
+}
+
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--json"];
+}
+
+export function modalDurableRunNeedsResume(
+  state: ModalResumeRunState,
+  counts: ModalResumeCheckpointCounts
+): boolean {
+  if (!isTerminalRunStatus(state.status)) return true;
+  return counts.remaining > 0 && counts.failed === 0;
+}
+
+function isTerminalRunStatus(status: string | undefined): boolean {
+  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
 }
 
 export function modalEvalRunCommand(input: {
