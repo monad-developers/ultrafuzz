@@ -2476,6 +2476,29 @@ test("workflow synchronization preserves the paused run state", async () => {
   assert.equal(status.value?.workflow?.status, "paused");
 });
 
+test("workflow synchronization preserves a quota-waiting run with parked tasks", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const launchEnv = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "quota-waiting-sync", env: launchEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-quota-waiting-sync",
+      status: "waiting-quota",
+      state: "waiting-quota",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+
+  const status = await getRunStatus({ projectRoot: project, runId: "quota-waiting-sync", env });
+
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.status, "running");
+  assert.equal(status.value?.workflow?.status, "waiting-quota");
+});
+
 test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
   for (const keepWorkspaces of [false, true]) {
     const project = tempProject();
@@ -6687,7 +6710,16 @@ test("resume suppresses duplicate submissions for every active workflow run stat
   const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  for (const state of ["in-progress", "started", "queued", "retrying", "waiting-approval"]) {
+  for (const state of [
+    "in-progress",
+    "started",
+    "queued",
+    "retrying",
+    "waiting-approval",
+    "waiting-event",
+    "waiting-timer",
+    "waiting-quota"
+  ]) {
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
       `${JSON.stringify(

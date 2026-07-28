@@ -102,7 +102,8 @@ const SMITHERS_ACTIVE_RUN_STATES = new Set([
   "queued",
   "waiting-approval",
   "waiting-event",
-  "waiting-timer"
+  "waiting-timer",
+  "waiting-quota"
 ]);
 
 export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.workflow.v1" as const;
