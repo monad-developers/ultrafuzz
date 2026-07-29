@@ -1541,8 +1541,15 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
+    rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
   };
   assert.deepEqual(persistedPlan.execution, plan.value!.resolved_config.execution);
+  assert.equal(persistedPlan.rendered_prompts.length, 1);
+  assert.match(persistedPlan.rendered_prompts[0]!.rendered_prompt_snapshot_path ?? "", /^prompt-snapshots\//u);
+  assert.equal(
+    fs.existsSync(path.join(plan.value!.run_root, persistedPlan.rendered_prompts[0]!.rendered_prompt_snapshot_path!)),
+    true
+  );
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
@@ -1557,25 +1564,65 @@ test("repairs only missing rendered prompts from compatible persisted run metada
   const expected = fs.readFileSync(promptPath, "utf8");
   fs.rmSync(promptPath);
 
-  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 1);
+  assert.equal(
+    await repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "prompt-repair",
+      runRoot: plan.value!.run_root
+    }),
+    1
+  );
   assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
-  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 0);
+  assert.equal(
+    await repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "prompt-repair",
+      runRoot: plan.value!.run_root
+    }),
+    0
+  );
 });
 
-test("repairs a digest-identical prompt when non-prompt runtime configuration changed", async () => {
+test("serializes concurrent prompt repairs without deleting another invocation's output", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "concurrent-prompt-repair", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
+  const expected = fs.readFileSync(promptPath, "utf8");
+  fs.rmSync(promptPath);
+
+  const repair = () =>
+    repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "concurrent-prompt-repair",
+      runRoot: plan.value!.run_root
+    });
+  assert.deepEqual((await Promise.all([repair(), repair()])).sort(), [0, 1]);
+  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
+  assert.equal(fs.existsSync(path.join(plan.value!.run_root, ".prompt-repair")), false);
+});
+
+test("repairs from immutable bytes after prompt-affecting runtime overrides and source changes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const sourcePrompt = path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md");
+  fs.appendFileSync(sourcePrompt, "\nOriginal quorum: {{triage_quorum}} of {{triage_panel_size}}.\n", "utf8");
   const plan = await planRun({
     projectRoot: project,
     runId: "prompt-repair-runtime-override",
-    runtimeOverrides: { maxParallelAgents: 2 },
+    runtimeOverrides: { triageQuorum: 6, triagePanelSize: 7 },
     env: {}
   });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
   const expected = fs.readFileSync(promptPath, "utf8");
+  assert.match(expected, /Original quorum: 6 of 7\./u);
   fs.rmSync(promptPath);
+  fs.appendFileSync(sourcePrompt, "\nChanged after planning.\n", "utf8");
+  fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "not valid toml = [\n", "utf8");
 
   assert.equal(
     await repairMissingRenderedPromptsForRun({
@@ -1588,7 +1635,7 @@ test("repairs a digest-identical prompt when non-prompt runtime configuration ch
   assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
 });
 
-test("validates complete legacy rendered prompts but refuses changed content or an unprovable repair", async () => {
+test("refuses all digest-less legacy prompt reuse because original lineage is unprovable", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -1598,41 +1645,45 @@ test("validates complete legacy rendered prompts but refuses changed content or 
   const persisted = JSON.parse(fs.readFileSync(planPath, "utf8")) as {
     rendered_prompts: Array<Record<string, unknown>>;
   };
-  persisted.rendered_prompts = persisted.rendered_prompts.map(({ rendered_prompt_digest: _digest, ...entry }) => ({
-    ...entry,
-    rendered_prompt_path: path.join("/__legacy_volume_mount", String(entry.rendered_prompt_path).replace(/^\/+/u, ""))
-  }));
+  persisted.rendered_prompts = persisted.rendered_prompts.map(
+    ({ rendered_prompt_digest: _digest, rendered_prompt_snapshot_path: _snapshot, ...entry }) => ({
+      ...entry,
+      rendered_prompt_path: path.join("/__legacy_volume_mount", String(entry.rendered_prompt_path).replace(/^\/+/u, ""))
+    })
+  );
   fs.writeFileSync(planPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
-  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }), 0);
-  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
-  const originalPrompt = fs.readFileSync(promptPath, "utf8");
-  fs.writeFileSync(promptPath, `${originalPrompt}\nchanged\n`, "utf8");
   await assert.rejects(
-    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }),
-    /does not match regenerated task input/u
-  );
-  fs.writeFileSync(promptPath, originalPrompt, "utf8");
-  fs.rmSync(plan.value!.rendered_prompts[0]!.rendered_prompt_path);
-  await assert.rejects(
-    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }),
-    /cannot repair missing legacy rendered prompt/u
+    repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "legacy-prompt-repair",
+      runRoot: plan.value!.run_root
+    }),
+    /cannot validate legacy rendered prompt/u
   );
 });
 
-test("refuses rendered prompt repair when regenerated content does not match its persisted digest", async () => {
+test("refuses rendered prompt repair when its immutable snapshot does not match the persisted digest", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const plan = await planRun({ projectRoot: project, runId: "prompt-lineage", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const prompt = plan.value!.rendered_prompts[0]!;
+  const persisted = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
+    rendered_prompts: Array<{ rendered_prompt_snapshot_path: string }>;
+  };
+  const snapshotPath = path.join(plan.value!.run_root, persisted.rendered_prompts[0]!.rendered_prompt_snapshot_path);
   fs.rmSync(prompt.rendered_prompt_path);
-  fs.appendFileSync(path.join(project, ".ultrafuzz", "prompts", prompt.prompt_path), "\n.\n", "utf8");
+  fs.appendFileSync(snapshotPath, "\n.\n", "utf8");
 
   await assert.rejects(
-    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-lineage" }),
-    /did not match persisted task metadata/u
+    repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "prompt-lineage",
+      runRoot: plan.value!.run_root
+    }),
+    /immutable rendered prompt snapshot does not match persisted task metadata/u
   );
   assert.equal(fs.existsSync(prompt.rendered_prompt_path), false);
 });
@@ -1647,7 +1698,11 @@ test("refuses to reuse an existing rendered prompt that does not match its persi
   fs.appendFileSync(prompt.rendered_prompt_path, "\n.\n", "utf8");
 
   await assert.rejects(
-    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-validation" }),
+    repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "prompt-validation",
+      runRoot: plan.value!.run_root
+    }),
     /existing rendered prompt does not match persisted task metadata/u
   );
 });

@@ -300,6 +300,7 @@ Before or at launch, each run MUST persist:
 - `events.jsonl`
 - `attempts.jsonl`
 - `plan.json`
+- immutable rendered prompt snapshots under `prompt-snapshots/`
 - per-node artifacts under `artifacts/`
 - review artifacts under `review/`
 - event query indexes under `events.index/`

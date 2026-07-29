@@ -1,15 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import lockfile from "proper-lockfile";
+
 import {
   appendEvent,
+  assertNoSymlinkComponents,
+  assertRegularFileInside,
   createInitialRunState,
   artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
+  safeResolveInside,
   updateNodeState,
   writeArtifactManifest,
+  writeFileDurable,
   writeJsonDurable,
   type NodeStateInput,
   type RunLayout
@@ -59,6 +65,9 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+
+const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
+const PROMPT_REPAIR_LOCK = ".prompt-repair";
 
 export async function planRun(input: PlanRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -194,6 +203,7 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
   }
 
+  const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
   writeJsonDurable(path.join(layout.root, "plan.json"), {
     schema_version: RUNTIME_SCHEMA_VERSION,
     run_id: runId,
@@ -204,7 +214,7 @@ export async function planRun(input: PlanRunInput) {
     redacted_config_fingerprint: redactedConfigFingerprint,
     execution: resolved.config.execution,
     topology: validation.value.topology,
-    rendered_prompts: renderedPrompts,
+    rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
     )
@@ -231,29 +241,46 @@ export async function planRun(input: PlanRunInput) {
 export async function repairMissingRenderedPromptsForRun(input: {
   projectRoot: string;
   runId: string;
-  runRoot?: string;
+  runRoot: string;
 }): Promise<number> {
   const projectRoot = path.resolve(input.projectRoot);
-  const resolved = await loadResolvedProject({ projectRoot });
-  if (resolved.config === undefined) {
-    throw new Error("cannot repair rendered prompts without a valid resolved configuration");
+  const layout = layoutForRunRoot(path.resolve(input.runRoot), input.runId);
+  const rootStat = fs.lstatSync(layout.root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("cannot repair rendered prompts from an unsafe run root");
   }
-  const runRoot =
-    input.runRoot === undefined
-      ? path.join(outputRootForConfig(projectRoot, resolved.config), input.runId)
-      : input.runRoot;
-  const layout = layoutForRunRoot(runRoot, input.runId);
-  const graph = readPersistedPlannedGraph(layout.graphPath);
+  const release = await lockfile.lock(layout.root, {
+    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
+    realpath: false,
+    stale: 300_000,
+    update: 60_000,
+    retries: {
+      retries: 120,
+      factor: 1,
+      minTimeout: 250,
+      maxTimeout: 1_000
+    }
+  });
+  try {
+    return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
+  } finally {
+    await release();
+  }
+}
+
+function repairRenderedPromptsForRun(input: { projectRoot: string; runId: string; layout: RunLayout }): number {
+  const { projectRoot, layout } = input;
+  readPersistedPlannedGraph(layout.graphPath);
   const plan = readPersistedPromptPlan(path.join(layout.root, "plan.json"));
   if (plan.run_id !== input.runId) {
     throw new Error("cannot repair rendered prompts from incompatible run metadata");
   }
 
   const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
-  const missingAttempts = new Set<string>();
-  const legacyAttempts = new Set<string>();
+  const repairs: Array<{ attemptId: string; promptPath: string; contents: string }> = [];
   for (const [attemptId, expected] of expectedByAttempt) {
     const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+    assertNoSymlinkComponents(layout.root, promptPath, `rendered prompt for ${attemptId}`);
     const projectRelativePromptPath = path.relative(projectRoot, promptPath);
     const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
     if (
@@ -264,108 +291,58 @@ export async function repairMissingRenderedPromptsForRun(input: {
     ) {
       throw new Error(`persisted rendered prompt path is incompatible for ${attemptId}`);
     }
+    if (expected.rendered_prompt_digest === undefined) {
+      throw new Error(
+        `cannot validate legacy rendered prompt for ${attemptId} without a persisted digest; start a new run`
+      );
+    }
     if (!fs.existsSync(promptPath)) {
-      if (expected.rendered_prompt_digest === undefined) {
-        throw new Error(`cannot repair missing legacy rendered prompt for ${attemptId} without a persisted digest`);
+      if (expected.rendered_prompt_snapshot_path === undefined) {
+        throw new Error(`cannot repair rendered prompt for ${attemptId} without an immutable snapshot`);
       }
-      missingAttempts.add(attemptId);
+      const snapshotPath = safeResolveInside(
+        layout.root,
+        expected.rendered_prompt_snapshot_path,
+        `rendered prompt snapshot for ${attemptId}`
+      );
+      assertRegularFileInside(layout.root, snapshotPath, `rendered prompt snapshot for ${attemptId}`);
+      const contents = fs.readFileSync(snapshotPath, "utf8");
+      if (sha256Stable(contents) !== expected.rendered_prompt_digest) {
+        throw new Error(`immutable rendered prompt snapshot does not match persisted task metadata for ${attemptId}`);
+      }
+      repairs.push({ attemptId, promptPath, contents });
       continue;
     }
-    const stat = fs.lstatSync(promptPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      throw new Error(`cannot repair unsafe rendered prompt for ${attemptId}`);
-    }
-    if (
-      expected.rendered_prompt_digest !== undefined &&
-      sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expected.rendered_prompt_digest
-    ) {
-      throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
-    }
-    if (expected.rendered_prompt_digest === undefined) legacyAttempts.add(attemptId);
+    validateRenderedPromptFile(layout, promptPath, expected.rendered_prompt_digest, attemptId);
   }
-  if (legacyAttempts.size > 0) {
-    const regenerated = renderPromptsForPlan({
-      catalog: loadPromptCatalog({ projectRoot }),
-      graph,
-      layout,
-      projectRoot,
-      resolvedConfig: resolved.config,
-      runId: input.runId,
-      attemptIds: legacyAttempts,
-      write: false
-    });
-    const regeneratedByAttempt = new Map(
-      regenerated.flatMap((entry) => (entry.attempt_id === undefined ? [] : [[entry.attempt_id, entry] as const]))
-    );
-    if (
-      regeneratedByAttempt.size !== legacyAttempts.size ||
-      [...legacyAttempts].some((attemptId) => !regeneratedByAttempt.has(attemptId))
-    ) {
-      throw new Error("legacy rendered prompt validation did not reproduce every persisted task input");
-    }
-    for (const attemptId of legacyAttempts) {
-      const expected = expectedByAttempt.get(attemptId)!;
-      const candidate = regeneratedByAttempt.get(attemptId)!;
-      const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
-      if (
-        path.resolve(candidate.rendered_prompt_path) !== path.resolve(promptPath) ||
-        candidate.prompt_id !== expected.prompt_id ||
-        candidate.prompt_path !== expected.prompt_path ||
-        JSON.stringify(candidate.variables_used) !== JSON.stringify(expected.variables_used) ||
-        sha256Stable(fs.readFileSync(promptPath, "utf8")) !== candidate.rendered_prompt_digest
-      ) {
-        throw new Error(`existing legacy rendered prompt does not match regenerated task input for ${attemptId}`);
-      }
-    }
-  }
-  if (missingAttempts.size === 0) return 0;
 
-  let rendered: RenderedPromptPlan[];
-  try {
-    rendered = renderPromptsForPlan({
-      catalog: loadPromptCatalog({ projectRoot }),
-      graph,
+  let repaired = 0;
+  for (const repair of repairs) {
+    // Every cooperating lifecycle command holds the per-run lock. If an
+    // external writer created the prompt meanwhile, validate it instead of
+    // overwriting or deleting content that this invocation does not own.
+    if (fs.existsSync(repair.promptPath)) {
+      const expected = expectedByAttempt.get(repair.attemptId)!;
+      validateRenderedPromptFile(layout, repair.promptPath, expected.rendered_prompt_digest!, repair.attemptId);
+      continue;
+    }
+    writeFileDurable(repair.promptPath, repair.contents);
+    validateRenderedPromptFile(
       layout,
-      projectRoot,
-      resolvedConfig: resolved.config,
-      runId: input.runId,
-      attemptIds: missingAttempts
+      repair.promptPath,
+      expectedByAttempt.get(repair.attemptId)!.rendered_prompt_digest!,
+      repair.attemptId
+    );
+    repaired += 1;
+  }
+  if (repaired > 0) {
+    appendEvent(layout, {
+      eventType: "rendered-prompts-repaired",
+      status: "succeeded",
+      payload: { count: repaired }
     });
-  } catch (error) {
-    for (const attemptId of missingAttempts) {
-      fs.rmSync(path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE), { force: true });
-    }
-    throw error;
   }
-  const repairedAttempts = new Set(rendered.map((entry) => entry.attempt_id).filter((value) => value !== undefined));
-  if (
-    repairedAttempts.size !== missingAttempts.size ||
-    [...missingAttempts].some((attemptId) => !repairedAttempts.has(attemptId))
-  ) {
-    for (const entry of rendered) fs.rmSync(entry.rendered_prompt_path, { force: true });
-    throw new Error("rendered prompt repair did not reproduce every missing task input");
-  }
-  for (const entry of rendered) {
-    const attemptId = entry.attempt_id!;
-    const expected = expectedByAttempt.get(attemptId)!;
-    const expectedPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
-    if (
-      path.resolve(entry.rendered_prompt_path) !== path.resolve(expectedPath) ||
-      entry.prompt_id !== expected.prompt_id ||
-      entry.prompt_path !== expected.prompt_path ||
-      entry.rendered_prompt_digest !== expected.rendered_prompt_digest ||
-      JSON.stringify(entry.variables_used) !== JSON.stringify(expected.variables_used)
-    ) {
-      for (const candidate of rendered) fs.rmSync(candidate.rendered_prompt_path, { force: true });
-      throw new Error(`rendered prompt repair did not match persisted task metadata for ${attemptId}`);
-    }
-  }
-  appendEvent(layout, {
-    eventType: "rendered-prompts-repaired",
-    status: "succeeded",
-    payload: { count: rendered.length }
-  });
-  return rendered.length;
+  return repaired;
 }
 
 interface PersistedPromptPlanEntry {
@@ -374,6 +351,7 @@ interface PersistedPromptPlanEntry {
   prompt_path: string;
   rendered_prompt_path: string;
   rendered_prompt_digest?: string;
+  rendered_prompt_snapshot_path?: string;
   variables_used: string[];
 }
 
@@ -400,6 +378,8 @@ function readPersistedPromptPlan(planPath: string): {
       (candidate.rendered_prompt_digest !== undefined &&
         (typeof candidate.rendered_prompt_digest !== "string" ||
           !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest))) ||
+      (candidate.rendered_prompt_snapshot_path !== undefined &&
+        typeof candidate.rendered_prompt_snapshot_path !== "string") ||
       !Array.isArray(candidate.variables_used) ||
       !candidate.variables_used.every((item) => typeof item === "string")
     ) {
@@ -413,6 +393,9 @@ function readPersistedPromptPlan(planPath: string): {
       ...(candidate.rendered_prompt_digest === undefined
         ? {}
         : { rendered_prompt_digest: candidate.rendered_prompt_digest }),
+      ...(candidate.rendered_prompt_snapshot_path === undefined
+        ? {}
+        : { rendered_prompt_snapshot_path: candidate.rendered_prompt_snapshot_path }),
       variables_used: candidate.variables_used
     };
   });
@@ -425,6 +408,41 @@ function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
     throw new Error("persisted planned graph is invalid");
   }
   return value as PlannedGraph;
+}
+
+function persistRenderedPromptSnapshots(
+  layout: RunLayout,
+  renderedPrompts: readonly RenderedPromptPlan[]
+): Array<RenderedPromptPlan & { rendered_prompt_snapshot_path: string }> {
+  return renderedPrompts.map((entry) => {
+    const contents = fs.readFileSync(entry.rendered_prompt_path, "utf8");
+    if (sha256Stable(contents) !== entry.rendered_prompt_digest) {
+      throw new Error(`rendered prompt changed before its immutable snapshot was persisted for ${entry.attempt_id}`);
+    }
+    const relativeSnapshotPath = `${RENDERED_PROMPT_SNAPSHOT_DIR}/${entry.rendered_prompt_digest}.md`;
+    const snapshotPath = safeResolveInside(layout.root, relativeSnapshotPath, "rendered prompt snapshot");
+    if (fs.existsSync(snapshotPath)) {
+      assertRegularFileInside(layout.root, snapshotPath, "rendered prompt snapshot");
+      if (sha256Stable(fs.readFileSync(snapshotPath, "utf8")) !== entry.rendered_prompt_digest) {
+        throw new Error(`immutable rendered prompt snapshot digest collision for ${entry.attempt_id}`);
+      }
+    } else {
+      writeFileDurable(snapshotPath, contents);
+    }
+    return { ...entry, rendered_prompt_snapshot_path: relativeSnapshotPath };
+  });
+}
+
+function validateRenderedPromptFile(
+  layout: RunLayout,
+  promptPath: string,
+  expectedDigest: string,
+  attemptId: string
+): void {
+  assertRegularFileInside(layout.root, promptPath, `rendered prompt for ${attemptId}`);
+  if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expectedDigest) {
+    throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
+  }
 }
 
 export function transformPromptCatalogForRun(
@@ -639,8 +657,6 @@ function renderPromptsForPlan(input: {
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
-  attemptIds?: ReadonlySet<string>;
-  write?: boolean;
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
@@ -652,7 +668,6 @@ function renderPromptsForPlan(input: {
     }
     const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
     for (const attempt of promptAttemptsForNode(node, input.layout)) {
-      if (input.attemptIds !== undefined && !input.attemptIds.has(attempt.attemptId)) continue;
       const result = renderPrompt({
         prompt: {
           id: promptEntry.id,
@@ -698,7 +713,7 @@ function renderPromptsForPlan(input: {
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });
-      if (input.write ?? true) writeRenderedPrompt(result);
+      writeRenderedPrompt(result);
       rendered.push({
         node_id: node.id,
         logical_node_id: node.logical_id,

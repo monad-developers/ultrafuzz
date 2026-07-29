@@ -26,10 +26,12 @@
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
-    "@ultrafuzz/topology": "workspace:*"
+    "@ultrafuzz/topology": "workspace:*",
+    "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
     "@moonshot-ai/kimi-code": "0.29.1",
+    "@types/proper-lockfile": "^4.1.4",
     "smithers-orchestrator": "0.29.0"
   }
 }

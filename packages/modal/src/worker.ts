@@ -215,7 +215,8 @@ async function resumeExistingEvaluation(
 }> {
   const repairedPrompts = await repairMissingRenderedPromptsForRun({
     projectRoot: workspace.target,
-    runId: workspace.productRunId
+    runId: workspace.productRunId,
+    runRoot: path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
   });
   if (repairedPrompts > 0) await flushVolume();
   modelWorkStarted = true;
