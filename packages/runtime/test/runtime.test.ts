@@ -1558,6 +1558,23 @@ test("repairs only missing rendered prompts from compatible persisted run metada
   assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 0);
 });
 
+test("refuses rendered prompt repair when regenerated content does not match its persisted digest", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "prompt-lineage", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const prompt = plan.value!.rendered_prompts[0]!;
+  fs.rmSync(prompt.rendered_prompt_path);
+  fs.appendFileSync(path.join(project, ".ultrafuzz", "prompts", prompt.prompt_path), "\n.\n", "utf8");
+
+  await assert.rejects(
+    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-lineage" }),
+    /did not match persisted task metadata/u
+  );
+  assert.equal(fs.existsSync(prompt.rendered_prompt_path), false);
+});
+
 test("plan uses an eval topology override without replacing the project topology", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

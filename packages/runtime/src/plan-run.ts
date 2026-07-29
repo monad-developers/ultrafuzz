@@ -285,6 +285,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
       path.resolve(entry.rendered_prompt_path) !== path.resolve(expectedPath) ||
       entry.prompt_id !== expected.prompt_id ||
       entry.prompt_path !== expected.prompt_path ||
+      entry.rendered_prompt_digest !== expected.rendered_prompt_digest ||
       JSON.stringify(entry.variables_used) !== JSON.stringify(expected.variables_used)
     ) {
       for (const candidate of rendered) fs.rmSync(candidate.rendered_prompt_path, { force: true });
@@ -303,6 +304,7 @@ interface PersistedPromptPlanEntry {
   attempt_id: string;
   prompt_id: string;
   prompt_path: string;
+  rendered_prompt_digest: string;
   variables_used: string[];
 }
 
@@ -325,6 +327,8 @@ function readPersistedPromptPlan(planPath: string): {
       typeof candidate.attempt_id !== "string" ||
       typeof candidate.prompt_id !== "string" ||
       typeof candidate.prompt_path !== "string" ||
+      typeof candidate.rendered_prompt_digest !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest) ||
       !Array.isArray(candidate.variables_used) ||
       !candidate.variables_used.every((item) => typeof item === "string")
     ) {
@@ -334,6 +338,7 @@ function readPersistedPromptPlan(planPath: string): {
       attempt_id: candidate.attempt_id,
       prompt_id: candidate.prompt_id,
       prompt_path: candidate.prompt_path,
+      rendered_prompt_digest: candidate.rendered_prompt_digest,
       variables_used: candidate.variables_used
     };
   });
@@ -626,6 +631,7 @@ function renderPromptsForPlan(input: {
         prompt_id: promptEntry.id,
         prompt_path: promptEntry.relativePath,
         rendered_prompt_path: result.renderedPromptPath,
+        rendered_prompt_digest: sha256Stable(result.renderedMarkdown),
         variables_used: result.variablesUsed,
         artifact_references: result.artifactReferences
       });

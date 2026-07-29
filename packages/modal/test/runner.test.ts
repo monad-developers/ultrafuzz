@@ -826,12 +826,14 @@ describe("Modal canonical recovery probe", () => {
         }
       })
     );
+    fs.writeFileSync(path.join(runRoot, "plan.json"), JSON.stringify({ topology: { logical_nodes: 3 } }));
     const command = modalCanonicalRecoveryProbeCommand(remoteRoot, mount);
 
     expect(JSON.parse(execFileSync(command[0]!, command.slice(1), { encoding: "utf8" }))).toEqual({
       status: "running",
       successful_nodes: 1,
       total_nodes: 2,
+      planned_nodes: 3,
       last_transition_at: "2026-01-01T00:09:50.000Z",
       last_success_at: "2026-01-01T00:09:45.000Z"
     });

@@ -1450,7 +1450,11 @@ export async function overseeModalBenchmarkOnce(
             [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
             launch
           );
-          const complete = isModalWorkerStatusComplete(workerStatus, inspected.canonical?.total_nodes);
+          const complete =
+            inspected.canonical !== undefined &&
+            inspected.canonical.successful_nodes === inspected.canonical.planned_nodes &&
+            inspected.canonical.total_nodes === inspected.canonical.planned_nodes &&
+            isModalWorkerStatusComplete(workerStatus, inspected.canonical.planned_nodes);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
             row,
@@ -1899,7 +1903,9 @@ if (candidates.length === 0) {
   process.exit(0);
 }
 candidates.sort((left, right) => right.modified - left.modified);
-const state = JSON.parse(fs.readFileSync(candidates[0].statePath, "utf8"));
+const statePath = candidates[0].statePath;
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+const plan = JSON.parse(fs.readFileSync(path.join(path.dirname(statePath), "plan.json"), "utf8"));
 const nodes = state && typeof state.nodes === "object" && state.nodes !== null ? Object.values(state.nodes) : [];
 const successful = new Set(["succeeded", "reused-from-prior-run"]);
 const logical = new Map();
@@ -1929,6 +1935,7 @@ process.stdout.write(JSON.stringify({
   status: typeof state.status === "string" ? state.status : "unknown",
   successful_nodes: successfulNodes.length,
   total_nodes: logical.size,
+  planned_nodes: Number.isSafeInteger(plan?.topology?.logical_nodes) ? plan.topology.logical_nodes : -1,
   last_transition_at: typeof state.last_transition_at === "string" ? state.last_transition_at : state.created_at,
   ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
 }));`;
@@ -1940,13 +1947,17 @@ function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalP
   const status = recoveryString(record, "status");
   const successfulNodes = recoveryCount(record, "successful_nodes");
   const totalNodes = recoveryCount(record, "total_nodes");
+  const plannedNodes = recoveryCount(record, "planned_nodes");
   const lastTransitionAt = recoveryString(record, "last_transition_at");
   const lastSuccessAt = recoveryString(record, "last_success_at");
   if (
     status === undefined ||
     successfulNodes === undefined ||
     totalNodes === undefined ||
+    plannedNodes === undefined ||
+    plannedNodes === 0 ||
     successfulNodes > totalNodes ||
+    totalNodes > plannedNodes ||
     lastTransitionAt === undefined ||
     !Number.isFinite(Date.parse(lastTransitionAt)) ||
     (lastSuccessAt !== undefined && !Number.isFinite(Date.parse(lastSuccessAt)))
@@ -1957,6 +1968,7 @@ function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalP
     status,
     successful_nodes: successfulNodes,
     total_nodes: totalNodes,
+    planned_nodes: plannedNodes,
     last_transition_at: lastTransitionAt,
     ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
   };

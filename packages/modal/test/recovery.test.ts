@@ -392,6 +392,7 @@ function progress(overrides: Partial<ModalRecoveryCanonicalProgress> = {}): Moda
     status: "running",
     successful_nodes: 0,
     total_nodes: 4,
+    planned_nodes: 4,
     last_transition_at: "2026-01-01T00:00:00.000Z",
     ...overrides
   };

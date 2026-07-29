@@ -68,6 +68,7 @@ export interface ModalRecoveryCanonicalProgress {
   status: string;
   successful_nodes: number;
   total_nodes: number;
+  planned_nodes: number;
   last_transition_at: string;
   last_success_at?: string;
 }

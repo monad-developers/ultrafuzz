@@ -172,6 +172,7 @@ export interface RenderedPromptPlan {
   prompt_id: string;
   prompt_path: string;
   rendered_prompt_path: string;
+  rendered_prompt_digest: string;
   variables_used: string[];
   artifact_references: unknown[];
 }
