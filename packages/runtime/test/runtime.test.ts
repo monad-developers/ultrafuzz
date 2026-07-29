@@ -1575,6 +1575,21 @@ test("refuses rendered prompt repair when regenerated content does not match its
   assert.equal(fs.existsSync(prompt.rendered_prompt_path), false);
 });
 
+test("refuses to reuse an existing rendered prompt that does not match its persisted digest", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "prompt-validation", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const prompt = plan.value!.rendered_prompts[0]!;
+  fs.appendFileSync(prompt.rendered_prompt_path, "\n.\n", "utf8");
+
+  await assert.rejects(
+    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-validation" }),
+    /existing rendered prompt does not match persisted task metadata/u
+  );
+});
+
 test("plan uses an eval topology override without replacing the project topology", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

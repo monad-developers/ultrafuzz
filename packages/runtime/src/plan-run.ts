@@ -247,7 +247,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
 
   const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
   const missingAttempts = new Set<string>();
-  for (const [attemptId] of expectedByAttempt) {
+  for (const [attemptId, expected] of expectedByAttempt) {
     const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
     if (!fs.existsSync(promptPath)) {
       missingAttempts.add(attemptId);
@@ -257,18 +257,29 @@ export async function repairMissingRenderedPromptsForRun(input: {
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new Error(`cannot repair unsafe rendered prompt for ${attemptId}`);
     }
+    if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expected.rendered_prompt_digest) {
+      throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
+    }
   }
   if (missingAttempts.size === 0) return 0;
 
-  const rendered = renderPromptsForPlan({
-    catalog: loadPromptCatalog({ projectRoot }),
-    graph,
-    layout,
-    projectRoot,
-    resolvedConfig: resolved.config,
-    runId: input.runId,
-    attemptIds: missingAttempts
-  });
+  let rendered: RenderedPromptPlan[];
+  try {
+    rendered = renderPromptsForPlan({
+      catalog: loadPromptCatalog({ projectRoot }),
+      graph,
+      layout,
+      projectRoot,
+      resolvedConfig: resolved.config,
+      runId: input.runId,
+      attemptIds: missingAttempts
+    });
+  } catch (error) {
+    for (const attemptId of missingAttempts) {
+      fs.rmSync(path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE), { force: true });
+    }
+    throw error;
+  }
   const repairedAttempts = new Set(rendered.map((entry) => entry.attempt_id).filter((value) => value !== undefined));
   if (
     repairedAttempts.size !== missingAttempts.size ||
