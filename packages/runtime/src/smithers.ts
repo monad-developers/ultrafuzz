@@ -554,7 +554,6 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--node-id",
           failedNodeId,
-          "--deps",
           "--force",
           "--format",
           "json"
@@ -653,7 +652,6 @@ export async function runSmithersLifecycleCommand(input: {
           "--node-id",
           input.resetNode,
           "--no-vcs",
-          "--deps",
           "--force",
           "--format",
           "json"

@@ -6261,7 +6261,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --deps --force --format json/
+    /timetravel .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --node-id node:project-discovery --no-vcs --force --format json/
   );
   assert.match(
     commands,
@@ -6372,7 +6372,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --deps --force --format json/u
+    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });
@@ -6411,7 +6411,7 @@ test("resume retries a failed task reported inside a successful terminal workflo
   assert.match(commands, /inspect ultrafuzz-terminal-row-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --deps --force --format json/u
+    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });
@@ -6459,7 +6459,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --deps --force --format json/u
+    /retry-task .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });
