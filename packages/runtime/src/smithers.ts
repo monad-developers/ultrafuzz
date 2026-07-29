@@ -546,9 +546,9 @@ export async function runSmithersLifecycleCommand(input: {
         ? smithersSnapshotFailedTasks(inspection)[0]
         : undefined;
     if (failedTask !== undefined) {
-      const retryResult = await execSmithersCli({
+      const resetResult = await execSmithersCli({
         args: [
-          "retry-task",
+          "timetravel",
           input.workflowPath,
           "--run-id",
           input.smithersRunId,
@@ -556,6 +556,7 @@ export async function runSmithersLifecycleCommand(input: {
           failedTask.nodeId,
           "--iteration",
           String(failedTask.iteration),
+          "--no-vcs",
           "--force",
           "--format",
           "json"
@@ -565,9 +566,10 @@ export async function runSmithersLifecycleCommand(input: {
         environmentVariableNames: input.environmentVariableNames,
         keepWorkspaces: input.keepWorkspaces
       });
-      return retryResult;
+      preResumeStderr = resetResult.stderr;
     }
     if (
+      failedTask === undefined &&
       input.retryFailed === true &&
       (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
     ) {

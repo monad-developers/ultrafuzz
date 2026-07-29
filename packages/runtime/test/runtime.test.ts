@@ -6376,9 +6376,12 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --force --format json/u
+    /timetravel .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
   );
-  assert.doesNotMatch(commands, /^up /mu);
+  assert.match(
+    commands,
+    /up .*ultrafuzz-terminal-retry-run\.tsx --resume ultrafuzz-terminal-retry-run --run-id ultrafuzz-terminal-retry-run --force --detach --max-concurrency 8 --format json/u
+  );
 });
 
 test("resume retries a failed task reported inside a successful terminal workflow", async () => {
@@ -6416,9 +6419,12 @@ test("resume retries a failed task reported inside a successful terminal workflo
   assert.match(commands, /inspect ultrafuzz-terminal-row-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --iteration 3 --force --format json/u
+    /timetravel .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --iteration 3 --no-vcs --force --format json/u
   );
-  assert.doesNotMatch(commands, /^up /mu);
+  assert.match(
+    commands,
+    /up .*ultrafuzz-terminal-row-retry-run\.tsx --resume ultrafuzz-terminal-row-retry-run --run-id ultrafuzz-terminal-row-retry-run --force --detach --max-concurrency 8 --format json/u
+  );
 });
 
 test("resume retries one failed workflow task before continuing a stale unfinished run", async () => {
@@ -6464,9 +6470,12 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --force --format json/u
+    /timetravel .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --force --format json/u
   );
-  assert.doesNotMatch(commands, /^up /mu);
+  assert.match(
+    commands,
+    /up .*ultrafuzz-stale-retry-run\.tsx --resume ultrafuzz-stale-retry-run --run-id ultrafuzz-stale-retry-run --force --detach --max-concurrency 8 --format json/u
+  );
 });
 
 test("resume rewinds a run-level render failure before continuing unfinished work", async () => {
