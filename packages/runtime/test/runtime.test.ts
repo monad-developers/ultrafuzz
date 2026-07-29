@@ -368,6 +368,7 @@ function workflowInspect(input: {
   status?: string;
   state?: string;
   error?: unknown;
+  failedChildKeys?: string[];
   includeVerifierSteps?: boolean;
   steps: Array<{ id: string; state: string; attempt?: number }>;
 }): unknown {
@@ -400,6 +401,9 @@ function workflowInspect(input: {
         computedAt: "2026-07-03T00:00:03.000Z",
         state: input.state ?? (input.status === "running" ? "running" : "succeeded")
       },
+      ...(input.failedChildKeys === undefined
+        ? {}
+        : { failedChildren: input.failedChildKeys.length, failedChildKeys: input.failedChildKeys }),
       steps
     }
   };
@@ -6372,7 +6376,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --force --format json/u
+    /retry-task .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });
@@ -6386,6 +6390,7 @@ test("resume retries a failed task reported inside a successful terminal workflo
       workflowRunId: "ultrafuzz-terminal-row-retry-run",
       status: "finished",
       state: "succeeded",
+      failedChildKeys: ["node:project-discovery::3"],
       steps: [
         { id: "node:project-discovery", state: "failed", attempt: 1 },
         { id: "node:strategy", state: "pending", attempt: 0 }
@@ -6411,7 +6416,7 @@ test("resume retries a failed task reported inside a successful terminal workflo
   assert.match(commands, /inspect ultrafuzz-terminal-row-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --force --format json/u
+    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --iteration 3 --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });
@@ -6459,7 +6464,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
   assert.match(
     commands,
-    /retry-task .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --force --format json/u
+    /retry-task .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --force --format json/u
   );
   assert.doesNotMatch(commands, /^up /mu);
 });

@@ -541,11 +541,11 @@ export async function runSmithersLifecycleCommand(input: {
         alreadyRunning: true
       };
     }
-    const failedNodeId =
+    const failedTask =
       input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
-        ? smithersSnapshotFailedNodeIds(inspection)[0]
+        ? smithersSnapshotFailedTasks(inspection)[0]
         : undefined;
-    if (failedNodeId !== undefined) {
+    if (failedTask !== undefined) {
       const retryResult = await execSmithersCli({
         args: [
           "retry-task",
@@ -553,7 +553,9 @@ export async function runSmithersLifecycleCommand(input: {
           "--run-id",
           input.smithersRunId,
           "--node-id",
-          failedNodeId,
+          failedTask.nodeId,
+          "--iteration",
+          String(failedTask.iteration),
           "--force",
           "--format",
           "json"
@@ -885,12 +887,21 @@ function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boo
   return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
 }
 
-function smithersSnapshotFailedNodeIds(snapshot: SmithersCommandSnapshot): string[] {
+function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
   const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
   const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const failedTasks = new Map<string, { nodeId: string; iteration: number }>();
+  const failedChildKeys = [data.failedChildKeys, parsed.failedChildKeys].find(Array.isArray) ?? [];
+  for (const key of failedChildKeys) {
+    if (typeof key !== "string") continue;
+    const separator = key.lastIndexOf("::");
+    const nodeId = separator < 0 ? key : key.slice(0, separator);
+    const iteration = separator < 0 ? 0 : Number(key.slice(separator + 2));
+    if (nodeId.trim() === "" || !Number.isSafeInteger(iteration) || iteration < 0) continue;
+    failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
+  }
   const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
   const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
-  const failedNodeIds = new Set<string>();
   for (const collection of collections) {
     const entries = Array.isArray(collection)
       ? collection
@@ -902,15 +913,20 @@ function smithersSnapshotFailedNodeIds(snapshot: SmithersCommandSnapshot): strin
     for (const entry of entries) {
       if (!isObjectRecord(entry)) continue;
       const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
-      const nodeId = [entry.id, entry.nodeId, entry.node_id].find(
+      const nodeId = [entry.nodeId, entry.node_id, entry.id].find(
         (value): value is string => typeof value === "string" && value.trim() !== ""
       );
+      const iteration =
+        typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
+          ? entry.iteration
+          : 0;
       if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
-        failedNodeIds.add(nodeId);
+        const key = `${nodeId}::${iteration}`;
+        if (!failedTasks.has(key)) failedTasks.set(key, { nodeId, iteration });
       }
     }
   }
-  return [...failedNodeIds];
+  return [...failedTasks.values()];
 }
 
 function latestSmithersTimelineFrame(value: unknown): number | undefined {
