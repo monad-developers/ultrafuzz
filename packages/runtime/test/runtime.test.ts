@@ -6377,6 +6377,45 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   assert.doesNotMatch(commands, /^up /mu);
 });
 
+test("resume retries a failed task reported inside a successful terminal workflow", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-terminal-row-retry-run",
+      status: "finished",
+      state: "succeeded",
+      steps: [
+        { id: "node:project-discovery", state: "failed", attempt: 1 },
+        { id: "node:strategy", state: "pending", attempt: 0 }
+      ]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "terminal-row-retry-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({
+    projectRoot: project,
+    runId: "terminal-row-retry-run",
+    maxConcurrency: 8,
+    force: true,
+    retryFailed: true,
+    env
+  });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-terminal-row-retry-run --format json/u);
+  assert.match(
+    commands,
+    /retry-task .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --deps --force --format json/u
+  );
+  assert.doesNotMatch(commands, /^up /mu);
+});
+
 test("resume retries one failed workflow task before continuing a stale unfinished run", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

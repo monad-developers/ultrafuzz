@@ -541,32 +541,35 @@ export async function runSmithersLifecycleCommand(input: {
         alreadyRunning: true
       };
     }
+    const failedNodeId =
+      input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
+        ? smithersSnapshotFailedNodeIds(inspection)[0]
+        : undefined;
+    if (failedNodeId !== undefined) {
+      const retryResult = await execSmithersCli({
+        args: [
+          "retry-task",
+          input.workflowPath,
+          "--run-id",
+          input.smithersRunId,
+          "--node-id",
+          failedNodeId,
+          "--deps",
+          "--force",
+          "--format",
+          "json"
+        ],
+        projectRoot: input.projectRoot,
+        env: input.env,
+        environmentVariableNames: input.environmentVariableNames,
+        keepWorkspaces: input.keepWorkspaces
+      });
+      return retryResult;
+    }
     if (
       input.retryFailed === true &&
       (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
     ) {
-      const failedNodeId = smithersSnapshotFailedNodeIds(inspection)[0];
-      if (failedNodeId !== undefined) {
-        const retryResult = await execSmithersCli({
-          args: [
-            "retry-task",
-            input.workflowPath,
-            "--run-id",
-            input.smithersRunId,
-            "--node-id",
-            failedNodeId,
-            "--deps",
-            "--force",
-            "--format",
-            "json"
-          ],
-          projectRoot: input.projectRoot,
-          env: input.env,
-          environmentVariableNames: input.environmentVariableNames,
-          keepWorkspaces: input.keepWorkspaces
-        });
-        return retryResult;
-      }
       if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
         if (!isCompatibleSmithersRunId(input.smithersRunId)) {
           assertRegularFileInside(
