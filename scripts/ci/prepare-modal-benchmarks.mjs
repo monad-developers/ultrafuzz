@@ -11,11 +11,11 @@ import {
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
   publicBenchmarkMaxParallelEvalRows,
-  publicBenchmarkMaxParallelWorkflowNodes
+  publicBenchmarkMaxParallelWorkflowNodes,
+  publicBenchmarkMaxRuntimeSeconds
 } from "../../packages/modal/dist/public-worker.js";
 
 const PUBLIC_NODE_TIMEOUT_SECONDS = 1800;
-const PUBLIC_MAX_RUNTIME_SECONDS = 3600;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const SAFE_REASONING = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
@@ -70,13 +70,14 @@ const targets = selectedTargets.map((target) => ({
 
 const models = benchmarkModels(mode, lane.model_profiles);
 const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
+const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
 if (!Number.isSafeInteger(maxParallelEvalRows) || maxParallelEvalRows <= 0) {
   throw new Error(`invalid ${mode} maximum parallel eval rows`);
 }
 const matrixRowsPerPair = selectedTargets.length * lane.trials_per_variant;
 const matrixWaves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
 const controlTimeoutSeconds =
-  matrixWaves * PUBLIC_MAX_RUNTIME_SECONDS +
+  matrixWaves * maxRuntimeSeconds +
   PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
   matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +
@@ -104,7 +105,7 @@ for (const model of models) {
       candidate_repository: repository,
       candidate_commit: candidateCommit,
       targets,
-      max_runtime_seconds: PUBLIC_MAX_RUNTIME_SECONDS
+      max_runtime_seconds: maxRuntimeSeconds
     },
     braintrust: {
       project: "ultrafuzz-public-benchmarks",

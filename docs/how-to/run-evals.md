@@ -217,8 +217,9 @@ A manual workflow dispatch launches the full EVMBench cohort instead, with
 GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max` by default. Its
 model and reasoning inputs can override all full-lane runners. Full runs only
 through that manual dispatch; pushes always select smoke. Both modes retain
-the standard Modal CPU and memory allocation, give each target row a
-3,600-second watchdog, and publish ordinary 30-day Actions artifacts. Missing
+the standard Modal CPU and memory allocation. Smoke rows receive a
+7,200-second watchdog, full-lane rows retain the 3,600-second watchdog, and
+both publish ordinary 30-day Actions artifacts. Missing
 credentials, revision drift, unavailable ground truth, failed model work,
 scoring errors, or an incomplete configured matrix fail before publication.
 
