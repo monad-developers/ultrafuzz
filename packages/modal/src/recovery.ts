@@ -232,6 +232,10 @@ export function createModalRecoveryState(input: {
   });
 }
 
+export function modalRecoveryRowsComplete(rows: readonly Pick<ModalRecoveryRowState, "status">[]): boolean {
+  return rows.every((row) => row.status === "completed");
+}
+
 export async function readModalRecoveryState(statePath: string): Promise<ModalRecoveryState | undefined> {
   try {
     return parseModalRecoveryState(JSON.parse(await readFile(path.resolve(statePath), "utf8")) as unknown);

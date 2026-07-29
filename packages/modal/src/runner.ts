@@ -125,6 +125,7 @@ import {
   createModalRecoveryState,
   markModalRecoveryWorkerLaunched,
   markModalRecoveryWorkerStopped,
+  modalRecoveryRowsComplete,
   modalRecoveryPolicyForNodeTimeout,
   parseModalRecoveryState,
   readModalRecoveryState,
@@ -1337,7 +1338,7 @@ export async function overseeModalBenchmarks(input: {
       snapshots.push(await overseeModalBenchmarkOnce({ ...job, env: input.env }));
     }
     console.log(JSON.stringify({ updated_at: new Date().toISOString(), jobs: snapshots }));
-    if (snapshots.every((snapshot) => snapshot.settled)) return snapshots;
+    if (snapshots.every((snapshot) => snapshot.complete)) return snapshots;
     await sleep(pollMs);
   }
 }
@@ -1516,10 +1517,11 @@ export async function overseeModalBenchmarkOnce(
           }
           rows.push(recoverySnapshot(row, decision.action, decision.reason, decision.retry_after_ms));
         }
+        const complete = modalRecoveryRowsComplete(rows);
         return {
           logical_run_id: launchState.logical_run_id,
-          complete: rows.every((row) => row.status === "completed"),
-          settled: rows.every((row) => row.status === "completed" || row.status === "terminal"),
+          complete,
+          settled: complete,
           rows
         };
       } finally {

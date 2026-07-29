@@ -6,6 +6,7 @@ import {
   markModalRecoveryWorkerStopped,
   modalRecoveryBackoffMs,
   modalRecoveryPolicyForNodeTimeout,
+  modalRecoveryRowsComplete,
   parseModalRecoveryState,
   reconcileModalRecoveryRow,
   reserveModalRecoveryWorker,
@@ -26,6 +27,11 @@ const IMAGE_ONE = "recovery-image-one";
 const IMAGE_TWO = "recovery-image-two";
 
 describe("Modal durable recovery policy", () => {
+  it("does not accept an incomplete terminal row as settled", () => {
+    expect(modalRecoveryRowsComplete([{ status: "terminal" }])).toBe(false);
+    expect(modalRecoveryRowsComplete([{ status: "completed" }])).toBe(true);
+  });
+
   it("does not classify a live owner as stale before the configured node timeout", () => {
     expect(modalRecoveryPolicyForNodeTimeout(120, POLICY)).toMatchObject({
       resumeGraceMs: 10_000,
