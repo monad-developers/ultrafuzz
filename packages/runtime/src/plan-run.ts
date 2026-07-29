@@ -231,18 +231,22 @@ export async function planRun(input: PlanRunInput) {
 export async function repairMissingRenderedPromptsForRun(input: {
   projectRoot: string;
   runId: string;
+  runRoot?: string;
 }): Promise<number> {
   const projectRoot = path.resolve(input.projectRoot);
   const resolved = await loadResolvedProject({ projectRoot });
   if (resolved.config === undefined) {
     throw new Error("cannot repair rendered prompts without a valid resolved configuration");
   }
-  const runRoot = path.join(outputRootForConfig(projectRoot, resolved.config), input.runId);
+  const runRoot =
+    input.runRoot === undefined
+      ? path.join(outputRootForConfig(projectRoot, resolved.config), input.runId)
+      : input.runRoot;
   const layout = layoutForRunRoot(runRoot, input.runId);
   const graph = readPersistedPlannedGraph(layout.graphPath);
   const plan = readPersistedPromptPlan(path.join(layout.root, "plan.json"));
-  if (plan.run_id !== input.runId || plan.config_fingerprint !== sha256Stable(resolved.config)) {
-    throw new Error("cannot repair rendered prompts from incompatible run configuration");
+  if (plan.run_id !== input.runId) {
+    throw new Error("cannot repair rendered prompts from incompatible run metadata");
   }
 
   const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));

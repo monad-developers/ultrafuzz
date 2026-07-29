@@ -1558,6 +1558,32 @@ test("repairs only missing rendered prompts from compatible persisted run metada
   assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 0);
 });
 
+test("repairs a digest-identical prompt when non-prompt runtime configuration changed", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "prompt-repair-runtime-override",
+    runtimeOverrides: { maxParallelAgents: 2 },
+    env: {}
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
+  const expected = fs.readFileSync(promptPath, "utf8");
+  fs.rmSync(promptPath);
+
+  assert.equal(
+    await repairMissingRenderedPromptsForRun({
+      projectRoot: project,
+      runId: "prompt-repair-runtime-override",
+      runRoot: plan.value!.run_root
+    }),
+    1
+  );
+  assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
+});
+
 test("preserves complete legacy rendered prompts but refuses an unprovable legacy repair", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -6242,6 +6268,24 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
     commands,
     /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-forked --run-id ultrafuzz-lifecycle-run-forked --force --detach --max-concurrency 8 --format json/
   );
+});
+
+test("resume refuses to invoke Smithers when a persisted rendered prompt was modified", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "lifecycle-prompt-integrity", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const promptPath = path.join(run.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md");
+  fs.appendFileSync(promptPath, "\nmodified\n", "utf8");
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, env });
+
+  assert.equal(resumed.ok, false);
+  assert.equal(resumed.diagnostics[0]?.code, "WORKFLOW_LIFECYCLE_FAILED");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
 });
 
 test("resume keeps an already-running linked workflow attached without launching a duplicate", async () => {

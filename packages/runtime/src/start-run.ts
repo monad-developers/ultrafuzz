@@ -25,7 +25,7 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { planRun } from "./plan-run.js";
+import { planRun, repairMissingRenderedPromptsForRun } from "./plan-run.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
@@ -205,6 +205,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   const requestedConcurrency = input.maxConcurrency ?? resolved.config.run.maxParallelAgents;
   try {
+    await repairMissingRenderedPromptsForRun({
+      projectRoot: path.resolve(input.projectRoot),
+      runId: input.runId,
+      runRoot: evidence.layout.root
+    });
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: resolved.config,
