@@ -245,13 +245,42 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm -w build
 
-      - name: Restore detached launch state
+      - name: Restore detached launch state candidates
         id: restore_launch
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          pattern: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-*
+          path: ${{ github.workspace }}/ci-modal/recovery-candidates
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Select the newest compatible detached launch state
+        if: steps.restore_launch.outcome == 'success'
+        run: |
+          candidate_root='${{ github.workspace }}/ci-modal/recovery-candidates'
+          control_root='${{ github.workspace }}/ci-modal/benchmark-control'
+          artifact_prefix='modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-'
+          current_attempt='${{ github.run_attempt }}'
+          selected=
+          selected_attempt=0
+          shopt -s nullglob
+          for candidate in "$candidate_root"/"$artifact_prefix"*; do
+            [ -d "$candidate" ] || continue
+            artifact_name="${candidate##*/}"
+            attempt="${artifact_name#"$artifact_prefix"}"
+            if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]] || (( attempt > current_attempt )); then
+              continue
+            fi
+            if (( attempt > selected_attempt )); then
+              selected="$candidate"
+              selected_attempt="$attempt"
+            fi
+          done
+          if [ -n "$selected" ]; then
+            mkdir -p "$control_root"
+            cp -a -- "$selected"/. "$control_root"/
+          fi
 
       - name: Discover recoverable launch control
         id: launch_control

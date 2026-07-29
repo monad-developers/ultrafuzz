@@ -938,7 +938,16 @@ describe("public Modal benchmark configuration", () => {
     expect(collect.if).toContain("needs.launch.result != 'skipped'");
     expect(collect.if).not.toContain("always()");
     expect(collect["timeout-minutes"]).toBe(360);
-    expect(step("Restore detached launch state")["continue-on-error"]).toBe(true);
+    const restoreLaunch = step("Restore detached launch state candidates");
+    expect(restoreLaunch["continue-on-error"]).toBe(true);
+    expect(restoreLaunch.with?.pattern).toBe("modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-*");
+    expect(restoreLaunch.with?.["run-id"]).toBe("${{ github.run_id }}");
+    expect(restoreLaunch.with?.["github-token"]).toBe("${{ github.token }}");
+    const selectLaunch = step("Select the newest compatible detached launch state");
+    expect(selectLaunch.if).toBe("steps.restore_launch.outcome == 'success'");
+    expect(selectLaunch.run).toContain("attempt > current_attempt");
+    expect(selectLaunch.run).toContain("attempt > selected_attempt");
+    expect(selectLaunch.run).toContain('cp -a -- "$selected"/. "$control_root"/');
     expect(step("Discover recoverable launch control").if).toBe("always()");
 
     const waitScript = step("Wait for Modal compute and retry only pre-model launch failures").run ?? "";
