@@ -51,6 +51,11 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers workflow prefers its relocatable task prompt path", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+});
+
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const agentStart = source.indexOf("function artifactAwareAgent");
@@ -66,7 +71,10 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(args)"), agent);
 
   const reset = source.slice(rootsStart, preparationStart);
-  assert.match(reset, /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical"\)/u);
+  assert.match(
+    reset,
+    /resetTaskArtifactContents\(task\.metadata\.artifacts\.dir, task\.attemptId, "canonical", task\.promptPath\)/u
+  );
   assert.match(
     reset,
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
@@ -81,8 +89,10 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
   assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
   assert.match(reset, /anchoredRoot !== path\.join\(parent, attemptId\)/u);
+  assert.match(reset, /const preservedInput =/u);
+  assert.match(reset, /candidate === preservedInput/u);
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
-  assert.match(reset, /rmSync\(path\.join\(anchoredRoot, entry\), \{ recursive: true, force: true \}\)/u);
+  assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
   assert.match(reset, /prepareArtifactMirror\(task\)/u);
 });
 

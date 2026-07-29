@@ -58,7 +58,10 @@ outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
-rendered prompt paths, and validation posture.
+rendered prompt paths and digests, immutable prompt snapshot paths, and
+validation posture. Exact rendered prompt snapshots live under
+`prompt-snapshots/`; lifecycle recovery uses those snapshots to restore missing
+task input without consulting mutable prompt sources or current configuration.
 
 ## State
 

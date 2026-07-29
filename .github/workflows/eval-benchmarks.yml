@@ -29,6 +29,16 @@ on:
         required: true
         default: high
         type: string
+      kimi_model:
+        description: Kimi runner model for the full EVMBench run
+        required: true
+        default: kimi-k3
+        type: string
+      kimi_reasoning:
+        description: Kimi runner reasoning effort for the full EVMBench run
+        required: true
+        default: max
+        type: string
 
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
@@ -82,10 +92,12 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
-            required+=(ANTHROPIC_API_KEY)
+            required+=(ANTHROPIC_API_KEY KIMI_API_KEY)
           fi
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -100,6 +112,8 @@ jobs:
           BENCHMARK_OPENAI_REASONING: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_reasoning || 'high' }}
           BENCHMARK_ANTHROPIC_MODEL: ${{ inputs.anthropic_model || 'claude-sonnet-5' }}
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
+          BENCHMARK_KIMI_MODEL: ${{ inputs.kimi_model || 'kimi-k3' }}
+          BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
@@ -114,9 +128,12 @@ jobs:
               --arg openai_reasoning "$BENCHMARK_OPENAI_REASONING" \
               --arg anthropic_model "$BENCHMARK_ANTHROPIC_MODEL" \
               --arg anthropic_reasoning "$BENCHMARK_ANTHROPIC_REASONING" \
+              --arg kimi_model "$BENCHMARK_KIMI_MODEL" \
+              --arg kimi_reasoning "$BENCHMARK_KIMI_REASONING" \
               '[
                 {provider: "openai", model: $openai_model, reasoning: $openai_reasoning},
-                {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning}
+                {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning},
+                {provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}
               ]')"
           fi
           export BENCHMARK_MODELS_JSON
@@ -160,6 +177,8 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           : > "$BENCHMARK_CONTROL/launch-attempts.jsonl"
           while IFS=$'\t' read -r config state pair; do
@@ -226,13 +245,46 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm -w build
 
-      - name: Restore detached launch state
+      - name: Restore detached launch state candidates
         id: restore_launch
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/ci-modal/benchmark-control
+          pattern: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-*
+          path: ${{ github.workspace }}/ci-modal/recovery-candidates
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Select the newest compatible detached launch state
+        if: steps.restore_launch.outcome == 'success'
+        run: |
+          candidate_root='${{ github.workspace }}/ci-modal/recovery-candidates'
+          control_root='${{ github.workspace }}/ci-modal/benchmark-control'
+          artifact_prefix='modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-'
+          current_attempt='${{ github.run_attempt }}'
+          selected=
+          selected_attempt=0
+          if [ -f "$candidate_root/manifest.json" ]; then
+            selected="$candidate_root"
+          else
+            shopt -s nullglob
+            for candidate in "$candidate_root"/"$artifact_prefix"*; do
+              [ -d "$candidate" ] || continue
+              artifact_name="${candidate##*/}"
+              attempt="${artifact_name#"$artifact_prefix"}"
+              if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]] || (( attempt > current_attempt )); then
+                continue
+              fi
+              if (( attempt > selected_attempt )); then
+                selected="$candidate"
+                selected_attempt="$attempt"
+              fi
+            done
+          fi
+          if [ -n "$selected" ]; then
+            mkdir -p "$control_root"
+            cp -a -- "$selected"/. "$control_root"/
+          fi
 
       - name: Discover recoverable launch control
         id: launch_control
@@ -256,6 +308,8 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           control_timeout_seconds="$(jq -er \
             '.control_timeout_seconds | select(type == "number" and . == floor and . >= 300)' \
@@ -457,6 +511,8 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
+          KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           mkdir -p "$BENCHMARK_RESULTS"
           collect_pair() {

@@ -4,7 +4,13 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { locateModalResumeWorkspace, modalDurableResumeCommand, repairModalEvalRunRecord } from "../src/resume.js";
+import {
+  locateModalResumeWorkspace,
+  modalDurableResumeCommand,
+  modalDurableRunAdvanced,
+  modalDurableRunNeedsResume,
+  repairModalEvalRunRecord
+} from "../src/resume.js";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
@@ -41,8 +47,68 @@ describe("Modal durable evaluation resume", () => {
       "durable-run-one",
       "--project",
       "/workspace/target",
+      "--force",
+      "--retry-failed",
       "--json"
     ]);
+  });
+
+  it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "running" },
+        { succeeded: 9, failed: 0, remaining: 50 }
+      )
+    ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "failed" },
+        { succeeded: 58, failed: 1, remaining: 0 }
+      )
+    ).toBe(true);
+    expect(
+      modalDurableRunNeedsResume(
+        { run_id: "durable-run-one", status: "succeeded" },
+        { succeeded: 59, failed: 0, remaining: 0 }
+      )
+    ).toBe(false);
+  });
+
+  it("requires durable post-resume progress before accepting another terminal checkpoint", () => {
+    const before = {
+      run_id: "durable-run-one",
+      status: "failed",
+      started_at: T0,
+      finished_at: T1,
+      nodes: {
+        completed: { status: "succeeded" },
+        retry: { status: "failed" }
+      }
+    };
+    expect(modalDurableRunAdvanced(before, structuredClone(before))).toBe(false);
+    expect(modalDurableRunAdvanced(before, { ...before, finished_at: T2 })).toBe(false);
+    expect(
+      modalDurableRunAdvanced(before, {
+        ...before,
+        status: "running",
+        finished_at: undefined,
+        nodes: { ...before.nodes, retry: { status: "running" } }
+      })
+    ).toBe(true);
+    expect(
+      modalDurableRunAdvanced(before, {
+        ...before,
+        finished_at: T2,
+        nodes: { ...before.nodes, retry: { status: "succeeded" } }
+      })
+    ).toBe(true);
+    expect(modalDurableRunAdvanced(before, { ...before, run_id: "durable-run-two", status: "running" })).toBe(false);
   });
 
   it("locates one exact linked durable run and rejects ambiguity", async () => {

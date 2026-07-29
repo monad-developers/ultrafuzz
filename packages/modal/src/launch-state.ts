@@ -38,8 +38,8 @@ const modelSchema = z
   .object({
     slug: z.string().min(1),
     model: z.string().min(1),
-    provider: z.enum(["openai", "anthropic"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent"]),
+    provider: z.enum(["openai", "anthropic", "kimi"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent", "KimiAgent"]),
     reasoning: z.string().min(1),
     auth_mode: z.enum(["api-key", "subscription"])
   })
@@ -561,6 +561,21 @@ export function isModalWorkerStatusTerminal(
   status: ModalWorkerStatus | undefined
 ): status is ModalWorkerStatus & { terminal: true } {
   return status?.terminal === true;
+}
+
+export function isModalWorkerStatusComplete(
+  status: ModalWorkerStatus | undefined,
+  expectedSucceeded: number | undefined
+): status is ModalWorkerStatus & { terminal: true; category: "succeeded" } {
+  return (
+    Number.isSafeInteger(expectedSucceeded) &&
+    expectedSucceeded! > 0 &&
+    status?.terminal === true &&
+    status.category === "succeeded" &&
+    status.node_counts?.succeeded === expectedSucceeded &&
+    status.node_counts?.failed === 0 &&
+    status.node_counts.remaining === 0
+  );
 }
 
 function matchesWorkerAttempt(

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
@@ -14,6 +14,7 @@ const dataRoot = dataRootOption(process.argv.slice(2));
 const checkpointPath = path.join(dataRoot, "checkpoint.json");
 const completionPath = path.join(dataRoot, "completed-unit");
 const resultPath = path.join(dataRoot, "result.json");
+const stopPath = path.join(dataRoot, "fresh-stop");
 
 async function main(): Promise<void> {
   await mkdir(dataRoot, { recursive: true });
@@ -34,7 +35,16 @@ async function main(): Promise<void> {
       completed_units: 1
     });
     await flushWrites();
-    for (;;) await new Promise((resolve) => setTimeout(resolve, 1_000));
+    for (;;) {
+      try {
+        await access(stopPath, constants.F_OK);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    }
+    await flushWrites();
+    return;
   }
 
   if (performedCompletedWork) throw new Error("resume repeated completed work");
@@ -52,14 +62,31 @@ async function main(): Promise<void> {
 }
 
 async function assertProviderAuth(selected: ModelProvider): Promise<void> {
-  await access(remoteAuthPath(selected), constants.R_OK);
-  const other: ModelProvider = selected === "openai" ? "anthropic" : "openai";
-  try {
-    await access(remoteAuthPath(other), constants.F_OK);
-  } catch {
-    return;
+  if (selected === "kimi") {
+    await assertKimiProviderAuth();
+  } else {
+    await access(remoteAuthPath(selected), constants.R_OK);
   }
-  throw new Error("unselected provider auth was staged");
+  for (const other of modelProviders().filter((provider) => provider !== selected)) {
+    try {
+      await access(remoteAuthPath(other), constants.F_OK);
+    } catch {
+      continue;
+    }
+    throw new Error("unselected provider auth was staged");
+  }
+}
+
+async function assertKimiProviderAuth(): Promise<void> {
+  const authDir = path.posix.dirname(remoteAuthPath("kimi"));
+  await access(remoteAuthPath("kimi"), constants.R_OK);
+  await access(path.posix.join(authDir, "device_id"), constants.R_OK);
+  const credentialsDir = path.posix.join(authDir, "credentials");
+  const credentialFiles = (await readdir(credentialsDir)).filter((name) =>
+    /^[A-Za-z0-9][A-Za-z0-9._-]*\.json$/u.test(name)
+  );
+  if (credentialFiles.length === 0) throw new Error("Kimi credential file was not staged");
+  await Promise.all(credentialFiles.map((name) => access(path.posix.join(credentialsDir, name), constants.R_OK)));
 }
 
 async function completeUnitOnce(): Promise<boolean> {
@@ -102,8 +129,12 @@ async function flushWrites(): Promise<void> {
 
 function providerOption(argv: string[]): ModelProvider {
   const value = requiredOption(argv, "--provider");
-  if (value !== "openai" && value !== "anthropic") throw new Error("provider is invalid");
-  return value;
+  if (!modelProviders().includes(value as ModelProvider)) throw new Error("provider is invalid");
+  return value as ModelProvider;
+}
+
+function modelProviders(): ModelProvider[] {
+  return ["openai", "anthropic", "kimi"];
 }
 
 function phaseOption(argv: string[]): "fresh" | "resume" {

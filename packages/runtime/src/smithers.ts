@@ -364,7 +364,9 @@ function smithersInputDocument(
     ...(operatorInput !== undefined ? { operator_input: operatorInput } : {}),
     tasks: compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
-      ...(task.renderedPromptPath ? { prompt_path: task.renderedPromptPath } : {})
+      ...(task.renderedPromptPath
+        ? { prompt_path: executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt") }
+        : {})
     }))
   };
 }
@@ -458,6 +460,8 @@ export async function runSmithersLifecycleCommand(input: {
   maxConcurrency?: number;
   forkFrame?: number;
   resetNode?: string;
+  force?: boolean;
+  retryFailed?: boolean;
   label?: string;
   resumeRecovery?: {
     runRoot: string;
@@ -476,13 +480,14 @@ export async function runSmithersLifecycleCommand(input: {
   recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
+  let preResumeStderr = "";
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
     const inspection = await runSmithersInspectionCommand({
       args: ["inspect", input.smithersRunId, "--format", "json"],
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND")) {
+    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
       assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
       assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
       fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
@@ -528,13 +533,114 @@ export async function runSmithersLifecycleCommand(input: {
         `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
       );
     }
-    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined) {
+    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
         command: inspection.command,
         alreadyRunning: true
       };
+    }
+    const failedTasks =
+      input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
+        ? smithersSnapshotFailedTasks(inspection)
+        : [];
+    if (failedTasks.length > 0) {
+      const resetStderr: string[] = [];
+      for (const failedTask of failedTasks) {
+        const resetResult = await execSmithersCli({
+          args: [
+            "timetravel",
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--node-id",
+            failedTask.nodeId,
+            "--iteration",
+            String(failedTask.iteration),
+            "--no-deps",
+            "--force",
+            "--format",
+            "json"
+          ],
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        });
+        if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
+      }
+      preResumeStderr = resetStderr.join("\n");
+    }
+    if (
+      failedTasks.length === 0 &&
+      input.retryFailed === true &&
+      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
+    ) {
+      if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
+        if (!isCompatibleSmithersRunId(input.smithersRunId)) {
+          assertRegularFileInside(
+            input.resumeRecovery.runRoot,
+            input.resumeRecovery.inputPath,
+            "persisted workflow input"
+          );
+          assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
+          fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
+          assertNoSymlinkComponents(
+            input.resumeRecovery.runRoot,
+            input.resumeRecovery.logsDir,
+            "workflow log directory"
+          );
+          const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
+          const recovery = await execSmithersCli({
+            args: [
+              "up",
+              input.workflowPath,
+              "--detach",
+              "--run-id",
+              replacementRunId,
+              ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+              "--root",
+              input.projectRoot,
+              "--log-dir",
+              input.resumeRecovery.logsDir,
+              "--input",
+              fs.readFileSync(input.resumeRecovery.inputPath, "utf8"),
+              "--format",
+              "json",
+              ...supervisorCommandArgs(input.controllerLeaseSeconds)
+            ],
+            projectRoot: input.projectRoot,
+            env: input.env,
+            environmentVariableNames: input.environmentVariableNames,
+            keepWorkspaces: input.keepWorkspaces
+          });
+          writeJsonDurable(path.join(path.dirname(input.resumeRecovery.inputPath), "recovery-submission.json"), {
+            schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
+            smithers_run_id: replacementRunId,
+            recovery: "incompatible-workflow-run-id",
+            command: recovery.command,
+            stdout: redactedEvidenceText(recovery.stdout),
+            stderr: redactedEvidenceText(recovery.stderr),
+            submitted_at: new Date().toISOString()
+          });
+          return { ...recovery, workflowRunId: replacementRunId };
+        }
+        const timeline = await execSmithersCli({
+          args: ["timeline", input.smithersRunId, "--json"],
+          projectRoot: input.projectRoot,
+          env: input.env
+        });
+        const latestFrame = latestSmithersTimelineFrame(jsonField(timeline.stdout).json);
+        if (latestFrame !== undefined) {
+          const rewind = await execSmithersCli({
+            args: ["rewind", input.smithersRunId, String(latestFrame), "--yes", "--json"],
+            projectRoot: input.projectRoot,
+            env: input.env
+          });
+          preResumeStderr = [timeline.stderr, rewind.stderr].filter((value) => value.length > 0).join("\n");
+        }
+      }
     }
   }
 
@@ -554,7 +660,6 @@ export async function runSmithersLifecycleCommand(input: {
           "--node-id",
           input.resetNode,
           "--no-vcs",
-          "--deps",
           "--force",
           "--format",
           "json"
@@ -683,6 +788,7 @@ export async function runSmithersLifecycleCommand(input: {
           input.smithersRunId,
           "--run-id",
           input.smithersRunId,
+          ...(input.force === true ? ["--force"] : []),
           "--detach",
           ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
           "--format",
@@ -701,6 +807,7 @@ export async function runSmithersLifecycleCommand(input: {
   });
   return {
     ...result,
+    stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
     ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
 }
@@ -751,6 +858,16 @@ function smithersSnapshotHasErrorCode(snapshot: SmithersCommandSnapshot, code: s
   );
 }
 
+function smithersSnapshotHasMissingRunHistory(snapshot: SmithersCommandSnapshot): boolean {
+  const evidence = [
+    snapshot.stdout,
+    snapshot.stderr,
+    snapshot.error ?? "",
+    snapshot.json === undefined ? "" : JSON.stringify(snapshot.json)
+  ].join("\n");
+  return evidence.includes("No Smithers run history found") || evidence.includes("No workflow run history found");
+}
+
 function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
   const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
   const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
@@ -765,6 +882,81 @@ function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | u
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
   const state = smithersSnapshotRunState(snapshot);
   return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+}
+
+function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
+  const state = smithersSnapshotRunState(snapshot);
+  return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
+}
+
+function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
+  return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
+}
+
+function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
+  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const failedTasks = new Map<string, { nodeId: string; iteration: number }>();
+  const failedChildKeys = [data.failedChildKeys, parsed.failedChildKeys].find(Array.isArray) ?? [];
+  for (const key of failedChildKeys) {
+    if (typeof key !== "string") continue;
+    const separator = key.lastIndexOf("::");
+    const nodeId = separator < 0 ? key : key.slice(0, separator);
+    const iteration = separator < 0 ? 0 : Number(key.slice(separator + 2));
+    if (nodeId.trim() === "" || !Number.isSafeInteger(iteration) || iteration < 0) continue;
+    failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
+  }
+  if (failedTasks.size > 0) return [...failedTasks.values()];
+  const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
+  const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
+  for (const collection of collections) {
+    const entries = Array.isArray(collection)
+      ? collection
+      : isObjectRecord(collection)
+        ? Object.entries(collection).map(([id, value]) =>
+            isObjectRecord(value) && typeof value.id !== "string" ? { ...value, id } : value
+          )
+        : [];
+    for (const entry of entries) {
+      if (!isObjectRecord(entry)) continue;
+      const state = [entry.state, entry.status].find((value): value is string => typeof value === "string");
+      const nodeId = [entry.nodeId, entry.node_id, entry.id].find(
+        (value): value is string => typeof value === "string" && value.trim() !== ""
+      );
+      const iteration =
+        typeof entry.iteration === "number" && Number.isSafeInteger(entry.iteration) && entry.iteration >= 0
+          ? entry.iteration
+          : 0;
+      if (state !== undefined && nodeId !== undefined && failedStates.has(state.toLowerCase())) {
+        const key = `${nodeId}::${iteration}`;
+        if (!failedTasks.has(key)) failedTasks.set(key, { nodeId, iteration });
+      }
+    }
+  }
+  return [...failedTasks.values()];
+}
+
+function latestSmithersTimelineFrame(value: unknown): number | undefined {
+  const parsed = isObjectRecord(value) ? value : {};
+  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
+  const timeline = isObjectRecord(data.timeline) ? data.timeline : data;
+  const frames = Array.isArray(timeline.frames) ? timeline.frames : [];
+  const frameNumbers = frames.flatMap((frame) => {
+    if (!isObjectRecord(frame)) return [];
+    const frameNumber = frame.frameNo ?? frame.frame_no ?? frame.frame;
+    return typeof frameNumber === "number" && Number.isSafeInteger(frameNumber) && frameNumber >= 0
+      ? [frameNumber]
+      : [];
+  });
+  return frameNumbers.length === 0 ? undefined : Math.max(...frameNumbers);
+}
+
+function isCompatibleSmithersRunId(value: string): boolean {
+  return /^[a-z0-9_-]{1,64}$/u.test(value);
+}
+
+function compatibleRecoveryRunId(value: string): string {
+  return `ufz-recovery-${crypto.createHash("sha256").update(value).digest("hex").slice(0, 32)}`;
 }
 
 function resetNodeMarkerMatches(markerPath: string | undefined, smithersRunId: string, nodeId: string): boolean {
@@ -1168,10 +1360,7 @@ function compileTask(input: {
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
-  const agentCredentialEnv =
-    input.config.execution.mode === "cloud" && agent?.auth === "api-key" && agent.apiKeyEnv !== undefined
-      ? [agent.apiKeyEnv]
-      : [];
+  const agentCredentialEnv = cloudAgentCredentialEnv(input.config.execution.mode, profile.agent, agent);
   const execution = {
     mode: input.config.execution.mode,
     ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
@@ -1271,6 +1460,17 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+function cloudAgentCredentialEnv(
+  executionMode: ResolvedConfig["execution"]["mode"],
+  agentRef: string,
+  agent: ResolvedConfig["agents"][string] | undefined
+): string[] {
+  if (executionMode !== "cloud" || agent?.auth !== "api-key" || agent.apiKeyEnv === undefined) return [];
+  const names = [agent.apiKeyEnv];
+  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY", "KIMI_BASE_URL");
+  return names;
 }
 
 function nodeAttemptsFor(node: ExpandedNode): NodeAttemptProvenance[] {

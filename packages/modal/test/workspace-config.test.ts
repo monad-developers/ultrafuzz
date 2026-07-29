@@ -37,6 +37,40 @@ describe("Modal target model profiles", () => {
     expect(config).toContain("default_timeout_seconds = 900");
   });
 
+  it("generates Kimi agent config for Kimi K3 without the incompatible final-message flag", () => {
+    const config = modalTargetToml(
+      {
+        slug: "kimi-k3",
+        model: "kimi-k3",
+        provider: "kimi",
+        agent: "KimiAgent",
+        reasoning: "max",
+        auth_mode: "subscription"
+      },
+      900
+    );
+
+    expect(config).toContain(`[models.default]\nagent = "KimiAgent"\nmodel = "kimi-k3"\nreasoning = "max"`);
+    expect(config).toContain('[agents.KimiAgent]\nauth = "subscription"\nconfig_dir = "/run/ultrafuzz-auth/kimi"');
+    expect(config).not.toContain("final-message-only");
+  });
+
+  it("uses Kimi-compatible API-key credentials for public Kimi benchmark targets", () => {
+    const config = modalTargetToml(
+      {
+        slug: "kimi-k3",
+        model: "kimi-k3",
+        provider: "kimi",
+        agent: "KimiAgent",
+        reasoning: "max",
+        auth_mode: "api-key"
+      },
+      900
+    );
+
+    expect(config).toContain('[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"');
+  });
+
   it("caps explicit group and node timeouts to the public benchmark node budget", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-timeout-cap-"));
     const topologyPath = path.join(root, "topology.yml");

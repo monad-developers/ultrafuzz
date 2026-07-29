@@ -40,6 +40,11 @@ const CONCURRENCY_KEYS = [
   "max_live_runner_workflows_by_provider",
   "max_live_judge_rows"
 ];
+const PROVIDER_AGENT = {
+  openai: "CodexAgent",
+  anthropic: "ClaudeAgent",
+  kimi: "KimiAgent"
+};
 
 export function validateAutomaticPublicationManifest(value, context) {
   const expected = publicationExpectations(context);
@@ -330,7 +335,7 @@ function publicationExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = smoke ? ["openai"] : ["openai", "anthropic"];
+  const providers = smoke ? ["openai"] : ["openai", "anthropic", "kimi"];
   return {
     candidateCommit,
     repository,
@@ -475,12 +480,18 @@ function checkedProduct(left, right, label) {
 
 export function validateAutomaticPairConfig(config, model, pair, context, usedModelSlugs) {
   const expectedRunId = `ci-${context.generation}-${context.mode}-${context.benchmark}-${pair.provider}`;
-  const expectedAgent = pair.provider === "openai" ? "CodexAgent" : "ClaudeAgent";
+  const expectedAgent = PROVIDER_AGENT[pair.provider];
+  if (expectedAgent === undefined) {
+    throw new Error(`benchmark config ${pair.config_path} has an unsupported model provider`);
+  }
   if (!SAFE_MODEL.test(model.model) || /(?:^|[-_.:/])latest$/iu.test(model.model)) {
     throw new Error(`benchmark config ${pair.config_path} has an unsafe or unpinned model`);
   }
   if (!SAFE_REASONING.test(model.reasoning)) {
     throw new Error(`benchmark config ${pair.config_path} has unsafe reasoning`);
+  }
+  if (pair.provider === "kimi" && !["low", "high", "max"].includes(model.reasoning)) {
+    throw new Error(`benchmark config ${pair.config_path} has unsupported Kimi reasoning`);
   }
   let expectedModelSlug = boundedSafeId(
     `benchmark-${context.mode}-${model.model}-${model.reasoning}`,

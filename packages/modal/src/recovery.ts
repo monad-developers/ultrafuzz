@@ -68,6 +68,7 @@ export interface ModalRecoveryCanonicalProgress {
   status: string;
   successful_nodes: number;
   total_nodes: number;
+  planned_nodes: number;
   last_transition_at: string;
   last_success_at?: string;
 }
@@ -95,6 +96,20 @@ export const DEFAULT_MODAL_RECOVERY_POLICY: Readonly<ModalRecoveryPolicy> = {
   backoffBaseMs: MODAL_RECOVERY_BACKOFF_BASE_MS,
   backoffMaxMs: MODAL_RECOVERY_BACKOFF_MAX_MS
 };
+
+export function modalRecoveryPolicyForNodeTimeout(
+  nodeTimeoutSeconds: number,
+  overrides: Partial<ModalRecoveryPolicy> = {}
+): ModalRecoveryPolicy {
+  if (!Number.isSafeInteger(nodeTimeoutSeconds) || nodeTimeoutSeconds <= 0) {
+    throw new Error("Modal node timeout must be a positive integer");
+  }
+  const policy = recoveryPolicy(overrides);
+  return {
+    ...policy,
+    staleAfterMs: Math.max(policy.staleAfterMs, nodeTimeoutSeconds * 1_000 + policy.resumeGraceMs)
+  };
+}
 
 export type ModalRecoveryAction = "keep" | "wait" | "launch" | "replace" | "complete" | "terminal" | "defer-rollout";
 
@@ -215,6 +230,10 @@ export function createModalRecoveryState(input: {
       workers: []
     }))
   });
+}
+
+export function modalRecoveryRowsComplete(rows: readonly Pick<ModalRecoveryRowState, "status">[]): boolean {
+  return rows.every((row) => row.status === "completed");
 }
 
 export async function readModalRecoveryState(statePath: string): Promise<ModalRecoveryState | undefined> {
@@ -448,7 +467,12 @@ function observeCanonicalProgress(
     if (active !== undefined) active.made_progress = true;
   }
   const nowMs = Date.parse(now);
-  const policyRecentAtMs = Math.max(transitionAtMs, successAtMs ?? Number.NEGATIVE_INFINITY);
+  const ownerLaunchedAtMs = owner?.live === true ? requiredTimestamp(owner.launched_at, "owner launch") : undefined;
+  const policyRecentAtMs = Math.max(
+    transitionAtMs,
+    successAtMs ?? Number.NEGATIVE_INFINITY,
+    ownerLaunchedAtMs ?? Number.NEGATIVE_INFINITY
+  );
   return { row: next, recent: successfulTransition || nowMs - policyRecentAtMs <= staleAfterMs };
 }
 

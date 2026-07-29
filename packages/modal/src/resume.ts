@@ -22,8 +22,35 @@ export interface ModalResumeRunState {
   nodes?: Record<string, { status?: string }>;
 }
 
+export interface ModalResumeCheckpointCounts {
+  succeeded: number;
+  failed: number;
+  remaining: number;
+}
+
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
-  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--json"];
+  return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
+}
+
+export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
+  if (!isTerminalRunStatus(state.status)) return true;
+  return counts.failed > 0 || counts.remaining > 0;
+}
+
+export function modalDurableRunAdvanced(before: ModalResumeRunState, after: ModalResumeRunState): boolean {
+  if (before.run_id !== after.run_id) return false;
+  if (before.status !== after.status) return true;
+  return JSON.stringify(nodeStatuses(before.nodes)) !== JSON.stringify(nodeStatuses(after.nodes));
+}
+
+function isTerminalRunStatus(status: string | undefined): boolean {
+  return status !== undefined && ["succeeded", "failed", "timed-out", "canceled"].includes(status);
+}
+
+function nodeStatuses(nodes: ModalResumeRunState["nodes"]): Array<[string, string | undefined]> {
+  return Object.entries(nodes ?? {})
+    .map(([nodeId, node]) => [nodeId, node.status] as [string, string | undefined])
+    .sort(([left], [right]) => left.localeCompare(right));
 }
 
 export function modalEvalRunCommand(input: {

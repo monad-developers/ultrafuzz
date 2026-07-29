@@ -123,7 +123,7 @@ function promptForTask(
   if (typeof inputTask?.prompt === "string") {
     prompt = inputTask.prompt;
   } else {
-    const promptPath = inputTask?.prompt_path ?? task.promptPath;
+    const promptPath = task.promptPath ?? inputTask?.prompt_path;
     prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
   }
   prompt = prompt.replaceAll(task.sourceProjectRoot, process.cwd());
@@ -201,7 +201,7 @@ function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
 }
 
 function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
-  resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical");
+  resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical", task.promptPath);
 
   const workspaceRoot = realpathSync(task.workspacePath);
   const artifactsParentCandidate = path.resolve(workspaceRoot, "artifacts");
@@ -237,7 +237,8 @@ function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
 function resetTaskArtifactContents(
   rootPath: string,
   attemptId: string,
-  label: "canonical" | "mirror" | "generated-test"
+  label: "canonical" | "mirror" | "generated-test",
+  preservedInputPath?: string
 ): void {
   const candidate = path.resolve(rootPath);
   if (path.basename(candidate) !== attemptId) {
@@ -248,8 +249,21 @@ function resetTaskArtifactContents(
   if (anchoredRoot !== path.join(parent, attemptId)) {
     throw new Error(`artifact-contract failure: unsafe ${label} task artifact root ${attemptId}`);
   }
+  const preservedInput =
+    preservedInputPath === undefined
+      ? undefined
+      : resolveRegularArtifactFile(
+          anchoredRoot,
+          path.resolve(preservedInputPath),
+          `artifact-contract failure: unsafe ${label} task input ${attemptId}`
+        );
+  if (preservedInput !== undefined && path.dirname(preservedInput) !== anchoredRoot) {
+    throw new Error(`artifact-contract failure: unsafe ${label} task input ${attemptId}`);
+  }
   for (const entry of readdirSync(anchoredRoot)) {
-    rmSync(path.join(anchoredRoot, entry), { recursive: true, force: true });
+    const candidate = path.join(anchoredRoot, entry);
+    if (candidate === preservedInput) continue;
+    rmSync(candidate, { recursive: true, force: true });
   }
 }
 

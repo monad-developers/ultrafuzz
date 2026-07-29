@@ -3,6 +3,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { access, appendFile, copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { repairMissingRenderedPromptsForRun } from "@ultrafuzz/runtime";
+
 import { isPublicModalBenchmarkConfig, loadModalBenchmarkConfig, type PrivateModalBenchmarkConfig } from "./config.js";
 import { EVAL_WATCH_TIMEOUT_SECONDS, type ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
@@ -17,6 +19,8 @@ import {
 import {
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
+  modalDurableRunAdvanced,
+  modalDurableRunNeedsResume,
   modalEvalRunCommand,
   repairModalEvalRunRecord,
   type ModalResumeRunState,
@@ -30,6 +34,7 @@ import {
   type OperationalFailureCategory,
   type TerminalDisposition
 } from "./terminal-disposition.js";
+import { topologyWithStrategyLoops } from "./topology-config.js";
 import {
   emptyWorkerCheckpoint,
   readWorkerCheckpoint,
@@ -208,12 +213,20 @@ async function resumeExistingEvaluation(
   evalRunId: string;
   terminalDisposition: TerminalDisposition | undefined;
 }> {
+  const repairedPrompts = await repairMissingRenderedPromptsForRun({
+    projectRoot: workspace.target,
+    runId: workspace.productRunId,
+    runRoot: path.join(workspace.target, ".ultrafuzz", "runs", workspace.productRunId)
+  });
+  if (repairedPrompts > 0) await flushVolume();
   modelWorkStarted = true;
   await writer.writePartial(await readWorkerCheckpoint(workspace.target));
   let state = await durableRunState(workspace.target, workspace.productRunId);
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
   let disposition = await terminalDispositionForState(workspace, state);
-  if (!isTerminalRunStatus(state.status)) {
+  const checkpoint = await readWorkerCheckpoint(workspace.target);
+  if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
+    const stateBeforeResume = state;
     const resumeRunId = state.run_id;
     await runBenchmarkExecutionOnce(
       () =>
@@ -223,7 +236,7 @@ async function resumeExistingEvaluation(
         }),
       () => inspectTerminalDisposition(workspace.target)
     );
-    state = await waitForTerminalRun(workspace, writer);
+    state = await waitForTerminalRun(workspace, writer, stateBeforeResume);
     disposition = await terminalDispositionForState(workspace, state);
   }
   await repairModalEvalRunRecord(workspace, state, disposition);
@@ -245,9 +258,11 @@ async function terminalDispositionForState(
 
 async function waitForTerminalRun(
   workspace: ModalResumeWorkspace,
-  writer: WorkerResultWriter
+  writer: WorkerResultWriter,
+  stateBeforeResume: ModalResumeRunState
 ): Promise<ModalResumeRunState> {
   const deadline = Date.now() + EVAL_WATCH_TIMEOUT_SECONDS * 1000;
+  let resumeObserved = false;
   while (Date.now() < deadline) {
     await runChecked(["node", CLI, "inspect", workspace.productRunId, "--project", workspace.target, "--json"], {
       label: "sync resumed run",
@@ -256,7 +271,8 @@ async function waitForTerminalRun(
     const state = await durableRunState(workspace.target, workspace.productRunId);
     if (state !== undefined) {
       await reportProgress(workspace.target, writer);
-      if (isTerminalRunStatus(state.status)) return state;
+      resumeObserved ||= modalDurableRunAdvanced(stateBeforeResume, state);
+      if (resumeObserved && isTerminalRunStatus(state.status)) return state;
     }
     await sleep(60_000);
   }
@@ -392,9 +408,7 @@ async function configureTarget(target: string): Promise<void> {
   );
   await writeFile(path.join(target, "ultrafuzz.toml"), modalTargetToml(MODEL, CONFIG.node_timeout_seconds));
   const topologyPath = path.join(target, ".ultrafuzz/topology.yml");
-  const topology = (await readFile(topologyPath, "utf8")).replace(/^(\s+loops:)\s*\d+\s*$/gmu, "$1 1");
-  const loops = [...topology.matchAll(/^\s+loops:\s*(\d+)\s*$/gmu)].map((match) => Number(match[1]));
-  if (loops.length === 0 || loops.some((value) => value !== 1)) throw new Error("failed to enforce loops=1");
+  const topology = topologyWithStrategyLoops(await readFile(topologyPath, "utf8"), CONFIG.loops);
   await writeFile(topologyPath, topology);
 }
 

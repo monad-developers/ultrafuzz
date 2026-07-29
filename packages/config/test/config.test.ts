@@ -36,7 +36,16 @@ describe("config loading and resolution", () => {
       auth: "api-key",
       apiKeyEnv: "OPENAI_API_KEY"
     });
+    expect(resolved.value.agents.KimiAgent).toEqual({
+      auth: "subscription"
+    });
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
+    expect(resolved.value.models.profiles.kimi).toEqual({
+      id: "kimi",
+      agent: "KimiAgent",
+      model: "kimi-k3",
+      reasoning: "max"
+    });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
     expect(resolved.value.run.controllerLeaseSeconds).toBe(30);
     expect(resolved.value.run.forgeGuardEnabled).toBe(true);
@@ -261,11 +270,21 @@ default = "mock"
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
+
+[agents.KimiAgent]
+auth = "api-key"
+api_key_env = "MOONSHOT_API_KEY"
+config_dir = ".kimi-code"
 `);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.value.agents?.CodexAgent?.auth).toBe("api-key");
     expect(parsed.value.agents?.CodexAgent?.apiKeyEnv).toBe("OPENAI_API_KEY");
+    expect(parsed.value.agents?.KimiAgent).toEqual({
+      auth: "api-key",
+      apiKeyEnv: "MOONSHOT_API_KEY",
+      configDir: ".kimi-code"
+    });
 
     const invalid = resolveConfig({
       env: {},
@@ -287,7 +306,9 @@ api_key_env = "OPENAI_API_KEY"
     if (!defaultResolved.ok) return;
     const serialized = serializeRedactedResolvedConfigToml(defaultResolved.value);
     expect(serialized).toContain("[agents.CodexAgent]");
+    expect(serialized).toContain("[agents.KimiAgent]");
     expect(serialized).toContain('auth = "api-key"');
+    expect(serialized).toContain('model = "kimi-k3"');
     expect(serialized).toContain("forge_guard_enabled = true");
     expect(serialized).toContain("forge_vmem_limit_kb = 12582912");
     expect(serialized).toContain("forge_rayon_threads = 1");
@@ -450,6 +471,56 @@ describe("model profile and triage validation", () => {
         "CONFIG_MODEL_REASONING_EMPTY",
         "CONFIG_MODEL_TIMEOUT_INVALID"
       ])
+    );
+  });
+
+  it("rejects Kimi reasoning values that Kimi Code cannot execute", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-invalid": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+        path: ["models", "kimi-invalid", "reasoning"]
+      })
+    );
+  });
+
+  it("rejects whitespace-padded Kimi reasoning values instead of normalizing them away", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            "kimi-padded": {
+              agent: "KimiAgent",
+              model: "kimi-k3",
+              reasoning: " max "
+            }
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
+        path: ["models", "kimi-padded", "reasoning"]
+      })
     );
   });
 

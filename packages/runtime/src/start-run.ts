@@ -25,7 +25,7 @@ import {
   type WorkflowLifecycleInput,
   type WorkflowLifecycleValue
 } from "./types.js";
-import { planRun } from "./plan-run.js";
+import { planRun, repairMissingRenderedPromptsForRun } from "./plan-run.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
@@ -205,6 +205,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   }
   const requestedConcurrency = input.maxConcurrency ?? resolved.config.run.maxParallelAgents;
   try {
+    await repairMissingRenderedPromptsForRun({
+      projectRoot: path.resolve(input.projectRoot),
+      runId: input.runId,
+      runRoot: evidence.layout.root
+    });
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: evidence.layout,
       config: resolved.config,
@@ -227,6 +232,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       maxConcurrency: requestedConcurrency,
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
+      force: input.force,
+      retryFailed: input.retryFailed,
       label: input.label,
       resumeRecovery:
         action === "resume"
@@ -260,6 +267,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         renewed_at: submittedAt,
         expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
       };
+      state.workflow_deadline_at = new Date(
+        Date.parse(submittedAt) + resolved.config.run.workflowDeadlineSeconds * 1_000
+      ).toISOString();
       state.last_transition_at = submittedAt;
       writeRunState(evidence.layout, state);
     }
@@ -497,10 +507,26 @@ function agentEnvironmentVariableNames(
   env: Record<string, string | undefined> | undefined
 ): string[] {
   const activeAgentRefs = new Set(agentRefs);
-  const names = Object.entries(config.agents)
-    .filter(([agentRef, agent]) => activeAgentRefs.has(agentRef) && agent.auth === "api-key")
-    .map(([, agent]) => agent.apiKeyEnv)
-    .filter((name): name is string => name !== undefined);
+  const names: string[] = [];
+  for (const [agentRef, agent] of Object.entries(config.agents)) {
+    if (!activeAgentRefs.has(agentRef)) continue;
+    if (agent.auth === "api-key" && agent.apiKeyEnv !== undefined) {
+      names.push(agent.apiKeyEnv);
+      if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY");
+    }
+    if (agentRef === "KimiAgent") {
+      names.push("KIMI_BASE_URL");
+      if (agent.auth === "subscription") {
+        names.push(
+          "KIMI_CODE_HOME",
+          "KIMI_SHARE_DIR",
+          "ULTRAFUZZ_KIMI_SESSION_HOME",
+          "ULTRAFUZZ_KIMI_SHARED_AUTH_HOME",
+          "ULTRAFUZZ_MODAL_REMOTE_ROOT"
+        );
+      }
+    }
+  }
   if (config.execution.mode === "cloud" && config.execution.provider !== undefined) {
     const provider = config.execution.providers[config.execution.provider];
     if (provider !== undefined) {

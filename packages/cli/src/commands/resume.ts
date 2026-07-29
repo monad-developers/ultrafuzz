@@ -9,6 +9,8 @@ export default class Resume extends Command {
   static override flags = {
     ...globalFlags,
     "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" }),
+    force: Flags.boolean({ summary: "Resume even if the workflow is already marked running" }),
+    "retry-failed": Flags.boolean({ summary: "Retry failed workflow tasks before resuming" }),
     "reset-node": Flags.string({ summary: "Retry one failed workflow node and its dependents before resuming" })
   };
 
@@ -18,6 +20,8 @@ export default class Resume extends Command {
       projectRoot: projectRoot(flags),
       runId: args.runId,
       maxConcurrency: flags["max-concurrency"],
+      force: flags.force,
+      retryFailed: flags["retry-failed"],
       resetNode: flags["reset-node"],
       env: cliIo().env
     });

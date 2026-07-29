@@ -34,8 +34,8 @@ const modelSchema = z
   .object({
     slug: safeId,
     model: z.string().min(1).max(256),
-    provider: z.enum(["openai", "anthropic"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent"]),
+    provider: z.enum(["openai", "anthropic", "kimi"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent", "KimiAgent"]),
     reasoning: z.string().min(1).max(64),
     auth_mode: z.enum(["api-key", "subscription"])
   })
@@ -43,8 +43,13 @@ const modelSchema = z
   .refine(
     (model) =>
       (model.provider === "openai" && model.agent === "CodexAgent") ||
-      (model.provider === "anthropic" && model.agent === "ClaudeAgent"),
+      (model.provider === "anthropic" && model.agent === "ClaudeAgent") ||
+      (model.provider === "kimi" && model.agent === "KimiAgent"),
     "model provider and agent do not match"
+  )
+  .refine(
+    (model) => model.provider !== "kimi" || ["low", "high", "max"].includes(model.reasoning),
+    "Kimi reasoning must be low, high, or max"
   );
 
 const publicBenchmarkTargetSchema = z
@@ -72,7 +77,7 @@ const commonBenchmarkConfig = {
     })
     .strict(),
   node_timeout_seconds: z.number().int().positive().max(86_400).default(DEFAULT_NODE_TIMEOUT_SECONDS),
-  loops: z.literal(1).default(1),
+  loops: z.number().int().positive().max(256).default(3),
   models: z
     .array(modelSchema)
     .min(1)

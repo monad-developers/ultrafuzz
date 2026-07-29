@@ -1,5 +1,7 @@
-import { access } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { access, lstat, mkdtemp, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
@@ -12,7 +14,12 @@ import {
   type Volume
 } from "modal";
 
-import { subscriptionAuthCopy, type SubscriptionAuthCopy } from "./auth.js";
+import {
+  prepareSubscriptionAuthCopy,
+  subscriptionAuthCopy,
+  type SubscriptionAuthCopy,
+  type SubscriptionAuthCopyEntry
+} from "./auth.js";
 import { DEFAULT_MODAL_APP, DEFAULT_MODAL_IMAGE, type ModelProvider } from "./defaults.js";
 import {
   cloudFailureResult,
@@ -35,8 +42,15 @@ const RESULT_PATH = `${MODAL_SMOKE_DATA_ROOT}/result.json`;
 const POLL_INTERVAL_MS = 500;
 const POLL_TIMEOUT_MS = 3 * 60 * 1000;
 
-export async function runRealModalSmoke(provider: ModelProvider): Promise<ModalSmokeResult> {
-  const driver = new RealModalSmokeDriver();
+export interface RealModalSmokeOptions {
+  imageName?: string;
+}
+
+export async function runRealModalSmoke(
+  provider: ModelProvider,
+  options: RealModalSmokeOptions = {}
+): Promise<ModalSmokeResult> {
+  const driver = new RealModalSmokeDriver(options);
   try {
     return await runModalSmoke(provider, driver);
   } catch {
@@ -57,19 +71,24 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   private readonly sandboxes = new Map<string, Sandbox>();
   private namePrefix = "";
 
+  constructor(private readonly options: RealModalSmokeOptions = {}) {}
+
   async prepare(provider: ModelProvider): Promise<ModalSmokePrepared> {
     this.failureStage = "prepare";
     this.modal = new ModalClient();
     this.provider = provider;
-    this.auth = subscriptionAuthCopy({ provider, auth_mode: "subscription" });
+    this.auth =
+      provider === "kimi"
+        ? await prepareSubscriptionAuthCopy({ provider, auth_mode: "subscription", model: "kimi-k3" })
+        : subscriptionAuthCopy({ provider, auth_mode: "subscription" });
     if (this.auth === undefined) throw new Error("smoke auth is unavailable");
     await access(this.auth.source);
     this.app = await this.modal.apps.fromName(DEFAULT_MODAL_APP, { createIfMissing: false });
-    this.image = await this.modal.images.fromName(DEFAULT_MODAL_IMAGE);
+    this.image = await this.modal.images.fromName(this.options.imageName ?? DEFAULT_MODAL_IMAGE);
     this.volume = await this.modal.volumes.ephemeral();
     this.namePrefix = `ultrafuzz-smoke-${provider}-${randomUUID().slice(0, 8)}`;
     return {
-      imageName: DEFAULT_MODAL_IMAGE,
+      imageName: this.options.imageName ?? DEFAULT_MODAL_IMAGE,
       entryPath: MODAL_SMOKE_ENTRY_PATH,
       volumeIdentity: this.volume.volumeId
     };
@@ -128,8 +147,11 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   async terminate(launch: ModalSmokeLaunch): Promise<void> {
     this.failureStage = "fresh-terminate";
     const sandbox = this.sandboxFor(launch);
-    await sandbox.terminate({ wait: true });
-    this.sandboxes.delete(sandbox.sandboxId);
+    try {
+      await sandbox.terminate({ wait: true });
+    } finally {
+      this.sandboxes.delete(sandbox.sandboxId);
+    }
   }
 
   async waitForCompletion(launch: ModalSmokeLaunch): Promise<ModalSmokeCompletion> {
@@ -155,11 +177,17 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
   async dispose(): Promise<void> {
     const sandboxes = [...this.sandboxes.values()];
     this.sandboxes.clear();
-    await Promise.all(sandboxes.map((sandbox) => sandbox.terminate({ wait: true }).catch(() => undefined)));
-    this.volume?.closeEphemeral();
-    this.volume = undefined;
-    this.modal?.close();
-    this.modal = undefined;
+    const auth = this.auth;
+    this.auth = undefined;
+    try {
+      await Promise.all(sandboxes.map((sandbox) => sandbox.terminate({ wait: true }).catch(() => undefined)));
+      this.volume?.closeEphemeral();
+      this.volume = undefined;
+      this.modal?.close();
+      this.modal = undefined;
+    } finally {
+      await auth?.cleanup?.();
+    }
   }
 
   private async readEvidence(launch: ModalSmokeLaunch, filePath: string): Promise<unknown> {
@@ -188,11 +216,53 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
 }
 
 async function stageAuth(sandbox: Sandbox, auth: SubscriptionAuthCopy, candidate: number): Promise<void> {
-  const pending = `${auth.destination}.pending-${candidate}`;
-  await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(auth.destination)]);
-  await sandbox.filesystem.copyFromLocal(auth.source, pending);
-  await runChecked(sandbox, ["install", "-m", "600", pending, auth.destination]);
-  await runChecked(sandbox, ["rm", "-f", pending]);
+  for (const entry of subscriptionAuthEntries(auth)) {
+    const pending = `${entry.destination}.pending-${candidate}`;
+    await access(entry.source);
+    const source = await lstat(entry.source);
+    await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(entry.destination)]);
+    if (source.isDirectory()) {
+      await stageAuthDirectory(sandbox, entry, pending);
+    } else if (source.isFile()) {
+      await sandbox.filesystem.copyFromLocal(entry.source, pending);
+      await runChecked(sandbox, ["rm", "-rf", entry.destination]);
+      await runChecked(sandbox, ["mv", pending, entry.destination]);
+    } else {
+      throw new Error(`smoke auth source must be a file or directory: ${entry.source}`);
+    }
+    await runChecked(sandbox, ["chmod", "-R", "go-rwx", entry.destination]);
+  }
+}
+
+async function stageAuthDirectory(sandbox: Sandbox, entry: SubscriptionAuthCopyEntry, pending: string): Promise<void> {
+  const temporary = await mkdtemp(path.join(tmpdir(), "ultrafuzz-modal-smoke-auth-"));
+  const archivePath = path.join(temporary, "auth-entry.tgz");
+  const remoteArchive = `${entry.destination}.tgz-${randomUUID()}`;
+  try {
+    execFileSync("tar", ["-C", entry.source, "-czf", archivePath, "."], { stdio: "ignore" });
+    await sandbox.filesystem.copyFromLocal(archivePath, remoteArchive);
+    await runChecked(sandbox, ["rm", "-rf", pending]);
+    await runChecked(sandbox, ["install", "-d", "-m", "700", pending]);
+    await runChecked(sandbox, [
+      "tar",
+      "--no-same-owner",
+      "--no-same-permissions",
+      "-xzf",
+      remoteArchive,
+      "-C",
+      pending
+    ]);
+    await runChecked(sandbox, ["rm", "-rf", entry.destination]);
+    await runChecked(sandbox, ["mv", pending, entry.destination]);
+  } finally {
+    await runChecked(sandbox, ["rm", "-f", remoteArchive]).catch(() => undefined);
+    await runChecked(sandbox, ["rm", "-rf", pending]).catch(() => undefined);
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+function subscriptionAuthEntries(auth: SubscriptionAuthCopy): SubscriptionAuthCopyEntry[] {
+  return auth.entries ?? [{ source: auth.source, destination: auth.destination }];
 }
 
 async function runChecked(sandbox: Sandbox, command: string[]): Promise<void> {
@@ -242,7 +312,7 @@ function booleanValue(value: unknown): boolean {
 }
 
 function providerValue(value: unknown): ModelProvider {
-  if (value !== "openai" && value !== "anthropic") throw new Error("smoke evidence is invalid");
+  if (value !== "openai" && value !== "anthropic" && value !== "kimi") throw new Error("smoke evidence is invalid");
   return value;
 }
 

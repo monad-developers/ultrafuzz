@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_MODAL_IMAGE, type ModelProvider } from "../src/defaults.js";
-import { remoteAuthPath } from "../src/layout.js";
+import { remoteAuthDir, remoteAuthPath } from "../src/layout.js";
 import {
   MODAL_SMOKE_ENTRY_PATH,
   cloudFailureResult,
@@ -18,7 +18,7 @@ import {
 } from "../src/smoke.js";
 
 describe("Modal smoke orchestration", () => {
-  it("kills a fresh worker and resumes once on the same durable volume", async () => {
+  it("terminates a fresh worker and resumes once on the same durable volume", async () => {
     const driver = new ContractDriver();
 
     const result = await runModalSmoke("openai", driver);
@@ -65,6 +65,17 @@ describe("Modal smoke orchestration", () => {
     expect(ambiguousResult.checks.single_launch_owner).toBe(false);
   });
 
+  it("keeps the production image check tied to the published image name", async () => {
+    const driver = new ContractDriver();
+    driver.imageName = "ultrafuzz-security-runner:kimi-candidate";
+
+    const result = await runModalSmoke("kimi", driver);
+
+    expect(result.status).toBe("failed");
+    expect(result.checks.production_image).toBe(false);
+    expect(result.checks.production_entrypoint).toBe(true);
+  });
+
   it("reports only an allowlisted cloud failure stage", () => {
     const result = cloudFailureResult("openai", "checkpoint");
 
@@ -82,7 +93,8 @@ describe("Modal smoke orchestration", () => {
 describe("provider-isolated smoke entrypoints", () => {
   it.each([
     ["openai", "anthropic"],
-    ["anthropic", "openai"]
+    ["anthropic", "openai"],
+    ["kimi", "openai"]
   ] as const)("stages only %s subscription auth", (selected, unselected) => {
     const fresh = modalSmokeEntrypointCommand(selected, "fresh");
     const resume = modalSmokeEntrypointCommand(selected, "resume");
@@ -90,6 +102,10 @@ describe("provider-isolated smoke entrypoints", () => {
     for (const command of [fresh, resume]) {
       expect(command).toContain(remoteAuthPath(selected));
       expect(command).not.toContain(remoteAuthPath(unselected));
+      if (selected === "kimi") {
+        expect(command).toContain(`${remoteAuthDir(selected)}/device_id`);
+        expect(command).not.toContain(`${remoteAuthDir(selected)}/credentials/kimi-code.json`);
+      }
       expect(command).toContain("runuser -u ubuntu");
       expect(command).toContain(MODAL_SMOKE_ENTRY_PATH);
     }
@@ -120,6 +136,7 @@ describe("dedicated cloud command", () => {
 
 class ContractDriver implements ModalSmokeDriver {
   readonly events: string[] = [];
+  imageName = DEFAULT_MODAL_IMAGE;
   resumeOwners = 1;
   checkpoint: ModalSmokeCheckpoint = {
     nonRoot: true,
@@ -136,7 +153,7 @@ class ContractDriver implements ModalSmokeDriver {
     this.events.push(`prepare:${provider}`);
     this.checkpoint = { ...this.checkpoint, providerAuth: provider };
     this.completion = { ...this.completion, providerAuth: provider };
-    return { imageName: DEFAULT_MODAL_IMAGE, entryPath: MODAL_SMOKE_ENTRY_PATH, volumeIdentity: "volume-one" };
+    return { imageName: this.imageName, entryPath: MODAL_SMOKE_ENTRY_PATH, volumeIdentity: "volume-one" };
   }
 
   async launch(prepared: ModalSmokePrepared, phase: ModalSmokePhase, candidate: number): Promise<ModalSmokeLaunch> {

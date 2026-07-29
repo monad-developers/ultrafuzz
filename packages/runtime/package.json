@@ -16,7 +16,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
-    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated Kimi'",
+    "test:kimi-contract": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated Kimi'",
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
@@ -25,6 +26,12 @@
     "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
-    "@ultrafuzz/topology": "workspace:*"
+    "@ultrafuzz/topology": "workspace:*",
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@moonshot-ai/kimi-code": "0.29.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "smithers-orchestrator": "0.29.0"
   }
 }

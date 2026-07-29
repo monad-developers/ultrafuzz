@@ -172,6 +172,24 @@ describe("public benchmark manifests", () => {
       })
     ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
 
+    const kimiSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "evmbench",
+      lane: "full",
+      cohort,
+      lanes,
+      runnerModelProfileOverride: {
+        id: "workflow-full-kimi-k3-max",
+        agent: "KimiAgent",
+        model: "kimi-k3",
+        reasoning: "max"
+      }
+    });
+    expect(kimiSuite.model_profiles["workflow-full-kimi-k3-max"]).toEqual({
+      agent: "KimiAgent",
+      model: "kimi-k3",
+      reasoning: "max"
+    });
+
     const smokeCohort = loadBenchmarkCohortManifest(path.join(REPOSITORY_ROOT, "benchmarks", "ultrafuzz-bench.json"));
     const smokeOverride = {
       id: "workflow-smoke-gpt-5-6-luna-202607-medium",
@@ -222,7 +240,8 @@ describe("public benchmark manifests", () => {
     expect(suite.variants).toHaveLength(lanes.full.model_profiles.length);
     expect(suite.variants.map((variant) => variant.runner_model_profile)).toEqual([
       "benchmark-full-gpt-5-6-luna-high",
-      "benchmark-full-claude-sonnet-5-high"
+      "benchmark-full-claude-sonnet-5-high",
+      "benchmark-full-kimi-k3-max"
     ]);
     expect(suite.variants.every((variant) => variant.judge_model_profile === lanes.full.judge_profile.id)).toBe(true);
     expect(suite.run.trials_per_variant).toBe(1);

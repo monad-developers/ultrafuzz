@@ -428,17 +428,33 @@ function isNodeError(error: unknown, code: string): boolean {
 }
 
 function aggregateCounts(nodes: Record<string, unknown>): AggregateCounts {
+  const logical = new Map<string, string[]>();
+  for (const [nodeId, value] of Object.entries(nodes)) {
+    const node = record(value);
+    if (node === undefined) continue;
+    const status = node.status;
+    if (typeof status !== "string") continue;
+    const logicalId = checkpointLogicalId(nodeId, node);
+    logical.set(logicalId, [...(logical.get(logicalId) ?? []), status]);
+  }
+
   let succeeded = 0;
   let failed = 0;
   let remaining = 0;
-  for (const value of Object.values(nodes)) {
-    const status = record(value)?.status;
-    if (typeof status !== "string") continue;
-    if (SUCCEEDED_STATUSES.has(status)) succeeded += 1;
-    else if (FAILED_STATUSES.has(status)) failed += 1;
+  for (const statuses of logical.values()) {
+    if (statuses.some((status) => FAILED_STATUSES.has(status))) failed += 1;
+    else if (statuses.every((status) => SUCCEEDED_STATUSES.has(status))) succeeded += 1;
     else remaining += 1;
   }
   return { succeeded, failed, remaining };
+}
+
+function checkpointLogicalId(nodeId: string, node: Record<string, unknown>): string {
+  for (const field of ["logical_id", "logical_node_id"] as const) {
+    const value = node[field];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return nodeId;
 }
 
 function aggregateUsage(metadata: Record<string, unknown> | undefined): AggregateUsage | null {

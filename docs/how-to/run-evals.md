@@ -149,13 +149,13 @@ All three target rows run concurrently, while the four strategy nodes within
 each row use a smoke-only four-way workflow concurrency limit.
 
 The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
-`high` plus Claude Sonnet 5 at `high`. It also pins `strategy_loops: 1`, while
-all three disable flags are `false`, so it retains the complete production
-topology with invariant tests, differential tests, and dynamic strategies.
-Both lanes default to one trial per variant and use the separate GPT-5.6 Sol
-`xhigh` judge. The benchmark adapter converts either lane into the normal
-`EvalSuiteSpec` and can project one runner for an isolated Modal pair while
-retaining the fixed judge.
+`high`, Claude Sonnet 5 at `high`, and Kimi K3 at `max`. It also pins
+`strategy_loops: 1`, while all three disable flags are `false`, so it retains
+the complete production topology with invariant tests, differential tests, and
+dynamic strategies. Both lanes default to one trial per variant and use the
+separate GPT-5.6 Sol `xhigh` judge. The benchmark adapter converts either lane
+into the normal `EvalSuiteSpec` and can project one runner for an isolated Modal
+pair while retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
 six charts in one transaction:
@@ -214,9 +214,9 @@ and independent full dispatches can still overlap, so enforce provider and
 Modal budgets across all concurrent runs.
 
 A manual workflow dispatch launches the full EVMBench cohort instead, with
-GPT-5.6 Luna `high` and Claude Sonnet 5 `high` by default. Its model and
-reasoning inputs can override both runners. Full runs only through that manual
-dispatch; pushes always select smoke. Both modes retain
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max` by default. Its
+model and reasoning inputs can override all full-lane runners. Full runs only
+through that manual dispatch; pushes always select smoke. Both modes retain
 the standard Modal CPU and memory allocation, give each target row a
 3,600-second watchdog, and publish ordinary 30-day Actions artifacts. Missing
 credentials, revision drift, unavailable ground truth, failed model work,

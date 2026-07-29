@@ -1,14 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import lockfile from "proper-lockfile";
+
 import {
   appendEvent,
+  assertNoSymlinkComponents,
+  assertRegularFileInside,
   createInitialRunState,
   artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
+  layoutForRunRoot,
+  safeResolveInside,
   updateNodeState,
   writeArtifactManifest,
+  writeFileDurable,
   writeJsonDurable,
   type NodeStateInput,
   type RunLayout
@@ -20,6 +27,7 @@ import {
 } from "@ultrafuzz/config";
 import {
   loadPromptCatalog,
+  RENDERED_PROMPT_FILE,
   renderPrompt,
   writeRenderedPrompt,
   type PromptCatalog,
@@ -57,6 +65,9 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+
+const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
+const PROMPT_REPAIR_LOCK = ".prompt-repair";
 
 export async function planRun(input: PlanRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -192,6 +203,7 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
   }
 
+  const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
   writeJsonDurable(path.join(layout.root, "plan.json"), {
     schema_version: RUNTIME_SCHEMA_VERSION,
     run_id: runId,
@@ -202,7 +214,7 @@ export async function planRun(input: PlanRunInput) {
     redacted_config_fingerprint: redactedConfigFingerprint,
     execution: resolved.config.execution,
     topology: validation.value.topology,
-    rendered_prompts: renderedPrompts,
+    rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
       Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
     )
@@ -224,6 +236,213 @@ export async function planRun(input: PlanRunInput) {
     layout,
     rendered_prompts: renderedPrompts
   });
+}
+
+export async function repairMissingRenderedPromptsForRun(input: {
+  projectRoot: string;
+  runId: string;
+  runRoot: string;
+}): Promise<number> {
+  const projectRoot = path.resolve(input.projectRoot);
+  const layout = layoutForRunRoot(path.resolve(input.runRoot), input.runId);
+  const rootStat = fs.lstatSync(layout.root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("cannot repair rendered prompts from an unsafe run root");
+  }
+  const release = await lockfile.lock(layout.root, {
+    lockfilePath: path.join(layout.root, PROMPT_REPAIR_LOCK),
+    realpath: false,
+    stale: 300_000,
+    update: 60_000,
+    retries: {
+      retries: 120,
+      factor: 1,
+      minTimeout: 250,
+      maxTimeout: 1_000
+    }
+  });
+  try {
+    return repairRenderedPromptsForRun({ projectRoot, runId: input.runId, layout });
+  } finally {
+    await release();
+  }
+}
+
+function repairRenderedPromptsForRun(input: { projectRoot: string; runId: string; layout: RunLayout }): number {
+  const { projectRoot, layout } = input;
+  readPersistedPlannedGraph(layout.graphPath);
+  const plan = readPersistedPromptPlan(path.join(layout.root, "plan.json"));
+  if (plan.run_id !== input.runId) {
+    throw new Error("cannot repair rendered prompts from incompatible run metadata");
+  }
+
+  const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
+  const repairs: Array<{ attemptId: string; promptPath: string; contents: string }> = [];
+  for (const [attemptId, expected] of expectedByAttempt) {
+    const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+    assertNoSymlinkComponents(layout.root, promptPath, `rendered prompt for ${attemptId}`);
+    const projectRelativePromptPath = path.relative(projectRoot, promptPath);
+    const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
+    if (
+      path.isAbsolute(projectRelativePromptPath) ||
+      projectRelativePromptPath.startsWith(`..${path.sep}`) ||
+      (persistedPromptPath !== projectRelativePromptPath &&
+        !persistedPromptPath.endsWith(`${path.sep}${projectRelativePromptPath}`))
+    ) {
+      throw new Error(`persisted rendered prompt path is incompatible for ${attemptId}`);
+    }
+    if (expected.rendered_prompt_digest === undefined) {
+      throw new Error(
+        `cannot validate legacy rendered prompt for ${attemptId} without a persisted digest; start a new run`
+      );
+    }
+    if (!fs.existsSync(promptPath)) {
+      if (expected.rendered_prompt_snapshot_path === undefined) {
+        throw new Error(`cannot repair rendered prompt for ${attemptId} without an immutable snapshot`);
+      }
+      const snapshotPath = safeResolveInside(
+        layout.root,
+        expected.rendered_prompt_snapshot_path,
+        `rendered prompt snapshot for ${attemptId}`
+      );
+      assertRegularFileInside(layout.root, snapshotPath, `rendered prompt snapshot for ${attemptId}`);
+      const contents = fs.readFileSync(snapshotPath, "utf8");
+      if (sha256Stable(contents) !== expected.rendered_prompt_digest) {
+        throw new Error(`immutable rendered prompt snapshot does not match persisted task metadata for ${attemptId}`);
+      }
+      repairs.push({ attemptId, promptPath, contents });
+      continue;
+    }
+    validateRenderedPromptFile(layout, promptPath, expected.rendered_prompt_digest, attemptId);
+  }
+
+  let repaired = 0;
+  for (const repair of repairs) {
+    // Every cooperating lifecycle command holds the per-run lock. If an
+    // external writer created the prompt meanwhile, validate it instead of
+    // overwriting or deleting content that this invocation does not own.
+    if (fs.existsSync(repair.promptPath)) {
+      const expected = expectedByAttempt.get(repair.attemptId)!;
+      validateRenderedPromptFile(layout, repair.promptPath, expected.rendered_prompt_digest!, repair.attemptId);
+      continue;
+    }
+    writeFileDurable(repair.promptPath, repair.contents);
+    validateRenderedPromptFile(
+      layout,
+      repair.promptPath,
+      expectedByAttempt.get(repair.attemptId)!.rendered_prompt_digest!,
+      repair.attemptId
+    );
+    repaired += 1;
+  }
+  if (repaired > 0) {
+    appendEvent(layout, {
+      eventType: "rendered-prompts-repaired",
+      status: "succeeded",
+      payload: { count: repaired }
+    });
+  }
+  return repaired;
+}
+
+interface PersistedPromptPlanEntry {
+  attempt_id: string;
+  prompt_id: string;
+  prompt_path: string;
+  rendered_prompt_path: string;
+  rendered_prompt_digest?: string;
+  rendered_prompt_snapshot_path?: string;
+  variables_used: string[];
+}
+
+function readPersistedPromptPlan(planPath: string): {
+  run_id: string;
+  config_fingerprint: string;
+  rendered_prompts: PersistedPromptPlanEntry[];
+} {
+  const value = JSON.parse(fs.readFileSync(planPath, "utf8")) as Record<string, unknown>;
+  if (
+    typeof value.run_id !== "string" ||
+    typeof value.config_fingerprint !== "string" ||
+    !Array.isArray(value.rendered_prompts)
+  ) {
+    throw new Error("persisted run plan is missing rendered prompt metadata");
+  }
+  const entries = value.rendered_prompts.map((entry) => {
+    const candidate = entry as Record<string, unknown>;
+    if (
+      typeof candidate.attempt_id !== "string" ||
+      typeof candidate.prompt_id !== "string" ||
+      typeof candidate.prompt_path !== "string" ||
+      typeof candidate.rendered_prompt_path !== "string" ||
+      (candidate.rendered_prompt_digest !== undefined &&
+        (typeof candidate.rendered_prompt_digest !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest))) ||
+      (candidate.rendered_prompt_snapshot_path !== undefined &&
+        typeof candidate.rendered_prompt_snapshot_path !== "string") ||
+      !Array.isArray(candidate.variables_used) ||
+      !candidate.variables_used.every((item) => typeof item === "string")
+    ) {
+      throw new Error("persisted rendered prompt metadata is invalid");
+    }
+    return {
+      attempt_id: candidate.attempt_id,
+      prompt_id: candidate.prompt_id,
+      prompt_path: candidate.prompt_path,
+      rendered_prompt_path: candidate.rendered_prompt_path,
+      ...(candidate.rendered_prompt_digest === undefined
+        ? {}
+        : { rendered_prompt_digest: candidate.rendered_prompt_digest }),
+      ...(candidate.rendered_prompt_snapshot_path === undefined
+        ? {}
+        : { rendered_prompt_snapshot_path: candidate.rendered_prompt_snapshot_path }),
+      variables_used: candidate.variables_used
+    };
+  });
+  return { run_id: value.run_id, config_fingerprint: value.config_fingerprint, rendered_prompts: entries };
+}
+
+function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
+  const value = JSON.parse(fs.readFileSync(graphPath, "utf8")) as Partial<PlannedGraph>;
+  if (value.schema_version !== "1.0" || !Array.isArray(value.nodes) || typeof value.groups !== "object") {
+    throw new Error("persisted planned graph is invalid");
+  }
+  return value as PlannedGraph;
+}
+
+function persistRenderedPromptSnapshots(
+  layout: RunLayout,
+  renderedPrompts: readonly RenderedPromptPlan[]
+): Array<RenderedPromptPlan & { rendered_prompt_snapshot_path: string }> {
+  return renderedPrompts.map((entry) => {
+    const contents = fs.readFileSync(entry.rendered_prompt_path, "utf8");
+    if (sha256Stable(contents) !== entry.rendered_prompt_digest) {
+      throw new Error(`rendered prompt changed before its immutable snapshot was persisted for ${entry.attempt_id}`);
+    }
+    const relativeSnapshotPath = `${RENDERED_PROMPT_SNAPSHOT_DIR}/${entry.rendered_prompt_digest}.md`;
+    const snapshotPath = safeResolveInside(layout.root, relativeSnapshotPath, "rendered prompt snapshot");
+    if (fs.existsSync(snapshotPath)) {
+      assertRegularFileInside(layout.root, snapshotPath, "rendered prompt snapshot");
+      if (sha256Stable(fs.readFileSync(snapshotPath, "utf8")) !== entry.rendered_prompt_digest) {
+        throw new Error(`immutable rendered prompt snapshot digest collision for ${entry.attempt_id}`);
+      }
+    } else {
+      writeFileDurable(snapshotPath, contents);
+    }
+    return { ...entry, rendered_prompt_snapshot_path: relativeSnapshotPath };
+  });
+}
+
+function validateRenderedPromptFile(
+  layout: RunLayout,
+  promptPath: string,
+  expectedDigest: string,
+  attemptId: string
+): void {
+  assertRegularFileInside(layout.root, promptPath, `rendered prompt for ${attemptId}`);
+  if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expectedDigest) {
+    throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
+  }
 }
 
 export function transformPromptCatalogForRun(
@@ -502,6 +721,7 @@ function renderPromptsForPlan(input: {
         prompt_id: promptEntry.id,
         prompt_path: promptEntry.relativePath,
         rendered_prompt_path: result.renderedPromptPath,
+        rendered_prompt_digest: sha256Stable(result.renderedMarkdown),
         variables_used: result.variablesUsed,
         artifact_references: result.artifactReferences
       });

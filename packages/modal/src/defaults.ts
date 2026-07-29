@@ -30,7 +30,7 @@ export const MODAL_BENCHMARK_SANDBOX_RESOURCES = {
 export const DEFAULT_MODAL_MAX_PARALLEL_AGENTS = 16;
 export const DEFAULT_MODAL_MAX_PARALLEL_NODES = 32;
 
-export type ModelProvider = "openai" | "anthropic";
+export type ModelProvider = "openai" | "anthropic" | "kimi";
 export type ModelAuthMode = "api-key" | "subscription";
 export type ModalLaunchMode = "resume" | "fresh";
 
@@ -38,7 +38,7 @@ export interface ModalModelSpec {
   slug: string;
   model: string;
   provider: ModelProvider;
-  agent: "CodexAgent" | "ClaudeAgent";
+  agent: "CodexAgent" | "ClaudeAgent" | "KimiAgent";
   reasoning: string;
   auth_mode: ModelAuthMode;
 }
@@ -89,6 +89,14 @@ export const DEFAULT_BENCHMARK_MODELS: readonly ModalModelSpec[] = [
     model: "claude-opus-4-8",
     provider: "anthropic",
     agent: "ClaudeAgent",
+    reasoning: "max",
+    auth_mode: "subscription"
+  },
+  {
+    slug: "kimi-k3",
+    model: "kimi-k3",
+    provider: "kimi",
+    agent: "KimiAgent",
     reasoning: "max",
     auth_mode: "subscription"
   }

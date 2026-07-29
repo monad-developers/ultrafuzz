@@ -45,7 +45,7 @@ export async function validateProject(input: ValidateProjectInput) {
   }
 
   if (resolved.config) {
-    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env);
+    const policy = evaluatePolicies(projectRoot, resolved.config, input.env ?? process.env, topologyCheck.agentRefs);
     Object.assign(posture, policy.posture);
   } else {
     const blocked = postureFromDiagnostics("policy", "policy checks need valid config", [
@@ -189,6 +189,7 @@ function validateTopologySurface(
 ): {
   posture: PostureItem;
   summary?: ValidateProjectResult["topology"];
+  agentRefs?: Set<string>;
 } {
   try {
     const pathToTopology = topologyPath ?? resolveTopologyPath(projectRoot);
@@ -212,8 +213,8 @@ function validateTopologySurface(
       modelProfiles: config ? modelProfilesForTopology(config) : undefined,
       defaultModelProfileId: config?.models.default
     });
+    const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
     if (config?.execution.mode === "cloud") {
-      const selectedAgents = new Set(expanded.nodes.flatMap((node) => node.modelFanout.map((model) => model.agentRef)));
       for (const agentId of [...selectedAgents].sort()) {
         if (config.agents[agentId]?.auth === "subscription") {
           executionDiagnostics.push({
@@ -236,7 +237,8 @@ function validateTopologySurface(
         path: pathToTopology,
         logical_nodes: topology.nodes.length,
         expanded_nodes: expanded.nodes.length
-      }
+      },
+      agentRefs: selectedAgents
     };
   } catch (error) {
     return {
@@ -250,11 +252,12 @@ function validateTopologySurface(
 function evaluatePolicies(
   projectRoot: string,
   config: ResolvedConfig,
-  _env: Record<string, string | undefined>
+  _env: Record<string, string | undefined>,
+  selectedAgentRefs: Set<string> | undefined
 ): {
   posture: Omit<PolicyPosture, "config" | "topology" | "prompts">;
 } {
-  const agentRegistry = validateAgentReferences(projectRoot, config);
+  const agentRegistry = validateAgentReferences(projectRoot, config, selectedAgentRefs);
   return {
     posture: {
       paths: postureFromDiagnostics("paths", "product files are written through project-local path guards", []),
@@ -268,9 +271,14 @@ function evaluatePolicies(
   };
 }
 
-function validateAgentReferences(projectRoot: string, config: ResolvedConfig): RuntimeDiagnostic[] {
+function validateAgentReferences(
+  projectRoot: string,
+  config: ResolvedConfig,
+  selectedAgentRefs: Set<string> | undefined
+): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const agentRefs = new Set(Object.values(config.models.profiles).map((profile) => profile.agent));
+  const defaultProfile = config.models.profiles[config.models.default];
+  const agentRefs = selectedAgentRefs ?? new Set(defaultProfile === undefined ? [] : [defaultProfile.agent]);
   const candidates = [
     path.join(projectRoot, ".smithers", "agents.ts"),
     path.join(projectRoot, ".smithers", "agents", "index.ts")

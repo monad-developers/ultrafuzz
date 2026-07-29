@@ -4,6 +4,7 @@ import { remoteAuthDir, remoteAuthPath } from "./layout.js";
 export const MODAL_SMOKE_RESULT_SCHEMA_VERSION = "ultrafuzz.modal.smoke-result.v1" as const;
 export const MODAL_SMOKE_ENTRY_PATH = "/opt/ultrafuzz/packages/modal/dist/smoke-worker.js";
 export const MODAL_SMOKE_DATA_ROOT = "/data/ultrafuzz-modal-smoke";
+export const MODAL_SMOKE_STOP_PATH = `${MODAL_SMOKE_DATA_ROOT}/fresh-stop`;
 
 export type ModalSmokePhase = "fresh" | "resume";
 export type ModalSmokeFailureStage =
@@ -65,15 +66,19 @@ export interface ModalSmokeResult {
 }
 
 export function modalSmokeEntrypointCommand(provider: ModelProvider, phase: ModalSmokePhase): string {
-  const authPath = remoteAuthPath(provider);
   const authDir = remoteAuthDir(provider);
   return [
     "set -euo pipefail",
-    `until test -s '${authPath}'; do sleep 1; done`,
+    ...modalSmokeAuthPaths(provider).map((authPath) => `until test -s '${authPath}'; do sleep 1; done`),
     `install -d -m 700 -o ubuntu -g ubuntu '${MODAL_SMOKE_DATA_ROOT}'`,
     `chown -R ubuntu:ubuntu '${MODAL_SMOKE_DATA_ROOT}' '${authDir}'`,
     `exec runuser -u ubuntu -- env HOME='/home/ubuntu' USER='ubuntu' LOGNAME='ubuntu' node '${MODAL_SMOKE_ENTRY_PATH}' --provider '${provider}' --phase '${phase}' --data-root '${MODAL_SMOKE_DATA_ROOT}'`
   ].join("; ");
+}
+
+export function modalSmokeAuthPaths(provider: ModelProvider): string[] {
+  if (provider !== "kimi") return [remoteAuthPath(provider)];
+  return [remoteAuthPath(provider), `${remoteAuthDir(provider)}/device_id`];
 }
 
 export async function runModalSmoke(provider: ModelProvider, driver: ModalSmokeDriver): Promise<ModalSmokeResult> {

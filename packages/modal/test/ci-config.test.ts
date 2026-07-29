@@ -122,7 +122,7 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("creates the complete two-provider EVMBench full mode from the checked-in cohort", () => {
+  it("creates the complete three-provider EVMBench full mode from the checked-in cohort", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-full-"));
     execFileSync(
@@ -162,13 +162,13 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.targets).toEqual(cohort.targets);
     expect(new Set(manifest.targets.map((target) => target.id)).size).toBe(40);
     expect(manifest.matrix_rows_per_pair).toBe(40);
-    expect(manifest.pairs).toHaveLength(2);
+    expect(manifest.pairs).toHaveLength(3);
     expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench"]));
-    expect(new Set(manifest.pairs.map((pair) => pair.provider))).toEqual(new Set(["openai", "anthropic"]));
+    expect(new Set(manifest.pairs.map((pair) => pair.provider))).toEqual(new Set(["openai", "anthropic", "kimi"]));
     expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
-      new Set(["benchmark-full-gpt-5-6-luna-high", "benchmark-full-claude-sonnet-5-high"])
+      new Set(["benchmark-full-gpt-5-6-luna-high", "benchmark-full-claude-sonnet-5-high", "benchmark-full-kimi-k3-max"])
     );
-    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(2);
+    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(3);
     const maxParallel = publicBenchmarkMaxParallelEvalRows("full");
     const liveRows = Math.min(40, maxParallel);
     const waves = Math.ceil(40 / maxParallel);
@@ -186,9 +186,10 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(manifest.concurrency.max_live_runner_workflows_by_provider).toEqual({
       openai: liveRows,
-      anthropic: liveRows
+      anthropic: liveRows,
+      kimi: liveRows
     });
-    expect(manifest.concurrency.max_live_judge_rows).toBe(2 * liveRows);
+    expect(manifest.concurrency.max_live_judge_rows).toBe(3 * liveRows);
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
         public_benchmark: {
@@ -207,7 +208,9 @@ describe("public Modal benchmark configuration", () => {
         expect.objectContaining(
           pair.provider === "openai"
             ? { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }
-            : { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }
+            : pair.provider === "anthropic"
+              ? { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }
+              : { provider: "kimi", model: "kimi-k3", reasoning: "max" }
         )
       ]);
     }
@@ -232,6 +235,7 @@ describe("public Modal benchmark configuration", () => {
           ...process.env,
           BENCHMARK_MODELS_JSON: JSON.stringify([
             { provider: "anthropic", model: "claude-sonnet-5-202607", reasoning: "medium" },
+            { provider: "kimi", model: "kimi-k3-202607", reasoning: "max" },
             { provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "xhigh" }
           ])
         }
@@ -240,8 +244,8 @@ describe("public Modal benchmark configuration", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
       pairs: Array<{ provider: string; model_slug: string; config_path: string }>;
     };
-    expect(manifest.pairs.map((pair) => pair.provider)).toEqual(["openai", "anthropic"]);
-    expect(new Set(manifest.pairs.map((pair) => pair.model_slug)).size).toBe(2);
+    expect(manifest.pairs.map((pair) => pair.provider)).toEqual(["openai", "anthropic", "kimi"]);
+    expect(new Set(manifest.pairs.map((pair) => pair.model_slug)).size).toBe(3);
     expect(manifest.pairs.every((pair) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(pair.model_slug))).toBe(true);
     const models = Object.fromEntries(
       manifest.pairs.map((pair) => {
@@ -253,7 +257,8 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(models).toEqual({
       openai: expect.objectContaining({ model: "gpt-5.6-luna-202607", reasoning: "xhigh" }),
-      anthropic: expect.objectContaining({ model: "claude-sonnet-5-202607", reasoning: "medium" })
+      anthropic: expect.objectContaining({ model: "claude-sonnet-5-202607", reasoning: "medium" }),
+      kimi: expect.objectContaining({ model: "kimi-k3-202607", reasoning: "max" })
     });
   });
 
@@ -321,7 +326,16 @@ describe("public Modal benchmark configuration", () => {
       {
         mode: "full",
         models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }],
-        message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic/u
+        message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic and kimi/u
+      },
+      {
+        mode: "full",
+        models: [
+          { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" },
+          { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" },
+          { provider: "kimi", model: "kimi-k3", reasoning: "xhigh" }
+        ],
+        message: /reasoning is unsupported for Kimi/u
       },
       {
         mode: "smoke",
@@ -380,7 +394,9 @@ describe("public Modal benchmark configuration", () => {
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
-      anthropic_reasoning: expect.objectContaining({ default: "high", type: "string" })
+      anthropic_reasoning: expect.objectContaining({ default: "high", type: "string" }),
+      kimi_model: expect.objectContaining({ default: "kimi-k3", type: "string" }),
+      kimi_reasoning: expect.objectContaining({ default: "max", type: "string" })
     });
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
@@ -408,8 +424,13 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_OPENAI_REASONING).not.toContain("vars.BENCHMARK_SMOKE_OPENAI_REASONING");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_MODEL).toContain("inputs.anthropic_model");
     expect(prepare?.env?.BENCHMARK_ANTHROPIC_REASONING).toContain("inputs.anthropic_reasoning");
+    expect(prepare?.env?.BENCHMARK_KIMI_MODEL).toContain("inputs.kimi_model");
+    expect(prepare?.env?.BENCHMARK_KIMI_MODEL).toContain("'kimi-k3'");
+    expect(prepare?.env?.BENCHMARK_KIMI_REASONING).toContain("inputs.kimi_reasoning");
+    expect(prepare?.env?.BENCHMARK_KIMI_REASONING).toContain("'max'");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('--arg reasoning "high"');
+    expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
@@ -470,6 +491,7 @@ describe("public Modal benchmark configuration", () => {
     const sensitive = [
       "ANTHROPIC_API_KEY",
       "BRAINTRUST_API_KEY",
+      "KIMI_API_KEY",
       "MODAL_TOKEN_ID",
       "MODAL_TOKEN_SECRET",
       "OPENAI_API_KEY"
@@ -916,7 +938,18 @@ describe("public Modal benchmark configuration", () => {
     expect(collect.if).toContain("needs.launch.result != 'skipped'");
     expect(collect.if).not.toContain("always()");
     expect(collect["timeout-minutes"]).toBe(360);
-    expect(step("Restore detached launch state")["continue-on-error"]).toBe(true);
+    const restoreLaunch = step("Restore detached launch state candidates");
+    expect(restoreLaunch["continue-on-error"]).toBe(true);
+    expect(restoreLaunch.with?.pattern).toBe("modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.run_id }}-*");
+    expect(restoreLaunch.with?.["run-id"]).toBe("${{ github.run_id }}");
+    expect(restoreLaunch.with?.["github-token"]).toBe("${{ github.token }}");
+    const selectLaunch = step("Select the newest compatible detached launch state");
+    expect(selectLaunch.if).toBe("steps.restore_launch.outcome == 'success'");
+    expect(selectLaunch.run).toContain('[ -f "$candidate_root/manifest.json" ]');
+    expect(selectLaunch.run).toContain('selected="$candidate_root"');
+    expect(selectLaunch.run).toContain("attempt > current_attempt");
+    expect(selectLaunch.run).toContain("attempt > selected_attempt");
+    expect(selectLaunch.run).toContain('cp -a -- "$selected"/. "$control_root"/');
     expect(step("Discover recoverable launch control").if).toBe("always()");
 
     const waitScript = step("Wait for Modal compute and retry only pre-model launch failures").run ?? "";
