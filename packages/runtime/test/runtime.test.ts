@@ -1558,6 +1558,30 @@ test("repairs only missing rendered prompts from compatible persisted run metada
   assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "prompt-repair" }), 0);
 });
 
+test("preserves complete legacy rendered prompts but refuses an unprovable legacy repair", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const plan = await planRun({ projectRoot: project, runId: "legacy-prompt-repair", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const planPath = path.join(plan.value!.run_root, "plan.json");
+  const persisted = JSON.parse(fs.readFileSync(planPath, "utf8")) as {
+    rendered_prompts: Array<Record<string, unknown>>;
+  };
+  persisted.rendered_prompts = persisted.rendered_prompts.map(({ rendered_prompt_digest: _digest, ...entry }) => ({
+    ...entry,
+    rendered_prompt_path: path.join("/__legacy_volume_mount", String(entry.rendered_prompt_path).replace(/^\/+/u, ""))
+  }));
+  fs.writeFileSync(planPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+  assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }), 0);
+  fs.rmSync(plan.value!.rendered_prompts[0]!.rendered_prompt_path);
+  await assert.rejects(
+    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }),
+    /cannot repair missing legacy rendered prompt/u
+  );
+});
+
 test("refuses rendered prompt repair when regenerated content does not match its persisted digest", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

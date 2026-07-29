@@ -249,7 +249,20 @@ export async function repairMissingRenderedPromptsForRun(input: {
   const missingAttempts = new Set<string>();
   for (const [attemptId, expected] of expectedByAttempt) {
     const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+    const projectRelativePromptPath = path.relative(projectRoot, promptPath);
+    const persistedPromptPath = path.normalize(expected.rendered_prompt_path);
+    if (
+      path.isAbsolute(projectRelativePromptPath) ||
+      projectRelativePromptPath.startsWith(`..${path.sep}`) ||
+      (persistedPromptPath !== projectRelativePromptPath &&
+        !persistedPromptPath.endsWith(`${path.sep}${projectRelativePromptPath}`))
+    ) {
+      throw new Error(`persisted rendered prompt path is incompatible for ${attemptId}`);
+    }
     if (!fs.existsSync(promptPath)) {
+      if (expected.rendered_prompt_digest === undefined) {
+        throw new Error(`cannot repair missing legacy rendered prompt for ${attemptId} without a persisted digest`);
+      }
       missingAttempts.add(attemptId);
       continue;
     }
@@ -257,7 +270,10 @@ export async function repairMissingRenderedPromptsForRun(input: {
     if (!stat.isFile() || stat.isSymbolicLink()) {
       throw new Error(`cannot repair unsafe rendered prompt for ${attemptId}`);
     }
-    if (sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expected.rendered_prompt_digest) {
+    if (
+      expected.rendered_prompt_digest !== undefined &&
+      sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expected.rendered_prompt_digest
+    ) {
       throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
     }
   }
@@ -315,7 +331,8 @@ interface PersistedPromptPlanEntry {
   attempt_id: string;
   prompt_id: string;
   prompt_path: string;
-  rendered_prompt_digest: string;
+  rendered_prompt_path: string;
+  rendered_prompt_digest?: string;
   variables_used: string[];
 }
 
@@ -338,8 +355,10 @@ function readPersistedPromptPlan(planPath: string): {
       typeof candidate.attempt_id !== "string" ||
       typeof candidate.prompt_id !== "string" ||
       typeof candidate.prompt_path !== "string" ||
-      typeof candidate.rendered_prompt_digest !== "string" ||
-      !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest) ||
+      typeof candidate.rendered_prompt_path !== "string" ||
+      (candidate.rendered_prompt_digest !== undefined &&
+        (typeof candidate.rendered_prompt_digest !== "string" ||
+          !/^[a-f0-9]{64}$/u.test(candidate.rendered_prompt_digest))) ||
       !Array.isArray(candidate.variables_used) ||
       !candidate.variables_used.every((item) => typeof item === "string")
     ) {
@@ -349,7 +368,10 @@ function readPersistedPromptPlan(planPath: string): {
       attempt_id: candidate.attempt_id,
       prompt_id: candidate.prompt_id,
       prompt_path: candidate.prompt_path,
-      rendered_prompt_digest: candidate.rendered_prompt_digest,
+      rendered_prompt_path: candidate.rendered_prompt_path,
+      ...(candidate.rendered_prompt_digest === undefined
+        ? {}
+        : { rendered_prompt_digest: candidate.rendered_prompt_digest }),
       variables_used: candidate.variables_used
     };
   });
