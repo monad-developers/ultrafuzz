@@ -86,7 +86,8 @@ import {
   type ModalLaunchState,
   type ModalLineageFingerprints,
   type ModalPostModelRecovery,
-  type ModalSandboxState
+  type ModalSandboxState,
+  type ModalWorkerStatus
 } from "./launch-state.js";
 import {
   REMOTE_CONFIG_DIR,
@@ -1451,11 +1452,7 @@ export async function overseeModalBenchmarkOnce(
             [parseJson(inspected.files["status.json"] ?? "{}"), parseJson(inspected.files["result.json"] ?? "{}")],
             launch
           );
-          const complete =
-            inspected.canonical !== undefined &&
-            inspected.canonical.successful_nodes === inspected.canonical.planned_nodes &&
-            inspected.canonical.total_nodes === inspected.canonical.planned_nodes &&
-            isModalWorkerStatusComplete(workerStatus, inspected.canonical.planned_nodes);
+          const complete = isModalRecoveryResultComplete(inspected.canonical, workerStatus);
           const observedAt = new Date(now()).toISOString();
           const decision = reconcileModalRecoveryRow({
             row,
@@ -1942,6 +1939,17 @@ process.stdout.write(JSON.stringify({
   ...(lastSuccessAt === undefined ? {} : { last_success_at: lastSuccessAt })
 }));`;
   return ["node", "-e", source, resolvePersistentRemoteRoot(remoteRoot, resolvedMountRoot)];
+}
+
+export function isModalRecoveryResultComplete(
+  canonical: ModalRecoveryCanonicalProgress | undefined,
+  workerStatus: ModalWorkerStatus | undefined
+): boolean {
+  return (
+    canonical !== undefined &&
+    canonical.successful_nodes === canonical.total_nodes &&
+    isModalWorkerStatusComplete(workerStatus, canonical.total_nodes)
+  );
 }
 
 function parseCanonicalRecoveryProgress(value: unknown): ModalRecoveryCanonicalProgress | undefined {

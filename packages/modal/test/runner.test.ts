@@ -23,7 +23,8 @@ import {
   modalLaunchTags,
   readModalLaunchState,
   reserveModalLaunchAttempt,
-  writeModalLaunchState
+  writeModalLaunchState,
+  type ModalWorkerStatus
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
@@ -41,6 +42,7 @@ import {
   createTrackedSourceArchive,
   finishReservedModalLaunch,
   hasExactPublicDiagnosticCollectionConfig,
+  isModalRecoveryResultComplete,
   launchModalBenchmark,
   modalCanonicalRecoveryProbeCommand,
   modalImageBuildTags,
@@ -837,6 +839,31 @@ describe("Modal canonical recovery probe", () => {
       last_transition_at: "2026-01-01T00:09:50.000Z",
       last_success_at: "2026-01-01T00:09:45.000Z"
     });
+  });
+
+  it("uses durable worker rows instead of topology-only nodes for strict completion", () => {
+    const canonical = {
+      status: "succeeded",
+      successful_nodes: 2,
+      total_nodes: 2,
+      planned_nodes: 3,
+      last_transition_at: "2026-01-01T00:10:00.000Z",
+      last_success_at: "2026-01-01T00:10:00.000Z"
+    };
+    const workerStatus: ModalWorkerStatus = {
+      schema_version: "ultrafuzz.modal.worker-result.v2",
+      stage: "terminal",
+      terminal: true,
+      category: "succeeded",
+      model_work_started: true,
+      retryable: false,
+      generation: 1,
+      attempt: 1,
+      node_counts: { succeeded: 2, failed: 0, remaining: 0 }
+    };
+
+    expect(isModalRecoveryResultComplete(canonical, workerStatus)).toBe(true);
+    expect(isModalRecoveryResultComplete({ ...canonical, successful_nodes: 1 }, workerStatus)).toBe(false);
   });
 });
 
