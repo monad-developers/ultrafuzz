@@ -323,11 +323,11 @@ function publicationExpectations(input) {
   const trialsPerVariant = positiveSafeInteger(input.trialsPerVariant ?? 1, "benchmark trials per variant");
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = positiveSafeInteger(
-    input.maxParallelEvalRows ?? (smoke ? 2 : 20),
+    input.maxParallelEvalRows ?? (smoke ? 3 : 20),
     "maximum parallel eval rows"
   );
   const maxParallelWorkflowNodes = positiveSafeInteger(
-    input.maxParallelWorkflowNodes ?? 8,
+    input.maxParallelWorkflowNodes ?? (smoke ? 4 : 8),
     "maximum parallel workflow nodes"
   );
   const maxRuntimeSeconds = positiveSafeInteger(
@@ -476,7 +476,7 @@ function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, ma
 }
 
 function defaultMaxRuntimeSeconds(mode) {
-  return mode === "smoke" ? 2 * 60 * 60 : 60 * 60;
+  return mode === "smoke" ? 4 * 60 * 60 + 10 * 60 : 60 * 60;
 }
 
 function positiveSafeInteger(value, label) {

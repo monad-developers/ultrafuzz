@@ -57,7 +57,10 @@ export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
 export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
-export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;
+// The smoke graph has four sequential agent stages. Each stage may use both of
+// its 1,800-second attempts, so retain ten minutes beyond the four-hour
+// topology bound for workflow transitions and final synchronization.
+export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 4 * 60 * 60 + 10 * 60;
 export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 60 * 60;
 
 export class PublicEvalDiagnosticsBuildError extends Error {

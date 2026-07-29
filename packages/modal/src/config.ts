@@ -111,7 +111,7 @@ const publicBenchmarkConfigSchema = z
         candidate_repository: httpsUrl,
         candidate_commit: fullSha,
         targets: z.array(publicBenchmarkTargetSchema).min(1).max(2_048).optional(),
-        max_runtime_seconds: z.number().int().min(300).max(7_200).default(3_600)
+        max_runtime_seconds: z.number().int().min(300).max(15_000).default(3_600)
       })
       .strict()
   })

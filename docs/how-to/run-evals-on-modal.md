@@ -142,8 +142,10 @@ differential, and dynamic strategies, with all three disable flags set to
 `false`. Push events can never select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Each
-smoke target row has a 7,200-second model-work watchdog, while full-lane rows
-retain the 3,600-second bound. The smoke admits all three
+smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
+sequential agent stages may each use two 1,800-second attempts, with ten minutes
+left for workflow transitions and final synchronization. Full-lane rows retain
+the 3,600-second bound. The smoke admits all three
 rows at a time; the full lane admits 20, keeping each checked-in cohort to two row
 waves. Smoke uses four-way workflow concurrency; full uses eight-way concurrency
 so production rows can progress without serializing their agent work.
