@@ -10,7 +10,7 @@ export default class Resume extends Command {
     ...globalFlags,
     "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" }),
     force: Flags.boolean({ summary: "Resume even if the workflow is already marked running" }),
-    "retry-failed": Flags.boolean({ summary: "Retry one failed workflow task before resuming" }),
+    "retry-failed": Flags.boolean({ summary: "Retry failed workflow tasks before resuming" }),
     "reset-node": Flags.string({ summary: "Retry one failed workflow node and its dependents before resuming" })
   };
 

@@ -541,35 +541,40 @@ export async function runSmithersLifecycleCommand(input: {
         alreadyRunning: true
       };
     }
-    const failedTask =
+    const failedTasks =
       input.retryFailed === true && !smithersSnapshotRunStateIsActive(inspection)
-        ? smithersSnapshotFailedTasks(inspection)[0]
-        : undefined;
-    if (failedTask !== undefined) {
-      const resetResult = await execSmithersCli({
-        args: [
-          "timetravel",
-          input.workflowPath,
-          "--run-id",
-          input.smithersRunId,
-          "--node-id",
-          failedTask.nodeId,
-          "--iteration",
-          String(failedTask.iteration),
-          "--no-vcs",
-          "--force",
-          "--format",
-          "json"
-        ],
-        projectRoot: input.projectRoot,
-        env: input.env,
-        environmentVariableNames: input.environmentVariableNames,
-        keepWorkspaces: input.keepWorkspaces
-      });
-      preResumeStderr = resetResult.stderr;
+        ? smithersSnapshotFailedTasks(inspection)
+        : [];
+    if (failedTasks.length > 0) {
+      const resetStderr: string[] = [];
+      for (const failedTask of failedTasks) {
+        const resetResult = await execSmithersCli({
+          args: [
+            "timetravel",
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--node-id",
+            failedTask.nodeId,
+            "--iteration",
+            String(failedTask.iteration),
+            "--no-vcs",
+            "--no-deps",
+            "--force",
+            "--format",
+            "json"
+          ],
+          projectRoot: input.projectRoot,
+          env: input.env,
+          environmentVariableNames: input.environmentVariableNames,
+          keepWorkspaces: input.keepWorkspaces
+        });
+        if (resetResult.stderr.length > 0) resetStderr.push(resetResult.stderr);
+      }
+      preResumeStderr = resetStderr.join("\n");
     }
     if (
-      failedTask === undefined &&
+      failedTasks.length === 0 &&
       input.retryFailed === true &&
       (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
     ) {
@@ -902,6 +907,7 @@ function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{
     if (nodeId.trim() === "" || !Number.isSafeInteger(iteration) || iteration < 0) continue;
     failedTasks.set(`${nodeId}::${iteration}`, { nodeId, iteration });
   }
+  if (failedTasks.size > 0) return [...failedTasks.values()];
   const collections = [data.steps, data.nodes, parsed.steps, parsed.nodes];
   const failedStates = new Set(["failed", "error", "timed-out", "timeout", "canceled", "cancelled"]);
   for (const collection of collections) {
