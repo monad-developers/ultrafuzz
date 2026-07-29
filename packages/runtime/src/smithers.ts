@@ -558,7 +558,6 @@ export async function runSmithersLifecycleCommand(input: {
             failedTask.nodeId,
             "--iteration",
             String(failedTask.iteration),
-            "--no-vcs",
             "--no-deps",
             "--force",
             "--format",

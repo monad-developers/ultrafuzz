@@ -6376,7 +6376,7 @@ test("resume retries one failed workflow task before continuing a terminal unfin
   assert.match(commands, /inspect ultrafuzz-terminal-retry-run --format json/u);
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --no-deps --force --format json/u
+    /timetravel .*ultrafuzz-terminal-retry-run\.tsx --run-id ultrafuzz-terminal-retry-run --node-id node:project-discovery --iteration 0 --no-deps --force --format json/u
   );
   assert.match(
     commands,
@@ -6419,11 +6419,11 @@ test("resume retries failed tasks reported inside a successful terminal workflow
   assert.match(commands, /inspect ultrafuzz-terminal-row-retry-run --format json/u);
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --iteration 3 --no-vcs --no-deps --force --format json/u
+    /timetravel .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:project-discovery --iteration 3 --no-deps --force --format json/u
   );
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:strategy --iteration 2 --no-vcs --no-deps --force --format json/u
+    /timetravel .*ultrafuzz-terminal-row-retry-run\.tsx --run-id ultrafuzz-terminal-row-retry-run --node-id node:strategy --iteration 2 --no-deps --force --format json/u
   );
   assert.match(
     commands,
@@ -6474,7 +6474,7 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
   assert.match(
     commands,
-    /timetravel .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --no-vcs --no-deps --force --format json/u
+    /timetravel .*ultrafuzz-stale-retry-run\.tsx --run-id ultrafuzz-stale-retry-run --node-id node:project-discovery --iteration 0 --no-deps --force --format json/u
   );
   assert.match(
     commands,
