@@ -467,7 +467,12 @@ function observeCanonicalProgress(
     if (active !== undefined) active.made_progress = true;
   }
   const nowMs = Date.parse(now);
-  const policyRecentAtMs = Math.max(transitionAtMs, successAtMs ?? Number.NEGATIVE_INFINITY);
+  const ownerLaunchedAtMs = owner?.live === true ? requiredTimestamp(owner.launched_at, "owner launch") : undefined;
+  const policyRecentAtMs = Math.max(
+    transitionAtMs,
+    successAtMs ?? Number.NEGATIVE_INFINITY,
+    ownerLaunchedAtMs ?? Number.NEGATIVE_INFINITY
+  );
   return { row: next, recent: successfulTransition || nowMs - policyRecentAtMs <= staleAfterMs };
 }
 

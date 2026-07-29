@@ -66,7 +66,7 @@ describe("Modal durable recovery policy", () => {
     expect(result.row.workers[0]).toMatchObject({ generation: 1, made_progress: true });
   });
 
-  it("rotates a genuinely stalled owner only after its resume grace period", () => {
+  it("rotates a genuinely stalled owner only after its stale window from launch", () => {
     let row = reserveWorker(rowState(), 1, "2026-01-01T00:00:00.000Z");
     row = markModalRecoveryWorkerLaunched(row, 1, "sandbox-one", "2026-01-01T00:00:01.000Z");
     const owner = recoveryOwner(1, true, "2026-01-01T00:00:01.000Z");
@@ -81,12 +81,23 @@ describe("Modal durable recovery policy", () => {
         canonical,
         policy: POLICY
       })
-    ).toMatchObject({ action: "wait", reason: "resume-grace", row: { no_progress_generations: 0 } });
+    ).toMatchObject({ action: "keep", reason: "canonical-progress", row: { no_progress_generations: 0 } });
 
     expect(
       reconcileModalRecoveryRow({
         row,
         now: "2026-01-01T00:00:12.000Z",
+        requestedImage: IMAGE_ONE,
+        owner,
+        canonical,
+        policy: POLICY
+      })
+    ).toMatchObject({ action: "keep", reason: "canonical-progress", row: { no_progress_generations: 0 } });
+
+    expect(
+      reconcileModalRecoveryRow({
+        row,
+        now: "2026-01-01T00:00:32.000Z",
         requestedImage: IMAGE_ONE,
         owner,
         canonical,
@@ -109,7 +120,7 @@ describe("Modal durable recovery policy", () => {
       row = markModalRecoveryWorkerLaunched(row, generation, `sandbox-${generation}`, reservedAt);
       const outcome = reconcileModalRecoveryRow({
         row,
-        now: new Date(nowMs + POLICY.resumeGraceMs + 1).toISOString(),
+        now: new Date(nowMs + POLICY.staleAfterMs + 1).toISOString(),
         requestedImage: IMAGE_ONE,
         owner: recoveryOwner(generation, true, reservedAt),
         canonical: progress({ last_transition_at: "2025-12-31T20:00:00.000Z" }),
@@ -125,7 +136,7 @@ describe("Modal durable recovery policy", () => {
           row,
           generation,
           "stalled",
-          new Date(nowMs + POLICY.resumeGraceMs + 2).toISOString()
+          new Date(nowMs + POLICY.staleAfterMs + 2).toISOString()
         );
         nowMs = Date.parse(row.next_eligible_at ?? "") + 1;
       } else {
@@ -302,7 +313,7 @@ describe("Modal durable recovery policy", () => {
       canonical: progress({ last_transition_at: "2025-12-31T23:00:00.000Z" }),
       policy: POLICY
     });
-    expect(grace).toMatchObject({ action: "wait", reason: "resume-grace" });
+    expect(grace).toMatchObject({ action: "keep", reason: "canonical-progress" });
     expect(grace.row.pending_image).toBeUndefined();
   });
 
