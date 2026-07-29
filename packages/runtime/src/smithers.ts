@@ -541,7 +541,10 @@ export async function runSmithersLifecycleCommand(input: {
         alreadyRunning: true
       };
     }
-    if (input.retryFailed === true && smithersSnapshotRunStateIsFailed(inspection)) {
+    if (
+      input.retryFailed === true &&
+      (smithersSnapshotRunStateIsFailed(inspection) || smithersSnapshotRunStateIsStale(inspection))
+    ) {
       const failedNodeId = smithersSnapshotFailedNodeIds(inspection)[0];
       if (failedNodeId !== undefined) {
         const retryResult = await execSmithersCli({
@@ -875,6 +878,10 @@ function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): bo
 function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
   const state = smithersSnapshotRunState(snapshot);
   return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
+}
+
+function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
+  return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
 }
 
 function smithersSnapshotFailedNodeIds(snapshot: SmithersCommandSnapshot): string[] {
