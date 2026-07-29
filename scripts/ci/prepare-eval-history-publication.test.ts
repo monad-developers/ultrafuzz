@@ -67,7 +67,7 @@ describe("trusted automatic eval-history publication handoff", () => {
         candidate_repository: context.repository,
         candidate_commit: context.candidateCommit,
         targets: smokeTargets(),
-        max_runtime_seconds: 3600
+        max_runtime_seconds: 7200
       }
     };
     expect(
@@ -141,7 +141,7 @@ describe("trusted automatic eval-history publication handoff", () => {
   it("accepts policy-derived trial and cohort matrix dimensions", () => {
     const manifest = smokeManifest();
     manifest.matrix_rows_per_pair = 6;
-    manifest.control_timeout_seconds = 21_000;
+    manifest.control_timeout_seconds = 31_800;
     expect(
       validateAutomaticPublicationManifest(manifest, {
         ...smokeContext(),
@@ -314,7 +314,7 @@ function smokeManifest() {
     image_name: `ufz-runner-${"a".repeat(40)}`,
     targets: smokeTargets(),
     matrix_rows_per_pair: 3,
-    control_timeout_seconds: 14_700,
+    control_timeout_seconds: 21_900,
     concurrency: {
       max_parallel_eval_rows_per_sandbox: 2,
       max_parallel_workflow_nodes_per_row: 8,

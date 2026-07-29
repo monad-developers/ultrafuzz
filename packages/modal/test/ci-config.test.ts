@@ -12,7 +12,8 @@ import {
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
   publicBenchmarkMaxParallelEvalRows,
-  publicBenchmarkMaxParallelWorkflowNodes
+  publicBenchmarkMaxParallelWorkflowNodes,
+  publicBenchmarkMaxRuntimeSeconds
 } from "../src/public-worker.js";
 
 interface BenchmarkTarget {
@@ -79,7 +80,7 @@ describe("public Modal benchmark configuration", () => {
     const maxParallel = publicBenchmarkMaxParallelEvalRows("smoke");
     const matrixWaves = Math.ceil(manifest.matrix_rows_per_pair / maxParallel);
     const workerEnvelopeSeconds =
-      matrixWaves * 3_600 +
+      matrixWaves * publicBenchmarkMaxRuntimeSeconds("smoke") +
       PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
       matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
       PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS;
@@ -106,7 +107,7 @@ describe("public Modal benchmark configuration", () => {
       };
       expect(config.node_timeout_seconds).toBe(1800);
       expect(config.public_benchmark).toEqual(
-        expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 3600 })
+        expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 7200 })
       );
       expect(config.public_benchmark.targets).toEqual(manifest.targets);
       expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");
@@ -173,7 +174,7 @@ describe("public Modal benchmark configuration", () => {
     const liveRows = Math.min(40, maxParallel);
     const waves = Math.ceil(40 / maxParallel);
     expect(manifest.control_timeout_seconds).toBe(
-      waves * 3_600 +
+      waves * publicBenchmarkMaxRuntimeSeconds("full") +
         PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
         waves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
         PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +

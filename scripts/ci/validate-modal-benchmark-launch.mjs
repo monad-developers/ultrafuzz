@@ -11,7 +11,8 @@ import {
   PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS,
   PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS,
   publicBenchmarkMaxParallelEvalRows,
-  publicBenchmarkMaxParallelWorkflowNodes
+  publicBenchmarkMaxParallelWorkflowNodes,
+  publicBenchmarkMaxRuntimeSeconds
 } from "../../packages/modal/dist/public-worker.js";
 
 import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
@@ -19,7 +20,6 @@ import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from ".
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const SAFE_BASENAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const GENERATION = /^([1-9][0-9]*)-([1-9][0-9]*)$/u;
-const PUBLIC_MAX_RUNTIME_SECONDS = 3600;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 
 export function validateModalBenchmarkLaunch(input) {
@@ -63,6 +63,7 @@ export function validateModalBenchmarkLaunch(input) {
     trialsPerVariant: dimensions.trialsPerVariant,
     maxParallelEvalRows: dimensions.maxParallelEvalRows,
     maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
+    maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
     controlTimeoutSeconds: dimensions.controlTimeoutSeconds
   });
 
@@ -184,7 +185,8 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
         generation: manifest.generation,
         mode: manifest.mode,
         benchmark: manifest.benchmark,
-        targets: dimensions.targets
+        targets: dimensions.targets,
+        maxRuntimeSeconds: dimensions.maxRuntimeSeconds
       },
       usedModelSlugs
     );
@@ -233,6 +235,7 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
   const trialsPerVariant = lane.trials_per_variant;
   const expectedMatrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = publicBenchmarkMaxParallelEvalRows(mode);
+  const maxRuntimeSeconds = publicBenchmarkMaxRuntimeSeconds(mode);
   const matrixWaves = Math.ceil(expectedMatrixRowsPerPair / maxParallelEvalRows);
   const targets = selectedTargets.map((target) => ({
     id: target.id,
@@ -252,8 +255,9 @@ export function modalBenchmarkPolicyDimensions(policyRoot, mode) {
     expectedMatrixRowsPerPair,
     maxParallelEvalRows,
     maxParallelWorkflowNodes: publicBenchmarkMaxParallelWorkflowNodes(mode),
+    maxRuntimeSeconds,
     controlTimeoutSeconds:
-      matrixWaves * PUBLIC_MAX_RUNTIME_SECONDS +
+      matrixWaves * maxRuntimeSeconds +
       PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
       matrixWaves * PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
       PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +

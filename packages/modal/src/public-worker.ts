@@ -57,6 +57,8 @@ export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;
 export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;
 export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;
+export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;
+export const PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS = 60 * 60;
 
 export class PublicEvalDiagnosticsBuildError extends Error {
   override readonly name = "PublicEvalDiagnosticsBuildError";
@@ -274,6 +276,10 @@ export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): numb
 
 export function publicBenchmarkMaxParallelWorkflowNodes(lane: "smoke" | "full"): number {
   return benchmarkLaneConcurrency(lane).max_parallel_targets;
+}
+
+export function publicBenchmarkMaxRuntimeSeconds(lane: "smoke" | "full"): number {
+  return lane === "smoke" ? PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS : PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS;
 }
 
 export function publicEvalCommandTimeoutSeconds(input: {

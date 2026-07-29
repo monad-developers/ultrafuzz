@@ -330,8 +330,13 @@ function publicationExpectations(input) {
     input.maxParallelWorkflowNodes ?? 8,
     "maximum parallel workflow nodes"
   );
+  const maxRuntimeSeconds = positiveSafeInteger(
+    input.maxRuntimeSeconds ?? defaultMaxRuntimeSeconds(input.mode),
+    "maximum runtime"
+  );
   const controlTimeoutSeconds = positiveSafeInteger(
-    input.controlTimeoutSeconds ?? defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows),
+    input.controlTimeoutSeconds ??
+      defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, maxRuntimeSeconds),
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
@@ -353,6 +358,7 @@ function publicationExpectations(input) {
     controlTimeoutSeconds,
     maxParallelEvalRows,
     maxParallelWorkflowNodes,
+    maxRuntimeSeconds,
     maxLiveRowsPerPair,
     maxLiveJudgeRows: checkedProduct(providers.length, maxLiveRowsPerPair, "maximum live judge rows")
   };
@@ -438,9 +444,10 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModul
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = workerModule.publicBenchmarkMaxParallelEvalRows(identity.mode);
   const maxParallelWorkflowNodes = workerModule.publicBenchmarkMaxParallelWorkflowNodes(identity.mode);
+  const maxRuntimeSeconds = workerModule.publicBenchmarkMaxRuntimeSeconds(identity.mode);
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
   const controlTimeoutSeconds =
-    waves * 3_600 +
+    waves * maxRuntimeSeconds +
     workerModule.PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
     waves * workerModule.PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
     workerModule.PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +
@@ -458,13 +465,18 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModul
     trialsPerVariant,
     maxParallelEvalRows,
     maxParallelWorkflowNodes,
+    maxRuntimeSeconds,
     controlTimeoutSeconds
   };
 }
 
-function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows) {
+function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, maxRuntimeSeconds) {
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
-  return waves * 3_600 + 5 * 60 + waves * 45 * 60 + 5 * 60 + 20 * 60 + 5 * 60;
+  return waves * maxRuntimeSeconds + 5 * 60 + waves * 45 * 60 + 5 * 60 + 20 * 60 + 5 * 60;
+}
+
+function defaultMaxRuntimeSeconds(mode) {
+  return mode === "smoke" ? 2 * 60 * 60 : 60 * 60;
 }
 
 function positiveSafeInteger(value, label) {
@@ -522,7 +534,9 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     context.targets === undefined || JSON.stringify(scope.targets) === JSON.stringify(context.targets)
       ? undefined
       : "target selection",
-    scope.max_runtime_seconds === 3600 ? undefined : "maximum runtime",
+    scope.max_runtime_seconds === (context.maxRuntimeSeconds ?? defaultMaxRuntimeSeconds(context.mode))
+      ? undefined
+      : "maximum runtime",
     config.braintrust.project === "ultrafuzz-public-benchmarks" ? undefined : "reporting project",
     config.braintrust.api_key_env === "BRAINTRUST_API_KEY" ? undefined : "reporting credential name",
     config.braintrust.judge_api_key_env === "OPENAI_API_KEY" ? undefined : "judge credential name",
