@@ -251,6 +251,7 @@ export async function repairMissingRenderedPromptsForRun(input: {
 
   const expectedByAttempt = new Map(plan.rendered_prompts.map((entry) => [entry.attempt_id, entry]));
   const missingAttempts = new Set<string>();
+  const legacyAttempts = new Set<string>();
   for (const [attemptId, expected] of expectedByAttempt) {
     const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
     const projectRelativePromptPath = path.relative(projectRoot, promptPath);
@@ -279,6 +280,42 @@ export async function repairMissingRenderedPromptsForRun(input: {
       sha256Stable(fs.readFileSync(promptPath, "utf8")) !== expected.rendered_prompt_digest
     ) {
       throw new Error(`existing rendered prompt does not match persisted task metadata for ${attemptId}`);
+    }
+    if (expected.rendered_prompt_digest === undefined) legacyAttempts.add(attemptId);
+  }
+  if (legacyAttempts.size > 0) {
+    const regenerated = renderPromptsForPlan({
+      catalog: loadPromptCatalog({ projectRoot }),
+      graph,
+      layout,
+      projectRoot,
+      resolvedConfig: resolved.config,
+      runId: input.runId,
+      attemptIds: legacyAttempts,
+      write: false
+    });
+    const regeneratedByAttempt = new Map(
+      regenerated.flatMap((entry) => (entry.attempt_id === undefined ? [] : [[entry.attempt_id, entry] as const]))
+    );
+    if (
+      regeneratedByAttempt.size !== legacyAttempts.size ||
+      [...legacyAttempts].some((attemptId) => !regeneratedByAttempt.has(attemptId))
+    ) {
+      throw new Error("legacy rendered prompt validation did not reproduce every persisted task input");
+    }
+    for (const attemptId of legacyAttempts) {
+      const expected = expectedByAttempt.get(attemptId)!;
+      const candidate = regeneratedByAttempt.get(attemptId)!;
+      const promptPath = path.join(getNodeArtifactDir(layout, attemptId), RENDERED_PROMPT_FILE);
+      if (
+        path.resolve(candidate.rendered_prompt_path) !== path.resolve(promptPath) ||
+        candidate.prompt_id !== expected.prompt_id ||
+        candidate.prompt_path !== expected.prompt_path ||
+        JSON.stringify(candidate.variables_used) !== JSON.stringify(expected.variables_used) ||
+        sha256Stable(fs.readFileSync(promptPath, "utf8")) !== candidate.rendered_prompt_digest
+      ) {
+        throw new Error(`existing legacy rendered prompt does not match regenerated task input for ${attemptId}`);
+      }
     }
   }
   if (missingAttempts.size === 0) return 0;
@@ -603,6 +640,7 @@ function renderPromptsForPlan(input: {
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
   attemptIds?: ReadonlySet<string>;
+  write?: boolean;
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
@@ -660,7 +698,7 @@ function renderPromptsForPlan(input: {
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });
-      writeRenderedPrompt(result);
+      if (input.write ?? true) writeRenderedPrompt(result);
       rendered.push({
         node_id: node.id,
         logical_node_id: node.logical_id,

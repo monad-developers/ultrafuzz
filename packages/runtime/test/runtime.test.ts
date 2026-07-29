@@ -1584,7 +1584,7 @@ test("repairs a digest-identical prompt when non-prompt runtime configuration ch
   assert.equal(fs.readFileSync(promptPath, "utf8"), expected);
 });
 
-test("preserves complete legacy rendered prompts but refuses an unprovable legacy repair", async () => {
+test("validates complete legacy rendered prompts but refuses changed content or an unprovable repair", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -1601,6 +1601,14 @@ test("preserves complete legacy rendered prompts but refuses an unprovable legac
   fs.writeFileSync(planPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
 
   assert.equal(await repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }), 0);
+  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
+  const originalPrompt = fs.readFileSync(promptPath, "utf8");
+  fs.writeFileSync(promptPath, `${originalPrompt}\nchanged\n`, "utf8");
+  await assert.rejects(
+    repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }),
+    /does not match regenerated task input/u
+  );
+  fs.writeFileSync(promptPath, originalPrompt, "utf8");
   fs.rmSync(plan.value!.rendered_prompts[0]!.rendered_prompt_path);
   await assert.rejects(
     repairMissingRenderedPromptsForRun({ projectRoot: project, runId: "legacy-prompt-repair" }),
