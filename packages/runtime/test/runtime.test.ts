@@ -6342,7 +6342,12 @@ test("resume retries one failed workflow task before continuing a stale unfinish
   });
   const run = await startRun({ projectRoot: project, runId: "stale-retry-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const expired = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  expired.workflow_deadline_at = new Date(0).toISOString();
+  fs.writeFileSync(statePath, `${JSON.stringify(expired, null, 2)}\n`, "utf8");
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const resumedAfter = Date.now();
 
   const resumed = await resumeRun({
     projectRoot: project,
@@ -6355,6 +6360,10 @@ test("resume retries one failed workflow task before continuing a stale unfinish
 
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
   assert.equal(resumed.value?.submitted, true);
+  const resumedState = JSON.parse(fs.readFileSync(statePath, "utf8")) as RunState;
+  assert.ok(Date.parse(resumedState.workflow_deadline_at ?? "") > resumedAfter);
+  assert.equal(resumedState.status, "running");
+  assert.equal(resumedState.finished_at, undefined);
   const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
   assert.match(commands, /inspect ultrafuzz-stale-retry-run --format json/u);
   assert.match(

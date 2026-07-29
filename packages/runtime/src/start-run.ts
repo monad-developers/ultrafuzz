@@ -262,6 +262,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
         renewed_at: submittedAt,
         expires_at: new Date(Date.parse(submittedAt) + leaseDurationMs).toISOString()
       };
+      state.workflow_deadline_at = new Date(
+        Date.parse(submittedAt) + resolved.config.run.workflowDeadlineSeconds * 1_000
+      ).toISOString();
       state.last_transition_at = submittedAt;
       writeRunState(evidence.layout, state);
     }
