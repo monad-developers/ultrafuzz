@@ -945,6 +945,8 @@ describe("public Modal benchmark configuration", () => {
     expect(restoreLaunch.with?.["github-token"]).toBe("${{ github.token }}");
     const selectLaunch = step("Select the newest compatible detached launch state");
     expect(selectLaunch.if).toBe("steps.restore_launch.outcome == 'success'");
+    expect(selectLaunch.run).toContain('[ -f "$candidate_root/manifest.json" ]');
+    expect(selectLaunch.run).toContain('selected="$candidate_root"');
     expect(selectLaunch.run).toContain("attempt > current_attempt");
     expect(selectLaunch.run).toContain("attempt > selected_attempt");
     expect(selectLaunch.run).toContain('cp -a -- "$selected"/. "$control_root"/');

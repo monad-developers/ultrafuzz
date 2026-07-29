@@ -264,19 +264,23 @@ jobs:
           current_attempt='${{ github.run_attempt }}'
           selected=
           selected_attempt=0
-          shopt -s nullglob
-          for candidate in "$candidate_root"/"$artifact_prefix"*; do
-            [ -d "$candidate" ] || continue
-            artifact_name="${candidate##*/}"
-            attempt="${artifact_name#"$artifact_prefix"}"
-            if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]] || (( attempt > current_attempt )); then
-              continue
-            fi
-            if (( attempt > selected_attempt )); then
-              selected="$candidate"
-              selected_attempt="$attempt"
-            fi
-          done
+          if [ -f "$candidate_root/manifest.json" ]; then
+            selected="$candidate_root"
+          else
+            shopt -s nullglob
+            for candidate in "$candidate_root"/"$artifact_prefix"*; do
+              [ -d "$candidate" ] || continue
+              artifact_name="${candidate##*/}"
+              attempt="${artifact_name#"$artifact_prefix"}"
+              if [[ ! "$attempt" =~ ^[1-9][0-9]*$ ]] || (( attempt > current_attempt )); then
+                continue
+              fi
+              if (( attempt > selected_attempt )); then
+                selected="$candidate"
+                selected_attempt="$attempt"
+              fi
+            done
+          fi
           if [ -n "$selected" ]; then
             mkdir -p "$control_root"
             cp -a -- "$selected"/. "$control_root"/
