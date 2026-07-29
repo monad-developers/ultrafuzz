@@ -2352,6 +2352,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
+  assert.match(workflowSource, /Authorized Defensive Security Context/);
   assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /dependsOn=\{\[task\.preparationId\]\}/);
