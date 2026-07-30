@@ -16,6 +16,7 @@ import type { ModalModelSpec } from "../src/defaults.js";
 import type { ModalWorkerLineage } from "../src/launch-state.js";
 import { PUBLIC_EVAL_DIAGNOSTICS_FILE, type PublicEvalDiagnostics } from "../src/public-eval-diagnostics.js";
 import {
+  assertPublicWorkerInput,
   assertPublicWorkerBundleLineage,
   checkpointPublicModelWorkStart,
   materializeBakedCandidate,
@@ -187,6 +188,71 @@ it("accepts the bounded full lane before reading paid-run credentials", async ()
   }
 }, 30_000);
 
+it("allows only API-key public workers plus Kimi subscription workers", () => {
+  const apiKeyModel: ModalModelSpec = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "public-auth-admission",
+    app_name: "ultrafuzz-benchmarks",
+    image_name: "fixture-image",
+    braintrust: { project: "fixture", api_key_env: "BRAINTRUST_API_KEY", judge_credential_ttl_seconds: 57_600 },
+    node_timeout_seconds: 1800,
+    loops: 1,
+    models: [apiKeyModel],
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      runner_model_profile: apiKeyModel.slug,
+      candidate_repository: "https://github.com/monad-developers/ultrafuzz",
+      candidate_commit: "a".repeat(40),
+      max_runtime_seconds: 3_600
+    }
+  } satisfies PublicModalBenchmarkConfig;
+  const kimiModel: ModalModelSpec = {
+    slug: "benchmark-smoke-kimi-k3-max",
+    model: "kimi-k3",
+    provider: "kimi",
+    agent: "KimiAgent",
+    reasoning: "max",
+    auth_mode: "subscription"
+  };
+
+  expect(() => assertPublicWorkerInput(config, apiKeyModel)).not.toThrow();
+  expect(() =>
+    assertPublicWorkerInput(
+      { ...config, public_benchmark: { ...config.public_benchmark, runner_model_profile: kimiModel.slug } },
+      kimiModel
+    )
+  ).not.toThrow();
+
+  for (const provider of ["openai", "anthropic"] as const) {
+    const subscriptionModel: ModalModelSpec = {
+      slug: `benchmark-smoke-${provider}-subscription`,
+      model: "subscription-model",
+      provider,
+      agent: provider === "openai" ? "CodexAgent" : "ClaudeAgent",
+      reasoning: "high",
+      auth_mode: "subscription"
+    };
+    expect(() =>
+      assertPublicWorkerInput(
+        {
+          ...config,
+          public_benchmark: { ...config.public_benchmark, runner_model_profile: subscriptionModel.slug }
+        },
+        subscriptionModel
+      )
+    ).toThrow(/Kimi subscription/u);
+  }
+});
+
 it("durably checkpoints the transition to paid model work before launch", async () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-public-checkpoint-"));
   const statusPath = path.join(root, "status.json");
@@ -229,7 +295,8 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
       order.push("run");
       throw failure;
     },
-    buildDiagnostics: () => {
+    buildDiagnostics: async () => {
+      await new Promise((resolve) => setImmediate(resolve));
       order.push("build");
       return diagnostics;
     },

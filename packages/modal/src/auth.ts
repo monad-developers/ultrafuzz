@@ -165,6 +165,29 @@ export async function kimiSubscriptionCredentialFileName(
   return path.basename(kimiCredentialPath(source, config, model));
 }
 
+export async function kimiSubscriptionAuthSecretValues(
+  model: string,
+  env: Record<string, string | undefined> = process.env,
+  home = os.homedir()
+): Promise<string[]> {
+  const source = localSubscriptionAuthPath("kimi", env, home);
+  return kimiSubscriptionAuthSecretValuesFromRoots(model, source, source);
+}
+
+export async function kimiSubscriptionAuthSecretValuesFromRoots(
+  model: string,
+  configRoot: string,
+  credentialRoot = configRoot
+): Promise<string[]> {
+  const config = kimiConfig(await readFile(path.join(configRoot, "config.toml"), "utf8"));
+  const credentialFile = path.basename(kimiCredentialPath(configRoot, config, model));
+  const credentialPath = path.join(credentialRoot, "credentials", credentialFile);
+  const token = kimiOAuthToken(await readFile(credentialPath, "utf8"), credentialPath, {
+    requireRefreshToken: false
+  });
+  return [...new Set([token.access_token, token.refresh_token].filter((value) => value.length > 0))];
+}
+
 export async function reconcileKimiSubscriptionAuthCredential(
   model: string,
   remoteCredential: string,

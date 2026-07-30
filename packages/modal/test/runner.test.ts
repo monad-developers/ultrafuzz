@@ -651,31 +651,85 @@ describe("Modal result collection", () => {
     );
   });
 
-  it("omits diagnostics unless an exact config supplies every injected secret value", () => {
+  it("omits diagnostics unless an exact config supplies every injected secret value", async () => {
     const files = {
       "status.json": "status",
       "public-eval-diagnostics.json": "diagnostics"
     };
-    expect(selectModalCollectedEvidence(files, undefined, undefined, {}).files).toEqual({
-      "status.json": "status"
+    await expect(selectModalCollectedEvidence(files, undefined, undefined, {})).resolves.toMatchObject({
+      files: {
+        "status.json": "status"
+      },
+      forbiddenSecretValues: []
     });
 
     const config = publicCollectionLineage().config;
-    expect(selectModalCollectedEvidence(files, config, config.models[0], {}).files).toEqual({
-      "status.json": "status"
+    await expect(selectModalCollectedEvidence(files, config, config.models[0], {})).resolves.toMatchObject({
+      files: {
+        "status.json": "status"
+      },
+      forbiddenSecretValues: []
     });
-    expect(selectModalCollectedEvidence(files, config, undefined, { OPENAI_API_KEY: "opaque-secret" }).files).toEqual({
-      "status.json": "status"
+    await expect(
+      selectModalCollectedEvidence(files, config, undefined, { OPENAI_API_KEY: "opaque-secret" })
+    ).resolves.toMatchObject({
+      files: {
+        "status.json": "status"
+      },
+      forbiddenSecretValues: []
     });
 
-    const selected = selectModalCollectedEvidence(files, config, config.models[0], {
+    const selected = await selectModalCollectedEvidence(files, config, config.models[0], {
       OPENAI_API_KEY: "opaque-secret"
     });
     expect(selected.files).toBe(files);
     expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
   });
 
-  it("uses Moonshot API keys as Kimi public collection redaction secrets", () => {
+  it("retains pre- and post-reconciliation Kimi subscription secrets for public collection", async () => {
+    const config = publicCollectionLineage().config;
+    const model: ModalModelSpec = {
+      slug: "benchmark-smoke-kimi-k3-max",
+      model: "kimi-k3",
+      provider: "kimi",
+      agent: "KimiAgent",
+      reasoning: "max",
+      auth_mode: "subscription"
+    };
+    const kimiAuthRoot = kimiSubscriptionAuthFixture("post-access", "post-refresh");
+
+    await expect(
+      publicBenchmarkCollectionSecretValues(
+        {
+          ...config,
+          models: [model],
+          public_benchmark: { ...config.public_benchmark, runner_model_profile: model.slug }
+        },
+        model,
+        { KIMI_CODE_HOME: kimiAuthRoot, OPENAI_API_KEY: "judge-secret" },
+        ["pre-access", "pre-refresh"]
+      )
+    ).resolves.toEqual(["pre-access", "pre-refresh", "post-access", "post-refresh", "judge-secret"]);
+
+    const files = {
+      "status.json": "status"
+    };
+    await expect(
+      selectModalCollectedEvidence(
+        files,
+        {
+          ...config,
+          models: [model],
+          public_benchmark: { ...config.public_benchmark, runner_model_profile: model.slug }
+        },
+        model,
+        { KIMI_CODE_HOME: kimiAuthRoot, OPENAI_API_KEY: "judge-secret" },
+        ["pre-access"]
+      )
+    ).resolves.toEqual({ files, forbiddenSecretValues: ["pre-access"] });
+  });
+
+  it("uses Moonshot API keys as Kimi public collection redaction secrets", async () => {
     const config = publicCollectionLineage().config;
     const model: ModalModelSpec = {
       slug: "kimi-k3",
@@ -686,15 +740,15 @@ describe("Modal result collection", () => {
       auth_mode: "api-key"
     };
 
-    expect(
+    await expect(
       publicBenchmarkCollectionSecretValues(config, model, {
         MOONSHOT_API_KEY: "moonshot-secret",
         OPENAI_API_KEY: "judge-secret"
       })
-    ).toEqual(["moonshot-secret", "judge-secret"]);
-    expect(() => publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })).toThrow(
-      /KIMI_API_KEY or MOONSHOT_API_KEY/u
-    );
+    ).resolves.toEqual(["moonshot-secret", "judge-secret"]);
+    await expect(
+      publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })
+    ).rejects.toThrow(/KIMI_API_KEY or MOONSHOT_API_KEY/u);
   });
 
   it("passes Kimi API base URLs to remote Modal benchmark workers", () => {
@@ -763,6 +817,33 @@ describe("Modal result collection", () => {
     expect(fs.readdirSync(output).filter((name) => name.startsWith(".collect-"))).toEqual([]);
   });
 });
+
+function kimiSubscriptionAuthFixture(accessToken: string, refreshToken: string): string {
+  const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-collection-"));
+  fs.mkdirSync(path.join(root, "credentials"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "config.toml"),
+    `default_model = "kimi-k3"
+
+[providers."managed:kimi-code"]
+oauth = { storage = "file", key = "oauth/kimi-code" }
+
+[models."kimi-k3"]
+provider = "managed:kimi-code"
+model = "k3"
+`
+  );
+  fs.writeFileSync(
+    path.join(root, "credentials", "kimi-code.json"),
+    `${JSON.stringify({
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: 2_010_000,
+      expires_in: 900
+    })}\n`
+  );
+  return root;
+}
 
 function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundleLineage>[0] {
   const candidateCommit = "d".repeat(40);
@@ -952,6 +1033,7 @@ describe("Modal worker identity", () => {
     const kimi = modalWorkerEntrypointCommand("kimi");
     expect(kimi).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/kimi'");
     expect(kimi).toContain("wait_for_staged_input '/run/ultrafuzz-auth/kimi/config.toml'");
+    expect(kimi).toContain("KIMI_CODE_HOME='/run/ultrafuzz-auth/kimi'");
     expect(kimi).toContain('ULTRAFUZZ_KIMI_SHARED_AUTH_HOME="$data_root/kimi-code-auth"');
     expect(kimi).toContain('ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"');
     expect(kimi).not.toContain("/run/ultrafuzz-auth/claude/.credentials.json");
