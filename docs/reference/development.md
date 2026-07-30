@@ -63,8 +63,8 @@ pnpm --filter @ultrafuzz/modal build
 ```
 
 These tests also validate the exact three-target automatic smoke and three-provider full
-EVMBench configuration, the fixed Sol judge, two-hour smoke and one-hour full row budgets, immutable
-image naming, hash-manifested public bundles, and the Modal-only benchmark
+EVMBench configuration, the fixed Sol judge, four-hour-ten-minute smoke and one-hour full row budgets,
+immutable image naming, hash-manifested public bundles, and the Modal-only benchmark
 workflow. They make no cloud or model calls.
 
 The real-cloud smoke is deliberately separate from every normal test and CI

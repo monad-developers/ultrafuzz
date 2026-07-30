@@ -5,12 +5,15 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  automaticProducerPolicyDimensions,
   assertPublicBenchmarkBundleMatrixScope,
   readAutomaticPublicationManifest,
   summarizePublicBenchmarkBundlePublication,
+  trustedCandidateRuntimePolicyDimensions,
   validateAutomaticPublicationManifest,
   validateAutomaticPairConfig,
-  validateBenchmarkPolicyFiles
+  validateBenchmarkPolicyFiles,
+  validateProducerPolicyDimensions
 } from "./prepare-eval-history-publication.mjs";
 
 const roots: string[] = [];
@@ -67,7 +70,7 @@ describe("trusted automatic eval-history publication handoff", () => {
         candidate_repository: context.repository,
         candidate_commit: context.candidateCommit,
         targets: smokeTargets(),
-        max_runtime_seconds: 7200
+        max_runtime_seconds: 15_000
       }
     };
     expect(
@@ -141,7 +144,7 @@ describe("trusted automatic eval-history publication handoff", () => {
   it("accepts policy-derived trial and cohort matrix dimensions", () => {
     const manifest = smokeManifest();
     manifest.matrix_rows_per_pair = 6;
-    manifest.control_timeout_seconds = 31_800;
+    manifest.control_timeout_seconds = 37_500;
     expect(
       validateAutomaticPublicationManifest(manifest, {
         ...smokeContext(),
@@ -168,6 +171,103 @@ describe("trusted automatic eval-history publication handoff", () => {
         trialsPerVariant: 1
       })
     ).toEqual(changedCohort);
+  });
+
+  it("accepts an older-policy producer with newer publication tooling", () => {
+    const root = temporaryRoot("ultrafuzz-publication-older-policy-");
+    const manifest = smokeManifest();
+    manifest.control_timeout_seconds = 12_000;
+    const pair = manifest.pairs[0]!;
+    fs.writeFileSync(
+      path.join(root, pair.config_path),
+      `${JSON.stringify({ public_benchmark: { max_runtime_seconds: 7_200 } })}\n`
+    );
+
+    const producerPolicy = automaticProducerPolicyDimensions(manifest, root);
+    expect(producerPolicy).toEqual({
+      matrixRowsPerPair: 3,
+      controlTimeoutSeconds: 12_000,
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 7_200
+    });
+    expect(validateProducerPolicyDimensions(producerPolicy, { ...producerPolicy })).toEqual(producerPolicy);
+    expect(() =>
+      validateProducerPolicyDimensions(producerPolicy, {
+        ...producerPolicy,
+        maxRuntimeSeconds: 15_000,
+        controlTimeoutSeconds: 19_800
+      })
+    ).toThrow(/trusted candidate policy/u);
+    expect(
+      validateAutomaticPublicationManifest(manifest, {
+        ...smokeContext(),
+        ...producerPolicy
+      })
+    ).toEqual(manifest);
+  });
+
+  it("reads runtime and concurrency policy from the trusted candidate checkout", () => {
+    expect(trustedCandidateRuntimePolicyDimensions(process.cwd(), "smoke")).toEqual({
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 15_000,
+      evalCleanupSeconds: 300,
+      scorePerWaveTimeoutSeconds: 2_700,
+      reportTimeoutSeconds: 300,
+      preparationTimeoutSeconds: 1_200,
+      controlPollingGraceSeconds: 300
+    });
+  });
+
+  it("ignores declaration-shaped comments, strings, templates, and nested constants", () => {
+    const root = temporaryRoot("ultrafuzz-publication-policy-decoys-");
+    const benchmarkPath = path.join(root, "packages/evals/src/benchmark-manifest.ts");
+    const workerPath = path.join(root, "packages/modal/src/public-worker.ts");
+    const preparationPath = path.join(root, "scripts/ci/prepare-modal-benchmarks.mjs");
+    for (const filePath of [benchmarkPath, workerPath, preparationPath]) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    }
+    fs.writeFileSync(
+      benchmarkPath,
+      [
+        'const decoy = "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 99;";',
+        "// export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 98;",
+        "function nested() { const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 97; return 97; }",
+        "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;",
+        "export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;"
+      ].join("\n")
+    );
+    fs.writeFileSync(
+      workerPath,
+      [
+        "const decoy = `export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 99;`;",
+        "/* export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 98; */",
+        "export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;",
+        "export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;",
+        "export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;",
+        "export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;",
+        "export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;"
+      ].join("\n")
+    );
+    fs.writeFileSync(
+      preparationPath,
+      [
+        'const decoy = "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 99;";',
+        "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;"
+      ].join("\n")
+    );
+
+    expect(trustedCandidateRuntimePolicyDimensions(root, "smoke")).toEqual({
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 7_200,
+      evalCleanupSeconds: 300,
+      scorePerWaveTimeoutSeconds: 2_700,
+      reportTimeoutSeconds: 300,
+      preparationTimeoutSeconds: 1_200,
+      controlPollingGraceSeconds: 300
+    });
   });
 
   it("rejects public bundles that omit a trusted target even when the row count still matches", () => {
@@ -314,12 +414,12 @@ function smokeManifest() {
     image_name: `ufz-runner-${"a".repeat(40)}`,
     targets: smokeTargets(),
     matrix_rows_per_pair: 3,
-    control_timeout_seconds: 21_900,
+    control_timeout_seconds: 19_800,
     concurrency: {
-      max_parallel_eval_rows_per_sandbox: 2,
-      max_parallel_workflow_nodes_per_row: 8,
-      max_live_runner_workflows_by_provider: { openai: 2 },
-      max_live_judge_rows: 2
+      max_parallel_eval_rows_per_sandbox: 3,
+      max_parallel_workflow_nodes_per_row: 4,
+      max_live_runner_workflows_by_provider: { openai: 3 },
+      max_live_judge_rows: 3
     },
     pairs: [
       {

@@ -878,7 +878,7 @@ test("init preserves existing project-owned files and validate exposes launch po
 });
 
 test(
-  "generated Kimi adapter narrows the pinned Smithers 0.29.0 command to Kimi Code 0.29.1",
+  "generated Kimi adapter narrows the pinned Smithers command to Kimi Code 0.29.1",
   { skip: !runningUnderBun },
   async () => {
     const project = tempProject();
@@ -950,7 +950,7 @@ default_effort = "high"
       cwd: "/workspace/target",
       options: {}
     });
-    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.29.0");
+    assert.equal(SMITHERS_ORCHESTRATOR_VERSION, "0.31.0");
     assert.ok(pinnedCommand.args.includes("--final-message-only"));
     assert.ok(pinnedCommand.args.includes("--print"));
     assert.ok(pinnedCommand.args.includes("--work-dir"));
@@ -1940,6 +1940,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
   assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /run_id: "cloud-nodes"/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
   assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
@@ -2778,6 +2779,58 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
+test("startRun patches the pinned CLI cold detached lifecycle", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+
+  const logPath = path.join(project, "patched-admission-smithers.log");
+  writeFakeInstalledSmithers(project);
+  const cliRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "cli");
+  const admissionSource = path.join(cliRoot, "src", "detached-admission.js");
+  const cliSource = path.join(cliRoot, "src", "index.js");
+  fs.mkdirSync(path.dirname(admissionSource), { recursive: true });
+  fs.writeFileSync(
+    path.join(cliRoot, "package.json"),
+    `${JSON.stringify({ name: "@smithers-orchestrator/cli", version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    cliSource,
+    [
+      '        const supervisor = spawn("bun", supervisorArgs, {',
+      "          detached: true,",
+      '          stdio: ["ignore", fd, fd],',
+      "          env: process.env,",
+      "        });",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    admissionSource,
+    [
+      'export const DETACHED_ADMISSION_NONCE_ENV = "SMITHERS_DETACHED_ADMISSION_NONCE";',
+      "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "patched-admission-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: logPath }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.match(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 300_000/u);
+  assert.doesNotMatch(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 30_000;/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /const supervisorFd = openSync\(logFile, "a"\)/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", supervisorFd, supervisorFd\]/u);
+  assert.doesNotMatch(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", fd, fd\]/u);
+});
+
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -2896,10 +2949,10 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
     dependencies: Record<string, string>;
     devDependencies: Record<string, string>;
   };
-  manifest.dependencies["smithers-orchestrator"] = "0.28.0";
+  manifest.dependencies["smithers-orchestrator"] = "0.29.0";
   manifest.dependencies["custom-agent-package"] = "1.2.3";
   fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  writeFakeInstalledSmithers(project, { version: "0.28.0" });
+  writeFakeInstalledSmithers(project, { version: "0.29.0" });
   const installer = writeFakeNpmInstaller(project);
 
   const run = await startRun({
@@ -6839,10 +6892,26 @@ test(
         "--format",
         "json"
       ],
-      { cwd: project, encoding: "utf8", maxBuffer: 1024 * 1024 * 16 }
+      {
+        cwd: project,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024 * 16,
+        env: { ...process.env, OPENAI_API_KEY: "test-openai-api-key" }
+      }
     );
     if (graphProcess.status !== 0 || graphProcess.stdout.trim() === "") {
-      throw graphProcess.error ?? new Error(graphProcess.stderr || "smithers graph failed");
+      throw (
+        graphProcess.error ??
+        new Error(
+          [
+            `smithers graph exited ${String(graphProcess.status)}`,
+            graphProcess.stderr.trim(),
+            graphProcess.stdout.trim()
+          ]
+            .filter(Boolean)
+            .join("\n")
+        )
+      );
     }
     const graphJson = graphProcess.stdout;
     const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };

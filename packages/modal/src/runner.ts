@@ -22,6 +22,7 @@ import {
   type AnalysisRecoverySummary
 } from "@ultrafuzz/artifacts";
 import { boundedEvalId } from "@ultrafuzz/evals";
+import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
   kimiSubscriptionCredentialFileName,
@@ -2938,7 +2939,7 @@ export function assertSanitizedModalCollectedFiles(
     }
   }
   const log = files["worker.log"];
-  if (log !== undefined && !isGenericWorkerLifecycleLog(log)) {
+  if (log !== undefined && !isGenericWorkerLifecycleLog(log, forbiddenSecretValues)) {
     throw new Error("refusing to collect an unsanitized Modal worker log");
   }
   const diagnosticsContents = files[PUBLIC_EVAL_DIAGNOSTICS_FILE];
@@ -3109,18 +3110,53 @@ async function syncDirectory(directoryPath: string): Promise<void> {
   }
 }
 
-function isGenericWorkerLifecycleLog(contents: string): boolean {
+function isGenericWorkerLifecycleLog(contents: string, forbiddenSecretValues: readonly string[]): boolean {
   if (Buffer.byteLength(contents, "utf8") > MAX_GENERIC_WORKER_LOG_BYTES) return false;
   if (contents === "") return true;
   if (!contents.endsWith("\n")) return false;
   return contents
     .slice(0, -1)
     .split("\n")
-    .every((line) =>
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (?:worker-started|operation-started|operation-finished|operation-failed)$/u.test(
-        line
+    .every((line) => isGenericWorkerLifecycleLine(line, forbiddenSecretValues));
+}
+
+function isGenericWorkerLifecycleLine(line: string, forbiddenSecretValues: readonly string[]): boolean {
+  if (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z (?:worker-started|operation-started|operation-finished|operation-failed)$/u.test(
+      line
+    )
+  ) {
+    return true;
+  }
+  const match = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z eval-failure-diagnostics ([A-Za-z0-9_-]{1,8192})$/u.exec(
+    line
+  );
+  if (match === null) return false;
+  try {
+    const value = JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")) as unknown;
+    return (
+      Array.isArray(value) &&
+      value.length >= 1 &&
+      value.length <= 3 &&
+      value.every(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          !Array.isArray(entry) &&
+          Object.keys(entry).sort().join(",") === "code,message" &&
+          (entry as Record<string, unknown>).code === "WORKFLOW_SUBMISSION_FAILED" &&
+          typeof (entry as Record<string, unknown>).message === "string" &&
+          Buffer.byteLength((entry as Record<string, string>).message!, "utf8") <= 1_000 &&
+          redactSecretsInText((entry as Record<string, string>).message!) ===
+            (entry as Record<string, string>).message &&
+          !forbiddenSecretValues.some(
+            (secret) => secret.length > 0 && (entry as Record<string, string>).message!.includes(secret)
+          )
       )
     );
+  } catch {
+    return false;
+  }
 }
 
 function sleep(ms: number): Promise<void> {

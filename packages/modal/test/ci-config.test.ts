@@ -87,6 +87,8 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.control_timeout_seconds).toBe(
       workerEnvelopeSeconds + PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS + 5 * 60
     );
+    expect(manifest.control_timeout_seconds).toBe(19_800);
+    expect(manifest.control_timeout_seconds).toBeLessThan(6 * 60 * 60);
     expect(manifest.concurrency).toEqual({
       max_parallel_eval_rows_per_sandbox: maxParallel,
       max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes("smoke"),
@@ -107,7 +109,7 @@ describe("public Modal benchmark configuration", () => {
       };
       expect(config.node_timeout_seconds).toBe(1800);
       expect(config.public_benchmark).toEqual(
-        expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 7200 })
+        expect.objectContaining({ benchmark: "ultrafuzz-bench", lane: "smoke", max_runtime_seconds: 15_000 })
       );
       expect(config.public_benchmark.targets).toEqual(manifest.targets);
       expect(config.braintrust.judge_api_key_env).toBe("OPENAI_API_KEY");

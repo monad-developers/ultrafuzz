@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
 
@@ -176,11 +177,15 @@ export async function prepareAutomaticPublication(input) {
     import("../../packages/modal/dist/public-worker.js"),
     import("../../packages/modal/dist/launch-state.js")
   ]);
+  const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
+  const producerPolicy = automaticProducerPolicyDimensions(
+    readJsonRegular(manifestPath, MAX_MANIFEST_BYTES, "benchmark manifest"),
+    controlRoot
+  );
   const context = publicationExpectations({
     ...input,
-    ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModule)
+    ...benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy)
   });
-  const manifestPath = regularFileInside(controlRoot, "manifest.json", MAX_MANIFEST_BYTES, "benchmark manifest");
   const manifest = readAutomaticPublicationManifest(manifestPath, context);
   const { loadModalBenchmarkConfig, fingerprintModalConfigFile, fingerprintModalModel } = configModule;
   const sourceFingerprint = launchStateModule.fingerprintTrackedSource(policyRoot);
@@ -323,11 +328,11 @@ function publicationExpectations(input) {
   const trialsPerVariant = positiveSafeInteger(input.trialsPerVariant ?? 1, "benchmark trials per variant");
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
   const maxParallelEvalRows = positiveSafeInteger(
-    input.maxParallelEvalRows ?? (smoke ? 2 : 20),
+    input.maxParallelEvalRows ?? (smoke ? 3 : 20),
     "maximum parallel eval rows"
   );
   const maxParallelWorkflowNodes = positiveSafeInteger(
-    input.maxParallelWorkflowNodes ?? 8,
+    input.maxParallelWorkflowNodes ?? (smoke ? 4 : 8),
     "maximum parallel workflow nodes"
   );
   const maxRuntimeSeconds = positiveSafeInteger(
@@ -409,7 +414,7 @@ function validateConcurrency(value, expected) {
   }
 }
 
-function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModule) {
+function benchmarkPolicyDimensions(policyRoot, identity, evalModule, producerPolicy) {
   const cohortPath = path.join(
     policyRoot,
     "benchmarks",
@@ -442,17 +447,25 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModul
   const targetCount = selectedTargets.length;
   const trialsPerVariant = lane.trials_per_variant;
   const matrixRowsPerPair = checkedProduct(targetCount, trialsPerVariant, "benchmark matrix row count");
-  const maxParallelEvalRows = workerModule.publicBenchmarkMaxParallelEvalRows(identity.mode);
-  const maxParallelWorkflowNodes = workerModule.publicBenchmarkMaxParallelWorkflowNodes(identity.mode);
-  const maxRuntimeSeconds = workerModule.publicBenchmarkMaxRuntimeSeconds(identity.mode);
+  const candidatePolicy = trustedCandidateRuntimePolicyDimensions(policyRoot, identity.mode);
+  const maxParallelEvalRows = candidatePolicy.maxParallelEvalRows;
+  const maxParallelWorkflowNodes = candidatePolicy.maxParallelWorkflowNodes;
+  const maxRuntimeSeconds = candidatePolicy.maxRuntimeSeconds;
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
   const controlTimeoutSeconds =
     waves * maxRuntimeSeconds +
-    workerModule.PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS +
-    waves * workerModule.PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS +
-    workerModule.PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS +
-    workerModule.PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS +
-    5 * 60;
+    candidatePolicy.evalCleanupSeconds +
+    waves * candidatePolicy.scorePerWaveTimeoutSeconds +
+    candidatePolicy.reportTimeoutSeconds +
+    candidatePolicy.preparationTimeoutSeconds +
+    candidatePolicy.controlPollingGraceSeconds;
+  validateProducerPolicyDimensions(producerPolicy, {
+    matrixRowsPerPair,
+    maxParallelEvalRows,
+    maxParallelWorkflowNodes,
+    maxRuntimeSeconds,
+    controlTimeoutSeconds
+  });
   return {
     targets: selectedTargets.map((target) => ({
       id: target.id,
@@ -470,13 +483,208 @@ function benchmarkPolicyDimensions(policyRoot, identity, evalModule, workerModul
   };
 }
 
+export function validateProducerPolicyDimensions(actual, expected) {
+  for (const key of [
+    "matrixRowsPerPair",
+    "maxParallelEvalRows",
+    "maxParallelWorkflowNodes",
+    "maxRuntimeSeconds",
+    "controlTimeoutSeconds"
+  ]) {
+    if (actual[key] !== expected[key]) {
+      throw new Error(`benchmark producer ${key} does not match the trusted candidate policy`);
+    }
+  }
+  return actual;
+}
+
+export function trustedCandidateRuntimePolicyDimensions(policyRoot, mode) {
+  if (mode !== "smoke" && mode !== "full") throw new Error("benchmark mode is invalid");
+  const root = regularDirectory(policyRoot, "benchmark policy root");
+  const benchmarkSource = fs.readFileSync(
+    regularFileInside(
+      root,
+      "packages/evals/src/benchmark-manifest.ts",
+      MAX_POLICY_BYTES,
+      "candidate benchmark concurrency policy"
+    ),
+    "utf8"
+  );
+  const workerSource = fs.readFileSync(
+    regularFileInside(
+      root,
+      "packages/modal/src/public-worker.ts",
+      MAX_POLICY_BYTES,
+      "candidate benchmark runtime policy"
+    ),
+    "utf8"
+  );
+  const preparationSource = fs.readFileSync(
+    regularFileInside(
+      root,
+      "scripts/ci/prepare-modal-benchmarks.mjs",
+      MAX_POLICY_BYTES,
+      "candidate benchmark control policy"
+    ),
+    "utf8"
+  );
+  const concurrencyNames =
+    mode === "smoke"
+      ? ["BENCHMARK_SMOKE_MAX_PARALLEL_RUNS", "BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS"]
+      : ["BENCHMARK_FULL_MAX_PARALLEL_RUNS", "BENCHMARK_FULL_MAX_PARALLEL_TARGETS"];
+  const concurrency = Object.fromEntries(
+    concurrencyNames.map((name) => [name, readNumericSourceConstant(benchmarkSource, name, {}, name)])
+  );
+  const runtimeName =
+    mode === "smoke" ? "PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS" : "PUBLIC_FULL_BENCHMARK_MAX_RUNTIME_SECONDS";
+  return {
+    maxParallelEvalRows: concurrency[concurrencyNames[0]],
+    maxParallelWorkflowNodes: concurrency[concurrencyNames[1]],
+    maxRuntimeSeconds: readNumericSourceConstant(workerSource, runtimeName, concurrency, runtimeName),
+    evalCleanupSeconds: readNumericSourceConstant(
+      workerSource,
+      "PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS",
+      concurrency,
+      "benchmark cleanup timeout"
+    ),
+    scorePerWaveTimeoutSeconds: readNumericSourceConstant(
+      workerSource,
+      "PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS",
+      concurrency,
+      "benchmark scoring timeout"
+    ),
+    reportTimeoutSeconds: readNumericSourceConstant(
+      workerSource,
+      "PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS",
+      concurrency,
+      "benchmark report timeout"
+    ),
+    preparationTimeoutSeconds: readNumericSourceConstant(
+      workerSource,
+      "PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS",
+      concurrency,
+      "benchmark preparation timeout"
+    ),
+    controlPollingGraceSeconds: readNumericSourceConstant(
+      preparationSource,
+      "PUBLIC_CONTROL_POLLING_GRACE_SECONDS",
+      {},
+      "benchmark control polling grace"
+    )
+  };
+}
+
+function readNumericSourceConstant(source, name, identifiers, label) {
+  const sourceFile = ts.createSourceFile("trusted-candidate-policy.ts", source, ts.ScriptTarget.Latest, true);
+  if (sourceFile.parseDiagnostics.length > 0) {
+    throw new Error(`${label} source is not valid TypeScript`);
+  }
+  const declarations = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === name &&
+        declaration.initializer !== undefined
+      ) {
+        declarations.push(declaration.initializer);
+      }
+    }
+  }
+  if (declarations.length !== 1) {
+    throw new Error(`${label} must have exactly one top-level const declaration in the trusted candidate policy`);
+  }
+  return evaluateIntegerExpression(declarations[0], identifiers, label);
+}
+
+function evaluateIntegerExpression(node, identifiers, label) {
+  let result;
+  if (ts.isNumericLiteral(node)) {
+    result = Number(node.text);
+  } else if (ts.isIdentifier(node) && Object.hasOwn(identifiers, node.text)) {
+    result = identifiers[node.text];
+  } else if (ts.isParenthesizedExpression(node)) {
+    result = evaluateIntegerExpression(node.expression, identifiers, label);
+  } else if (ts.isPrefixUnaryExpression(node)) {
+    const operand = evaluateIntegerExpression(node.operand, identifiers, label);
+    if (node.operator === ts.SyntaxKind.PlusToken) result = operand;
+    else if (node.operator === ts.SyntaxKind.MinusToken) result = -operand;
+  } else if (ts.isBinaryExpression(node)) {
+    const left = evaluateIntegerExpression(node.left, identifiers, label);
+    const right = evaluateIntegerExpression(node.right, identifiers, label);
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.PlusToken:
+        result = left + right;
+        break;
+      case ts.SyntaxKind.MinusToken:
+        result = left - right;
+        break;
+      case ts.SyntaxKind.AsteriskToken:
+        result = left * right;
+        break;
+      case ts.SyntaxKind.SlashToken:
+        if (right === 0 || left % right !== 0) throw new Error(`${label} contains a non-integral expression`);
+        result = left / right;
+        break;
+    }
+  }
+  if (!Number.isSafeInteger(result) || result < 1) {
+    throw new Error(`${label} must resolve to a positive safe integer`);
+  }
+  return result;
+}
+
+export function automaticProducerPolicyDimensions(value, controlRoot) {
+  const root = regularDirectory(controlRoot, "benchmark control root");
+  const manifest = strictRecord(value, "benchmark manifest", ROOT_KEYS);
+  const matrixRowsPerPair = positiveSafeInteger(manifest.matrix_rows_per_pair, "benchmark matrix row count");
+  const controlTimeoutSeconds = positiveSafeInteger(manifest.control_timeout_seconds, "benchmark control timeout");
+  const concurrency = strictRecord(manifest.concurrency, "benchmark concurrency", CONCURRENCY_KEYS);
+  const maxParallelEvalRows = positiveSafeInteger(
+    concurrency.max_parallel_eval_rows_per_sandbox,
+    "maximum parallel eval rows"
+  );
+  const maxParallelWorkflowNodes = positiveSafeInteger(
+    concurrency.max_parallel_workflow_nodes_per_row,
+    "maximum parallel workflow nodes"
+  );
+  if (!Array.isArray(manifest.pairs) || manifest.pairs.length === 0) {
+    throw new Error("benchmark manifest must contain producer pairs");
+  }
+  const runtimes = manifest.pairs.map((value, index) => {
+    const pair = strictRecord(value, `benchmark pair ${index}`, PAIR_KEYS);
+    const configPath = safeBasename(pair.config_path, `benchmark pair ${index} config path`);
+    const config = looseRecord(
+      readJsonRegular(
+        regularFileInside(root, configPath, MAX_CONFIG_BYTES, `benchmark config ${configPath}`),
+        MAX_CONFIG_BYTES,
+        `benchmark config ${configPath}`
+      ),
+      `benchmark config ${configPath}`
+    );
+    const scope = looseRecord(config.public_benchmark, `benchmark config ${configPath} public scope`);
+    return positiveSafeInteger(scope.max_runtime_seconds, `benchmark config ${configPath} maximum runtime`);
+  });
+  if (new Set(runtimes).size !== 1) {
+    throw new Error("benchmark producer pairs must use one maximum runtime policy");
+  }
+  return {
+    matrixRowsPerPair,
+    controlTimeoutSeconds,
+    maxParallelEvalRows,
+    maxParallelWorkflowNodes,
+    maxRuntimeSeconds: runtimes[0]
+  };
+}
+
 function defaultControlTimeoutSeconds(matrixRowsPerPair, maxParallelEvalRows, maxRuntimeSeconds) {
   const waves = Math.ceil(matrixRowsPerPair / maxParallelEvalRows);
   return waves * maxRuntimeSeconds + 5 * 60 + waves * 45 * 60 + 5 * 60 + 20 * 60 + 5 * 60;
 }
 
 function defaultMaxRuntimeSeconds(mode) {
-  return mode === "smoke" ? 2 * 60 * 60 : 60 * 60;
+  return mode === "smoke" ? 4 * 60 * 60 + 10 * 60 : 60 * 60;
 }
 
 function positiveSafeInteger(value, label) {
@@ -862,6 +1070,13 @@ function strictRecord(value, label, expectedKeys) {
   const expected = [...expectedKeys].sort();
   if (JSON.stringify(keys) !== JSON.stringify(expected)) {
     throw new Error(`${label} must contain exactly ${expected.join(", ")}`);
+  }
+  return value;
+}
+
+function looseRecord(value, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
   }
   return value;
 }

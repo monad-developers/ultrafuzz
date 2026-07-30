@@ -32,6 +32,7 @@ import {
   publicEvalCommandTimeoutSeconds,
   publicEvalRunId,
   preparePublicEvalSuite,
+  publicEvalFailureDiagnosticLogPayload,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
@@ -243,6 +244,53 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
 
   expect(result).toEqual({ diagnostics, runError: failure });
   expect(order).toEqual(["run", "build", "persist", "flush"]);
+});
+
+it("publishes only bounded redacted workflow-submission messages from eval JSON", () => {
+  const secret = "sk-fixture-secret-value";
+  const payload = publicEvalFailureDiagnosticLogPayload(
+    JSON.stringify({
+      diagnostics: [
+        {
+          code: "WORKFLOW_SUBMISSION_FAILED",
+          message: `runner failed with api_key=${secret}\nprivate detail`,
+          details: { credential: secret }
+        },
+        { code: "EVAL_ROW_SYNC_FAILED", message: `must not publish ${secret}` }
+      ],
+      data: { private: secret }
+    }),
+    [secret]
+  );
+
+  expect(payload).toBeDefined();
+  const decoded = JSON.parse(Buffer.from(payload!, "base64url").toString("utf8")) as unknown;
+  expect(decoded).toEqual([
+    {
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: "runner failed with api_key=<redacted> private detail"
+    }
+  ]);
+  expect(JSON.stringify(decoded)).not.toContain(secret);
+  expect(JSON.stringify(decoded)).not.toContain("details");
+  expect(publicEvalFailureDiagnosticLogPayload("not json", [secret])).toBeUndefined();
+
+  const longPayload = publicEvalFailureDiagnosticLogPayload(
+    JSON.stringify({
+      diagnostics: [
+        {
+          code: "WORKFLOW_SUBMISSION_FAILED",
+          message: `${"command-prefix ".repeat(100)}stderr: decisive child failure`
+        }
+      ]
+    }),
+    []
+  );
+  const longDecoded = JSON.parse(Buffer.from(longPayload!, "base64url").toString("utf8")) as Array<{
+    message: string;
+  }>;
+  expect(longDecoded[0]!.message).toContain("stderr: decisive child failure");
+  expect(Buffer.byteLength(longDecoded[0]!.message, "utf8")).toBeLessThanOrEqual(1_000);
 });
 
 it("preserves the eval run failure when no diagnostic can be built", async () => {
