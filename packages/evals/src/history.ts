@@ -1103,12 +1103,21 @@ export function checkEvalHistoryCharts(history: EvalHistory, chartsDirectory: st
   return mismatches;
 }
 
-// Ordered series-identity fields. Every field except `target` is treated as
-// shared context: when it is constant across all plotted series it is rendered
-// once in the chart subtitle, and only the fields that actually vary end up in
-// each series legend label. `target` always labels the series so per-target
-// lines stay legible even when it is the only distinguishing field.
-const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning", "cohort", "policy"] as const;
+const SINGLE_ITEM_JSON_PRIMITIVE_ARRAY =
+  /\[\n\s+((?:"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?))\n\s+\]/giu;
+
+export function formatEvalHistoryJson(history: EvalHistory): string {
+  // Prettier keeps short single-item primitive arrays on one line. Match that
+  // behavior for deterministic publisher output without adding a formatter
+  // dependency to the runtime eval-history path.
+  return `${JSON.stringify(history, null, 2).replace(SINGLE_ITEM_JSON_PRIMITIVE_ARRAY, "[$1]")}\n`;
+}
+
+// Ordered series-identity fields. Benchmark lineage fields such as cohort and
+// execution policy are intentionally excluded from line identity: those changes
+// are rendered as vertical markers, while the metric lines keep tracking the
+// same benchmark target/model over time.
+const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning"] as const;
 
 interface SeriesFields {
   benchmark: string;
@@ -1127,6 +1136,19 @@ interface ChartPoint {
   commit: string;
   repositoryUrl: string;
   value: number | null;
+}
+
+interface ChartColumn {
+  key: string;
+  timestamp: string;
+  commit: string;
+  repositoryUrl: string;
+}
+
+interface LineageMarker {
+  columnKey: string;
+  label: string;
+  title: string;
 }
 
 function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric): ChartPoint[] {
@@ -1174,6 +1196,44 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     );
 }
 
+function chartColumnKey(point: Pick<ChartPoint, "timestamp" | "commit">): string {
+  return [point.timestamp, point.commit].join("\u0000");
+}
+
+function chartColumns(points: ChartPoint[]): ChartColumn[] {
+  const byKey = new Map<string, ChartColumn>();
+  for (const point of points) {
+    const key = chartColumnKey(point);
+    if (byKey.has(key)) continue;
+    byKey.set(key, {
+      key,
+      timestamp: point.timestamp,
+      commit: point.commit,
+      repositoryUrl: point.repositoryUrl
+    });
+  }
+  return [...byKey.values()].sort(
+    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
+  );
+}
+
+function chartLineageMarkers(points: ChartPoint[]): LineageMarker[] {
+  const earliestByLineage = new Map<string, ChartPoint>();
+  for (const point of [...points].sort(
+    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
+  )) {
+    const lineageKey = [point.fields.benchmark, point.fields.lane, point.fields.cohort, point.fields.policy].join(
+      "\u0000"
+    );
+    if (!earliestByLineage.has(lineageKey)) earliestByLineage.set(lineageKey, point);
+  }
+  return [...earliestByLineage.values()].map((point) => ({
+    columnKey: chartColumnKey(point),
+    label: point.fields.cohort,
+    title: `${point.fields.benchmark} ${point.fields.lane} ${point.fields.cohort} ${point.fields.policy}`
+  }));
+}
+
 function shortFingerprint(value: string): string {
   return value.replace(/^sha256:/u, "").slice(0, 8);
 }
@@ -1212,14 +1272,16 @@ function renderChart(
   const plotWidth = width - left - right;
   const plotHeight = 300;
   const plotBottom = top + plotHeight;
-  const legendTop = plotBottom + 58;
+  const dateLabelBottom = plotBottom + 116;
+  const legendTop = dateLabelBottom + 34;
   const points = chartPoints(observations, metric);
+  const columns = chartColumns(points);
+  const columnIndex = new Map(columns.map((column, index) => [column.key, index]));
 
   const seriesKeys = [...new Set(points.map((point) => point.seriesKey))];
   const height = legendTop + seriesKeys.length * 22 + 12;
   const palette = ["#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c", "#4f46e5"];
   const color = new Map(seriesKeys.map((name, index) => [name, palette[index % palette.length]!]));
-  const seriesIndex = new Map(seriesKeys.map((name, index) => [name, index]));
   const seriesFieldsByKey = new Map(
     seriesKeys.map((key) => [key, points.find((point) => point.seriesKey === key)!.fields])
   );
@@ -1240,22 +1302,17 @@ function renderChart(
   const seriesLabel = (fields: SeriesFields): string =>
     [...varyingFields.map((field) => fields[field]), fields.target].join(" ");
 
-  const timestamps = points.map((point) => Date.parse(point.timestamp));
-  const minTime = timestamps.length === 0 ? 0 : Math.min(...timestamps);
-  const maxTime = timestamps.length === 0 ? 0 : Math.max(...timestamps);
-  // With a single benchmarked commit there is no time axis to spread points
-  // along, so lay the per-target series out side by side instead of stacking
-  // them on one x. Multiple commits use the real time axis.
-  const singleColumn = points.length > 0 && minTime === maxTime;
   const available = points.map((point) => point.value).filter((value): value is number => value !== null);
   const maxValue = ratioMetric ? 1 : Math.max(1, ...available);
-  const x = (point: ChartPoint): number => {
-    if (singleColumn) {
-      return left + (plotWidth * ((seriesIndex.get(point.seriesKey) ?? 0) + 1)) / (seriesKeys.length + 1);
-    }
-    if (minTime === maxTime) return left + plotWidth / 2;
+  const columnX = (column: ChartColumn): number => {
+    if (columns.length <= 1) return left + plotWidth / 2;
+    const index = columnIndex.get(column.key) ?? 0;
     const pad = 44;
-    return left + pad + ((Date.parse(point.timestamp) - minTime) / (maxTime - minTime)) * (plotWidth - 2 * pad);
+    return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
+  };
+  const x = (point: ChartPoint): number => {
+    const column = columns[columnIndex.get(chartColumnKey(point)) ?? 0];
+    return column === undefined ? left + plotWidth / 2 : columnX(column);
   };
   const y = (value: number): number => top + plotHeight - (value / maxValue) * plotHeight;
 
@@ -1273,7 +1330,7 @@ function renderChart(
     );
   }
   lines.push(
-    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across candidate commits.")}</text>`,
+    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across evenly spaced candidate-run columns.")}</text>`,
     `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
   );
@@ -1290,6 +1347,16 @@ function renderChart(
       `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No published observations</text>`
     );
   } else {
+    for (const marker of chartLineageMarkers(points)) {
+      const column = columns[columnIndex.get(marker.columnKey) ?? 0];
+      if (column === undefined) continue;
+      const markerX = columnX(column);
+      lines.push(
+        `<g data-lineage-marker="${xml(marker.label)}"><title>${xml(marker.title)}</title>`,
+        `<line x1="${format(markerX)}" y1="${top}" x2="${format(markerX)}" y2="${plotBottom}" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>`,
+        `<text transform="translate(${format(markerX + 7)},${format(top + 8)}) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">${xml(marker.label)}</text></g>`
+      );
+    }
     const bySeries = new Map<string, ChartPoint[]>();
     for (const point of points) bySeries.set(point.seriesKey, [...(bySeries.get(point.seriesKey) ?? []), point]);
     for (const [name, values] of bySeries) {
@@ -1324,21 +1391,11 @@ function renderChart(
         );
       }
     }
-    // Label each distinct commit column once beneath the axis; cap crowded
-    // histories to the earliest and latest commits.
-    const columnByTimestamp = new Map<string, ChartPoint>();
-    for (const point of points)
-      if (!columnByTimestamp.has(point.timestamp)) columnByTimestamp.set(point.timestamp, point);
-    let columns = [...columnByTimestamp.values()].sort(
-      (leftPoint, rightPoint) =>
-        compareText(leftPoint.timestamp, rightPoint.timestamp) || compareText(leftPoint.commit, rightPoint.commit)
-    );
-    if (columns.length > 8) columns = [columns[0]!, columns.at(-1)!];
     for (const column of columns) {
-      const columnX = singleColumn ? left + plotWidth / 2 : x(column);
+      const labelX = columnX(column);
       lines.push(
-        `<text x="${format(columnX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
-        `<text x="${format(columnX)}" y="${plotBottom + 34}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
+        `<text x="${format(labelX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
+        `<text transform="translate(${format(labelX)},${dateLabelBottom}) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
       );
     }
   }
@@ -1374,7 +1431,7 @@ function installHistoryPublication(
   let chartsInstalled = false;
   try {
     fs.mkdirSync(stagedCharts, { recursive: true });
-    fs.writeFileSync(stagedHistory, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+    fs.writeFileSync(stagedHistory, formatEvalHistoryJson(history), "utf8");
     for (const [file, contents] of charts) fs.writeFileSync(path.join(stagedCharts, file), contents, "utf8");
 
     if (fs.existsSync(historyPath)) {
