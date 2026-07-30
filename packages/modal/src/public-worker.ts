@@ -19,6 +19,7 @@ import {
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
+import { redactSecretsInText } from "@ultrafuzz/security";
 import { stringify } from "yaml";
 
 import { runnerApiKeyEnv } from "./auth.js";
@@ -186,7 +187,8 @@ export async function runPublicBenchmarkWorker(input: {
                   maxParallelRuns: prepared.maxParallelRuns,
                   rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds
                 }) * 1000,
-              timeoutCategory: "model-work-timeout"
+              timeoutCategory: "model-work-timeout",
+              publicDiagnosticSecretValues: forbiddenSecretValues
             }
           ).then(() => undefined),
         buildDiagnostics: () =>
@@ -810,6 +812,7 @@ async function runCommand(
     env?: Record<string, string>;
     timeoutCategory?: string;
     signal?: AbortSignal;
+    publicDiagnosticSecretValues?: readonly string[];
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
@@ -859,6 +862,16 @@ async function runCommand(
     if (killTimer !== undefined) clearTimeout(killTimer);
     options.signal?.removeEventListener("abort", abortHandler);
   });
+  const capturedStdout = Buffer.concat(stdout).toString("utf8");
+  if (options.publicDiagnosticSecretValues !== undefined) {
+    const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, options.publicDiagnosticSecretValues);
+    if (payload !== undefined) {
+      await fs.promises.appendFile(
+        options.logPath,
+        `${new Date().toISOString()} eval-failure-diagnostics ${payload}\n`
+      );
+    }
+  }
   if (timedOut || aborted) {
     await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-failed\n`);
     throw new OperationalDispositionError("unreachable", {
@@ -876,7 +889,54 @@ async function runCommand(
     });
   }
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-finished\n`);
-  return Buffer.concat(stdout).toString("utf8");
+  return capturedStdout;
+}
+
+export function publicEvalFailureDiagnosticLogPayload(
+  stdout: string,
+  forbiddenSecretValues: readonly string[]
+): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!isPlainRecord(parsed) || !Array.isArray(parsed.diagnostics)) return undefined;
+  const diagnostics = parsed.diagnostics
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        isPlainRecord(entry) && entry.code === "WORKFLOW_SUBMISSION_FAILED" && typeof entry.message === "string"
+    )
+    .slice(0, 3)
+    .map((entry) => ({
+      code: "WORKFLOW_SUBMISSION_FAILED",
+      message: sanitizePublicDiagnosticMessage(entry.message as string, forbiddenSecretValues)
+    }));
+  if (diagnostics.length === 0) return undefined;
+  return Buffer.from(JSON.stringify(diagnostics), "utf8").toString("base64url");
+}
+
+function sanitizePublicDiagnosticMessage(message: string, forbiddenSecretValues: readonly string[]): string {
+  let sanitized = message;
+  for (const secret of [...new Set(forbiddenSecretValues.filter((value) => value.length > 0))].sort(
+    (left, right) => right.length - left.length
+  )) {
+    sanitized = sanitized.split(secret).join("<redacted>");
+  }
+  sanitized = [...redactSecretsInText(sanitized)]
+    .map((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint <= 31 || codePoint === 127 ? " " : character;
+    })
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return Buffer.from(sanitized, "utf8").subarray(0, 1_000).toString("utf8");
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function flushFilesystem(): Promise<void> {

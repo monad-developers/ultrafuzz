@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 
 export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
 
@@ -574,64 +575,61 @@ export function trustedCandidateRuntimePolicyDimensions(policyRoot, mode) {
 }
 
 function readNumericSourceConstant(source, name, identifiers, label) {
-  const match = new RegExp(`(?:export\\s+)?const\\s+${name}\\s*=\\s*([^;]+);`, "u").exec(source);
-  if (match === null) throw new Error(`${label} is unavailable from the trusted candidate policy`);
-  return evaluateIntegerExpression(match[1], identifiers, label);
+  const sourceFile = ts.createSourceFile("trusted-candidate-policy.ts", source, ts.ScriptTarget.Latest, true);
+  if (sourceFile.parseDiagnostics.length > 0) {
+    throw new Error(`${label} source is not valid TypeScript`);
+  }
+  const declarations = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === name &&
+        declaration.initializer !== undefined
+      ) {
+        declarations.push(declaration.initializer);
+      }
+    }
+  }
+  if (declarations.length !== 1) {
+    throw new Error(`${label} must have exactly one top-level const declaration in the trusted candidate policy`);
+  }
+  return evaluateIntegerExpression(declarations[0], identifiers, label);
 }
 
-function evaluateIntegerExpression(expression, identifiers, label) {
-  const tokens = [];
-  const tokenPattern = /\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|[()+\-*/])/uy;
-  let offset = 0;
-  while (offset < expression.length) {
-    tokenPattern.lastIndex = offset;
-    const match = tokenPattern.exec(expression);
-    if (match === null) {
-      if (/^\s*$/u.test(expression.slice(offset))) break;
-      throw new Error(`${label} contains an unsupported expression`);
+function evaluateIntegerExpression(node, identifiers, label) {
+  let result;
+  if (ts.isNumericLiteral(node)) {
+    result = Number(node.text);
+  } else if (ts.isIdentifier(node) && Object.hasOwn(identifiers, node.text)) {
+    result = identifiers[node.text];
+  } else if (ts.isParenthesizedExpression(node)) {
+    result = evaluateIntegerExpression(node.expression, identifiers, label);
+  } else if (ts.isPrefixUnaryExpression(node)) {
+    const operand = evaluateIntegerExpression(node.operand, identifiers, label);
+    if (node.operator === ts.SyntaxKind.PlusToken) result = operand;
+    else if (node.operator === ts.SyntaxKind.MinusToken) result = -operand;
+  } else if (ts.isBinaryExpression(node)) {
+    const left = evaluateIntegerExpression(node.left, identifiers, label);
+    const right = evaluateIntegerExpression(node.right, identifiers, label);
+    switch (node.operatorToken.kind) {
+      case ts.SyntaxKind.PlusToken:
+        result = left + right;
+        break;
+      case ts.SyntaxKind.MinusToken:
+        result = left - right;
+        break;
+      case ts.SyntaxKind.AsteriskToken:
+        result = left * right;
+        break;
+      case ts.SyntaxKind.SlashToken:
+        if (right === 0 || left % right !== 0) throw new Error(`${label} contains a non-integral expression`);
+        result = left / right;
+        break;
     }
-    tokens.push(match[1]);
-    offset = tokenPattern.lastIndex;
   }
-  let index = 0;
-  const primary = () => {
-    const token = tokens[index++];
-    if (token === "(") {
-      const value = sum();
-      if (tokens[index++] !== ")") throw new Error(`${label} contains an unbalanced expression`);
-      return value;
-    }
-    if (token === "+" || token === "-") {
-      const value = primary();
-      return token === "-" ? -value : value;
-    }
-    if (token !== undefined && /^\d+$/u.test(token)) return Number(token);
-    if (token !== undefined && Object.hasOwn(identifiers, token)) return identifiers[token];
-    throw new Error(`${label} contains an unknown policy identifier`);
-  };
-  const product = () => {
-    let value = primary();
-    while (tokens[index] === "*" || tokens[index] === "/") {
-      const operator = tokens[index++];
-      const right = primary();
-      if (operator === "/" && (right === 0 || value % right !== 0)) {
-        throw new Error(`${label} contains a non-integral expression`);
-      }
-      value = operator === "*" ? value * right : value / right;
-    }
-    return value;
-  };
-  const sum = () => {
-    let value = product();
-    while (tokens[index] === "+" || tokens[index] === "-") {
-      const operator = tokens[index++];
-      const right = product();
-      value = operator === "+" ? value + right : value - right;
-    }
-    return value;
-  };
-  const result = sum();
-  if (index !== tokens.length || !Number.isSafeInteger(result) || result < 1) {
+  if (!Number.isSafeInteger(result) || result < 1) {
     throw new Error(`${label} must resolve to a positive safe integer`);
   }
   return result;

@@ -220,6 +220,56 @@ describe("trusted automatic eval-history publication handoff", () => {
     });
   });
 
+  it("ignores declaration-shaped comments, strings, templates, and nested constants", () => {
+    const root = temporaryRoot("ultrafuzz-publication-policy-decoys-");
+    const benchmarkPath = path.join(root, "packages/evals/src/benchmark-manifest.ts");
+    const workerPath = path.join(root, "packages/modal/src/public-worker.ts");
+    const preparationPath = path.join(root, "scripts/ci/prepare-modal-benchmarks.mjs");
+    for (const filePath of [benchmarkPath, workerPath, preparationPath]) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    }
+    fs.writeFileSync(
+      benchmarkPath,
+      [
+        'const decoy = "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 99;";',
+        "// export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 98;",
+        "function nested() { const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 97; return 97; }",
+        "export const BENCHMARK_SMOKE_MAX_PARALLEL_RUNS = 3;",
+        "export const BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS = 4;"
+      ].join("\n")
+    );
+    fs.writeFileSync(
+      workerPath,
+      [
+        "const decoy = `export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 99;`;",
+        "/* export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 98; */",
+        "export const PUBLIC_BENCHMARK_SMOKE_MAX_RUNTIME_SECONDS = 2 * 60 * 60;",
+        "export const PUBLIC_BENCHMARK_EVAL_CLEANUP_SECONDS = 5 * 60;",
+        "export const PUBLIC_BENCHMARK_SCORE_PER_WAVE_TIMEOUT_SECONDS = 45 * 60;",
+        "export const PUBLIC_BENCHMARK_REPORT_TIMEOUT_SECONDS = 5 * 60;",
+        "export const PUBLIC_BENCHMARK_PREPARATION_TIMEOUT_SECONDS = 20 * 60;"
+      ].join("\n")
+    );
+    fs.writeFileSync(
+      preparationPath,
+      [
+        'const decoy = "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 99;";',
+        "const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;"
+      ].join("\n")
+    );
+
+    expect(trustedCandidateRuntimePolicyDimensions(root, "smoke")).toEqual({
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 7_200,
+      evalCleanupSeconds: 300,
+      scorePerWaveTimeoutSeconds: 2_700,
+      reportTimeoutSeconds: 300,
+      preparationTimeoutSeconds: 1_200,
+      controlPollingGraceSeconds: 300
+    });
+  });
+
   it("rejects public bundles that omit a trusted target even when the row count still matches", () => {
     const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
     const modelSlug = smokeManifest().pairs[0]!.model_slug;

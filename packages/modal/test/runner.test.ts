@@ -575,6 +575,47 @@ describe("Modal result collection", () => {
     expect(() =>
       assertSanitizedModalCollectedFiles({ ...files, "worker.log": "unexpected detail\n" }, context)
     ).toThrow(/unsanitized Modal worker log/u);
+
+    const diagnosticPayload = Buffer.from(
+      JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: "detached admission timed out" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${diagnosticPayload}\n`
+        },
+        context
+      )
+    ).not.toThrow();
+    const secretLikePayload = Buffer.from(
+      JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: "api_key=sk-secret-value" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${secretLikePayload}\n`
+        },
+        context
+      )
+    ).toThrow(/unsanitized Modal worker log/u);
+    const injectedSecretPayload = Buffer.from(
+      JSON.stringify([{ code: "WORKFLOW_SUBMISSION_FAILED", message: "opaque-secret-that-is-not-pattern-shaped" }]),
+      "utf8"
+    ).toString("base64url");
+    expect(() =>
+      assertSanitizedModalCollectedFiles(
+        {
+          ...files,
+          "worker.log": `2026-01-01T00:00:00.000Z eval-failure-diagnostics ${injectedSecretPayload}\n`
+        },
+        context,
+        ["opaque-secret-that-is-not-pattern-shaped"]
+      )
+    ).toThrow(/unsanitized Modal worker log/u);
   });
 
   it("collects only an exactly reconciled privacy-safe recovery lifecycle", () => {
