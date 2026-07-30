@@ -1,5 +1,6 @@
 export const SMITHERS_ORCHESTRATOR_VERSION = "0.31.0";
 export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
+export const SMITHERS_EFFECT_VERSION = "3.21.4";
 
 const REQUIRED_SMITHERS_DEPENDENCIES = {
   dependencies: {
@@ -8,7 +9,15 @@ const REQUIRED_SMITHERS_DEPENDENCIES = {
   },
   devDependencies: {
     typescript: "6.0.3"
+  },
+  overrides: {
+    effect: SMITHERS_EFFECT_VERSION
   }
+} as const;
+
+const UNOVERRIDDEN_SMITHERS_DEPENDENCIES = {
+  dependencies: REQUIRED_SMITHERS_DEPENDENCIES.dependencies,
+  devDependencies: REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
 } as const;
 
 const LEGACY_SMITHERS_DEPENDENCIES = {
@@ -87,17 +96,22 @@ export function assertSmithersPackageManifest(value: unknown): void {
 }
 
 export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPackageMigration {
+  const missingRequiredEffectOverride =
+    isRecord(value) &&
+    hasRequiredVersions(value, UNOVERRIDDEN_SMITHERS_DEPENDENCIES) &&
+    (!isRecord(value.overrides) || value.overrides.effect === undefined);
   if (
     !isRecord(value) ||
     value.name !== "ultrafuzz-smithers" ||
     value.private !== true ||
     value.type !== "module" ||
-    ![
+    (![
       PREVIOUS_SMITHERS_DEPENDENCIES,
       OLDER_EXACT_SMITHERS_DEPENDENCIES,
       OLDEST_EXACT_SMITHERS_DEPENDENCIES,
       LEGACY_SMITHERS_DEPENDENCIES
-    ].some((dependencies) => hasRequiredVersions(value, dependencies))
+    ].some((dependencies) => hasRequiredVersions(value, dependencies)) &&
+      !missingRequiredEffectOverride)
   ) {
     return { manifest: value, migrated: false };
   }
@@ -113,6 +127,10 @@ export function migrateLegacySmithersPackageManifest(value: unknown): SmithersPa
       devDependencies: {
         ...devDependencies,
         ...REQUIRED_SMITHERS_DEPENDENCIES.devDependencies
+      },
+      overrides: {
+        ...(isRecord(value.overrides) ? value.overrides : {}),
+        ...REQUIRED_SMITHERS_DEPENDENCIES.overrides
       }
     },
     migrated: true
@@ -127,6 +145,7 @@ function hasRequiredVersions(
     | typeof OLDER_EXACT_SMITHERS_DEPENDENCIES
     | typeof OLDEST_EXACT_SMITHERS_DEPENDENCIES
     | typeof LEGACY_SMITHERS_DEPENDENCIES
+    | typeof UNOVERRIDDEN_SMITHERS_DEPENDENCIES
 ): boolean {
   for (const [section, expected] of Object.entries(required)) {
     const actual = value[section];
