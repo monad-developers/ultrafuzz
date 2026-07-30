@@ -5,12 +5,15 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  automaticProducerPolicyDimensions,
   assertPublicBenchmarkBundleMatrixScope,
   readAutomaticPublicationManifest,
   summarizePublicBenchmarkBundlePublication,
+  trustedCandidateRuntimePolicyDimensions,
   validateAutomaticPublicationManifest,
   validateAutomaticPairConfig,
-  validateBenchmarkPolicyFiles
+  validateBenchmarkPolicyFiles,
+  validateProducerPolicyDimensions
 } from "./prepare-eval-history-publication.mjs";
 
 const roots: string[] = [];
@@ -168,6 +171,53 @@ describe("trusted automatic eval-history publication handoff", () => {
         trialsPerVariant: 1
       })
     ).toEqual(changedCohort);
+  });
+
+  it("accepts an older-policy producer with newer publication tooling", () => {
+    const root = temporaryRoot("ultrafuzz-publication-older-policy-");
+    const manifest = smokeManifest();
+    manifest.control_timeout_seconds = 12_000;
+    const pair = manifest.pairs[0]!;
+    fs.writeFileSync(
+      path.join(root, pair.config_path),
+      `${JSON.stringify({ public_benchmark: { max_runtime_seconds: 7_200 } })}\n`
+    );
+
+    const producerPolicy = automaticProducerPolicyDimensions(manifest, root);
+    expect(producerPolicy).toEqual({
+      matrixRowsPerPair: 3,
+      controlTimeoutSeconds: 12_000,
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 7_200
+    });
+    expect(validateProducerPolicyDimensions(producerPolicy, { ...producerPolicy })).toEqual(producerPolicy);
+    expect(() =>
+      validateProducerPolicyDimensions(producerPolicy, {
+        ...producerPolicy,
+        maxRuntimeSeconds: 15_000,
+        controlTimeoutSeconds: 19_800
+      })
+    ).toThrow(/trusted candidate policy/u);
+    expect(
+      validateAutomaticPublicationManifest(manifest, {
+        ...smokeContext(),
+        ...producerPolicy
+      })
+    ).toEqual(manifest);
+  });
+
+  it("reads runtime and concurrency policy from the trusted candidate checkout", () => {
+    expect(trustedCandidateRuntimePolicyDimensions(process.cwd(), "smoke")).toEqual({
+      maxParallelEvalRows: 3,
+      maxParallelWorkflowNodes: 4,
+      maxRuntimeSeconds: 15_000,
+      evalCleanupSeconds: 300,
+      scorePerWaveTimeoutSeconds: 2_700,
+      reportTimeoutSeconds: 300,
+      preparationTimeoutSeconds: 1_200,
+      controlPollingGraceSeconds: 300
+    });
   });
 
   it("rejects public bundles that omit a trusted target even when the row count still matches", () => {

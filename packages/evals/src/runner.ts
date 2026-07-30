@@ -403,6 +403,11 @@ export async function watchEvalRow(
   const sync: RowSync = input.sync ?? defaultRowSync;
   const pollIntervalMs = input.pollIntervalMs ?? DEFAULT_EVAL_POLL_INTERVAL_MS;
   const deadline = Date.now() + (input.timeoutSeconds ?? DEFAULT_EVAL_WATCH_TIMEOUT_SECONDS) * 1000;
+  let syncFailureCount = 0;
+  let consecutiveSyncFailures = 0;
+  let firstSyncFailureAt: string | undefined;
+  let lastSyncFailureAt: string | undefined;
+  let lastSyncFailureMessage: string | undefined;
 
   // The detached subprocess writes graph.json only after DAG planning, which
   // can be seconds to tens of seconds after launch. Defer onRowStart until the
@@ -434,13 +439,14 @@ export async function watchEvalRow(
         runId: input.record.ultrafuzz_run_id ?? "",
         ...(input.env !== undefined ? { env: input.env } : {})
       });
+      consecutiveSyncFailures = 0;
     } catch (error) {
-      diagnostics.push({
-        code: "EVAL_ROW_SYNC_FAILED",
-        message: error instanceof Error ? error.message : String(error),
-        severity: "warning",
-        source: "evals"
-      });
+      const observedAt = new Date().toISOString();
+      syncFailureCount += 1;
+      consecutiveSyncFailures += 1;
+      firstSyncFailureAt ??= observedAt;
+      lastSyncFailureAt = observedAt;
+      lastSyncFailureMessage = error instanceof Error ? error.message : String(error);
     }
     await startRowIfReady(false);
     if (rowStarted) {
@@ -460,6 +466,22 @@ export async function watchEvalRow(
   diagnostics.push(...finalDrain.warnings);
   state = readStateSafe(runRoot);
   const watchTimedOut = Date.now() >= deadline && (state === undefined || !isTerminalRunStatus(state.status));
+  const syncFailureDiagnostic: RuntimeDiagnostic | undefined =
+    syncFailureCount === 0
+      ? undefined
+      : {
+          code: "EVAL_ROW_SYNC_FAILED",
+          message: `eval row ${input.row.id} had ${syncFailureCount} workflow synchronization failure(s); last failure: ${lastSyncFailureMessage ?? "unknown"}`,
+          severity: "warning",
+          source: "evals",
+          details: {
+            failure_count: syncFailureCount,
+            consecutive_failures_at_finish: consecutiveSyncFailures,
+            first_failure_at: firstSyncFailureAt,
+            last_failure_at: lastSyncFailureAt
+          }
+        };
+  if (syncFailureDiagnostic !== undefined) diagnostics.push(syncFailureDiagnostic);
   const timeoutDiagnostic: RuntimeDiagnostic | undefined = watchTimedOut
     ? {
         code: "EVAL_ROW_WATCH_TIMEOUT",
@@ -498,7 +520,15 @@ export async function watchEvalRow(
     final_status: result.status,
     workflow: evalWorkflowLifecycle(state),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
-    ...(timeoutDiagnostic === undefined ? {} : { diagnostics: [...input.record.diagnostics, timeoutDiagnostic] })
+    ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
+      ? {}
+      : {
+          diagnostics: [
+            ...input.record.diagnostics,
+            ...(syncFailureDiagnostic === undefined ? [] : [syncFailureDiagnostic]),
+            ...(timeoutDiagnostic === undefined ? [] : [timeoutDiagnostic])
+          ]
+        })
   };
   appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
   return {
@@ -509,7 +539,15 @@ export async function watchEvalRow(
 
 const defaultRowSync: RowSync = async (input) => {
   const projectRoot = input.projectRoot;
-  await syncRun({ projectRoot, runId: input.runId, ...(input.env !== undefined ? { env: input.env } : {}) });
+  const result = await syncRun({
+    projectRoot,
+    runId: input.runId,
+    ...(input.env !== undefined ? { env: input.env } : {})
+  });
+  if (!result.ok) {
+    const summary = result.diagnostics.map((diagnostic) => `${diagnostic.code}: ${diagnostic.message}`).join("; ");
+    throw new Error(summary === "" ? "workflow synchronization failed without diagnostics" : summary);
+  }
 };
 
 function readGraph(runRoot: string): unknown {
