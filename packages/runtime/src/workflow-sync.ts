@@ -2924,6 +2924,7 @@ function statusFromWorkflowState(state: string): NodeStatus {
       "waiting-approval",
       "waiting-event",
       "waiting-timer",
+      "waiting-quota",
       "queued"
     ].includes(normalized)
   ) {
@@ -2958,7 +2959,8 @@ function finalRunStatus(
       "queued",
       "waiting-approval",
       "waiting-event",
-      "waiting-timer"
+      "waiting-timer",
+      "waiting-quota"
     ].includes(workflowStatus)
   ) {
     return "running";

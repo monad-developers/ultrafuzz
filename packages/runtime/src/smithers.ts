@@ -1678,6 +1678,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
+      prompt: task.renderedPromptPath === undefined ? "" : fs.readFileSync(task.renderedPromptPath, "utf8"),
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined
@@ -1705,6 +1706,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
   );
   return renderRuntimeTemplate("smithers/workflows/workflow.tsx", {
     __ULTRAFUZZ_RUN_ID__: compiled.runId,
+    __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
     __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts")),

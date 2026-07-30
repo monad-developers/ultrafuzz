@@ -1941,6 +1941,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
   assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
   assert.match(workflowSource, /run_id: "cloud-nodes"/u);
+  assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
   assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
@@ -2318,6 +2319,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
+  assert.match(workflowSource, /lstatSync\(candidate\)/);
+  assert.match(workflowSource, /function isMissingPathError/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
   assert.match(workflowSource, /function canonicalEmptyArtifact/);
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
@@ -2349,6 +2352,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /"reasoningEffort": "max"/);
   assert.match(workflowSource, /metadata=\{task\.metadata\}/);
   assert.match(workflowSource, /output=\{outputs\.task\}/);
+  assert.match(workflowSource, /Authorized Defensive Security Context/);
   assert.match(workflowSource, /id=\{task\.preparationId\}/);
   assert.match(workflowSource, /dependsOn=\{task\.dependsOn\}/);
   assert.match(workflowSource, /dependsOn=\{\[task\.preparationId\]\}/);
@@ -2473,6 +2477,29 @@ test("workflow synchronization preserves the paused run state", async () => {
   assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
   assert.equal(status.value?.status, "paused");
   assert.equal(status.value?.workflow?.status, "paused");
+});
+
+test("workflow synchronization preserves a quota-waiting run with parked tasks", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const launchEnv = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId: "quota-waiting-sync", env: launchEnv });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-quota-waiting-sync",
+      status: "waiting-quota",
+      state: "waiting-quota",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+
+  const status = await getRunStatus({ projectRoot: project, runId: "quota-waiting-sync", env });
+
+  assert.equal(status.ok, true, JSON.stringify(status.diagnostics));
+  assert.equal(status.value?.status, "running");
+  assert.equal(status.value?.workflow?.status, "waiting-quota");
 });
 
 test("startRun maps keep_workspaces to the Smithers worktree retention environment", async () => {
@@ -2759,6 +2786,11 @@ ${`${marker} `.repeat(2000)}
   ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
   assert.match(smithersInput.tasks?.[0]?.prompt_path ?? "", /prompt\.rendered\.md$/);
+  const workflowSource = fs.readFileSync(
+    path.join(project, ".smithers", "workflows", "ultrafuzz-compact-input-run.tsx"),
+    "utf8"
+  );
+  assert.match(workflowSource, new RegExp(marker));
 });
 
 test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
@@ -6686,7 +6718,15 @@ test("resume suppresses duplicate submissions for every active workflow run stat
   const run = await startRun({ projectRoot: project, runId: "retrying-lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  for (const state of ["in-progress", "started", "queued", "retrying", "waiting-approval"]) {
+  for (const state of [
+    "in-progress",
+    "started",
+    "queued",
+    "retrying",
+    "waiting-approval",
+    "waiting-event",
+    "waiting-timer"
+  ]) {
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
       `${JSON.stringify(
@@ -6709,6 +6749,31 @@ test("resume suppresses duplicate submissions for every active workflow run stat
     assert.match(commands, /inspect ultrafuzz-retrying-lifecycle-run --format json/u);
     assert.doesNotMatch(commands, /^up /mu, `state ${state} must not launch a duplicate up --resume`);
   }
+});
+
+test("resume re-submits a quota-waiting workflow after credentials change", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: "ultrafuzz-quota-resume-run",
+      status: "waiting-quota",
+      state: "waiting-quota",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId: "quota-resume-run", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId: "quota-resume-run", env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.submitted, true);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, /inspect ultrafuzz-quota-resume-run --format json/u);
+  assert.match(commands, /^up .*--resume ultrafuzz-quota-resume-run/mu);
 });
 
 test("resume --reset-node does not repeat a committed reset after a failed continuation", async () => {
