@@ -13,6 +13,7 @@ import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/ref
 
 import {
   assertSmithersPackageManifest,
+  KIMI_CODE_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
@@ -794,6 +795,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
+  assert.equal(smithersPackage.dependencies?.["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
   assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
@@ -1367,6 +1369,76 @@ test(
       /Cannot combine|unknown option|--final-message-only|--print|--work-dir|--thinking|--no-thinking/u
     );
     await command.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi subscription config infers managed K3 reasoning efforts",
+  { skip: !runningUnderBun || !fs.existsSync(localKimiCode), timeout: 15_000 },
+  async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-managed-k3-"));
+    try {
+      fs.mkdirSync(path.join(home, "credentials"), { recursive: true });
+      fs.writeFileSync(
+        path.join(home, "config.toml"),
+        `default_model = "kimi-code/k3"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+api_key = ""
+base_url = "https://127.0.0.1:9/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code"
+
+[models."kimi-code/k3"]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+capabilities = ["video_in", "thinking", "image_in"]
+display_name = "K3"
+`,
+        "utf8"
+      );
+      fs.writeFileSync(path.join(home, "device_id"), "00000000-0000-0000-0000-000000000106\n", "utf8");
+      fs.writeFileSync(
+        path.join(home, "credentials", "kimi-code.json"),
+        `${JSON.stringify({
+          access_token: "contract-access-token",
+          refresh_token: "contract-refresh-token",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+          expires_in: 900,
+          token_type: "Bearer",
+          scope: "openid"
+        })}\n`,
+        "utf8"
+      );
+
+      const project = tempProject();
+      assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+      const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+      const command = await new KimiCode029Agent({
+        model: "kimi-k3",
+        ultrafuzzAuthMode: "subscription",
+        ultrafuzzReasoningEffort: "max",
+        configDir: home
+      }).buildCommand({
+        prompt: "Contract only",
+        cwd: project,
+        options: {}
+      });
+      assert.ok(command.env?.KIMI_CODE_HOME);
+      const configPath = path.join(command.env.KIMI_CODE_HOME, "config.toml");
+      const configText = fs.readFileSync(configPath, "utf8");
+      assert.match(configText, /\[models\.(?:"kimi-k3"|kimi-k3)\]/u);
+      assert.match(configText, /support_efforts\s*=\s*\[\s*"low",\s*"high",\s*"max"\s*\]/u);
+      assert.match(configText, /default_effort\s*=\s*"max"/u);
+      execFileSync(localKimiCode, ["doctor", "config", configPath], { encoding: "utf8" });
+      await command.cleanup?.();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   }
 );
 
@@ -2965,6 +3037,7 @@ test("startRun migrates the known generated Smithers caret manifest without drop
     devDependencies: Record<string, string>;
   };
   assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(migrated.dependencies["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
   assert.equal(migrated.dependencies.zod, "4.4.3");
   assert.equal(migrated.devDependencies.typescript, "6.0.3");
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
@@ -3001,6 +3074,7 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
     dependencies: Record<string, string>;
   };
   assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(migrated.dependencies["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
 });
@@ -3069,6 +3143,7 @@ test("generated workflow dependencies require exact runner versions while allowi
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
       dependencies: {
+        "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
         "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
         zod: "4.4.3",
         "custom-agent-package": "1.2.3"

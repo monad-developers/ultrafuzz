@@ -305,10 +305,17 @@ function kimiSnapshotConfig(config: KimiConfig, model: string): string {
   const snapshot: Record<string, unknown> = {
     default_model: model,
     providers: { [providerName]: provider },
-    models: { [model]: modelConfig }
+    models: { [model]: kimiSnapshotModelConfig(model, modelConfig) }
   };
   if (isRecord(config.thinking)) snapshot.thinking = config.thinking;
   return stringify(snapshot as Parameters<typeof stringify>[0]);
+}
+
+function kimiSnapshotModelConfig(model: string, modelConfig: Record<string, unknown>): Record<string, unknown> {
+  if (model !== "kimi-k3" || modelConfig.support_efforts !== undefined || modelConfig.model !== "k3") {
+    return modelConfig;
+  }
+  return { ...modelConfig, support_efforts: ["low", "high", "max"] };
 }
 
 function kimiModelProvider(

@@ -475,6 +475,7 @@ model = "unrelated"
     expect(snapshotConfig).toContain('default_model = "kimi-k3"');
     expect(snapshotConfig).toContain("[models.kimi-k3]");
     expect(snapshotConfig).toContain('model = "k3"');
+    expect(snapshotConfig).toMatch(/support_efforts\s*=\s*\[\s*"low",\s*"high",\s*"max"\s*\]/u);
     expect(snapshotConfig).not.toContain("kimi-code/k3");
     await prepared?.cleanup?.();
   });

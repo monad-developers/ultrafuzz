@@ -275,7 +275,7 @@ function createKimiApiKeyConfigDir(
     `model = ${tomlString(upstreamModel)}`,
     `max_context_size = ${k3 ? 1048576 : 262144}`,
     ...(k3 ? ['capabilities = [ "thinking", "always_thinking", "image_in", "video_in", "tool_use" ]'] : []),
-    'support_efforts = [ "low", "high", "max" ]',
+    `support_efforts = ${tomlArray(KIMI_REASONING_EFFORTS)}`,
     `default_effort = ${tomlString(reasoningEffort)}`,
     "",
     "[thinking]",
@@ -314,6 +314,10 @@ function kimiApiBaseUrl(): string {
 
 function tomlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function tomlArray(values: readonly string[]): string {
+  return `[ ${values.map(tomlString).join(", ")} ]`;
 }
 
 function materializeKimiSharedAuthHome(source: string): string {
@@ -666,10 +670,22 @@ function applyKimiReasoningConfig(
   if (start === -1) {
     throw new Error(`KimiAgent model alias is missing from Kimi Code config.toml: ${alias}`);
   }
-  const section = lines.slice(start + 1, end);
+  let sectionEnd = end;
+  let section = lines.slice(start + 1, sectionEnd);
   const supportedLine = section.find((line) => /^\s*support_efforts\s*=/u.test(line));
-  const supported =
+  let supported =
     supportedLine === undefined ? [] : [...supportedLine.matchAll(/"([^"]+)"/gu)].map((match) => match[1]);
+  if (supportedLine === undefined) {
+    const inferred = inferredKimiSupportEfforts(alias, section);
+    if (inferred !== undefined) {
+      const defaultEffortIndex = section.findIndex((line) => /^\s*default_effort\s*=/u.test(line));
+      const insertOffset = defaultEffortIndex === -1 ? section.length : defaultEffortIndex;
+      lines.splice(start + 1 + insertOffset, 0, `support_efforts = ${tomlArray(inferred)}`);
+      sectionEnd += 1;
+      section = lines.slice(start + 1, sectionEnd);
+      supported = [...inferred];
+    }
+  }
   if (!supported.includes(reasoningEffort)) {
     throw new Error(
       `KimiAgent model ${alias} does not support reasoning effort ${reasoningEffort}; supported efforts: ${
@@ -686,6 +702,15 @@ function applyKimiReasoningConfig(
   }
   applyKimiThinkingConfig(lines, reasoningEffort);
   writeFileSync(configPath, lines.join("\n"), { encoding: "utf8", mode: 0o600 });
+}
+
+function inferredKimiSupportEfforts(
+  alias: string,
+  section: readonly string[]
+): readonly KimiReasoningEffort[] | undefined {
+  const k3Alias = alias === "kimi-k3" || alias === KIMI_K3_MANAGED_ALIAS;
+  const k3Model = section.some((line) => /^\s*model\s*=\s*"k3"\s*$/u.test(line));
+  return k3Alias && k3Model ? KIMI_REASONING_EFFORTS : undefined;
 }
 
 function applyKimiThinkingConfig(lines: string[], reasoningEffort: KimiReasoningEffort): void {
