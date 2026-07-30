@@ -6,6 +6,7 @@ on:
       - "**"
     paths-ignore:
       - benchmarks/history.json
+      - benchmarks/public-results/**
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:

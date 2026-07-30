@@ -892,7 +892,11 @@ describe("public Modal benchmark configuration", () => {
       on: { push: { branches: string[]; "paths-ignore": string[] } };
     };
     expect(producer.on.push.branches).toEqual(["**"]);
-    expect(producer.on.push["paths-ignore"]).toEqual(["benchmarks/history.json", "docs/assets/eval-history/**"]);
+    expect(producer.on.push["paths-ignore"]).toEqual([
+      "benchmarks/history.json",
+      "benchmarks/public-results/**",
+      "docs/assets/eval-history/**"
+    ]);
 
     const publisher = fs.readFileSync(path.join(workspace, "scripts/ci/publish-eval-history-cas.mjs"), "utf8");
     expect(publisher).toContain('const TARGET_BRANCH = "main"');
