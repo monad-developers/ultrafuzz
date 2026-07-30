@@ -323,7 +323,6 @@ async function runModalNodeSandbox(
     const volumeSubPath = modalNodeVolumeSubpath(request.runId, request.sandboxId, input.execution_generation);
     if (sandbox !== undefined) {
       const known = evidence.provider_execution_ids.includes(sandbox.sandboxId);
-      await releaseModalAcceptancePauseDetach(request.rootDir, input, env, request.runId, sandbox);
       evidence = updateCloudAttemptEvidence(evidencePath, evidence, {
         state: "running",
         providerExecutionId: sandbox.sandboxId,
@@ -334,6 +333,7 @@ async function runModalNodeSandbox(
         cleanupState: "pending",
         transition: true
       });
+      await releaseModalAcceptancePauseDetach(request.rootDir, input, env, request.runId, sandbox);
       request.heartbeat({
         stage: "resumed",
         provider: "modal",

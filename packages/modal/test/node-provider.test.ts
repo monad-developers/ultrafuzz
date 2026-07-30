@@ -482,6 +482,54 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("records a reattached sandbox before releasing an acceptance pause", async () => {
+    const fixture = createProjectFixture();
+    const sandbox = fakeSandbox(undefined, undefined, "sandbox-reattached-at-pause");
+    const acceptanceRoot = path.join(fixture.root, fixture.input.run_root, "cloud-execution", "acceptance");
+    fs.mkdirSync(acceptanceRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(
+        acceptanceRoot,
+        `pause-detach-claim-${boundedTestIdentity(`${fixture.input.attempt_id}:${sandbox.sandboxId}`)}.json`
+      ),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.cloud-acceptance-pause-detach-claim.v1",
+        controller_run_id: "controller-run",
+        run_id: fixture.input.run_id,
+        task_id: fixture.input.task_id,
+        attempt_id: fixture.input.attempt_id,
+        provider_execution_id: sandbox.sandboxId,
+        provider_state_at_detach: "live",
+        claimed_at: "2026-07-24T00:00:00.000Z"
+      })}\n`
+    );
+    sandbox.exec.mockRejectedValue(new Error("resume signal failed"));
+    const options = providerOptions(fakeClient({ listed: [sandbox] }));
+    try {
+      await expect(
+        createModalNodeSandboxProvider({
+          ...options,
+          env: { ...options.env, ULTRAFUZZ_MODAL_CLOUD_ACCEPTANCE: "1" }
+        }).run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow("resume signal failed");
+      expect(readCloudAttemptEvidence(fixture.root, fixture.input)).toMatchObject({
+        state: "failed",
+        provider_execution_ids: ["sandbox-reattached-at-pause"],
+        cleanup_state: "pending"
+      });
+      expect(sandbox.terminate).not.toHaveBeenCalled();
+      expect(sandbox.detach).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects a stale controlled-fault marker instead of consuming it for another generation", async () => {
     const fixture = createProjectFixture();
     fixture.input.task_id = "node:smoke-context";
