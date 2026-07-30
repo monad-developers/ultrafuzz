@@ -14,6 +14,7 @@ import {
   assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
+  formatEvalHistoryJson,
   mergeEvalHistory,
   parseEvalHistory,
   renderEvalHistoryCharts,
@@ -656,7 +657,23 @@ describe("longitudinal eval history", () => {
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
   });
 
-  it("keeps changed cohorts and execution policies in separate chart series", () => {
+  it("formats published history JSON compatibly with repository Prettier checks", () => {
+    const history = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [
+        observation({
+          cost_usd: null,
+          cost_completeness: { status: "unavailable", reasons: ["accounting-unavailable"] }
+        })
+      ]
+    });
+    const formatted = formatEvalHistoryJson(history);
+
+    expect(formatted).toContain('"reasons": ["accounting-unavailable"]');
+    expect(parseEvalHistory(JSON.parse(formatted))).toEqual(history);
+  });
+
+  it("renders changed cohorts and execution policies as lineage markers instead of chart series", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
@@ -672,8 +689,11 @@ describe("longitudinal eval history", () => {
       })
     ).get("precision.svg")!;
 
-    expect(svg).toContain("cohort-aaaaaaaa policy-dddddddd");
-    expect(svg).toContain("cohort-cccccccc policy-eeeeeeee");
+    expect(svg.match(/<polyline /gu)).toHaveLength(1);
+    expect(svg).toContain('data-lineage-marker="cohort-aaaaaaaa"');
+    expect(svg).toContain('data-lineage-marker="cohort-cccccccc"');
+    expect(svg).not.toContain(">cohort-aaaaaaaa policy-dddddddd target-a</text>");
+    expect(svg).not.toContain(">cohort-cccccccc policy-eeeeeeee target-a</text>");
   });
 
   it("labels the globally earliest and latest dates across series", () => {
@@ -693,6 +713,34 @@ describe("longitudinal eval history", () => {
     );
     const svg = charts.get("precision.svg")!;
     expect(svg.indexOf(">2026-07-17</text>")).toBeLessThan(svg.indexOf(">2026-07-19</text>"));
+  });
+
+  it("uses evenly spaced run columns and rotates date labels below the x axis", () => {
+    const observations = [0, 1, 2].map((index) =>
+      observation({
+        id: `run-${index}`,
+        candidate_commit: `${index + 1}`.repeat(40),
+        run_timestamp: ["2026-07-17T00:00:00.000Z", "2026-07-29T00:00:00.000Z", "2026-07-30T00:00:00.000Z"][index]!,
+        precision: 0.25 + index * 0.1
+      })
+    );
+    const svg = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations
+      })
+    ).get("precision.svg")!;
+
+    const match = /<polyline[^>]+points="([^"]+)"/u.exec(svg);
+    expect(match).not.toBeNull();
+    const polylinePoints = match?.[1];
+    expect(polylinePoints).toBeDefined();
+    if (polylinePoints === undefined) throw new Error("missing polyline points");
+    const xCoordinates = polylinePoints.split(" ").map((point) => Number(point.split(",")[0]!));
+    expect(xCoordinates).toHaveLength(3);
+    expect(xCoordinates[1]! - xCoordinates[0]!).toBeCloseTo(xCoordinates[2]! - xCoordinates[1]!, 5);
+    expect(svg).toContain("rotate(-90)");
+    expect(svg).toContain(">2026-07-29</text>");
   });
 });
 

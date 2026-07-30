@@ -1907,9 +1907,7 @@
       "cost_usd": null,
       "cost_completeness": {
         "status": "unavailable",
-        "reasons": [
-          "accounting-unavailable"
-        ]
+        "reasons": ["accounting-unavailable"]
       },
       "source_eval_run_id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max",
       "source_artifact": "modal:manual-kimi-smoke-bdf2482-nt7200/benchmark-smoke-kimi-k3-max",
@@ -1978,9 +1976,7 @@
       "cost_usd": null,
       "cost_completeness": {
         "status": "unavailable",
-        "reasons": [
-          "accounting-unavailable"
-        ]
+        "reasons": ["accounting-unavailable"]
       },
       "source_eval_run_id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max",
       "source_artifact": "modal:manual-kimi-smoke-bdf2482-nt7200/benchmark-smoke-kimi-k3-max",
@@ -2049,9 +2045,7 @@
       "cost_usd": null,
       "cost_completeness": {
         "status": "unavailable",
-        "reasons": [
-          "accounting-unavailable"
-        ]
+        "reasons": ["accounting-unavailable"]
       },
       "source_eval_run_id": "manual-kimi-smoke-bdf2482-nt7200-benchmark-smoke-kimi-k3-max",
       "source_artifact": "modal:manual-kimi-smoke-bdf2482-nt7200/benchmark-smoke-kimi-k3-max",
