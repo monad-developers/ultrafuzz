@@ -379,12 +379,6 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
       );
     }
     runnerModelProfileOverride = parsedOverride.data;
-    if (input.lane === "smoke" && runnerModelProfileOverride.agent !== "CodexAgent") {
-      throw new EvalError(
-        "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
-        "smoke runner override must remain an explicit CodexAgent profile"
-      );
-    }
   }
   const selectedRunnerProfiles =
     runnerModelProfileOverride === undefined
