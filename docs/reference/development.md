@@ -22,7 +22,7 @@ pnpm -w docs:check
 The root CI script runs format check, lint, build, and release validation:
 
 ```bash
-pnpm -w ci
+pnpm -w run ci
 ```
 
 ## Package Checks
