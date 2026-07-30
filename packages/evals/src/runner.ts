@@ -356,12 +356,14 @@ export function benchmarkModelProfileOverrides(
     agent: runnerProfile.agent,
     ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
   };
+  const benchmarkReasoning = runnerProfile.agent === "KimiAgent" ? (runnerProfile.reasoning ?? "max") : "high";
+  const coordinationReasoning = runnerProfile.agent === "KimiAgent" ? (runnerProfile.reasoning ?? "max") : "medium";
   return {
     runtimeOverrides: {
       models: {
         profiles: {
-          benchmark: { ...selectedModel, reasoning: "high" },
-          "smoke-coordination": { ...selectedModel, reasoning: "medium" }
+          benchmark: { ...selectedModel, reasoning: benchmarkReasoning },
+          "smoke-coordination": { ...selectedModel, reasoning: coordinationReasoning }
         }
       }
     }

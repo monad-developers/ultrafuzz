@@ -216,20 +216,39 @@ describe("public benchmark manifests", () => {
       model: "gpt-5.6-luna-202607",
       reasoning: "medium"
     });
-    expect(() =>
-      adaptBenchmarkManifestToEvalSuite({
-        benchmark: "ultrafuzz-bench",
-        lane: "smoke",
-        cohort: smokeCohort,
-        lanes,
-        runnerModelProfileOverride: {
-          id: "workflow-smoke-claude-sonnet-5-high",
-          agent: "ClaudeAgent",
-          model: "claude-sonnet-5",
-          reasoning: "high"
+    const smokeKimiOverride = {
+      id: "workflow-smoke-kimi-k3-max",
+      agent: "KimiAgent" as const,
+      model: "kimi-k3",
+      reasoning: "max"
+    };
+    const smokeKimiSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort: smokeCohort,
+      lanes,
+      runnerModelProfileOverride: smokeKimiOverride
+    });
+    expect(smokeKimiSuite.model_profiles[smokeKimiOverride.id]).toEqual({
+      agent: "KimiAgent",
+      model: "kimi-k3",
+      reasoning: "max"
+    });
+    expect(
+      benchmarkModelProfileOverrides(
+        { workflow_input: smokeKimiSuite.variants[0]?.workflow_input },
+        smokeKimiSuite.model_profiles[smokeKimiOverride.id]
+      )
+    ).toEqual({
+      runtimeOverrides: {
+        models: {
+          profiles: {
+            benchmark: { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" },
+            "smoke-coordination": { agent: "KimiAgent", model: "kimi-k3", reasoning: "max" }
+          }
         }
-      })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_BENCHMARK_MODEL_PROFILE_INVALID" }));
+      }
+    });
   });
 
   it("uses every supported target and every pinned profile in the full lane", () => {

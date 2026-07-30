@@ -601,12 +601,7 @@ describe("longitudinal eval history", () => {
     ).not.toThrow();
 
     const noncanonicalSmokeSuite = structuredClone(suite);
-    const smokeRunner = noncanonicalSmokeSuite.run.runner_model_profile;
-    noncanonicalSmokeSuite.model_profiles[smokeRunner] = {
-      agent: "ClaudeAgent",
-      model: "claude-sonnet-5",
-      reasoning: "high"
-    };
+    noncanonicalSmokeSuite.targets[0]!.ref = "b".repeat(40);
     expect(() =>
       assertPublicBenchmarkGeneration(
         REPOSITORY_ROOT,
