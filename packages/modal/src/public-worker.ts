@@ -932,7 +932,8 @@ function sanitizePublicDiagnosticMessage(message: string, forbiddenSecretValues:
     .join("")
     .replace(/\s+/gu, " ")
     .trim();
-  return Buffer.from(sanitized, "utf8").subarray(0, 1_000).toString("utf8");
+  const bytes = Buffer.from(sanitized, "utf8");
+  return bytes.subarray(Math.max(0, bytes.length - 1_000)).toString("utf8");
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
