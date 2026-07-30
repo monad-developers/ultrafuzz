@@ -26,6 +26,7 @@ import { redactSecretsInText } from "@ultrafuzz/security";
 
 import {
   kimiSubscriptionCredentialFileName,
+  kimiSubscriptionAuthSecretValues,
   prepareSubscriptionAuthCopy,
   reconcileKimiSubscriptionAuthCredential,
   runnerApiKeyEnv,
@@ -1225,6 +1226,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
   const kimiRuntimeEnv =
     subscriptionProvider === "kimi"
       ? [
+          "KIMI_CODE_HOME='/run/ultrafuzz-auth/kimi'",
           'ULTRAFUZZ_KIMI_SHARED_AUTH_HOME="$data_root/kimi-code-auth"',
           'ULTRAFUZZ_KIMI_SESSION_HOME="$data_root/kimi-code-sessions"'
         ]
@@ -2311,6 +2313,15 @@ export async function collectModalBenchmark(input: {
         }
         const output = path.resolve(input.outputDir, launch.slug);
         const configuredModel = collectionConfig?.models.find((model) => model.slug === launch.slug);
+        const collectionEnv = input.env ?? process.env;
+        const collectionPublicConfig =
+          collectionConfig !== undefined && isPublicModalBenchmarkConfig(collectionConfig)
+            ? collectionConfig
+            : undefined;
+        const locallyRetainedSecretValues =
+          collectionPublicConfig !== undefined && configuredModel !== undefined
+            ? await safePublicBenchmarkCollectionSecretValues(collectionPublicConfig, configuredModel, collectionEnv)
+            : [];
         if (
           isModalWorkerStatusTerminal(persistedStatus) &&
           configuredModel !== undefined &&
@@ -2322,10 +2333,18 @@ export async function collectModalBenchmark(input: {
             image,
             launch,
             model: configuredModel,
-            env: input.env ?? process.env
+            env: collectionEnv
           });
         }
-        const collectionEnv = input.env ?? process.env;
+        const retainedCollectionSecretValues =
+          collectionPublicConfig !== undefined && configuredModel !== undefined
+            ? await safePublicBenchmarkCollectionSecretValues(
+                collectionPublicConfig,
+                configuredModel,
+                collectionEnv,
+                locallyRetainedSecretValues
+              )
+            : locallyRetainedSecretValues;
         const exactDiagnosticConfig =
           collectionConfig !== undefined &&
           collectionConfigFingerprint !== undefined &&
@@ -2339,11 +2358,12 @@ export async function collectModalBenchmark(input: {
           })
             ? { config: collectionConfig, model: configuredModel }
             : undefined;
-        const selectedWorkerEvidence = selectModalCollectedEvidence(
+        const selectedWorkerEvidence = await selectModalCollectedEvidence(
           files,
           exactDiagnosticConfig?.config,
           exactDiagnosticConfig?.model,
-          collectionEnv
+          collectionEnv,
+          retainedCollectionSecretValues
         );
         const recoveryLifecycle = createModalRecoveryLifecycleDocument(
           state.recovery_lifecycle.filter((record) => record.model_slug === launch.slug)
@@ -2397,7 +2417,12 @@ export async function collectModalBenchmark(input: {
           if (configuredModel === undefined) throw new Error(`public benchmark config is missing ${launch.slug}`);
           const bundle = parsePublicBenchmarkBundle(
             JSON.parse(contents) as unknown,
-            publicBenchmarkCollectionSecretValues(publicCollection!.config, configuredModel, collectionEnv)
+            await publicBenchmarkCollectionSecretValues(
+              publicCollection!.config,
+              configuredModel,
+              collectionEnv,
+              retainedCollectionSecretValues
+            )
           );
           assertPublicBenchmarkBundleLineage({
             bundle,
@@ -2420,15 +2445,36 @@ export async function collectModalBenchmark(input: {
   }
 }
 
-export function publicBenchmarkCollectionSecretValues(
+export async function publicBenchmarkCollectionSecretValues(
   config: PublicModalBenchmarkConfig,
   model: ModalModelSpec,
-  env: Record<string, string | undefined>
-): string[] {
+  env: Record<string, string | undefined>,
+  retainedSecretValues: readonly string[] = []
+): Promise<string[]> {
+  const runnerSecretValues =
+    model.auth_mode === "api-key"
+      ? [requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider))]
+      : await kimiSubscriptionAuthSecretValues(model.model, env);
   return [
-    requiredAnyEnv(env, runnerApiKeySourceEnv(model.provider)),
-    requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+    ...new Set([
+      ...retainedSecretValues,
+      ...runnerSecretValues,
+      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+    ])
   ];
+}
+
+async function safePublicBenchmarkCollectionSecretValues(
+  config: PublicModalBenchmarkConfig,
+  model: ModalModelSpec,
+  env: Record<string, string | undefined>,
+  retainedSecretValues: readonly string[] = []
+): Promise<string[]> {
+  try {
+    return await publicBenchmarkCollectionSecretValues(config, model, env, retainedSecretValues);
+  } catch {
+    return [...new Set(retainedSecretValues)];
+  }
 }
 
 export function hasExactPublicDiagnosticCollectionConfig(input: {
@@ -2664,17 +2710,6 @@ export function modalBenchmarkSecretValues(
   const kimiBaseUrl = optionalKimiApiBaseUrl(model, env);
   if (kimiBaseUrl !== undefined) values.KIMI_BASE_URL = kimiBaseUrl;
   return values;
-}
-
-function availableSecretValues(
-  config: ModalBenchmarkConfig,
-  model: ModalModelSpec,
-  env: Record<string, string | undefined>
-): string[] {
-  const runnerEnv = model.auth_mode === "api-key" ? runnerApiKeyEnv(model.provider) : undefined;
-  return [...secretEnvNames(config, model)]
-    .map((name) => (name === runnerEnv ? firstEnv(env, runnerApiKeySourceEnv(model.provider)) : env[name]))
-    .filter((value): value is string => value !== undefined && value !== "");
 }
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
@@ -2993,24 +3028,31 @@ export function assertSanitizedModalCollectedFiles(
   }
 }
 
-export function selectModalCollectedEvidence(
+export async function selectModalCollectedEvidence(
   files: Readonly<Record<string, string>>,
   config: ModalBenchmarkConfig | undefined,
   configuredModel: ModalModelSpec | undefined,
-  env: Record<string, string | undefined>
-): { files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] } {
+  env: Record<string, string | undefined>,
+  retainedSecretValues: readonly string[] = []
+): Promise<{ files: Readonly<Record<string, string>>; forbiddenSecretValues: string[] }> {
   if (files[PUBLIC_EVAL_DIAGNOSTICS_FILE] === undefined) {
-    return { files, forbiddenSecretValues: [] };
+    return { files, forbiddenSecretValues: [...new Set(retainedSecretValues)] };
   }
-  if (config === undefined || configuredModel === undefined) {
+  if (config === undefined || configuredModel === undefined || !isPublicModalBenchmarkConfig(config)) {
     const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
-    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+    return { files: withoutDiagnostics, forbiddenSecretValues: [...new Set(retainedSecretValues)] };
   }
-  const names = [...secretEnvNames(config, configuredModel)];
-  const forbiddenSecretValues = availableSecretValues(config, configuredModel, env);
-  if (forbiddenSecretValues.length !== names.length) {
+  let forbiddenSecretValues: string[];
+  try {
+    forbiddenSecretValues = await publicBenchmarkCollectionSecretValues(
+      config,
+      configuredModel,
+      env,
+      retainedSecretValues
+    );
+  } catch {
     const { [PUBLIC_EVAL_DIAGNOSTICS_FILE]: _diagnostics, ...withoutDiagnostics } = files;
-    return { files: withoutDiagnostics, forbiddenSecretValues: [] };
+    return { files: withoutDiagnostics, forbiddenSecretValues: [...new Set(retainedSecretValues)] };
   }
   return { files, forbiddenSecretValues };
 }

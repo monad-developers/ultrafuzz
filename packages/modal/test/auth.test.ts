@@ -6,6 +6,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  kimiSubscriptionAuthSecretValues,
+  kimiSubscriptionAuthSecretValuesFromRoots,
   kimiSubscriptionCredentialFileName,
   localSubscriptionAuthPath,
   prepareSubscriptionAuthCopy,
@@ -228,6 +230,44 @@ describe("runtime-only subscription auth", () => {
       refresh_token: "old-refresh",
       expires_at: 2_010_000
     });
+  });
+
+  it("returns selected Kimi subscription access and refresh tokens without unrelated credentials", async () => {
+    const source = kimiAuthFixture({ oauthKey: "oauth/selected-kimi" });
+    fs.writeFileSync(
+      path.join(source, "credentials", "unrelated-provider.json"),
+      `${JSON.stringify({
+        access_token: "unrelated-access",
+        refresh_token: "unrelated-refresh",
+        expires_at: 2_010_000,
+        expires_in: 900
+      })}\n`
+    );
+
+    await expect(kimiSubscriptionAuthSecretValues("kimi-k3", { KIMI_CODE_HOME: source })).resolves.toEqual([
+      "old-access",
+      "old-refresh"
+    ]);
+  });
+
+  it("resolves Kimi subscription secrets from separate config and credential roots", async () => {
+    const configRoot = kimiAuthFixture({ oauthKey: "oauth/selected-kimi" });
+    const credentialRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-credential-root-test-"));
+    fs.mkdirSync(path.join(credentialRoot, "credentials"), { recursive: true });
+    fs.writeFileSync(
+      path.join(credentialRoot, "credentials", "selected-kimi.json"),
+      `${JSON.stringify({
+        access_token: "remote-access",
+        refresh_token: "remote-refresh",
+        expires_at: 2_010_000,
+        expires_in: 900
+      })}\n`
+    );
+
+    await expect(kimiSubscriptionAuthSecretValuesFromRoots("kimi-k3", configRoot, credentialRoot)).resolves.toEqual([
+      "remote-access",
+      "remote-refresh"
+    ]);
   });
 
   it("does not overwrite a newer host Kimi refresh token with stale Modal state", async () => {

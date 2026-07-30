@@ -22,10 +22,11 @@ import {
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { stringify } from "yaml";
 
-import { runnerApiKeyEnv } from "./auth.js";
+import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
 import type { PublicModalBenchmarkConfig } from "./config.js";
 import type { ModalModelSpec } from "./defaults.js";
 import { convertAuditMarkdownGroundTruth } from "./ground-truth.js";
+import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
@@ -129,13 +130,17 @@ export async function runPublicBenchmarkWorker(input: {
       await writer.writePartial(emptyWorkerCheckpoint());
       await flushFilesystem();
       assertPublicWorkerInput(input.config, input.model);
-      const forbiddenSecretValues = [
-        requiredEnv(runnerApiKeyEnv(input.model.provider)),
-        requiredEnv(input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
-      ];
+      const retainedForbiddenSecretValues = new Set<string>();
+      const resolveForbiddenSecretValues = async (): Promise<string[]> => {
+        for (const value of await publicBenchmarkWorkerSecretValues(input.config, input.model, input.dataRoot)) {
+          retainedForbiddenSecretValues.add(value);
+        }
+        return [...retainedForbiddenSecretValues];
+      };
+      const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
       if (fs.existsSync(bundlePath)) {
         try {
-          const bundle = readPublicBenchmarkBundle(bundlePath, forbiddenSecretValues);
+          const bundle = readPublicBenchmarkBundle(bundlePath, initialForbiddenSecretValues);
           assertPublicWorkerBundleLineage(bundle, input.config, input.model, input.lineage);
           return "finished";
         } catch {
@@ -188,17 +193,17 @@ export async function runPublicBenchmarkWorker(input: {
                   rowWatchSeconds: input.config.public_benchmark.max_runtime_seconds
                 }) * 1000,
               timeoutCategory: "model-work-timeout",
-              publicDiagnosticSecretValues: forbiddenSecretValues
+              publicDiagnosticSecretValues: resolveForbiddenSecretValues
             }
           ).then(() => undefined),
-        buildDiagnostics: () =>
+        buildDiagnostics: async () =>
           createPublicEvalDiagnosticsFromRun({
             config: input.config,
             model: input.model,
             lineage: input.lineage,
             controlRoot: prepared.controlRoot,
             evalRunId: prepared.evalRunId,
-            forbiddenSecretValues
+            forbiddenSecretValues: await resolveForbiddenSecretValues()
           }),
         persistDiagnostics: (diagnostics) => writePublicEvalDiagnosticsAtomic(diagnosticsPath, diagnostics),
         flush: flushFilesystem
@@ -250,7 +255,7 @@ export async function runPublicBenchmarkWorker(input: {
           },
           input.config.public_benchmark.lane
         ),
-        forbiddenSecretValues
+        forbiddenSecretValues: await resolveForbiddenSecretValues()
       });
       await writePublicBundleAtomic(bundlePath, bundle);
       return "finished";
@@ -331,7 +336,7 @@ export async function checkpointPublicModelWorkStart(
 
 export async function runAndCheckpointPublicEvalDiagnostics(input: {
   runEval: () => Promise<void>;
-  buildDiagnostics: () => PublicEvalDiagnostics;
+  buildDiagnostics: () => PublicEvalDiagnostics | Promise<PublicEvalDiagnostics>;
   persistDiagnostics: (diagnostics: PublicEvalDiagnostics) => Promise<void>;
   flush: () => Promise<void>;
 }): Promise<{ diagnostics: PublicEvalDiagnostics; runError?: unknown }> {
@@ -343,7 +348,7 @@ export async function runAndCheckpointPublicEvalDiagnostics(input: {
   }
   let diagnostics: PublicEvalDiagnostics;
   try {
-    diagnostics = input.buildDiagnostics();
+    diagnostics = await input.buildDiagnostics();
   } catch (error) {
     if (runError !== undefined) throw runError;
     throw new PublicEvalDiagnosticsBuildError(error);
@@ -404,14 +409,33 @@ export async function writePublicBundleAtomic(filePath: string, bundle: PublicBe
   }
 }
 
-function assertPublicWorkerInput(config: PublicModalBenchmarkConfig, model: ModalModelSpec): void {
+export function assertPublicWorkerInput(config: PublicModalBenchmarkConfig, model: ModalModelSpec): void {
   const scope = config.public_benchmark;
   if (scope.runner_model_profile !== model.slug) {
     throw new Error("public benchmark runner profile must equal the selected Modal model slug");
   }
-  if (model.auth_mode !== "api-key") {
-    throw new Error("public benchmark runners must use API-key authentication");
+  if (model.auth_mode !== "api-key" && !(model.provider === "kimi" && model.auth_mode === "subscription")) {
+    throw new Error("public benchmark runners must use API-key authentication or Kimi subscription authentication");
   }
+}
+
+export async function publicBenchmarkWorkerSecretValues(
+  config: PublicModalBenchmarkConfig,
+  model: ModalModelSpec,
+  dataRoot: string,
+  env: Record<string, string | undefined> = process.env
+): Promise<string[]> {
+  const runnerSecretValues =
+    model.auth_mode === "api-key"
+      ? [requiredEnv(runnerApiKeyEnv(model.provider), env)]
+      : await kimiSubscriptionAuthSecretValuesFromRoots(
+          model.model,
+          remoteAuthDir("kimi"),
+          path.join(dataRoot, "kimi-code-auth")
+        );
+  return [
+    ...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env)])
+  ];
 }
 
 async function preparePublicBenchmark(
@@ -812,7 +836,7 @@ async function runCommand(
     env?: Record<string, string>;
     timeoutCategory?: string;
     signal?: AbortSignal;
-    publicDiagnosticSecretValues?: readonly string[];
+    publicDiagnosticSecretValues?: readonly string[] | (() => Promise<readonly string[]>);
   }
 ): Promise<string> {
   await fs.promises.appendFile(options.logPath, `${new Date().toISOString()} operation-started\n`);
@@ -864,7 +888,11 @@ async function runCommand(
   });
   const capturedStdout = Buffer.concat(stdout).toString("utf8");
   if (options.publicDiagnosticSecretValues !== undefined) {
-    const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, options.publicDiagnosticSecretValues);
+    const forbiddenSecretValues =
+      typeof options.publicDiagnosticSecretValues === "function"
+        ? await options.publicDiagnosticSecretValues()
+        : options.publicDiagnosticSecretValues;
+    const payload = publicEvalFailureDiagnosticLogPayload(capturedStdout, forbiddenSecretValues);
     if (payload !== undefined) {
       await fs.promises.appendFile(
         options.logPath,
@@ -953,8 +981,8 @@ async function runBare(argv: string[]): Promise<void> {
   if (exitCode !== 0) throw new Error(`${argv[0]} exited ${exitCode}`);
 }
 
-function requiredEnv(name: string): string {
-  const value = process.env[name];
+function requiredEnv(name: string, env: Record<string, string | undefined> = process.env): string {
+  const value = env[name];
   if (value === undefined || value.trim() === "") throw new Error(`${name} is required`);
   return value;
 }
