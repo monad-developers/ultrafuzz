@@ -32,6 +32,22 @@ const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
+const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisor = spawn("bun", supervisorArgs, {
+          detached: true,
+          stdio: ["ignore", fd, fd],
+          env: process.env,
+        });`;
+const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorFd = openSync(logFile, "a");
+        let supervisor;
+        try {
+          supervisor = spawn("bun", supervisorArgs, {
+            detached: true,
+            stdio: ["ignore", supervisorFd, supervisorFd],
+            env: process.env,
+          });
+        } finally {
+          closeSync(supervisorFd);
+        }`;
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
   "APPDATA",
@@ -1165,7 +1181,7 @@ async function ensureSmithersDependencies(
     resolveInstalledSmithersPackageRoot(projectRoot);
   }
   if (installedSmithersValidationError(projectRoot) === undefined) {
-    applySmithersDetachedAdmissionCompatibilityPatch(projectRoot);
+    applySmithers031CompatibilityPatches(projectRoot);
     return;
   }
   await execFileAsync(
@@ -1193,10 +1209,10 @@ async function ensureSmithersDependencies(
   if (validationError !== undefined) {
     throw new Error(`Smithers dependency install did not produce the pinned local workflow runner: ${validationError}`);
   }
-  applySmithersDetachedAdmissionCompatibilityPatch(projectRoot);
+  applySmithers031CompatibilityPatches(projectRoot);
 }
 
-function applySmithersDetachedAdmissionCompatibilityPatch(projectRoot: string): void {
+function applySmithers031CompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
   const candidatePackageRoots = [
     path.join(nodeModules, "@smithers-orchestrator", "cli"),
@@ -1211,24 +1227,39 @@ function applySmithersDetachedAdmissionCompatibilityPatch(projectRoot: string): 
   const packageRoot = candidatePackageRoots[0]!;
   const packageJson = path.join(packageRoot, "package.json");
   const admissionSource = path.join(packageRoot, "src", "detached-admission.js");
+  const cliSource = path.join(packageRoot, "src", "index.js");
   assertRegularFileInside(nodeModules, packageJson, "installed Smithers CLI package metadata");
   assertRegularFileInside(nodeModules, admissionSource, "installed Smithers detached admission implementation");
+  assertRegularFileInside(nodeModules, cliSource, "installed Smithers CLI implementation");
   const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
   if (!isObjectRecord(metadata) || metadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
     throw new Error(`installed Smithers CLI package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
   }
-  const source = fs.readFileSync(admissionSource, "utf8");
-  if (source.includes(SMITHERS_CLI_DETACHED_ADMISSION_PATCH)) return;
-  if (source.split(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE).length !== 2) {
-    throw new Error("pinned workflow runner detached admission implementation is incompatible");
+  const admissionContents = fs.readFileSync(admissionSource, "utf8");
+  if (!admissionContents.includes(SMITHERS_CLI_DETACHED_ADMISSION_PATCH)) {
+    if (admissionContents.split(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE).length !== 2) {
+      throw new Error("pinned workflow runner detached admission implementation is incompatible");
+    }
+    // Smithers 0.31 waits for a durable RunStarted admission marker, but its
+    // hard-coded 30-second ceiling is shorter than cold startup for the public
+    // smoke graph. Retain the stronger admission proof while allowing bounded
+    // initialization time until the dependency exposes this as configuration.
+    writeFileDurable(
+      admissionSource,
+      admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
+    );
   }
-  // Smithers 0.31 waits for a durable RunStarted admission marker, but its
-  // hard-coded 30-second ceiling is shorter than cold startup for the public
-  // smoke graph. Retain the stronger admission proof while allowing bounded
-  // initialization time until the dependency exposes this as configuration.
+  const cliContents = fs.readFileSync(cliSource, "utf8");
+  if (cliContents.includes(SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)) return;
+  if (cliContents.split(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE).length !== 2) {
+    throw new Error("pinned workflow runner detached supervisor implementation is incompatible");
+  }
+  // Smithers 0.31 closes the detached-engine log descriptor before reusing it
+  // for the supervisor spawn. Open a dedicated descriptor so supervised public
+  // runs do not fail nondeterministically with posix_spawn EBADF.
   writeFileDurable(
-    admissionSource,
-    source.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
+    cliSource,
+    cliContents.replace(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)
   );
 }
 

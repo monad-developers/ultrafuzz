@@ -1940,6 +1940,7 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /<Sandbox/);
   assert.match(workflowSource, /createModalNodeSandboxProvider/);
   assert.match(workflowSource, /schema_version: "ultrafuzz\.modal\.node\.v1"/);
+  assert.match(workflowSource, /run_id: "cloud-nodes"/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
   assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
@@ -2778,7 +2779,7 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
-test("startRun extends the pinned CLI admission gate for cold detached smoke graphs", async () => {
+test("startRun patches the pinned CLI cold detached lifecycle", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -2787,10 +2788,23 @@ test("startRun extends the pinned CLI admission gate for cold detached smoke gra
   writeFakeInstalledSmithers(project);
   const cliRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "cli");
   const admissionSource = path.join(cliRoot, "src", "detached-admission.js");
+  const cliSource = path.join(cliRoot, "src", "index.js");
   fs.mkdirSync(path.dirname(admissionSource), { recursive: true });
   fs.writeFileSync(
     path.join(cliRoot, "package.json"),
     `${JSON.stringify({ name: "@smithers-orchestrator/cli", version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    cliSource,
+    [
+      '        const supervisor = spawn("bun", supervisorArgs, {',
+      "          detached: true,",
+      '          stdio: ["ignore", fd, fd],',
+      "          env: process.env,",
+      "        });",
+      ""
+    ].join("\n"),
     "utf8"
   );
   fs.writeFileSync(
@@ -2812,6 +2826,9 @@ test("startRun extends the pinned CLI admission gate for cold detached smoke gra
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   assert.match(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 300_000/u);
   assert.doesNotMatch(fs.readFileSync(admissionSource, "utf8"), /DETACHED_ADMISSION_TIMEOUT_MS = 30_000;/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /const supervisorFd = openSync\(logFile, "a"\)/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", supervisorFd, supervisorFd\]/u);
+  assert.doesNotMatch(fs.readFileSync(cliSource, "utf8"), /stdio: \["ignore", fd, fd\]/u);
 });
 
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
