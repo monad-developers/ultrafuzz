@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="644" viewBox="0 0 960 644" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="666" viewBox="0 0 960 666" role="img" aria-labelledby="title desc">
 <title id="title">UltrafuzzBench quality</title>
-<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest 12 candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>
-<rect width="960" height="644" fill="#ffffff"/>
+<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest 12 candidate runs. Solid lines connect identical scoring identities; dashed guides cross scoring changes. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>
+<rect width="960" height="666" fill="#ffffff"/>
 <text x="70" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>
 <text x="70" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">ultrafuzz-bench · smoke · latest 12 of 15 complete runs</text>
-<text x="70" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and incompatible lineages are not connected.</text>
+<text x="70" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; solid lines are comparable, while dashed links are visual guides only.</text>
 <line x1="70" y1="110" x2="70" y2="410" stroke="#6b7280"/>
 <line x1="70" y1="410" x2="930" y2="410" stroke="#6b7280"/>
 <line x1="70" y1="410" x2="930" y2="410" stroke="#e5e7eb"/>
@@ -27,30 +27,39 @@
 <g data-lineage-marker="cohort-7d061c80"><title>ultrafuzz-bench smoke cohort-7d061c80 policy-33b8d296</title>
 <line x1="535.09" y1="110" x2="535.09" y2="410" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
 <text transform="translate(542.09,118) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-7d061c80</text></g>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="111" y1="338.93" x2="181.18" y2="373.88" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="181.18" y1="373.88" x2="251.36" y2="284.51" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="321.55" y1="329.44" x2="391.73" y2="380" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="391.73" y1="380" x2="461.91" y2="348.87" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="461.91" y1="348.87" x2="602.27" y2="326.72" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="602.27" y1="326.72" x2="672.45" y2="329.98" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="672.45" y1="329.98" x2="742.64" y2="338.93" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="742.64" y1="338.93" x2="812.82" y2="359.98" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="812.82" y1="359.98" x2="883" y2="323.94" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 8483637: 23.7% · score-d2408140</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="111" cy="338.93" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="111" cy="338.93" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) e03c176: 12.0% · score-45acaa99</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="181.18" cy="373.88" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="181.18" cy="373.88" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/da5d191b03f61b4e07149c10d29bbd7542511889"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) da5d191: 41.8% · score-aad998ae</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="251.36" cy="284.51" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="251.36" cy="284.51" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/24b90c4d2a03ece561b3b1b988cfa2508c088013"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 24b90c4: 26.9% · score-cfa860f0</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="321.55" cy="329.44" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="321.55" cy="329.44" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/5cfa918db7448aeb92b6b8aa66f687a9359b71e6"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 5cfa918: 10.0% · score-18cbb163</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="391.73" cy="380" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="391.73" cy="380" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) bdf2482: 20.4% · score-0bc0f337</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="461.91" cy="348.87" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="461.91" cy="348.87" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/ed26197c6c6cf5c7d21e35b9f2c9f5cb85fcac8e"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) ed26197: 27.8% · score-a7190c43</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="602.27" cy="326.72" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="602.27" cy="326.72" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 3ea3059: 26.7% · score-205fcd37</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="672.45" cy="329.98" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="672.45" cy="329.98" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/63becee294476e3e750a79163c01634138b94282"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 63becee: 23.7% · score-edcff785</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="742.64" cy="338.93" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="742.64" cy="338.93" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bf9f729656bd4d2b0e8860c560cc3a1716a3dca0"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) bf9f729: 16.7% · score-88c0f00d</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="812.82" cy="359.98" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="812.82" cy="359.98" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/8aac39f661655f98f6e9ba2be71c079d650e2223"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 8aac39f: 28.7% · score-17ca908c</title>
-<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#0f766e" stroke="#ffffff" stroke-width="1" cx="883" cy="323.94" r="5"/></a>
+<circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="883" cy="323.94" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/bdf2482db2ad359aa9b48775e73206fa37f32278"><title>smoke benchmark-smoke-kimi-k3-max kimi-k3 max UltrafuzzBench Score (macro-F1) bdf2482: 39.6% · score-0bc0f337</title>
-<rect data-metric="f1" data-profile="benchmark-smoke-kimi-k3-max" fill="#0f766e" stroke="#ffffff" stroke-width="1" x="533.09" y="286.12" width="10" height="10"/></a>
+<rect data-metric="f1" data-profile="benchmark-smoke-kimi-k3-max" fill="#c2410c" stroke="#ffffff" stroke-width="1" x="533.09" y="286.12" width="10" height="10"/></a>
 <text x="114" y="428" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">8483637</text>
 <text transform="translate(114,526) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-22</text>
 <text x="184.18" y="428" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">e03c176</text>
@@ -77,8 +86,10 @@
 <text transform="translate(886,526) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
 <line x1="70" y1="556" x2="84" y2="556" stroke="#0f766e" stroke-width="4"/>
 <text x="90" y="560" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>
-<circle  fill="#374151" stroke="#ffffff" stroke-width="1" cx="77" cy="578" r="4"/>
-<text x="90" y="582" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-gpt-5-6-luna-high · gpt-5.6-luna · high</text>
-<rect  fill="#374151" stroke="#ffffff" stroke-width="1" x="73" y="596" width="8" height="8"/>
-<text x="90" y="604" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-kimi-k3-max · kimi-k3 · max</text>
+<line x1="70" y1="578" x2="84" y2="578" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<text x="90" y="582" font-family="system-ui, sans-serif" font-size="14" fill="#374151">Scoring identity changed (visual guide only)</text>
+<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="77" cy="600" r="4"/>
+<text x="90" y="604" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-gpt-5-6-luna-high · gpt-5.6-luna · high</text>
+<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="73" y="618" width="8" height="8"/>
+<text x="90" y="626" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-kimi-k3-max · kimi-k3 · max</text>
 </svg>
