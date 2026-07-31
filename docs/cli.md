@@ -59,9 +59,11 @@ selects another agent, backend-specific reasoning is cleared, including when
 - `status <run-id> [--window <minutes>] [--watch] [--interval <seconds>]`
   shows whether a run is healthy, blocked, stalled, quota-parked, paused, or
   finished, plus node progress, an ETA, and how long the current step has been
-  running. `--watch` refreshes every `--interval` seconds (default 30) until
-  the run is terminal; with `--json` each poll is one newline-delimited
-  `ultrafuzz.cli.result.v1` envelope.
+  running. Progress counts every settled node, so failed and skipped nodes
+  advance the percentage instead of pinning it below 100%. `--watch` refreshes
+  every `--interval` seconds (default 30) until the run is terminal; with
+  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v1`
+  envelope.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
 - `resume <run-id>` continues a paused run using the existing linked workflow.

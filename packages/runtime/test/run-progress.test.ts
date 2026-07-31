@@ -121,6 +121,36 @@ test("summarizeRunProgress reports progress, ETA, and current-step elapsed time 
   assert.equal(summary.current_step.running_count, 1);
 });
 
+test("summarizeRunProgress counts failed and skipped nodes as settled progress", () => {
+  const summary = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 258, failed: 4, skipped: 2, total: 264 }),
+    throughput: throughput({ recent_finished: 2, total_finished: 258 }),
+    runStartedAt: "2026-07-31T09:00:00.000Z",
+    nowMs: NOW_MS
+  });
+
+  // Percent must agree with `remaining`: nothing is left to run, so a run whose
+  // last nodes failed or were skipped cannot sit below 100% with a zero ETA.
+  assert.equal(summary.progress.remaining, 0);
+  assert.equal(summary.progress.percent, 100);
+  assert.equal(summary.progress.failed, 4);
+  assert.equal(summary.progress.skipped, 2);
+  assert.equal(summary.eta.seconds, 0);
+  assert.equal(summary.eta.basis, "no-remaining-nodes");
+
+  const partial = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 130, failed: 2, in_progress: 1, pending: 131, total: 264 }),
+    throughput: throughput({ recent_finished: 2, total_finished: 130 }),
+    runStartedAt: "2026-07-31T09:00:00.000Z",
+    nowMs: NOW_MS
+  });
+
+  assert.equal(partial.progress.percent, 50);
+  assert.equal(partial.progress.remaining, 132);
+});
+
 test("summarizeRunProgress falls back to whole-run throughput when the recent window is empty", () => {
   const summary = summarizeRunProgress({
     runStatus: "running",

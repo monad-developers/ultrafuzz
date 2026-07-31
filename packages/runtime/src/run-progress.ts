@@ -37,7 +37,10 @@ function runProgress(counts: RunHealthCounts): RunHealthProgress {
   const settled = counts.finished + counts.failed + counts.skipped;
   const remaining = Math.max(0, counts.total - settled);
   return {
-    percent: counts.total > 0 ? Math.floor((counts.finished / counts.total) * 100) : 0,
+    // Percent and `remaining` must agree on what "done" means: a run whose last
+    // nodes failed or were skipped has nothing left to do, so it must not sit
+    // at 98% with a zero ETA forever. The failed count stays visible alongside.
+    percent: counts.total > 0 ? Math.floor((settled / counts.total) * 100) : 0,
     finished: counts.finished,
     in_progress: counts.in_progress,
     pending: counts.pending,

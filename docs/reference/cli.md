@@ -181,7 +181,9 @@ counts:
 
 - `progress`: `percent`, `finished`, `in_progress`, `pending`, `failed`,
   `skipped`, `remaining`, and `total`. `remaining` is every node that is not
-  finished, failed, or skipped.
+  finished, failed, or skipped, and `percent` is the share of nodes that are
+  settled, so it agrees with `remaining` reaching zero even when nodes failed
+  or were skipped.
 - `eta`: `available`, `seconds`, `basis`, and `unavailable_reason`. `basis` is
   `recent-throughput` when the recent activity window observed completions,
   `run-throughput` when only whole-run throughput is available, and
@@ -190,17 +192,17 @@ counts:
 - `current_step`: `node_id`, `iteration`, `started_at`, `elapsed_seconds`, and
   `running_count`. Elapsed time comes from Ultrafuzz's synchronized durable
   `state.json` node timestamps, and the reported step is the longest-running
-  one. `elapsed_seconds` is `null` when no running node has a recorded start. `pause`
-  requests a graceful stop: no new tasks are scheduled, in-flight tasks finish,
-  and the run settles in the resumable `paused` state. `resume` reports
-  `submitted: false` instead of
-  launching a duplicate continuation when the linked workflow is still in an
-  active state (running, in-progress, started, queued, retrying, or waiting).
-  `resume --reset-node` retries one failed workflow node and its dependents in
-  the same linked run; the applied reset is recorded so retrying the command
-  after a failed continuation resumes the already-reset run instead of repeating
-  the reset. `fork` may start from a checkpoint frame and may reset one workflow
-  node before starting the fork.
+  one. `elapsed_seconds` is `null` when no running node has a recorded start.
+
+`pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
+finish, and the run settles in the resumable `paused` state. `resume` reports
+`submitted: false` instead of launching a duplicate continuation when the linked
+workflow is still in an active state (running, in-progress, started, queued,
+retrying, or waiting). `resume --reset-node` retries one failed workflow node and
+its dependents in the same linked run; the applied reset is recorded so retrying
+the command after a failed continuation resumes the already-reset run instead of
+repeating the reset. `fork` may start from a checkpoint frame and may reset one
+workflow node before starting the fork.
 
 ## Report
 
