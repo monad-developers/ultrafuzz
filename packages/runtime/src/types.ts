@@ -262,35 +262,75 @@ export type RunHealthVerdict =
   | "cancelled"
   | "failed";
 
-export interface RunHealthValue extends RunListEntry {
+export interface RunHealthCounts {
+  finished: number;
+  in_progress: number;
+  pending: number;
+  failed: number;
+  waiting_approval: number;
+  waiting_event: number;
+  waiting_timer: number;
+  skipped: number;
+  other: number;
+  total: number;
+}
+
+export interface RunHealthThroughput {
+  recent_finished: number;
+  window_ms: number;
+  total_finished: number;
+  last_finished_at_ms: number | null;
+}
+
+export interface RunHealthProgress {
+  percent: number;
+  finished: number;
+  in_progress: number;
+  pending: number;
+  failed: number;
+  skipped: number;
+  remaining: number;
+  total: number;
+}
+
+export type RunEtaBasis = "recent-throughput" | "run-throughput" | "no-remaining-nodes";
+
+export type RunEtaUnavailableReason = "run-terminal" | "no-finished-nodes" | "no-observed-elapsed-time";
+
+export interface RunHealthEta {
+  available: boolean;
+  seconds: number | null;
+  basis: RunEtaBasis | null;
+  unavailable_reason: RunEtaUnavailableReason | null;
+}
+
+export interface RunHealthCurrentStep {
+  node_id: string | null;
+  iteration: number | null;
+  started_at: string | null;
+  elapsed_seconds: number | null;
+  running_count: number;
+}
+
+export interface RunProgressSummary {
+  progress: RunHealthProgress;
+  eta: RunHealthEta;
+  current_step: RunHealthCurrentStep;
+}
+
+export interface RunHealthValue extends RunListEntry, RunProgressSummary {
   workflow_run_id: string;
   workflow_status: string;
   verdict: RunHealthVerdict;
   reason: string;
-  counts: {
-    finished: number;
-    in_progress: number;
-    pending: number;
-    failed: number;
-    waiting_approval: number;
-    waiting_event: number;
-    waiting_timer: number;
-    skipped: number;
-    other: number;
-    total: number;
-  };
+  counts: RunHealthCounts;
   model_mix: Array<{
     engine: string;
     model: string;
     attempts: number;
     quota_parked: boolean;
   }>;
-  throughput: {
-    recent_finished: number;
-    window_ms: number;
-    total_finished: number;
-    last_finished_at_ms: number | null;
-  };
+  throughput: RunHealthThroughput;
   gating: Array<{
     node_id: string;
     iteration: number;

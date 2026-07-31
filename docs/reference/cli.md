@@ -17,7 +17,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz references update`    | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
 | `ultrafuzz ps`                   | List Ultrafuzz runs and linked workflow status.                                                                |
 | `ultrafuzz inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                   |
-| `ultrafuzz status <run-id>`      | Show a concise health verdict, progress counts, throughput, and gating nodes.                                  |
+| `ultrafuzz status <run-id>`      | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
 | `ultrafuzz pause <run-id>`       | Gracefully pause an active run after its in-flight tasks finish.                                               |
 | `ultrafuzz resume <run-id>`      | Delegate resume for the linked workflow run after product checks.                                              |
 | `ultrafuzz replay <run-id>`      | Delegate replay for the linked workflow run after product checks.                                              |
@@ -134,7 +134,12 @@ SHAs.
 ```bash
 ultrafuzz ps [--project <path>] [--json]
 ultrafuzz inspect <run-id> [--project <path>] [--json]
-ultrafuzz status <run-id> [--project <path>] [--window <minutes>] [--json]
+ultrafuzz status <run-id> \
+  [--project <path>] \
+  [--window <minutes>] \
+  [--watch] \
+  [--interval <seconds>] \
+  [--json]
 ultrafuzz pause <run-id> [--project <path>] [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
   [--reset-node <workflow-node-id>] [--json]
@@ -150,17 +155,52 @@ ultrafuzz fork <run-id> \
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the workflow run
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
-and maps workflow details into the stable Ultrafuzz JSON envelope. `pause`
-requests a graceful stop: no new tasks are scheduled, in-flight tasks finish,
-and the run settles in the resumable `paused` state. `resume` reports
-`submitted: false` instead of
-launching a duplicate continuation when the linked workflow is still in an
-active state (running, in-progress, started, queued, retrying, or waiting).
-`resume --reset-node` retries one failed workflow node and its dependents in
-the same linked run; the applied reset is recorded so retrying the command
-after a failed continuation resumes the already-reset run instead of repeating
-the reset. `fork` may start from a checkpoint frame and may reset one workflow
-node before starting the fork.
+and maps workflow details into the stable Ultrafuzz JSON envelope.
+
+`status` human output is watch-friendly:
+
+```text
+Run: <run-id>
+Status: running-healthy (running)
+Reason: 1 running, 2 finished in last 10m
+Progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
+ETA: 20 minutes
+Time on current step: 10 minutes on stateful-invariant-campaign
+Pace: 4 finished in the last 10m
+```
+
+`--watch` re-polls every `--interval` seconds (default 30) until the run
+reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`)
+or the poll fails. With `--json --watch`, every poll writes one
+newline-delimited `ultrafuzz.cli.result.v1` envelope so the stream pipes into
+`jq` and other line-oriented tools; without `--watch`, `--json` keeps the
+existing pretty-printed single envelope.
+
+The JSON envelope carries stable machine-readable fields alongside the existing
+counts:
+
+- `progress`: `percent`, `finished`, `in_progress`, `pending`, `failed`,
+  `skipped`, `remaining`, and `total`. `remaining` is every node that is not
+  finished, failed, or skipped.
+- `eta`: `available`, `seconds`, `basis`, and `unavailable_reason`. `basis` is
+  `recent-throughput` when the recent activity window observed completions,
+  `run-throughput` when only whole-run throughput is available, and
+  `no-remaining-nodes` when nothing is left to run. `unavailable_reason` is
+  `no-finished-nodes`, `no-observed-elapsed-time`, or `run-terminal`.
+- `current_step`: `node_id`, `iteration`, `started_at`, `elapsed_seconds`, and
+  `running_count`. Elapsed time comes from Ultrafuzz's synchronized durable
+  `state.json` node timestamps, and the reported step is the longest-running
+  one. `elapsed_seconds` is `null` when no running node has a recorded start. `pause`
+  requests a graceful stop: no new tasks are scheduled, in-flight tasks finish,
+  and the run settles in the resumable `paused` state. `resume` reports
+  `submitted: false` instead of
+  launching a duplicate continuation when the linked workflow is still in an
+  active state (running, in-progress, started, queued, retrying, or waiting).
+  `resume --reset-node` retries one failed workflow node and its dependents in
+  the same linked run; the applied reset is recorded so retrying the command
+  after a failed continuation resumes the already-reset run instead of repeating
+  the reset. `fork` may start from a checkpoint frame and may reset one workflow
+  node before starting the fork.
 
 ## Report
 

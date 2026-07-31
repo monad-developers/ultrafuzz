@@ -319,11 +319,60 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     verdict: string;
     counts: { in_progress: number };
     gating: Array<{ node_id: string }>;
+    progress: { percent: number; remaining: number; total: number };
+    eta: { available: boolean; seconds: number | null; basis: string | null };
+    current_step: { running_count: number; elapsed_seconds: number | null };
   };
   assert.equal(statusData.run_id, "cli-run");
   assert.equal(statusData.verdict, "running-healthy");
   assert.equal(statusData.counts.in_progress, 1);
   assert.equal(statusData.gating[0]?.node_id, "project-discovery");
+  assert.equal(statusData.progress.percent, 33);
+  assert.equal(statusData.progress.remaining, 4);
+  assert.equal(statusData.progress.total, 6);
+  assert.equal(statusData.eta.available, true);
+  assert.equal(statusData.eta.basis, "recent-throughput");
+  assert.equal(statusData.eta.seconds, 1_200);
+  assert.equal(statusData.current_step.running_count, 0);
+  assert.equal(statusData.current_step.elapsed_seconds, null);
+
+  const statePath = path.join(runData.run_root, "state.json");
+  const runningState = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    status: string;
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  const firstNodeId = Object.keys(runningState.nodes)[0]!;
+  runningState.nodes[firstNodeId] = {
+    ...runningState.nodes[firstNodeId],
+    status: "running",
+    started_at: new Date(Date.now() - 600_000).toISOString()
+  };
+  fs.writeFileSync(statePath, `${JSON.stringify(runningState, null, 2)}\n`, "utf8");
+
+  const statusText = await cli(project, ["status", runData.run_id, "--window", "5"], env);
+  assert.equal(statusText.code, 0, statusText.stderr);
+  assert.doesNotMatch(statusText.stdout, /smithers/iu);
+  assert.match(statusText.stdout, /^Status: running-healthy \(running\)$/mu);
+  assert.match(statusText.stdout, /^Progress: 33% \(2 finished \/ 1 running \/ 3 pending \/ 0 failed \/ 6 total\)$/mu);
+  assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
+  assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
+
+  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+  fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
+  const watched = await watching;
+  assert.equal(watched.code, 0, watched.stderr);
+  const watchedLines = watched.stdout.split("\n").filter(Boolean);
+  assert.equal(watchedLines.length, 2);
+  const watchedEnvelopes = watchedLines.map((line) => JSON.parse(line) as Record<string, unknown>);
+  for (const body of watchedEnvelopes) {
+    assertNoSmithersSurface(body);
+    assert.equal(body.command, "status");
+    assert.equal(body.ok, true);
+  }
+  assert.equal((watchedEnvelopes[0]!.data as { status: string }).status, "running");
+  assert.equal((watchedEnvelopes[1]!.data as { status: string }).status, "succeeded");
 
   const artifactDir = path.join(runData.run_root, "artifacts", "project-discovery");
   fs.mkdirSync(artifactDir, { recursive: true });
