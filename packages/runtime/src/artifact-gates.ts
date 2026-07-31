@@ -274,10 +274,17 @@ function severityArtifactForNode(
   return undefined;
 }
 
-// The default topology runs one final recon-fuzzer campaign in
-// `stateful-invariant-campaign`. The dedicated recon campaign node is still
-// accepted so project-owned topologies that split the campaign keep their gates.
-const campaignLogicalNodeIds = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
+/**
+ * Logical node IDs whose artifacts carry campaign property provenance. The
+ * default topology runs one final recon-fuzzer campaign in
+ * `stateful-invariant-campaign`; the dedicated recon campaign node stays
+ * accepted so project-owned topologies that split the campaign keep their
+ * gates. Exported so a test can pin this list to the shipped topology — the
+ * bug this list fixes was a gate keyed on an ID the topology did not contain.
+ */
+export const CAMPAIGN_LOGICAL_NODE_IDS = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
+
+const campaignLogicalNodeIds = CAMPAIGN_LOGICAL_NODE_IDS;
 
 const campaignResultArtifactNames = [
   "recon-fuzzer-results.json",
@@ -373,6 +380,11 @@ function verifyCampaignPropertyReferences(
     ...propertyReferenceDiagnostics(catalog, references),
     ...campaigns.flatMap((campaign) =>
       campaignFindingReferenceDiagnostics(campaign.value.failures, validatedFindings, campaign.path, findingsPath)
+    ),
+    ...danglingCampaignFindingDiagnostics(
+      new Set(campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))),
+      validatedFindings,
+      findingsPath
     )
   ];
   const implementedIds = new Set(
@@ -605,9 +617,7 @@ function campaignFindingReferenceDiagnostics(
   }
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const failureIds = new Set<string>();
   for (const [failureIndex, failure] of failures.entries()) {
-    failureIds.add(failure.id);
     const failurePropertyIds = failure.property_ids ?? [];
     const matchingFindings = findingsById.get(failure.id) ?? [];
     if (
@@ -645,22 +655,38 @@ function campaignFindingReferenceDiagnostics(
     }
   }
 
-  for (const [findingId, matchingFindings] of findingsById) {
-    if (failureIds.has(findingId)) {
+  return diagnostics;
+}
+
+/**
+ * Reports findings that no campaign record explains. This must be judged once
+ * against the union of every campaign record in the node: when a node runs more
+ * than one backend, a failure observed by one backend is legitimately absent
+ * from the other backend's record.
+ */
+function danglingCampaignFindingDiagnostics(
+  failureIds: ReadonlySet<string>,
+  findings: Array<Record<string, unknown>>,
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [findingIndex, finding] of findings.entries()) {
+    if (typeof finding.id !== "string" || failureIds.has(finding.id)) {
       continue;
     }
-    for (const finding of matchingFindings) {
-      if (finding.propertyIds.length === 0) {
-        continue;
-      }
-      diagnostics.push({
-        code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
-        message: `Property-derived finding ${JSON.stringify(findingId)} has no campaign failure with the same ID`,
-        severity: "error",
-        source: "property-provenance",
-        path: `${findingsPath}#$[${finding.index}].id`
-      });
+    const propertyIds = Array.isArray(finding.property_ids)
+      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
+      : [];
+    if (propertyIds.length === 0) {
+      continue;
     }
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
+      message: `Property-derived finding ${JSON.stringify(finding.id)} has no campaign failure with the same ID`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${findingsPath}#$[${findingIndex}].id`
+    });
   }
   return diagnostics;
 }

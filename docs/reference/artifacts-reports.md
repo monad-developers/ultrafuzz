@@ -144,8 +144,8 @@ references/manifest.json
 
 The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
 and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
-`campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan records
-the resolved vCPU count, worker count, wall-clock budget, deadline, and
+`campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan
+records the resolved vCPU count, worker count, wall-clock budget, deadline, and
 finalization reserve. The backend record keeps its command, version, timestamps,
 terminal status, distinct artifact paths, failures, reproducers, and available
 coverage metadata. The summary classifies the result as `complete`, `partial`,
@@ -258,7 +258,8 @@ not originate from a catalog property omit the field.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
-campaign result record independently, reject raw campaign/finding
+campaign result record independently, judge unexplained findings against the
+union of every campaign record in the node, reject raw campaign/finding
 reference mismatches and dangling final-report IDs, and require final joins to
 match the validated sources, implementation/test paths, and complete set of
 originating fuzzer backends. Final `report.json` stores the joined chain in

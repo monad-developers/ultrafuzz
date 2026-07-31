@@ -70,7 +70,7 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("Preserve the existing priority-threshold selection");
     expect(campaign).toContain("workers = max(1, available_vcpus)");
     expect(campaign).toContain("1 vCPU means 1 worker");
-    expect(campaign).toContain("higher\n     counts use `available_vcpus` workers on the one backend");
+    expect(campaign).toMatch(/higher\s+counts use `available_vcpus` workers on the one backend/u);
     expect(campaign).toContain("finalization reserve");
     expect(campaign).toContain("do not divide it into per-backend slices");
     expect(campaign).toContain("backends/recon-fuzzer");
@@ -85,6 +85,8 @@ describe("prompt semantic anchors", () => {
     expect(campaign).toContain("`complete`: recon-fuzzer ran to its expected terminal state");
     expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
     expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
+    expect(campaign).toContain("--workers <workers>");
+    expect(campaign).toContain("using the literal\nstring `recon`");
     expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
   });
 

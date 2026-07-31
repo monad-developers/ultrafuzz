@@ -75,6 +75,14 @@ Use this configured invariant testing fuzzer timeout:
      finalization reserve to `campaign-plan.json` before starting the backend.
 
 3. Run the backend without path collisions.
+   - Start the long campaign from this template, substituting the resolved
+     worker count and the repository's own contract, config, and corpus
+     conventions:
+     `recon fuzz . --contract CryticTester --test-mode assertion --workers <workers> --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     Add `--config <path>` only when the repository's Recon/Echidna config
+     requires it. Always pass `--workers` with the count resolved in step 2; do
+     not reuse the bounded smoke's `--test-limit`, `--seq-len`, or single-worker
+     flags for the long campaign.
    - Give recon-fuzzer distinct corpus, cache, log, raw-result, and reproducer
      paths under `{{artifact_dir}}/backends/recon-fuzzer`. Never let concurrent
      processes write the same path.
@@ -165,8 +173,9 @@ Use this exact top-level shape for the backend record:
 }
 ```
 
-Record the exact backend in `fuzzer_backend` when it ran; omit that field when
-it was unavailable. Every failure needs a non-empty `id` and `status`. Use an
+Record the exact backend in `fuzzer_backend` when it ran, using the literal
+string `recon` so the final report join matches; omit that field when the
+backend was unavailable. Every failure needs a non-empty `id` and `status`. Use an
 empty `failures` array when none were observed. A failure and its final
 deduplicated finding must share the same ID. Property IDs are optional only for
 failures not caused by an implemented catalog property. References to an

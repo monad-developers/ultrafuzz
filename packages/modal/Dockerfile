@@ -10,7 +10,7 @@ ENV DISABLE_AUTOUPDATER=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      bash build-essential ca-certificates curl git jq libgmp10 libssl3t64 \
+      bash build-essential ca-certificates curl git jq libssl3t64 \
       python3 python3-pip python3-venv ripgrep tar unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
