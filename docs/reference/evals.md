@@ -219,8 +219,13 @@ equal weight. Macro precision and recall use the same equal-target weighting.
 
 The latest-result summary sums target cost and uses the slowest target as the
 parallel run's wall clock. If any target lacks complete cost or runtime
-evidence, that summary value is unavailable. The compact overview replaces the
-six detailed README plots; the per-target [precision](../assets/eval-history/precision.svg),
+evidence, that summary value is unavailable. When the latest run contains
+multiple model profiles, the summary shows every profile instead of choosing
+one by identifier order. The quality overview shows at most the 12 latest
+complete candidate runs, gives each model profile a distinct marker shape, and
+breaks lines when the cohort, execution policy, or scoring identity changes.
+The compact overview replaces the six detailed README plots; the per-target
+[precision](../assets/eval-history/precision.svg),
 [recall](../assets/eval-history/recall.svg), [F1](../assets/eval-history/f1.svg),
 [unique true positives](../assets/eval-history/cumulative-unique-true-positives.svg),
 [wall clock](../assets/eval-history/wall-clock-time.svg), and

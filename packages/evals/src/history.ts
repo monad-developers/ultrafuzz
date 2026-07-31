@@ -127,6 +127,7 @@ const githubRepositoryUrl = z
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
+const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
   .string()
   .min(1)
@@ -191,7 +192,7 @@ const observationBaseShape = {
 const currentObservationSchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
   ...observationBaseShape,
-  ground_truth_bug_count: positiveInteger,
+  ground_truth_bug_count: nonNegativeInteger,
   status: publicationStatusSchema,
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
@@ -478,7 +479,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       for (const row of rows) {
         for (const bugId of input.matchedGroundTruthByRow.get(row.id) ?? []) uniqueMatches.add(bugId);
       }
-      const groundTruthBugCount = requiredConsistentPositiveInteger(
+      const groundTruthBugCount = requiredConsistentNonNegativeInteger(
         scores.map((score) => score.ground_truth_bug_count),
         "ground-truth bug count",
         first.id
@@ -755,10 +756,10 @@ function requiredConsistent(values: Array<string | undefined>, field: string, ro
   return values[0];
 }
 
-function requiredConsistentPositiveInteger(values: number[], field: string, rowId: string): number {
+function requiredConsistentNonNegativeInteger(values: number[], field: string, rowId: string): number {
   const unique = new Set(values);
   const value = values[0];
-  if (unique.size !== 1 || value === undefined || !Number.isInteger(value) || value <= 0) {
+  if (unique.size !== 1 || value === undefined || !Number.isInteger(value) || value < 0) {
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `${field} is missing or inconsistent for ${rowId}`);
   }
   return value;
@@ -1245,6 +1246,16 @@ function aggregateLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
     aggregate.benchmark,
     aggregate.lane,
     aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint,
+    aggregate.scoring_fingerprint
+  ].join("\u0000");
+}
+
+function aggregatePolicyLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
     aggregate.execution_policy_fingerprint
   ].join("\u0000");
 }
@@ -1253,60 +1264,85 @@ function aggregateColumnKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   return [aggregate.run_timestamp, aggregate.candidate_commit, aggregate.source_eval_run_id].join("\u0000");
 }
 
+function aggregateRunKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregateColumnKey(aggregate),
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint,
+    aggregate.scoring_fingerprint
+  ].join("\u0000");
+}
+
 function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): string {
   const width = 960;
-  const height = 190;
   const left = 40;
+  const latestAnchor = aggregates.at(-1);
+  const latestRun =
+    latestAnchor === undefined
+      ? []
+      : aggregates
+          .filter((aggregate) => aggregateRunKey(aggregate) === aggregateRunKey(latestAnchor))
+          .sort((leftAggregate, rightAggregate) =>
+            compareText(leftAggregate.model_profile, rightAggregate.model_profile)
+          );
+  const height = latestAnchor === undefined ? 190 : 136 + latestRun.length * 40;
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
-    '<title id="title">Latest UltrafuzzBench result</title>'
+    '<title id="title">Latest UltrafuzzBench run</title>'
   ];
-  const latest = aggregates.at(-1);
-  if (latest === undefined) {
+  if (latestAnchor === undefined) {
     lines.push(
       '<desc id="desc">No complete published benchmark run is available.</desc>',
       `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
-      `<text x="${left}" y="54" font-family="system-ui, sans-serif" font-size="24" font-weight="600" fill="#111827">Latest UltrafuzzBench result</text>`,
+      `<text x="${left}" y="54" font-family="system-ui, sans-serif" font-size="24" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
       `<text x="${left}" y="112" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark run</text>`,
       "</svg>"
     );
     return `${lines.join("\n")}\n`;
   }
 
-  const commitUrl = `${latest.candidate_repository_url.replace(/\/$/u, "")}/commit/${latest.candidate_commit}`;
-  const groundTruth = latest.ground_truth_bug_count;
-  const values = [
-    { label: "Score (macro-F1)", value: formatOverviewPercent(latest.f1) },
-    { label: "Macro precision", value: formatOverviewPercent(latest.precision) },
-    { label: "Macro recall", value: formatOverviewPercent(latest.recall) },
-    {
-      label: "Bugs found",
-      value:
-        groundTruth === null
-          ? `${latest.cumulative_unique_true_positives} / n/a`
-          : `${latest.cumulative_unique_true_positives} / ${groundTruth}`
-    },
-    { label: "Total cost", value: latest.cost_usd === null ? "n/a" : `$${latest.cost_usd.toFixed(2)}` },
-    {
-      label: "Wall clock",
-      value: latest.wall_clock_seconds === null ? "n/a" : formatElapsed(latest.wall_clock_seconds)
-    }
-  ];
+  const commitUrl = `${latestAnchor.candidate_repository_url.replace(/\/$/u, "")}/commit/${latestAnchor.candidate_commit}`;
+  const profileDescriptions = latestRun.map((aggregate) => {
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives} bugs found`
+        : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
+    return `${aggregate.model} ${aggregate.reasoning_effort}: macro-F1 ${formatOverviewPercent(aggregate.f1)}, macro precision ${formatOverviewPercent(aggregate.precision)}, macro recall ${formatOverviewPercent(aggregate.recall)}, ${bugs}`;
+  });
   lines.push(
-    `<desc id="desc">Latest complete ${xml(latest.benchmark)} ${xml(latest.lane)} result: macro-F1 ${xml(formatOverviewPercent(latest.f1))}, macro precision ${xml(formatOverviewPercent(latest.precision))}, macro recall ${xml(formatOverviewPercent(latest.recall))}, ${latest.cumulative_unique_true_positives}${groundTruth === null ? "" : ` of ${groundTruth}`} bugs found.</desc>`,
+    `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
     `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
-    `<text x="${left}" y="38" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench result</text>`,
-    `<text x="${left}" y="65" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml(`${latest.benchmark} · ${latest.lane} · ${latest.model} · ${latest.reasoning_effort} · ${latest.target_count} targets · ${latest.run_timestamp.slice(0, 10)}`)}</text>`,
-    `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><text x="${width - left}" y="38" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">${xml(latest.candidate_commit.slice(0, 7))}</text></a>`
+    `<text x="${left}" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
+    `<text x="${left}" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml(`${latestAnchor.benchmark} · ${latestAnchor.lane} · ${latestRun.length} ${latestRun.length === 1 ? "profile" : "profiles"} · ${latestAnchor.target_count} targets each · ${latestAnchor.run_timestamp.slice(0, 10)}`)}</text>`,
+    `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><text x="${width - left}" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">${xml(latestAnchor.candidate_commit.slice(0, 7))}</text></a>`,
+    `<text x="${left}" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>`,
+    '<text x="345" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Score (macro-F1)</text>',
+    '<text x="465" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Precision</text>',
+    '<text x="575" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Recall</text>',
+    '<text x="690" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>',
+    '<text x="800" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>',
+    '<text x="920" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Wall clock</text>',
+    `<line x1="${left}" y1="106" x2="${width - left}" y2="106" stroke="#d1d5db"/>`
   );
-  const cardWidth = (width - left * 2 - 5 * 10) / 6;
-  values.forEach((item, index) => {
-    const cardX = left + index * (cardWidth + 10);
+  latestRun.forEach((aggregate, index) => {
+    const rowTop = 112 + index * 40;
+    const rowY = rowTop + 23;
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives}`
+        : `${aggregate.cumulative_unique_true_positives} / ${aggregate.ground_truth_bug_count}`;
     lines.push(
-      `<rect x="${format(cardX)}" y="86" width="${format(cardWidth)}" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>`,
-      `<text x="${format(cardX + 12)}" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">${xml(item.label)}</text>`,
-      `<text x="${format(cardX + 12)}" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">${xml(item.value)}</text>`
+      `<rect x="${left}" y="${rowTop}" width="${width - left * 2}" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>`,
+      `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
+      `<text x="345" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
+      `<text x="465" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#2563eb">${xml(formatOverviewPercent(aggregate.precision))}</text>`,
+      `<text x="575" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#c2410c">${xml(formatOverviewPercent(aggregate.recall))}</text>`,
+      `<text x="690" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
+      `<text x="800" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
+      `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
     );
   });
   lines.push("</svg>");
@@ -1319,6 +1355,29 @@ const OVERVIEW_METRICS = [
   { key: "f1", label: "F1 (UltrafuzzBench Score)", color: "#0f766e", width: 4, dash: undefined }
 ] as const;
 
+const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
+
+function renderProfileMarker(
+  profileIndex: number,
+  x: number,
+  y: number,
+  color: string,
+  radius: number,
+  attributes = ""
+): string {
+  const common = `${attributes} fill="${color}" stroke="#ffffff" stroke-width="1"`;
+  switch (profileIndex % 4) {
+    case 1:
+      return `<rect ${common} x="${format(x - radius)}" y="${format(y - radius)}" width="${format(radius * 2)}" height="${format(radius * 2)}"/>`;
+    case 2:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y)} ${format(x)},${format(y + radius + 1)} ${format(x - radius - 1)},${format(y)}"/>`;
+    case 3:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y + radius)} ${format(x - radius - 1)},${format(y + radius)}"/>`;
+    default:
+      return `<circle ${common} cx="${format(x)}" cy="${format(y)}" r="${format(radius)}"/>`;
+  }
+}
+
 function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): string {
   const width = 960;
   const left = 70;
@@ -1328,16 +1387,23 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
   const plotHeight = 300;
   const plotBottom = top + plotHeight;
   const dateLabelBottom = plotBottom + 116;
-  const profiles = [...new Map(aggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()];
-  const legendRows = profiles.flatMap((profile) => OVERVIEW_METRICS.map((metric) => ({ profile, metric })));
-  const legendTop = dateLabelBottom + 34;
-  const height = legendTop + Math.max(1, legendRows.length) * 22 + 12;
-  const columns = [...new Map(aggregates.map((aggregate) => [aggregateColumnKey(aggregate), aggregate])).values()].sort(
+  const allColumns = [
+    ...new Map(aggregates.map((aggregate) => [aggregateColumnKey(aggregate), aggregate])).values()
+  ].sort(
     (leftAggregate, rightAggregate) =>
       compareText(leftAggregate.run_timestamp, rightAggregate.run_timestamp) ||
       compareText(leftAggregate.candidate_commit, rightAggregate.candidate_commit) ||
       compareText(leftAggregate.source_eval_run_id, rightAggregate.source_eval_run_id)
   );
+  const columns = allColumns.slice(-EVAL_HISTORY_OVERVIEW_MAX_COLUMNS);
+  const visibleColumnKeys = new Set(columns.map(aggregateColumnKey));
+  const visibleAggregates = aggregates.filter((aggregate) => visibleColumnKeys.has(aggregateColumnKey(aggregate)));
+  const profiles = [
+    ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
+  ];
+  const legendTop = dateLabelBottom + 34;
+  const legendRowCount = OVERVIEW_METRICS.length + profiles.length;
+  const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;
   const columnIndex = new Map(columns.map((column, index) => [aggregateColumnKey(column), index]));
   const columnX = (aggregate: EvalHistoryBenchmarkAggregate): number => {
     if (columns.length <= 1) return left + plotWidth / 2;
@@ -1345,18 +1411,27 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     const pad = 44;
     return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
   };
+  const pointX = (aggregate: EvalHistoryBenchmarkAggregate, profileIndex: number): number => {
+    if (profiles.length <= 1) return columnX(aggregate);
+    const offsetStep = Math.min(6, 16 / (profiles.length - 1));
+    return columnX(aggregate) + (profileIndex - (profiles.length - 1) / 2) * offsetStep;
+  };
   const y = (value: number): number => top + plotHeight - value * plotHeight;
-  const constantContext = new Set(aggregates.map((aggregate) => `${aggregate.benchmark} · ${aggregate.lane}`));
-  const subtitle = constantContext.size === 1 ? [...constantContext][0]! : "Public benchmark history";
+  const constantContext = new Set(visibleAggregates.map((aggregate) => `${aggregate.benchmark} · ${aggregate.lane}`));
+  const context = constantContext.size === 1 ? [...constantContext][0]! : "Public benchmark history";
+  const subtitle =
+    allColumns.length > columns.length
+      ? `${context} · latest ${columns.length} of ${allColumns.length} complete runs`
+      : context;
   const lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     '<title id="title">UltrafuzzBench quality</title>',
-    '<desc id="desc">Macro precision, recall, and F1 over complete benchmark target cohorts by candidate run. Lines break when benchmark lineage changes.</desc>',
+    `<desc id="desc">Macro precision, recall, and F1 over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
     `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,
-    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and lineage changes break the lines.</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and incompatible lineages are not connected.</text>`,
     `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
   ];
@@ -1368,14 +1443,14 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
       `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">${formatOverviewPercent(value)}</text>`
     );
   }
-  if (aggregates.length === 0) {
+  if (visibleAggregates.length === 0) {
     lines.push(
       `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark runs</text>`
     );
   } else {
     const earliestByLineage = new Map<string, EvalHistoryBenchmarkAggregate>();
-    for (const aggregate of aggregates) {
-      const lineage = aggregateLineageKey(aggregate);
+    for (const aggregate of visibleAggregates) {
+      const lineage = aggregatePolicyLineageKey(aggregate);
       if (!earliestByLineage.has(lineage)) earliestByLineage.set(lineage, aggregate);
     }
     for (const aggregate of earliestByLineage.values()) {
@@ -1390,7 +1465,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     }
 
     profiles.forEach((profile, profileIndex) => {
-      const profilePoints = aggregates.filter(
+      const profilePoints = visibleAggregates.filter(
         (aggregate) => aggregateProfileKey(aggregate) === aggregateProfileKey(profile)
       );
       OVERVIEW_METRICS.forEach((metric) => {
@@ -1399,7 +1474,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
         const flush = (): void => {
           if (segment.length > 1) {
             lines.push(
-              `<polyline data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" fill="none" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`} opacity="${profileIndex === 0 ? "1" : "0.72"}" points="${segment.map((aggregate) => `${format(columnX(aggregate))},${format(y(aggregate[metric.key]))}`).join(" ")}"/>`
+              `<polyline data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" fill="none" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`} points="${segment.map((aggregate) => `${format(pointX(aggregate, profileIndex))},${format(y(aggregate[metric.key]))}`).join(" ")}"/>`
             );
           }
           segment = [];
@@ -1413,10 +1488,11 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
         flush();
         for (const aggregate of profilePoints) {
           const commitUrl = `${aggregate.candidate_repository_url.replace(/\/$/u, "")}/commit/${aggregate.candidate_commit}`;
-          const label = `${profile.model} ${profile.reasoning_effort} ${metric.label}`;
+          const label = `${profile.lane} ${profile.model_profile} ${profile.model} ${profile.reasoning_effort} ${metric.label}`;
+          const attributes = `data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}"`;
           lines.push(
-            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${aggregate.candidate_commit.slice(0, 7)}: ${formatOverviewPercent(aggregate[metric.key])}`)}</title>`,
-            `<circle data-metric="${metric.key}" cx="${format(columnX(aggregate))}" cy="${format(y(aggregate[metric.key]))}" r="${metric.key === "f1" ? 5 : 4}" fill="${metric.color}" opacity="${profileIndex === 0 ? "1" : "0.72"}"/></a>`
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${aggregate.candidate_commit.slice(0, 7)}: ${formatOverviewPercent(aggregate[metric.key])} · score-${shortFingerprint(aggregate.scoring_fingerprint)}`)}</title>`,
+            `${renderProfileMarker(profileIndex, pointX(aggregate, profileIndex), y(aggregate[metric.key]), metric.color, metric.key === "f1" ? 5 : 4, attributes)}</a>`
           );
         }
       });
@@ -1429,12 +1505,18 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
       );
     }
   }
-  legendRows.forEach(({ profile, metric }, index) => {
+  OVERVIEW_METRICS.forEach((metric, index) => {
     const rowY = legendTop + index * 22;
-    const profileLabel = profiles.length === 1 ? "" : `${profile.model} · ${profile.reasoning_effort} · `;
     lines.push(
       `<line x1="${left}" y1="${rowY - 4}" x2="${left + 14}" y2="${rowY - 4}" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`}/>`,
-      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14"${metric.key === "f1" ? ' font-weight="600"' : ""} fill="#374151">${xml(`${profileLabel}${metric.label}`)}</text>`
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14"${metric.key === "f1" ? ' font-weight="600"' : ""} fill="#374151">${xml(metric.label)}</text>`
+    );
+  });
+  profiles.forEach((profile, profileIndex) => {
+    const rowY = legendTop + (OVERVIEW_METRICS.length + profileIndex) * 22;
+    lines.push(
+      renderProfileMarker(profileIndex, left + 7, rowY - 4, "#374151", 4),
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(`${profile.lane} · ${profile.model_profile} · ${profile.model} · ${profile.reasoning_effort}`)}</text>`
     );
   });
   lines.push("</svg>");
