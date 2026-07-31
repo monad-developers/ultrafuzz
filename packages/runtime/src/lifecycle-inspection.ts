@@ -582,20 +582,28 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
 }
 
 /**
- * A streamed command that exits nonzero must not look like an empty success.
- * A `null` exit code means Ultrafuzz stopped the process itself for truncation
- * or abort, which is a normal end to a bounded stream.
+ * A streamed command that failed must not look like an empty success. Only a
+ * stop Ultrafuzz initiated itself, for truncation or abort, is a normal end to
+ * a bounded stream; a nonzero exit or an external signal such as an OOM kill is
+ * a real failure even though the latter carries no exit code.
  */
 function streamFailureDiagnostic(stream: SmithersStreamResult, code: string): RuntimeDiagnostic | undefined {
-  if (stream.truncated || stream.exitCode === null || stream.exitCode === 0) {
+  if (stream.stoppedByCaller || (stream.exitCode === 0 && stream.terminatedBySignal === null)) {
     return undefined;
   }
   return {
     code,
-    message: publicWorkflowText(stream.stderr.trim() || `workflow runner command exited with code ${stream.exitCode}`),
+    message: publicWorkflowText(stream.stderr.trim() || streamFailureSummary(stream)),
     severity: "error",
     source: "workflow"
   };
+}
+
+function streamFailureSummary(stream: SmithersStreamResult): string {
+  if (stream.terminatedBySignal !== null) {
+    return `workflow runner command was terminated by ${stream.terminatedBySignal}`;
+  }
+  return `workflow runner command exited with code ${stream.exitCode ?? "an unknown status"}`;
 }
 
 function invalidPayloadDiagnostic(code: string): RuntimeDiagnostic {

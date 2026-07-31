@@ -539,6 +539,21 @@ test("event queries report a diagnostic when the engine command exits nonzero", 
   assert.equal(watched.diagnostics[0]?.code, "WORKFLOW_EVENTS_WATCH_FAILED");
 });
 
+test("event queries report a diagnostic when the engine process is killed by a signal", async () => {
+  const { project, env } = await launchedProject({ events: "" });
+  // An OOM-style external kill leaves no exit code, which must still be a
+  // failure rather than an empty success.
+  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nkill -9 $$\n", "utf8");
+  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+
+  const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(queried.ok, false);
+  assert.equal(queried.diagnostics[0]?.code, "WORKFLOW_EVENTS_QUERY_FAILED");
+  assert.match(queried.diagnostics[0]?.message ?? "", /terminated by SIGKILL/u);
+  assertNoEngineBranding(queried.diagnostics);
+});
+
 test("a truncated event stream stays successful even though the process is killed", async () => {
   const lines = Array.from({ length: 4 }, (_, index) =>
     JSON.stringify({

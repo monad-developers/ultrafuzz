@@ -294,6 +294,14 @@ export interface SmithersStreamResult {
   lines: number;
   truncated: boolean;
   exitCode: number | null;
+  /** Set when the process died from a signal, e.g. an OOM kill. */
+  terminatedBySignal: string | null;
+  /**
+   * True only when Ultrafuzz itself stopped the process for truncation or
+   * abort. Callers must not infer that from a null exit code: an externally
+   * signalled death also has no exit code but is a real failure.
+   */
+  stoppedByCaller: boolean;
   stderr: string;
 }
 
@@ -529,7 +537,15 @@ export async function streamSmithersCommand(input: {
   // already been dispatched, so an abort listener registered later never fires
   // and the doomed child would run until it exited on its own.
   if (isAbortedSignal(input.signal)) {
-    return { command: displayCommand, lines: 0, truncated: false, exitCode: null, stderr: "" };
+    return {
+      command: displayCommand,
+      lines: 0,
+      truncated: false,
+      exitCode: null,
+      terminatedBySignal: null,
+      stoppedByCaller: true,
+      stderr: ""
+    };
   }
   await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
   const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
@@ -541,7 +557,9 @@ export async function streamSmithersCommand(input: {
   let lines = 0;
   let truncated = false;
   let stderr = "";
+  let stoppedByCaller = false;
   const stopStreaming = (): void => {
+    stoppedByCaller = true;
     reader.close();
     child.stdout.destroy();
     child.stderr.destroy();
@@ -563,7 +581,7 @@ export async function streamSmithersCommand(input: {
     stderr = truncateDiagnosticText(`${stderr}${chunk}`);
   });
   try {
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       let settled = false;
       const settle = (action: () => void): void => {
         if (settled) return;
@@ -575,9 +593,9 @@ export async function streamSmithersCommand(input: {
           reject(error);
         });
       });
-      child.once("close", (code) => {
+      child.once("close", (code, signal) => {
         settle(() => {
-          resolve(code);
+          resolve({ code, signal });
         });
       });
       reader.on("line", (line) => {
@@ -592,7 +610,15 @@ export async function streamSmithersCommand(input: {
         }
       });
     });
-    return { command: displayCommand, lines, truncated, exitCode, stderr: redactedEvidenceText(stderr) };
+    return {
+      command: displayCommand,
+      lines,
+      truncated,
+      exitCode: exit.code,
+      terminatedBySignal: exit.signal,
+      stoppedByCaller,
+      stderr: redactedEvidenceText(stderr)
+    };
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     stopStreaming();
