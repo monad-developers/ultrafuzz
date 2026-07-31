@@ -331,16 +331,16 @@ describe("Modal benchmark termination", () => {
 });
 
 describe("Modal image source staging", () => {
-  it("installs both final invariant backends alongside the Recon coverage backend", () => {
+  it("installs recon-fuzzer as the only fuzzing backend", () => {
     const commands = modalSecurityToolchainCommands().join("\n");
     const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
 
     expect(commands).toContain("Recon-Fuzz/recon-fuzzer");
-    expect(commands).toContain("crytic/echidna");
-    expect(commands).toContain("crytic/medusa");
+    expect(commands).not.toContain("crytic/echidna");
+    expect(commands).not.toContain("crytic/medusa");
     expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
-    expect(standaloneDockerfile).toContain("crytic/echidna");
-    expect(standaloneDockerfile).toContain("crytic/medusa");
+    expect(standaloneDockerfile).not.toContain("crytic/echidna");
+    expect(standaloneDockerfile).not.toContain("crytic/medusa");
     expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
