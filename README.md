@@ -80,22 +80,6 @@ because workspace package exports point at `dist/**` entrypoints.
 
 Longitudinal results from the public benchmark suite. See [Eval Suites](docs/reference/evals.md) for methodology.
 
-**Quality**
+![UltrafuzzBench quality over time](docs/assets/eval-history/quality.svg)
 
-![Precision over time](docs/assets/eval-history/precision.svg)
-
-![F1 over time](docs/assets/eval-history/f1.svg)
-
-**Coverage**
-
-![Recall over time](docs/assets/eval-history/recall.svg)
-
-![Cumulative unique true positives over time](docs/assets/eval-history/cumulative-unique-true-positives.svg)
-
-**Efficiency**
-
-![Wall-clock time over time](docs/assets/eval-history/wall-clock-time.svg)
-
-**Spend**
-
-![Cost over time](docs/assets/eval-history/cost.svg)
+![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)

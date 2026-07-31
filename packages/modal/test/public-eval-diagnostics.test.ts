@@ -464,6 +464,99 @@ describe("public post-eval diagnostics", () => {
       reason_codes: []
     });
     expect(diagnostics.summary.genuine_task_failure_rows).toBe(1);
+
+    const legacySecondRow = {
+      ...diagnostics.rows[0]!,
+      row_id: "target-a-runner-trial-2",
+      trial_id: "trial-2"
+    };
+    expect(() =>
+      parsePublicEvalDiagnostics({
+        ...diagnostics,
+        schema_version: "ultrafuzz.modal.public-eval-diagnostics.v1",
+        summary: {
+          ...diagnostics.summary,
+          planned: 2,
+          launched: 2,
+          workflow_failed: 2,
+          genuine_task_failure_rows: 2,
+          terminal_reports_present: 2,
+          scoring_ready: true
+        },
+        rows: [diagnostics.rows[0], legacySecondRow]
+      })
+    ).not.toThrow();
+  });
+
+  it("publishes one report-backed failed target across rows but rejects two targets", () => {
+    const fixture = evalFixture();
+    fixture.runSummary.records[0]!.final_status = "failed";
+    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+
+    const oneFailure = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(oneFailure.rows[0]).toMatchObject({
+      final_status: "failed",
+      workflow_status: "failed",
+      terminal_disposition: "operational-failure",
+      terminal_report_present: true,
+      scoring_ready: true,
+      reason_codes: []
+    });
+    expect(oneFailure.summary).toMatchObject({ workflow_failed: 1, scoring_ready: true });
+
+    const sameTargetSecondRow = {
+      ...fixture.matrix[0]!,
+      id: "target-a-runner-trial-2",
+      trial_id: "trial-2"
+    };
+    const sameTargetSecondRecord = {
+      ...fixture.runSummary.records[0]!,
+      row_id: sameTargetSecondRow.id,
+      trial_id: sameTargetSecondRow.trial_id,
+      workflow_ids: ["workflow-2"]
+    };
+    const sameTargetFailures = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: [...fixture.matrix, sameTargetSecondRow],
+      runSummary: { records: [...fixture.runSummary.records, sameTargetSecondRecord] }
+    });
+
+    expect(sameTargetFailures.rows.every((row) => row.scoring_ready)).toBe(true);
+    expect(sameTargetFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: true });
+
+    const secondTargetRow = {
+      ...sameTargetSecondRow,
+      id: "target-b-runner-trial-2",
+      target_id: "target-b"
+    };
+    const secondTargetRecord = {
+      ...sameTargetSecondRecord,
+      row_id: secondTargetRow.id,
+      target_id: secondTargetRow.target_id,
+      workflow_ids: ["workflow-3"]
+    };
+    const twoTargetFailures = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: [...fixture.matrix, secondTargetRow],
+      runSummary: { records: [...fixture.runSummary.records, secondTargetRecord] }
+    });
+
+    expect(twoTargetFailures.rows.every((row) => row.scoring_ready)).toBe(true);
+    expect(twoTargetFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: false });
   });
 
   it("writes atomically with owner-only permissions and no temporary residue", async () => {

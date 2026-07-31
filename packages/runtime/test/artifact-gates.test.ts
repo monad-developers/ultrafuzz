@@ -12,7 +12,12 @@ import {
   writeArtifactManifest
 } from "@ultrafuzz/artifacts";
 
-import { dependencyGateForNode, verifyRequiredArtifactsForAttempt, type PlannedGraphNode } from "../src/index.js";
+import {
+  CAMPAIGN_LOGICAL_NODE_IDS,
+  dependencyGateForNode,
+  verifyRequiredArtifactsForAttempt,
+  type PlannedGraphNode
+} from "../src/index.js";
 
 function tempProject(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-gates-"));
@@ -56,6 +61,27 @@ function plannedNode(paths: string[]): PlannedGraphNode {
     model_fanout: []
   };
 }
+
+test("the campaign provenance gate covers the campaign node the shipped topology runs", () => {
+  // Guards the regression this list fixes: the gate was previously keyed on a
+  // logical ID the default topology does not contain, so campaign property
+  // joins went unverified. A node rename must not silently reintroduce that.
+  // The runtime build copies the shipped topology to dist/topology.yml, so this
+  // asserts against the exact file the package ships.
+  const topologyPath = path.join(import.meta.dirname, "..", "..", "dist", "topology.yml");
+  const topologySource = fs.readFileSync(topologyPath, "utf8");
+  const campaignIds = [...topologySource.matchAll(/^ {2}- id: (\S+)$/gmu)]
+    .map((match) => match[1]!)
+    .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
+
+  assert.ok(campaignIds.length > 0, "shipped topology declares no invariant campaign node");
+  for (const campaignId of campaignIds) {
+    assert.ok(
+      CAMPAIGN_LOGICAL_NODE_IDS.some((gated) => gated === campaignId),
+      `topology campaign node ${campaignId} is not covered by the provenance gate`
+    );
+  }
+});
 
 test("required artifact gate validates generated-test manifest shape and listed files", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
@@ -298,7 +324,7 @@ test("campaign gate accepts non-property findings and validates property-derived
       ]
     })
   );
-  const campaignId = "stateful-invariant-recon-campaign";
+  const campaignId = "stateful-invariant-campaign";
   writeArtifact(
     layout,
     campaignId,
@@ -392,6 +418,290 @@ test("campaign gate accepts non-property findings and validates property-derived
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+});
+
+test("campaign gate accepts a partial dual-backend campaign where one backend saw nothing", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-partial-dual" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-campaign";
+  // A project-owned topology still on the dual-backend campaign: Echidna
+  // observed the failure and Medusa finished clean. Dangling findings must be
+  // judged against the union of both records, not each record alone.
+  writeArtifact(
+    layout,
+    campaignId,
+    "echidna-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "echidna",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "medusa-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "medusa",
+      failures: []
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "failure-1",
+        title: "Property failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The property failed.",
+        property_ids: ["property-1"]
+      }
+    ])
+  );
+  const node = {
+    ...plannedNode(["echidna-results.json", "medusa-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // A finding no record explains is still rejected.
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "failure-unknown",
+        title: "Unexplained failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "No campaign record explains this.",
+        property_ids: ["property-1"]
+      }
+    ])
+  );
+  const dangling = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(dangling.ok, false);
+  assert.ok(dangling.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_CAMPAIGN_REFERENCE_MISSING"));
+});
+
+test("campaign gate still applies to project-owned split recon campaign nodes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-split-campaign" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-recon-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-unknown"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "failure-1",
+        title: "Property failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The property failed.",
+        property_ids: ["property-unknown"]
+      }
+    ])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+});
+
+test("final report gate joins the default recon-only campaign backend", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-recon-report" });
+  const node = { ...plannedNode(["report.json"]), id: "final-report", logical_id: "final-report" };
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"]
+        }
+      ]
+    })
+  );
+  // The default topology emits exactly this record from this node; the report
+  // join must resolve `recon` from it rather than reporting a backend mismatch.
+  writeArtifact(
+    layout,
+    "stateful-invariant-campaign",
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "finding-property", status: "reproduced", property_ids: ["property-1"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    node.id,
+    "report.json",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: [
+        {
+          finding_id: "finding-property",
+          title: "Property failure",
+          property_ids: ["property-1"],
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"],
+          fuzzer_backend: "recon"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  // A report claiming a backend the campaign never recorded is still rejected.
+  writeArtifact(
+    layout,
+    node.id,
+    "report.json",
+    JSON.stringify({
+      schema_version: "1.0",
+      run_metadata: {},
+      issues: [],
+      non_production_outcomes: [],
+      property_provenance: [
+        {
+          finding_id: "finding-property",
+          title: "Property failure",
+          property_ids: ["property-1"],
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }],
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: ["test/foundry/Property1.t.sol"],
+          fuzzer_backends: ["recon", "medusa"]
+        }
+      ]
+    })
+  );
+  const mismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(mismatch.ok, false);
+  assert.ok(mismatch.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REPORT_FUZZER_BACKEND_MISMATCH"));
 });
 
 test("final report gate rejects dangling property references while allowing historical provenance", () => {

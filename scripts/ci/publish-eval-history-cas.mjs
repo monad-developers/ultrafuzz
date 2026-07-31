@@ -18,6 +18,8 @@ const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
 const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
 const HISTORY_PATHS = [
   "benchmarks/history.json",
+  "docs/assets/eval-history/latest-summary.svg",
+  "docs/assets/eval-history/quality.svg",
   "docs/assets/eval-history/precision.svg",
   "docs/assets/eval-history/recall.svg",
   "docs/assets/eval-history/f1.svg",
@@ -475,7 +477,7 @@ function positiveSafeInteger(value, label) {
 }
 
 function publicationStatus(value, evalRunId) {
-  if (value !== "succeeded" && value !== "genuine-task-failures") {
+  if (value !== "succeeded" && value !== "genuine-task-failures" && value !== "failed") {
     throw new Error(`publication run ${evalRunId} status is invalid`);
   }
   return value;

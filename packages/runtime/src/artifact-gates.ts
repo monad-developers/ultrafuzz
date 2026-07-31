@@ -274,6 +274,28 @@ function severityArtifactForNode(
   return undefined;
 }
 
+/**
+ * Logical node IDs whose artifacts carry campaign property provenance. The
+ * default topology runs one final recon-fuzzer campaign in
+ * `stateful-invariant-campaign`; the dedicated recon campaign node stays
+ * accepted so project-owned topologies that split the campaign keep their
+ * gates. Exported so a test can pin this list to the shipped topology — the
+ * bug this list fixes was a gate keyed on an ID the topology did not contain.
+ */
+export const CAMPAIGN_LOGICAL_NODE_IDS = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
+
+const campaignLogicalNodeIds = CAMPAIGN_LOGICAL_NODE_IDS;
+
+const campaignResultArtifactNames = [
+  "recon-fuzzer-results.json",
+  "echidna-results.json",
+  "medusa-results.json"
+] as const;
+
+function isCampaignLogicalId(logicalId: string): boolean {
+  return campaignLogicalNodeIds.some((nodeId) => nodeId === logicalId);
+}
+
 function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
@@ -283,7 +305,7 @@ function verifyPropertyProvenanceArtifacts(
   if (logicalId === "final-report") {
     return verifyFinalReportPropertyReferences(layout, artifactDir);
   }
-  if (logicalId !== "stateful-invariant-implement-properties" && logicalId !== "stateful-invariant-recon-campaign") {
+  if (logicalId !== "stateful-invariant-implement-properties" && !isCampaignLogicalId(logicalId)) {
     return [];
   }
 
@@ -358,6 +380,11 @@ function verifyCampaignPropertyReferences(
     ...propertyReferenceDiagnostics(catalog, references),
     ...campaigns.flatMap((campaign) =>
       campaignFindingReferenceDiagnostics(campaign.value.failures, validatedFindings, campaign.path, findingsPath)
+    ),
+    ...danglingCampaignFindingDiagnostics(
+      new Set(campaigns.flatMap((campaign) => campaign.value.failures.map((failure) => failure.id))),
+      validatedFindings,
+      findingsPath
     )
   ];
   const implementedIds = new Set(
@@ -522,32 +549,23 @@ function reportPropertyJoinDiagnostics(
   return diagnostics;
 }
 
-const campaignResultArtifactNames = [
-  "echidna-results.json",
-  "medusa-results.json",
-  "recon-fuzzer-results.json"
-] as const;
-
 function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {
   const backendsByFinding = new Map<string, Set<string>>();
-  const campaignArtifacts = [
-    ["stateful-invariant-campaign", "echidna-results.json"],
-    ["stateful-invariant-campaign", "medusa-results.json"],
-    ["stateful-invariant-recon-campaign", "recon-fuzzer-results.json"]
-  ] as const;
-  for (const [nodeId, artifactName] of campaignArtifacts) {
-    const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
-    if (campaignPath === undefined) {
-      continue;
-    }
-    const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
-    if (result.value?.fuzzer_backend === undefined) {
-      continue;
-    }
-    for (const failure of result.value.failures) {
-      const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
-      backends.add(result.value.fuzzer_backend);
-      backendsByFinding.set(failure.id, backends);
+  for (const nodeId of campaignLogicalNodeIds) {
+    for (const artifactName of campaignResultArtifactNames) {
+      const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
+      if (campaignPath === undefined) {
+        continue;
+      }
+      const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+      if (result.value?.fuzzer_backend === undefined) {
+        continue;
+      }
+      for (const failure of result.value.failures) {
+        const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
+        backends.add(result.value.fuzzer_backend);
+        backendsByFinding.set(failure.id, backends);
+      }
     }
   }
   return new Map([...backendsByFinding].map(([findingId, backends]) => [findingId, [...backends].sort()]));
@@ -599,9 +617,7 @@ function campaignFindingReferenceDiagnostics(
   }
 
   const diagnostics: RuntimeDiagnostic[] = [];
-  const failureIds = new Set<string>();
   for (const [failureIndex, failure] of failures.entries()) {
-    failureIds.add(failure.id);
     const failurePropertyIds = failure.property_ids ?? [];
     const matchingFindings = findingsById.get(failure.id) ?? [];
     if (
@@ -639,22 +655,38 @@ function campaignFindingReferenceDiagnostics(
     }
   }
 
-  for (const [findingId, matchingFindings] of findingsById) {
-    if (failureIds.has(findingId)) {
+  return diagnostics;
+}
+
+/**
+ * Reports findings that no campaign record explains. This must be judged once
+ * against the union of every campaign record in the node: when a node runs more
+ * than one backend, a failure observed by one backend is legitimately absent
+ * from the other backend's record.
+ */
+function danglingCampaignFindingDiagnostics(
+  failureIds: ReadonlySet<string>,
+  findings: Array<Record<string, unknown>>,
+  findingsPath: string
+): RuntimeDiagnostic[] {
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [findingIndex, finding] of findings.entries()) {
+    if (typeof finding.id !== "string" || failureIds.has(finding.id)) {
       continue;
     }
-    for (const finding of matchingFindings) {
-      if (finding.propertyIds.length === 0) {
-        continue;
-      }
-      diagnostics.push({
-        code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
-        message: `Property-derived finding ${JSON.stringify(findingId)} has no campaign failure with the same ID`,
-        severity: "error",
-        source: "property-provenance",
-        path: `${findingsPath}#$[${finding.index}].id`
-      });
+    const propertyIds = Array.isArray(finding.property_ids)
+      ? finding.property_ids.filter((propertyId): propertyId is string => typeof propertyId === "string")
+      : [];
+    if (propertyIds.length === 0) {
+      continue;
     }
+    diagnostics.push({
+      code: "PROPERTY_CAMPAIGN_REFERENCE_MISSING",
+      message: `Property-derived finding ${JSON.stringify(finding.id)} has no campaign failure with the same ID`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${findingsPath}#$[${findingIndex}].id`
+    });
   }
   return diagnostics;
 }

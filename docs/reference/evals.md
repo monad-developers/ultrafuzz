@@ -203,10 +203,31 @@ runner. These overrides retain the lane's fixed provider count, target
 selection, and topology. Publication validates every pair as an exact projection
 of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for
-every target row. The smoke workflow profile and selected strategy IDs are part
+every successful target row; the single report-backed failed target may publish
+an empty normalized finding list. The smoke workflow profile and selected strategy IDs are part
 of the execution-policy fingerprint, so its charts cannot mix with full or
 legacy smoke observations.
-`eval history` consumes only complete scored generations, stores aggregate
+
+### Published history
+
+The README overview emits one point only when a candidate run contains every
+target pinned by its cohort, exactly once, for the same benchmark, lane,
+variant, model profile, cohort, execution policy, and scoring lineage.
+Incomplete or duplicate target sets are retained in the append-only history but
+omitted from the overview. The **UltrafuzzBench Score** is macro-F1: the
+arithmetic mean of the per-target F1 values, so each target and framework has
+equal weight. Macro precision and recall use the same equal-target weighting.
+Precision and recall remain available in `benchmarks/history.json` but are omitted
+from the overview charts.
+
+The latest-result summary sums target cost and uses the slowest target as the
+parallel run's wall clock. If any target lacks complete cost or runtime
+evidence, that summary value is unavailable. When the latest run contains
+multiple model profiles, the summary shows every profile instead of choosing
+one by identifier order. The quality overview shows at most the 12 latest
+complete candidate runs, gives each model profile a distinct marker shape, and
+breaks lines when the cohort, execution policy, or scoring identity changes.
+`eval history` consumes complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or
 model calls. Efficiency values that are not complete remain `null` with typed
@@ -215,9 +236,10 @@ reasons and render as unavailable.
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the
 allowlisted report and normalized-finding files. It also carries the strict
-post-eval diagnostic that certifies each scoreable terminal outcome; history
-accepts a failed workflow only when that evidence identifies a report-backed
-genuine task failure. Bundle path, size, and SHA-256 checks are distinct from
+post-eval diagnostic that certifies each scoreable terminal outcome. A complete
+cohort may include one report-backed failed workflow, preserving that failure as
+a scored datapoint; two failed rows or missing terminal evidence still block
+publication. Bundle path, size, and SHA-256 checks are distinct from
 the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
 `eval publish --provider langsmith <eval-run-id>` replays the journal from

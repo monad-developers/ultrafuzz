@@ -647,9 +647,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
       - path: campaign-summary.json
         contract: ultrafuzz/json-object@1
-      - path: echidna-results.json
-        contract: ultrafuzz/property-campaign@1
-      - path: medusa-results.json
+      - path: recon-fuzzer-results.json
         contract: ultrafuzz/property-campaign@1
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1

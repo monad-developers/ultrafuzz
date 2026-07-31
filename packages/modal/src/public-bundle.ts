@@ -6,14 +6,16 @@ import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifa
 import {
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
-  parsePublicEvalDiagnostics
+  parsePublicEvalDiagnostics,
+  publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
 
-export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
+export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
+const PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -25,7 +27,8 @@ const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const caseCount = z.number().int().nonnegative().max(MAX_ROWS);
-const bundleStatus = z.enum(["succeeded", "genuine-task-failures"]);
+const bundleStatus = z.enum(["succeeded", "genuine-task-failures", "failed"]);
+const legacyBundleStatus = z.enum(["succeeded", "genuine-task-failures"]);
 const relativePath = z
   .string()
   .min(1)
@@ -65,6 +68,17 @@ const bundleTargetSchema = z.strictObject({
   publication_location: targetPublicationLocationSchema
 });
 
+const legacyBundleTargetSchema = z.strictObject({
+  id: safeId,
+  repository: z.string().url().max(2_048),
+  revision: fullSha,
+  framework: safeId.optional(),
+  status: legacyBundleStatus,
+  executed_case_count: caseCount,
+  graded_case_count: caseCount,
+  publication_location: targetPublicationLocationSchema
+});
+
 const bundleLineageSchema = z.strictObject({
   logical_run_id: safeId,
   generation: z.number().int().positive(),
@@ -76,8 +90,7 @@ const bundleLineageSchema = z.strictObject({
   model_fingerprint: sha256
 });
 
-const bundleSchema = z.strictObject({
-  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION),
+const bundleShape = {
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
   model_slug: safeId,
@@ -88,20 +101,35 @@ const bundleSchema = z.strictObject({
   candidate_commit: z.string().regex(/^[0-9a-f]{40}$/u),
   eval_run_id: safeId,
   lineage: bundleLineageSchema,
-  status: bundleStatus,
   executed_case_count: caseCount,
   graded_case_count: caseCount,
-  targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS),
   created_at: z.string().datetime({ offset: true }),
   files: z
     .array(bundleFileSchema)
     .min(1)
     .max(MAX_ROWS * 4 + 16)
+} as const;
+
+const currentBundleSchema = z.strictObject({
+  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION),
+  ...bundleShape,
+  status: bundleStatus,
+  targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
 });
 
+const legacyBundleSchema = z.strictObject({
+  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION),
+  ...bundleShape,
+  status: legacyBundleStatus,
+  targets: z.array(legacyBundleTargetSchema).min(1).max(MAX_ROWS)
+});
+
+const bundleSchema = z.union([currentBundleSchema, legacyBundleSchema]);
+
 export type PublicBenchmarkBundle = z.infer<typeof bundleSchema>;
+type CurrentPublicBenchmarkBundle = z.infer<typeof currentBundleSchema>;
 type PublicBenchmarkBundleFile = z.infer<typeof bundleFileSchema>;
-type PublicBenchmarkBundleTarget = z.infer<typeof bundleTargetSchema>;
+type PublicBenchmarkBundleTarget = PublicBenchmarkBundle["targets"][number];
 type PublicBenchmarkBundleMetadata = Pick<
   PublicBenchmarkBundle,
   "status" | "executed_case_count" | "graded_case_count" | "targets"
@@ -129,7 +157,7 @@ export function createPublicBenchmarkBundle(input: {
   forbiddenSecretValues?: readonly string[];
   createdAt?: string;
   publicationBundlePath?: string;
-}): PublicBenchmarkBundle {
+}): CurrentPublicBenchmarkBundle {
   const forbiddenSecretValues = [...new Set(input.forbiddenSecretValues ?? [])].filter((value) => value.length > 0);
   const files = input.files.map((entry) => {
     const contents = readRegularFileNoFollow(entry.root, entry.source);
@@ -174,6 +202,9 @@ export function createPublicBenchmarkBundle(input: {
     },
     forbiddenSecretValues
   );
+  if (bundle.schema_version !== PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION) {
+    throw new Error("new public benchmark bundle used an unexpected schema version");
+  }
   if (Buffer.byteLength(JSON.stringify(bundle), "utf8") > MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES) {
     throw new Error("public benchmark bundle exceeds the size limit");
   }
@@ -311,7 +342,7 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
-  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath);
+  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath, diagnostics);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
     matrixRows,
@@ -326,9 +357,13 @@ export function parsePublicBenchmarkBundle(
 function assertSmokeFindingFloor(
   lane: PublicBenchmarkBundle["lane"],
   matrixRows: Map<string, PublicBundleMatrixRow>,
-  contentsByPath: Map<string, Buffer>
+  contentsByPath: Map<string, Buffer>,
+  diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>
 ): void {
   if (lane !== "smoke") return;
+  const failedDatapointRows = new Set(
+    diagnostics.rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).map((row) => row.row_id)
+  );
   for (const rowId of matrixRows.keys()) {
     const bundlePath = `reports/${rowId}/findings.normalized.json`;
     const contents = contentsByPath.get(bundlePath);
@@ -340,7 +375,7 @@ function assertSmokeFindingFloor(
     } catch (error) {
       throw new Error(`smoke benchmark row ${rowId} has invalid normalized findings`, { cause: error });
     }
-    if (findings.length === 0) {
+    if (findings.length === 0 && !failedDatapointRows.has(rowId)) {
       throw new Error(`smoke benchmark row ${rowId} must report at least one normalized finding`);
     }
   }
@@ -506,7 +541,9 @@ function summarizePublicBenchmarkBundleContents(input: {
         (row) => row?.final_status === "succeeded" && row.workflow_status === "succeeded"
       )
         ? "succeeded"
-        : "genuine-task-failures";
+        : diagnostics.some((row) => row?.terminal_disposition === "operational-failure")
+          ? "failed"
+          : "genuine-task-failures";
       const reportPaths = rows.flatMap((row) =>
         PUBLIC_REPORT_FILES.map((reportFile) => `reports/${row.id}/${reportFile}`)
       );
@@ -529,7 +566,11 @@ function summarizePublicBenchmarkBundleContents(input: {
   const executedCaseCount = targets.reduce((sum, target) => sum + target.executed_case_count, 0);
   const gradedCaseCount = targets.reduce((sum, target) => sum + target.graded_case_count, 0);
   return {
-    status: targets.every((target) => target.status === "succeeded") ? "succeeded" : "genuine-task-failures",
+    status: targets.every((target) => target.status === "succeeded")
+      ? "succeeded"
+      : targets.some((target) => target.status === "failed")
+        ? "failed"
+        : "genuine-task-failures",
     executed_case_count: executedCaseCount,
     graded_case_count: gradedCaseCount,
     targets
