@@ -525,6 +525,12 @@ export async function streamSmithersCommand(input: {
 }): Promise<SmithersStreamResult> {
   const command = [...input.args];
   const displayCommand = smithersDisplayCommand(command);
+  // An already-aborted caller must not spawn a process at all: `abort` has
+  // already been dispatched, so an abort listener registered later never fires
+  // and the doomed child would run until it exited on its own.
+  if (isAbortedSignal(input.signal)) {
+    return { command: displayCommand, lines: 0, truncated: false, exitCode: null, stderr: "" };
+  }
   await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
   const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
     cwd: input.projectRoot,
@@ -547,6 +553,11 @@ export async function streamSmithersCommand(input: {
     stopStreaming();
   };
   input.signal?.addEventListener("abort", onAbort, { once: true });
+  // Covers an abort that landed while dependencies were being verified above,
+  // after the pre-spawn check and before this listener existed.
+  if (isAbortedSignal(input.signal)) {
+    stopStreaming();
+  }
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
     stderr = truncateDiagnosticText(`${stderr}${chunk}`);
@@ -586,6 +597,10 @@ export async function streamSmithersCommand(input: {
     input.signal?.removeEventListener("abort", onAbort);
     stopStreaming();
   }
+}
+
+function isAbortedSignal(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /**

@@ -9,7 +9,8 @@ import {
   runSmithersInspectionCommand,
   smithersDiagnostic,
   streamSmithersCommand,
-  type SmithersCommandSnapshot
+  type SmithersCommandSnapshot,
+  type SmithersStreamResult
 } from "./smithers.js";
 import { readLinkedWorkflowEvidence } from "./start-run.js";
 import type {
@@ -190,9 +191,9 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   }
   const limit = boundedEventLimit(input.limit);
   const events: WorkflowLifecycleEvent[] = [];
-  let truncated: boolean;
+  let stream: SmithersStreamResult;
   try {
-    const stream = await streamSmithersCommand({
+    stream = await streamSmithersCommand({
       args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
       projectRoot,
       env: input.env,
@@ -205,10 +206,14 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
         }
       }
     });
-    truncated = stream.truncated;
   } catch (error) {
     return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
   }
+  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_QUERY_FAILED");
+  if (streamFailure !== undefined) {
+    return runtimeFailure<WorkflowEventsValue>([streamFailure]);
+  }
+  const truncated = stream.truncated;
   return runtimeResult<WorkflowEventsValue>(true, {
     run_id: input.runId,
     workflow_run_id: evidence.smithersRunId,
@@ -232,8 +237,9 @@ export async function watchWorkflowEvents(
   }
   const limit = boundedEventLimit(input.limit);
   let observed = 0;
+  let stream: SmithersStreamResult;
   try {
-    const stream = await streamSmithersCommand({
+    stream = await streamSmithersCommand({
       args: [
         ...workflowEventsArgs(evidence.smithersRunId, input, { watch: true, limit }),
         ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
@@ -250,16 +256,20 @@ export async function watchWorkflowEvents(
         }
       }
     });
-    return runtimeResult<WorkflowEventsValue>(true, {
-      run_id: input.runId,
-      workflow_run_id: evidence.smithersRunId,
-      events: [],
-      limit: observed,
-      truncated: stream.truncated
-    });
   } catch (error) {
     return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_WATCH_FAILED")]);
   }
+  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_WATCH_FAILED");
+  if (streamFailure !== undefined) {
+    return runtimeFailure<WorkflowEventsValue>([streamFailure]);
+  }
+  return runtimeResult<WorkflowEventsValue>(true, {
+    run_id: input.runId,
+    workflow_run_id: evidence.smithersRunId,
+    events: [],
+    limit: observed,
+    truncated: stream.truncated
+  });
 }
 
 export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
@@ -292,8 +302,9 @@ export async function watchWorkflowNode(
     return runtimeFailure<WorkflowNodeValue>(evidence.diagnostics);
   }
   let last: WorkflowNodeValue | undefined;
+  let stream: SmithersStreamResult;
   try {
-    await streamSmithersCommand({
+    stream = await streamSmithersCommand({
       args: [
         ...workflowNodeArgs(evidence.smithersRunId, input, "jsonl"),
         "--watch",
@@ -314,6 +325,10 @@ export async function watchWorkflowNode(
     });
   } catch (error) {
     return runtimeFailure<WorkflowNodeValue>([smithersDiagnostic(error, "WORKFLOW_NODE_WATCH_FAILED")]);
+  }
+  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_NODE_WATCH_FAILED");
+  if (streamFailure !== undefined) {
+    return runtimeFailure<WorkflowNodeValue>([streamFailure]);
   }
   if (last === undefined) {
     return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
@@ -561,6 +576,23 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
   return {
     code,
     message: publicWorkflowText(snapshot.error ?? (snapshot.stderr.trim() || "workflow runner command failed")),
+    severity: "error",
+    source: "workflow"
+  };
+}
+
+/**
+ * A streamed command that exits nonzero must not look like an empty success.
+ * A `null` exit code means Ultrafuzz stopped the process itself for truncation
+ * or abort, which is a normal end to a bounded stream.
+ */
+function streamFailureDiagnostic(stream: SmithersStreamResult, code: string): RuntimeDiagnostic | undefined {
+  if (stream.truncated || stream.exitCode === null || stream.exitCode === 0) {
+    return undefined;
+  }
+  return {
+    code,
+    message: publicWorkflowText(stream.stderr.trim() || `workflow runner command exited with code ${stream.exitCode}`),
     severity: "error",
     source: "workflow"
   };

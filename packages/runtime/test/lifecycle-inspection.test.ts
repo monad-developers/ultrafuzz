@@ -515,6 +515,49 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
   assert.equal(watched.value?.limit, 0);
 });
 
+test("event queries report a diagnostic when the engine command exits nonzero", async () => {
+  const { project, env } = await launchedProject({ events: "" });
+  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'run not found' >&2\nexit 4\n", "utf8");
+  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+
+  // A failed query must not look like a run with no events.
+  const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
+  assert.equal(queried.ok, false);
+  assert.equal(queried.diagnostics[0]?.code, "WORKFLOW_EVENTS_QUERY_FAILED");
+  assert.match(queried.diagnostics[0]?.message ?? "", /run not found/u);
+  assertNoEngineBranding(queried.diagnostics);
+
+  const watched = await watchWorkflowEvents({
+    projectRoot: project,
+    runId: "inspect-run",
+    env,
+    onEvent: () => {
+      assert.fail("a failing watch must not stream events");
+    }
+  });
+  assert.equal(watched.ok, false);
+  assert.equal(watched.diagnostics[0]?.code, "WORKFLOW_EVENTS_WATCH_FAILED");
+});
+
+test("a truncated event stream stays successful even though the process is killed", async () => {
+  const lines = Array.from({ length: 4 }, (_, index) =>
+    JSON.stringify({
+      runId: WORKFLOW_RUN_ID,
+      seq: index,
+      timestampMs: 1_700_000_000_000 + index,
+      type: "node.progress",
+      payload: { nodeId: "node:project-discovery" }
+    })
+  );
+  const { project, env } = await launchedProject({ events: lines.join("\n") });
+
+  const events = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 2 });
+
+  assert.equal(events.ok, true, JSON.stringify(events.diagnostics));
+  assert.equal(events.value?.truncated, true);
+  assert.equal(events.value?.events.length, 2);
+});
+
 test("getWorkflowNode returns focused status without attempt or tool detail by default", async () => {
   const { project, env } = await launchedProject({ node: nodeDetailFixture() });
 
