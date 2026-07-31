@@ -31,7 +31,7 @@ describe("prompt semantic anchors", () => {
     expect(promptCorpus).not.toContain("medusa version");
   });
 
-  it("keeps the final invariant campaign backend-neutral and dual-backend", () => {
+  it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {
     const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
     const aggregate = prompt("review/aggregate-test-files.md");
     const dynamic = prompt("strategies/dynamic-strategy-generator.md");
@@ -47,12 +47,13 @@ describe("prompt semantic anchors", () => {
         "campaign-plan.json",
         "campaign-summary.json",
         "campaign-report.md",
-        "echidna-results.json",
-        "medusa-results.json",
+        "recon-fuzzer-results.json",
         "generated-tests.json",
         "findings.json"
       ])
     );
+    expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("echidna-results.json");
+    expect(campaignNode?.outputs?.map((output) => output.path)).not.toContain("medusa-results.json");
     expect(topology.nodes.find((node) => node.id === "dynamic-strategy-generator")?.depends_on).toContain(
       "stateful-invariant-campaign"
     );
@@ -63,30 +64,28 @@ describe("prompt semantic anchors", () => {
     expect(aggregate).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
     expect(dynamic).toContain("{{artifact_path:stateful-invariant-campaign}}/generated-tests.json");
 
-    expect(campaign).toContain("Echidna and Medusa");
+    expect(campaign).toContain("final recon-fuzzer campaign");
     expect(campaign).toContain("one implemented Chimera property suite");
-    expect(campaign).toContain("Recon is only the coverage backend and deployment smoke");
+    expect(campaign).toContain("recon-fuzzer is the single final bug-finding backend");
     expect(campaign).toContain("Preserve the existing priority-threshold selection");
-    expect(campaign).toContain("workers_per_fuzzer = max(1, floor(available_vcpus / 2))");
+    expect(campaign).toContain("workers = max(1, available_vcpus)");
     expect(campaign).toContain("1 vCPU means 1 worker");
-    expect(campaign).toContain("2 vCPUs means 1 worker per backend in parallel");
-    expect(campaign).toMatch(/odd\s+counts of at least 3/u);
-    expect(campaign).toContain("even counts use `available_vcpus / 2`");
-    expect(campaign).toContain("same parent deadline");
-    expect(campaign).toContain("two equal fixed slices");
+    expect(campaign).toContain("higher\n     counts use `available_vcpus` workers on the one backend");
     expect(campaign).toContain("finalization reserve");
-    expect(campaign).toContain("backends/echidna");
-    expect(campaign).toContain("backends/medusa");
-    expect(campaign).toContain("Finalize both backend records before deduplicating failures");
+    expect(campaign).toContain("do not divide it into per-backend slices");
+    expect(campaign).toContain("backends/recon-fuzzer");
+    expect(campaign).not.toContain("backends/echidna");
+    expect(campaign).not.toContain("backends/medusa");
+    expect(campaign).toContain("Finalize the backend record before deduplicating failures");
     expect(campaign).toContain("all contributing backend provenance");
-    expect(campaign).toContain("A later pass or a passing result from the other backend must never erase");
+    expect(campaign).toContain("A later pass must never erase");
     expect(campaign).toContain("property_ids");
     expect(campaign).toContain("deterministic Foundry reproducer for every unique failure");
     expect(campaign).toContain("classify it as `blocked-unreproduced`");
-    expect(campaign).toContain("`complete`: Echidna and Medusa both ran to their expected terminal state");
-    expect(campaign).toContain("`partial`: exactly one backend was unavailable");
-    expect(campaign).toContain("`blocked`: neither backend produced usable results");
-    expect(campaign).toMatch(/start\/end timestamps so\s+multi-vCPU runs prove that the two campaigns overlapped/u);
+    expect(campaign).toContain("`complete`: recon-fuzzer ran to its expected terminal state");
+    expect(campaign).toContain("`partial`: recon-fuzzer produced usable results but ended early");
+    expect(campaign).toContain("`blocked`: recon-fuzzer produced no usable results");
+    expect(campaign).toContain("{{artifact_dir}}/recon-fuzzer-results.json");
   });
 
   it("keeps generated-test manifests on the canonical generated_tests contract", () => {

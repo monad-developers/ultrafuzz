@@ -298,7 +298,7 @@ test("campaign gate accepts non-property findings and validates property-derived
       ]
     })
   );
-  const campaignId = "stateful-invariant-recon-campaign";
+  const campaignId = "stateful-invariant-campaign";
   writeArtifact(
     layout,
     campaignId,
@@ -392,6 +392,80 @@ test("campaign gate accepts non-property findings and validates property-derived
   const unknown = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
   assert.equal(unknown.ok, false);
   assert.ok(unknown.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
+});
+
+test("campaign gate still applies to project-owned split recon campaign nodes", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-split-campaign" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-1",
+          description: "Balances remain conserved",
+          category: "accounting",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-certora", source_property_id: "certora-1" }]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "stateful-invariant-implement-properties",
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      properties: [
+        {
+          property_id: "property-1",
+          status: "implemented",
+          implementation_paths: ["test/recon/Properties.sol"],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const campaignId = "stateful-invariant-recon-campaign";
+  writeArtifact(
+    layout,
+    campaignId,
+    "recon-fuzzer-results.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "recon",
+      failures: [{ id: "failure-1", status: "reproduced", property_ids: ["property-unknown"] }]
+    })
+  );
+  writeArtifact(
+    layout,
+    campaignId,
+    "findings.json",
+    JSON.stringify([
+      {
+        schema_version: "1.0",
+        id: "failure-1",
+        title: "Property failure",
+        status: "reproduced",
+        severity_guess: "medium",
+        confidence: "high",
+        summary: "The property failed.",
+        property_ids: ["property-unknown"]
+      }
+    ])
+  );
+  const node = {
+    ...plannedNode(["recon-fuzzer-results.json", "findings.json"]),
+    id: campaignId,
+    logical_id: campaignId
+  };
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, campaignId);
+  assert.equal(result.ok, false);
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_UNKNOWN"));
 });
 
 test("final report gate rejects dangling property references while allowing historical provenance", () => {

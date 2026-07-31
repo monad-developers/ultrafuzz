@@ -85,10 +85,9 @@ Implemented property records:
 `{{artifact_path:stateful-invariant-implement-properties}}/implemented-properties.json`
 
 Invariant campaign results:
-`{{artifact_path:stateful-invariant-campaign}}/echidna-results.json` and
-`{{artifact_path:stateful-invariant-campaign}}/medusa-results.json`
+`{{artifact_path:stateful-invariant-campaign}}/recon-fuzzer-results.json`
 
-These four files form the provenance join from a finding's `property_ids` to
+These three files form the provenance join from a finding's `property_ids` to
 its canonical properties, source lens rows, implementation/test paths, and
 recorded fuzzer backends. Treat references to an unknown canonical property as
 an invalid current-run artifact. Historical or external artifacts may predate
@@ -463,7 +462,7 @@ row containing:
 - the union of `implementation_paths` and `test_paths` joined from
   `implemented-properties.json`;
 - every originating backend recorded for the same stable finding ID in
-  `echidna-results.json` and `medusa-results.json`, otherwise `unavailable`.
+  `recon-fuzzer-results.json`, otherwise `unavailable`.
 
 Use table columns `Finding`, `Property IDs`, `Source nodes`, `Source property
 IDs`, `Implementation/test paths`, and `Fuzzer backends`. Do not add a row for a

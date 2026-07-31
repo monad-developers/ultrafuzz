@@ -3,8 +3,6 @@ FROM ubuntu:24.04
 ARG NODE_VERSION=22.23.1
 ARG FOUNDRY_VERSION=1.7.1
 ARG RECON_VERSION=0.4.17
-ARG ECHIDNA_VERSION=2.3.2
-ARG MEDUSA_VERSION=1.5.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/usr/local/bin:/opt/security-venv/bin:/home/ubuntu/.local/bin:$PATH
@@ -31,14 +29,6 @@ RUN curl -fsSL "https://github.com/foundry-rs/foundry/releases/download/v${FOUND
 RUN curl -fsSL "https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v${RECON_VERSION}/recon-linux-x86_64.tar.gz" -o /tmp/recon.tar.gz \
     && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin \
     && rm /tmp/recon.tar.gz
-
-RUN curl -fsSL "https://github.com/crytic/echidna/releases/download/v${ECHIDNA_VERSION}/echidna-${ECHIDNA_VERSION}-x86_64-linux.tar.gz" -o /tmp/echidna.tar.gz \
-    && tar -xzf /tmp/echidna.tar.gz -C /usr/local/bin \
-    && rm /tmp/echidna.tar.gz
-
-RUN curl -fsSL "https://github.com/crytic/medusa/releases/download/v${MEDUSA_VERSION}/medusa-linux-x64.tar.gz" -o /tmp/medusa.tar.gz \
-    && tar -xzf /tmp/medusa.tar.gz -C /usr/local/bin \
-    && rm /tmp/medusa.tar.gz
 
 RUN python3 -m venv /opt/security-venv \
     && /opt/security-venv/bin/pip install --no-cache-dir \

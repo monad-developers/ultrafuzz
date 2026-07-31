@@ -274,6 +274,21 @@ function severityArtifactForNode(
   return undefined;
 }
 
+// The default topology runs one final recon-fuzzer campaign in
+// `stateful-invariant-campaign`. The dedicated recon campaign node is still
+// accepted so project-owned topologies that split the campaign keep their gates.
+const campaignLogicalNodeIds = ["stateful-invariant-campaign", "stateful-invariant-recon-campaign"] as const;
+
+const campaignResultArtifactNames = [
+  "recon-fuzzer-results.json",
+  "echidna-results.json",
+  "medusa-results.json"
+] as const;
+
+function isCampaignLogicalId(logicalId: string): boolean {
+  return campaignLogicalNodeIds.some((nodeId) => nodeId === logicalId);
+}
+
 function verifyPropertyProvenanceArtifacts(
   layout: RunLayout,
   artifactDir: string,
@@ -283,7 +298,7 @@ function verifyPropertyProvenanceArtifacts(
   if (logicalId === "final-report") {
     return verifyFinalReportPropertyReferences(layout, artifactDir);
   }
-  if (logicalId !== "stateful-invariant-implement-properties" && logicalId !== "stateful-invariant-recon-campaign") {
+  if (logicalId !== "stateful-invariant-implement-properties" && !isCampaignLogicalId(logicalId)) {
     return [];
   }
 
@@ -522,32 +537,23 @@ function reportPropertyJoinDiagnostics(
   return diagnostics;
 }
 
-const campaignResultArtifactNames = [
-  "echidna-results.json",
-  "medusa-results.json",
-  "recon-fuzzer-results.json"
-] as const;
-
 function readCampaignFuzzerBackends(layout: RunLayout): ReadonlyMap<string, readonly string[]> {
   const backendsByFinding = new Map<string, Set<string>>();
-  const campaignArtifacts = [
-    ["stateful-invariant-campaign", "echidna-results.json"],
-    ["stateful-invariant-campaign", "medusa-results.json"],
-    ["stateful-invariant-recon-campaign", "recon-fuzzer-results.json"]
-  ] as const;
-  for (const [nodeId, artifactName] of campaignArtifacts) {
-    const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
-    if (campaignPath === undefined) {
-      continue;
-    }
-    const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
-    if (result.value?.fuzzer_backend === undefined) {
-      continue;
-    }
-    for (const failure of result.value.failures) {
-      const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
-      backends.add(result.value.fuzzer_backend);
-      backendsByFinding.set(failure.id, backends);
+  for (const nodeId of campaignLogicalNodeIds) {
+    for (const artifactName of campaignResultArtifactNames) {
+      const campaignPath = findLogicalNodeArtifact(layout, nodeId, artifactName);
+      if (campaignPath === undefined) {
+        continue;
+      }
+      const result = validatePropertyCampaignSchema(readJsonFile(campaignPath), campaignPath);
+      if (result.value?.fuzzer_backend === undefined) {
+        continue;
+      }
+      for (const failure of result.value.failures) {
+        const backends = backendsByFinding.get(failure.id) ?? new Set<string>();
+        backends.add(result.value.fuzzer_backend);
+        backendsByFinding.set(failure.id, backends);
+      }
     }
   }
   return new Map([...backendsByFinding].map(([findingId, backends]) => [findingId, [...backends].sort()]));
