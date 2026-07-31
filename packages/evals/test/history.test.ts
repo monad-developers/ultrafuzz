@@ -229,20 +229,30 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
   };
 }
 
-function publicDiagnostics(matrix: EvalMatrixRow[], genuineFailureRows: ReadonlySet<string> = new Set()) {
+function publicDiagnostics(
+  matrix: EvalMatrixRow[],
+  genuineFailureRows: ReadonlySet<string> = new Set(),
+  failedDatapointRows: ReadonlySet<string> = new Set()
+) {
   const first = matrix[0]!;
   const rows = matrix.map((row, index) => {
     const genuineFailure = genuineFailureRows.has(row.id);
+    const failedDatapoint = failedDatapointRows.has(row.id);
+    const failed = genuineFailure || failedDatapoint;
     return {
       row_id: row.id,
       target_id: row.target_id,
       variant_id: row.variant_id,
       trial_id: row.trial_id,
       run_status: "launched",
-      final_status: genuineFailure ? "failed" : "succeeded",
-      workflow_status: genuineFailure ? "failed" : "succeeded",
+      final_status: failed ? "failed" : "succeeded",
+      workflow_status: failed ? "failed" : "succeeded",
       workflow_terminal: true,
-      terminal_disposition: genuineFailure ? "genuine-task-failures" : "clean",
+      terminal_disposition: genuineFailure
+        ? "genuine-task-failures"
+        : failedDatapoint
+          ? "operational-failure"
+          : "clean",
       terminal_report_present: true,
       workflow_ids: [`workflow-${index + 1}`],
       diagnostic_codes: [],
@@ -355,7 +365,7 @@ describe("longitudinal eval history", () => {
     expect(parsed.observations).toEqual([publishedV2]);
   });
 
-  it("requires ground-truth counts for v3 observations and bounds unique matches", () => {
+  it("requires ground-truth counts for current observations and bounds unique matches", () => {
     const { ground_truth_bug_count: _groundTruthBugCount, ...missingGroundTruth } = observation();
     expect(() =>
       parseEvalHistory({
@@ -375,6 +385,32 @@ describe("longitudinal eval history", () => {
         observations: [observation({ cumulative_unique_true_positives: 0, ground_truth_bug_count: 0 })]
       })
     ).not.toThrow();
+  });
+
+  it("versions failed publication statuses without widening older observations", () => {
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).not.toThrow();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            schema_version: "ultrafuzz.eval.history.observation.v3",
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("rejects malformed history and inconsistent completeness", () => {
@@ -658,6 +694,25 @@ describe("longitudinal eval history", () => {
         publicEvalDiagnostics: genuineFailureDiagnostics
       })
     ).toMatchObject([{ status: "genuine-task-failures", target_publication: { status: "genuine-task-failures" } }]);
+    const failedDatapointDiagnostics = publicDiagnostics([first, second], new Set(), new Set([second.id]));
+    expect(
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: summary(rows),
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set<string>()]
+        ]),
+        publicEvalDiagnostics: failedDatapointDiagnostics
+      })
+    ).toMatchObject([{ status: "failed", target_publication: { status: "failed" } }]);
     expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",
@@ -843,12 +898,16 @@ describe("longitudinal eval history", () => {
     const quality = charts.get("quality.svg")!;
     const summary = charts.get("latest-summary.svg")!;
 
-    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(3);
+    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(1);
     expect(quality).toContain('data-metric="f1"');
+    expect(quality).not.toContain('data-metric="precision"');
+    expect(quality).not.toContain('data-metric="recall"');
     expect(quality).toContain('stroke-width="4"');
     expect(quality).toContain("incomplete cohorts are omitted");
     expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-full-kimi-k3-max"');
     expect(summary).toContain("2 model profiles");
+    expect(summary).not.toContain(">Precision</text>");
+    expect(summary).not.toContain(">Recall</text>");
     expect(summary).toContain("gpt-5.6-luna · high");
     expect(summary).toContain("kimi-k3 · max");
     expect(summary.match(/3 \/ 6/gu)).toHaveLength(2);
@@ -876,7 +935,7 @@ describe("longitudinal eval history", () => {
 
     expect(quality).toContain("latest 12 of 13 complete runs");
     expect(quality).not.toContain(commits[0]!.slice(0, 7));
-    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(3);
+    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(1);
     expect(quality).toContain("incompatible lineages are not connected");
   });
 

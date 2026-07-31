@@ -944,7 +944,9 @@ function assertBundleTargetsMatchExpected(bundleTargets, expectedTargetsValue, t
 }
 
 function safeBundleStatus(value, label) {
-  if (value !== "succeeded" && value !== "genuine-task-failures") throw new Error(`${label} is invalid`);
+  if (value !== "succeeded" && value !== "genuine-task-failures" && value !== "failed") {
+    throw new Error(`${label} is invalid`);
+  }
   return value;
 }
 

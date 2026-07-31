@@ -28,7 +28,8 @@ import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
+const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
 const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
@@ -42,7 +43,7 @@ export interface EvalHistoryCompleteness {
   reasons: string[];
 }
 
-export type EvalHistoryObservationStatus = "succeeded" | "genuine-task-failures";
+export type EvalHistoryObservationStatus = "succeeded" | "genuine-task-failures" | "failed";
 
 export interface EvalHistoryTargetPublication {
   target: string;
@@ -61,6 +62,7 @@ export interface EvalHistoryTargetPublication {
 export interface EvalHistoryObservation {
   schema_version:
     | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
@@ -125,7 +127,8 @@ const githubRepositoryUrl = z
   .string()
   .url()
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
-const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
+const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
+const legacyPublicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
 const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
@@ -146,18 +149,32 @@ const completenessSchema = z.strictObject({
   reasons: z.array(safeText)
 });
 
-const targetPublicationSchema = z.strictObject({
+const targetPublicationIdentityShape = {
   target: safeText,
   repository: z.string().url().max(2_048),
   revision: shaSchema,
-  framework: safeText.optional(),
-  status: publicationStatusSchema,
+  framework: safeText.optional()
+} as const;
+
+const targetPublicationResultShape = {
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
   publication_location: z.strictObject({
     bundle_path: relativePathSchema,
     report_paths: z.array(relativePathSchema).min(1)
   })
+} as const;
+
+const targetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: publicationStatusSchema,
+  ...targetPublicationResultShape
+});
+
+const legacyTargetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: legacyPublicationStatusSchema,
+  ...targetPublicationResultShape
 });
 
 const observationBaseShape = {
@@ -200,17 +217,28 @@ const currentObservationSchema = z.strictObject({
   target_publication: targetPublicationSchema
 });
 
+const previousObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
+  status: legacyPublicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: legacyTargetPublicationSchema
+});
+
 const publishedObservationSchema = z.strictObject({
   schema_version: z.union([
     z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
     z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
   ]),
   ...observationBaseShape,
-  status: publicationStatusSchema,
+  status: legacyPublicationStatusSchema,
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
   publication_url: publicationUrlSchema,
-  target_publication: targetPublicationSchema
+  target_publication: legacyTargetPublicationSchema
 });
 
 const legacyObservationSchema = z.strictObject({
@@ -218,7 +246,12 @@ const legacyObservationSchema = z.strictObject({
   ...observationBaseShape
 });
 
-const observationSchema = z.union([currentObservationSchema, publishedObservationSchema, legacyObservationSchema]);
+const observationSchema = z.union([
+  currentObservationSchema,
+  previousObservationSchema,
+  publishedObservationSchema,
+  legacyObservationSchema
+]);
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
@@ -386,7 +419,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       "eval generation does not have exactly one score per row"
     );
   }
-  const verifiedGenuineTaskFailures = verifiedGenuineTaskFailureRows(input, provenance.candidate.commit, summaryRows);
+  const verifiedFailureStatuses = verifiedPublishableFailureRows(input, provenance.candidate.commit, summaryRows);
   for (const row of input.matrix) {
     const score = summaryRows.get(row.id);
     if (score === undefined || !score.report_schema_valid) {
@@ -396,7 +429,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     const verifiedTaskFailure =
       score.lifecycle.workflow.terminal &&
       score.lifecycle.workflow.status === "failed" &&
-      verifiedGenuineTaskFailures.has(row.id);
+      verifiedFailureStatuses.has(row.id);
     if (!successful && !verifiedTaskFailure) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} did not finish successfully`);
     }
@@ -458,7 +491,9 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         (score) => score.lifecycle.workflow.terminal && score.lifecycle.workflow.status === "succeeded"
       )
         ? "succeeded"
-        : "genuine-task-failures";
+        : rows.some((row) => verifiedFailureStatuses.get(row.id) === "failed")
+          ? "failed"
+          : "genuine-task-failures";
       const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath);
       const model = requiredConsistent(
         rows.map((row) => row.runner_model),
@@ -528,12 +563,12 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     });
 }
 
-function verifiedGenuineTaskFailureRows(
+function verifiedPublishableFailureRows(
   input: EvalHistoryGenerationInput,
   candidateCommit: string,
   summaryRows: ReadonlyMap<string, EvalScoreSummary["rows"][number]>
-): Set<string> {
-  if (input.publicEvalDiagnostics === undefined) return new Set();
+): Map<string, Exclude<EvalHistoryObservationStatus, "succeeded">> {
+  if (input.publicEvalDiagnostics === undefined) return new Map();
   let diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>;
   try {
     diagnostics = parsePublicEvalDiagnostics(input.publicEvalDiagnostics);
@@ -565,7 +600,7 @@ function verifiedGenuineTaskFailureRows(
   if (matrixRows.size !== input.matrix.length) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval matrix contains duplicate rows");
   }
-  const genuineTaskFailures = new Set<string>();
+  const failureStatuses = new Map<string, Exclude<EvalHistoryObservationStatus, "succeeded">>();
   for (const diagnostic of diagnostics.rows) {
     const row = matrixRows.get(diagnostic.row_id);
     const score = summaryRows.get(diagnostic.row_id);
@@ -612,15 +647,20 @@ function verifiedGenuineTaskFailureRows(
       diagnostic.final_status === "failed" &&
       diagnostic.workflow_status === "failed" &&
       diagnostic.terminal_disposition === "genuine-task-failures";
-    if (!succeeded && !genuineTaskFailure) {
+    const failedDatapoint =
+      diagnostic.final_status === "failed" &&
+      diagnostic.workflow_status === "failed" &&
+      diagnostic.terminal_disposition === "operational-failure";
+    if (!succeeded && !genuineTaskFailure && !failedDatapoint) {
       throw new EvalError(
         "EVAL_HISTORY_GENERATION_INCOMPLETE",
         `public eval diagnostics outcome is not publishable for row ${diagnostic.row_id}`
       );
     }
-    if (genuineTaskFailure) genuineTaskFailures.add(diagnostic.row_id);
+    if (genuineTaskFailure) failureStatuses.set(diagnostic.row_id, "genuine-task-failures");
+    if (failedDatapoint) failureStatuses.set(diagnostic.row_id, "failed");
   }
-  return genuineTaskFailures;
+  return failureStatuses;
 }
 
 function targetPublicationForRows(
@@ -1310,7 +1350,7 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
       aggregate.ground_truth_bug_count === null
         ? `${aggregate.cumulative_unique_true_positives} bugs found`
         : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
-    return `${aggregate.model} ${aggregate.reasoning_effort}: macro-F1 ${formatOverviewPercent(aggregate.f1)}, macro precision ${formatOverviewPercent(aggregate.precision)}, macro recall ${formatOverviewPercent(aggregate.recall)}, ${bugs}`;
+    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}`;
   });
   lines.push(
     `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
@@ -1319,11 +1359,9 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
     `<text x="${left}" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml(`${latestAnchor.benchmark} · ${latestAnchor.lane} · ${latestRun.length} ${latestRun.length === 1 ? "profile" : "profiles"} · ${latestAnchor.target_count} targets each · ${latestAnchor.run_timestamp.slice(0, 10)}`)}</text>`,
     `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><text x="${width - left}" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">${xml(latestAnchor.candidate_commit.slice(0, 7))}</text></a>`,
     `<text x="${left}" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>`,
-    '<text x="345" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Score (macro-F1)</text>',
-    '<text x="465" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Precision</text>',
-    '<text x="575" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Recall</text>',
-    '<text x="690" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>',
-    '<text x="800" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>',
+    '<text x="400" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">UltrafuzzBench Score (macro-F1)</text>',
+    '<text x="600" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>',
+    '<text x="760" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>',
     '<text x="920" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Wall clock</text>',
     `<line x1="${left}" y1="106" x2="${width - left}" y2="106" stroke="#d1d5db"/>`
   );
@@ -1337,11 +1375,9 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
     lines.push(
       `<rect x="${left}" y="${rowTop}" width="${width - left * 2}" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>`,
       `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
-      `<text x="345" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
-      `<text x="465" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#2563eb">${xml(formatOverviewPercent(aggregate.precision))}</text>`,
-      `<text x="575" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#c2410c">${xml(formatOverviewPercent(aggregate.recall))}</text>`,
-      `<text x="690" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
-      `<text x="800" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
+      `<text x="400" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
+      `<text x="600" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
+      `<text x="760" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
       `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
     );
   });
@@ -1350,9 +1386,7 @@ function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): s
 }
 
 const OVERVIEW_METRICS = [
-  { key: "precision", label: "Precision", color: "#2563eb", width: 2, dash: "5 4" },
-  { key: "recall", label: "Recall", color: "#c2410c", width: 2, dash: "2 4" },
-  { key: "f1", label: "F1 (UltrafuzzBench Score)", color: "#0f766e", width: 4, dash: undefined }
+  { key: "f1", label: "UltrafuzzBench Score (macro-F1)", color: "#0f766e", width: 4, dash: undefined }
 ] as const;
 
 const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
@@ -1427,7 +1461,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     '<title id="title">UltrafuzzBench quality</title>',
-    `<desc id="desc">Macro precision, recall, and F1 over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>`,
+    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
     `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,

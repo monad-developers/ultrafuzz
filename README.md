@@ -74,11 +74,6 @@ because workspace package exports point at `dist/**` entrypoints.
 
 Longitudinal results from the public benchmark suite. See [Eval Suites](docs/reference/evals.md) for methodology.
 
-![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)
-
-[Open the latest-result SVG with its text description](docs/assets/eval-history/latest-summary.svg).
-
 ![UltrafuzzBench quality over time](docs/assets/eval-history/quality.svg)
 
-[Explore the detailed per-target charts](docs/reference/evals.md#published-history) or inspect the
-[accessible numeric source data in the append-only history](benchmarks/history.json).
+![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)

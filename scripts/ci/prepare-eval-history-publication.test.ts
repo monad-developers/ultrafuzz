@@ -327,6 +327,14 @@ describe("trusted automatic eval-history publication handoff", () => {
       graded_case_count: 3,
       publication_url: publicationUrl
     });
+    const failedBundle = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
+    failedBundle.status = "failed";
+    failedBundle.targets[2]!.status = "failed";
+    expect(summarizePublicBenchmarkBundlePublication(failedBundle, expected, pair, publicationUrl)).toMatchObject({
+      status: "failed",
+      executed_case_count: 3,
+      graded_case_count: 3
+    });
     expect(() =>
       summarizePublicBenchmarkBundlePublication(
         completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId, { launched: 0 }),

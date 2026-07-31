@@ -3,7 +3,8 @@ import { z } from "zod/v4";
 import { boundedEvalId } from "./utils.js";
 
 export const PUBLIC_EVAL_DIAGNOSTICS_FILE = "public-eval-diagnostics.json" as const;
-export const PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v1" as const;
+export const PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v2" as const;
+const PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v1" as const;
 export const MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES = 1024 * 1024;
 export const MAX_PUBLIC_EVAL_FAILED_NODES_PER_ROW = 32;
 export const PUBLIC_EVAL_FAILED_NODE_STATUSES = ["failed", "timed-out"] as const;
@@ -108,8 +109,7 @@ const summarySchema = z.strictObject({
   scoring_ready: z.boolean()
 });
 
-const diagnosticsSchema = z.strictObject({
-  schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION),
+const diagnosticsShape = {
   stage: z.literal("post-eval-pre-score"),
   benchmark: z.enum(["evmbench", "ultrafuzz-bench"]),
   lane: z.enum(["smoke", "full"]),
@@ -122,7 +122,18 @@ const diagnosticsSchema = z.strictObject({
   lineage: lineageSchema,
   summary: summarySchema,
   rows: z.array(rowSchema).min(1).max(MAX_ROWS)
-});
+} as const;
+
+const diagnosticsSchema = z.union([
+  z.strictObject({
+    schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION),
+    ...diagnosticsShape
+  }),
+  z.strictObject({
+    schema_version: z.literal(PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION),
+    ...diagnosticsShape
+  })
+]);
 
 export type PublicEvalDiagnostics = z.infer<typeof diagnosticsSchema>;
 export type PublicEvalDiagnosticsRow = z.infer<typeof rowSchema>;
@@ -135,6 +146,7 @@ export function comparePublicEvalDiagnosticIds(left: string, right: string): num
 
 export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostics {
   const parsed = diagnosticsSchema.parse(value);
+  const legacy = parsed.schema_version === PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION;
   if (parsed.eval_run_id !== boundedEvalId([parsed.lineage.logical_run_id, parsed.model_slug], 128)) {
     throw new Error("public eval diagnostics eval run does not match its lineage");
   }
@@ -153,7 +165,9 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
     if (JSON.stringify(row.failed_nodes.map((node) => node.node_id)) !== JSON.stringify(sortedFailedNodeIds)) {
       throw new Error(`public eval diagnostics row failed nodes are not deterministic: ${row.row_id}`);
     }
-    const expectedReasons = publicEvalDiagnosticsReadinessReasonCodes(row);
+    const expectedReasons = legacy
+      ? legacyPublicEvalDiagnosticsReadinessReasonCodes(row)
+      : publicEvalDiagnosticsReadinessReasonCodes(row);
     if (
       JSON.stringify(row.reason_codes) !== JSON.stringify(expectedReasons) ||
       row.scoring_ready !== (expectedReasons.length === 0)
@@ -161,7 +175,9 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
       throw new Error(`public eval diagnostics row readiness is inconsistent: ${row.row_id}`);
     }
   }
-  const expected = summarizePublicEvalDiagnosticsRows(parsed.rows);
+  const expected = legacy
+    ? summarizeLegacyPublicEvalDiagnosticsRows(parsed.rows)
+    : summarizePublicEvalDiagnosticsRows(parsed.rows);
   if (JSON.stringify(parsed.summary) !== JSON.stringify(expected)) {
     throw new Error("public eval diagnostics summary is inconsistent");
   }
@@ -183,8 +199,41 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
+    scoring_ready: rows.every((row) => row.scoring_ready) && publicEvalDiagnosticsFailedTargetCount(rows) <= 1
+  };
+}
+
+function summarizeLegacyPublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow[]): PublicEvalDiagnostics["summary"] {
+  return {
+    planned: rows.length,
+    launched: rows.filter((row) => row.run_status === "launched").length,
+    launch_failed: rows.filter((row) => row.run_status === "failed").length,
+    run_records_missing: rows.filter((row) => row.run_status === "missing").length,
+    workflow_succeeded: rows.filter((row) => row.workflow_status === "succeeded" && row.workflow_terminal).length,
+    workflow_failed: rows.filter((row) => row.workflow_terminal && row.workflow_status !== "succeeded").length,
+    workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
+    genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
+    terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
     scoring_ready: rows.every((row) => row.scoring_ready)
   };
+}
+
+export function publicEvalDiagnosticsFailedTargetCount(
+  rows: readonly (Pick<PublicEvalDiagnosticsRow, "target_id"> &
+    Parameters<typeof publicEvalDiagnosticsRowIsFailedDatapoint>[0])[]
+): number {
+  return new Set(rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).map((row) => row.target_id)).size;
+}
+
+export function publicEvalDiagnosticsRowIsFailedDatapoint(
+  row: Pick<PublicEvalDiagnosticsRow, "final_status" | "workflow_status" | "workflow_terminal" | "terminal_disposition">
+): boolean {
+  return (
+    row.final_status === "failed" &&
+    row.workflow_status === "failed" &&
+    row.workflow_terminal &&
+    (row.terminal_disposition === "genuine-task-failures" || row.terminal_disposition === "operational-failure")
+  );
 }
 
 export function publicEvalDiagnosticsReadinessReasonCodes(
@@ -198,6 +247,28 @@ export function publicEvalDiagnosticsReadinessReasonCodes(
     | "terminal_report_present"
     | "workflow_ids"
   >
+): PublicEvalDiagnosticsReasonCode[] {
+  const failedDatapoint = publicEvalDiagnosticsRowIsFailedDatapoint(row);
+  const reasons: PublicEvalDiagnosticsReasonCode[] = [];
+  if (row.run_status === "missing") reasons.push("run-record-missing");
+  if (row.run_status === "failed") reasons.push("launch-failed");
+  if (!row.workflow_terminal) reasons.push("workflow-nonterminal");
+  if (row.workflow_status !== "succeeded" && !failedDatapoint) reasons.push("workflow-not-scoreable");
+  if (row.final_status !== "succeeded" && !failedDatapoint) reasons.push("final-status-not-scoreable");
+  if (
+    row.final_status === "failed" &&
+    row.terminal_disposition !== "genuine-task-failures" &&
+    row.terminal_disposition !== "operational-failure"
+  ) {
+    reasons.push("terminal-disposition-not-scoreable");
+  }
+  if (row.workflow_ids.length === 0) reasons.push("workflow-id-missing");
+  if (!row.terminal_report_present) reasons.push("terminal-report-missing");
+  return reasons;
+}
+
+function legacyPublicEvalDiagnosticsReadinessReasonCodes(
+  row: Parameters<typeof publicEvalDiagnosticsReadinessReasonCodes>[0]
 ): PublicEvalDiagnosticsReasonCode[] {
   const genuineTaskFailure =
     row.final_status === "failed" &&

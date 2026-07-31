@@ -239,6 +239,12 @@ describe("eval history Git CAS publisher", () => {
       graded_case_count: 3,
       publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
     });
+    expect(
+      parseEvalHistoryPublicationGeneration({
+        ...valid,
+        runs: [{ ...valid.runs[0], status: "failed" }]
+      }).runs[0]
+    ).toMatchObject({ status: "failed" });
     expect(() =>
       parseEvalHistoryPublicationGeneration({
         ...valid,
