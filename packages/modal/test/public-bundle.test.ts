@@ -52,8 +52,21 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v3");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
+    expect(
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3"
+      })
+    ).toMatchObject({ schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3", status: "succeeded" });
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3",
+        status: "failed"
+      })
+    ).toThrow();
     expect(bundle).toMatchObject({
       status: "succeeded",
       executed_case_count: 2,

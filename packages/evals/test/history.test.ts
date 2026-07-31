@@ -365,7 +365,7 @@ describe("longitudinal eval history", () => {
     expect(parsed.observations).toEqual([publishedV2]);
   });
 
-  it("requires ground-truth counts for v3 observations and bounds unique matches", () => {
+  it("requires ground-truth counts for current observations and bounds unique matches", () => {
     const { ground_truth_bug_count: _groundTruthBugCount, ...missingGroundTruth } = observation();
     expect(() =>
       parseEvalHistory({
@@ -385,6 +385,32 @@ describe("longitudinal eval history", () => {
         observations: [observation({ cumulative_unique_true_positives: 0, ground_truth_bug_count: 0 })]
       })
     ).not.toThrow();
+  });
+
+  it("versions failed publication statuses without widening older observations", () => {
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).not.toThrow();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            schema_version: "ultrafuzz.eval.history.observation.v3",
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("rejects malformed history and inconsistent completeness", () => {

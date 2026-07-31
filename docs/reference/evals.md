@@ -203,7 +203,8 @@ runner. These overrides retain the lane's fixed provider count, target
 selection, and topology. Publication validates every pair as an exact projection
 of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for
-every target row. The smoke workflow profile and selected strategy IDs are part
+every successful target row; the single report-backed failed target may publish
+an empty normalized finding list. The smoke workflow profile and selected strategy IDs are part
 of the execution-policy fingerprint, so its charts cannot mix with full or
 legacy smoke observations.
 

@@ -14,7 +14,7 @@ import {
   boundedEvalId,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
-  publicEvalDiagnosticsRowIsFailedDatapoint,
+  publicEvalDiagnosticsFailedTargetCount,
   resolveTerminalReportPath,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
@@ -284,9 +284,7 @@ export function publicEvalRunId(runId: string, modelSlug: string): string {
 }
 
 export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnostics): boolean {
-  return (
-    diagnostics.summary.scoring_ready && diagnostics.rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).length === 1
-  );
+  return diagnostics.summary.scoring_ready && publicEvalDiagnosticsFailedTargetCount(diagnostics.rows) === 1;
 }
 
 export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): number {

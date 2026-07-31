@@ -316,6 +316,7 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
 
 it("continues after the eval command reports one publishable failed datapoint", () => {
   const failedRow = {
+    target_id: "target-a",
     final_status: "failed",
     workflow_status: "failed",
     workflow_terminal: true,
@@ -324,13 +325,13 @@ it("continues after the eval command reports one publishable failed datapoint", 
   expect(
     publicEvalRunErrorCanBePublished({
       summary: { scoring_ready: true },
-      rows: [failedRow]
+      rows: [failedRow, failedRow]
     } as PublicEvalDiagnostics)
   ).toBe(true);
   expect(
     publicEvalRunErrorCanBePublished({
-      summary: { scoring_ready: false },
-      rows: [failedRow, failedRow]
+      summary: { scoring_ready: true },
+      rows: [failedRow, { ...failedRow, target_id: "target-b" }]
     } as PublicEvalDiagnostics)
   ).toBe(false);
   expect(
@@ -338,6 +339,7 @@ it("continues after the eval command reports one publishable failed datapoint", 
       summary: { scoring_ready: true },
       rows: [
         {
+          target_id: "target-a",
           final_status: "succeeded",
           workflow_status: "succeeded",
           workflow_terminal: true,

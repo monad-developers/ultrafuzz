@@ -28,7 +28,8 @@ import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
+const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
 const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
@@ -61,6 +62,7 @@ export interface EvalHistoryTargetPublication {
 export interface EvalHistoryObservation {
   schema_version:
     | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
     | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
@@ -126,6 +128,7 @@ const githubRepositoryUrl = z
   .url()
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
+const legacyPublicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
 const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
@@ -146,18 +149,32 @@ const completenessSchema = z.strictObject({
   reasons: z.array(safeText)
 });
 
-const targetPublicationSchema = z.strictObject({
+const targetPublicationIdentityShape = {
   target: safeText,
   repository: z.string().url().max(2_048),
   revision: shaSchema,
-  framework: safeText.optional(),
-  status: publicationStatusSchema,
+  framework: safeText.optional()
+} as const;
+
+const targetPublicationResultShape = {
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
   publication_location: z.strictObject({
     bundle_path: relativePathSchema,
     report_paths: z.array(relativePathSchema).min(1)
   })
+} as const;
+
+const targetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: publicationStatusSchema,
+  ...targetPublicationResultShape
+});
+
+const legacyTargetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: legacyPublicationStatusSchema,
+  ...targetPublicationResultShape
 });
 
 const observationBaseShape = {
@@ -200,17 +217,28 @@ const currentObservationSchema = z.strictObject({
   target_publication: targetPublicationSchema
 });
 
+const previousObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
+  status: legacyPublicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: legacyTargetPublicationSchema
+});
+
 const publishedObservationSchema = z.strictObject({
   schema_version: z.union([
     z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
     z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
   ]),
   ...observationBaseShape,
-  status: publicationStatusSchema,
+  status: legacyPublicationStatusSchema,
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
   publication_url: publicationUrlSchema,
-  target_publication: targetPublicationSchema
+  target_publication: legacyTargetPublicationSchema
 });
 
 const legacyObservationSchema = z.strictObject({
@@ -218,7 +246,12 @@ const legacyObservationSchema = z.strictObject({
   ...observationBaseShape
 });
 
-const observationSchema = z.union([currentObservationSchema, publishedObservationSchema, legacyObservationSchema]);
+const observationSchema = z.union([
+  currentObservationSchema,
+  previousObservationSchema,
+  publishedObservationSchema,
+  legacyObservationSchema
+]);
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
