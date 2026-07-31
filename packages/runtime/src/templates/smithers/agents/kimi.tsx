@@ -5,11 +5,15 @@ import {
   constants,
   cpSync,
   existsSync,
+  fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  opendirSync,
   readFileSync,
   readSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -62,7 +66,12 @@ const KIMI_WIRE_FILE_NAME = "wire.jsonl";
 const KIMI_WIRE_USAGE_TYPE = "usage.record";
 const KIMI_WIRE_MAX_DEPTH = 8;
 const KIMI_WIRE_MAX_FILES = 512;
-const KIMI_WIRE_CHUNK_BYTES = 1024 * 1024;
+const KIMI_WIRE_MAX_DIRECTORIES = 2_048;
+const KIMI_WIRE_MAX_ENTRIES = 8_192;
+const KIMI_WIRE_MAX_FILE_BYTES = 64 * 1024 * 1024;
+const KIMI_WIRE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const KIMI_WIRE_MAX_LINE_BYTES = 1024 * 1024;
+const KIMI_WIRE_CHUNK_BYTES = 64 * 1024;
 
 /** One Kimi Code `usage.record` payload. The four components are independent:
  * `inputOther` already excludes cached input and `output` already includes
@@ -73,10 +82,18 @@ type KimiWireUsage = {
   inputCacheRead: number;
   inputCacheCreation: number;
 };
-/** Records already present per wire file when the invocation started, keyed by
- * the wire path relative to the isolated runtime home. */
-type KimiUsageBaseline = Map<string, number>;
+type KimiWireSnapshot = { dev: number; ino: number; size: number };
+/** Byte offsets and file identities captured after resume state is seeded. */
+type KimiUsageBaseline = { runtimeHome: string; wires: Map<string, KimiWireSnapshot> };
 type KimiWireFile = { relative: string; absolute: string };
+type KimiWireWalkBudget = { directories: number; entries: number };
+type KimiWireReadBudget = { bytes: number };
+type KimiSmithersUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  inputTokenDetails: { cacheReadTokens: number; cacheWriteTokens: number };
+  totalTokens: number;
+};
 
 export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgent {
   const reasoningEffort = kimiReasoningEffort(options.reasoningEffort);
@@ -90,9 +107,18 @@ export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgen
 export class KimiCode029Agent extends SmithersKimiAgent {
   private activeRuntimeHome: string | undefined;
   private activeUsageBaseline: KimiUsageBaseline | undefined;
+  private pendingFailureUsage: KimiSmithersUsage | undefined;
 
   constructor(options: KimiCode029Options) {
     super({ ...options });
+  }
+
+  override generate(...args: Parameters<SmithersKimiAgent["generate"]>): ReturnType<SmithersKimiAgent["generate"]> {
+    return this.withFailureUsage(super.generate(...args)) as ReturnType<SmithersKimiAgent["generate"]>;
+  }
+
+  override stream(...args: Parameters<SmithersKimiAgent["stream"]>): ReturnType<SmithersKimiAgent["stream"]> {
+    return this.withFailureUsage(super.stream(...args)) as ReturnType<SmithersKimiAgent["stream"]>;
   }
 
   override createOutputInterpreter(): KimiOutputInterpreter {
@@ -112,15 +138,18 @@ export class KimiCode029Agent extends SmithersKimiAgent {
         // Kimi Code 0.29.1 prints no usage on stdout, so the pinned Smithers
         // BaseCliAgent falls back to the completed event. Attach this
         // invocation's own wire-record delta there.
-        const usage = this.invocationUsage();
+        const delta = this.invocationUsage();
+        this.pendingFailureUsage = delta === undefined ? undefined : kimiSmithersUsage(delta);
         const events = base.onExit?.(result) ?? [];
-        if (usage === undefined) return events;
+        if (delta === undefined) return events;
+        const usage = kimiCompletedUsage(delta);
         return events.map((event) => (event.type === "completed" ? { ...event, usage } : event));
       }
     };
   }
 
   override async buildCommand(params: KimiCommandParams): Promise<KimiCommand> {
+    this.pendingFailureUsage = undefined;
     const opts = this.opts as KimiCode029Options;
     const knownSession = configuredSession(params, opts);
     const apiKeyConfigDir =
@@ -209,31 +238,26 @@ export class KimiCode029Agent extends SmithersKimiAgent {
     };
   }
 
-  /**
-   * This invocation's usage in the exact aliases the pinned Smithers
-   * `usageFromCompletedEvent` reads. `cache_read_input_tokens` is always
-   * present — an absent cache-read key makes Ultrafuzz accounting mark the
-   * component unavailable and suppress cost entirely. No reasoning field is
-   * emitted because Kimi already folds thinking tokens into `output`.
-   */
-  private invocationUsage(): Record<string, number> | undefined {
+  private invocationUsage(): KimiWireUsage | undefined {
     const runtimeHome = this.activeRuntimeHome;
-    if (runtimeHome === undefined) return undefined;
-    let delta: KimiWireUsage | undefined;
+    const baseline = this.activeUsageBaseline;
+    if (runtimeHome === undefined || baseline === undefined) return undefined;
     try {
-      delta = kimiUsageDelta(runtimeHome, this.activeUsageBaseline ?? new Map());
+      return kimiUsageDelta(runtimeHome, baseline);
     } catch {
       // Telemetry must never fail an otherwise successful invocation.
       return undefined;
     }
-    if (delta === undefined) return undefined;
-    return {
-      input_tokens: delta.inputOther,
-      output_tokens: delta.output,
-      cache_read_input_tokens: delta.inputCacheRead,
-      cache_creation_input_tokens: delta.inputCacheCreation,
-      total_tokens: delta.inputOther + delta.output + delta.inputCacheRead + delta.inputCacheCreation
-    };
+  }
+
+  private withFailureUsage<T>(promise: Promise<T>): Promise<T> {
+    return promise
+      .catch((error: unknown) => {
+        throw attachKimiFailureUsage(error, this.pendingFailureUsage);
+      })
+      .finally(() => {
+        this.pendingFailureUsage = undefined;
+      });
   }
 
   private captureKimiSession(line: string): void {
@@ -727,88 +751,242 @@ function remapKimiSessionPath(value: string, sourceSessionDir: string, targetSes
 // `sessions/**/agents/<agentId>/wire.jsonl`. Everything below reads strictly
 // inside one invocation's isolated runtime home.
 
-function collectKimiWireFiles(runtimeHome: string): KimiWireFile[] {
-  const found: KimiWireFile[] = [];
-  walkKimiWireDir(path.join(runtimeHome, "sessions"), runtimeHome, 0, found);
-  found.sort((left, right) => left.relative.localeCompare(right.relative));
-  return found;
+function kimiCompletedUsage(delta: KimiWireUsage): Record<string, number> {
+  return {
+    input_tokens: delta.inputOther,
+    output_tokens: delta.output,
+    cache_read_input_tokens: delta.inputCacheRead,
+    cache_creation_input_tokens: delta.inputCacheCreation,
+    total_tokens: kimiUsageTotal(delta)
+  };
 }
 
-function walkKimiWireDir(dir: string, runtimeHome: string, depth: number, found: KimiWireFile[]): void {
-  if (depth > KIMI_WIRE_MAX_DEPTH || found.length >= KIMI_WIRE_MAX_FILES) return;
-  for (const entry of readKimiDirEntries(dir)) {
-    if (found.length >= KIMI_WIRE_MAX_FILES) return;
+function kimiSmithersUsage(delta: KimiWireUsage): KimiSmithersUsage {
+  return {
+    inputTokens: delta.inputOther,
+    outputTokens: delta.output,
+    inputTokenDetails: {
+      cacheReadTokens: delta.inputCacheRead,
+      cacheWriteTokens: delta.inputCacheCreation
+    },
+    totalTokens: kimiUsageTotal(delta)
+  };
+}
+
+function attachKimiFailureUsage(error: unknown, usage: KimiSmithersUsage | undefined): unknown {
+  if (usage === undefined || !isRecord(error)) return error;
+  try {
+    error.usage = usage;
+  } catch {
+    // Preserve the original failure if an exotic error object is immutable.
+  }
+  return error;
+}
+
+function collectKimiWireFiles(runtimeHome: string): { runtimeHome: string; files: KimiWireFile[] } {
+  const canonicalHome = realpathSync(runtimeHome);
+  const sessions = path.join(canonicalHome, "sessions");
+  let sessionsStat;
+  try {
+    sessionsStat = lstatSync(sessions);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return { runtimeHome: canonicalHome, files: [] };
+    throw error;
+  }
+  if (sessionsStat.isSymbolicLink() || !sessionsStat.isDirectory()) {
+    throw new Error("Kimi sessions path is not a real directory");
+  }
+  const canonicalSessions = realpathSync(sessions);
+  if (containedKimiWirePath(canonicalHome, canonicalSessions) === undefined) {
+    throw new Error("Kimi sessions path escapes the isolated runtime home");
+  }
+  const found: KimiWireFile[] = [];
+  const budget: KimiWireWalkBudget = { directories: 0, entries: 0 };
+  walkKimiWireDir(canonicalSessions, canonicalHome, 0, budget, found);
+  found.sort((left, right) => left.relative.localeCompare(right.relative));
+  return { runtimeHome: canonicalHome, files: found };
+}
+
+function walkKimiWireDir(
+  dir: string,
+  runtimeHome: string,
+  depth: number,
+  budget: KimiWireWalkBudget,
+  found: KimiWireFile[]
+): void {
+  budget.directories += 1;
+  if (budget.directories > KIMI_WIRE_MAX_DIRECTORIES) {
+    throw new Error("Kimi wire traversal exceeded its directory budget");
+  }
+  const entries = readKimiDirEntries(dir, runtimeHome, budget);
+  for (const entry of entries) {
     // The runtime home symlinks config.toml, device_id, credentials, and oauth;
     // never traverse or read a link, wherever it points.
     if (entry.isSymbolicLink()) continue;
-    const absolute = path.join(dir, entry.name);
+    const candidate = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walkKimiWireDir(absolute, runtimeHome, depth + 1, found);
+      if (depth >= KIMI_WIRE_MAX_DEPTH) {
+        throw new Error("Kimi wire traversal exceeded its depth budget");
+      }
+      const childStat = lstatSync(candidate);
+      if (childStat.isSymbolicLink() || !childStat.isDirectory()) continue;
+      const canonicalChild = realpathSync(candidate);
+      if (containedKimiWirePath(runtimeHome, canonicalChild) === undefined) {
+        throw new Error("Kimi wire directory escapes the isolated runtime home");
+      }
+      walkKimiWireDir(canonicalChild, runtimeHome, depth + 1, budget, found);
       continue;
     }
     if (!entry.isFile() || entry.name !== KIMI_WIRE_FILE_NAME) continue;
-    const relative = containedKimiWirePath(runtimeHome, absolute);
-    if (relative === undefined) continue;
-    found.push({ relative, absolute });
+    const fileStat = lstatSync(candidate);
+    if (fileStat.isSymbolicLink() || !fileStat.isFile()) continue;
+    const canonicalFile = realpathSync(candidate);
+    const relative = containedKimiWirePath(runtimeHome, canonicalFile);
+    if (relative === undefined) throw new Error("Kimi wire file escapes the isolated runtime home");
+    if (found.length >= KIMI_WIRE_MAX_FILES) {
+      throw new Error("Kimi wire traversal exceeded its file budget");
+    }
+    found.push({ relative, absolute: canonicalFile });
   }
 }
 
-function readKimiDirEntries(dir: string): Dirent[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true });
-  } catch {
-    // A missing or unreadable sessions tree simply carries no usage.
-    return [];
+function readKimiDirEntries(dir: string, runtimeHome: string, budget: KimiWireWalkBudget): Dirent[] {
+  if (
+    typeof constants.O_NOFOLLOW !== "number" ||
+    typeof constants.O_NONBLOCK !== "number" ||
+    typeof constants.O_DIRECTORY !== "number"
+  ) {
+    throw new Error("Kimi wire telemetry requires safe directory opens");
   }
+  const descriptor = openSync(
+    dir,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK | constants.O_DIRECTORY
+  );
+  let handle: ReturnType<typeof opendirSync> | undefined;
+  const entries: Dirent[] = [];
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isDirectory()) throw new Error("Kimi wire traversal descriptor is not a directory");
+    const descriptorPath = process.platform === "linux" ? `/proc/self/fd/${descriptor}` : `/dev/fd/${descriptor}`;
+    const openedPath = realpathSync(descriptorPath);
+    if (containedKimiWirePath(runtimeHome, openedPath) === undefined) {
+      throw new Error("Opened Kimi wire directory escapes the isolated runtime home");
+    }
+    handle = opendirSync(descriptorPath);
+    for (;;) {
+      const entry = handle.readSync();
+      if (entry === null) break;
+      budget.entries += 1;
+      if (budget.entries > KIMI_WIRE_MAX_ENTRIES) {
+        throw new Error("Kimi wire traversal exceeded its entry budget");
+      }
+      entries.push(entry);
+    }
+  } finally {
+    try {
+      handle?.closeSync();
+    } finally {
+      closeKimiWire(descriptor);
+    }
+  }
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  return entries;
 }
 
 function containedKimiWirePath(runtimeHome: string, candidate: string): string | undefined {
-  const relative = path.relative(path.resolve(runtimeHome), path.resolve(candidate));
-  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  const relative = path.relative(runtimeHome, candidate);
+  if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return undefined;
+  }
   return relative;
 }
 
-function readKimiWireUsageRecords(filePath: string): KimiWireUsage[] {
-  const records: KimiWireUsage[] = [];
-  let descriptor: number | undefined;
+function openKimiWire(file: KimiWireFile, runtimeHome: string): { descriptor: number; snapshot: KimiWireSnapshot } {
+  if (typeof constants.O_NOFOLLOW !== "number" || typeof constants.O_NONBLOCK !== "number") {
+    throw new Error("Kimi wire telemetry requires no-follow and nonblocking file opens");
+  }
+  const canonicalFile = realpathSync(file.absolute);
+  if (containedKimiWirePath(runtimeHome, canonicalFile) === undefined) {
+    throw new Error("Kimi wire file escapes the isolated runtime home");
+  }
+  const descriptor = openSync(canonicalFile, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    // O_NOFOLLOW closes the window between the directory walk's symlink check
-    // and this open, so a wire path swapped for a link is never read.
-    descriptor = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    scanKimiWireUsageRecords(descriptor, records);
-  } catch {
-    // Keep whatever was already parsed. A short read must never make a
-    // baseline look empty and turn inherited history into new usage.
-  } finally {
-    if (descriptor !== undefined) {
-      try {
-        closeSync(descriptor);
-      } catch {
-        // The descriptor is already unusable; there is nothing left to release.
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile() || !Number.isSafeInteger(stats.size) || stats.size < 0) {
+      throw new Error("Kimi wire descriptor is not a bounded regular file");
+    }
+    if (process.platform === "linux") {
+      const openedPath = realpathSync(`/proc/self/fd/${descriptor}`);
+      if (containedKimiWirePath(runtimeHome, openedPath) === undefined) {
+        throw new Error("Opened Kimi wire descriptor escapes the isolated runtime home");
       }
     }
+    return { descriptor, snapshot: { dev: stats.dev, ino: stats.ino, size: stats.size } };
+  } catch (error) {
+    closeSync(descriptor);
+    throw error;
   }
-  return records;
 }
 
-function scanKimiWireUsageRecords(descriptor: number, records: KimiWireUsage[]): void {
+function closeKimiWire(descriptor: number): void {
+  try {
+    closeSync(descriptor);
+  } catch {
+    // Telemetry cleanup must never mask the invocation result.
+  }
+}
+
+function scanKimiWireUsageRecords(
+  descriptor: number,
+  start: number,
+  end: number,
+  budget: KimiWireReadBudget
+): { usage: KimiWireUsage; records: number } {
+  const length = end - start;
+  if (length < 0 || length > KIMI_WIRE_MAX_FILE_BYTES || budget.bytes + length > KIMI_WIRE_MAX_TOTAL_BYTES) {
+    throw new Error("Kimi wire usage delta exceeded its byte budget");
+  }
+  budget.bytes += length;
+  const usage: KimiWireUsage = { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
   const chunk = Buffer.allocUnsafe(KIMI_WIRE_CHUNK_BYTES);
   const decoder = new StringDecoder("utf8");
   let pending = "";
-  for (;;) {
-    const bytes = readSync(descriptor, chunk, 0, chunk.length, null);
-    if (bytes <= 0) break;
+  let position = start;
+  let records = 0;
+  while (position < end) {
+    const requested = Math.min(chunk.length, end - position);
+    const bytes = readSync(descriptor, chunk, 0, requested, position);
+    if (bytes <= 0) throw new Error("Kimi wire ended before its snapshotted size");
+    position += bytes;
     pending += decoder.write(chunk.subarray(0, bytes));
-    const lines = pending.split("\n");
-    pending = lines.pop() ?? "";
-    for (const line of lines) appendKimiWireUsageRecord(records, line);
+    for (;;) {
+      const newline = pending.indexOf("\n");
+      if (newline === -1) break;
+      const line = pending.slice(0, newline);
+      if (Buffer.byteLength(line, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
+        throw new Error("Kimi wire line exceeded its byte budget");
+      }
+      const record = kimiWireUsageRecord(line);
+      if (record !== undefined) {
+        addKimiWireUsage(usage, record);
+        records += 1;
+      }
+      pending = pending.slice(newline + 1);
+    }
+    if (Buffer.byteLength(pending, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
+      throw new Error("Kimi wire line exceeded its byte budget");
+    }
   }
-  appendKimiWireUsageRecord(records, `${pending}${decoder.end()}`);
-}
-
-function appendKimiWireUsageRecord(records: KimiWireUsage[], line: string): void {
-  const usage = kimiWireUsageRecord(line);
-  if (usage !== undefined) records.push(usage);
+  pending += decoder.end();
+  if (Buffer.byteLength(pending, "utf8") > KIMI_WIRE_MAX_LINE_BYTES) {
+    throw new Error("Kimi wire line exceeded its byte budget");
+  }
+  const finalRecord = kimiWireUsageRecord(pending);
+  if (finalRecord !== undefined) {
+    addKimiWireUsage(usage, finalRecord);
+    records += 1;
+  }
+  return { usage, records };
 }
 
 function kimiWireUsageRecord(line: string): KimiWireUsage | undefined {
@@ -841,34 +1019,81 @@ function kimiWireUsageRecord(line: string): KimiWireUsage | undefined {
 }
 
 function kimiUsageComponent(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function kimiUsageBaseline(runtimeHome: string): KimiUsageBaseline {
-  const baseline: KimiUsageBaseline = new Map();
-  for (const wire of collectKimiWireFiles(runtimeHome)) {
-    baseline.set(wire.relative, readKimiWireUsageRecords(wire.absolute).length);
+function addKimiWireUsage(target: KimiWireUsage, value: KimiWireUsage): void {
+  target.inputOther = safeKimiUsageSum(target.inputOther, value.inputOther);
+  target.output = safeKimiUsageSum(target.output, value.output);
+  target.inputCacheRead = safeKimiUsageSum(target.inputCacheRead, value.inputCacheRead);
+  target.inputCacheCreation = safeKimiUsageSum(target.inputCacheCreation, value.inputCacheCreation);
+}
+
+function safeKimiUsageSum(left: number, right: number): number {
+  const sum = left + right;
+  if (!Number.isSafeInteger(sum) || sum < 0) throw new Error("Kimi wire usage exceeded the safe integer range");
+  return sum;
+}
+
+function kimiUsageTotal(usage: KimiWireUsage): number {
+  return safeKimiUsageSum(
+    safeKimiUsageSum(usage.inputOther, usage.output),
+    safeKimiUsageSum(usage.inputCacheRead, usage.inputCacheCreation)
+  );
+}
+
+function kimiUsageBaseline(runtimeHome: string): KimiUsageBaseline | undefined {
+  try {
+    const collected = collectKimiWireFiles(runtimeHome);
+    const wires = new Map<string, KimiWireSnapshot>();
+    for (const wire of collected.files) {
+      const opened = openKimiWire(wire, collected.runtimeHome);
+      try {
+        wires.set(wire.relative, opened.snapshot);
+      } finally {
+        closeKimiWire(opened.descriptor);
+      }
+    }
+    return { runtimeHome: collected.runtimeHome, wires };
+  } catch {
+    // An incomplete baseline could reclassify inherited history as new usage.
+    // Suppress telemetry for this invocation instead.
+    return undefined;
   }
-  return baseline;
 }
 
 function kimiUsageDelta(runtimeHome: string, baseline: KimiUsageBaseline): KimiWireUsage | undefined {
+  const collected = collectKimiWireFiles(runtimeHome);
+  if (collected.runtimeHome !== baseline.runtimeHome) throw new Error("Kimi runtime home changed during invocation");
   const delta: KimiWireUsage = { inputOther: 0, output: 0, inputCacheRead: 0, inputCacheCreation: 0 };
+  const seen = new Set<string>();
+  const readBudget: KimiWireReadBudget = { bytes: 0 };
   let counted = 0;
-  for (const wire of collectKimiWireFiles(runtimeHome)) {
-    const records = readKimiWireUsageRecords(wire.absolute);
-    const skip = baseline.get(wire.relative) ?? 0;
-    // A rewritten or compacted wire must never yield a negative or duplicated
-    // delta, so contribute nothing when it lost records.
-    if (records.length < skip) continue;
-    for (const record of records.slice(skip)) {
-      delta.inputOther += record.inputOther;
-      delta.output += record.output;
-      delta.inputCacheRead += record.inputCacheRead;
-      delta.inputCacheCreation += record.inputCacheCreation;
-      counted += 1;
+  for (const wire of collected.files) {
+    const opened = openKimiWire(wire, collected.runtimeHome);
+    try {
+      const before = baseline.wires.get(wire.relative);
+      const start = before?.size ?? 0;
+      if (
+        before !== undefined &&
+        (before.dev !== opened.snapshot.dev || before.ino !== opened.snapshot.ino || opened.snapshot.size < before.size)
+      ) {
+        throw new Error("Kimi wire was replaced or truncated during invocation");
+      }
+      const scanned = scanKimiWireUsageRecords(opened.descriptor, start, opened.snapshot.size, readBudget);
+      addKimiWireUsage(delta, scanned.usage);
+      counted += scanned.records;
+      seen.add(wire.relative);
+    } finally {
+      closeKimiWire(opened.descriptor);
     }
   }
+  for (const relative of baseline.wires.keys()) {
+    if (!seen.has(relative)) throw new Error("A baselined Kimi wire disappeared during invocation");
+  }
+  // Validate the aggregate while still inside invocationUsage's telemetry
+  // guard so an otherwise successful invocation cannot fail on overflow.
+  kimiUsageTotal(delta);
   // Absent usage stays absent rather than becoming zeros.
   return counted === 0 ? undefined : delta;
 }

@@ -48,9 +48,13 @@ function tempProject(): string {
 async function loadGeneratedKimiAgent(project: string): Promise<{
   KimiCode029Agent: new (options: Record<string, unknown>) => {
     issuedSessionId?: string;
+    generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command?: string;
       args: string[];
       env?: Record<string, string>;
+      stdin?: string;
+      outputFormat?: string;
       cleanup?: () => Promise<void>;
       benignStderrPatterns: RegExp[];
     }>;
@@ -88,9 +92,13 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   const kimiModule = (await import(pathToFileURL(path.join(fixture, "kimi.mjs")).href)) as {
     KimiCode029Agent: new (options: Record<string, unknown>) => {
       issuedSessionId?: string;
+      generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command?: string;
         args: string[];
         env?: Record<string, string>;
+        stdin?: string;
+        outputFormat?: string;
         cleanup?: () => Promise<void>;
         benignStderrPatterns: RegExp[];
       }>;
@@ -1746,6 +1754,108 @@ test(
 );
 
 test(
+  "generated Kimi adapter reports failed-attempt usage and excludes it from a resumed retry",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-failed-retry");
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const originalBuildCommand = agent.buildCommand.bind(agent);
+    const session = "00000000-0000-0000-0000-000000000207";
+    const bucket = "wd_target_000000000207";
+    let invocation = 0;
+
+    agent.buildCommand = async (params) => {
+      const command = await originalBuildCommand(params);
+      const home = command.env?.KIMI_CODE_HOME;
+      assert.ok(home);
+      invocation += 1;
+      const sessionDir = path.join(home, "sessions", bucket, session);
+      const wire = path.join(sessionDir, "agents", "main", "wire.jsonl");
+      const script =
+        invocation === 1
+          ? [
+              'const fs = require("node:fs");',
+              'const path = require("node:path");',
+              `const home = ${JSON.stringify(home)};`,
+              `const sessionDir = ${JSON.stringify(sessionDir)};`,
+              `const wire = ${JSON.stringify(wire)};`,
+              "fs.mkdirSync(path.dirname(wire), { recursive: true });",
+              `fs.writeFileSync(wire, ${JSON.stringify(`${kimiUsageRecordLine(101, 23, 400, 7)}\n`)});`,
+              `fs.writeFileSync(path.join(sessionDir, "state.json"), ${JSON.stringify(
+                `${JSON.stringify({
+                  workDir: project,
+                  agents: {
+                    main: { homedir: path.join(sessionDir, "agents", "main"), type: "agent", parentAgentId: null }
+                  }
+                })}\n`
+              )});`,
+              `fs.writeFileSync(path.join(home, "session_index.jsonl"), ${JSON.stringify(
+                `${JSON.stringify({ sessionId: session, sessionDir, workDir: project })}\n`
+              )});`,
+              `console.log(${JSON.stringify(
+                JSON.stringify({
+                  role: "meta",
+                  type: "session.resume_hint",
+                  session_id: session,
+                  command: `kimi -r ${session}`,
+                  content: `To resume this session: kimi -r ${session}`
+                })
+              )});`,
+              "process.exit(17);"
+            ].join("\n")
+          : [
+              'const fs = require("node:fs");',
+              `const wire = ${JSON.stringify(wire)};`,
+              `fs.appendFileSync(wire, ${JSON.stringify(`${kimiUsageRecordLine(11, 5, 30, 2)}\n`)});`
+            ].join("\n");
+      return {
+        ...command,
+        command: "/usr/bin/env",
+        args: ["node", "-e", script],
+        stdin: undefined,
+        outputFormat: "stream-json"
+      };
+    };
+
+    let failure: unknown;
+    try {
+      await agent.generate({ prompt: "Fail after usage", rootDir: project });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure instanceof Error);
+    assert.deepEqual((failure as Error & { usage?: unknown }).usage, {
+      inputTokens: 101,
+      outputTokens: 23,
+      inputTokenDetails: { cacheReadTokens: 400, cacheWriteTokens: 7 },
+      totalTokens: 531
+    });
+    assert.equal(agent.issuedSessionId, session);
+
+    const retried = await agent.generate({
+      prompt: "Resume after failure",
+      rootDir: project,
+      resumeSession: session
+    });
+    const retryUsage = retried.usage as {
+      inputTokens?: number;
+      outputTokens?: number;
+      inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+      totalTokens?: number;
+    };
+    assert.equal(retryUsage.inputTokens, 11);
+    assert.equal(retryUsage.outputTokens, 5);
+    assert.equal(retryUsage.inputTokenDetails?.cacheReadTokens, 30);
+    assert.equal(retryUsage.inputTokenDetails?.cacheWriteTokens, 2);
+    assert.equal(retryUsage.totalTokens, 48);
+  }
+);
+
+test(
   "generated Kimi adapter skips malformed wire usage without fabricating tokens",
   { skip: !runningUnderBun },
   async () => {
@@ -1857,6 +1967,111 @@ test(
       total_tokens: 110
     });
     await command.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi adapter fails telemetry closed on unsafe wire bounds and replacement",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-bounds");
+    const options = kimiSubscriptionOptions(sourceConfig);
+
+    const oversized = new KimiCode029Agent(options);
+    const oversizedCommand = await oversized.buildCommand({
+      prompt: "Oversized usage wire",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    const oversizedHome = oversizedCommand.env?.KIMI_CODE_HOME;
+    assert.ok(oversizedHome);
+    const oversizedWire = writeKimiWire(oversizedHome, "wd_target_000000000208/session-208", "main", [
+      kimiUsageRecordLine(9, 8, 7, 6)
+    ]);
+    fs.appendFileSync(oversizedWire, "x".repeat(1024 * 1024 + 1), "utf8");
+    const oversizedCompleted = kimiCompletedEvent(
+      oversized.createOutputInterpreter().onExit?.(kimiExitResult(oversizedCommand.args))
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(oversizedCompleted, "usage"), false);
+    await oversizedCommand.cleanup?.();
+
+    const overflowing = new KimiCode029Agent(options);
+    const overflowingCommand = await overflowing.buildCommand({
+      prompt: "Overflowing usage values",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    const overflowingHome = overflowingCommand.env?.KIMI_CODE_HOME;
+    assert.ok(overflowingHome);
+    writeKimiWire(overflowingHome, "wd_target_000000000209/session-209", "main", [
+      kimiUsageRecordLine(Number.MAX_SAFE_INTEGER, 0, 0, 0),
+      // Each component total is independently safe, but the combined total is not.
+      kimiUsageRecordLine(0, 1, 0, 0)
+    ]);
+    const overflowingCompleted = kimiCompletedEvent(
+      overflowing.createOutputInterpreter().onExit?.(kimiExitResult(overflowingCommand.args))
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(overflowingCompleted, "usage"), false);
+    await overflowingCommand.cleanup?.();
+
+    const tooMany = new KimiCode029Agent(options);
+    const tooManyCommand = await tooMany.buildCommand({
+      prompt: "Too many usage wires",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    const tooManyHome = tooManyCommand.env?.KIMI_CODE_HOME;
+    assert.ok(tooManyHome);
+    for (let index = 0; index < 513; index += 1) {
+      writeKimiWire(tooManyHome, "wd_target_000000000211/session-211", `agent-${index.toString().padStart(3, "0")}`, [
+        kimiUsageRecordLine(1, 1, 0, 0)
+      ]);
+    }
+    const tooManyCompleted = kimiCompletedEvent(
+      tooMany.createOutputInterpreter().onExit?.(kimiExitResult(tooManyCommand.args))
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(tooManyCompleted, "usage"), false);
+    await tooManyCommand.cleanup?.();
+
+    const session = "00000000-0000-0000-0000-000000000210";
+    const bucket = "wd_target_000000000210";
+    const storedSessionDir = path.join(sourceConfig, "sessions", bucket, session);
+    writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [kimiUsageRecordLine(1_000, 200, 3_000, 40)]);
+    fs.writeFileSync(
+      path.join(storedSessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: { homedir: path.join(storedSessionDir, "agents", "main"), type: "agent", parentAgentId: null }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(sourceConfig, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: session, sessionDir: storedSessionDir, workDir: "/workspace/target" })}\n`,
+      "utf8"
+    );
+    const replaced = new KimiCode029Agent(options);
+    const replacedCommand = await replaced.buildCommand({
+      prompt: "Replaced resumed wire",
+      cwd: "/workspace/target",
+      options: { resumeSession: session }
+    });
+    const replacedHome = replacedCommand.env?.KIMI_CODE_HOME;
+    assert.ok(replacedHome);
+    const runtimeWire = path.join(replacedHome, "sessions", bucket, session, "agents", "main", "wire.jsonl");
+    fs.rmSync(runtimeWire);
+    fs.writeFileSync(runtimeWire, `${kimiUsageRecordLine(99, 88, 77, 66)}\n`, "utf8");
+    const replacedCompleted = kimiCompletedEvent(
+      replaced.createOutputInterpreter().onExit?.(kimiExitResult(replacedCommand.args))
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(replacedCompleted, "usage"), false);
+    await replacedCommand.cleanup?.();
   }
 );
 
