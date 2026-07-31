@@ -17,7 +17,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `ultrafuzz references update`       | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
 | `ultrafuzz ps`                      | List Ultrafuzz runs and linked workflow status.                                                                |
 | `ultrafuzz inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                   |
-| `ultrafuzz status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                                  |
+| `ultrafuzz status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
 | `ultrafuzz pause <run-id>`          | Gracefully pause an active run after its in-flight tasks finish.                                               |
 | `ultrafuzz why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
 | `ultrafuzz timeline <run-id>`       | Show checkpoint frames and fork lineage, including the frame numbers `fork --frame` accepts.                   |

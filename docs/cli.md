@@ -13,7 +13,7 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `references update`       | Rewrite the project reference catalog to current default-branch SHAs with `--latest`.                                     |
 | `ps`                      | List Ultrafuzz runs with linked workflow status.                                                                          |
 | `inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                              |
-| `status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                                                    |
+| `status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                        |
 | `pause <run-id>`          | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
 | `why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                                      |
 | `timeline <run-id>`       | Show checkpoint frames and fork lineage, with the frame numbers `fork --frame` accepts.                                   |
