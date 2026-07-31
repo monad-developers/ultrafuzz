@@ -1,7 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
 import {
@@ -280,6 +281,35 @@ export interface SmithersPauseResult {
   stderr: string;
 }
 
+export interface SmithersCancelResult {
+  status: "cancel-requested" | "cancelled";
+  reportedStatus?: string;
+  command: readonly string[];
+  stdout: string;
+  stderr: string;
+}
+
+export interface SmithersStreamResult {
+  command: string[];
+  lines: number;
+  truncated: boolean;
+  exitCode: number | null;
+  stderr: string;
+}
+
+export interface SmithersInstallationPosture {
+  bundled_version: string;
+  required_version: string;
+  installed_version: string | null;
+  installed_bin_target: string | null;
+  bin_path: string | null;
+  layout_error: string | null;
+  compatibility_patches: {
+    detached_admission: "applied" | "upstream" | "missing" | "unknown";
+    supervisor_descriptor: "applied" | "upstream" | "missing" | "unknown";
+  };
+}
+
 export interface SmithersCommandSnapshot {
   command: string[];
   ok: boolean;
@@ -461,13 +491,183 @@ export async function requestSmithersCancel(input: {
   smithersRunId: string;
   projectRoot: string;
   env?: Record<string, string | undefined>;
-}): Promise<void> {
-  await execSmithersCli({
+}): Promise<SmithersCancelResult> {
+  const result = await execSmithersCli({
     args: ["cancel", input.smithersRunId, "--format", "json"],
     projectRoot: input.projectRoot,
     env: input.env,
     acceptedExitCodes: [2]
   });
+  const reportedStatus = firstStringField(commandPayload(jsonField(result.stdout).json), ["status"]);
+  // The engine reports `cancelled`; Ultrafuzz keeps `cancel-requested` until a
+  // confirmed terminal cancellation so a durable request never looks finished.
+  const status = isConfirmedCancelStatus(reportedStatus) ? "cancelled" : "cancel-requested";
+  return { ...result, status, ...(reportedStatus === undefined ? {} : { reportedStatus }) };
+}
+
+function isConfirmedCancelStatus(value: string | undefined): boolean {
+  return value === "cancelled" || value === "canceled";
+}
+
+/**
+ * Streams a bounded number of stdout lines from an inspection command instead
+ * of buffering the whole run through `execFile`. Watch surfaces need
+ * incremental output and deterministic teardown; the bounded inspection helper
+ * stays strict for one-shot reads.
+ */
+export async function streamSmithersCommand(input: {
+  args: readonly string[];
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  maxLines: number;
+  onLine: (line: string) => void | Promise<void>;
+}): Promise<SmithersStreamResult> {
+  const command = [...input.args];
+  const displayCommand = smithersDisplayCommand(command);
+  await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
+  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
+    cwd: input.projectRoot,
+    env: smithersCommandEnv(input.projectRoot, input.env),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
+  let lines = 0;
+  let truncated = false;
+  let stderr = "";
+  const stopStreaming = (): void => {
+    reader.close();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+    }
+  };
+  const onAbort = (): void => {
+    stopStreaming();
+  };
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = truncateDiagnosticText(`${stderr}${chunk}`);
+  });
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      let settled = false;
+      const settle = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        action();
+      };
+      child.once("error", (error) => {
+        settle(() => {
+          reject(error);
+        });
+      });
+      child.once("close", (code) => {
+        settle(() => {
+          resolve(code);
+        });
+      });
+      reader.on("line", (line) => {
+        if (truncated || line.trim().length === 0) {
+          return;
+        }
+        lines += 1;
+        void input.onLine(line);
+        if (lines >= input.maxLines) {
+          truncated = true;
+          stopStreaming();
+        }
+      });
+    });
+    return { command: displayCommand, lines, truncated, exitCode, stderr: redactedEvidenceText(stderr) };
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+    stopStreaming();
+  }
+}
+
+/**
+ * Reports the local workflow-runner installation posture without mutating or
+ * upgrading anything, so `doctor` can explain a broken install offline.
+ */
+export function inspectSmithersInstallation(projectRoot: string): SmithersInstallationPosture {
+  const resolvedRoot = path.resolve(projectRoot);
+  const binPath = localSmithersExecutable(resolvedRoot);
+  let installedVersion: string | null = null;
+  let installedBinTarget: string | null = null;
+  try {
+    const packageJson = path.join(resolveInstalledSmithersPackageRoot(resolvedRoot), "package.json");
+    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
+    if (isObjectRecord(metadata)) {
+      installedVersion = typeof metadata.version === "string" ? metadata.version : null;
+      const bin = metadata.bin;
+      installedBinTarget = isObjectRecord(bin) && typeof bin.smithers === "string" ? bin.smithers : null;
+    }
+  } catch {
+    installedVersion = null;
+  }
+  return {
+    bundled_version: SMITHERS_ORCHESTRATOR_VERSION,
+    required_version: SMITHERS_ORCHESTRATOR_VERSION,
+    installed_version: installedVersion,
+    installed_bin_target: installedBinTarget,
+    bin_path: fs.existsSync(binPath) ? binPath : null,
+    layout_error: installedSmithersValidationError(resolvedRoot) ?? null,
+    compatibility_patches: inspectSmithersCompatibilityPatches(resolvedRoot)
+  };
+}
+
+function inspectSmithersCompatibilityPatches(
+  projectRoot: string
+): SmithersInstallationPosture["compatibility_patches"] {
+  const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
+  const packageRoots = [
+    path.join(nodeModules, "@smithers-orchestrator", "cli"),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
+  ].filter((candidate) => fs.existsSync(candidate));
+  if (packageRoots.length !== 1) {
+    return { detached_admission: "unknown", supervisor_descriptor: "unknown" };
+  }
+  const packageRoot = packageRoots[0]!;
+  return {
+    detached_admission: patchPosture(
+      path.join(packageRoot, "src", "detached-admission.js"),
+      SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
+      SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
+    ),
+    supervisor_descriptor: patchPosture(
+      path.join(packageRoot, "src", "index.js"),
+      SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
+      SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
+    )
+  };
+}
+
+function patchPosture(
+  sourcePath: string,
+  patched: string,
+  patchable: string
+): "applied" | "upstream" | "missing" | "unknown" {
+  if (!fs.existsSync(sourcePath)) {
+    return "unknown";
+  }
+  const contents = fs.readFileSync(sourcePath, "utf8");
+  if (contents.includes(patched)) {
+    return "applied";
+  }
+  // The upstream release still carries the shape Ultrafuzz patches, so the
+  // patch is simply not applied yet. Anything else means the dependency
+  // replaced the behavior and the local patch is no longer required.
+  return contents.includes(patchable) ? "missing" : "upstream";
+}
+
+export function commandPayload(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) {
+    return undefined;
+  }
+  return isObjectRecord(value.data) ? value.data : value;
 }
 
 export async function runSmithersLifecycleCommand(input: {

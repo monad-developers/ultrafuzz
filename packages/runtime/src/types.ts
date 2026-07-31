@@ -452,6 +452,243 @@ export interface PauseRunValue {
   submitted: boolean;
 }
 
+export interface CancelRunInput {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}
+
+export interface CancelRunValue {
+  run_id: string;
+  workflow_run_id: string;
+  action: "cancel";
+  /** Ultrafuzz spells the confirmed terminal state `canceled`. */
+  status: "cancel-requested" | "canceled";
+  submitted: boolean;
+  confirmed: boolean;
+  run_status: string;
+}
+
+export interface WorkflowRunQueryInput {
+  projectRoot: string;
+  runId: string;
+  env?: Record<string, string | undefined>;
+}
+
+export type RunBlockerKind =
+  | "waiting-approval"
+  | "waiting-event"
+  | "waiting-timer"
+  | "retry-backoff"
+  | "retries-exhausted"
+  | "dependency-failed"
+  | "stale-heartbeat"
+  | "engine-busy"
+  | "binding"
+  | "side-effect-boundary"
+  | "other";
+
+export interface RunBlocker {
+  kind: RunBlockerKind;
+  node_id: string | null;
+  iteration: number | null;
+  reason: string;
+  unblocker: string | null;
+  waiting_since: string | null;
+  attempt: number | null;
+  max_attempts: number | null;
+}
+
+export interface DiagnoseRunValue {
+  run_id: string;
+  workflow_run_id: string;
+  run_status: string;
+  workflow_status: string;
+  summary: string;
+  current_node_id: string | null;
+  blockers: RunBlocker[];
+  notes: string[];
+  generated_at_ms: number | null;
+}
+
+export interface RunTimelineForkPoint {
+  run_id: string;
+  branch_label: string | null;
+  description: string | null;
+}
+
+export interface RunTimelineFrame {
+  frame: number;
+  created_at: string | null;
+  content_hash: string | null;
+  forks: RunTimelineForkPoint[];
+}
+
+export interface RunTimelineBranch {
+  workflow_run_id: string;
+  branch: string | null;
+  depth: number;
+  frames: RunTimelineFrame[];
+}
+
+export interface RunTimelineValue {
+  run_id: string;
+  workflow_run_id: string;
+  tree: boolean;
+  branch: string | null;
+  frames: RunTimelineFrame[];
+  latest_frame: number | null;
+  lineage: RunTimelineBranch[];
+}
+
+export interface WorkflowEventsQueryInput extends WorkflowRunQueryInput {
+  nodeId?: string;
+  type?: string;
+  since?: string;
+  limit?: number;
+  history?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface WorkflowLifecycleEvent {
+  sequence: number | null;
+  timestamp: string | null;
+  category: string;
+  node_id: string | null;
+  iteration: number | null;
+  attempt: number | null;
+  detail: string | null;
+}
+
+export interface WorkflowEventsValue {
+  run_id: string;
+  workflow_run_id: string;
+  events: WorkflowLifecycleEvent[];
+  limit: number;
+  truncated: boolean;
+}
+
+export interface WorkflowNodeQueryInput extends WorkflowRunQueryInput {
+  nodeId: string;
+  iteration?: number;
+  attempts?: boolean;
+  tools?: boolean;
+  signal?: AbortSignal;
+}
+
+export interface WorkflowNodeToolCall {
+  attempt: number | null;
+  sequence: number | null;
+  name: string;
+  status: string | null;
+  duration_ms: number | null;
+  error: string | null;
+  input?: unknown;
+  output?: unknown;
+}
+
+export interface WorkflowNodeAttempt {
+  attempt: number | null;
+  iteration: number | null;
+  state: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  error: string | null;
+  cached: boolean;
+  models: string[];
+  agents: string[];
+  tool_calls: WorkflowNodeToolCall[];
+}
+
+export interface WorkflowNodeValue {
+  run_id: string;
+  workflow_run_id: string;
+  node_id: string;
+  iteration: number | null;
+  state: string | null;
+  status: string | null;
+  duration_ms: number | null;
+  updated_at: string | null;
+  attempt_counts: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    cancelled: number;
+    waiting: number;
+  };
+  models: string[];
+  agents: string[];
+  output: {
+    source: string | null;
+    present: boolean;
+  };
+  attempts: WorkflowNodeAttempt[];
+  tool_details_included: boolean;
+}
+
+export interface RunSnapshot {
+  sequence: number | null;
+  node_id: string | null;
+  iteration: number | null;
+  attempt: number | null;
+  tier: string | null;
+  source: string | null;
+  label: string | null;
+  created_at: string | null;
+}
+
+export interface RunSnapshotsValue {
+  run_id: string;
+  workflow_run_id: string;
+  snapshots: RunSnapshot[];
+}
+
+export type DoctorCheckStatus = "ok" | "warning" | "error" | "unknown";
+
+export interface DoctorCheck {
+  name: string;
+  status: DoctorCheckStatus;
+  summary: string;
+}
+
+export interface DoctorValue {
+  project_root: string;
+  ok: boolean;
+  checks: DoctorCheck[];
+  validation: {
+    status: DoctorCheckStatus;
+    policy_posture: Record<string, { status: string; summary: string }>;
+  };
+  toolchain: Array<{
+    name: string;
+    required: boolean;
+    available: boolean;
+    path: string | null;
+  }>;
+  workflow_engine: {
+    bundled_version: string;
+    required_version: string;
+    installed_version: string | null;
+    installed_bin_target: string | null;
+    bin_path: string | null;
+    latest_published_version: string | "unknown";
+    layout_status: DoctorCheckStatus;
+    layout_detail: string | null;
+    compatibility_patches: {
+      detached_admission: string;
+      supervisor_descriptor: string;
+    };
+  };
+}
+
+export interface DoctorInput {
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  /** Skips the registry lookup; the latest version is reported as `unknown`. */
+  offline?: boolean;
+}
+
 export interface SyncRunInput {
   projectRoot: string;
   runId: string;
