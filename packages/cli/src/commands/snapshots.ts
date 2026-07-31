@@ -28,7 +28,7 @@ function renderSnapshots(value: RunSnapshotsValue): string {
     const node = snapshot.node_id ?? "run";
     const iteration = snapshot.iteration === null ? "" : `#${snapshot.iteration}`;
     const attempt = snapshot.attempt === null ? "" : ` attempt ${snapshot.attempt}`;
-    const tier = snapshot.tier === null ? "" : ` [${snapshot.tier}]`;
+    const tier = snapshot.tier === null ? "" : ` [tier${snapshot.tier}]`;
     lines.push(
       `- seq ${snapshot.sequence ?? "?"}: ${node}${iteration}${attempt}${tier} at ${snapshot.created_at ?? "unknown time"}`
     );

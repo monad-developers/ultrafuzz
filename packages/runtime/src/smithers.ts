@@ -30,6 +30,7 @@ import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
@@ -305,6 +306,8 @@ export interface SmithersStreamResult {
   stderr: string;
 }
 
+export type SmithersPatchPosture = "applied" | "upstream" | "missing" | "incompatible" | "unknown";
+
 export interface SmithersInstallationPosture {
   bundled_version: string;
   required_version: string;
@@ -313,8 +316,8 @@ export interface SmithersInstallationPosture {
   bin_path: string | null;
   layout_error: string | null;
   compatibility_patches: {
-    detached_admission: "applied" | "upstream" | "missing" | "unknown";
-    supervisor_descriptor: "applied" | "upstream" | "missing" | "unknown";
+    detached_admission: SmithersPatchPosture;
+    supervisor_descriptor: SmithersPatchPosture;
   };
 }
 
@@ -500,17 +503,31 @@ export async function requestSmithersCancel(input: {
   projectRoot: string;
   env?: Record<string, string | undefined>;
 }): Promise<SmithersCancelResult> {
+  // Exit 2 carries a durable cancel request. Exit 4 is the engine reporting the
+  // run is no longer active, which for cancellation is a completed outcome, not
+  // a failure: rerunning `cancel` to confirm an in-flight request must converge
+  // rather than error.
   const result = await execSmithersCli({
     args: ["cancel", input.smithersRunId, "--format", "json"],
     projectRoot: input.projectRoot,
     env: input.env,
-    acceptedExitCodes: [2]
+    acceptedExitCodes: [2, 4]
   });
+  if (result.exitCode === 4 && !smithersStdoutHasErrorCode(result.stdout, "RUN_NOT_ACTIVE")) {
+    throw new Error(sanitizedDiagnosticText(result.stderr.trim() || "workflow runner cancel failed"));
+  }
+  if (result.exitCode === 4) {
+    return { ...result, status: "cancelled", reportedStatus: "already-terminal" };
+  }
   const reportedStatus = firstStringField(commandPayload(jsonField(result.stdout).json), ["status"]);
   // The engine reports `cancelled`; Ultrafuzz keeps `cancel-requested` until a
   // confirmed terminal cancellation so a durable request never looks finished.
   const status = isConfirmedCancelStatus(reportedStatus) ? "cancelled" : "cancel-requested";
   return { ...result, status, ...(reportedStatus === undefined ? {} : { reportedStatus }) };
+}
+
+function smithersStdoutHasErrorCode(stdout: string, code: string): boolean {
+  return jsonHasErrorCode(jsonField(stdout).json, code) || stdout.includes(code);
 }
 
 function isConfirmedCancelStatus(value: string | undefined): boolean {
@@ -558,6 +575,7 @@ export async function streamSmithersCommand(input: {
   let truncated = false;
   let stderr = "";
   let stoppedByCaller = false;
+  let killTimer: NodeJS.Timeout | undefined;
   const stopStreaming = (): void => {
     stoppedByCaller = true;
     reader.close();
@@ -565,6 +583,13 @@ export async function streamSmithersCommand(input: {
     child.stderr.destroy();
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
+      // A wedged engine can ignore SIGTERM, which would leave this awaiting
+      // `close` forever. Escalate once, and never hold the event loop open.
+      killTimer ??= setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, STREAM_TERMINATION_GRACE_MS).unref();
     }
   };
   const onAbort = (): void => {
@@ -603,7 +628,24 @@ export async function streamSmithersCommand(input: {
           return;
         }
         lines += 1;
-        void input.onLine(line);
+        // Contain a throwing or rejecting consumer: an exception raised inside
+        // this readline handler would otherwise be uncaught and the awaited
+        // promise would never settle.
+        try {
+          const pending = input.onLine(line);
+          if (pending !== undefined) {
+            pending.catch((error: unknown) => {
+              settle(() => {
+                reject(error instanceof Error ? error : new Error(String(error)));
+              });
+            });
+          }
+        } catch (error) {
+          settle(() => {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          });
+          return;
+        }
         if (lines >= input.maxLines) {
           truncated = true;
           stopStreaming();
@@ -622,6 +664,9 @@ export async function streamSmithersCommand(input: {
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     stopStreaming();
+    if (killTimer !== undefined) {
+      clearTimeout(killTimer);
+    }
   }
 }
 
@@ -686,22 +731,25 @@ function inspectSmithersCompatibilityPatches(
   };
 }
 
-function patchPosture(
-  sourcePath: string,
-  patched: string,
-  patchable: string
-): "applied" | "upstream" | "missing" | "unknown" {
+function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
   if (!fs.existsSync(sourcePath)) {
     return "unknown";
   }
-  const contents = fs.readFileSync(sourcePath, "utf8");
+  let contents: string;
+  try {
+    contents = fs.readFileSync(sourcePath, "utf8");
+  } catch {
+    // An unreadable source must degrade, not throw out of `doctor`.
+    return "unknown";
+  }
   if (contents.includes(patched)) {
     return "applied";
   }
-  // The upstream release still carries the shape Ultrafuzz patches, so the
-  // patch is simply not applied yet. Anything else means the dependency
-  // replaced the behavior and the local patch is no longer required.
-  return contents.includes(patchable) ? "missing" : "upstream";
+  // The pinned release carries the exact shape Ultrafuzz patches, so a source
+  // with neither the patch nor the patchable shape has been modified or
+  // replaced. `applySmithers031CompatibilityPatches` throws in that state, so
+  // report it as incompatible rather than assuming an upstream fix.
+  return contents.includes(patchable) ? "missing" : "incompatible";
 }
 
 export function commandPayload(value: unknown): Record<string, unknown> | undefined {

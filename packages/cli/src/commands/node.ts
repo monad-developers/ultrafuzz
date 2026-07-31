@@ -5,6 +5,7 @@ import {
   cliIo,
   commandFromRuntime,
   emitCommandResult,
+  emitWatchFailure,
   envelope,
   globalFlags,
   projectRoot,
@@ -57,7 +58,7 @@ export default class Node extends Command {
       }
     });
     if (!result.ok) {
-      emitCommandResult(this, "node", commandFromRuntime("node", result, renderNode), json);
+      emitWatchFailure("node", commandFromRuntime("node", result, renderNode), json);
     }
   }
 }

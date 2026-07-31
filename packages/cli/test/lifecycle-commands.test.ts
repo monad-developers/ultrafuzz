@@ -142,7 +142,7 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
           nodeId: "node:project-discovery",
           iteration: 0,
           attempt: 1,
-          tier: "durability",
+          tier: 1,
           source: "node-finish",
           label: null,
           commitId: "commit-1",
@@ -319,7 +319,7 @@ test("snapshots lists checkpoints without engine-internal identifiers", async ()
   const human = await cli(project, ["snapshots", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Snapshots: 1$/mu);
-  assert.match(human.stdout, /seq 4: node:project-discovery#0 attempt 1 \[durability\]/u);
+  assert.match(human.stdout, /seq 4: node:project-discovery#0 attempt 1 \[tier1\]/u);
 
   const json = await cli(project, ["snapshots", RUN_ID, "--json"], env);
   assert.equal(json.code, 0, json.stderr);
@@ -409,6 +409,39 @@ test("node --watch emits NDJSON envelopes and terminates", async () => {
     fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"),
     /node node:project-discovery --run-id ultrafuzz-lifecycle-cli-run --format jsonl --watch/u
   );
+});
+
+test("events rejects a raw event category instead of widening the view", async () => {
+  const { project, env } = await launchedProject();
+
+  const rejected = await cli(project, ["events", RUN_ID, "--type", "agent", "--json"], env);
+
+  assert.equal(rejected.code, 1);
+  const body = parseJson(rejected);
+  assert.equal(body.ok, false);
+  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_EVENTS_TYPE_UNSUPPORTED");
+  // The engine must never have been asked.
+  assert.equal(fs.existsSync(path.join(project, "smithers-commands.log")), true);
+  assert.doesNotMatch(fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8"), /--type agent/u);
+
+  const accepted = await cli(project, ["events", RUN_ID, "--type", "node", "--json"], env);
+  assert.equal(accepted.code, 0, accepted.stderr);
+});
+
+test("events --watch --json keeps a stream failure on one NDJSON line", async () => {
+  const { project, env } = await launchedProject();
+  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'stream broke' >&2\nexit 3\n", "utf8");
+  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+
+  const watched = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
+
+  assert.equal(watched.code, 1);
+  const lines = watched.stdout.split("\n").filter(Boolean);
+  assert.equal(lines.length, 1);
+  const body = JSON.parse(lines[0]!) as Record<string, unknown>;
+  assert.equal(body.ok, false);
+  assert.equal(body.command, "events");
+  assertNoEngineBranding(body);
 });
 
 test("cancel distinguishes a submitted request from a confirmed cancellation", async () => {

@@ -74,11 +74,16 @@ export async function diagnoseProject(input: DoctorInput) {
       required: true,
       ...resolveExecutable(name, env)
     })),
-    ...agentRefs.map((agentRef) => ({
-      name: AGENT_EXECUTABLES[agentRef] ?? agentRef,
-      required: true,
-      ...resolveExecutable(AGENT_EXECUTABLES[agentRef] ?? agentRef, env)
-    }))
+    ...agentRefs.map((agentRef) => {
+      const executable = AGENT_EXECUTABLES[agentRef];
+      return {
+        name: executable ?? agentRef,
+        // Only demand a CLI for agents whose executable Ultrafuzz actually
+        // knows; an unrecognised ref is reported without being required.
+        required: executable !== undefined,
+        ...resolveExecutable(executable ?? agentRef, env)
+      };
+    })
   ];
   const missingTools = toolchain.filter((entry) => entry.required && !entry.available).map((entry) => entry.name);
   checks.push({
@@ -204,8 +209,27 @@ function compatibilityPatchCheck(installation: SmithersInstallationPosture): {
   diagnostics: RuntimeDiagnostic[];
 } {
   const entries = Object.entries(installation.compatibility_patches);
+  const incompatible = entries.filter(([, posture]) => posture === "incompatible").map(([name]) => name);
   const missing = entries.filter(([, posture]) => posture === "missing").map(([name]) => name);
   const unknown = entries.filter(([, posture]) => posture === "unknown").map(([name]) => name);
+  if (incompatible.length > 0) {
+    // The next run hard-fails in this state, so doctor must not call it healthy.
+    return {
+      check: {
+        name: "workflow-engine-patches",
+        status: "error",
+        summary: `installed engine source is modified or incompatible for: ${incompatible.join(", ")}`
+      },
+      diagnostics: [
+        {
+          code: "DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE",
+          message: `installed workflow engine source no longer matches the shape Ultrafuzz patches for: ${incompatible.join(", ")}; reinstall the pinned engine`,
+          severity: "error",
+          source: "doctor"
+        }
+      ]
+    };
+  }
   if (missing.length > 0) {
     return {
       check: {
@@ -332,19 +356,36 @@ function resolveExecutable(
   env: Record<string, string | undefined>
 ): { available: boolean; path: string | null } {
   const searchPath = env.PATH ?? process.env.PATH ?? "";
+  // Windows resolves a bare command name through PATHEXT and does not mark
+  // executables with an exec bit, so requiring X_OK there reports every tool
+  // missing.
+  const windows = process.platform === "win32";
+  const extensions = windows
+    ? [
+        "",
+        ...(env.PATHEXT ?? process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+          .split(";")
+          .map((entry) => entry.trim())
+          .filter((entry) => entry.length > 0)
+      ]
+    : [""];
   for (const entry of searchPath.split(path.delimiter)) {
     if (entry.length === 0) {
       continue;
     }
-    const candidate = path.join(path.resolve(entry), name);
-    try {
-      if (!fs.statSync(candidate).isFile()) {
+    for (const extension of extensions) {
+      const candidate = path.join(path.resolve(entry), `${name}${extension}`);
+      try {
+        if (!fs.statSync(candidate).isFile()) {
+          continue;
+        }
+        if (!windows) {
+          fs.accessSync(candidate, fs.constants.X_OK);
+        }
+        return { available: true, path: candidate };
+      } catch {
         continue;
       }
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return { available: true, path: candidate };
-    } catch {
-      continue;
     }
   }
   return { available: false, path: null };

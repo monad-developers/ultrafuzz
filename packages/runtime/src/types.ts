@@ -508,7 +508,7 @@ export interface DiagnoseRunValue {
   current_node_id: string | null;
   blockers: RunBlocker[];
   notes: string[];
-  generated_at_ms: number | null;
+  generated_at: string | null;
 }
 
 export interface RunTimelineForkPoint {
@@ -632,7 +632,8 @@ export interface RunSnapshot {
   node_id: string | null;
   iteration: number | null;
   attempt: number | null;
-  tier: string | null;
+  /** Durability tier the engine records as an integer. */
+  tier: number | null;
   source: string | null;
   label: string | null;
   created_at: string | null;

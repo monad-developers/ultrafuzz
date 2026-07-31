@@ -1,5 +1,6 @@
 import { Args, Command, Flags } from "@oclif/core";
 import {
+  isLifecycleEventCategory,
   queryWorkflowEvents,
   watchWorkflowEvents,
   type WorkflowEventsValue,
@@ -8,8 +9,10 @@ import {
 
 import {
   cliIo,
+  commandFailure,
   commandFromRuntime,
   emitCommandResult,
+  emitWatchFailure,
   envelope,
   globalFlags,
   projectRoot,
@@ -38,6 +41,19 @@ export default class Events extends Command {
 
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Events);
+    if (flags.type !== undefined && !isLifecycleEventCategory(flags.type)) {
+      emitCommandResult(
+        this,
+        "events",
+        commandFailure(
+          "events",
+          `--type must be a lifecycle event category, not ${flags.type}; raw agent and tool categories are not exposed`,
+          "WORKFLOW_EVENTS_TYPE_UNSUPPORTED"
+        ),
+        flags.json === true
+      );
+      return;
+    }
     const query = {
       projectRoot: projectRoot(flags),
       runId: args.runId,
@@ -62,7 +78,7 @@ export default class Events extends Command {
       }
     });
     if (!result.ok) {
-      emitCommandResult(this, "events", commandFromRuntime("events", result, renderEvents), json);
+      emitWatchFailure("events", commandFromRuntime("events", result, renderEvents), json);
     }
   }
 }

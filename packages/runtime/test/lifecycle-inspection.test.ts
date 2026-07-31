@@ -15,6 +15,7 @@ import {
   queryWorkflowEvents,
   startRun,
   watchWorkflowEvents,
+  watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
 import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
@@ -63,6 +64,7 @@ nodes:
 
 interface FakeInspectionFixtures {
   why?: unknown;
+  nodeWatchLines?: string;
   timeline?: unknown;
   snapshots?: unknown;
   node?: unknown;
@@ -90,6 +92,10 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   fs.writeFileSync(files.snapshots, `${JSON.stringify(fixtures.snapshots ?? { snapshots: [] })}\n`, "utf8");
   fs.writeFileSync(files.node, `${JSON.stringify({ data: fixtures.node ?? {} })}\n`, "utf8");
   fs.writeFileSync(files.events, fixtures.events ?? "", "utf8");
+  const nodeWatchPath = path.join(project, "fake-node-watch.ndjson");
+  if (fixtures.nodeWatchLines !== undefined) {
+    fs.writeFileSync(nodeWatchPath, fixtures.nodeWatchLines, "utf8");
+  }
 
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
@@ -108,7 +114,11 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       `    cat ${shellQuote(files.snapshots)}`,
       "    ;;",
       "  node)",
-      `    cat ${shellQuote(files.node)}`,
+      '    if [ -n "$SMITHERS_FAKE_NODE_WATCH" ]; then',
+      '      cat "$SMITHERS_FAKE_NODE_WATCH"',
+      "    else",
+      `      cat ${shellQuote(files.node)}`,
+      "    fi",
       "    ;;",
       "  events)",
       `    cat ${shellQuote(files.events)}`,
@@ -129,7 +139,8 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
   return {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_BIN: smithers,
-    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
+    SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
   };
 }
 
@@ -349,7 +360,7 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
           nodeId: "node:project-discovery",
           iteration: 0,
           attempt: 1,
-          tier: "durability",
+          tier: 1,
           source: "node-finish",
           label: null,
           commitId: "commit-abc",
@@ -366,7 +377,7 @@ test("listRunSnapshots adapts the checkpoint list", async () => {
   assert.equal(snapshots.ok, true, JSON.stringify(snapshots.diagnostics));
   assert.equal(snapshots.value?.snapshots.length, 1);
   assert.equal(snapshots.value?.snapshots[0]?.sequence, 3);
-  assert.equal(snapshots.value?.snapshots[0]?.tier, "durability");
+  assert.equal(snapshots.value?.snapshots[0]?.tier, 1);
   assert.equal(snapshots.value?.snapshots[0]?.created_at, new Date(1_700_000_100_000).toISOString());
   // Commit and workspace identifiers stay internal to the engine.
   assert.equal("commit_id" in (snapshots.value?.snapshots[0] ?? {}), false);
@@ -636,6 +647,127 @@ test("getWorkflowNode includes attempts on request and tool payloads only with -
   assert.deepEqual(call?.output, { note: "ok" });
   // Tool payloads pass through the shared secret redaction helpers.
   assert.doesNotMatch(JSON.stringify(call?.input), /sk-live-secret/u);
+});
+
+test("watchWorkflowNode keeps streaming past the engine's terminal clear-screen bytes", async () => {
+  const detail = JSON.stringify(nodeDetailFixture());
+  // The engine's watch loop clears the terminal before every non-initial
+  // render, writing an ANSI sequence with no trailing newline into the same
+  // stdout stream as the JSONL payload.
+  const { project, env } = await launchedProject({
+    nodeWatchLines: `${detail}\n\u001B[2J\u001B[0f${detail}\n\u001B[2J\u001B[0f${detail}\n`
+  });
+  const snapshots: string[] = [];
+
+  const watched = await watchWorkflowNode({
+    projectRoot: project,
+    runId: "inspect-run",
+    nodeId: "node:project-discovery",
+    env,
+    intervalSeconds: 1,
+    onSnapshot: (value) => {
+      snapshots.push(value.node_id);
+    }
+  });
+
+  assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
+  assert.equal(snapshots.length, 3);
+  assert.deepEqual(new Set(snapshots), new Set(["node:project-discovery"]));
+  assert.match(
+    smithersLog(project),
+    /node node:project-discovery --run-id ultrafuzz-inspect-run --format jsonl --watch --interval 1/u
+  );
+});
+
+test("cancelRun converges when the engine reports the run is already terminal", async () => {
+  const { project, env, runRoot } = await launchedProject({});
+  // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
+  // rerunning cancel to confirm an in-flight request must not error.
+  fs.writeFileSync(
+    env.SMITHERS_BIN!,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "cancel" ]; then',
+      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE"}}\'',
+      "  exit 4",
+      "fi",
+      "printf '%s\\n' '{\"ok\":true}'",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+
+  const confirmed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(confirmed.ok, true, JSON.stringify(confirmed.diagnostics));
+  assert.equal(confirmed.value?.status, "canceled");
+  assert.equal(confirmed.value?.confirmed, true);
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as { status: string };
+  assert.equal(state.status, "canceled");
+});
+
+test("cancelRun still fails on an unrelated engine error exit", async () => {
+  const { project, env } = await launchedProject({});
+  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'database is locked' >&2\nexit 4\n", "utf8");
+  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+
+  const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(failed.ok, false);
+  assert.equal(failed.diagnostics[0]?.code, "WORKFLOW_CANCEL_FAILED");
+});
+
+test("queryWorkflowEvents does not call an exact-limit result truncated", async () => {
+  const lines = Array.from({ length: 2 }, (_, index) =>
+    JSON.stringify({
+      runId: WORKFLOW_RUN_ID,
+      seq: index,
+      timestampMs: 1_700_000_000_000 + index,
+      type: "node.progress",
+      payload: { nodeId: "node:project-discovery" }
+    })
+  );
+  const { project, env } = await launchedProject({ events: lines.join("\n") });
+
+  const exact = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env, limit: 2 });
+
+  assert.equal(exact.ok, true, JSON.stringify(exact.diagnostics));
+  assert.equal(exact.value?.events.length, 2);
+  assert.equal(exact.value?.truncated, false);
+});
+
+test("watchWorkflowEvents stops the stream when the caller aborts mid-stream", async () => {
+  const lines = Array.from({ length: 200 }, (_, index) =>
+    JSON.stringify({
+      runId: WORKFLOW_RUN_ID,
+      seq: index,
+      timestampMs: 1_700_000_000_000 + index,
+      type: "node.progress",
+      payload: { nodeId: "node:project-discovery" }
+    })
+  );
+  const { project, env } = await launchedProject({ events: lines.join("\n") });
+  const controller = new AbortController();
+  let observed = 0;
+
+  const watched = await watchWorkflowEvents({
+    projectRoot: project,
+    runId: "inspect-run",
+    env,
+    signal: controller.signal,
+    onEvent: () => {
+      observed += 1;
+      if (observed === 1) {
+        controller.abort();
+      }
+    }
+  });
+
+  assert.equal(watched.ok, true, JSON.stringify(watched.diagnostics));
+  assert.ok(observed >= 1);
+  // An abort is a caller-initiated stop, so it must not surface as a failure.
+  assert.equal(watched.diagnostics.length, 0);
 });
 
 test("getWorkflowNode rejects an unexpected engine response", async () => {

@@ -199,7 +199,9 @@ workflow-engine run ID.
 request before the run actually stops, so `cancel` distinguishes the two: a
 submitted request reports `cancel-requested` and leaves the product run
 nonterminal, and a confirmed cancellation reports Ultrafuzz's canonical
-terminal spelling `canceled` with its terminal timestamp. Both outcomes append
+terminal spelling `canceled` with its terminal timestamp. Rerunning `cancel`
+after the run has already stopped converges on the confirmed result instead of
+failing. Both outcomes append
 distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
 diagnostic.
 
@@ -218,14 +220,19 @@ next step.
 under `lineage`, each with its own depth and frames.
 
 `snapshots` is read-only and lists durability and workspace checkpoints with
-`sequence`, `node_id`, `iteration`, `attempt`, `tier`, `source`, `label`, and
-`created_at`. There is no `restore` or `rewind` command: those need separate
+`sequence`, `node_id`, `iteration`, `attempt`, `tier` (an integer durability
+tier), `source`, `label`, and `created_at`. There is no `restore` or `rewind` command: those need separate
 product-state and side-effect-boundary design.
 
 `events` shows the **linked workflow** lifecycle log, which is distinct from
 Ultrafuzz's own product evidence in `.ultrafuzz/runs/<run-id>/events.jsonl`. It
-defaults to lifecycle events and never requests raw agent chunks. Without
-`--watch` it returns a bounded typed array with `limit` and `truncated`;
+defaults to lifecycle events and never requests raw agent chunks. `--type` is
+restricted to lifecycle categories (`approval`, `frame`, `memory`, `node`,
+`revert`, `run`, `sandbox`, `scorer`, `snapshot`, `supervisor`, `timer`,
+`workflow`); a raw agent or tool category is rejected with
+`WORKFLOW_EVENTS_TYPE_UNSUPPORTED` rather than silently widening the view.
+Without `--watch` it returns a bounded typed array with `limit` and
+`truncated`;
 `--limit` defaults to 200 and is capped at 2000. `--watch` streams new events
 incrementally rather than buffering the run, printing one redacted event per
 line in human mode and one newline-delimited `ultrafuzz.cli.result.v1` envelope
@@ -257,14 +264,17 @@ non-launching configuration contract unchanged. Doctor reports:
 - whether the installed dependency layout passes Ultrafuzz's exact
   manifest and path validation;
 - whether required compatibility patches, or their upstream replacements, are
-  present.
+  present. A source carrying neither the patch nor the shape Ultrafuzz patches
+  is reported as modified or incompatible, because the next run fails in that
+  state.
 
 Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
 `DOCTOR_WORKFLOW_ENGINE_MISSING`,
 `DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH`,
 `DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID`,
-`DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING`, `DOCTOR_WORKFLOW_ENGINE_OUTDATED`,
-and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
+`DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING`,
+`DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE`,
+`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
 warning and an `unknown` latest version instead of failing an otherwise valid
 offline project. Doctor never mutates or upgrades dependencies.
 

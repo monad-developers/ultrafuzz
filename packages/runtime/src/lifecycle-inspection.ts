@@ -1,6 +1,7 @@
+import fs from "node:fs";
 import path from "node:path";
 
-import { appendEvent, updateRunStatus } from "@ultrafuzz/artifacts";
+import { appendEvent, readRunState, updateRunStatus } from "@ultrafuzz/artifacts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 
 import {
@@ -55,9 +56,13 @@ export async function cancelRun(input: CancelRunInput) {
       env: input.env
     });
     const confirmed = result.status === "cancelled";
+    // Read the persisted status rather than assuming `running`: `pause`d and
+    // `pending` runs are cancellable too, and the append-only event evidence
+    // must not record a state the run was never in.
+    const persistedStatus = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending";
     appendEvent(evidence.layout, {
       eventType: confirmed ? "workflow-cancel-confirmed" : "workflow-cancel-requested",
-      status: confirmed ? "canceled" : "running",
+      status: confirmed ? "canceled" : persistedStatus,
       payload: {
         action: "cancel",
         workflow_run_id: evidence.smithersRunId,
@@ -74,7 +79,7 @@ export async function cancelRun(input: CancelRunInput) {
       status: confirmed ? "canceled" : "cancel-requested",
       submitted: !confirmed,
       confirmed,
-      run_status: state?.status ?? "running"
+      run_status: state?.status ?? persistedStatus
     });
   } catch (error) {
     return runtimeFailure<CancelRunValue>([smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED")]);
@@ -113,13 +118,15 @@ export async function diagnoseRun(input: WorkflowRunQueryInput) {
     {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
-      run_status: (sync.ok ? sync.value.status : undefined) ?? "unknown",
+      run_status:
+        (sync.ok ? sync.value.status : undefined) ??
+        (fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "unknown"),
       workflow_status: stringOr(payload.status, "unknown"),
       summary: publicWorkflowText(stringOr(payload.summary, "no diagnosis available")),
       current_node_id: nullableString(payload.currentNodeId),
       blockers: blockerRows.map(adaptBlocker),
       notes: stringArray(payload.information).map(publicWorkflowText),
-      generated_at_ms: nullableNumber(payload.generatedAtMs)
+      generated_at: timestampFromMs(nullableNumber(payload.generatedAtMs))
     },
     syncDiagnostics
   );
@@ -144,7 +151,7 @@ export async function getRunTimeline(input: WorkflowRunQueryInput & { tree?: boo
   if (timeline === undefined) {
     return runtimeFailure<RunTimelineValue>([invalidPayloadDiagnostic("WORKFLOW_TIMELINE_INVALID")]);
   }
-  const frames = recordArray(timeline.frames).map(adaptTimelineFrame);
+  const frames = recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? []);
   const lineage: RunTimelineBranch[] = [];
   collectTimelineLineage(timeline, 0, lineage);
   return runtimeResult<RunTimelineValue>(true, {
@@ -198,7 +205,8 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
       projectRoot,
       env: input.env,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
-      maxLines: limit,
+      // One line past the limit so an exact-limit result is not called truncated.
+      maxLines: limit + 1,
       onLine: (line) => {
         const event = adaptEventLine(line);
         if (event !== undefined) {
@@ -213,13 +221,13 @@ export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   if (streamFailure !== undefined) {
     return runtimeFailure<WorkflowEventsValue>([streamFailure]);
   }
-  const truncated = stream.truncated;
+  const truncated = stream.truncated && stream.lines > limit;
   return runtimeResult<WorkflowEventsValue>(true, {
     run_id: input.runId,
     workflow_run_id: evidence.smithersRunId,
-    events,
+    events: events.slice(0, limit),
     limit,
-    truncated
+    truncated: truncated || events.length > limit
   });
 }
 
@@ -336,6 +344,30 @@ export async function watchWorkflowNode(
   return runtimeResult<WorkflowNodeValue>(true, last);
 }
 
+/**
+ * Categories that stay within the engine's lifecycle-only view. The engine only
+ * applies its lifecycle default when no explicit `--type` is given, so passing
+ * a raw-chunk category would reach agent and tool events without `--raw`.
+ */
+const LIFECYCLE_EVENT_CATEGORIES = new Set([
+  "approval",
+  "frame",
+  "memory",
+  "node",
+  "revert",
+  "run",
+  "sandbox",
+  "scorer",
+  "snapshot",
+  "supervisor",
+  "timer",
+  "workflow"
+]);
+
+export function isLifecycleEventCategory(value: string): boolean {
+  return LIFECYCLE_EVENT_CATEGORIES.has(value);
+}
+
 function workflowEventsArgs(
   smithersRunId: string,
   input: Pick<WorkflowEventsQueryInput, "nodeId" | "type" | "since" | "history">,
@@ -422,9 +454,14 @@ function blockerKind(value: string | null): RunBlockerKind {
   }
 }
 
-function adaptTimelineFrame(row: Record<string, unknown>): RunTimelineFrame {
+function adaptTimelineFrame(row: Record<string, unknown>): RunTimelineFrame | undefined {
+  const frame = nullableNumber(row.frameNo);
+  if (frame === null) {
+    // Never invent a frame number: it would be offered to `fork --frame`.
+    return undefined;
+  }
   return {
-    frame: nullableNumber(row.frameNo) ?? 0,
+    frame,
     created_at: timestampFromMs(nullableNumber(row.createdAtMs)),
     content_hash: nullableString(row.contentHash),
     forks: recordArray(row.forks).map((fork) => ({
@@ -440,7 +477,7 @@ function collectTimelineLineage(timeline: Record<string, unknown>, depth: number
     workflow_run_id: stringOr(timeline.runId, "unknown"),
     branch: nullableString(timeline.branch),
     depth,
-    frames: recordArray(timeline.frames).map(adaptTimelineFrame)
+    frames: recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? [])
   });
   for (const child of recordArray(timeline.children)) {
     collectTimelineLineage(child, depth + 1, into);
@@ -453,7 +490,7 @@ function adaptSnapshot(row: Record<string, unknown>): RunSnapshot {
     node_id: nullableString(row.nodeId),
     iteration: nullableNumber(row.iteration),
     attempt: nullableNumber(row.attempt),
-    tier: nullableString(row.tier),
+    tier: nullableNumber(row.tier),
     source: nullableString(row.source),
     label: mapNullable(nullableString(row.label), publicWorkflowText),
     created_at: timestampFromMs(nullableNumber(row.createdAtMs))
@@ -647,17 +684,30 @@ const PUBLIC_WORKFLOW_COMMANDS = new Set([
 /** Strips secrets and engine branding from anything that reaches an operator. */
 function publicWorkflowText(value: string): string {
   return redactSecretsInText(value)
-    .replace(/`?\bsmithers\s+([a-z][a-z-]*)`?/giu, (_match, command: string) =>
+    .replace(/(`?)\bsmithers\s+([a-z][a-z-]*)(`?)/giu, (_match, open: string, command: string, close: string) =>
       PUBLIC_WORKFLOW_COMMANDS.has(command.toLowerCase())
         ? `\`ultrafuzz ${command.toLowerCase()}\``
-        : `workflow runner ${command}`
+        : `${open}workflow runner ${command}${close}`
     )
     .replace(/smithers/giu, "workflow runner");
 }
 
+/**
+ * The engine's watch loop clears the terminal before every non-initial render,
+ * writing an ANSI control sequence with no trailing newline into the same
+ * stdout stream as the JSON payload. Strip that prefix so watch snapshots after
+ * the first are not silently dropped.
+ */
 function parseJsonLine(line: string): unknown {
+  // Start at the first object brace so an ANSI clear-screen prefix is skipped.
+  // Anything else that is not parseable JSON still returns undefined, exactly
+  // as it did before.
+  const start = line.indexOf("{");
+  if (start < 0) {
+    return undefined;
+  }
   try {
-    return JSON.parse(line) as unknown;
+    return JSON.parse(line.slice(start)) as unknown;
   } catch {
     return undefined;
   }

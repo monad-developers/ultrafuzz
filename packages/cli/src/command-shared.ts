@@ -133,6 +133,21 @@ export function emitCommandResult(command: Command, commandName: string, result:
   void command;
 }
 
+/**
+ * Emits a failure that interrupts a `--watch` stream. In JSON mode the envelope
+ * must stay on one line so a line-wise consumer can still parse the error it
+ * was waiting for.
+ */
+export function emitWatchFailure(commandName: string, result: CommandResult, json: boolean): void {
+  const io = cliIo();
+  process.exitCode = process.exitCode ?? 1;
+  if (json) {
+    io.stdout.write(`${JSON.stringify(envelope(commandName, result))}\n`);
+    return;
+  }
+  io.stderr.write(result.text ?? "");
+}
+
 export function diagnosticsText(diagnostics: RuntimeDiagnostic[]): string {
   if (diagnostics.length === 0) {
     return "";
