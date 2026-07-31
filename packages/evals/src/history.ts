@@ -1281,6 +1281,10 @@ function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   ].join("\u0000");
 }
 
+function aggregateLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [aggregatePolicyLineageKey(aggregate), aggregate.scoring_fingerprint].join("\u0000");
+}
+
 function aggregatePolicyLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   return [
     aggregate.benchmark,
@@ -1379,6 +1383,13 @@ const OVERVIEW_METRICS = [
   { key: "f1", label: "UltrafuzzBench Score (macro-F1)", color: "#0f766e", width: 4, dash: undefined }
 ] as const;
 
+const OVERVIEW_SCORING_CHANGE_GUIDE = {
+  label: "Scoring identity changed (visual guide only)",
+  color: "#0f766e",
+  width: 2,
+  dash: "5 5"
+} as const;
+
 const OVERVIEW_PROFILE_COLORS = ["#2563eb", "#c2410c", "#7c3aed", "#be123c", "#0369a1", "#a16207"] as const;
 
 const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
@@ -1428,7 +1439,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
   ];
   const legendTop = dateLabelBottom + 34;
-  const legendRowCount = OVERVIEW_METRICS.length + profiles.length;
+  const legendRowCount = OVERVIEW_METRICS.length + 1 + profiles.length;
   const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;
   const columnIndex = new Map(columns.map((column, index) => [aggregateColumnKey(column), index]));
   const columnX = (aggregate: EvalHistoryBenchmarkAggregate): number => {
@@ -1453,11 +1464,11 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     '<title id="title">UltrafuzzBench quality</title>',
-    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>`,
+    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Solid lines connect identical scoring identities; dashed guides cross scoring changes. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
     `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,
-    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and incompatible lineages are not connected.</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; solid lines are comparable, while dashed links are visual guides only.</text>`,
     `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
   ];
@@ -1496,6 +1507,19 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
         (aggregate) => aggregateProfileKey(aggregate) === aggregateProfileKey(profile)
       );
       OVERVIEW_METRICS.forEach((metric) => {
+        for (let index = 1; index < profilePoints.length; index += 1) {
+          const previous = profilePoints[index - 1]!;
+          const current = profilePoints[index]!;
+          if (
+            aggregatePolicyLineageKey(previous) !== aggregatePolicyLineageKey(current) ||
+            aggregateLineageKey(previous) === aggregateLineageKey(current)
+          ) {
+            continue;
+          }
+          lines.push(
+            `<line data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" data-continuity="scoring-change" x1="${format(pointX(previous, profileIndex))}" y1="${format(y(previous[metric.key]))}" x2="${format(pointX(current, profileIndex))}" y2="${format(y(current[metric.key]))}" stroke="${OVERVIEW_SCORING_CHANGE_GUIDE.color}" stroke-width="${OVERVIEW_SCORING_CHANGE_GUIDE.width}" stroke-dasharray="${OVERVIEW_SCORING_CHANGE_GUIDE.dash}"/>`
+          );
+        }
         let segment: EvalHistoryBenchmarkAggregate[] = [];
         let segmentLineage: string | undefined;
         const flush = (): void => {
@@ -1507,9 +1531,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
           segment = [];
         };
         for (const aggregate of profilePoints) {
-          // Exact scoring identities include the candidate commit, so using them
-          // here would reduce every longitudinal trend to disconnected points.
-          const lineage = aggregatePolicyLineageKey(aggregate);
+          const lineage = aggregateLineageKey(aggregate);
           if (segmentLineage !== undefined && lineage !== segmentLineage) flush();
           segmentLineage = lineage;
           segment.push(aggregate);
@@ -1541,8 +1563,13 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
       `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14"${metric.key === "f1" ? ' font-weight="600"' : ""} fill="#374151">${xml(metric.label)}</text>`
     );
   });
+  const scoringGuideRowY = legendTop + OVERVIEW_METRICS.length * 22;
+  lines.push(
+    `<line x1="${left}" y1="${scoringGuideRowY - 4}" x2="${left + 14}" y2="${scoringGuideRowY - 4}" stroke="${OVERVIEW_SCORING_CHANGE_GUIDE.color}" stroke-width="${OVERVIEW_SCORING_CHANGE_GUIDE.width}" stroke-dasharray="${OVERVIEW_SCORING_CHANGE_GUIDE.dash}"/>`,
+    `<text x="${left + 20}" y="${scoringGuideRowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(OVERVIEW_SCORING_CHANGE_GUIDE.label)}</text>`
+  );
   profiles.forEach((profile, profileIndex) => {
-    const rowY = legendTop + (OVERVIEW_METRICS.length + profileIndex) * 22;
+    const rowY = legendTop + (OVERVIEW_METRICS.length + 1 + profileIndex) * 22;
     const profileColor = OVERVIEW_PROFILE_COLORS[profileIndex % OVERVIEW_PROFILE_COLORS.length]!;
     lines.push(
       renderProfileMarker(profileIndex, left + 7, rowY - 4, profileColor, 4),

@@ -226,10 +226,12 @@ evidence, that summary value is unavailable. When the latest run contains
 multiple model profiles, the summary shows every profile instead of choosing
 one by identifier order. The quality overview shows at most the 12 latest
 complete candidate runs, gives each model profile a distinct marker color and
-shape, and breaks lines when the cohort or execution policy changes. Exact
-per-candidate scoring identities remain available in point tooltips and still
-gate strict `eval compare` compatibility; they do not fragment the visual trend
-because the scoring identity records the candidate commit itself.
+shape, and breaks lines when the cohort or execution policy changes. Solid line
+segments connect identical scoring identities. Because an exact scoring
+identity records the candidate commit itself, dashed segments provide a visual
+guide across scoring-identity changes without claiming strict comparability.
+Exact scoring identities remain available in point tooltips and continue to
+gate strict `eval compare` compatibility.
 `eval history` consumes complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or

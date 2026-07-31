@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="644" viewBox="0 0 960 644" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="666" viewBox="0 0 960 666" role="img" aria-labelledby="title desc">
 <title id="title">UltrafuzzBench quality</title>
-<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest 12 candidate runs. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>
-<rect width="960" height="644" fill="#ffffff"/>
+<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest 12 candidate runs. Solid lines connect identical scoring identities; dashed guides cross scoring changes. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>
+<rect width="960" height="666" fill="#ffffff"/>
 <text x="70" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>
 <text x="70" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">ultrafuzz-bench · smoke · latest 12 of 15 complete runs</text>
-<text x="70" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and incompatible lineages are not connected.</text>
+<text x="70" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; solid lines are comparable, while dashed links are visual guides only.</text>
 <line x1="70" y1="110" x2="70" y2="410" stroke="#6b7280"/>
 <line x1="70" y1="410" x2="930" y2="410" stroke="#6b7280"/>
 <line x1="70" y1="410" x2="930" y2="410" stroke="#e5e7eb"/>
@@ -27,8 +27,15 @@
 <g data-lineage-marker="cohort-7d061c80"><title>ultrafuzz-bench smoke cohort-7d061c80 policy-33b8d296</title>
 <line x1="535.09" y1="110" x2="535.09" y2="410" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>
 <text transform="translate(542.09,118) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">cohort-7d061c80</text></g>
-<polyline data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="none" stroke="#0f766e" stroke-width="4" points="111,338.93 181.18,373.88 251.36,284.51"/>
-<polyline data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="none" stroke="#0f766e" stroke-width="4" points="321.55,329.44 391.73,380 461.91,348.87 602.27,326.72 672.45,329.98 742.64,338.93 812.82,359.98 883,323.94"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="111" y1="338.93" x2="181.18" y2="373.88" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="181.18" y1="373.88" x2="251.36" y2="284.51" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="321.55" y1="329.44" x2="391.73" y2="380" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="391.73" y1="380" x2="461.91" y2="348.87" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="461.91" y1="348.87" x2="602.27" y2="326.72" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="602.27" y1="326.72" x2="672.45" y2="329.98" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="672.45" y1="329.98" x2="742.64" y2="338.93" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="742.64" y1="338.93" x2="812.82" y2="359.98" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<line data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" data-continuity="scoring-change" x1="812.82" y1="359.98" x2="883" y2="323.94" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/84836379f09e6e84ff0da059f7e26a2a38e4cc98"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) 8483637: 23.7% · score-d2408140</title>
 <circle data-metric="f1" data-profile="benchmark-smoke-gpt-5-6-luna-high" fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="111" cy="338.93" r="5"/></a>
 <a href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/e03c176587f695fe711b8123f88c2cbbcfca36af"><title>smoke benchmark-smoke-gpt-5-6-luna-high gpt-5.6-luna high UltrafuzzBench Score (macro-F1) e03c176: 12.0% · score-45acaa99</title>
@@ -79,8 +86,10 @@
 <text transform="translate(886,526) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">2026-07-31</text>
 <line x1="70" y1="556" x2="84" y2="556" stroke="#0f766e" stroke-width="4"/>
 <text x="90" y="560" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>
-<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="77" cy="578" r="4"/>
-<text x="90" y="582" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-gpt-5-6-luna-high · gpt-5.6-luna · high</text>
-<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="73" y="596" width="8" height="8"/>
-<text x="90" y="604" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-kimi-k3-max · kimi-k3 · max</text>
+<line x1="70" y1="578" x2="84" y2="578" stroke="#0f766e" stroke-width="2" stroke-dasharray="5 5"/>
+<text x="90" y="582" font-family="system-ui, sans-serif" font-size="14" fill="#374151">Scoring identity changed (visual guide only)</text>
+<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="77" cy="600" r="4"/>
+<text x="90" y="604" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-gpt-5-6-luna-high · gpt-5.6-luna · high</text>
+<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="73" y="618" width="8" height="8"/>
+<text x="90" y="626" font-family="system-ui, sans-serif" font-size="14" fill="#374151">smoke · benchmark-smoke-kimi-k3-max · kimi-k3 · max</text>
 </svg>

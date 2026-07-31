@@ -903,7 +903,7 @@ describe("longitudinal eval history", () => {
     expect(quality).not.toContain('data-metric="precision"');
     expect(quality).not.toContain('data-metric="recall"');
     expect(quality).toContain('stroke-width="4"');
-    expect(quality).toContain("incomplete cohorts are omitted");
+    expect(quality).toContain("solid lines are comparable");
     expect(quality).toContain('<circle data-metric="f1" data-profile="benchmark-smoke" fill="#2563eb"');
     expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-full-kimi-k3-max" fill="#c2410c"');
     expect(summary).toContain("2 model profiles");
@@ -916,7 +916,7 @@ describe("longitudinal eval history", () => {
     expect(summary).toContain("2m 0s");
   });
 
-  it("connects per-candidate scoring identities and bounds the quality overview to recent runs", () => {
+  it("renders visual guides across per-candidate scoring identities and bounds recent runs", () => {
     const commits = "0123456789abc".split("").map((character) => character.repeat(40));
     const observations = commits.flatMap((candidateCommit, index) =>
       (["target-a", "target-b"] as const).map((target) =>
@@ -936,10 +936,9 @@ describe("longitudinal eval history", () => {
 
     expect(quality).toContain("latest 12 of 13 complete runs");
     expect(quality).not.toContain(commits[0]!.slice(0, 7));
-    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(1);
-    const points = /<polyline data-metric="f1"[^>]+points="([^"]+)"/u.exec(quality)?.[1]?.split(" ");
-    expect(points).toHaveLength(12);
-    expect(quality).toContain("incompatible lineages are not connected");
+    expect(quality).not.toContain("<polyline data-metric=");
+    expect(quality.match(/data-continuity="scoring-change"/gu)).toHaveLength(11);
+    expect(quality).toContain("Scoring identity changed (visual guide only)");
   });
 
   it("formats published history JSON compatibly with repository Prettier checks", () => {
