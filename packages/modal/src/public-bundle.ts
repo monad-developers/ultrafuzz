@@ -6,7 +6,8 @@ import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifa
 import {
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
-  parsePublicEvalDiagnostics
+  parsePublicEvalDiagnostics,
+  publicEvalDiagnosticsRowIsFailedDatapoint
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
 import { z } from "zod/v4";
@@ -25,7 +26,7 @@ const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const caseCount = z.number().int().nonnegative().max(MAX_ROWS);
-const bundleStatus = z.enum(["succeeded", "genuine-task-failures"]);
+const bundleStatus = z.enum(["succeeded", "genuine-task-failures", "failed"]);
 const relativePath = z
   .string()
   .min(1)
@@ -311,7 +312,7 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
-  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath);
+  assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath, diagnostics);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
     matrixRows,
@@ -326,9 +327,13 @@ export function parsePublicBenchmarkBundle(
 function assertSmokeFindingFloor(
   lane: PublicBenchmarkBundle["lane"],
   matrixRows: Map<string, PublicBundleMatrixRow>,
-  contentsByPath: Map<string, Buffer>
+  contentsByPath: Map<string, Buffer>,
+  diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>
 ): void {
   if (lane !== "smoke") return;
+  const failedDatapointRows = new Set(
+    diagnostics.rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).map((row) => row.row_id)
+  );
   for (const rowId of matrixRows.keys()) {
     const bundlePath = `reports/${rowId}/findings.normalized.json`;
     const contents = contentsByPath.get(bundlePath);
@@ -340,7 +345,7 @@ function assertSmokeFindingFloor(
     } catch (error) {
       throw new Error(`smoke benchmark row ${rowId} has invalid normalized findings`, { cause: error });
     }
-    if (findings.length === 0) {
+    if (findings.length === 0 && !failedDatapointRows.has(rowId)) {
       throw new Error(`smoke benchmark row ${rowId} must report at least one normalized finding`);
     }
   }
@@ -506,7 +511,9 @@ function summarizePublicBenchmarkBundleContents(input: {
         (row) => row?.final_status === "succeeded" && row.workflow_status === "succeeded"
       )
         ? "succeeded"
-        : "genuine-task-failures";
+        : diagnostics.some((row) => row?.terminal_disposition === "operational-failure")
+          ? "failed"
+          : "genuine-task-failures";
       const reportPaths = rows.flatMap((row) =>
         PUBLIC_REPORT_FILES.map((reportFile) => `reports/${row.id}/${reportFile}`)
       );
@@ -529,7 +536,11 @@ function summarizePublicBenchmarkBundleContents(input: {
   const executedCaseCount = targets.reduce((sum, target) => sum + target.executed_case_count, 0);
   const gradedCaseCount = targets.reduce((sum, target) => sum + target.graded_case_count, 0);
   return {
-    status: targets.every((target) => target.status === "succeeded") ? "succeeded" : "genuine-task-failures",
+    status: targets.every((target) => target.status === "succeeded")
+      ? "succeeded"
+      : targets.some((target) => target.status === "failed")
+        ? "failed"
+        : "genuine-task-failures",
     executed_case_count: executedCaseCount,
     graded_case_count: gradedCaseCount,
     targets

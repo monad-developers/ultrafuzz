@@ -477,7 +477,7 @@ function positiveSafeInteger(value, label) {
 }
 
 function publicationStatus(value, evalRunId) {
-  if (value !== "succeeded" && value !== "genuine-task-failures") {
+  if (value !== "succeeded" && value !== "genuine-task-failures" && value !== "failed") {
     throw new Error(`publication run ${evalRunId} status is invalid`);
   }
   return value;

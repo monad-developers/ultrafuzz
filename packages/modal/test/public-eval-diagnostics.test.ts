@@ -466,6 +466,54 @@ describe("public post-eval diagnostics", () => {
     expect(diagnostics.summary.genuine_task_failure_rows).toBe(1);
   });
 
+  it("publishes one report-backed failed workflow as a datapoint but rejects two", () => {
+    const fixture = evalFixture();
+    fixture.runSummary.records[0]!.final_status = "failed";
+    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+
+    const oneFailure = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(oneFailure.rows[0]).toMatchObject({
+      final_status: "failed",
+      workflow_status: "failed",
+      terminal_disposition: "operational-failure",
+      terminal_report_present: true,
+      scoring_ready: true,
+      reason_codes: []
+    });
+    expect(oneFailure.summary).toMatchObject({ workflow_failed: 1, scoring_ready: true });
+
+    const secondRow = {
+      ...fixture.matrix[0]!,
+      id: "target-b-runner-trial-1",
+      target_id: "target-b"
+    };
+    const secondRecord = {
+      ...fixture.runSummary.records[0]!,
+      row_id: secondRow.id,
+      target_id: secondRow.target_id,
+      workflow_ids: ["workflow-2"]
+    };
+    const twoFailures = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: [...fixture.matrix, secondRow],
+      runSummary: { records: [...fixture.runSummary.records, secondRecord] }
+    });
+
+    expect(twoFailures.rows.every((row) => row.scoring_ready)).toBe(true);
+    expect(twoFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: false });
+  });
+
   it("writes atomically with owner-only permissions and no temporary residue", async () => {
     const fixture = evalFixture();
     const diagnostics = createPublicEvalDiagnostics({

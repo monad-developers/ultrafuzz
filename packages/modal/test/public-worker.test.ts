@@ -34,6 +34,7 @@ import {
   publicEvalRunId,
   preparePublicEvalSuite,
   publicEvalFailureDiagnosticLogPayload,
+  publicEvalRunErrorCanBePublished,
   runAndCheckpointPublicEvalDiagnostics,
   runPublicBenchmarkWorker,
   runWithPublicPreparationTimeout,
@@ -311,6 +312,40 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
 
   expect(result).toEqual({ diagnostics, runError: failure });
   expect(order).toEqual(["run", "build", "persist", "flush"]);
+});
+
+it("continues after the eval command reports one publishable failed datapoint", () => {
+  const failedRow = {
+    final_status: "failed",
+    workflow_status: "failed",
+    workflow_terminal: true,
+    terminal_disposition: "operational-failure"
+  };
+  expect(
+    publicEvalRunErrorCanBePublished({
+      summary: { scoring_ready: true },
+      rows: [failedRow]
+    } as PublicEvalDiagnostics)
+  ).toBe(true);
+  expect(
+    publicEvalRunErrorCanBePublished({
+      summary: { scoring_ready: false },
+      rows: [failedRow, failedRow]
+    } as PublicEvalDiagnostics)
+  ).toBe(false);
+  expect(
+    publicEvalRunErrorCanBePublished({
+      summary: { scoring_ready: true },
+      rows: [
+        {
+          final_status: "succeeded",
+          workflow_status: "succeeded",
+          workflow_terminal: true,
+          terminal_disposition: "clean"
+        }
+      ]
+    } as PublicEvalDiagnostics)
+  ).toBe(false);
 });
 
 it("publishes only bounded redacted workflow-submission messages from eval JSON", () => {
@@ -644,6 +679,23 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
     `reports/${rowId}/findings.normalized.json`
   ]);
   expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
+
+  fs.rmSync(path.join(dedupeRoot, "deduped-findings.json"));
+  fs.appendFileSync(
+    path.join(evalRoot, "runs.jsonl"),
+    `${JSON.stringify({
+      ...record,
+      final_status: "failed",
+      workflow: { status: "failed", terminal: true }
+    })}\n`
+  );
+  const failedReportSources = publicBundleSources(
+    controlRoot,
+    evalRunId,
+    { root, source: diagnosticsPath },
+    "smoke"
+  ).filter((source) => source.path.startsWith("reports/"));
+  expect(failedReportSources.at(-1)?.source).toBe(path.join(reportRoot, "findings.normalized.json"));
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {

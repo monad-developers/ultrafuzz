@@ -173,6 +173,7 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
 }
 
 export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRow[]): PublicEvalDiagnostics["summary"] {
+  const failedDatapointRows = rows.filter(publicEvalDiagnosticsRowIsFailedDatapoint).length;
   return {
     planned: rows.length,
     launched: rows.filter((row) => row.run_status === "launched").length,
@@ -183,8 +184,19 @@ export function summarizePublicEvalDiagnosticsRows(rows: PublicEvalDiagnosticsRo
     workflow_nonterminal: rows.filter((row) => !row.workflow_terminal).length,
     genuine_task_failure_rows: rows.filter((row) => row.terminal_disposition === "genuine-task-failures").length,
     terminal_reports_present: rows.filter((row) => row.terminal_report_present).length,
-    scoring_ready: rows.every((row) => row.scoring_ready)
+    scoring_ready: rows.every((row) => row.scoring_ready) && failedDatapointRows <= 1
   };
+}
+
+export function publicEvalDiagnosticsRowIsFailedDatapoint(
+  row: Pick<PublicEvalDiagnosticsRow, "final_status" | "workflow_status" | "workflow_terminal" | "terminal_disposition">
+): boolean {
+  return (
+    row.final_status === "failed" &&
+    row.workflow_status === "failed" &&
+    row.workflow_terminal &&
+    (row.terminal_disposition === "genuine-task-failures" || row.terminal_disposition === "operational-failure")
+  );
 }
 
 export function publicEvalDiagnosticsReadinessReasonCodes(
@@ -199,18 +211,18 @@ export function publicEvalDiagnosticsReadinessReasonCodes(
     | "workflow_ids"
   >
 ): PublicEvalDiagnosticsReasonCode[] {
-  const genuineTaskFailure =
-    row.final_status === "failed" &&
-    row.workflow_status === "failed" &&
-    row.workflow_terminal &&
-    row.terminal_disposition === "genuine-task-failures";
+  const failedDatapoint = publicEvalDiagnosticsRowIsFailedDatapoint(row);
   const reasons: PublicEvalDiagnosticsReasonCode[] = [];
   if (row.run_status === "missing") reasons.push("run-record-missing");
   if (row.run_status === "failed") reasons.push("launch-failed");
   if (!row.workflow_terminal) reasons.push("workflow-nonterminal");
-  if (row.workflow_status !== "succeeded" && !genuineTaskFailure) reasons.push("workflow-not-scoreable");
-  if (row.final_status !== "succeeded" && !genuineTaskFailure) reasons.push("final-status-not-scoreable");
-  if (row.final_status === "failed" && row.terminal_disposition !== "genuine-task-failures") {
+  if (row.workflow_status !== "succeeded" && !failedDatapoint) reasons.push("workflow-not-scoreable");
+  if (row.final_status !== "succeeded" && !failedDatapoint) reasons.push("final-status-not-scoreable");
+  if (
+    row.final_status === "failed" &&
+    row.terminal_disposition !== "genuine-task-failures" &&
+    row.terminal_disposition !== "operational-failure"
+  ) {
     reasons.push("terminal-disposition-not-scoreable");
   }
   if (row.workflow_ids.length === 0) reasons.push("workflow-id-missing");
