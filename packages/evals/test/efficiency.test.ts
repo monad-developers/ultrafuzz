@@ -242,6 +242,39 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
   });
 
+  it("publishes Kimi token and cost fields from independent component accounting", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-kimi-"));
+    writeTerminalRun(runRoot);
+    // Shape produced by a Kimi run: the four wire components stay independent
+    // and pricing is partial only because Moonshot lists no cache-write rate.
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      JSON.stringify({
+        accounting: {
+          cumulative: {
+            uncached_input_tokens: 120_000,
+            output_tokens: 8_000,
+            cache_read_tokens: 400_000,
+            cache_write_tokens: 20_000,
+            reasoning_tokens: 0,
+            total_tokens: 548_000,
+            estimated_spend_usd: 0.6,
+            usage_complete: true,
+            pricing_complete: false,
+            partial_pricing: true
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.total_tokens).toBe(548_000);
+    expect(summary.efficiency.cost_usd).toBe(0.6);
+    expect(summary.efficiency.usage).toEqual({ status: "complete", reason: null });
+    expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
+  });
+
   it("does not infer zero cost from incomplete zero-token usage", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-incomplete-zero-"));
     writeTerminalRun(runRoot);
