@@ -28,7 +28,8 @@ import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
+const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
@@ -59,7 +60,9 @@ export interface EvalHistoryTargetPublication {
 
 export interface EvalHistoryObservation {
   schema_version:
-    typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
+    | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
@@ -81,6 +84,7 @@ export interface EvalHistoryObservation {
   recall: number;
   f1: number;
   cumulative_unique_true_positives: number;
+  ground_truth_bug_count?: number;
   wall_clock_seconds: number | null;
   wall_clock_completeness: EvalHistoryCompleteness;
   cost_usd: number | null;
@@ -123,6 +127,7 @@ const githubRepositoryUrl = z
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
 const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
+const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
   .string()
   .min(1)
@@ -185,8 +190,19 @@ const observationBaseShape = {
 } as const;
 
 const currentObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
+  status: publicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: targetPublicationSchema
+});
+
+const publishedObservationSchema = z.strictObject({
   schema_version: z.union([
-    z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
+    z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
     z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
   ]),
   ...observationBaseShape,
@@ -202,7 +218,7 @@ const legacyObservationSchema = z.strictObject({
   ...observationBaseShape
 });
 
-const observationSchema = z.union([currentObservationSchema, legacyObservationSchema]);
+const observationSchema = z.union([currentObservationSchema, publishedObservationSchema, legacyObservationSchema]);
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
@@ -222,6 +238,8 @@ export const EVAL_HISTORY_CHARTS = [
   { file: "wall-clock-time.svg", metric: "wall_clock_seconds", title: "Wall-clock time (seconds)", ratio: false },
   { file: "cost.svg", metric: "cost_usd", title: "Cost (USD)", ratio: false }
 ] as const;
+
+export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg"] as const;
 
 type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
@@ -266,6 +284,15 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     const targetKeys = observation.target_revisions.map((target) => target.target);
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
+    }
+    if (
+      observation.ground_truth_bug_count !== undefined &&
+      observation.cumulative_unique_true_positives > observation.ground_truth_bug_count
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `observation ${observation.id} finds more unique true positives than its ground truth contains`
+      );
     }
     if (hasPublicationMetadata(observation)) {
       const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
@@ -452,6 +479,11 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       for (const row of rows) {
         for (const bugId of input.matchedGroundTruthByRow.get(row.id) ?? []) uniqueMatches.add(bugId);
       }
+      const groundTruthBugCount = requiredConsistentNonNegativeInteger(
+        scores.map((score) => score.ground_truth_bug_count),
+        "ground-truth bug count",
+        first.id
+      );
       const wallClock = aggregateEfficiency(
         scores.map((score) => ({ value: score.efficiency.wall_time_seconds, completeness: score.efficiency.runtime }))
       );
@@ -481,6 +513,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         recall: mean(scores.map((score) => score.recall)),
         f1: mean(scores.map((score) => score.f1_score)),
         cumulative_unique_true_positives: uniqueMatches.size,
+        ground_truth_bug_count: groundTruthBugCount,
         wall_clock_seconds: wallClock.value,
         wall_clock_completeness: wallClock.completeness,
         cost_usd: cost.value,
@@ -721,6 +754,15 @@ function requiredConsistent(values: Array<string | undefined>, field: string, ro
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `${field} is missing or inconsistent for ${rowId}`);
   }
   return values[0];
+}
+
+function requiredConsistentNonNegativeInteger(values: number[], field: string, rowId: string): number {
+  const unique = new Set(values);
+  const value = values[0];
+  if (unique.size !== 1 || value === undefined || !Number.isInteger(value) || value < 0) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `${field} is missing or inconsistent for ${rowId}`);
+  }
+  return value;
 }
 
 function aggregateEfficiency(entries: Array<{ value: number | null; completeness: EvalEfficiencyCompleteness }>): {
@@ -1071,14 +1113,438 @@ function matchedGroundTruthByRow(
   return result;
 }
 
+export interface EvalHistoryBenchmarkAggregate {
+  key: string;
+  benchmark: EvalHistoryBenchmark;
+  lane: EvalHistoryLane;
+  variant: string;
+  model_profile: string;
+  model: string;
+  reasoning_effort: string;
+  run_timestamp: string;
+  candidate_commit: string;
+  candidate_repository_url: string;
+  cohort_fingerprint: string;
+  execution_policy_fingerprint: string;
+  scoring_fingerprint: string;
+  source_eval_run_id: string;
+  target_count: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  cumulative_unique_true_positives: number;
+  ground_truth_bug_count: number | null;
+  wall_clock_seconds: number | null;
+  cost_usd: number | null;
+}
+
+function canonicalTargetRevisions(observation: EvalHistoryObservation): string {
+  return observation.target_revisions
+    .map(({ target, revision }) => `${target}:${revision}`)
+    .sort(compareText)
+    .join("\u0001");
+}
+
+export function aggregateEvalHistoryBenchmarkRuns(
+  observations: EvalHistoryObservation[]
+): EvalHistoryBenchmarkAggregate[] {
+  const groups = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of observations) {
+    const key = [
+      observation.benchmark,
+      observation.lane,
+      observation.variant,
+      observation.model_profile,
+      observation.model,
+      observation.reasoning_effort,
+      observation.cohort_fingerprint,
+      observation.execution_policy_fingerprint,
+      observation.scoring_fingerprint,
+      observation.run_timestamp,
+      observation.candidate_commit,
+      observation.source_eval_run_id
+    ].join("\u0000");
+    groups.set(key, [...(groups.get(key) ?? []), observation]);
+  }
+
+  const aggregates: EvalHistoryBenchmarkAggregate[] = [];
+  for (const [key, group] of groups) {
+    const first = group[0]!;
+    const targetRevisions = canonicalTargetRevisions(first);
+    const expectedTargets = new Set(first.target_revisions.map(({ target }) => target));
+    const observedTargets = new Set(group.map(({ target }) => target));
+    const complete =
+      expectedTargets.size > 0 &&
+      group.length === expectedTargets.size &&
+      observedTargets.size === expectedTargets.size &&
+      [...expectedTargets].every((target) => observedTargets.has(target)) &&
+      group.every(
+        (observation) =>
+          canonicalTargetRevisions(observation) === targetRevisions &&
+          observation.candidate_repository_url === first.candidate_repository_url
+      );
+    if (!complete) continue;
+
+    const groundTruthCounts = group.map((observation) => observation.ground_truth_bug_count);
+    const wallClockValues = group.map((observation) => observation.wall_clock_seconds);
+    const costValues = group.map((observation) => observation.cost_usd);
+    aggregates.push({
+      key,
+      benchmark: first.benchmark,
+      lane: first.lane,
+      variant: first.variant,
+      model_profile: first.model_profile,
+      model: first.model,
+      reasoning_effort: first.reasoning_effort,
+      run_timestamp: first.run_timestamp,
+      candidate_commit: first.candidate_commit,
+      candidate_repository_url: first.candidate_repository_url,
+      cohort_fingerprint: first.cohort_fingerprint,
+      execution_policy_fingerprint: first.execution_policy_fingerprint,
+      scoring_fingerprint: first.scoring_fingerprint,
+      source_eval_run_id: first.source_eval_run_id,
+      target_count: expectedTargets.size,
+      precision: mean(group.map((observation) => observation.precision)),
+      recall: mean(group.map((observation) => observation.recall)),
+      f1: mean(group.map((observation) => observation.f1)),
+      cumulative_unique_true_positives: group.reduce(
+        (sum, observation) => sum + observation.cumulative_unique_true_positives,
+        0
+      ),
+      ground_truth_bug_count: groundTruthCounts.some((value) => value === undefined)
+        ? null
+        : groundTruthCounts.reduce<number>((sum, value) => sum + (value ?? 0), 0),
+      wall_clock_seconds: wallClockValues.some((value) => value === null)
+        ? null
+        : round(Math.max(...wallClockValues.map((value) => value ?? 0))),
+      cost_usd: costValues.some((value) => value === null)
+        ? null
+        : round(costValues.reduce<number>((sum, value) => sum + (value ?? 0), 0))
+    });
+  }
+  return aggregates.sort(
+    (left, right) =>
+      compareText(left.run_timestamp, right.run_timestamp) ||
+      compareText(left.candidate_commit, right.candidate_commit) ||
+      compareText(left.key, right.key)
+  );
+}
+
+function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.variant,
+    aggregate.model_profile,
+    aggregate.model,
+    aggregate.reasoning_effort
+  ].join("\u0000");
+}
+
+function aggregateLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint,
+    aggregate.scoring_fingerprint
+  ].join("\u0000");
+}
+
+function aggregatePolicyLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint
+  ].join("\u0000");
+}
+
+function aggregateColumnKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [aggregate.run_timestamp, aggregate.candidate_commit, aggregate.source_eval_run_id].join("\u0000");
+}
+
+function aggregateRunKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregateColumnKey(aggregate),
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint,
+    aggregate.scoring_fingerprint
+  ].join("\u0000");
+}
+
+function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 40;
+  const latestAnchor = aggregates.at(-1);
+  const latestRun =
+    latestAnchor === undefined
+      ? []
+      : aggregates
+          .filter((aggregate) => aggregateRunKey(aggregate) === aggregateRunKey(latestAnchor))
+          .sort((leftAggregate, rightAggregate) =>
+            compareText(leftAggregate.model_profile, rightAggregate.model_profile)
+          );
+  const height = latestAnchor === undefined ? 190 : 136 + latestRun.length * 40;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">Latest UltrafuzzBench run</title>'
+  ];
+  if (latestAnchor === undefined) {
+    lines.push(
+      '<desc id="desc">No complete published benchmark run is available.</desc>',
+      `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
+      `<text x="${left}" y="54" font-family="system-ui, sans-serif" font-size="24" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
+      `<text x="${left}" y="112" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark run</text>`,
+      "</svg>"
+    );
+    return `${lines.join("\n")}\n`;
+  }
+
+  const commitUrl = `${latestAnchor.candidate_repository_url.replace(/\/$/u, "")}/commit/${latestAnchor.candidate_commit}`;
+  const profileDescriptions = latestRun.map((aggregate) => {
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives} bugs found`
+        : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
+    return `${aggregate.model} ${aggregate.reasoning_effort}: macro-F1 ${formatOverviewPercent(aggregate.f1)}, macro precision ${formatOverviewPercent(aggregate.precision)}, macro recall ${formatOverviewPercent(aggregate.recall)}, ${bugs}`;
+  });
+  lines.push(
+    `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
+    `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
+    `<text x="${left}" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
+    `<text x="${left}" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml(`${latestAnchor.benchmark} · ${latestAnchor.lane} · ${latestRun.length} ${latestRun.length === 1 ? "profile" : "profiles"} · ${latestAnchor.target_count} targets each · ${latestAnchor.run_timestamp.slice(0, 10)}`)}</text>`,
+    `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><text x="${width - left}" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">${xml(latestAnchor.candidate_commit.slice(0, 7))}</text></a>`,
+    `<text x="${left}" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>`,
+    '<text x="345" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Score (macro-F1)</text>',
+    '<text x="465" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Precision</text>',
+    '<text x="575" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Recall</text>',
+    '<text x="690" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>',
+    '<text x="800" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>',
+    '<text x="920" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Wall clock</text>',
+    `<line x1="${left}" y1="106" x2="${width - left}" y2="106" stroke="#d1d5db"/>`
+  );
+  latestRun.forEach((aggregate, index) => {
+    const rowTop = 112 + index * 40;
+    const rowY = rowTop + 23;
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives}`
+        : `${aggregate.cumulative_unique_true_positives} / ${aggregate.ground_truth_bug_count}`;
+    lines.push(
+      `<rect x="${left}" y="${rowTop}" width="${width - left * 2}" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>`,
+      `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
+      `<text x="345" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
+      `<text x="465" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#2563eb">${xml(formatOverviewPercent(aggregate.precision))}</text>`,
+      `<text x="575" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#c2410c">${xml(formatOverviewPercent(aggregate.recall))}</text>`,
+      `<text x="690" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
+      `<text x="800" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
+      `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
+const OVERVIEW_METRICS = [
+  { key: "precision", label: "Precision", color: "#2563eb", width: 2, dash: "5 4" },
+  { key: "recall", label: "Recall", color: "#c2410c", width: 2, dash: "2 4" },
+  { key: "f1", label: "F1 (UltrafuzzBench Score)", color: "#0f766e", width: 4, dash: undefined }
+] as const;
+
+const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
+
+function renderProfileMarker(
+  profileIndex: number,
+  x: number,
+  y: number,
+  color: string,
+  radius: number,
+  attributes = ""
+): string {
+  const common = `${attributes} fill="${color}" stroke="#ffffff" stroke-width="1"`;
+  switch (profileIndex % 4) {
+    case 1:
+      return `<rect ${common} x="${format(x - radius)}" y="${format(y - radius)}" width="${format(radius * 2)}" height="${format(radius * 2)}"/>`;
+    case 2:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y)} ${format(x)},${format(y + radius + 1)} ${format(x - radius - 1)},${format(y)}"/>`;
+    case 3:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y + radius)} ${format(x - radius - 1)},${format(y + radius)}"/>`;
+    default:
+      return `<circle ${common} cx="${format(x)}" cy="${format(y)}" r="${format(radius)}"/>`;
+  }
+}
+
+function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 70;
+  const right = 30;
+  const top = 110;
+  const plotWidth = width - left - right;
+  const plotHeight = 300;
+  const plotBottom = top + plotHeight;
+  const dateLabelBottom = plotBottom + 116;
+  const allColumns = [
+    ...new Map(aggregates.map((aggregate) => [aggregateColumnKey(aggregate), aggregate])).values()
+  ].sort(
+    (leftAggregate, rightAggregate) =>
+      compareText(leftAggregate.run_timestamp, rightAggregate.run_timestamp) ||
+      compareText(leftAggregate.candidate_commit, rightAggregate.candidate_commit) ||
+      compareText(leftAggregate.source_eval_run_id, rightAggregate.source_eval_run_id)
+  );
+  const columns = allColumns.slice(-EVAL_HISTORY_OVERVIEW_MAX_COLUMNS);
+  const visibleColumnKeys = new Set(columns.map(aggregateColumnKey));
+  const visibleAggregates = aggregates.filter((aggregate) => visibleColumnKeys.has(aggregateColumnKey(aggregate)));
+  const profiles = [
+    ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
+  ];
+  const legendTop = dateLabelBottom + 34;
+  const legendRowCount = OVERVIEW_METRICS.length + profiles.length;
+  const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;
+  const columnIndex = new Map(columns.map((column, index) => [aggregateColumnKey(column), index]));
+  const columnX = (aggregate: EvalHistoryBenchmarkAggregate): number => {
+    if (columns.length <= 1) return left + plotWidth / 2;
+    const index = columnIndex.get(aggregateColumnKey(aggregate)) ?? 0;
+    const pad = 44;
+    return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
+  };
+  const pointX = (aggregate: EvalHistoryBenchmarkAggregate, profileIndex: number): number => {
+    if (profiles.length <= 1) return columnX(aggregate);
+    const offsetStep = Math.min(6, 16 / (profiles.length - 1));
+    return columnX(aggregate) + (profileIndex - (profiles.length - 1) / 2) * offsetStep;
+  };
+  const y = (value: number): number => top + plotHeight - value * plotHeight;
+  const constantContext = new Set(visibleAggregates.map((aggregate) => `${aggregate.benchmark} · ${aggregate.lane}`));
+  const context = constantContext.size === 1 ? [...constantContext][0]! : "Public benchmark history";
+  const subtitle =
+    allColumns.length > columns.length
+      ? `${context} · latest ${columns.length} of ${allColumns.length} complete runs`
+      : context;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">UltrafuzzBench quality</title>',
+    `<desc id="desc">Macro precision, recall, and F1 over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
+    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; incomplete cohorts are omitted and incompatible lineages are not connected.</text>`,
+    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
+  ];
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const value = tick / 4;
+    const tickY = y(value);
+    lines.push(
+      `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
+      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">${formatOverviewPercent(value)}</text>`
+    );
+  }
+  if (visibleAggregates.length === 0) {
+    lines.push(
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark runs</text>`
+    );
+  } else {
+    const earliestByLineage = new Map<string, EvalHistoryBenchmarkAggregate>();
+    for (const aggregate of visibleAggregates) {
+      const lineage = aggregatePolicyLineageKey(aggregate);
+      if (!earliestByLineage.has(lineage)) earliestByLineage.set(lineage, aggregate);
+    }
+    for (const aggregate of earliestByLineage.values()) {
+      const markerX = columnX(aggregate);
+      const cohort = `cohort-${shortFingerprint(aggregate.cohort_fingerprint)}`;
+      const policy = `policy-${shortFingerprint(aggregate.execution_policy_fingerprint)}`;
+      lines.push(
+        `<g data-lineage-marker="${xml(cohort)}"><title>${xml(`${aggregate.benchmark} ${aggregate.lane} ${cohort} ${policy}`)}</title>`,
+        `<line x1="${format(markerX)}" y1="${top}" x2="${format(markerX)}" y2="${plotBottom}" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>`,
+        `<text transform="translate(${format(markerX + 7)},${format(top + 8)}) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">${xml(cohort)}</text></g>`
+      );
+    }
+
+    profiles.forEach((profile, profileIndex) => {
+      const profilePoints = visibleAggregates.filter(
+        (aggregate) => aggregateProfileKey(aggregate) === aggregateProfileKey(profile)
+      );
+      OVERVIEW_METRICS.forEach((metric) => {
+        let segment: EvalHistoryBenchmarkAggregate[] = [];
+        let segmentLineage: string | undefined;
+        const flush = (): void => {
+          if (segment.length > 1) {
+            lines.push(
+              `<polyline data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" fill="none" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`} points="${segment.map((aggregate) => `${format(pointX(aggregate, profileIndex))},${format(y(aggregate[metric.key]))}`).join(" ")}"/>`
+            );
+          }
+          segment = [];
+        };
+        for (const aggregate of profilePoints) {
+          const lineage = aggregateLineageKey(aggregate);
+          if (segmentLineage !== undefined && lineage !== segmentLineage) flush();
+          segmentLineage = lineage;
+          segment.push(aggregate);
+        }
+        flush();
+        for (const aggregate of profilePoints) {
+          const commitUrl = `${aggregate.candidate_repository_url.replace(/\/$/u, "")}/commit/${aggregate.candidate_commit}`;
+          const label = `${profile.lane} ${profile.model_profile} ${profile.model} ${profile.reasoning_effort} ${metric.label}`;
+          const attributes = `data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}"`;
+          lines.push(
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${aggregate.candidate_commit.slice(0, 7)}: ${formatOverviewPercent(aggregate[metric.key])} · score-${shortFingerprint(aggregate.scoring_fingerprint)}`)}</title>`,
+            `${renderProfileMarker(profileIndex, pointX(aggregate, profileIndex), y(aggregate[metric.key]), metric.color, metric.key === "f1" ? 5 : 4, attributes)}</a>`
+          );
+        }
+      });
+    });
+    for (const column of columns) {
+      const labelX = columnX(column);
+      lines.push(
+        `<text x="${format(labelX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">${xml(column.candidate_commit.slice(0, 7))}</text>`,
+        `<text transform="translate(${format(labelX)},${dateLabelBottom}) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.run_timestamp.slice(0, 10))}</text>`
+      );
+    }
+  }
+  OVERVIEW_METRICS.forEach((metric, index) => {
+    const rowY = legendTop + index * 22;
+    lines.push(
+      `<line x1="${left}" y1="${rowY - 4}" x2="${left + 14}" y2="${rowY - 4}" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`}/>`,
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14"${metric.key === "f1" ? ' font-weight="600"' : ""} fill="#374151">${xml(metric.label)}</text>`
+    );
+  });
+  profiles.forEach((profile, profileIndex) => {
+    const rowY = legendTop + (OVERVIEW_METRICS.length + profileIndex) * 22;
+    lines.push(
+      renderProfileMarker(profileIndex, left + 7, rowY - 4, "#374151", 4),
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(`${profile.lane} · ${profile.model_profile} · ${profile.model} · ${profile.reasoning_effort}`)}</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
+function formatOverviewPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatElapsed(value: number): string {
+  const seconds = Math.round(value);
+  if (seconds >= 3_600) return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
 export function renderEvalHistoryCharts(history: EvalHistory): Map<string, string> {
   const validated = parseEvalHistory(history);
-  return new Map(
-    EVAL_HISTORY_CHARTS.map((chart) => [
-      chart.file,
-      renderChart(validated.observations, chart.metric, chart.title, chart.ratio)
-    ])
+  const aggregates = aggregateEvalHistoryBenchmarkRuns(validated.observations).filter(
+    (aggregate) => aggregate.benchmark === "ultrafuzz-bench"
   );
+  return new Map([
+    [EVAL_HISTORY_OVERVIEW_FILES[0], renderLatestEvalSummary(aggregates)],
+    [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
+    ...EVAL_HISTORY_CHARTS.map(
+      (chart) => [chart.file, renderChart(validated.observations, chart.metric, chart.title, chart.ratio)] as const
+    )
+  ]);
 }
 
 export function writeEvalHistoryCharts(history: EvalHistory, chartsDirectory: string): string[] {

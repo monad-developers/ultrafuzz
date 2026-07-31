@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="176" viewBox="0 0 960 176" role="img" aria-labelledby="title desc">
+<title id="title">Latest UltrafuzzBench run</title>
+<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. gpt-5.6-luna high: macro-F1 26.7%, macro precision 100.0%, macro recall 15.4%, 5 bugs found.</desc>
+<rect width="960" height="176" rx="12" fill="#f9fafb"/>
+<text x="40" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>
+<text x="40" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">ultrafuzz-bench · smoke · 1 profile · 3 targets each · 2026-07-30</text>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506"><text x="920" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">3ea3059</text></a>
+<text x="40" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>
+<text x="345" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Score (macro-F1)</text>
+<text x="465" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Precision</text>
+<text x="575" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Recall</text>
+<text x="690" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>
+<text x="800" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>
+<text x="920" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Wall clock</text>
+<line x1="40" y1="106" x2="920" y2="106" stroke="#d1d5db"/>
+<rect x="40" y="112" width="880" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="52" y="135" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>smoke · benchmark-smoke-gpt-5-6-luna-high</title>gpt-5.6-luna · high</text>
+<text x="345" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">26.7%</text>
+<text x="465" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#2563eb">100.0%</text>
+<text x="575" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#c2410c">15.4%</text>
+<text x="690" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">5</text>
+<text x="800" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">$80.34</text>
+<text x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">11m 56s</text>
+</svg>

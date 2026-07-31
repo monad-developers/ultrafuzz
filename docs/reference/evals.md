@@ -206,6 +206,31 @@ Smoke publication additionally requires at least one normalized finding for
 every target row. The smoke workflow profile and selected strategy IDs are part
 of the execution-policy fingerprint, so its charts cannot mix with full or
 legacy smoke observations.
+
+### Published history
+
+The README overview emits one point only when a candidate run contains every
+target pinned by its cohort, exactly once, for the same benchmark, lane,
+variant, model profile, cohort, execution policy, and scoring lineage.
+Incomplete or duplicate target sets are retained in the append-only history but
+omitted from the overview. The **UltrafuzzBench Score** is macro-F1: the
+arithmetic mean of the per-target F1 values, so each target and framework has
+equal weight. Macro precision and recall use the same equal-target weighting.
+
+The latest-result summary sums target cost and uses the slowest target as the
+parallel run's wall clock. If any target lacks complete cost or runtime
+evidence, that summary value is unavailable. When the latest run contains
+multiple model profiles, the summary shows every profile instead of choosing
+one by identifier order. The quality overview shows at most the 12 latest
+complete candidate runs, gives each model profile a distinct marker shape, and
+breaks lines when the cohort, execution policy, or scoring identity changes.
+The compact overview replaces the six detailed README plots; the per-target
+[precision](../assets/eval-history/precision.svg),
+[recall](../assets/eval-history/recall.svg), [F1](../assets/eval-history/f1.svg),
+[unique true positives](../assets/eval-history/cumulative-unique-true-positives.svg),
+[wall clock](../assets/eval-history/wall-clock-time.svg), and
+[cost](../assets/eval-history/cost.svg) charts remain available for diagnosis.
+
 `eval history` consumes only complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or
