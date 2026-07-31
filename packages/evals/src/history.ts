@@ -1281,16 +1281,6 @@ function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   ].join("\u0000");
 }
 
-function aggregateLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
-  return [
-    aggregate.benchmark,
-    aggregate.lane,
-    aggregate.cohort_fingerprint,
-    aggregate.execution_policy_fingerprint,
-    aggregate.scoring_fingerprint
-  ].join("\u0000");
-}
-
 function aggregatePolicyLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
   return [
     aggregate.benchmark,
@@ -1389,6 +1379,8 @@ const OVERVIEW_METRICS = [
   { key: "f1", label: "UltrafuzzBench Score (macro-F1)", color: "#0f766e", width: 4, dash: undefined }
 ] as const;
 
+const OVERVIEW_PROFILE_COLORS = ["#2563eb", "#c2410c", "#7c3aed", "#be123c", "#0369a1", "#a16207"] as const;
+
 const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
 
 function renderProfileMarker(
@@ -1461,7 +1453,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     '<?xml version="1.0" encoding="UTF-8"?>',
     `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
     '<title id="title">UltrafuzzBench quality</title>',
-    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort, execution policy, or scoring identity changes. Marker shapes distinguish model profiles.</desc>`,
+    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>`,
     `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
     `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
     `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,
@@ -1499,6 +1491,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
     }
 
     profiles.forEach((profile, profileIndex) => {
+      const profileColor = OVERVIEW_PROFILE_COLORS[profileIndex % OVERVIEW_PROFILE_COLORS.length]!;
       const profilePoints = visibleAggregates.filter(
         (aggregate) => aggregateProfileKey(aggregate) === aggregateProfileKey(profile)
       );
@@ -1514,7 +1507,9 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
           segment = [];
         };
         for (const aggregate of profilePoints) {
-          const lineage = aggregateLineageKey(aggregate);
+          // Exact scoring identities include the candidate commit, so using them
+          // here would reduce every longitudinal trend to disconnected points.
+          const lineage = aggregatePolicyLineageKey(aggregate);
           if (segmentLineage !== undefined && lineage !== segmentLineage) flush();
           segmentLineage = lineage;
           segment.push(aggregate);
@@ -1526,7 +1521,7 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
           const attributes = `data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}"`;
           lines.push(
             `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${aggregate.candidate_commit.slice(0, 7)}: ${formatOverviewPercent(aggregate[metric.key])} · score-${shortFingerprint(aggregate.scoring_fingerprint)}`)}</title>`,
-            `${renderProfileMarker(profileIndex, pointX(aggregate, profileIndex), y(aggregate[metric.key]), metric.color, metric.key === "f1" ? 5 : 4, attributes)}</a>`
+            `${renderProfileMarker(profileIndex, pointX(aggregate, profileIndex), y(aggregate[metric.key]), profileColor, metric.key === "f1" ? 5 : 4, attributes)}</a>`
           );
         }
       });
@@ -1548,8 +1543,9 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
   });
   profiles.forEach((profile, profileIndex) => {
     const rowY = legendTop + (OVERVIEW_METRICS.length + profileIndex) * 22;
+    const profileColor = OVERVIEW_PROFILE_COLORS[profileIndex % OVERVIEW_PROFILE_COLORS.length]!;
     lines.push(
-      renderProfileMarker(profileIndex, left + 7, rowY - 4, "#374151", 4),
+      renderProfileMarker(profileIndex, left + 7, rowY - 4, profileColor, 4),
       `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(`${profile.lane} · ${profile.model_profile} · ${profile.model} · ${profile.reasoning_effort}`)}</text>`
     );
   });

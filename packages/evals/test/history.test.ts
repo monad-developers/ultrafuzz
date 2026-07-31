@@ -904,7 +904,8 @@ describe("longitudinal eval history", () => {
     expect(quality).not.toContain('data-metric="recall"');
     expect(quality).toContain('stroke-width="4"');
     expect(quality).toContain("incomplete cohorts are omitted");
-    expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-full-kimi-k3-max"');
+    expect(quality).toContain('<circle data-metric="f1" data-profile="benchmark-smoke" fill="#2563eb"');
+    expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-full-kimi-k3-max" fill="#c2410c"');
     expect(summary).toContain("2 model profiles");
     expect(summary).not.toContain(">Precision</text>");
     expect(summary).not.toContain(">Recall</text>");
@@ -915,7 +916,7 @@ describe("longitudinal eval history", () => {
     expect(summary).toContain("2m 0s");
   });
 
-  it("does not connect scoring changes and bounds the quality overview to recent runs", () => {
+  it("connects per-candidate scoring identities and bounds the quality overview to recent runs", () => {
     const commits = "0123456789abc".split("").map((character) => character.repeat(40));
     const observations = commits.flatMap((candidateCommit, index) =>
       (["target-a", "target-b"] as const).map((target) =>
@@ -925,7 +926,7 @@ describe("longitudinal eval history", () => {
           source_artifact: `https://github.com/monad-developers/ultrafuzz/actions/runs/${index}`,
           candidate_commit: candidateCommit,
           run_timestamp: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
-          scoring_fingerprint: index === 12 ? `sha256:${"f".repeat(64)}` : SCORING_FINGERPRINT
+          scoring_fingerprint: `sha256:${candidateCommit[0]!.repeat(64)}`
         })
       )
     );
@@ -936,6 +937,8 @@ describe("longitudinal eval history", () => {
     expect(quality).toContain("latest 12 of 13 complete runs");
     expect(quality).not.toContain(commits[0]!.slice(0, 7));
     expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(1);
+    const points = /<polyline data-metric="f1"[^>]+points="([^"]+)"/u.exec(quality)?.[1]?.split(" ");
+    expect(points).toHaveLength(12);
     expect(quality).toContain("incompatible lineages are not connected");
   });
 

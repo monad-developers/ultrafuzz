@@ -225,8 +225,11 @@ parallel run's wall clock. If any target lacks complete cost or runtime
 evidence, that summary value is unavailable. When the latest run contains
 multiple model profiles, the summary shows every profile instead of choosing
 one by identifier order. The quality overview shows at most the 12 latest
-complete candidate runs, gives each model profile a distinct marker shape, and
-breaks lines when the cohort, execution policy, or scoring identity changes.
+complete candidate runs, gives each model profile a distinct marker color and
+shape, and breaks lines when the cohort or execution policy changes. Exact
+per-candidate scoring identities remain available in point tooltips and still
+gate strict `eval compare` compatibility; they do not fragment the visual trend
+because the scoring identity records the candidate commit itself.
 `eval history` consumes complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or
