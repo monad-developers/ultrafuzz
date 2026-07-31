@@ -21,7 +21,16 @@ test("eval history renders and checks deterministic public charts", async () => 
   assert.equal(result.command, "eval history");
   assert.equal(result.ok, true);
   assert.equal(result.data.observations, 0);
-  assert.equal(fs.readdirSync(path.join(project, "docs", "assets", "eval-history")).length, 6);
+  assert.deepEqual(fs.readdirSync(path.join(project, "docs", "assets", "eval-history")).sort(), [
+    "cost.svg",
+    "cumulative-unique-true-positives.svg",
+    "f1.svg",
+    "latest-summary.svg",
+    "precision.svg",
+    "quality.svg",
+    "recall.svg",
+    "wall-clock-time.svg"
+  ]);
 
   const checked = await invoke(project, ["eval", "history", "--project", project, "--check", "--json"]);
   assert.equal(checked.code, 0, checked.stderr || checked.stdout);

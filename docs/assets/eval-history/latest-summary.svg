@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="190" viewBox="0 0 960 190" role="img" aria-labelledby="title desc">
+<title id="title">Latest UltrafuzzBench result</title>
+<desc id="desc">Latest complete ultrafuzz-bench smoke result: macro-F1 26.7%, macro precision 100.0%, macro recall 15.4%, 5 of 31 bugs found.</desc>
+<rect width="960" height="190" rx="12" fill="#f9fafb"/>
+<text x="40" y="38" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench result</text>
+<text x="40" y="65" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">ultrafuzz-bench · smoke · gpt-5.6-luna · high · 3 targets · 2026-07-30</text>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/3ea30591805bdb0dda96ae56efa08419e7b4a506"><text x="920" y="38" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">3ea3059</text></a>
+<rect x="40" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="52" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Score (macro-F1)</text>
+<text x="52" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">26.7%</text>
+<rect x="188.33" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="200.33" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Macro precision</text>
+<text x="200.33" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">100.0%</text>
+<rect x="336.67" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="348.67" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Macro recall</text>
+<text x="348.67" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">15.4%</text>
+<rect x="485" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="497" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Bugs found</text>
+<text x="497" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">5 / 31</text>
+<rect x="633.33" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="645.33" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Total cost</text>
+<text x="645.33" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">$80.34</text>
+<rect x="781.67" y="86" width="138.33" height="78" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+<text x="793.67" y="112" font-family="system-ui, sans-serif" font-size="12" fill="#6b7280">Wall clock</text>
+<text x="793.67" y="145" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">11m 56s</text>
+</svg>

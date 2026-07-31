@@ -14,6 +14,8 @@ import {
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
 const TARGET_REF = "refs/heads/main";
 const CHARTS = [
+  "latest-summary.svg",
+  "quality.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",
@@ -311,6 +313,8 @@ function installFixtureCli(checkout: string): void {
 import path from "node:path";
 
 const charts = [
+  "latest-summary.svg",
+  "quality.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",

@@ -11,6 +11,7 @@ import {
 import {
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
+  aggregateEvalHistoryBenchmarkRuns,
   assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
@@ -57,6 +58,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     recall: 0.5,
     f1: 0.6,
     cumulative_unique_true_positives: 2,
+    ground_truth_bug_count: 2,
     wall_clock_seconds: 120,
     wall_clock_completeness: { status: "complete", reasons: [] },
     cost_usd: 1.25,
@@ -84,6 +86,35 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/1",
     ...overrides
   };
+}
+
+const TARGET_B_REVISION = "4444444444444444444444444444444444444444";
+const AGGREGATE_TARGET_REVISIONS = [
+  { target: "target-a", revision: TARGET_REVISION },
+  { target: "target-b", revision: TARGET_B_REVISION }
+];
+
+function cohortObservation(
+  target: "target-a" | "target-b",
+  overrides: Partial<EvalHistoryObservation> = {}
+): EvalHistoryObservation {
+  const base = observation();
+  const revision = target === "target-a" ? TARGET_REVISION : TARGET_B_REVISION;
+  return observation({
+    id: `run-1:${target}:baseline:benchmark-smoke`,
+    benchmark: "ultrafuzz-bench",
+    target,
+    target_revisions: AGGREGATE_TARGET_REVISIONS,
+    cumulative_unique_true_positives: target === "target-a" ? 1 : 2,
+    ground_truth_bug_count: target === "target-a" ? 2 : 4,
+    target_publication: {
+      ...base.target_publication!,
+      target,
+      revision,
+      repository: `https://example.com/${target}`
+    },
+    ...overrides
+  });
 }
 
 function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRowScore {
@@ -294,6 +325,7 @@ describe("longitudinal eval history", () => {
       graded_case_count: _gradedCaseCount,
       publication_url: _publicationUrl,
       target_publication: _targetPublication,
+      ground_truth_bug_count: _groundTruthBugCount,
       ...legacy
     } = observation({ schema_version: "ultrafuzz.eval.history.observation.v1" });
     const parsed = parseEvalHistory({
@@ -301,6 +333,33 @@ describe("longitudinal eval history", () => {
       observations: [legacy]
     });
     expect(parsed.observations).toEqual([legacy]);
+  });
+
+  it("preserves published v2 observations without ground-truth counts", () => {
+    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
+      schema_version: "ultrafuzz.eval.history.observation.v2"
+    });
+    const parsed = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [publishedV2]
+    });
+    expect(parsed.observations).toEqual([publishedV2]);
+  });
+
+  it("requires ground-truth counts for v3 observations and bounds unique matches", () => {
+    const { ground_truth_bug_count: _groundTruthBugCount, ...missingGroundTruth } = observation();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [missingGroundTruth]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [observation({ cumulative_unique_true_positives: 3, ground_truth_bug_count: 2 })]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("rejects malformed history and inconsistent completeness", () => {
@@ -403,6 +462,7 @@ describe("longitudinal eval history", () => {
       recall: 0.75,
       f1: 0.75,
       cumulative_unique_true_positives: 2,
+      ground_truth_bug_count: 2,
       wall_clock_seconds: 100,
       cost_usd: 0.75,
       executed_case_count: 2,
@@ -637,6 +697,7 @@ describe("longitudinal eval history", () => {
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
       observations: [
         observation({
+          benchmark: "ultrafuzz-bench",
           wall_clock_seconds: null,
           wall_clock_completeness: { status: "unavailable", reasons: ["workflow-state-unavailable"] },
           cost_usd: null,
@@ -655,6 +716,80 @@ describe("longitudinal eval history", () => {
     expect(first.get("precision.svg")).toContain(">target-a</text>");
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
+    expect(first.get("latest-summary.svg")).toContain("Score (macro-F1)");
+    expect(first.get("latest-summary.svg")).toContain(">n/a</text>");
+    expect(first.get("quality.svg")).toContain('data-metric="f1"');
+  });
+
+  it("aggregates only complete target cohorts with macro quality and parallel efficiency semantics", () => {
+    const targetA = cohortObservation("target-a", {
+      precision: 0.5,
+      recall: 0.5,
+      f1: 0.5,
+      wall_clock_seconds: 120,
+      cost_usd: 1.25
+    });
+    const targetB = cohortObservation("target-b", {
+      precision: 1,
+      recall: 0.25,
+      f1: 0.4,
+      wall_clock_seconds: 180,
+      cost_usd: 2
+    });
+
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA])).toEqual([]);
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA, { ...targetA, id: "duplicate-target-a" }])).toEqual([]);
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA, targetB])).toMatchObject([
+      {
+        target_count: 2,
+        precision: 0.75,
+        recall: 0.375,
+        f1: 0.45,
+        cumulative_unique_true_positives: 3,
+        ground_truth_bug_count: 6,
+        wall_clock_seconds: 180,
+        cost_usd: 3.25
+      }
+    ]);
+  });
+
+  it("renders one complete-run overview and breaks quality lines when lineage changes", () => {
+    const firstRun = (["target-a", "target-b"] as const).map((target) => cohortObservation(target));
+    const secondRun = (["target-a", "target-b"] as const).map((target) =>
+      cohortObservation(target, {
+        id: `run-2:${target}:baseline:benchmark-smoke`,
+        source_eval_run_id: "run-2",
+        source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/2",
+        candidate_commit: "3333333333333333333333333333333333333333",
+        run_timestamp: "2026-07-20T00:00:00.000Z"
+      })
+    );
+    const thirdRun = (["target-a", "target-b"] as const).map((target) =>
+      cohortObservation(target, {
+        id: `run-3:${target}:baseline:benchmark-smoke`,
+        source_eval_run_id: "run-3",
+        source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/3",
+        candidate_commit: "5555555555555555555555555555555555555555",
+        run_timestamp: "2026-07-21T00:00:00.000Z",
+        execution_policy_fingerprint: `sha256:${"e".repeat(64)}`
+      })
+    );
+    const charts = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [...firstRun, ...secondRun, ...thirdRun]
+      })
+    );
+    const quality = charts.get("quality.svg")!;
+    const summary = charts.get("latest-summary.svg")!;
+
+    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(3);
+    expect(quality).toContain('data-metric="f1"');
+    expect(quality).toContain('stroke-width="4"');
+    expect(quality).toContain("incomplete cohorts are omitted");
+    expect(summary).toContain("3 / 6");
+    expect(summary).toContain("$2.50");
+    expect(summary).toContain("2m 0s");
   });
 
   it("formats published history JSON compatibly with repository Prettier checks", () => {
