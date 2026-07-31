@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1516,6 +1517,398 @@ enabled = true
       assert.equal(credential.refresh_token, undefined);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+);
+
+type KimiInterpreterEvent = {
+  type?: string;
+  ok?: boolean;
+  answer?: string;
+  resume?: string;
+  usage?: Record<string, number>;
+};
+
+function writeKimiSourceConfig(project: string, name: string): string {
+  const sourceConfig = path.join(project, name);
+  fs.mkdirSync(path.join(sourceConfig, "credentials"), { recursive: true });
+  fs.writeFileSync(
+    path.join(sourceConfig, "config.toml"),
+    `default_model = "kimi-k3"
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://api.kimi.com/coding/v1"
+oauth = { storage = "file", key = "oauth/kimi-code" }
+
+[models.kimi-k3]
+provider = "managed:kimi-code"
+model = "k3"
+max_context_size = 1048576
+support_efforts = [ "low", "high", "max" ]
+default_effort = "high"
+`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(sourceConfig, "credentials", "kimi-code.json"),
+    JSON.stringify({
+      access_token: "usage-access-token",
+      refresh_token: "usage-refresh-token",
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      expires_in: 3600
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(path.join(sourceConfig, "device_id"), "usage-device\n", "utf8");
+  return sourceConfig;
+}
+
+function kimiSubscriptionOptions(sourceConfig: string): Record<string, unknown> {
+  return {
+    model: "kimi-k3",
+    configDir: sourceConfig,
+    ultrafuzzAuthMode: "subscription",
+    ultrafuzzReasoningEffort: "max"
+  };
+}
+
+function kimiUsageRecordLine(
+  inputOther: number,
+  output: number,
+  inputCacheRead: number,
+  inputCacheCreation: number
+): string {
+  return JSON.stringify({
+    type: "usage.record",
+    model: "kimi-k3",
+    usage: { inputOther, output, inputCacheRead, inputCacheCreation },
+    usageScope: "turn"
+  });
+}
+
+/** Writes `<home>/sessions/<sessionRelative>/agents/<agentId>/wire.jsonl`. */
+function writeKimiWire(home: string, sessionRelative: string, agentId: string, lines: string[]): string {
+  const agentDir = path.join(home, "sessions", ...sessionRelative.split("/"), "agents", agentId);
+  fs.mkdirSync(agentDir, { recursive: true });
+  const wire = path.join(agentDir, "wire.jsonl");
+  fs.writeFileSync(wire, lines.length === 0 ? "" : `${lines.join("\n")}\n`, "utf8");
+  return wire;
+}
+
+function kimiWireHeaderLine(sessionId: string): string {
+  return JSON.stringify({ type: "metadata", version: "1.4", sessionId, createdAt: "2026-07-09T00:00:00.000Z" });
+}
+
+function kimiExitResult(args: string[]): unknown {
+  return {
+    command: "kimi",
+    args,
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    stdoutTruncated: false,
+    stderrTruncated: false
+  };
+}
+
+function kimiCompletedEvent(events: unknown): KimiInterpreterEvent {
+  const completed = (events as KimiInterpreterEvent[]).find((event) => event.type === "completed");
+  assert.ok(completed !== undefined, "the Kimi interpreter emitted no completed event");
+  return completed;
+}
+
+test(
+  "generated Kimi adapter reports one invocation's wire usage across every agent wire",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-fresh");
+
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const command = await agent.buildCommand({ prompt: "Fresh usage", cwd: "/workspace/target", options: {} });
+    const home = command.env?.KIMI_CODE_HOME;
+    assert.ok(home);
+
+    const session = "00000000-0000-0000-0000-000000000201";
+    const sessionRelative = `wd_target_000000000201/${session}`;
+    writeKimiWire(home, sessionRelative, "main", [
+      kimiWireHeaderLine(session),
+      kimiUsageRecordLine(1_200, 340, 8_000, 500),
+      JSON.stringify({ type: "message.appended", role: "assistant", content: "no usage on this record" }),
+      kimiUsageRecordLine(90, 12, 0, 0)
+    ]);
+    writeKimiWire(home, sessionRelative, "sub-1", [
+      kimiWireHeaderLine(session),
+      kimiUsageRecordLine(700, 60, 1_000, 0)
+    ]);
+
+    const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
+    // Independent components, summed across the main agent and its sub-agent.
+    assert.deepEqual(completed.usage, {
+      input_tokens: 1_990,
+      output_tokens: 412,
+      cache_read_input_tokens: 9_000,
+      cache_creation_input_tokens: 500,
+      total_tokens: 11_902
+    });
+    // Kimi folds thinking tokens into `output`; a reasoning alias would double count.
+    assert.equal(Object.prototype.hasOwnProperty.call(completed.usage ?? {}, "reasoning_tokens"), false);
+    assert.equal(completed.usage?.cache_read_input_tokens !== undefined, true);
+    // Attaching usage leaves the rest of the completed event untouched.
+    assert.equal(completed.ok, true);
+
+    await command.cleanup?.();
+    // Cleanup clears the per-invocation baseline and runtime home, so a reused
+    // agent instance cannot re-report the previous invocation's tokens.
+    const afterCleanup = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
+    assert.equal(Object.prototype.hasOwnProperty.call(afterCleanup, "usage"), false);
+  }
+);
+
+test(
+  "generated Kimi adapter reports only the resumed invocation's own tokens",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-resume");
+
+    const session = "00000000-0000-0000-0000-000000000202";
+    const bucket = "wd_target_000000000202";
+    const sessionDir = path.join(sourceConfig, "sessions", bucket, session);
+    writeKimiWire(sourceConfig, `${bucket}/${session}`, "main", [
+      kimiWireHeaderLine(session),
+      kimiUsageRecordLine(5_000_000, 400_000, 9_000_000, 100_000),
+      kimiUsageRecordLine(1_000, 2_000, 3_000, 4_000)
+    ]);
+    fs.writeFileSync(
+      path.join(sessionDir, "state.json"),
+      `${JSON.stringify({
+        workDir: "/workspace/target",
+        agents: {
+          main: { homedir: path.join(sessionDir, "agents", "main"), type: "agent", parentAgentId: null }
+        }
+      })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(sourceConfig, "session_index.jsonl"),
+      `${JSON.stringify({ sessionId: session, sessionDir, workDir: "/workspace/target" })}\n`,
+      "utf8"
+    );
+
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const command = await agent.buildCommand({
+      prompt: "Resume usage",
+      cwd: "/workspace/target",
+      options: { resumeSession: session }
+    });
+    const home = command.env?.KIMI_CODE_HOME;
+    assert.ok(home);
+    const runtimeWire = path.join(home, "sessions", bucket, session, "agents", "main", "wire.jsonl");
+    assert.equal(fs.existsSync(runtimeWire), true);
+
+    fs.appendFileSync(
+      runtimeWire,
+      `${kimiUsageRecordLine(1_500, 250, 6_000, 700)}\n${kimiUsageRecordLine(10, 20, 30, 40)}\n`,
+      "utf8"
+    );
+
+    // The seeded history really is present, so the reported delta is the
+    // baseline skipping it rather than an empty resumed wire.
+    assert.equal(
+      fs
+        .readFileSync(runtimeWire, "utf8")
+        .split("\n")
+        .filter((line) => line.includes('"usage.record"')).length,
+      4
+    );
+
+    const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
+    assert.deepEqual(completed.usage, {
+      input_tokens: 1_510,
+      output_tokens: 270,
+      cache_read_input_tokens: 6_030,
+      cache_creation_input_tokens: 740,
+      total_tokens: 8_550
+    });
+    // Session recovery still reports the resumed session alongside the usage.
+    assert.equal(completed.resume, session);
+    assert.equal(completed.ok, true);
+    await command.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi adapter skips malformed wire usage without fabricating tokens",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-malformed");
+    const options = kimiSubscriptionOptions(sourceConfig);
+
+    const tolerant = new KimiCode029Agent(options);
+    const tolerantCommand = await tolerant.buildCommand({
+      prompt: "Malformed usage",
+      cwd: "/workspace/target",
+      options: {}
+    });
+    const tolerantHome = tolerantCommand.env?.KIMI_CODE_HOME;
+    assert.ok(tolerantHome);
+    const tolerantWire = writeKimiWire(tolerantHome, "wd_target_000000000203/session-203", "main", [
+      "not json at all",
+      "{",
+      JSON.stringify({
+        type: "usage.record",
+        usage: { inputOther: "12", output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
+      }),
+      JSON.stringify({
+        type: "usage.record",
+        usage: { inputOther: -5, output: 1, inputCacheRead: 0, inputCacheCreation: 0 }
+      }),
+      JSON.stringify({ type: "usage.record", usage: { inputOther: 4, output: 2, inputCacheRead: 1 } }),
+      JSON.stringify({ type: "usage.record", model: "kimi-k3" }),
+      JSON.stringify({ type: "message.appended", usage: { inputOther: 999, output: 999 } }),
+      kimiUsageRecordLine(33, 7, 2, 1)
+    ]);
+    // A torn final line, exactly as a crashed Kimi process leaves it.
+    fs.appendFileSync(tolerantWire, '{"type":"usage.record","model":"kimi-k3","usage":{"inputOth', "utf8");
+
+    const tolerantCompleted = kimiCompletedEvent(
+      tolerant.createOutputInterpreter().onExit?.(kimiExitResult(tolerantCommand.args))
+    );
+    assert.deepEqual(tolerantCompleted.usage, {
+      input_tokens: 33,
+      output_tokens: 7,
+      cache_read_input_tokens: 2,
+      cache_creation_input_tokens: 1,
+      total_tokens: 43
+    });
+    await tolerantCommand.cleanup?.();
+
+    const absent = new KimiCode029Agent(options);
+    const absentCommand = await absent.buildCommand({ prompt: "No usage", cwd: "/workspace/target", options: {} });
+    const absentHome = absentCommand.env?.KIMI_CODE_HOME;
+    assert.ok(absentHome);
+    writeKimiWire(absentHome, "wd_target_000000000204/session-204", "main", [
+      kimiWireHeaderLine("session-204"),
+      "still not json",
+      JSON.stringify({ type: "usage.record", usage: { inputOther: Number.NaN } })
+    ]);
+    const absentCompleted = kimiCompletedEvent(
+      absent.createOutputInterpreter().onExit?.(kimiExitResult(absentCommand.args))
+    );
+    // Absent usage stays absent so accounting reports it unavailable, not zero,
+    // and the successful-output and session behavior is unchanged.
+    assert.equal(Object.prototype.hasOwnProperty.call(absentCompleted, "usage"), false);
+    assert.equal(absentCompleted.type, "completed");
+    assert.equal(absentCompleted.ok, true);
+    assert.equal(absentCompleted.resume, undefined);
+    await absentCommand.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi adapter reads wire usage only from inside the isolated runtime home",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { KimiCode029Agent } = await loadGeneratedKimiAgent(project);
+    const sourceConfig = writeKimiSourceConfig(project, "kimi-usage-isolation");
+    // A shared session store outside this invocation's runtime home.
+    writeKimiWire(sourceConfig, "wd_other/session-other", "main", [
+      kimiUsageRecordLine(9_000_000, 9_000_000, 9_000_000, 9_000_000)
+    ]);
+
+    const agent = new KimiCode029Agent(kimiSubscriptionOptions(sourceConfig));
+    const command = await agent.buildCommand({ prompt: "Isolated usage", cwd: "/workspace/target", options: {} });
+    const home = command.env?.KIMI_CODE_HOME;
+    assert.ok(home);
+
+    const escaped = path.join(project, "kimi-escaped-wire");
+    fs.mkdirSync(escaped, { recursive: true });
+    fs.writeFileSync(
+      path.join(escaped, "wire.jsonl"),
+      `${kimiUsageRecordLine(7_000_000, 7_000_000, 7_000_000, 7_000_000)}\n`,
+      "utf8"
+    );
+    fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
+    fs.symlinkSync(escaped, path.join(home, "sessions", "linked-agent-dir"), "dir");
+    fs.symlinkSync(path.join(escaped, "wire.jsonl"), path.join(home, "sessions", "wire.jsonl"));
+    writeKimiWire(home, "wd_target_000000000205/session-205", "main", [kimiUsageRecordLine(11, 22, 33, 44)]);
+
+    const completed = kimiCompletedEvent(agent.createOutputInterpreter().onExit?.(kimiExitResult(command.args)));
+    assert.deepEqual(completed.usage, {
+      input_tokens: 11,
+      output_tokens: 22,
+      cache_read_input_tokens: 33,
+      cache_creation_input_tokens: 44,
+      total_tokens: 110
+    });
+    await command.cleanup?.();
+  }
+);
+
+test(
+  "generated Kimi completed-event usage is what pinned Smithers 0.31.0 consumes",
+  { skip: !runningUnderBun },
+  async () => {
+    const smithersEntry = fs.realpathSync(
+      path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js")
+    );
+    const resolved = createRequire(smithersEntry).resolve("@smithers-orchestrator/agents/BaseCliAgent");
+    const baseCliAgent = (await import(pathToFileURL(resolved).href)) as {
+      extractUsageFromOutput: (raw: string) => unknown;
+    };
+    // A realistic Kimi Code 0.29.1 stream-json transcript: no `usage` anywhere,
+    // so BaseCliAgent provably falls through to the completed event we populate.
+    const streamJson = [
+      JSON.stringify({ role: "meta", type: "system.version", version: "0.29.1" }),
+      JSON.stringify({ role: "assistant", content: "Reviewing the target contracts." }),
+      JSON.stringify({ role: "tool", tool_call_id: "call_1", content: "read 42 lines" }),
+      JSON.stringify({ role: "assistant", content: "Done." }),
+      JSON.stringify({
+        type: "goal.summary",
+        goalId: "goal_1",
+        status: "completed",
+        reason: null,
+        turnsUsed: 3,
+        tokensUsed: 4_242,
+        wallClockMs: 9_000
+      }),
+      JSON.stringify({
+        role: "meta",
+        type: "session.resume_hint",
+        session_id: "00000000-0000-0000-0000-000000000206",
+        command: "kimi -r 00000000-0000-0000-0000-000000000206",
+        content: "To resume this session: kimi -r 00000000-0000-0000-0000-000000000206"
+      })
+    ].join("\n");
+    assert.equal(baseCliAgent.extractUsageFromOutput(streamJson), undefined);
+
+    // The completed-event fallback reads these exact aliases; a Smithers bump
+    // that renames them must fail here rather than silently drop accounting.
+    const pinnedSource = fs.readFileSync(path.join(path.dirname(resolved), "BaseCliAgent.js"), "utf8");
+    assert.match(pinnedSource, /usageFromCompletedEvent\(completedEvent\)/u);
+    for (const alias of [
+      "input_tokens",
+      "output_tokens",
+      "cache_read_input_tokens",
+      "cache_creation_input_tokens",
+      "total_tokens"
+    ]) {
+      assert.ok(pinnedSource.includes(alias), `pinned BaseCliAgent no longer reads ${alias}`);
     }
   }
 );
@@ -4430,6 +4823,253 @@ test("syncRun applies context-tier pricing from the live catalog", async () => {
   assert.equal(metadata.accounting?.current?.tokens_used, "310,000");
   assert.equal(metadata.accounting?.current?.estimated_spend, "$3.45");
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
+});
+
+const MOONSHOT_KIMI_CATALOG = {
+  moonshotai: {
+    models: {
+      "kimi-k3": { cost: { input: 3, output: 15, cache_read: 0.3 } }
+    }
+  }
+};
+
+function kimiTokenUsageEvents(workflowRunId: string): string {
+  return workflowEvents(workflowRunId, [
+    { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+    {
+      type: "TokenUsageReported",
+      nodeId: "node:project-discovery",
+      attempt: 1,
+      extra: {
+        iteration: 0,
+        // Kimi wire components map 1:1 onto Ultrafuzz's independent components.
+        inputTokens: 120_000,
+        outputTokens: 8_000,
+        cacheReadTokens: 400_000,
+        cacheWriteTokens: 20_000,
+        model: "kimi-k3",
+        agent: "KimiAgent"
+      }
+    },
+    { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+    { type: "RunFinished" }
+  ]);
+}
+
+test("syncRun publishes durable Kimi accounting and API-comparison cost at Moonshot rates", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-kimi-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: kimiTokenUsageEvents(workflowRunId)
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl(MOONSHOT_KIMI_CATALOG);
+  const run = await startRun({ projectRoot: project, runId: "kimi-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "kimi-accounting", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+
+  type KimiAccountingSegment = {
+    uncached_input_tokens?: number;
+    output_tokens?: number;
+    cache_read_tokens?: number;
+    cache_write_tokens?: number;
+    reasoning_tokens?: number;
+    inclusive_token_total?: number;
+    billable_token_total?: number;
+    total_tokens?: number;
+    estimated_spend?: string;
+    estimated_spend_usd?: number;
+    component_costs_usd?: Record<string, number>;
+    usage_complete?: boolean;
+    pricing_complete?: boolean;
+    partial_pricing?: boolean;
+    pricing_incomplete_reasons?: Array<{ code?: string; component?: string; model?: string }>;
+    usage_incomplete_reasons?: unknown[];
+    models?: string[];
+    agents?: string[];
+    event_count?: number;
+  };
+  const readAccounting = (): {
+    current?: KimiAccountingSegment;
+    cumulative?: KimiAccountingSegment;
+    pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
+    updated_at?: string;
+  } =>
+    (
+      JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+        accounting?: {
+          current?: KimiAccountingSegment;
+          cumulative?: KimiAccountingSegment;
+          pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
+          updated_at?: string;
+        };
+      }
+    ).accounting ?? {};
+
+  const accounting = readAccounting();
+  for (const segment of [accounting.current, accounting.cumulative]) {
+    assert.ok(segment);
+    // The four Kimi components stay independent through the durable ledger.
+    assert.equal(segment.uncached_input_tokens, 120_000);
+    assert.equal(segment.output_tokens, 8_000);
+    assert.equal(segment.cache_read_tokens, 400_000);
+    assert.equal(segment.cache_write_tokens, 20_000);
+    assert.equal(segment.reasoning_tokens, 0);
+    assert.equal(segment.inclusive_token_total, 548_000);
+    assert.equal(segment.billable_token_total, 528_000);
+    assert.equal(segment.total_tokens, 548_000);
+    assert.equal(segment.usage_complete, true);
+    assert.deepEqual(segment.usage_incomplete_reasons, []);
+    assert.equal(segment.estimated_spend_usd, 0.6);
+    assert.notEqual(segment.estimated_spend_usd, null);
+    assert.deepEqual(segment.component_costs_usd, {
+      uncached_input: 0.36,
+      cache_read: 0.12,
+      cache_write: 0,
+      output: 0.12,
+      reasoning: 0
+    });
+    // Cost is populated; pricing is partial only because the Moonshot catalog
+    // entry carries no cache-write rate.
+    assert.equal(segment.pricing_complete, false);
+    assert.equal(segment.partial_pricing, true);
+    assert.deepEqual(segment.pricing_incomplete_reasons, [
+      { code: "component-rate-unavailable", component: "cache_write", model: "kimi-k3" }
+    ]);
+    assert.deepEqual(segment.models, ["kimi-k3"]);
+    assert.deepEqual(segment.agents, ["KimiAgent"]);
+  }
+  assert.equal(accounting.current?.estimated_spend, "$0.60+");
+  assert.deepEqual(accounting.pricing_catalog?.resolved_models, ["kimi-k3"]);
+  assert.deepEqual(accounting.pricing_catalog?.unresolved_models, []);
+
+  const resync = await syncRun({ projectRoot: project, runId: "kimi-accounting", env });
+  assert.equal(resync.ok, true, JSON.stringify(resync.diagnostics));
+  const resynced = readAccounting();
+  assert.deepEqual(resynced.current, accounting.current);
+  assert.deepEqual(resynced.cumulative, accounting.cumulative);
+  assert.equal(resynced.updated_at, accounting.updated_at);
+  assert.equal(resynced.cumulative?.event_count, accounting.cumulative?.event_count);
+});
+
+test("syncRun prices Kimi models from Moonshot, not an alphabetically earlier same-name provider", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-kimi-provider-pin";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          model: "kimi-k3",
+          agent: "KimiAgent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    aihubmix: {
+      models: {
+        "kimi-k3": { cost: { input: 30, output: 150, cache_read: 3 } }
+      }
+    },
+    ...MOONSHOT_KIMI_CATALOG,
+    venice: {
+      models: {
+        "kimi-k3": { cost: { input: 3.75, output: 18.75 } }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "kimi-provider-pin", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "kimi-provider-pin", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: { estimated_spend?: string; estimated_spend_usd?: number; partial_pricing?: boolean };
+      pricing_catalog?: { model_prices?: Record<string, { inputUsdPerMillion?: number }> };
+    };
+  };
+  // 1M uncached input at $3 plus 100k output at $15 — the Moonshot rates.
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, 4.5);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "$4.50");
+  assert.equal(metadata.accounting?.current?.partial_pricing, false);
+  assert.equal(metadata.accounting?.pricing_catalog?.model_prices?.["kimi-k3"]?.inputUsdPerMillion, 3);
+});
+
+test("syncRun leaves a Kimi model unpriced when Moonshot does not list it", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-kimi-unresolved";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: kimiTokenUsageEvents(workflowRunId)
+  });
+  // Only non-Moonshot providers list the alias; borrowing their rate would
+  // publish a silently wrong cost, so the model must stay unresolved.
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    crof: { models: { "kimi-k3": { cost: { input: 2, output: 8, cache_read: 0.25 } } } },
+    kenari: { models: { "kimi-k3": { cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 } } } },
+    moonshotai: { models: { "kimi-k2.6": { cost: { input: 0.95, output: 4, cache_read: 0.16 } } } }
+  });
+  const run = await startRun({ projectRoot: project, runId: "kimi-unresolved", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "kimi-unresolved", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: {
+      current?: {
+        total_tokens?: number;
+        estimated_spend?: string;
+        estimated_spend_usd?: number;
+        usage_complete?: boolean;
+        pricing_incomplete_reasons?: Array<{ code?: string }>;
+      };
+      pricing_catalog?: { resolved_models?: string[]; unresolved_models?: string[] };
+    };
+  };
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.resolved_models, []);
+  assert.deepEqual(metadata.accounting?.pricing_catalog?.unresolved_models, ["kimi-k3"]);
+  assert.equal(metadata.accounting?.current?.total_tokens, 548_000);
+  assert.equal(metadata.accounting?.current?.usage_complete, true);
+  assert.equal(metadata.accounting?.current?.estimated_spend, "unavailable");
+  assert.equal(metadata.accounting?.current?.estimated_spend_usd, undefined);
+  assert.ok(
+    metadata.accounting?.current?.pricing_incomplete_reasons?.every(
+      (reason) => reason.code === "model-pricing-unavailable"
+    )
+  );
 });
 
 test("syncRun does not assume zero cache reads when cache telemetry is missing", async () => {

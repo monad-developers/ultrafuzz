@@ -136,6 +136,22 @@ with `--prompt`. Kimi reasoning is limited to `low`, `high`, or `max`; the
 selected value is written to the executed model's `default_effort` and
 `[thinking].effort`, and any other value is rejected.
 
+Kimi Code prints no token usage on stdout, so each invocation's authoritative
+usage is read from the per-agent `wire.jsonl` records inside that invocation's
+isolated runtime home, covering the main agent and every sub-agent. Ultrafuzz
+takes a per-wire baseline right after session seeding, so a resumed session
+reports only the tokens it adds and never re-reports inherited history.
+Kimi's four components — uncached input, output, cache reads, and cache
+creation — are reported independently; Kimi already folds thinking tokens into
+output, so no separate reasoning total is published. Malformed or absent usage
+stays absent rather than becoming zeros, which keeps accounting honest about
+what it does not know. Kimi model pricing resolves against the Moonshot
+provider entry in the pricing catalog, so the configured alias must match a
+Moonshot catalog model id such as `kimi-k3`; anything else is reported as an
+unresolved model instead of being priced from a same-named third-party entry.
+Subscription runs are not billed per token, so the published cost is an
+API-comparison estimate at Moonshot list rates.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixes Kimi token accounting so UltrafuzzBench publishes tokens and an API-comparison cost for Kimi runs, and pins Kimi model pricing to the Moonshot provider.
+
 ## v0.0.4
 
 - Adds eval suites with a provider-agnostic `EvalReporter` and first-class node telemetry (#17).
