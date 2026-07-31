@@ -151,6 +151,88 @@ test("summarizeRunProgress counts failed and skipped nodes as settled progress",
   assert.equal(partial.progress.remaining, 132);
 });
 
+test("summarizeRunProgress clamps an inconsistent engine snapshot", () => {
+  // Counts arrive from the engine and are only checked for finiteness.
+  const over = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 10, total: 6 }),
+    throughput: throughput({ recent_finished: 1, total_finished: 10 }),
+    nowMs: NOW_MS
+  });
+  assert.equal(over.progress.percent, 100);
+  assert.equal(over.progress.remaining, 0);
+
+  const under = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: -2, total: 6 }),
+    throughput: throughput(),
+    nowMs: NOW_MS
+  });
+  assert.equal(under.progress.percent, 0);
+});
+
+test("summarizeRunProgress does not call a live run with no node counts complete", () => {
+  const live = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ total: 0 }),
+    throughput: throughput(),
+    nowMs: NOW_MS
+  });
+
+  assert.equal(live.progress.percent, 0);
+  assert.equal(live.eta.available, false);
+  assert.equal(live.eta.seconds, null);
+  assert.equal(live.eta.unavailable_reason, "no-node-counts");
+
+  // A terminal run with an empty snapshot legitimately has nothing left.
+  const terminal = summarizeRunProgress({
+    runStatus: "succeeded",
+    counts: counts({ total: 0 }),
+    throughput: throughput(),
+    nowMs: NOW_MS
+  });
+  assert.equal(terminal.eta.seconds, 0);
+  assert.equal(terminal.eta.basis, "no-remaining-nodes");
+});
+
+test("summarizeRunProgress reports no ETA for a paused run", () => {
+  const summary = summarizeRunProgress({
+    runStatus: "paused",
+    counts: counts({ finished: 2, pending: 4, total: 6 }),
+    throughput: throughput({ recent_finished: 2, total_finished: 2 }),
+    runStartedAt: "2026-07-31T11:00:00.000Z",
+    nowMs: NOW_MS
+  });
+
+  // A paused run is deliberately not progressing; extrapolating throughput
+  // would advertise a completion time that cannot happen.
+  assert.equal(summary.eta.available, false);
+  assert.equal(summary.eta.seconds, null);
+  assert.equal(summary.eta.unavailable_reason, "run-paused");
+});
+
+test("summarizeRunProgress ignores nodes parked on an external wait", () => {
+  const summary = summarizeRunProgress({
+    runStatus: "running",
+    counts: counts({ finished: 5, waiting_approval: 1, total: 6 }),
+    throughput: throughput({ recent_finished: 1, total_finished: 5 }),
+    state: runState({
+      "node:approval#0": {
+        ...runningNode({ nodeId: "node:approval#0", startedAt: "2026-07-31T09:00:00.000Z" }),
+        wait_reason: "approval" as const
+      }
+    }),
+    runStartedAt: "2026-07-31T09:00:00.000Z",
+    nowMs: NOW_MS
+  });
+
+  // Reporting an approval-parked node as the current step would show hours of
+  // elapsed time for work that is not executing.
+  assert.equal(summary.current_step.running_count, 0);
+  assert.equal(summary.current_step.node_id, null);
+  assert.equal(summary.current_step.elapsed_seconds, null);
+});
+
 test("summarizeRunProgress falls back to whole-run throughput when the recent window is empty", () => {
   const summary = summarizeRunProgress({
     runStatus: "running",

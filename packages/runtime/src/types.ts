@@ -295,7 +295,8 @@ export interface RunHealthProgress {
 
 export type RunEtaBasis = "recent-throughput" | "run-throughput" | "no-remaining-nodes";
 
-export type RunEtaUnavailableReason = "run-terminal" | "no-finished-nodes" | "no-observed-elapsed-time";
+export type RunEtaUnavailableReason =
+  "run-terminal" | "run-paused" | "no-node-counts" | "no-finished-nodes" | "no-observed-elapsed-time";
 
 export interface RunHealthEta {
   available: boolean;

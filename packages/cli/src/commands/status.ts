@@ -4,6 +4,7 @@ import { getRunHealth, type RunHealthValue } from "@ultrafuzz/runtime";
 
 import {
   cliIo,
+  commandFailure,
   commandFromRuntime,
   emitCommandResult,
   envelope,
@@ -32,21 +33,31 @@ export default class Status extends Command {
 
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Status);
+    const watch = flags.watch === true;
+    const json = flags.json === true;
     let refresh = true;
     while (refresh) {
-      const health = await getRunHealth({
-        projectRoot: projectRoot(flags),
-        runId: args.runId,
-        windowMinutes: flags.window,
-        env: cliIo().env
-      });
-      emitStatusResult(
-        this,
-        commandFromRuntime("status", health, renderHealth),
-        flags.watch === true,
-        flags.json === true
-      );
-      refresh = flags.watch === true && health.ok && shouldRefresh(health.value);
+      let result: CommandResult;
+      let health: Awaited<ReturnType<typeof getRunHealth>> | undefined;
+      try {
+        health = await getRunHealth({
+          projectRoot: projectRoot(flags),
+          runId: args.runId,
+          windowMinutes: flags.window,
+          env: cliIo().env
+        });
+        result = commandFromRuntime("status", health, renderHealth);
+      } catch (error) {
+        // A throw must stay inside the envelope: letting it escape would print a
+        // pretty-printed failure into the middle of the NDJSON stream.
+        result = commandFailure(
+          "status",
+          error instanceof Error ? error.message : "status is unavailable",
+          "RUN_STATUS_FAILED"
+        );
+      }
+      emitStatusResult(this, result, watch, json);
+      refresh = watch && health?.ok === true && shouldRefresh(health.value);
       if (refresh) {
         await wait(flags.interval * 1_000);
       }
@@ -60,6 +71,11 @@ function emitStatusResult(command: Command, result: CommandResult, watch: boolea
       process.exitCode = process.exitCode ?? 1;
     }
     cliIo().stdout.write(`${JSON.stringify(envelope("status", result))}\n`);
+    return;
+  }
+  if (watch && !json && result.ok) {
+    // Blank-line separated so consecutive polls stay readable in a terminal.
+    cliIo().stdout.write(`Snapshot: ${new Date().toISOString()}\n${result.text ?? ""}\n`);
     return;
   }
   emitCommandResult(command, "status", result, json);
@@ -81,7 +97,7 @@ function renderHealth(value: RunHealthValue): string {
     `Run: ${value.run_id}`,
     `Status: ${value.verdict} (${value.status})`,
     `Reason: ${value.reason}`,
-    `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed / ${progress.total} total)`,
+    `Progress: ${progress.percent}% (${progress.finished} finished / ${progress.in_progress} running / ${progress.pending} pending / ${progress.failed} failed${extraBuckets(value)} / ${progress.total} total)`,
     `ETA: ${renderEta(value.eta)}`,
     `Time on current step: ${renderCurrentStep(value.current_step)}`,
     `Pace: ${value.throughput.recent_finished} finished in the last ${Math.max(1, Math.round(value.throughput.window_ms / 60_000))}m`
@@ -108,10 +124,22 @@ function renderCurrentStep(step: RunHealthValue["current_step"]): string {
     return "no running step";
   }
   const others = step.running_count > 1 ? ` (+${step.running_count - 1} more running)` : "";
-  if (step.elapsed_seconds === null) {
+  if (step.elapsed_seconds === null || step.node_id === null) {
     return `unavailable (no recorded start)${others}`;
   }
-  return `${formatDuration(step.elapsed_seconds)} on ${step.node_id ?? "unknown"}${others}`;
+  return `${formatDuration(step.elapsed_seconds)} on ${step.node_id}${others}`;
+}
+
+/** Keeps the Progress line's buckets summing to `total` when nodes are waiting. */
+function extraBuckets(value: RunHealthValue): string {
+  const counts = value.counts;
+  const waiting = counts.waiting_approval + counts.waiting_event + counts.waiting_timer;
+  const entries = [
+    waiting > 0 ? `${waiting} waiting` : undefined,
+    value.progress.skipped > 0 ? `${value.progress.skipped} skipped` : undefined,
+    counts.other > 0 ? `${counts.other} other` : undefined
+  ].filter((entry): entry is string => entry !== undefined);
+  return entries.length === 0 ? "" : ` / ${entries.join(" / ")}`;
 }
 
 function formatDuration(seconds: number): string {
@@ -122,5 +150,9 @@ function formatDuration(seconds: number): string {
   if (minutes < 90) {
     return `${minutes} minute${minutes === 1 ? "" : "s"}`;
   }
-  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) {
+    return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  }
+  return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, "0")}h`;
 }

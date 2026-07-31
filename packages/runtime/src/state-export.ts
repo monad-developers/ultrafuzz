@@ -206,7 +206,7 @@ export async function getRunHealth(input: {
         counts: health.counts,
         throughput: health.throughput,
         state,
-        runStartedAt: base.started_at ?? state?.started_at,
+        runStartedAt: base.started_at,
         nowMs: Date.now()
       })
     },

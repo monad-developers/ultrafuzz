@@ -188,11 +188,26 @@ counts:
   `recent-throughput` when the recent activity window observed completions,
   `run-throughput` when only whole-run throughput is available, and
   `no-remaining-nodes` when nothing is left to run. `unavailable_reason` is
-  `no-finished-nodes`, `no-observed-elapsed-time`, or `run-terminal`.
+  `no-node-counts` (a live run whose snapshot reports no nodes),
+  `no-finished-nodes`, `no-observed-elapsed-time`, `run-paused` (a paused run is
+  deliberately not progressing), or `run-terminal`.
 - `current_step`: `node_id`, `iteration`, `started_at`, `elapsed_seconds`, and
   `running_count`. Elapsed time comes from Ultrafuzz's synchronized durable
   `state.json` node timestamps, and the reported step is the longest-running
   one. `elapsed_seconds` is `null` when no running node has a recorded start.
+  Nodes parked on an approval, event, timer, or controller handover are excluded
+  — they are not executing, and `ultrafuzz why` explains those waits.
+
+`progress` and `current_step` are denominated differently and can legitimately
+disagree. `progress` counts the linked workflow's own tasks, which include
+preparation and verification work that has no durable node, while
+`current_step` counts durable Ultrafuzz nodes. Treat `progress` as campaign-wide
+completion and `current_step` as what is executing right now.
+
+`--watch` re-synchronizes linked workflow evidence on every poll, exactly as a
+single `status` call does, so it is not a read-only command. It stops only at a
+terminal run status or a failed poll: `paused` is a deliberate steady state, so
+a watch on a paused run keeps polling until interrupted.
 
 `pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
 finish, and the run settles in the resumable `paused` state. `resume` reports

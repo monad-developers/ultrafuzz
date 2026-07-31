@@ -357,6 +357,38 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.match(statusText.stdout, /^ETA: 20 minutes$/mu);
   assert.match(statusText.stdout, /^Time on current step: 10 minutes on \S+$/mu);
 
+  // Long-running steps roll over into hours and then days.
+  for (const [elapsedMs, expected] of [
+    [30_000, "less than a minute"],
+    [60_000, "1 minute"],
+    [5_400_000, "1h 30m"],
+    [3 * 86_400_000, "3d 00h"]
+  ] as const) {
+    const rolled = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+      nodes: Record<string, Record<string, unknown>>;
+    };
+    rolled.nodes[firstNodeId] = {
+      ...rolled.nodes[firstNodeId],
+      status: "running",
+      started_at: new Date(Date.now() - elapsedMs).toISOString()
+    };
+    fs.writeFileSync(statePath, `${JSON.stringify(rolled, null, 2)}\n`, "utf8");
+    const rolledText = await cli(project, ["status", runData.run_id], env);
+    assert.equal(rolledText.code, 0, rolledText.stderr);
+    assert.match(rolledText.stdout, new RegExp(`^Time on current step: ${expected} on \\S+$`, "mu"));
+  }
+
+  // Restore the 10-minute step for the watch assertions below.
+  const restored = JSON.parse(fs.readFileSync(statePath, "utf8")) as {
+    nodes: Record<string, Record<string, unknown>>;
+  };
+  restored.nodes[firstNodeId] = {
+    ...restored.nodes[firstNodeId],
+    status: "running",
+    started_at: new Date(Date.now() - 600_000).toISOString()
+  };
+  fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
+
   const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env);
   await new Promise((resolve) => setTimeout(resolve, 400));
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
@@ -538,6 +570,30 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assert.equal(pauseData.action, "pause");
   assert.equal(pauseData.status, "pause-requested");
   assert.equal(pauseData.submitted, true);
+});
+
+test("status --watch --json keeps a failing poll on one NDJSON line", async () => {
+  const project = tempProject();
+  const env = fakeSmithersEnv(project);
+  const init = await cli(project, ["init", "--json"], env);
+  assert.equal(init.code, 0, init.stderr);
+  writeSmallTopology(project);
+  const run = await cli(project, ["run", "--run-id", "watch-failure-run", "--json"], env);
+  assert.equal(run.code, 0, run.stderr);
+  const runRoot = (parseJson(run).data as { run_root: string }).run_root;
+  // A corrupt state.json makes the poll throw rather than return a failure
+  // result; the stream must stay newline-delimited for `jq` consumers.
+  fs.writeFileSync(path.join(runRoot, "state.json"), "{ not json", "utf8");
+
+  const watched = await cli(project, ["status", "watch-failure-run", "--watch", "--json"], env);
+
+  assert.equal(watched.code, 1);
+  const lines = watched.stdout.split("\n").filter(Boolean);
+  assert.equal(lines.length, 1);
+  const body = JSON.parse(lines[0]!) as Record<string, unknown>;
+  assert.equal(body.ok, false);
+  assert.equal(body.command, "status");
+  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "RUN_STATUS_FAILED");
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {
