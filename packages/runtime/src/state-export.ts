@@ -497,7 +497,8 @@ function isRunHealthVerdict(value: string | undefined): value is RunHealthVerdic
 }
 
 function publicHealthReason(value: string): string {
-  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz inspect`").replace(/smithers/giu, "workflow runner");
+  // `ultrafuzz why` now wraps the engine diagnosis, so recommend it directly.
+  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`").replace(/smithers/giu, "workflow runner");
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

@@ -33,11 +33,17 @@ local dashboard plus final report for review.
    run evidence under `.ultrafuzz/runs/**`.
 5. `ultrafuzz ps`, `ultrafuzz status <run-id>`, and `ultrafuzz inspect <run-id>`
    Show product run evidence, concise health, and linked workflow status.
-6. `ultrafuzz pause|resume|replay|fork <run-id>`
-   Pause, resume, replay, or fork a linked run.
-7. `ultrafuzz report <run-id>`
+6. `ultrafuzz why <run-id>`, `ultrafuzz events <run-id>`, and
+   `ultrafuzz node <run-id> <node-id>`
+   Diagnose a blocked run, follow linked workflow lifecycle events, and drill
+   into one node's attempts, retries, and timing.
+7. `ultrafuzz pause|resume|replay|fork|cancel <run-id>`
+   Pause, resume, replay, fork, or cancel a linked run. `ultrafuzz timeline
+<run-id>` and `ultrafuzz snapshots <run-id>` show the checkpoint frames and
+   durability snapshots those operations work from.
+8. `ultrafuzz report <run-id>`
    Shows the agent-written final report artifact when the run has produced one.
-8. `ultrafuzz materialize <run-id>` and `ultrafuzz clean <run-id>`
+9. `ultrafuzz materialize <run-id>` and `ultrafuzz clean <run-id>`
    Perform explicit, selected, path-safe filesystem operations. Agent limits
    around commits, pushes, pull requests, external submissions, staging, and
    merges are prompt instructions and trust-model assumptions, not a
