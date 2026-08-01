@@ -16,6 +16,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain(`[models.benchmark]\nagent = "ClaudeAgent"\nmodel = "claude-fable-5"`);
     expect(config).not.toContain("[models.smoke-coordination]");
     expect(config).not.toContain('model = "gpt-5.5"');
+    expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("max_parallel_nodes = 32");
   });
@@ -69,6 +70,23 @@ describe("Modal target model profiles", () => {
     );
 
     expect(config).toContain('[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"');
+  });
+
+  it("generates the dedicated DeepSeek V4 profile and API-key agent config", () => {
+    const config = modalTargetToml(
+      {
+        slug: "deepseek-v4-pro",
+        model: "deepseek-v4-pro",
+        provider: "deepseek",
+        agent: "DeepSeekAgent",
+        reasoning: "max",
+        auth_mode: "api-key"
+      },
+      900
+    );
+
+    expect(config).toContain(`[models.default]\nagent = "DeepSeekAgent"\nmodel = "deepseek-v4-pro"\nreasoning = "max"`);
+    expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
   });
 
   it("caps explicit group and node timeouts to the public benchmark node budget", () => {

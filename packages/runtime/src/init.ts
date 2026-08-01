@@ -17,6 +17,7 @@ const AGENT_REGISTRY_FILE = ".smithers/agents/index.ts";
 const AGENT_TEMPLATES = [
   { file: "claude.ts", template: "smithers/agents/claude.tsx", ref: "ClaudeAgent" },
   { file: "codex.ts", template: "smithers/agents/codex.tsx", ref: "CodexAgent" },
+  { file: "deepseek.ts", template: "smithers/agents/deepseek.tsx", ref: "DeepSeekAgent" },
   { file: "kimi.ts", template: "smithers/agents/kimi.tsx", ref: "KimiAgent" }
 ] as const;
 

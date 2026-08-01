@@ -2,6 +2,7 @@ const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
 const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
 const MOONSHOT_PROVIDER_ID = "moonshotai";
+const DEEPSEEK_PROVIDER_ID = "deepseek";
 
 export interface ModelPricing {
   inputUsdPerMillion: number;
@@ -326,14 +327,14 @@ function providerForModel(model: string): string | undefined {
 }
 
 /**
- * Kimi aliases appear in dozens of models.dev provider catalogs at wildly
- * different rates, including $0 subscription-only entries. Pinning the family
- * to Moonshot keeps the API-comparison estimate from depending on whichever
- * third-party provider happens to sort first. A pinned provider is exclusive:
- * when it does not list the alias the model stays unresolved and reports as
- * unpriced instead of silently borrowing a same-named rate.
+ * Kimi and DeepSeek aliases appear in many models.dev provider catalogs at
+ * different rates, including $0 subscription-only entries. Pinning each family
+ * to its first-party provider keeps the API-comparison estimate from depending
+ * on whichever third-party provider happens to sort first. A pin is exclusive:
+ * when the first-party catalog does not list an alias, it stays unresolved.
  */
 function pinnedProviderForModel(model: string): string | undefined {
+  if (model.startsWith("deepseek")) return DEEPSEEK_PROVIDER_ID;
   return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
 }
 

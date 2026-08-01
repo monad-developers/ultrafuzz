@@ -152,6 +152,41 @@ unresolved model instead of being priced from a same-named third-party entry.
 Subscription runs are not billed per token, so the published cost is an
 API-comparison estimate at Moonshot list rates.
 
+## DeepSeek agent
+
+`ultrafuzz init` also generates a dedicated `DeepSeekAgent`. The default root
+config includes an opt-in DeepSeek V4 Pro profile:
+
+```toml
+[models.deepseek]
+agent = "DeepSeekAgent"
+model = "deepseek-v4-pro"
+reasoning = "max"
+
+[agents.DeepSeekAgent]
+auth = "api-key"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
+against DeepSeek's documented Anthropic-compatible endpoint,
+`https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
+`ANTHROPIC_API_KEY` so an unrelated Anthropic credential cannot take precedence.
+The supported reasoning efforts are `low`, `high`, and `max`, and any other
+value is rejected before execution. See DeepSeek's
+[Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code)
+and [Anthropic API guide](https://api-docs.deepseek.com/guides/anthropic_api).
+
+DeepSeek's automatic disk cache reports cache misses and hits independently.
+Ultrafuzz records those as uncached input and cache-read tokens, records no
+cache-write charge, and treats the provider's output count as already including
+thinking tokens rather than publishing a second reasoning component. Pricing
+is pinned to the first-party `deepseek` catalog entry so a same-named hosted or
+subscription plan cannot supply a zero or unrelated rate. The current
+[DeepSeek price table](https://api-docs.deepseek.com/quick_start/pricing) lists
+DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
+million cache-hit input tokens, and $0.87 per million output tokens.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml

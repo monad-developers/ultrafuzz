@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { access, lstat, mkdtemp, rm } from "node:fs/promises";
+import { access, lstat, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ import {
   type SubscriptionAuthCopyEntry
 } from "./auth.js";
 import { DEFAULT_MODAL_APP, DEFAULT_MODAL_IMAGE, type ModelProvider } from "./defaults.js";
+import { remoteAuthPath } from "./layout.js";
 import {
   cloudFailureResult,
   MODAL_SMOKE_DATA_ROOT,
@@ -44,6 +45,7 @@ const POLL_TIMEOUT_MS = 3 * 60 * 1000;
 
 export interface RealModalSmokeOptions {
   imageName?: string;
+  apiKey?: string;
 }
 
 export async function runRealModalSmoke(
@@ -80,7 +82,9 @@ class RealModalSmokeDriver implements ModalSmokeDriver {
     this.auth =
       provider === "kimi"
         ? await prepareSubscriptionAuthCopy({ provider, auth_mode: "subscription", model: "kimi-k3" })
-        : subscriptionAuthCopy({ provider, auth_mode: "subscription" });
+        : provider === "deepseek"
+          ? await prepareDeepSeekSmokeAuth(this.options.apiKey)
+          : subscriptionAuthCopy({ provider, auth_mode: "subscription" });
     if (this.auth === undefined) throw new Error("smoke auth is unavailable");
     await access(this.auth.source);
     this.app = await this.modal.apps.fromName(DEFAULT_MODAL_APP, { createIfMissing: false });
@@ -312,8 +316,29 @@ function booleanValue(value: unknown): boolean {
 }
 
 function providerValue(value: unknown): ModelProvider {
-  if (value !== "openai" && value !== "anthropic" && value !== "kimi") throw new Error("smoke evidence is invalid");
+  if (value !== "openai" && value !== "anthropic" && value !== "deepseek" && value !== "kimi") {
+    throw new Error("smoke evidence is invalid");
+  }
   return value;
+}
+
+async function prepareDeepSeekSmokeAuth(apiKey: string | undefined): Promise<SubscriptionAuthCopy> {
+  if (apiKey === undefined || apiKey.trim() === "") throw new Error("DeepSeek smoke requires DEEPSEEK_API_KEY");
+  const temporary = await mkdtemp(path.join(tmpdir(), "ultrafuzz-modal-smoke-deepseek-auth-"));
+  const source = path.join(temporary, "api-key");
+  try {
+    await writeFile(source, apiKey, { encoding: "utf8", mode: 0o600 });
+    return {
+      source,
+      destination: remoteAuthPath("deepseek"),
+      cleanup: async () => {
+        await rm(temporary, { recursive: true, force: true });
+      }
+    };
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function integerValue(value: unknown): number {

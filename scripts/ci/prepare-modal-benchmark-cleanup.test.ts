@@ -215,6 +215,7 @@ function cleanupFixture() {
         trialsPerVariant: 1,
         maxParallelEvalRows: 3,
         maxParallelWorkflowNodes: 4,
+        maxRuntimeSeconds: 3600,
         controlTimeoutSeconds: 8_400
       }
     }

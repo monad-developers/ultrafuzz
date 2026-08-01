@@ -45,6 +45,12 @@
         "agent": "KimiAgent",
         "model": "kimi-k3",
         "reasoning": "max"
+      },
+      {
+        "id": "benchmark-full-deepseek-v4-pro-max",
+        "agent": "DeepSeekAgent",
+        "model": "deepseek-v4-pro",
+        "reasoning": "max"
       }
     ],
     "judge_profile": {

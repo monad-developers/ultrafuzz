@@ -125,7 +125,7 @@ describe("public Modal benchmark configuration", () => {
     }
   });
 
-  it("creates the complete three-provider EVMBench full mode from the checked-in cohort", () => {
+  it("creates the complete four-provider EVMBench full mode from the checked-in cohort", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-full-"));
     execFileSync(
@@ -165,13 +165,20 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.targets).toEqual(cohort.targets);
     expect(new Set(manifest.targets.map((target) => target.id)).size).toBe(40);
     expect(manifest.matrix_rows_per_pair).toBe(40);
-    expect(manifest.pairs).toHaveLength(3);
+    expect(manifest.pairs).toHaveLength(4);
     expect(new Set(manifest.pairs.map((pair) => pair.benchmark))).toEqual(new Set(["evmbench"]));
-    expect(new Set(manifest.pairs.map((pair) => pair.provider))).toEqual(new Set(["openai", "anthropic", "kimi"]));
-    expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
-      new Set(["benchmark-full-gpt-5-6-luna-high", "benchmark-full-claude-sonnet-5-high", "benchmark-full-kimi-k3-max"])
+    expect(new Set(manifest.pairs.map((pair) => pair.provider))).toEqual(
+      new Set(["openai", "anthropic", "kimi", "deepseek"])
     );
-    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(3);
+    expect(new Set(manifest.pairs.map((pair) => pair.model_slug))).toEqual(
+      new Set([
+        "benchmark-full-gpt-5-6-luna-high",
+        "benchmark-full-claude-sonnet-5-high",
+        "benchmark-full-kimi-k3-max",
+        "benchmark-full-deepseek-v4-pro-max"
+      ])
+    );
+    expect(new Set(manifest.pairs.map((pair) => pair.pair)).size).toBe(4);
     const maxParallel = publicBenchmarkMaxParallelEvalRows("full");
     const liveRows = Math.min(40, maxParallel);
     const waves = Math.ceil(40 / maxParallel);
@@ -190,9 +197,10 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.concurrency.max_live_runner_workflows_by_provider).toEqual({
       openai: liveRows,
       anthropic: liveRows,
-      kimi: liveRows
+      kimi: liveRows,
+      deepseek: liveRows
     });
-    expect(manifest.concurrency.max_live_judge_rows).toBe(3 * liveRows);
+    expect(manifest.concurrency.max_live_judge_rows).toBe(4 * liveRows);
     for (const pair of manifest.pairs) {
       const config = JSON.parse(fs.readFileSync(path.join(output, pair.config_path), "utf8")) as {
         public_benchmark: {
@@ -213,7 +221,9 @@ describe("public Modal benchmark configuration", () => {
             ? { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }
             : pair.provider === "anthropic"
               ? { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }
-              : { provider: "kimi", model: "kimi-k3", reasoning: "max" }
+              : pair.provider === "kimi"
+                ? { provider: "kimi", model: "kimi-k3", reasoning: "max" }
+                : { provider: "deepseek", model: "deepseek-v4-pro", reasoning: "max" }
         )
       ]);
     }
@@ -239,6 +249,7 @@ describe("public Modal benchmark configuration", () => {
           BENCHMARK_MODELS_JSON: JSON.stringify([
             { provider: "anthropic", model: "claude-sonnet-5-202607", reasoning: "medium" },
             { provider: "kimi", model: "kimi-k3-202607", reasoning: "max" },
+            { provider: "deepseek", model: "deepseek-v4-pro-202607", reasoning: "high" },
             { provider: "openai", model: "gpt-5.6-luna-202607", reasoning: "xhigh" }
           ])
         }
@@ -247,8 +258,8 @@ describe("public Modal benchmark configuration", () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
       pairs: Array<{ provider: string; model_slug: string; config_path: string }>;
     };
-    expect(manifest.pairs.map((pair) => pair.provider)).toEqual(["openai", "anthropic", "kimi"]);
-    expect(new Set(manifest.pairs.map((pair) => pair.model_slug)).size).toBe(3);
+    expect(manifest.pairs.map((pair) => pair.provider)).toEqual(["openai", "anthropic", "kimi", "deepseek"]);
+    expect(new Set(manifest.pairs.map((pair) => pair.model_slug)).size).toBe(4);
     expect(manifest.pairs.every((pair) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(pair.model_slug))).toBe(true);
     const models = Object.fromEntries(
       manifest.pairs.map((pair) => {
@@ -261,7 +272,8 @@ describe("public Modal benchmark configuration", () => {
     expect(models).toEqual({
       openai: expect.objectContaining({ model: "gpt-5.6-luna-202607", reasoning: "xhigh" }),
       anthropic: expect.objectContaining({ model: "claude-sonnet-5-202607", reasoning: "medium" }),
-      kimi: expect.objectContaining({ model: "kimi-k3-202607", reasoning: "max" })
+      kimi: expect.objectContaining({ model: "kimi-k3-202607", reasoning: "max" }),
+      deepseek: expect.objectContaining({ model: "deepseek-v4-pro-202607", reasoning: "high" })
     });
   });
 
@@ -313,30 +325,80 @@ describe("public Modal benchmark configuration", () => {
     ]);
   });
 
+  it("creates an explicit DeepSeek V4 smoke benchmark with max reasoning", () => {
+    const workspace = path.resolve("../..");
+    const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-deepseek-smoke-"));
+    execFileSync(
+      process.execPath,
+      [
+        path.join(workspace, "scripts/ci/prepare-modal-benchmarks.mjs"),
+        "f".repeat(40),
+        "https://github.com/monad-developers/ultrafuzz",
+        "deepseek-smoke-1",
+        output,
+        "smoke"
+      ],
+      {
+        cwd: workspace,
+        env: {
+          ...process.env,
+          BENCHMARK_MODELS_JSON: JSON.stringify([{ provider: "deepseek", model: "deepseek-v4-pro", reasoning: "max" }])
+        }
+      }
+    );
+    const manifest = JSON.parse(fs.readFileSync(path.join(output, "manifest.json"), "utf8")) as {
+      benchmark: string;
+      pairs: Array<{ provider: string; model_slug: string; config_path: string }>;
+    };
+    expect(manifest.benchmark).toBe("ultrafuzz-bench");
+    expect(manifest.pairs).toEqual([
+      expect.objectContaining({
+        provider: "deepseek",
+        model_slug: "benchmark-smoke-deepseek-v4-pro-max"
+      })
+    ]);
+    const config = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
+      models: Array<{ agent: string; auth_mode: string; model: string; provider: string; reasoning: string }>;
+    };
+    expect(config.models).toEqual([
+      expect.objectContaining({
+        agent: "DeepSeekAgent",
+        auth_mode: "api-key",
+        model: "deepseek-v4-pro",
+        provider: "deepseek",
+        reasoning: "max"
+      })
+    ]);
+  });
+
   it("rejects unsafe model overrides and provider sets that do not match the mode", () => {
     const workspace = path.resolve("../..");
     const cases = [
       {
         mode: "smoke",
-        models: [{ provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" }],
-        message: /smoke BENCHMARK_MODELS_JSON must contain exactly openai/u
+        models: [
+          { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" },
+          { provider: "deepseek", model: "deepseek-v4-pro", reasoning: "max" }
+        ],
+        message: /smoke BENCHMARK_MODELS_JSON must contain exactly/u
       },
       {
         mode: "smoke",
-        models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "medium" }],
-        message: /smoke BENCHMARK_MODELS_JSON reasoning must be high/u
+        models: [{ provider: "deepseek", model: "deepseek-v4-pro", reasoning: "xhigh" }],
+        message: /reasoning is unsupported for DeepSeek/u
       },
       {
         mode: "full",
         models: [{ provider: "openai", model: "gpt-5.6-luna", reasoning: "high" }],
-        message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic and kimi/u
+        message: /full BENCHMARK_MODELS_JSON must contain exactly openai and anthropic and kimi and deepseek/u
       },
       {
         mode: "full",
         models: [
           { provider: "openai", model: "gpt-5.6-luna", reasoning: "high" },
           { provider: "anthropic", model: "claude-sonnet-5", reasoning: "high" },
-          { provider: "kimi", model: "kimi-k3", reasoning: "xhigh" }
+          { provider: "kimi", model: "kimi-k3", reasoning: "xhigh" },
+          { provider: "deepseek", model: "deepseek-v4-pro", reasoning: "max" }
         ],
         message: /reasoning is unsupported for Kimi/u
       },
@@ -399,7 +461,9 @@ describe("public Modal benchmark configuration", () => {
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
       anthropic_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       kimi_model: expect.objectContaining({ default: "kimi-k3", type: "string" }),
-      kimi_reasoning: expect.objectContaining({ default: "max", type: "string" })
+      kimi_reasoning: expect.objectContaining({ default: "max", type: "string" }),
+      deepseek_model: expect.objectContaining({ default: "deepseek-v4-pro", type: "string" }),
+      deepseek_reasoning: expect.objectContaining({ default: "max", type: "string" })
     });
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
@@ -431,9 +495,14 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_KIMI_MODEL).toContain("'kimi-k3'");
     expect(prepare?.env?.BENCHMARK_KIMI_REASONING).toContain("inputs.kimi_reasoning");
     expect(prepare?.env?.BENCHMARK_KIMI_REASONING).toContain("'max'");
+    expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("inputs.deepseek_model");
+    expect(prepare?.env?.BENCHMARK_DEEPSEEK_MODEL).toContain("'deepseek-v4-pro'");
+    expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
+    expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
     expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
+    expect(prepare?.run).toContain('{provider: "deepseek", model: $deepseek_model, reasoning: $deepseek_reasoning}');
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
@@ -494,6 +563,7 @@ describe("public Modal benchmark configuration", () => {
     const sensitive = [
       "ANTHROPIC_API_KEY",
       "BRAINTRUST_API_KEY",
+      "DEEPSEEK_API_KEY",
       "KIMI_API_KEY",
       "MODAL_TOKEN_ID",
       "MODAL_TOKEN_SECRET",

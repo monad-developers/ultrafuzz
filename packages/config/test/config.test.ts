@@ -39,11 +39,21 @@ describe("config loading and resolution", () => {
     expect(resolved.value.agents.KimiAgent).toEqual({
       auth: "subscription"
     });
+    expect(resolved.value.agents.DeepSeekAgent).toEqual({
+      auth: "api-key",
+      apiKeyEnv: "DEEPSEEK_API_KEY"
+    });
     expect(resolved.value.models.profiles.default?.reasoning).toBe("xhigh");
     expect(resolved.value.models.profiles.kimi).toEqual({
       id: "kimi",
       agent: "KimiAgent",
       model: "kimi-k3",
+      reasoning: "max"
+    });
+    expect(resolved.value.models.profiles.deepseek).toEqual({
+      id: "deepseek",
+      agent: "DeepSeekAgent",
+      model: "deepseek-v4-pro",
       reasoning: "max"
     });
     expect(resolved.value.run.workflowDeadlineSeconds).toBe(86_400);
@@ -520,6 +530,31 @@ describe("model profile and triage validation", () => {
       expect.objectContaining({
         code: "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
         path: ["models", "kimi-padded", "reasoning"]
+      })
+    );
+  });
+
+  it("rejects DeepSeek reasoning values outside the provider's supported efforts", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        models: {
+          profiles: {
+            "deepseek-invalid": {
+              agent: "DeepSeekAgent",
+              model: "deepseek-v4-pro",
+              reasoning: "xhigh"
+            }
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+        path: ["models", "deepseek-invalid", "reasoning"]
       })
     );
   });

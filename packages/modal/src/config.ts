@@ -34,8 +34,8 @@ const modelSchema = z
   .object({
     slug: safeId,
     model: z.string().min(1).max(256),
-    provider: z.enum(["openai", "anthropic", "kimi"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent", "KimiAgent"]),
+    provider: z.enum(["openai", "anthropic", "deepseek", "kimi"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"]),
     reasoning: z.string().min(1).max(64),
     auth_mode: z.enum(["api-key", "subscription"])
   })
@@ -44,12 +44,21 @@ const modelSchema = z
     (model) =>
       (model.provider === "openai" && model.agent === "CodexAgent") ||
       (model.provider === "anthropic" && model.agent === "ClaudeAgent") ||
+      (model.provider === "deepseek" && model.agent === "DeepSeekAgent") ||
       (model.provider === "kimi" && model.agent === "KimiAgent"),
     "model provider and agent do not match"
   )
   .refine(
     (model) => model.provider !== "kimi" || ["low", "high", "max"].includes(model.reasoning),
     "Kimi reasoning must be low, high, or max"
+  )
+  .refine(
+    (model) => model.provider !== "deepseek" || ["low", "high", "max"].includes(model.reasoning),
+    "DeepSeek reasoning must be low, high, or max"
+  )
+  .refine(
+    (model) => model.provider !== "deepseek" || model.auth_mode === "api-key",
+    "DeepSeek authentication must use an API key"
   );
 
 const publicBenchmarkTargetSchema = z

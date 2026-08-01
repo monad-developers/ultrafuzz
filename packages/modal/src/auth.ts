@@ -228,12 +228,18 @@ export function localSubscriptionAuthPath(
   if (provider === "anthropic") {
     return path.join(env.CLAUDE_CONFIG_DIR ?? path.join(home, ".claude"), ".credentials.json");
   }
+  if (provider === "deepseek") {
+    throw new Error("DeepSeek does not support subscription authentication");
+  }
   return env.KIMI_CODE_HOME ?? env.KIMI_SHARE_DIR ?? path.join(home, ".kimi-code");
 }
 
-export function runnerApiKeyEnv(provider: ModelProvider): "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "KIMI_API_KEY" {
+export function runnerApiKeyEnv(
+  provider: ModelProvider
+): "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "DEEPSEEK_API_KEY" | "KIMI_API_KEY" {
   if (provider === "openai") return "OPENAI_API_KEY";
   if (provider === "anthropic") return "ANTHROPIC_API_KEY";
+  if (provider === "deepseek") return "DEEPSEEK_API_KEY";
   return "KIMI_API_KEY";
 }
 

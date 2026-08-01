@@ -275,6 +275,37 @@ describe("terminal eval efficiency", () => {
     expect(summary.efficiency.cost).toEqual({ status: "partial", reason: "pricing-incomplete" });
   });
 
+  it("publishes complete DeepSeek cache-aware token and cost fields", () => {
+    const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-deepseek-"));
+    writeTerminalRun(runRoot);
+    fs.writeFileSync(
+      path.join(runRoot, "run.json"),
+      JSON.stringify({
+        accounting: {
+          cumulative: {
+            uncached_input_tokens: 120_000,
+            output_tokens: 8_000,
+            cache_read_tokens: 400_000,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+            total_tokens: 528_000,
+            estimated_spend_usd: 0.06061,
+            usage_complete: true,
+            pricing_complete: true,
+            partial_pricing: false
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    const summary = summarizeEvalTerminal(terminalRecord(runRoot));
+    expect(summary.efficiency.total_tokens).toBe(528_000);
+    expect(summary.efficiency.cost_usd).toBe(0.06061);
+    expect(summary.efficiency.usage).toEqual({ status: "complete", reason: null });
+    expect(summary.efficiency.cost).toEqual({ status: "complete", reason: null });
+  });
+
   it("does not infer zero cost from incomplete zero-token usage", () => {
     const runRoot = mkdtempSync(path.join(tmpdir(), "ufz-eval-efficiency-incomplete-zero-"));
     writeTerminalRun(runRoot);
