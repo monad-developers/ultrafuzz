@@ -57,6 +57,7 @@ export function validateModalBenchmarkLaunch(input) {
     producerRunId,
     producerRunAttempt,
     mode,
+    ...(input.expectedProviders === undefined ? {} : { expectedProviders: input.expectedProviders }),
     targets: dimensions.targets,
     targetIds: dimensions.targetIds,
     targetCount: dimensions.targetCount,
@@ -319,12 +320,26 @@ function isRecord(value) {
 }
 
 function main(args) {
-  if (args.length !== 3) {
-    throw new Error("usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <smoke|full>");
+  const usage =
+    "usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <smoke|full> [--expected-provider <provider>]";
+  if (args.length !== 3 && args.length !== 5) {
+    throw new Error(usage);
   }
-  const [manifestPath, policyRoot, expectedMode] = args;
+  const [manifestPath, policyRoot, expectedMode, option, expectedProvider] = args;
   if (expectedMode !== "smoke" && expectedMode !== "full") throw new Error("expected mode must be smoke or full");
-  console.log(JSON.stringify(validateModalBenchmarkLaunch({ manifestPath, policyRoot, expectedMode })));
+  if (option !== undefined && (option !== "--expected-provider" || expectedProvider === undefined)) {
+    throw new Error(usage);
+  }
+  console.log(
+    JSON.stringify(
+      validateModalBenchmarkLaunch({
+        manifestPath,
+        policyRoot,
+        expectedMode,
+        ...(expectedProvider === undefined ? {} : { expectedProviders: [expectedProvider] })
+      })
+    )
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

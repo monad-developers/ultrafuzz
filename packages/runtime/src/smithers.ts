@@ -27,6 +27,7 @@ import {
   SMITHERS_ORCHESTRATOR_VERSION
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
@@ -152,6 +153,7 @@ export interface CompiledSmithersTask {
     maxDelayMs: number;
   };
   workspacePath: string;
+  baseCommit: string;
   artifactDir: string;
   dependencyArtifactDirs: readonly string[];
   renderedPromptPath?: string;
@@ -215,6 +217,7 @@ export interface SmithersTaskMetadata {
     primitive: "worktree";
     path: string;
     repoPath: string;
+    baseCommit: string;
     trustModel: string;
   };
   artifacts: {
@@ -332,6 +335,7 @@ export interface SmithersCommandSnapshot {
 
 export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSmithersWorkflow {
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
+  const baseCommit = resolveCheckedOutCommit(projectRoot);
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
   const agenticAttemptsByNodeId = new Map<string, string[]>();
@@ -361,6 +365,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           node,
           attempt,
           runLayout: input.runLayout,
+          baseCommit,
           workflowName,
           renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
@@ -1698,6 +1703,7 @@ function compileTask(input: {
   node: ExpandedNode;
   attempt: NodeAttemptProvenance;
   runLayout: RunLayout;
+  baseCommit: string;
   workflowName: string;
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
@@ -1776,6 +1782,7 @@ function compileTask(input: {
       primitive: "worktree",
       path: workspacePath,
       repoPath: input.config.project.repo,
+      baseCommit: input.baseCommit,
       trustModel: input.config.permissions.trustModel
     },
     artifacts: {
@@ -1814,6 +1821,7 @@ function compileTask(input: {
     retries,
     retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
     workspacePath,
+    baseCommit: input.baseCommit,
     artifactDir,
     dependencyArtifactDirs,
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
@@ -1980,6 +1988,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
       sourceProjectRoot: compiled.projectRoot,
+      baseCommit: task.baseCommit,
       branch: `ultrafuzz/${compiled.runId}/${task.attemptId}`,
       timeoutMs: task.timeoutMs,
       runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),

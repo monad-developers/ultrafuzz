@@ -68,6 +68,7 @@ export interface ModalNodeSandboxInput {
   task_id: string;
   attempt_id: string;
   execution_generation: string;
+  base_commit: string;
   workflow_path: string;
   prompt_path?: string;
   run_root: string;
@@ -299,6 +300,7 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     "task_id",
     "attempt_id",
     "execution_generation",
+    "base_commit",
     "workflow_path",
     "run_root",
     "artifact_dir",
@@ -311,6 +313,9 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
     throw new Error("cloud node execution generation is invalid");
+  }
+  if (!/^[0-9a-f]{40}$/u.test(value.base_commit as string)) {
+    throw new Error("cloud node base commit is invalid");
   }
   if (
     !Array.isArray(value.agent_credential_env) ||
@@ -368,7 +373,7 @@ export async function createModalNodeHandoffArchive(
     checkedPath(root, value, "dependency artifact directory")
   );
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
-  assertChildPath(runRoot, workflowPath, "workflow path");
+  assertExpectedWorkflowPath(root, workflowPath);
   if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
@@ -380,17 +385,27 @@ export async function createModalNodeHandoffArchive(
   const archive = path.join(temporaryRoot, "project.tgz");
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   try {
-    const baseArchive = path.join(temporaryRoot, "base.tar");
-    execFileSync("git", ["archive", "--format=tar", "--output", baseArchive, "HEAD"], { cwd: root });
-    await extractSafeTarArchive(baseArchive, staging, { gzip: false, label: "cloud handoff" });
-    fs.rmSync(baseArchive, { force: true });
-    assertSafeTree(staging);
+    const sourceCommit = input.base_commit;
     execFileSync("git", ["init", "--quiet"], { cwd: staging });
     execFileSync("git", ["config", "user.name", "Ultrafuzz Cloud"], { cwd: staging });
     execFileSync("git", ["config", "user.email", "cloud@invalid"], { cwd: staging });
-    execFileSync("git", ["add", "-A"], { cwd: staging });
-    execFileSync("git", ["commit", "--quiet", "-m", "immutable cloud input"], { cwd: staging });
-    for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG"]) {
+    // Carry the exact compiled commit as a shallow boundary. Recreating a
+    // synthetic commit from `git archive`, or reading a newer controller HEAD,
+    // would prevent the generated Worktree base pin from resolving in the worker.
+    execFileSync("git", ["fetch", "--quiet", "--depth", "1", "--no-tags", root, sourceCommit], {
+      cwd: staging
+    });
+    execFileSync("git", ["checkout", "--quiet", "--detach", sourceCommit], { cwd: staging });
+    const stagedCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+      cwd: staging,
+      encoding: "utf8"
+    })
+      .trim()
+      .toLowerCase();
+    if (stagedCommit !== sourceCommit) {
+      throw new Error("cloud handoff source revision mismatch");
+    }
+    for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG", "FETCH_HEAD", "ORIG_HEAD"]) {
       fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
     }
     assertSafeTree(staging);
@@ -409,6 +424,7 @@ export async function createModalNodeHandoffArchive(
       ".smithers/agents/index.ts",
       ".smithers/agents/codex.ts",
       ".smithers/agents/claude.ts",
+      ".smithers/agents/deepseek.ts",
       ".smithers/agents/kimi.ts",
       ".smithers/agents/toml.ts"
     ]) {
@@ -591,6 +607,13 @@ function checkedPath(root: string, value: string, label: string, mustExist = tru
 function assertChildPath(parent: string, child: string, label: string): void {
   if (child === parent || !child.startsWith(`${parent}${path.sep}`)) {
     throw new Error(`${label} must stay inside the run root`);
+  }
+}
+
+function assertExpectedWorkflowPath(root: string, workflowPath: string): void {
+  const workflowRoot = path.join(root, ".smithers", "workflows");
+  if (workflowPath === workflowRoot || !workflowPath.startsWith(`${workflowRoot}${path.sep}`)) {
+    throw new Error("workflow path must stay inside .smithers/workflows");
   }
 }
 

@@ -30,6 +30,35 @@ describe("Modal benchmark launch guardrails", () => {
     });
   });
 
+  it("requires an explicit trusted provider override for a DeepSeek smoke manifest", () => {
+    const fixture = preparedSmokeFixture({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+    expect(() => validateModalBenchmarkLaunch(fixture.input)).toThrow();
+
+    const expected = {
+      mode: "smoke",
+      benchmark: "ultrafuzz-bench",
+      execution: { mode: "modal", dry_run: false },
+      target_count: 3,
+      matrix_rows_per_pair: 3,
+      pair_count: 1
+    };
+    expect(validateModalBenchmarkLaunch({ ...fixture.input, expectedProviders: ["deepseek"] })).toEqual(expected);
+
+    const output = execFileSync(
+      process.execPath,
+      [
+        path.join(path.resolve("."), "scripts/ci/validate-modal-benchmark-launch.mjs"),
+        fixture.manifestPath,
+        path.resolve("."),
+        "smoke",
+        "--expected-provider",
+        "deepseek"
+      ],
+      { cwd: path.resolve("."), encoding: "utf8" }
+    );
+    expect(JSON.parse(output)).toEqual(expected);
+  });
+
   it("rejects one-target canonical smoke manifests before dispatch", () => {
     const fixture = preparedSmokeFixture();
     const manifest = readJson<LaunchManifest>(fixture.manifestPath);
@@ -153,7 +182,7 @@ interface LaunchConfig {
   public_benchmark: { targets: LaunchTarget[] };
 }
 
-function preparedSmokeFixture() {
+function preparedSmokeFixture(model?: { provider: string; model: string; reasoning: string }) {
   const workspace = path.resolve(".");
   const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-"));
   roots.push(output);
@@ -167,7 +196,13 @@ function preparedSmokeFixture() {
       output,
       "smoke"
     ],
-    { cwd: workspace }
+    {
+      cwd: workspace,
+      env: {
+        ...process.env,
+        BENCHMARK_MODELS_JSON: model === undefined ? "" : JSON.stringify([model])
+      }
+    }
   );
   const manifestPath = path.join(output, "manifest.json");
   const manifest = readJson<LaunchManifest>(manifestPath);

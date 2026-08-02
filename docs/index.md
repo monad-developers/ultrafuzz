@@ -41,6 +41,10 @@ ultrafuzz report <run-id>
 Normal runs use cached pinned references. Use `ultrafuzz references sync` as
 the explicit network step before a run that needs reference material.
 
+Before `ultrafuzz run`, commit the source being analyzed. The project must be a
+Git repository with a committed `HEAD` because each task worktree is pinned to
+that exact revision; a non-Git project or an unborn branch fails before launch.
+
 Generated tests, findings, and reports remain artifacts until you explicitly
 copy reviewed outputs into the target project with `ultrafuzz materialize`.
 

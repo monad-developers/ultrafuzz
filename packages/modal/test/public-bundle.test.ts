@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
@@ -52,8 +52,14 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v5");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
+    expect(
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v4"
+      })
+    ).toMatchObject({ schema_version: "ultrafuzz.modal.public-benchmark-bundle.v4", status: "succeeded" });
     expect(
       parsePublicBenchmarkBundle({
         ...bundle,
@@ -189,6 +195,119 @@ describe("public Modal benchmark bundles", () => {
         })
       ).toThrow(new RegExp(`missing reports/${rowIds[1]}/${required.replace(".", "\\.")}`, "u"));
     }
+  });
+
+  it("requires each current report to attest the exact matrix target revision", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-target-revision-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const reportPath = `reports/${rowId}/report.json`;
+    const report = JSON.parse(bundleFileText(bundle, reportPath)) as {
+      run_metadata: Record<string, unknown>;
+    };
+
+    delete report.run_metadata.target_revision;
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/runner-attested target revision/u);
+
+    report.run_metadata.target_revision = "2".repeat(40);
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/target revision does not match the matrix/u);
+
+    report.run_metadata.target_revision = "1".repeat(40);
+    const sourceAttestation = report.run_metadata.source_attestation as {
+      task_count: number;
+      tasks: Array<Record<string, unknown>>;
+      workspace_path?: string;
+    };
+    sourceAttestation.tasks[0]!.initial_head = "2".repeat(40);
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/invalid source attestation task/u);
+
+    sourceAttestation.tasks[0]!.initial_head = "1".repeat(40);
+    sourceAttestation.workspace_path = "/private/runner/worktree";
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/invalid source attestation metadata/u);
+
+    delete sourceAttestation.workspace_path;
+    sourceAttestation.task_count = 2;
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/invalid source attestation metadata/u);
+
+    sourceAttestation.tasks.push({ ...sourceAttestation.tasks[0]! });
+    expect(() =>
+      parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`))
+    ).toThrow(/repeats a source attestation task/u);
+  });
+
+  it("rejects contradictory explicit target commits in every schema without legacy false positives", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-legacy-target-revision-"));
+    const rowId = "target-a-runner-trial-1";
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, [rowId])
+    });
+    const reportPath = `reports/${rowId}/report.json`;
+    const report = JSON.parse(bundleFileText(bundle, reportPath)) as {
+      run_metadata: Record<string, unknown>;
+    };
+    const schemaVersions = [
+      "ultrafuzz.modal.public-benchmark-bundle.v3",
+      "ultrafuzz.modal.public-benchmark-bundle.v4"
+    ] as const;
+
+    for (const schemaVersion of schemaVersions) {
+      for (const contradictoryMetadata of [
+        { commit: "2".repeat(7) },
+        { target_commit: "2".repeat(40) },
+        { target: `benchmark target @ commit ${"2".repeat(7)}` }
+      ]) {
+        const contradictoryReport = structuredClone(report);
+        Object.assign(contradictoryReport.run_metadata, contradictoryMetadata);
+        expect(() =>
+          parsePublicBenchmarkBundle({
+            ...replaceBundleContents(bundle, reportPath, `${JSON.stringify(contradictoryReport, null, 2)}\n`),
+            schema_version: schemaVersion
+          })
+        ).toThrow(/contradicts the matrix target revision/u);
+      }
+
+      const matchingReport = structuredClone(report);
+      Object.assign(matchingReport.run_metadata, {
+        commit: "1".repeat(7),
+        target: `benchmark target @ commit ${"1".repeat(12)}`,
+        review_notes: "Unrelated user@deadbeef text is not an explicit target revision."
+      });
+      expect(
+        parsePublicBenchmarkBundle({
+          ...replaceBundleContents(bundle, reportPath, `${JSON.stringify(matchingReport, null, 2)}\n`),
+          schema_version: schemaVersion
+        })
+      ).toMatchObject({ schema_version: schemaVersion });
+    }
+
+    const contradictoryCurrentReport = structuredClone(report);
+    contradictoryCurrentReport.run_metadata.commit = "2".repeat(7);
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, reportPath, `${JSON.stringify(contradictoryCurrentReport, null, 2)}\n`)
+      )
+    ).toThrow(/contradicts the matrix target revision/u);
+
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...replaceBundleContents(bundle, reportPath, "not JSON\n"),
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3"
+      })
+    ).toThrow(/report\.json is not valid JSON/u);
   });
 
   it("fails the smoke no-regression gate when any target row has no finding", () => {
@@ -454,6 +573,59 @@ describe("public Modal benchmark bundles", () => {
     ).toThrow(/symlink/u);
   });
 
+  it("refuses to publish a hard-linked report source", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-hardlink-"));
+    const rowId = "target-a-runner-trial-1";
+    const files = completePublicSources(root, [rowId]);
+    const report = files.find((entry) => entry.path === `reports/${rowId}/report.json`);
+    if (report === undefined) throw new Error("missing report fixture");
+    fs.linkSync(report.source, path.join(root, "report-hardlink.json"));
+
+    expect(() =>
+      createPublicBenchmarkBundle({
+        ...TEST_BUNDLE_METADATA,
+        files
+      })
+    ).toThrow(/source cannot be hard-linked/u);
+  });
+
+  it("fails closed when a report parent is substituted between validation and open", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-parent-swap-"));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-parent-swap-outside-"));
+    const rowId = "target-a-runner-trial-1";
+    const files = completePublicSources(root, [rowId]);
+    const report = files.find((entry) => entry.path === `reports/${rowId}/report.json`);
+    if (report === undefined) throw new Error("missing report fixture");
+    const reportParent = path.dirname(report.source);
+    const movedParent = path.join(outside, "moved-report-parent");
+
+    const originalOpenSync = fs.openSync.bind(fs);
+    let substituted = false;
+    const openSpy = vi.spyOn(fs, "openSync").mockImplementation(((candidate, flags, mode) => {
+      if (!substituted && String(candidate).endsWith(path.relative(root, report.source))) {
+        substituted = true;
+        fs.renameSync(reportParent, movedParent);
+        fs.symlinkSync(movedParent, reportParent, "dir");
+      }
+      return originalOpenSync(candidate, flags, mode);
+    }) as typeof fs.openSync);
+
+    try {
+      expect(() =>
+        createPublicBenchmarkBundle({
+          ...TEST_BUNDLE_METADATA,
+          files
+        })
+      ).toThrow(/opened source escapes its canonical root|source crosses an unsafe directory/u);
+      expect(substituted).toBe(true);
+    } finally {
+      openSpy.mockRestore();
+      if (fs.lstatSync(reportParent, { throwIfNoEntry: false })?.isSymbolicLink()) fs.unlinkSync(reportParent);
+      if (fs.existsSync(movedParent)) fs.renameSync(movedParent, reportParent);
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("refuses a pre-existing intermediate output symlink without writing through it", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-output-intermediate-"));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-outside-intermediate-"));
@@ -558,6 +730,21 @@ describe("public Modal benchmark bundles", () => {
     expect(() =>
       parsePublicBenchmarkBundle(replaceBundleContents(bundle, reportPath, `leaked ${opaque}\n`), [opaque])
     ).toThrow(/injected secret value/u);
+
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, model: "sk-proj-metadata-secret-123456" })).toThrow(
+      /metadata contains secret-like content/u
+    );
+    expect(() => parsePublicBenchmarkBundle({ ...bundle, model: opaque }, [opaque])).toThrow(
+      /metadata contains an injected secret value/u
+    );
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        targets: bundle.targets.map((target, index) =>
+          index === 0 ? { ...target, repository: "https://user:opaque@example.com/private.git" } : target
+        )
+      })
+    ).toThrow(/credential-free HTTP\(S\) URL/u);
   });
 });
 
@@ -679,7 +866,29 @@ function completePublicSources(root: string, rowIds: string[]): Array<{ path: st
       [
         "report.json",
         `${JSON.stringify(
-          { schema_version: "1.0", run_metadata: {}, issues: [finding], non_production_outcomes: [] },
+          {
+            schema_version: "1.0",
+            run_metadata: {
+              target_revision: "1".repeat(40),
+              source_attestation: {
+                schema_version: "ultrafuzz.workspace-source-attestation.v1",
+                target_revision: "1".repeat(40),
+                task_count: 1,
+                tasks: [
+                  {
+                    attempt_id: "final-report",
+                    node_id: "final-report",
+                    expected_base_commit: "1".repeat(40),
+                    initial_head: "1".repeat(40),
+                    agent_root_verified: true,
+                    tracked_clean: true
+                  }
+                ]
+              }
+            },
+            issues: [finding],
+            non_production_outcomes: []
+          },
           null,
           2
         )}\n`

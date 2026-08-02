@@ -30,7 +30,9 @@ local dashboard plus final report for review.
    references are not cached.
 4. `ultrafuzz run --project <project>`
    Renders prompts, writes the product plan, launches the workflow, and stores
-   run evidence under `.ultrafuzz/runs/**`.
+   run evidence under `.ultrafuzz/runs/**`. The project must be a Git repository
+   with a committed `HEAD`; Ultrafuzz pins every task worktree to that exact
+   source revision and fails closed before launch when it cannot resolve one.
 5. `ultrafuzz ps`, `ultrafuzz status <run-id>`, and `ultrafuzz inspect <run-id>`
    Show product run evidence, concise health, and linked workflow status.
 6. `ultrafuzz why <run-id>`, `ultrafuzz events <run-id>`, and

@@ -42,7 +42,15 @@ import {
 const runningUnderBun = typeof process.versions.bun === "string";
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runtime-"));
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "ultrafuzz-test@example.com"], {
+    cwd: project,
+    stdio: "ignore"
+  });
+  execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: project, stdio: "ignore" });
+  return project;
 }
 
 async function loadGeneratedKimiAgent(project: string): Promise<{
@@ -3197,10 +3205,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       retries?: number;
       retryPolicy?: unknown;
       workspacePath?: string;
+      baseCommit?: string;
       artifactDir?: string;
       metadata?: {
         node?: { concreteNodeId?: string };
         model?: { modelName?: string; reasoningEffort?: string };
+        workspace?: { baseCommit?: string };
       };
     }>;
   };
@@ -3218,6 +3228,12 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersTasks.tasks[0]?.agentRef, "CodexAgent");
   assert.equal(smithersTasks.tasks[0]?.modelName, "gpt-runtime-override");
   assert.equal(smithersTasks.tasks[0]?.reasoningEffort, "max");
+  const expectedBaseCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+    cwd: project,
+    encoding: "utf8"
+  }).trim();
+  assert.equal(smithersTasks.tasks[0]?.baseCommit, expectedBaseCommit);
+  assert.equal(smithersTasks.tasks[0]?.metadata?.workspace?.baseCommit, expectedBaseCommit);
   assert.equal(smithersTasks.tasks[0]?.artifactDir, path.join(run.value!.run_root, "artifacts", "project-discovery"));
   assert.notEqual(smithersTasks.tasks[0]?.artifactDir, smithersTasks.tasks[0]?.workspacePath);
   assert.ok(smithersTasks.tasks.every((task) => typeof task.timeoutMs === "number"));
@@ -3245,6 +3261,28 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /lstatSync\(candidate\)/);
   assert.match(workflowSource, /function isMissingPathError/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
+  assert.match(workflowSource, /assertWorkspaceBaseCommit\(task\.workspacePath, task\.baseCommit\)/);
+  assert.match(workflowSource, /assertAgentWorkspaceProvenance/);
+  assert.match(workflowSource, /typeof args\?\.rootDir === "string"/);
+  assert.match(workflowSource, /mirroredArtifactDir\(task\)\s*\n\s*\);/);
+  assert.match(workflowSource, /persistWorkspaceSourceAttestation\(\{/);
+  assert.match(
+    workflowSource,
+    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);[\s\S]*?const verifiedWorkspace = assertAgentWorkspaceProvenance\([\s\S]*?persistWorkspaceSourceAttestation\(\{[\s\S]*?workspace: verifiedWorkspace/
+  );
+  assert.doesNotMatch(workflowSource, /writeWorkspaceSourceAttestation/);
+  assert.match(workflowSource, /readWorkspaceSourceAttestation\(\{/);
+  assert.match(workflowSource, /sourceAttestationClosure\(task\)/);
+  assert.doesNotMatch(workflowSource, /agentWorkspaceAttestations/);
+  assert.match(workflowSource, /function sourceAttestation/);
+  assert.match(workflowSource, /runMetadata\.source_attestation = attestation/);
+  assert.match(workflowSource, /const attestation = sourceAttestation\(task\);/);
+  assert.match(workflowSource, /verifyReportSourceAttestation\(contents, task\.baseCommit, attestation\)/);
+  assert.match(workflowSource, /baseBranch=\{task\.baseCommit\}/);
+  assert.match(workflowSource, /base_commit: task\.baseCommit/);
+  assert.equal(workflowSource.includes(`"baseCommit": ${JSON.stringify(expectedBaseCommit)}`), true);
+  assert.match(workflowSource, /\{\(\) => prepareTask\(task\)\}/);
+  assert.match(workflowSource, /runMetadata\.target_revision = targetRevision/);
   assert.match(workflowSource, /function canonicalEmptyArtifact/);
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
@@ -4104,6 +4142,44 @@ test("startRun includes bounded workflow runner stdio when submission fails", as
   assert.equal(diagnostic.details?.exit_code, 42);
   assert.equal(diagnostic.details?.stdout, "submission stdout detail api_key=<redacted>\n");
   assert.equal(diagnostic.details?.stderr, "submission stderr detail token=<redacted>\n");
+});
+
+test("startRun fails closed with a structured diagnostic when source HEAD is unavailable", async (context) => {
+  for (const repositoryState of ["non-git", "unborn-head"] as const) {
+    await context.test(repositoryState, async () => {
+      const project = tempProject();
+      initProject({ projectRoot: project, force: true });
+      writeSmallTopology(project);
+      fs.rmSync(path.join(project, ".git"), { recursive: true, force: true });
+      if (repositoryState === "unborn-head") {
+        execFileSync("git", ["init", "--quiet"], { cwd: project });
+      }
+
+      const run = await startRun({
+        projectRoot: project,
+        runId: `missing-source-${repositoryState}`
+      });
+
+      assert.equal(run.ok, false);
+      assert.equal(run.value, undefined);
+      assert.equal(run.diagnostics[0]?.code, "WORKFLOW_COMPILE_FAILED");
+      assert.equal(run.diagnostics[0]?.source, "workflow");
+      assert.match(run.diagnostics[0]?.message ?? "", /could not resolve the checked-out source commit/u);
+      const state = JSON.parse(
+        fs.readFileSync(
+          path.join(project, ".ultrafuzz", "runs", `missing-source-${repositoryState}`, "state.json"),
+          "utf8"
+        )
+      ) as { status?: unknown };
+      assert.equal(state.status, "failed");
+      const events = fs.readFileSync(
+        path.join(project, ".ultrafuzz", "runs", `missing-source-${repositoryState}`, "events.jsonl"),
+        "utf8"
+      );
+      assert.match(events, /"event_type":"workflow-compile-failed"/u);
+      assert.doesNotMatch(events, /workflow-submitting/u);
+    });
+  }
 });
 
 test("syncRun marks successful workflow completion, normalizes findings, and writes manifests", async () => {
@@ -8219,13 +8295,18 @@ test(
   { skip: realSmithersGraphUnavailable() },
   async () => {
     const project = tempProject();
+    fs.writeFileSync(path.join(project, "source.txt"), "candidate A\n", "utf8");
+    execFileSync("git", ["add", "source.txt"], { cwd: project });
+    execFileSync("git", ["commit", "-m", "candidate A"], { cwd: project, stdio: "ignore" });
+    execFileSync("git", ["branch", "-M", "main"], { cwd: project });
+    const candidateA = execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8" }).trim();
+    fs.writeFileSync(path.join(project, "source.txt"), "local main B\n", "utf8");
+    execFileSync("git", ["commit", "-am", "local main B"], { cwd: project, stdio: "ignore" });
+    const localMainB = execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8" }).trim();
+    execFileSync("git", ["checkout", "--detach", candidateA], { cwd: project, stdio: "ignore" });
     initProject({ projectRoot: project, force: true });
     writeSmallTopology(project);
-    fs.symlinkSync(
-      path.join(workspaceRoot(), ".smithers", "node_modules"),
-      path.join(project, ".smithers", "node_modules"),
-      "dir"
-    );
+    fs.symlinkSync(runtimeSmithersNodeModules(), path.join(project, ".smithers", "node_modules"), "dir");
 
     const plan = await planRun({ projectRoot: project, runId: "graph-smoke", env: {} });
     assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -8239,9 +8320,23 @@ test(
       renderedPrompts: plan.value!.rendered_prompts,
       operatorPrompt: "graph smoke"
     });
+    assert.notEqual(candidateA, localMainB);
+    assert.equal(execFileSync("git", ["rev-parse", "main"], { cwd: project, encoding: "utf8" }).trim(), localMainB);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: project, encoding: "utf8" }).trim(), candidateA);
+    assert.equal(
+      compiled.tasks.every((task) => task.baseCommit === candidateA),
+      true
+    );
+    const persistedTasks = JSON.parse(fs.readFileSync(compiled.tasksPath, "utf8")) as {
+      tasks?: Array<{ baseCommit?: string }>;
+    };
+    assert.equal(
+      persistedTasks.tasks?.every((task) => task.baseCommit === candidateA),
+      true
+    );
 
     const graphProcess = spawnSync(
-      "smithers",
+      runtimeSmithersBinary(),
       [
         "graph",
         compiled.evidenceWorkflowPath,
@@ -8277,8 +8372,11 @@ test(
       );
     }
     const graphJson = graphProcess.stdout;
-    const graph = JSON.parse(graphJson) as { tasks?: Array<{ nodeId?: string }> };
+    const graph = JSON.parse(graphJson) as {
+      tasks?: Array<{ nodeId?: string; worktreeBaseBranch?: string }>;
+    };
     assert.equal(graph.tasks?.[0]?.nodeId, "prepare:project-discovery");
+    assert.equal(graph.tasks?.[0]?.worktreeBaseBranch, candidateA);
     assert.equal(
       graph.tasks?.some((task) => task.nodeId === "node:project-discovery"),
       true
@@ -8291,15 +8389,21 @@ test(
 );
 
 function realSmithersGraphUnavailable(): string | false {
-  try {
-    execFileSync("smithers", ["graph", "--help"], { stdio: "ignore" });
-  } catch {
-    return "smithers CLI is not installed";
+  if (!fs.existsSync(runtimeSmithersBinary())) {
+    return "runtime Smithers CLI is not installed";
   }
-  if (!fs.existsSync(path.join(workspaceRoot(), ".smithers", "node_modules", "smithers-orchestrator"))) {
-    return ".smithers Smithers dependencies are not installed";
+  if (!fs.existsSync(path.join(runtimeSmithersNodeModules(), "smithers-orchestrator"))) {
+    return "runtime Smithers dependencies are not installed";
   }
   return false;
+}
+
+function runtimeSmithersNodeModules(): string {
+  return path.join(workspaceRoot(), "packages", "runtime", "node_modules");
+}
+
+function runtimeSmithersBinary(): string {
+  return path.join(runtimeSmithersNodeModules(), ".bin", process.platform === "win32" ? "smithers.cmd" : "smithers");
 }
 
 function workspaceRoot(): string {

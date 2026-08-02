@@ -34,6 +34,33 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(validateAutomaticPublicationManifest(smokeManifest(), smokeContext())).toEqual(smokeManifest());
   });
 
+  it("requires an explicit trusted provider set for a DeepSeek smoke publication manifest", () => {
+    const manifest = smokeManifest();
+    const modelSlug = "benchmark-smoke-deepseek-v4-flash-max";
+    const pair = `ultrafuzz-bench-${modelSlug}`;
+    const providerConcurrency = manifest.concurrency.max_live_runner_workflows_by_provider as Record<string, number>;
+    delete providerConcurrency.openai;
+    providerConcurrency.deepseek = 3;
+    manifest.pairs = [
+      {
+        ...manifest.pairs[0]!,
+        pair,
+        model_slug: modelSlug,
+        provider: "deepseek",
+        config_path: `${pair}.json`,
+        state_path: `${pair}.state.json`
+      }
+    ];
+
+    expect(() => validateAutomaticPublicationManifest(manifest, smokeContext())).toThrow();
+    expect(
+      validateAutomaticPublicationManifest(manifest, {
+        ...smokeContext(),
+        expectedProviders: ["deepseek"]
+      })
+    ).toEqual(manifest);
+  });
+
   it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
     const modelSlug = "benchmark-smoke-gpt-5-6-luna-202607-high";
     const pair = {
@@ -125,6 +152,12 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(
       validateAutomaticPublicationManifest(fullManifest(), fullContext).pairs.map((pair) => pair.provider)
     ).toEqual(["openai", "anthropic", "kimi", "deepseek"]);
+    expect(() =>
+      validateAutomaticPublicationManifest(fullManifest(), {
+        ...fullContext,
+        expectedProviders: ["deepseek"]
+      })
+    ).toThrow(/full benchmark must expect exactly openai, anthropic, kimi, and deepseek in order/u);
 
     for (const mutate of [
       (manifest: ReturnType<typeof fullManifest>) => manifest.pairs.pop(),

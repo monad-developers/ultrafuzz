@@ -27,7 +27,7 @@ import {
   type ModalWorkerStatus
 } from "../src/launch-state.js";
 import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remoteAuthPath } from "../src/layout.js";
-import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES } from "../src/public-bundle.js";
+import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES, PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
   KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
@@ -445,6 +445,17 @@ describe("Modal result collection", () => {
     const lineage = publicCollectionLineage();
 
     expect(() => assertPublicBenchmarkBundleLineage(lineage)).not.toThrow();
+    for (const schemaVersion of [
+      "ultrafuzz.modal.public-benchmark-bundle.v3",
+      "ultrafuzz.modal.public-benchmark-bundle.v4"
+    ] as const) {
+      expect(() =>
+        assertPublicBenchmarkBundleLineage({
+          ...lineage,
+          bundle: { ...lineage.bundle, schema_version: schemaVersion }
+        })
+      ).toThrow(/bundle schema version/u);
+    }
     expect(() => assertPublicBenchmarkBundleLineage({ ...lineage, configFingerprint: "f".repeat(64) })).toThrow(
       /configuration fingerprint/u
     );
@@ -868,6 +879,7 @@ function publicCollectionLineage(): Parameters<typeof assertPublicBenchmarkBundl
   if (!isPublicModalBenchmarkConfig(config)) throw new Error("expected a public benchmark config");
   return {
     bundle: {
+      schema_version: PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
       benchmark: "evmbench",
       lane: "smoke",
       model_slug: MODEL.slug,

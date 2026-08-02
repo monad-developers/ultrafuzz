@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,7 +17,15 @@ interface Capture {
 }
 
 function tempProject(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "ufz-lifecycle-cli-"));
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-lifecycle-cli-"));
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: project, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "ultrafuzz-test@example.com"], {
+    cwd: project,
+    stdio: "ignore"
+  });
+  execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: project, stdio: "ignore" });
+  return project;
 }
 
 function shellQuote(value: string): string {

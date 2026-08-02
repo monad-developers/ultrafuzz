@@ -41,7 +41,7 @@ import {
   publicScoreCommandTimeoutSeconds,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
-import type { PublicBenchmarkBundle } from "../src/public-bundle.js";
+import { PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION, type PublicBenchmarkBundle } from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { WorkerResultWriter } from "../src/worker-result.js";
 
@@ -746,6 +746,7 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
     model_fingerprint: "e".repeat(64)
   };
   const bundle = {
+    schema_version: PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
     benchmark: config.public_benchmark.benchmark,
     lane: config.public_benchmark.lane,
     model_slug: model.slug,
@@ -766,6 +767,19 @@ it("rejects a persisted public bundle unless every worker lineage field matches"
   } as PublicBenchmarkBundle;
 
   expect(() => assertPublicWorkerBundleLineage(bundle, config, model, lineage)).not.toThrow();
+  for (const schemaVersion of [
+    "ultrafuzz.modal.public-benchmark-bundle.v3",
+    "ultrafuzz.modal.public-benchmark-bundle.v4"
+  ] as const) {
+    expect(() =>
+      assertPublicWorkerBundleLineage(
+        { ...bundle, schema_version: schemaVersion } as PublicBenchmarkBundle,
+        config,
+        model,
+        lineage
+      )
+    ).toThrow(/schema version/u);
+  }
   expect(() =>
     assertPublicWorkerBundleLineage(
       {
@@ -844,6 +858,7 @@ it("bounds composed public eval run IDs without losing model identity or bundle 
     model_fingerprint: "e".repeat(64)
   };
   const bundle = {
+    schema_version: PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
     benchmark: config.public_benchmark.benchmark,
     lane: config.public_benchmark.lane,
     model_slug: model.slug,

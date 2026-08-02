@@ -47,6 +47,7 @@ const PROVIDER_AGENT = {
   deepseek: "DeepSeekAgent",
   kimi: "KimiAgent"
 };
+const FULL_BENCHMARK_PROVIDERS = ["openai", "anthropic", "kimi", "deepseek"];
 
 export function validateAutomaticPublicationManifest(value, context) {
   const expected = publicationExpectations(context);
@@ -346,7 +347,7 @@ function publicationExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = smoke ? ["openai"] : ["openai", "anthropic", "kimi", "deepseek"];
+  const providers = expectedBenchmarkProviders(input.mode, input.expectedProviders);
   return {
     candidateCommit,
     repository,
@@ -368,6 +369,28 @@ function publicationExpectations(input) {
     maxLiveRowsPerPair,
     maxLiveJudgeRows: checkedProduct(providers.length, maxLiveRowsPerPair, "maximum live judge rows")
   };
+}
+
+function expectedBenchmarkProviders(mode, explicitProviders) {
+  const defaults = mode === "smoke" ? ["openai"] : FULL_BENCHMARK_PROVIDERS;
+  if (explicitProviders === undefined) return [...defaults];
+  if (
+    !Array.isArray(explicitProviders) ||
+    explicitProviders.some((provider) => typeof provider !== "string" || !Object.hasOwn(PROVIDER_AGENT, provider)) ||
+    new Set(explicitProviders).size !== explicitProviders.length
+  ) {
+    throw new Error("expected benchmark providers are invalid");
+  }
+  if (mode === "smoke") {
+    if (explicitProviders.length !== 1) {
+      throw new Error("smoke benchmark must expect exactly one provider");
+    }
+    return [...explicitProviders];
+  }
+  if (JSON.stringify(explicitProviders) !== JSON.stringify(FULL_BENCHMARK_PROVIDERS)) {
+    throw new Error("full benchmark must expect exactly openai, anthropic, kimi, and deepseek in order");
+  }
+  return [...FULL_BENCHMARK_PROVIDERS];
 }
 
 function validateExecution(value) {
@@ -1173,9 +1196,11 @@ async function main() {
   }
   if (command !== "automatic") {
     throw new Error(
-      "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output>"
+      "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>]"
     );
   }
+  const automaticUsage =
+    "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>]";
   const [
     manifestPath,
     controlRoot,
@@ -1204,11 +1229,13 @@ async function main() {
       generationPath,
       planPath
     ].some((value) => value === undefined) ||
-    extra.length > 0
+    (extra.length !== 0 && extra.length !== 2)
   ) {
-    throw new Error(
-      "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output>"
-    );
+    throw new Error(automaticUsage);
+  }
+  const [option, expectedProvider] = extra;
+  if (option !== undefined && (option !== "--expected-provider" || expectedProvider === undefined)) {
+    throw new Error(automaticUsage);
   }
   const result = await prepareAutomaticPublication({
     manifestPath,
@@ -1221,7 +1248,8 @@ async function main() {
     producerRunAttempt,
     mode,
     generationPath,
-    planPath
+    planPath,
+    ...(expectedProvider === undefined ? {} : { expectedProviders: [expectedProvider] })
   });
   process.stdout.write(`${JSON.stringify({ pairs: result.plan.pairs.length })}\n`);
 }

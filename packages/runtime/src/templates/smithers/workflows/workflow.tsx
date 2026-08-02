@@ -27,7 +27,14 @@ import * as projectAgents from "../agents/index.ts";
 const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
 const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
-const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
+const {
+  assertAgentWorkspaceProvenance,
+  assertWorkspaceBaseCommit,
+  normalizeFinalReportSeverityRecord,
+  normalizeSeverityLevel,
+  persistWorkspaceSourceAttestation,
+  readWorkspaceSourceAttestation
+} = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -48,7 +55,11 @@ const taskOutput = z.object({
 });
 
 const preparationOutput = z.object({
-  prepared: z.literal(true)
+  prepared: z.literal(true),
+  workspace: z.object({
+    base_commit: z.string().regex(/^[0-9a-f]{40}$/u),
+    initial_head: z.string().regex(/^[0-9a-f]{40}$/u)
+  })
 });
 
 const verificationOutput = z.object({
@@ -140,6 +151,18 @@ function promptForTask(
   return prompt.replaceAll(task.artifactDir, mirroredArtifactDir(task));
 }
 
+function prepareTask(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
+  const workspace = assertWorkspaceBaseCommit(task.workspacePath, task.baseCommit);
+  prepareArtifactMirror(task);
+  return {
+    prepared: true,
+    workspace: {
+      base_commit: workspace.baseCommit,
+      initial_head: workspace.initialHead
+    }
+  };
+}
+
 function baseAgentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[] | undefined {
   const factory = agentFactories[task.agentRef];
   if (factory === undefined) {
@@ -178,11 +201,50 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       if ((args?.taskContext?.attempt ?? 1) > 1) {
         resetTaskArtifactsForRetry(task);
       }
+      const workspace = assertAgentWorkspaceProvenance(
+        task.workspacePath,
+        task.baseCommit,
+        typeof args?.rootDir === "string" ? args.rootDir : undefined,
+        mirroredArtifactDir(task)
+      );
+      persistWorkspaceSourceAttestation({
+        artifactDir: task.artifactDir,
+        targetRevision: task.baseCommit,
+        current: {
+          attemptId: task.attemptId,
+          nodeId: task.metadata.node.logicalNodeId,
+          workspace
+        },
+        dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
+        expectedTasks: sourceAttestationClosure(task)
+      });
       const result = await agent.generate(args);
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
       // preserving outputs; this remains deterministic and model-free.
       prepareArtifactMirror(task);
+      // Re-check the exact repository identity and source tree after the model
+      // returns. Evidence captured before invocation cannot prove the model did
+      // not leave the worktree on a different revision or modify target source.
+      const verifiedWorkspace = assertAgentWorkspaceProvenance(
+        task.workspacePath,
+        task.baseCommit,
+        typeof args?.rootDir === "string" ? args.rootDir : undefined,
+        mirroredArtifactDir(task)
+      );
+      // Rebuild the runner-owned attestation from the post-invocation check so
+      // model access to the artifact directory cannot substitute stale evidence.
+      persistWorkspaceSourceAttestation({
+        artifactDir: task.artifactDir,
+        targetRevision: task.baseCommit,
+        current: {
+          attemptId: task.attemptId,
+          nodeId: task.metadata.node.logicalNodeId,
+          workspace: verifiedWorkspace
+        },
+        dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
+        expectedTasks: sourceAttestationClosure(task)
+      });
       materializeMissingMarkdownArtifacts(task, result);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
@@ -200,6 +262,32 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       return result;
     }
   };
+}
+
+function sourceAttestationClosure(task: (typeof taskSpecs)[number]): Array<{ attemptId: string; nodeId: string }> {
+  const tasksByVerifierId = new Map(taskSpecs.map((candidate) => [candidate.verifierId, candidate]));
+  const expected = new Map<string, string>();
+  const visit = (candidate: (typeof taskSpecs)[number]): void => {
+    if (expected.has(candidate.attemptId)) return;
+    expected.set(candidate.attemptId, candidate.metadata.node.logicalNodeId);
+    for (const dependencyId of candidate.dependsOn) {
+      const dependency = tasksByVerifierId.get(dependencyId);
+      if (dependency === undefined) {
+        throw new Error(`workspace-provenance failure: unknown attestation dependency ${dependencyId}`);
+      }
+      visit(dependency);
+    }
+  };
+  visit(task);
+  return [...expected].map(([attemptId, nodeId]) => ({ attemptId, nodeId }));
+}
+
+function sourceAttestation(task: (typeof taskSpecs)[number]): ReturnType<typeof readWorkspaceSourceAttestation> {
+  return readWorkspaceSourceAttestation({
+    artifactDir: task.artifactDir,
+    targetRevision: task.baseCommit,
+    expectedTasks: sourceAttestationClosure(task)
+  });
 }
 
 function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
@@ -307,7 +395,7 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
   return roots;
 }
 
-function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
+function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
   const workspaceRoot = realpathSync(task.workspacePath);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
@@ -336,7 +424,6 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
       writeFileSync(artifactPath, emptyArtifact, { encoding: "utf8", flag: "wx", mode: 0o600 });
     }
   }
-  return { prepared: true };
 }
 
 function canonicalEmptyArtifact(
@@ -859,7 +946,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
       }
       const contents = readFileSync(resolvedPath, "utf8");
       const originalIsValid = validateArtifactContract(output.contract, contents, output.path).ok;
-      const normalized = normalizeLegacyReportProvenanceFields(contents);
+      const normalized = normalizeLegacyReportProvenanceFields(contents, task.baseCommit, sourceAttestation(task));
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
         break;
@@ -871,7 +958,11 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
   }
 }
 
-function normalizeLegacyReportProvenanceFields(contents: string): string | undefined {
+function normalizeLegacyReportProvenanceFields(
+  contents: string,
+  targetRevision: string,
+  attestation: ReturnType<typeof sourceAttestation>
+): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -881,9 +972,18 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const report = parsed as { issues?: unknown; property_provenance?: unknown };
+  const report = parsed as { issues?: unknown; property_provenance?: unknown; run_metadata?: unknown };
 
   let changed = false;
+  const runMetadata = isPlainRecord(report.run_metadata) ? { ...report.run_metadata } : {};
+  if (runMetadata.target_revision !== targetRevision) {
+    runMetadata.target_revision = targetRevision;
+    changed = true;
+  }
+  if (JSON.stringify(runMetadata.source_attestation) !== JSON.stringify(attestation)) {
+    runMetadata.source_attestation = attestation;
+    changed = true;
+  }
   const issues = Array.isArray(report.issues)
     ? report.issues.map((entry) => {
         const normalized = normalizeLegacyFindingRecord(entry);
@@ -918,6 +1018,7 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
     ? `${JSON.stringify(
         {
           ...report,
+          run_metadata: runMetadata,
           ...(issues === undefined ? {} : { issues }),
           ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
         },
@@ -1141,6 +1242,7 @@ function resolveNonEmptyRegularArtifactFile(
 }
 
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
+  const attestation = sourceAttestation(task);
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const artifacts = task.outputs.map((output) => {
@@ -1179,6 +1281,9 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     if (output.contract === "ultrafuzz/generated-tests@1") {
       verifyGeneratedTestFiles(artifactRoot, validation.value);
     }
+    if (output.contract === "ultrafuzz/report@1") {
+      verifyReportSourceAttestation(contents, task.baseCommit, attestation);
+    }
     return {
       path: output.path,
       contract: output.contract,
@@ -1192,6 +1297,26 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     throw new Error("artifact-contract failure: primary artifact is missing");
   }
   return { artifacts, primary_artifact: primary.path };
+}
+
+function verifyReportSourceAttestation(
+  contents: string,
+  targetRevision: string,
+  attestation: ReturnType<typeof sourceAttestation>
+): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch (error) {
+    throw new Error("workspace-provenance failure: final report is not valid JSON", { cause: error });
+  }
+  const runMetadata = isPlainRecord(parsed) && isPlainRecord(parsed.run_metadata) ? parsed.run_metadata : undefined;
+  if (
+    runMetadata?.target_revision !== targetRevision ||
+    JSON.stringify(runMetadata.source_attestation) !== JSON.stringify(attestation)
+  ) {
+    throw new Error("workspace-provenance failure: final report source attestation is not canonical");
+  }
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
@@ -1247,6 +1372,7 @@ export default smithers((ctx) => {
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
+                    base_commit: task.baseCommit,
                     workflow_path: task.workflowPath,
                     ...(task.promptPath === undefined ? {} : { prompt_path: task.promptPath }),
                     run_root: task.runRoot,
@@ -1289,7 +1415,7 @@ export default smithers((ctx) => {
             );
           }
           return (
-            <Worktree key={task.id} path={task.workspacePath} branch={task.branch}>
+            <Worktree key={task.id} path={task.workspacePath} branch={task.branch} baseBranch={task.baseCommit}>
               <Task
                 id={task.preparationId}
                 output={outputs.preparation}
@@ -1301,7 +1427,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => prepareArtifactMirror(task)}
+                {() => prepareTask(task)}
               </Task>
               <Task
                 id={task.id}

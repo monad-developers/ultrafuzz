@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { assertFindingsSchema, assertRegularFileInside } from "@ultrafuzz/artifacts";
+import { assertFindingsSchema } from "@ultrafuzz/artifacts";
 import {
   MAX_PUBLIC_EVAL_DIAGNOSTICS_BYTES,
   PUBLIC_EVAL_DIAGNOSTICS_FILE,
@@ -14,7 +14,8 @@ import { z } from "zod/v4";
 
 import type { ModalWorkerLineage } from "./launch-state.js";
 
-export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
+export const PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v5" as const;
+const PUBLIC_BENCHMARK_BUNDLE_PREVIOUS_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v4" as const;
 const PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v3" as const;
 export const MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES = 256 * 1024 * 1024;
 
@@ -27,6 +28,24 @@ const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
 const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
 const caseCount = z.number().int().nonnegative().max(MAX_ROWS);
+const repositoryUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => {
+    try {
+      const parsed = new URL(value);
+      return (
+        (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+        parsed.username === "" &&
+        parsed.password === "" &&
+        parsed.search === "" &&
+        parsed.hash === ""
+      );
+    } catch {
+      return false;
+    }
+  }, "must be a credential-free HTTP(S) URL without a query or fragment");
 const bundleStatus = z.enum(["succeeded", "genuine-task-failures", "failed"]);
 const legacyBundleStatus = z.enum(["succeeded", "genuine-task-failures"]);
 const relativePath = z
@@ -59,7 +78,7 @@ const targetPublicationLocationSchema = z.strictObject({
 
 const bundleTargetSchema = z.strictObject({
   id: safeId,
-  repository: z.string().url().max(2_048),
+  repository: repositoryUrl,
   revision: fullSha,
   framework: safeId.optional(),
   status: bundleStatus,
@@ -70,7 +89,7 @@ const bundleTargetSchema = z.strictObject({
 
 const legacyBundleTargetSchema = z.strictObject({
   id: safeId,
-  repository: z.string().url().max(2_048),
+  repository: repositoryUrl,
   revision: fullSha,
   framework: safeId.optional(),
   status: legacyBundleStatus,
@@ -117,6 +136,13 @@ const currentBundleSchema = z.strictObject({
   targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
 });
 
+const previousBundleSchema = z.strictObject({
+  schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_PREVIOUS_SCHEMA_VERSION),
+  ...bundleShape,
+  status: bundleStatus,
+  targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
+});
+
 const legacyBundleSchema = z.strictObject({
   schema_version: z.literal(PUBLIC_BENCHMARK_BUNDLE_LEGACY_SCHEMA_VERSION),
   ...bundleShape,
@@ -124,7 +150,23 @@ const legacyBundleSchema = z.strictObject({
   targets: z.array(legacyBundleTargetSchema).min(1).max(MAX_ROWS)
 });
 
-const bundleSchema = z.union([currentBundleSchema, legacyBundleSchema]);
+const bundleSchema = z.union([currentBundleSchema, previousBundleSchema, legacyBundleSchema]);
+
+const sourceAttestationTaskSchema = z.strictObject({
+  attempt_id: safeId,
+  node_id: safeId,
+  expected_base_commit: fullSha,
+  initial_head: fullSha,
+  agent_root_verified: z.literal(true),
+  tracked_clean: z.literal(true)
+});
+
+const sourceAttestationSchema = z.strictObject({
+  schema_version: z.literal("ultrafuzz.workspace-source-attestation.v1"),
+  target_revision: fullSha,
+  task_count: z.number().int().positive().max(MAX_ROWS),
+  tasks: z.array(sourceAttestationTaskSchema).min(1).max(MAX_ROWS)
+});
 
 export type PublicBenchmarkBundle = z.infer<typeof bundleSchema>;
 type CurrentPublicBenchmarkBundle = z.infer<typeof currentBundleSchema>;
@@ -225,33 +267,214 @@ function assertPublicBenchmarkFileContainsNoSecrets(
   }
 }
 
-function readRegularFileNoFollow(root: string, source: string): Buffer {
-  assertRegularFileInside(root, source, "public benchmark bundle source");
-  return readRegularFilePathNoFollow(source, MAX_FILE_BYTES, `public benchmark file is too large: ${source}`);
+function assertPublicBenchmarkMetadataContainsNoSecrets(
+  bundle: PublicBenchmarkBundle,
+  forbiddenSecretValues: readonly string[]
+): void {
+  const metadata = JSON.stringify({
+    ...bundle,
+    files: bundle.files.map((file) => ({
+      path: file.path,
+      size_bytes: file.size_bytes,
+      sha256: file.sha256
+    }))
+  });
+  if (forbiddenSecretValues.some((secret) => metadata.includes(secret))) {
+    throw new Error("public benchmark bundle metadata contains an injected secret value");
+  }
+  if (redactSecretsInText(metadata) !== metadata) {
+    throw new Error("public benchmark bundle metadata contains secret-like content");
+  }
 }
 
-function readRegularFilePathNoFollow(filePath: string, maxBytes: number, tooLargeMessage: string): Buffer {
+interface SourcePathIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+interface SourcePathSnapshot {
+  root: string;
+  file: string;
+  relativeFile: string;
+  canonicalRoot: string;
+  canonicalFile: string;
+  directories: SourcePathIdentity[];
+  fileIdentity: SourcePathIdentity;
+}
+
+function readRegularFileNoFollow(
+  root: string,
+  source: string,
+  maxBytes = MAX_FILE_BYTES,
+  tooLargeMessage = `public benchmark file is too large: ${source}`
+): Buffer {
+  const snapshot = snapshotRegularSource(root, source);
   const noFollow = (fs.constants as typeof fs.constants & { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
   const nonBlocking = (fs.constants as typeof fs.constants & { O_NONBLOCK?: number }).O_NONBLOCK ?? 0;
-  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+  const directoryOnly = (fs.constants as typeof fs.constants & { O_DIRECTORY?: number }).O_DIRECTORY ?? 0;
+  const procFdAvailable = process.platform === "linux" && fs.existsSync("/proc/self/fd");
+  let rootDescriptor: number | undefined;
+  let descriptor: number | undefined;
   try {
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile()) throw new Error(`public benchmark source is not a regular file: ${filePath}`);
-    if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > maxBytes) throw new Error(tooLargeMessage);
+    let openPath = snapshot.file;
+    if (procFdAvailable) {
+      // Anchor traversal to the already-opened root on Linux. Other platforms
+      // use the fail-closed dev/inode plus pre/post ancestor proof below.
+      rootDescriptor = fs.openSync(snapshot.root, fs.constants.O_RDONLY | noFollow | nonBlocking | directoryOnly);
+      const openedRoot = fs.fstatSync(rootDescriptor, { bigint: true });
+      assertIdentityMatches(snapshot.directories[0]!, openedRoot, "public benchmark source root changed while opening");
+      if (!openedRoot.isDirectory()) {
+        throw new Error("public benchmark source root is not a regular directory");
+      }
+      const openedRootPath = resolveProcDescriptorPath(rootDescriptor, "public benchmark source root");
+      if (openedRootPath !== snapshot.canonicalRoot) {
+        throw new Error("public benchmark source root changed while opening");
+      }
+      openPath = path.join(`/proc/self/fd/${String(rootDescriptor)}`, ...snapshot.relativeFile.split(path.sep));
+    }
+
+    descriptor = fs.openSync(openPath, fs.constants.O_RDONLY | noFollow | nonBlocking);
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    assertOpenedSource(snapshot, descriptor, opened, procFdAvailable);
+    assertSourceSnapshotCurrent(snapshot, opened);
+    if (opened.size < 0n || opened.size > BigInt(maxBytes)) throw new Error(tooLargeMessage);
 
     const chunks: Buffer[] = [];
     let totalBytes = 0;
     while (totalBytes <= maxBytes) {
       const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - totalBytes));
       const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.byteLength, null);
-      if (bytesRead === 0) return Buffer.concat(chunks, totalBytes);
+      if (bytesRead === 0) {
+        const completed = fs.fstatSync(descriptor, { bigint: true });
+        assertOpenedSource(snapshot, descriptor, completed, procFdAvailable);
+        assertSourceSnapshotCurrent(snapshot, completed);
+        return Buffer.concat(chunks, totalBytes);
+      }
       chunks.push(chunk.subarray(0, bytesRead));
       totalBytes += bytesRead;
     }
     throw new Error(tooLargeMessage);
   } finally {
-    fs.closeSync(descriptor);
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (rootDescriptor !== undefined) fs.closeSync(rootDescriptor);
   }
+}
+
+function snapshotRegularSource(root: string, source: string): SourcePathSnapshot {
+  const rootPath = path.resolve(root);
+  const filePath = path.resolve(source);
+  const relativeFile = path.relative(rootPath, filePath);
+  if (
+    relativeFile === "" ||
+    relativeFile === ".." ||
+    relativeFile.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeFile)
+  ) {
+    throw new Error(`public benchmark bundle source escapes ${rootPath}`);
+  }
+
+  const parts = relativeFile.split(path.sep);
+  const directories: SourcePathIdentity[] = [];
+  let current = rootPath;
+  for (let index = 0; index < parts.length; index += 1) {
+    const stat = fs.lstatSync(current, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`public benchmark bundle source crosses an unsafe directory: ${current}`);
+    }
+    directories.push(pathIdentity(current, stat));
+    current = path.join(current, parts[index]!);
+  }
+
+  const fileStat = fs.lstatSync(filePath, { bigint: true });
+  if (fileStat.isSymbolicLink()) {
+    throw new Error(`public benchmark bundle source cannot be a symlink: ${filePath}`);
+  }
+  if (!fileStat.isFile()) {
+    throw new Error(`public benchmark source is not a regular file: ${filePath}`);
+  }
+  if (fileStat.nlink !== 1n) {
+    throw new Error(`public benchmark bundle source cannot be hard-linked: ${filePath}`);
+  }
+
+  const canonicalRoot = fs.realpathSync.native(rootPath);
+  const canonicalFile = fs.realpathSync.native(filePath);
+  if (!isStrictlyInside(canonicalRoot, canonicalFile)) {
+    throw new Error(`public benchmark bundle source escapes ${canonicalRoot}`);
+  }
+  return {
+    root: rootPath,
+    file: filePath,
+    relativeFile,
+    canonicalRoot,
+    canonicalFile,
+    directories,
+    fileIdentity: pathIdentity(filePath, fileStat)
+  };
+}
+
+function assertOpenedSource(
+  snapshot: SourcePathSnapshot,
+  descriptor: number,
+  stat: fs.BigIntStats,
+  procFdAvailable: boolean
+): void {
+  if (!stat.isFile()) {
+    throw new Error(`public benchmark source is not a regular file: ${snapshot.file}`);
+  }
+  if (stat.nlink !== 1n) {
+    throw new Error(`public benchmark bundle source cannot be hard-linked: ${snapshot.file}`);
+  }
+  assertIdentityMatches(snapshot.fileIdentity, stat, "public benchmark bundle source changed while opening");
+  if (!procFdAvailable) return;
+  const openedPath = resolveProcDescriptorPath(descriptor, "public benchmark bundle source");
+  if (openedPath !== snapshot.canonicalFile || !isStrictlyInside(snapshot.canonicalRoot, openedPath)) {
+    throw new Error("public benchmark bundle opened source escapes its canonical root");
+  }
+}
+
+function assertSourceSnapshotCurrent(snapshot: SourcePathSnapshot, opened: fs.BigIntStats): void {
+  const current = snapshotRegularSource(snapshot.root, snapshot.file);
+  if (
+    current.canonicalRoot !== snapshot.canonicalRoot ||
+    current.canonicalFile !== snapshot.canonicalFile ||
+    current.directories.length !== snapshot.directories.length
+  ) {
+    throw new Error("public benchmark bundle source path changed while reading");
+  }
+  for (const [index, identity] of snapshot.directories.entries()) {
+    const currentIdentity = current.directories[index];
+    if (
+      currentIdentity === undefined ||
+      currentIdentity.path !== identity.path ||
+      currentIdentity.dev !== identity.dev ||
+      currentIdentity.ino !== identity.ino
+    ) {
+      throw new Error("public benchmark bundle source parent changed while reading");
+    }
+  }
+  assertIdentityMatches(current.fileIdentity, opened, "public benchmark bundle source changed while reading");
+}
+
+function pathIdentity(filePath: string, stat: fs.BigIntStats): SourcePathIdentity {
+  return { path: filePath, dev: stat.dev, ino: stat.ino };
+}
+
+function assertIdentityMatches(identity: SourcePathIdentity, stat: fs.BigIntStats, message: string): void {
+  if (identity.dev !== stat.dev || identity.ino !== stat.ino) throw new Error(message);
+}
+
+function resolveProcDescriptorPath(descriptor: number, label: string): string {
+  try {
+    return fs.realpathSync.native(`/proc/self/fd/${String(descriptor)}`);
+  } catch (error) {
+    throw new Error(`${label} descriptor target cannot be verified`, { cause: error });
+  }
+}
+
+function isStrictlyInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 export function parsePublicBenchmarkBundle(
@@ -260,6 +483,7 @@ export function parsePublicBenchmarkBundle(
 ): PublicBenchmarkBundle {
   const parsed = bundleSchema.parse(value);
   const exactSecrets = [...new Set(forbiddenSecretValues)].filter((secret) => secret.length > 0);
+  assertPublicBenchmarkMetadataContainsNoSecrets(parsed, exactSecrets);
   const paths = new Set<string>();
   const contentsByPath = new Map<string, Buffer>();
   let decodedBytes = 0;
@@ -342,6 +566,10 @@ export function parsePublicBenchmarkBundle(
       if (!paths.has(required)) throw new Error(`public benchmark bundle is missing ${required}`);
     }
   }
+  if (parsed.schema_version === PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION) {
+    assertReportTargetRevisions(matrixRows, contentsByPath);
+  }
+  assertNoReportTargetRevisionContradictions(matrixRows, contentsByPath);
   assertSmokeFindingFloor(parsed.lane, matrixRows, contentsByPath, diagnostics);
   const publicationBundlePath = uniqueDeclaredPublicationBundlePath(parsed.targets);
   const expectedMetadata = summarizePublicBenchmarkBundleContents({
@@ -352,6 +580,92 @@ export function parsePublicBenchmarkBundle(
   });
   assertPublicBenchmarkBundleMetadata(parsed, expectedMetadata);
   return parsed;
+}
+
+function assertReportTargetRevisions(
+  matrixRows: Map<string, PublicBundleMatrixRow>,
+  contentsByPath: Map<string, Buffer>
+): void {
+  for (const [rowId, row] of matrixRows) {
+    const reportPath = `reports/${rowId}/report.json`;
+    const contents = contentsByPath.get(reportPath);
+    let report: unknown;
+    try {
+      report = contents === undefined ? undefined : (JSON.parse(contents.toString("utf8")) as unknown);
+    } catch (error) {
+      throw new Error(`public benchmark bundle ${reportPath} is not valid JSON`, { cause: error });
+    }
+    const runMetadata = recordValue(recordValue(report)?.run_metadata);
+    const targetRevision = fullSha.safeParse(runMetadata?.target_revision);
+    if (!targetRevision.success) {
+      throw new Error(`public benchmark bundle ${reportPath} is missing its runner-attested target revision`);
+    }
+    if (targetRevision.data !== row.target.ref) {
+      throw new Error(`public benchmark bundle ${reportPath} target revision does not match the matrix`);
+    }
+    assertSourceAttestation(reportPath, row.target.ref, runMetadata?.source_attestation);
+  }
+}
+
+function assertSourceAttestation(reportPath: string, targetRevision: string, value: unknown): void {
+  const result = sourceAttestationSchema.safeParse(value);
+  if (!result.success) {
+    throw new Error(`public benchmark bundle ${reportPath} has invalid source attestation metadata`);
+  }
+  const attestation = result.data;
+  if (attestation.target_revision !== targetRevision || attestation.tasks.length !== attestation.task_count) {
+    throw new Error(`public benchmark bundle ${reportPath} has invalid source attestation metadata`);
+  }
+  const attemptIds = new Set<string>();
+  for (const [index, task] of attestation.tasks.entries()) {
+    if (task.expected_base_commit !== targetRevision || task.initial_head !== targetRevision) {
+      throw new Error(`public benchmark bundle ${reportPath} has invalid source attestation task ${index}`);
+    }
+    if (attemptIds.has(task.attempt_id)) {
+      throw new Error(`public benchmark bundle ${reportPath} repeats a source attestation task`);
+    }
+    attemptIds.add(task.attempt_id);
+  }
+}
+
+function assertNoReportTargetRevisionContradictions(
+  matrixRows: Map<string, PublicBundleMatrixRow>,
+  contentsByPath: Map<string, Buffer>
+): void {
+  const commitFields = ["commit", "revision", "target_commit", "target_revision"] as const;
+  for (const [rowId, row] of matrixRows) {
+    const reportPath = `reports/${rowId}/report.json`;
+    const contents = contentsByPath.get(reportPath);
+    let report: unknown;
+    try {
+      report = contents === undefined ? undefined : (JSON.parse(contents.toString("utf8")) as unknown);
+    } catch (error) {
+      throw new Error(`public benchmark bundle ${reportPath} is not valid JSON`, { cause: error });
+    }
+    const reportRecord = recordValue(report);
+    if (reportRecord === undefined) {
+      throw new Error(`public benchmark bundle ${reportPath} must contain a JSON object`);
+    }
+    if (reportRecord.run_metadata === undefined) continue;
+    const runMetadata = recordValue(reportRecord.run_metadata);
+    if (runMetadata === undefined) {
+      throw new Error(`public benchmark bundle ${reportPath} run_metadata must be an object`);
+    }
+
+    const candidates = commitFields.flatMap((field) => {
+      const value = runMetadata[field];
+      return typeof value === "string" ? [value.trim()] : [];
+    });
+    const target = runMetadata.target;
+    if (typeof target === "string") {
+      candidates.push(...[...target.matchAll(/@\s+commit\s+([0-9a-f]{7,40})\b/giu)].map((match) => match[1] ?? ""));
+    }
+    for (const candidate of candidates) {
+      if (/^[0-9a-f]{7,40}$/iu.test(candidate) && !row.target.ref.startsWith(candidate.toLowerCase())) {
+        throw new Error(`public benchmark bundle ${reportPath} contradicts the matrix target revision`);
+      }
+    }
+  }
 }
 
 function assertSmokeFindingFloor(
@@ -659,8 +973,10 @@ export function readPublicBenchmarkBundle(
   filePath: string,
   forbiddenSecretValues: readonly string[] = []
 ): PublicBenchmarkBundle {
-  const contents = readRegularFilePathNoFollow(
-    filePath,
+  const resolved = path.resolve(filePath);
+  const contents = readRegularFileNoFollow(
+    path.dirname(resolved),
+    resolved,
     MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
     "public benchmark bundle exceeds the size limit"
   );

@@ -45,16 +45,28 @@ export async function startRun(input: StartRunInput) {
   }
 
   const plan = planned.value;
-  const compiled = compileSmithersWorkflow({
-    config: plan.resolved_config,
-    graph: plan.expanded_graph,
-    runLayout: plan.layout,
-    projectRoot: plan.validation.project_root,
-    workflowName: `ultrafuzz-${plan.run_id}`,
-    renderedPrompts: plan.rendered_prompts,
-    operatorPrompt: input.prompt,
-    operatorInput: input.workflowInput
-  });
+  let compiled: CompiledSmithersWorkflow;
+  try {
+    compiled = compileSmithersWorkflow({
+      config: plan.resolved_config,
+      graph: plan.expanded_graph,
+      runLayout: plan.layout,
+      projectRoot: plan.validation.project_root,
+      workflowName: `ultrafuzz-${plan.run_id}`,
+      renderedPrompts: plan.rendered_prompts,
+      operatorPrompt: input.prompt,
+      operatorInput: input.workflowInput
+    });
+  } catch (error) {
+    const diagnostic = smithersDiagnostic(error, "WORKFLOW_COMPILE_FAILED");
+    updateRunStatus(plan.layout, "failed");
+    appendEvent(plan.layout, {
+      eventType: "workflow-compile-failed",
+      status: "failed",
+      payload: diagnostic
+    });
+    return runtimeFailure<StartRunValue>([diagnostic]);
+  }
   persistSmithersEvidence(plan.layout, plan.graph, compiled);
   appendEvent(plan.layout, {
     eventType: "workflow-compiled",

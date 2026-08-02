@@ -105,6 +105,7 @@ import {
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   parsePublicBenchmarkBundle,
+  PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
   type PublicBenchmarkBundle
 } from "./public-bundle.js";
 import {
@@ -2503,7 +2504,15 @@ export function hasExactPublicDiagnosticCollectionConfig(input: {
 export function assertPublicBenchmarkBundleLineage(input: {
   bundle: Pick<
     PublicBenchmarkBundle,
-    "benchmark" | "lane" | "model_slug" | "model" | "reasoning" | "candidate_commit" | "eval_run_id" | "lineage"
+    | "schema_version"
+    | "benchmark"
+    | "lane"
+    | "model_slug"
+    | "model"
+    | "reasoning"
+    | "candidate_commit"
+    | "eval_run_id"
+    | "lineage"
   >;
   config: PublicModalBenchmarkConfig;
   configFingerprint: string;
@@ -2514,6 +2523,7 @@ export function assertPublicBenchmarkBundleLineage(input: {
   const scope = config.public_benchmark;
   const configuredModel = config.models.find((model) => model.slug === launch.slug);
   const mismatches = [
+    bundle.schema_version === PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION ? undefined : "bundle schema version",
     config.run_id === state.logical_run_id ? undefined : "logical run",
     config.image_name === state.image ? undefined : "image",
     configFingerprint === state.fingerprints.config ? undefined : "configuration fingerprint",

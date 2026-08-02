@@ -31,6 +31,7 @@ import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
+  PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
   readPublicBenchmarkBundle,
   type PublicBenchmarkBundle,
   type PublicBenchmarkBundleSource
@@ -373,6 +374,7 @@ export function assertPublicWorkerBundleLineage(
 ): void {
   const scope = config.public_benchmark;
   const mismatches = [
+    bundle.schema_version === PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION ? undefined : "schema version",
     bundle.benchmark === scope.benchmark ? undefined : "benchmark",
     bundle.lane === scope.lane ? undefined : "lane",
     bundle.model_slug === model.slug ? undefined : "model slug",

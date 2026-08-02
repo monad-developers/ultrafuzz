@@ -15,6 +15,7 @@ import {
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
+  parseModalNodeSandboxInput,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import { copySafeTree } from "../src/node-worker.js";
@@ -42,17 +43,29 @@ describe("Modal node sandbox provider", () => {
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
+    fs.writeFileSync(path.join(fixture.root, "source.txt"), "current checkout B\n");
+    fs.writeFileSync(path.join(fixture.root, "current-only.txt"), "must not cross the pinned handoff\n");
+    execFileSync("git", ["add", "source.txt", "current-only.txt"], { cwd: fixture.root });
+    execFileSync("git", ["commit", "--quiet", "-m", "move current checkout to B"], { cwd: fixture.root });
+    const currentCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+      cwd: fixture.root,
+      encoding: "utf8"
+    }).trim();
+    expect(currentCommit).not.toBe(fixture.input.base_commit);
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-extracted-"));
     try {
       const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
       expect(entries).toContain("./source.txt");
       expect(entries).toContain(`./${fixture.input.workflow_path}`);
       expect(entries).toContain(`./${fixture.input.prompt_path}`);
+      expect(entries).toContain("./.smithers/agents/deepseek.ts");
       expect(entries).toContain("./.smithers/agents/kimi.ts");
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
       }
       expect(entries).not.toContain("local-only-secret");
+      expect(entries).not.toContain("current-only.txt");
       expect(entries).not.toContain("unrelated.txt");
       expect(entries).not.toContain("stale.txt");
       expect(entries).not.toContain(`./${fixture.input.run_root}/workspaces/`);
@@ -60,8 +73,37 @@ describe("Modal node sandbox provider", () => {
       expect(entries).not.toContain("./.git/logs/");
       expect(entries).not.toContain("./.git/hooks/");
       expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
+      await extractSafeTarArchive(archive.path, extracted, { gzip: true, label: "cloud handoff test" });
+      const extractedCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+        cwd: extracted,
+        encoding: "utf8"
+      }).trim();
+      expect(extractedCommit).toBe(fixture.input.base_commit);
+      expect(fs.readFileSync(path.join(extracted, "source.txt"), "utf8")).toBe("committed source\n");
+      expect(fs.readFileSync(path.join(extracted, ".smithers", "agents", "deepseek.ts"), "utf8")).toContain(
+        "createDeepSeekAgent"
+      );
+      expect(() => execFileSync("git", ["cat-file", "-e", "HEAD^"], { cwd: extracted, stdio: "ignore" })).toThrow();
     } finally {
+      fs.rmSync(extracted, { recursive: true, force: true });
       archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("validates the exact base commit and confines generated workflows to .smithers/workflows", async () => {
+    const fixture = createProjectFixture();
+    try {
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, base_commit: "A".repeat(40) })).toThrow(
+        /base commit is invalid/u
+      );
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, {
+          ...fixture.input,
+          workflow_path: fixture.input.prompt_path!
+        })
+      ).rejects.toThrow(/workflow path must stay inside \.smithers\/workflows/u);
+    } finally {
       fixture.cleanup();
     }
   });
@@ -72,9 +114,13 @@ describe("Modal node sandbox provider", () => {
       fs.symlinkSync("source.txt", path.join(fixture.root, "source-link.txt"));
       execFileSync("git", ["add", "source-link.txt"], { cwd: fixture.root });
       execFileSync("git", ["commit", "--quiet", "-m", "add symlink"], { cwd: fixture.root });
+      fixture.input.base_commit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+        cwd: fixture.root,
+        encoding: "utf8"
+      }).trim();
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
-        /unsupported symlink entry/u
+        /unsafe filesystem entry|unsupported symlink entry/u
       );
     } finally {
       fixture.cleanup();
@@ -497,7 +543,7 @@ function createProjectFixture() {
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
   const dependencyArtifactDirs = [`${runRoot}/artifacts/dependency-one`, `${runRoot}/artifacts/dependency-two`];
   const workspaceDir = `${runRoot}/workspaces/attempt-one`;
-  const workflowPath = `${runRoot}/smithers/workflow.tsx`;
+  const workflowPath = ".smithers/workflows/ultrafuzz-run-one.tsx";
   const promptPath = `${runRoot}/prompts/attempt-one.md`;
   fs.mkdirSync(path.join(root, path.dirname(workflowPath)), { recursive: true });
   fs.mkdirSync(path.join(root, path.dirname(promptPath)), { recursive: true });
@@ -510,7 +556,12 @@ function createProjectFixture() {
   fs.mkdirSync(path.join(root, runRoot, "artifacts", "unrelated"), { recursive: true });
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });
-  fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
+  fs.writeFileSync(path.join(root, "source.txt"), "historical source\n");
+  fs.writeFileSync(path.join(root, "historical-secret.txt"), "must not survive shallow handoff\n");
+  fs.writeFileSync(
+    path.join(root, ".smithers", "agents", "deepseek.ts"),
+    "export const createDeepSeekAgent = () => ({});\n"
+  );
   fs.writeFileSync(path.join(root, ".smithers", "agents", "kimi.ts"), "export const createKimiAgent = () => ({});\n");
   fs.writeFileSync(path.join(root, workflowPath), "export default {};\n");
   fs.writeFileSync(path.join(root, promptPath), "rendered prompt\n");
@@ -521,14 +572,23 @@ function createProjectFixture() {
   execFileSync("git", ["init", "--quiet"], { cwd: root });
   execFileSync("git", ["config", "user.name", "Ultrafuzz Test"], { cwd: root });
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
-  execFileSync("git", ["add", "source.txt"], { cwd: root });
+  execFileSync("git", ["add", "source.txt", "historical-secret.txt"], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "historical fixture"], { cwd: root });
+  fs.writeFileSync(path.join(root, "source.txt"), "committed source\n");
+  fs.unlinkSync(path.join(root, "historical-secret.txt"));
+  execFileSync("git", ["add", "source.txt", "historical-secret.txt"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+  const baseCommit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
+    cwd: root,
+    encoding: "utf8"
+  }).trim();
   const input: ModalNodeSandboxInput = {
     schema_version: "ultrafuzz.modal.node.v1",
     run_id: "run-one",
     task_id: "node:attempt-one",
     attempt_id: "attempt-one",
     execution_generation: "base",
+    base_commit: baseCommit,
     workflow_path: workflowPath,
     prompt_path: promptPath,
     run_root: runRoot,
