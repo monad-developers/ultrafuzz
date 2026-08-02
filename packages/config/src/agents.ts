@@ -30,9 +30,21 @@ const agentConfigsSchema = z.record(agentIdSchema, agentConfigSchema);
 export function validateAgentConfigs(agents: Record<string, AgentConfig>): ConfigDiagnostic[] {
   const parsed = agentConfigsSchema.safeParse(agents);
   if (parsed.success) {
-    return [];
+    return validateProviderAgentConfigs(parsed.data);
   }
   return parsed.error.issues.map(agentConfigDiagnostic);
+}
+
+function validateProviderAgentConfigs(agents: Record<string, AgentConfig>): ConfigDiagnostic[] {
+  if (agents.DeepSeekAgent?.auth !== "subscription") return [];
+  return [
+    diagnostic(
+      "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+      "DeepSeekAgent supports only api-key authentication",
+      ["agents", "DeepSeekAgent", "auth"],
+      "validation"
+    )
+  ];
 }
 
 function agentConfigDiagnostic(issue: ZodIssue): ConfigDiagnostic {

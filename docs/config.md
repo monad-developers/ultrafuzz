@@ -171,7 +171,11 @@ api_key_env = "DEEPSEEK_API_KEY"
 DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
 against DeepSeek's documented Anthropic-compatible endpoint,
 `https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
-`ANTHROPIC_API_KEY` so an unrelated Anthropic credential cannot take precedence.
+competing Claude credentials and provider selectors, and uses an isolated
+`CLAUDE_CONFIG_DIR` (default `.ultrafuzz/deepseek-claude`) so unrelated Anthropic
+credentials, routing, and session storage cannot take precedence. Project and
+managed Claude settings remain separate policy layers. Set `config_dir` under
+`[agents.DeepSeekAgent]` to choose another isolated directory.
 The supported reasoning efforts are `low`, `high`, and `max`, and any other
 value is rejected before execution. See DeepSeek's
 [Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code)

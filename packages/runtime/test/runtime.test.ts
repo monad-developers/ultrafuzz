@@ -115,6 +115,10 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+    stream(options: Record<string, unknown>): Promise<{
+      usage?: Promise<Record<string, unknown>>;
+      totalUsage?: Promise<Record<string, unknown>>;
+    }>;
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
       command?: string;
       args: string[];
@@ -154,6 +158,10 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
     DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
       generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+      stream(options: Record<string, unknown>): Promise<{
+        usage?: Promise<Record<string, unknown>>;
+        totalUsage?: Promise<Record<string, unknown>>;
+      }>;
       buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
         command?: string;
         args: string[];
@@ -972,7 +980,8 @@ test(
       model: "deepseek-v4-pro",
       extraArgs: ["--effort", "max"],
       permissionMode: "bypassPermissions",
-      ultrafuzzApiKey: "deepseek-test-key"
+      ultrafuzzApiKey: "deepseek-test-key",
+      configDir: path.join(project, ".ultrafuzz", "deepseek-claude")
     });
 
     const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
@@ -985,6 +994,36 @@ test(
     assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
     assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "deepseek-test-key");
     assert.equal(command.env?.ANTHROPIC_API_KEY, "");
+    assert.equal(command.env?.CLAUDE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+    assert.equal(command.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+    for (const name of [
+      "ANTHROPIC_CONFIG_DIR",
+      "ANTHROPIC_CUSTOM_HEADERS",
+      "ANTHROPIC_FEDERATION_RULE_ID",
+      "ANTHROPIC_IDENTITY_TOKEN",
+      "ANTHROPIC_IDENTITY_TOKEN_FILE",
+      "ANTHROPIC_ORGANIZATION_ID",
+      "ANTHROPIC_PROFILE",
+      "ANTHROPIC_UNIX_SOCKET",
+      "CCR_OAUTH_TOKEN_FILE",
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+      "CLAUDE_CODE_HOST_CREDS_FILE",
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+      "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
+      "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_FOUNDRY",
+      "CLAUDE_CODE_USE_GATEWAY",
+      "CLAUDE_CODE_USE_MANTLE",
+      "CLAUDE_CODE_USE_VERTEX"
+    ]) {
+      assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
+    }
 
     const resultLine = JSON.stringify({
       type: "result",
@@ -1022,11 +1061,18 @@ test(
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const usage = {
-      input_tokens: 101,
+    const providerUsage = {
+      prompt_cache_miss_tokens: 101,
+      prompt_cache_hit_tokens: 400,
       output_tokens: 23,
-      cache_read_input_tokens: 400,
       reasoning_tokens: 17
+    };
+    const normalizedUsage = {
+      inputTokens: 101,
+      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
+      outputTokens: 23,
+      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+      totalTokens: 524
     };
 
     const successful = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
@@ -1041,20 +1087,18 @@ test(
             is_error: false,
             result: "done",
             session_id: "deepseek-session",
-            usage
+            usage: providerUsage
           })
         )})`
       ],
       outputFormat: "stream-json"
     });
     const result = await successful.generate({ prompt: "Telemetry", rootDir: project });
-    assert.deepEqual(result.usage, {
-      inputTokens: 101,
-      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
-      outputTokens: 23,
-      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
-      totalTokens: 524
-    });
+    assert.deepEqual(result.usage, normalizedUsage);
+
+    const streamed = await successful.stream({ prompt: "Stream telemetry", rootDir: project });
+    assert.deepEqual(await streamed.usage, normalizedUsage);
+    assert.deepEqual(await streamed.totalUsage, normalizedUsage);
 
     const failed = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
     failed.buildCommand = async () => ({
@@ -1062,7 +1106,13 @@ test(
       args: [
         "-e",
         `console.log(${JSON.stringify(
-          JSON.stringify({ type: "result", subtype: "error", is_error: true, error: "provider failed", usage })
+          JSON.stringify({
+            type: "result",
+            subtype: "error",
+            is_error: true,
+            error: "provider failed",
+            usage: providerUsage
+          })
         )}); process.exit(17)`
       ],
       outputFormat: "stream-json"
@@ -1074,13 +1124,7 @@ test(
       failure = error;
     }
     assert.ok(failure instanceof Error);
-    assert.deepEqual((failure as Error & { usage?: unknown }).usage, {
-      inputTokens: 101,
-      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
-      outputTokens: 23,
-      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
-      totalTokens: 524
-    });
+    assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
   }
 );
 

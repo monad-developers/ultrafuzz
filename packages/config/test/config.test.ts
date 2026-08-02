@@ -559,6 +559,27 @@ describe("model profile and triage validation", () => {
     );
   });
 
+  it("rejects unsupported DeepSeek subscription authentication during config validation", () => {
+    const resolved = resolveConfig({
+      env: {},
+      projectConfig: {
+        agents: {
+          DeepSeekAgent: {
+            auth: "subscription"
+          }
+        }
+      }
+    });
+
+    expect(resolved.ok).toBe(false);
+    expect(resolved.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: "CONFIG_AGENT_DEEPSEEK_AUTH_UNSUPPORTED",
+        path: ["agents", "DeepSeekAgent", "auth"]
+      })
+    );
+  });
+
   it("redacts sensitive diagnostic messages", () => {
     const redacted = redactDiagnostics([
       {

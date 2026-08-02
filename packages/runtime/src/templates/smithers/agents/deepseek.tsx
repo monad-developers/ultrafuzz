@@ -3,8 +3,8 @@ import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
 import { readStringTable, stringField } from "./toml";
 
-type DeepSeekAuthConfig = { auth?: string; api_key_env?: string };
-type DeepSeekAuthOptions = { ultrafuzzApiKey: string };
+type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
+type DeepSeekAuthOptions = { ultrafuzzApiKey: string; configDir: string };
 export type DeepSeekTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type DeepSeekAgentOptions = ConstructorParameters<typeof SmithersClaudeCodeAgent>[0] & DeepSeekAuthOptions;
 type DeepSeekCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
@@ -28,6 +28,7 @@ type DeepSeekSmithersUsage = {
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
+const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
 
 /**
  * DeepSeek's supported coding-agent integration is Claude Code over its
@@ -58,7 +59,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
   override stream(
     ...args: Parameters<SmithersClaudeCodeAgent["stream"]>
   ): ReturnType<SmithersClaudeCodeAgent["stream"]> {
-    return this.withFailureUsage(super.stream(...args)) as ReturnType<SmithersClaudeCodeAgent["stream"]>;
+    return this.withDeepSeekStreamUsage(super.stream(...args)) as ReturnType<SmithersClaudeCodeAgent["stream"]>;
   }
 
   override createOutputInterpreter(): DeepSeekOutputInterpreter {
@@ -89,7 +90,36 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
         // Anthropic credential can never win over the DeepSeek route.
         ANTHROPIC_API_KEY: "",
         ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
-        ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL
+        ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
+        // Keep first-party Claude auth, alternate provider routing, and host
+        // proxies from competing with the explicit DeepSeek endpoint/token.
+        ANTHROPIC_CONFIG_DIR: "",
+        ANTHROPIC_CUSTOM_HEADERS: "",
+        ANTHROPIC_FEDERATION_RULE_ID: "",
+        ANTHROPIC_IDENTITY_TOKEN: "",
+        ANTHROPIC_IDENTITY_TOKEN_FILE: "",
+        ANTHROPIC_ORGANIZATION_ID: "",
+        ANTHROPIC_PROFILE: "",
+        ANTHROPIC_UNIX_SOCKET: "",
+        CCR_OAUTH_TOKEN_FILE: "",
+        CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: "",
+        CLAUDE_CODE_HOST_AUTH_ENV_VAR: "",
+        CLAUDE_CODE_HOST_CREDS_FILE: "",
+        CLAUDE_CODE_OAUTH_REFRESH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR: "",
+        CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "",
+        CLAUDE_CODE_REMOTE_SETTINGS_PATH: "",
+        CLAUDE_CODE_USE_ANTHROPIC_AWS: "",
+        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: "",
+        CLAUDE_CODE_USE_BEDROCK: "",
+        CLAUDE_CODE_USE_FOUNDRY: "",
+        CLAUDE_CODE_USE_GATEWAY: "",
+        CLAUDE_CODE_USE_MANTLE: "",
+        CLAUDE_CODE_USE_VERTEX: "",
+        // Claude treats an empty secure-storage override as "use the default".
+        // Point it at the same isolated root as the rest of its session state.
+        CLAUDE_SECURESTORAGE_CONFIG_DIR: opts.configDir
       }
     };
   }
@@ -105,8 +135,9 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
       });
   }
 
-  private withFailureUsage<T>(promise: Promise<T>): Promise<T> {
+  private withDeepSeekStreamUsage<T>(promise: Promise<T>): Promise<T> {
     return promise
+      .then((result) => attachDeepSeekStreamUsage(result, this.pendingUsage))
       .catch((error: unknown) => {
         throw attachDeepSeekFailureUsage(error, this.pendingUsage);
       })
@@ -122,7 +153,10 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
   if (auth !== "api-key") {
     throw new Error(`DeepSeekAgent supports only api-key auth in ultrafuzz.toml, not ${auth}`);
   }
-  return { ultrafuzzApiKey: requiredEnv(config.api_key_env ?? "DEEPSEEK_API_KEY") };
+  return {
+    ultrafuzzApiKey: requiredEnv(config.api_key_env ?? "DEEPSEEK_API_KEY"),
+    configDir: resolveConfigDir(config.config_dir ?? DEEPSEEK_CLAUDE_CONFIG_DIR)
+  };
 }
 
 function readDeepSeekAuthConfig(): DeepSeekAuthConfig {
@@ -130,7 +164,8 @@ function readDeepSeekAuthConfig(): DeepSeekAuthConfig {
   const deepseek = readStringTable(readFileSync(configPath, "utf8"), "agents.DeepSeekAgent");
   return {
     auth: stringField(deepseek, "auth"),
-    api_key_env: stringField(deepseek, "api_key_env")
+    api_key_env: stringField(deepseek, "api_key_env"),
+    config_dir: stringField(deepseek, "config_dir")
   };
 }
 
@@ -140,6 +175,13 @@ function requiredEnv(name: string): string {
     throw new Error(`agents.DeepSeekAgent auth is api-key, but ${name} is not set`);
   }
   return value;
+}
+
+function resolveConfigDir(value: string): string {
+  if (value.trim() === "") {
+    throw new Error("agents.DeepSeekAgent.config_dir cannot be empty");
+  }
+  return path.isAbsolute(value) ? value : path.resolve(process.cwd(), value);
 }
 
 function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEffort | undefined {
@@ -230,6 +272,18 @@ function attachDeepSeekResultUsage<T>(result: T, usage: DeepSeekSmithersUsage | 
   } catch {
     // Telemetry must never turn a successful provider invocation into a model
     // failure if an exotic Smithers result becomes immutable.
+  }
+  return result;
+}
+
+function attachDeepSeekStreamUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
+  if (usage === undefined || !isRecord(result)) return result;
+  try {
+    result.usage = Promise.resolve(usage);
+    result.totalUsage = Promise.resolve(usage);
+  } catch {
+    // Telemetry must never turn a successful provider invocation into a model
+    // failure if an exotic Smithers stream result becomes immutable.
   }
   return result;
 }
