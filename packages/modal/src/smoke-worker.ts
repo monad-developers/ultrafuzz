@@ -134,7 +134,7 @@ function providerOption(argv: string[]): ModelProvider {
 }
 
 function modelProviders(): ModelProvider[] {
-  return ["openai", "anthropic", "kimi"];
+  return ["openai", "anthropic", "deepseek", "kimi"];
 }
 
 function phaseOption(argv: string[]): "fresh" | "resume" {

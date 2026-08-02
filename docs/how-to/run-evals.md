@@ -149,7 +149,8 @@ All three target rows run concurrently, while the four strategy nodes within
 each row use a smoke-only four-way workflow concurrency limit.
 
 The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
-`high`, Claude Sonnet 5 at `high`, and Kimi K3 at `max`. It also pins
+`high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at
+`max`. It also pins
 `strategy_loops: 1`, while all three disable flags are `false`, so it retains
 the complete production topology with invariant tests, differential tests, and
 dynamic strategies. Both lanes default to one trial per variant and use the
@@ -214,7 +215,8 @@ and independent full dispatches can still overlap, so enforce provider and
 Modal budgets across all concurrent runs.
 
 A manual workflow dispatch launches the full EVMBench cohort instead, with
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max` by default. Its
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
+`max` by default. Its
 model and reasoning inputs can override all full-lane runners. Full runs only
 through that manual dispatch; pushes always select smoke. Both modes retain
 the standard Modal CPU and memory allocation. Smoke rows receive a

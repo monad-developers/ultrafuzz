@@ -193,7 +193,8 @@ strategies cover time, external dependencies, externalized accounting, and
 lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled
 strategy families. The full lane selects every checked-in EVMBench target, pins
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max`, sets the same
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
+`max`, sets the same
 one strategy loop, and explicitly leaves all three disable flags off so the
 complete topology is included. Both default to one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one

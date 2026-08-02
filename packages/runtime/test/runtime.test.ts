@@ -112,6 +112,71 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   return { KimiCode029Agent: kimiModule.KimiCode029Agent };
 }
 
+async function loadGeneratedDeepSeekAgent(project: string): Promise<{
+  DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
+    generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+    stream(options: Record<string, unknown>): Promise<{
+      usage?: Promise<Record<string, unknown>>;
+      totalUsage?: Promise<Record<string, unknown>>;
+    }>;
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command?: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+    }>;
+    createOutputInterpreter(): {
+      onStdoutLine?: (line: string) => unknown;
+      onExit?: (result: unknown) => unknown;
+    };
+  };
+}> {
+  const fixture = path.join(project, "deepseek-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const deepSeekSource = fs
+    .readFileSync(path.join(agentsDir, "deepseek.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"');
+  fs.writeFileSync(path.join(fixture, "deepseek.mjs"), transpile(deepSeekSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
+    DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
+      generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
+      stream(options: Record<string, unknown>): Promise<{
+        usage?: Promise<Record<string, unknown>>;
+        totalUsage?: Promise<Record<string, unknown>>;
+      }>;
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command?: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+      }>;
+      createOutputInterpreter(): {
+        onStdoutLine?: (line: string) => unknown;
+        onExit?: (result: unknown) => unknown;
+      };
+    };
+  };
+  return { DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent };
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -254,6 +319,9 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "fi",
       'if [ -n "$SMITHERS_FAKE_KIMI_ENV_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$KIMI_API_KEY" "$MOONSHOT_API_KEY" "$KIMI_BASE_URL" "$ULTRAFUZZ_KIMI_SHARED_AUTH_HOME" "$ULTRAFUZZ_KIMI_SESSION_HOME" "$ULTRAFUZZ_MODAL_REMOTE_ROOT" > "$SMITHERS_FAKE_KIMI_ENV_LOG"',
+      "fi",
+      'if [ -n "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG" ]; then',
+      '  printf \'%s|%s\\n\' "$DEEPSEEK_API_KEY" "$ANTHROPIC_API_KEY" > "$SMITHERS_FAKE_DEEPSEEK_ENV_LOG"',
       "fi",
       'if [ -n "$SMITHERS_FAKE_CONTEXT_LOG" ]; then',
       '  printf \'%s|%s|%s|%s|%s|%s\\n\' "$SMITHERS_RUN_ID" "$SMITHERS_NODE_ID" "$SMITHERS_ATTEMPT" "$SMITHERS_ITERATION" "$SMITHERS_CLI_SRC_DIR" "$SMITHERS_SNAPSHOT_SOCK" > "$SMITHERS_FAKE_CONTEXT_LOG"',
@@ -829,17 +897,20 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
 
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/claude.ts")), true);
+  assert.equal(fs.existsSync(path.join(project, ".smithers/agents/deepseek.ts")), true);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/kimi.ts")), true);
   const agentsIndexText = fs.readFileSync(path.join(project, ".smithers/agents/index.ts"), "utf8");
   assert.match(agentsIndexText, /export \{ createCodexAgent \} from ".\/codex";/);
   assert.match(agentsIndexText, /export \{ createClaudeAgent \} from ".\/claude";/);
+  assert.match(agentsIndexText, /export \{ createDeepSeekAgent \} from ".\/deepseek";/);
   assert.match(agentsIndexText, /export \{ createKimiAgent \} from ".\/kimi";/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*ClaudeAgent: createClaudeAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*CodexAgent: createCodexAgent/);
+  assert.match(agentsIndexText, /agentFactories = \{[^}]*DeepSeekAgent: createDeepSeekAgent/);
   assert.match(agentsIndexText, /agentFactories = \{[^}]*KimiAgent: createKimiAgent/);
   // Importing the registry must not construct any agent: doing so reads that
   // agent's auth and fails a project that only uses the other backend.
-  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|Kimi)Agent\(\)/);
+  assert.doesNotMatch(agentsIndexText, /=\s*create(Codex|Claude|DeepSeek|Kimi)Agent\(\)/);
   assert.doesNotMatch(codexAgentText, /=\s*createCodexAgent\(\)/);
   const claudeAgentText = fs.readFileSync(path.join(project, ".smithers/agents/claude.ts"), "utf8");
   assert.match(claudeAgentText, /ClaudeCodeAgent/);
@@ -858,6 +929,15 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(claudeAgentText, /import \{ readStringTable, stringField \} from ".\/toml";/);
   assert.doesNotMatch(claudeAgentText, /function readStringTable/);
   assert.doesNotMatch(claudeAgentText, /JSON\.parse/);
+  const deepSeekAgentText = fs.readFileSync(path.join(project, ".smithers/agents/deepseek.ts"), "utf8");
+  assert.match(deepSeekAgentText, /DeepSeekClaudeCodeAgent/);
+  assert.match(deepSeekAgentText, /createDeepSeekAgent/);
+  assert.match(deepSeekAgentText, /https:\/\/api\.deepseek\.com\/anthropic/);
+  assert.match(deepSeekAgentText, /ANTHROPIC_AUTH_TOKEN/);
+  assert.match(deepSeekAgentText, /DEEPSEEK_API_KEY/);
+  assert.match(deepSeekAgentText, /cacheReadTokens/);
+  assert.match(deepSeekAgentText, /reasoningTokens: undefined/);
+  assert.doesNotMatch(deepSeekAgentText, /=\s*createDeepSeekAgent\(\)/);
   const kimiAgentText = fs.readFileSync(path.join(project, ".smithers/agents/kimi.ts"), "utf8");
   assert.match(kimiAgentText, /KimiAgent/);
   assert.match(kimiAgentText, /createKimiAgent/);
@@ -887,6 +967,166 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
+
+test(
+  "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const agent = new DeepSeekClaudeCodeAgent({
+      model: "deepseek-v4-pro",
+      extraArgs: ["--effort", "max"],
+      permissionMode: "bypassPermissions",
+      ultrafuzzApiKey: "deepseek-test-key",
+      configDir: path.join(project, ".ultrafuzz", "deepseek-claude")
+    });
+
+    const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+    assert.equal(command.command, "claude");
+    assert.equal(command.args.includes("deepseek-v4-pro"), true);
+    assert.deepEqual(command.args.slice(command.args.indexOf("--effort"), command.args.indexOf("--effort") + 2), [
+      "--effort",
+      "max"
+    ]);
+    assert.equal(command.env?.ANTHROPIC_BASE_URL, "https://api.deepseek.com/anthropic");
+    assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "deepseek-test-key");
+    assert.equal(command.env?.ANTHROPIC_API_KEY, "");
+    assert.equal(command.env?.CLAUDE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+    assert.equal(command.env?.CLAUDE_SECURESTORAGE_CONFIG_DIR, path.join(project, ".ultrafuzz", "deepseek-claude"));
+    for (const name of [
+      "ANTHROPIC_CONFIG_DIR",
+      "ANTHROPIC_CUSTOM_HEADERS",
+      "ANTHROPIC_FEDERATION_RULE_ID",
+      "ANTHROPIC_IDENTITY_TOKEN",
+      "ANTHROPIC_IDENTITY_TOKEN_FILE",
+      "ANTHROPIC_ORGANIZATION_ID",
+      "ANTHROPIC_PROFILE",
+      "ANTHROPIC_UNIX_SOCKET",
+      "CCR_OAUTH_TOKEN_FILE",
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+      "CLAUDE_CODE_HOST_CREDS_FILE",
+      "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+      "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
+      "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+      "CLAUDE_CODE_USE_BEDROCK",
+      "CLAUDE_CODE_USE_FOUNDRY",
+      "CLAUDE_CODE_USE_GATEWAY",
+      "CLAUDE_CODE_USE_MANTLE",
+      "CLAUDE_CODE_USE_VERTEX"
+    ]) {
+      assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
+    }
+
+    const resultLine = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "done",
+      usage: {
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 400,
+        cache_creation_input_tokens: 999,
+        reasoning_tokens: 20
+      }
+    });
+    const events = agent.createOutputInterpreter().onStdoutLine?.(resultLine) as Array<{
+      type?: string;
+      usage?: Record<string, number>;
+    }>;
+    const completed = events.find((event) => event.type === "completed");
+    assert.deepEqual(completed?.usage, {
+      input_tokens: 120,
+      output_tokens: 30,
+      cache_read_input_tokens: 400,
+      cache_creation_input_tokens: 0,
+      total_tokens: 550
+    });
+  }
+);
+
+test(
+  "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const providerUsage = {
+      prompt_cache_miss_tokens: 101,
+      prompt_cache_hit_tokens: 400,
+      output_tokens: 23,
+      reasoning_tokens: 17
+    };
+    const normalizedUsage = {
+      inputTokens: 101,
+      inputTokenDetails: { noCacheTokens: 101, cacheReadTokens: 400, cacheWriteTokens: 0 },
+      outputTokens: 23,
+      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+      totalTokens: 524
+    };
+
+    const successful = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
+    successful.buildCommand = async () => ({
+      command: process.execPath,
+      args: [
+        "-e",
+        `console.log(${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            result: "done",
+            session_id: "deepseek-session",
+            usage: providerUsage
+          })
+        )})`
+      ],
+      outputFormat: "stream-json"
+    });
+    const result = await successful.generate({ prompt: "Telemetry", rootDir: project });
+    assert.deepEqual(result.usage, normalizedUsage);
+
+    const streamed = await successful.stream({ prompt: "Stream telemetry", rootDir: project });
+    assert.deepEqual(await streamed.usage, normalizedUsage);
+    assert.deepEqual(await streamed.totalUsage, normalizedUsage);
+
+    const failed = new DeepSeekClaudeCodeAgent({ model: "deepseek-v4-pro", ultrafuzzApiKey: "test-key" });
+    failed.buildCommand = async () => ({
+      command: process.execPath,
+      args: [
+        "-e",
+        `console.log(${JSON.stringify(
+          JSON.stringify({
+            type: "result",
+            subtype: "error",
+            is_error: true,
+            error: "provider failed",
+            usage: providerUsage
+          })
+        )}); process.exit(17)`
+      ],
+      outputFormat: "stream-json"
+    });
+    let failure: unknown;
+    try {
+      await failed.generate({ prompt: "Failed telemetry", rootDir: project });
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure instanceof Error);
+    assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
+  }
+);
 
 test(
   "generated Kimi adapter narrows the pinned Smithers command to Kimi Code 0.29.1",
@@ -2865,8 +3105,8 @@ test("init reports an agent registry that does not export a generated agent", as
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
 
-  // Simulate a project scaffolded before ClaudeAgent and KimiAgent existed: the registry
-  // predates the adapter, and init preserves project-owned files.
+  // Simulate a project scaffolded before ClaudeAgent, DeepSeekAgent, and KimiAgent
+  // existed: the registry predates the adapters, and init preserves project-owned files.
   const registryPath = path.join(project, ".smithers/agents/index.ts");
   fs.writeFileSync(
     registryPath,
@@ -2879,13 +3119,15 @@ test("init reports an agent registry that does not export a generated agent", as
   const upgraded = initProject({ projectRoot: project });
   assert.equal(upgraded.ok, true);
   const stale = upgraded.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(stale.length, 2, JSON.stringify(upgraded.diagnostics));
+  assert.equal(stale.length, 3, JSON.stringify(upgraded.diagnostics));
   assert.equal(stale[0]?.severity, "warning");
   assert.match(stale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
+  assert.match(stale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(stale.map((entry) => entry.message).join("\n"), /KimiAgent/);
 
-  // A registry that names the agent without registering its factory is still
-  // stale: nothing resolves it, since generated adapters export only factories.
+  // A registry that names Claude, DeepSeek, and Kimi without registering their
+  // factories is still stale: nothing resolves it, since generated adapters export
+  // only factories.
   fs.writeFileSync(
     registryPath,
     'import { createCodexAgent } from "./codex";\n' +
@@ -2896,8 +3138,9 @@ test("init reports an agent registry that does not export a generated agent", as
   );
   const named = initProject({ projectRoot: project });
   const namedStale = named.diagnostics.filter((entry) => entry.code === "INIT_AGENT_REGISTRY_STALE");
-  assert.equal(namedStale.length, 2, JSON.stringify(named.diagnostics));
+  assert.equal(namedStale.length, 3, JSON.stringify(named.diagnostics));
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /ClaudeAgent/);
+  assert.match(namedStale.map((entry) => entry.message).join("\n"), /DeepSeekAgent/);
   assert.match(namedStale.map((entry) => entry.message).join("\n"), /KimiAgent/);
 
   // A registry that exports every generated agent stays quiet.
@@ -3335,6 +3578,28 @@ test("startRun forwards Kimi-specific runtime environment without exposing unrel
     fs.readFileSync(kimiEnvironmentLog, "utf8"),
     "||https://kimi.example.invalid/v1|/data/run/kimi-code-auth|/data/run/kimi-code-sessions|/data/run\n"
   );
+});
+
+test("startRun forwards only the configured DeepSeek API key for DeepSeek runs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const deepSeekEnvironmentLog = path.join(project, "smithers-deepseek-environment.log");
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "deepseek-api-environment",
+    agent: "DeepSeekAgent",
+    env: {
+      ...fakeSmithersEnv(project),
+      SMITHERS_FAKE_DEEPSEEK_ENV_LOG: deepSeekEnvironmentLog,
+      DEEPSEEK_API_KEY: "deepseek-agent-key",
+      ANTHROPIC_API_KEY: "unrelated-anthropic-key"
+    }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  assert.equal(fs.readFileSync(deepSeekEnvironmentLog, "utf8"), "deepseek-agent-key|\n");
 });
 
 test("startRun forwards Moonshot fallback credentials for Kimi API-key auth", async () => {
@@ -5038,6 +5303,109 @@ test("syncRun applies context-tier pricing from the live catalog", async () => {
   assert.equal(metadata.accounting?.current?.tokens_used, "310,000");
   assert.equal(metadata.accounting?.current?.estimated_spend, "$3.45");
   assert.equal(metadata.accounting?.current?.partial_pricing, false);
+});
+
+test("syncRun publishes complete DeepSeek V4 telemetry at first-party list rates", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-deepseek-accounting";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        extra: {
+          iteration: 0,
+          inputTokens: 120_000,
+          outputTokens: 8_000,
+          cacheReadTokens: 400_000,
+          cacheWriteTokens: 0,
+          // DeepSeek output already includes thinking tokens; emitting another
+          // reasoning component would double-count the provider's completion.
+          model: "deepseek-v4-pro",
+          agent: "DeepSeekAgent"
+        }
+      },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+    "alibaba-token-plan": {
+      models: {
+        "deepseek-v4-pro": { cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 } }
+      }
+    },
+    deepseek: {
+      models: {
+        "deepseek-v4-pro": { cost: { input: 0.435, output: 0.87, reasoning: 0.87, cache_read: 0.003625 } }
+      }
+    }
+  });
+  const run = await startRun({ projectRoot: project, runId: "deepseek-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "deepseek-accounting", env });
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const accounting = (
+    JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+      accounting?: {
+        current?: {
+          uncached_input_tokens?: number;
+          output_tokens?: number;
+          cache_read_tokens?: number;
+          cache_write_tokens?: number;
+          reasoning_tokens?: number;
+          inclusive_token_total?: number;
+          billable_token_total?: number;
+          estimated_spend_usd?: number;
+          estimated_spend?: string;
+          component_costs_usd?: Record<string, number>;
+          usage_complete?: boolean;
+          pricing_complete?: boolean;
+          partial_pricing?: boolean;
+          models?: string[];
+          agents?: string[];
+        };
+        pricing_catalog?: {
+          resolved_models?: string[];
+          model_prices?: Record<string, { inputUsdPerMillion?: number; cachedInputUsdPerMillion?: number }>;
+        };
+      };
+    }
+  ).accounting;
+  assert.equal(accounting?.current?.uncached_input_tokens, 120_000);
+  assert.equal(accounting?.current?.cache_read_tokens, 400_000);
+  assert.equal(accounting?.current?.cache_write_tokens, 0);
+  assert.equal(accounting?.current?.output_tokens, 8_000);
+  assert.equal(accounting?.current?.reasoning_tokens, 0);
+  assert.equal(accounting?.current?.inclusive_token_total, 528_000);
+  assert.equal(accounting?.current?.billable_token_total, 528_000);
+  assert.equal(accounting?.current?.estimated_spend, "$0.06");
+  assert.equal(accounting?.current?.estimated_spend_usd, 0.06061);
+  assert.deepEqual(accounting?.current?.component_costs_usd, {
+    uncached_input: 0.0522,
+    cache_read: 0.00145,
+    cache_write: 0,
+    output: 0.00696,
+    reasoning: 0
+  });
+  assert.equal(accounting?.current?.usage_complete, true);
+  assert.equal(accounting?.current?.pricing_complete, true);
+  assert.equal(accounting?.current?.partial_pricing, false);
+  assert.deepEqual(accounting?.current?.models, ["deepseek-v4-pro"]);
+  assert.deepEqual(accounting?.current?.agents, ["DeepSeekAgent"]);
+  assert.deepEqual(accounting?.pricing_catalog?.resolved_models, ["deepseek-v4-pro"]);
+  assert.equal(accounting?.pricing_catalog?.model_prices?.["deepseek-v4-pro"]?.inputUsdPerMillion, 0.435);
+  assert.equal(accounting?.pricing_catalog?.model_prices?.["deepseek-v4-pro"]?.cachedInputUsdPerMillion, 0.003625);
 });
 
 const MOONSHOT_KIMI_CATALOG = {

@@ -270,6 +270,12 @@ function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: Benchmar
             agent: "KimiAgent",
             model: "kimi-k3",
             reasoning: "max"
+          },
+          {
+            id: "benchmark-full-deepseek-v4-pro-max",
+            agent: "DeepSeekAgent",
+            model: "deepseek-v4-pro",
+            reasoning: "max"
           }
         ])
   ];
@@ -287,7 +293,7 @@ function assertFixedBenchmarkProfiles(laneName: "smoke" | "full", lane: Benchmar
       "EVAL_BENCHMARK_MANIFEST_INVALID",
       laneName === "smoke"
         ? "smoke lane must use exactly the gpt-5.6-luna high runner with the gpt-5.6-sol xhigh judge"
-        : "full lane must use exactly gpt-5.6-luna high, claude-sonnet-5 high, and kimi-k3 max runners with the gpt-5.6-sol xhigh judge"
+        : "full lane must use exactly gpt-5.6-luna high, claude-sonnet-5 high, kimi-k3 max, and deepseek-v4-pro max runners with the gpt-5.6-sol xhigh judge"
     );
   }
 }
@@ -370,12 +376,12 @@ export function adaptBenchmarkManifestToEvalSuite(input: {
     const parsedOverride = modelProfileSchema.safeParse(input.runnerModelProfileOverride);
     if (
       !parsedOverride.success ||
-      !["CodexAgent", "ClaudeAgent", "KimiAgent"].includes(parsedOverride.data.agent) ||
+      !["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"].includes(parsedOverride.data.agent) ||
       parsedOverride.data.id === lane.judge_profile.id
     ) {
       throw new EvalError(
         "EVAL_BENCHMARK_MODEL_PROFILE_INVALID",
-        "runner model profile override must be a safe explicit CodexAgent, ClaudeAgent, or KimiAgent profile distinct from the judge"
+        "runner model profile override must be a safe explicit CodexAgent, ClaudeAgent, DeepSeekAgent, or KimiAgent profile distinct from the judge"
       );
     }
     runnerModelProfileOverride = parsedOverride.data;

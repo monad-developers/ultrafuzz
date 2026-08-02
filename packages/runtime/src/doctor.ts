@@ -28,6 +28,7 @@ const REQUIRED_TOOLCHAIN_COMMANDS = ["git", "node", "forge"] as const;
 const AGENT_EXECUTABLES: Record<string, string> = {
   ClaudeAgent: "claude",
   CodexAgent: "codex",
+  DeepSeekAgent: "claude",
   KimiAgent: "kimi"
 };
 

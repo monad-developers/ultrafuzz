@@ -40,6 +40,16 @@ on:
         required: true
         default: max
         type: string
+      deepseek_model:
+        description: DeepSeek runner model for the full EVMBench run
+        required: true
+        default: deepseek-v4-pro
+        type: string
+      deepseek_reasoning:
+        description: DeepSeek runner reasoning effort for the full EVMBench run
+        required: true
+        default: max
+        type: string
 
 env:
   BENCHMARK_MODE: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
@@ -93,12 +103,13 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
           required=(MODAL_TOKEN_ID MODAL_TOKEN_SECRET OPENAI_API_KEY)
           if [ "$BENCHMARK_MODE" = full ]; then
-            required+=(ANTHROPIC_API_KEY KIMI_API_KEY)
+            required+=(ANTHROPIC_API_KEY KIMI_API_KEY DEEPSEEK_API_KEY)
           fi
           for name in "${required[@]}"; do
             if [ -z "${!name:-}" ]; then
@@ -115,6 +126,8 @@ jobs:
           BENCHMARK_ANTHROPIC_REASONING: ${{ inputs.anthropic_reasoning || 'high' }}
           BENCHMARK_KIMI_MODEL: ${{ inputs.kimi_model || 'kimi-k3' }}
           BENCHMARK_KIMI_REASONING: ${{ inputs.kimi_reasoning || 'max' }}
+          BENCHMARK_DEEPSEEK_MODEL: ${{ inputs.deepseek_model || 'deepseek-v4-pro' }}
+          BENCHMARK_DEEPSEEK_REASONING: ${{ inputs.deepseek_reasoning || 'max' }}
         run: |
           candidate="$(git rev-parse HEAD)"
           generation="${{ github.run_id }}-${{ github.run_attempt }}"
@@ -131,10 +144,13 @@ jobs:
               --arg anthropic_reasoning "$BENCHMARK_ANTHROPIC_REASONING" \
               --arg kimi_model "$BENCHMARK_KIMI_MODEL" \
               --arg kimi_reasoning "$BENCHMARK_KIMI_REASONING" \
+              --arg deepseek_model "$BENCHMARK_DEEPSEEK_MODEL" \
+              --arg deepseek_reasoning "$BENCHMARK_DEEPSEEK_REASONING" \
               '[
                 {provider: "openai", model: $openai_model, reasoning: $openai_reasoning},
                 {provider: "anthropic", model: $anthropic_model, reasoning: $anthropic_reasoning},
-                {provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}
+                {provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning},
+                {provider: "deepseek", model: $deepseek_model, reasoning: $deepseek_reasoning}
               ]')"
           fi
           export BENCHMARK_MODELS_JSON
@@ -178,6 +194,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
@@ -309,6 +326,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |
@@ -512,6 +530,7 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.ANTHROPIC_API_KEY || '' }}
+          DEEPSEEK_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.DEEPSEEK_API_KEY || '' }}
           KIMI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_API_KEY || github.event_name == 'workflow_dispatch' && secrets.MOONSHOT_API_KEY || '' }}
           KIMI_BASE_URL: ${{ github.event_name == 'workflow_dispatch' && secrets.KIMI_BASE_URL || github.event_name == 'workflow_dispatch' && vars.KIMI_BASE_URL || '' }}
         run: |

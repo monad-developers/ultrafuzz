@@ -30,7 +30,7 @@ export const MODAL_BENCHMARK_SANDBOX_RESOURCES = {
 export const DEFAULT_MODAL_MAX_PARALLEL_AGENTS = 16;
 export const DEFAULT_MODAL_MAX_PARALLEL_NODES = 32;
 
-export type ModelProvider = "openai" | "anthropic" | "kimi";
+export type ModelProvider = "openai" | "anthropic" | "deepseek" | "kimi";
 export type ModelAuthMode = "api-key" | "subscription";
 export type ModalLaunchMode = "resume" | "fresh";
 
@@ -38,7 +38,7 @@ export interface ModalModelSpec {
   slug: string;
   model: string;
   provider: ModelProvider;
-  agent: "CodexAgent" | "ClaudeAgent" | "KimiAgent";
+  agent: "CodexAgent" | "ClaudeAgent" | "DeepSeekAgent" | "KimiAgent";
   reasoning: string;
   auth_mode: ModelAuthMode;
 }
@@ -99,5 +99,13 @@ export const DEFAULT_BENCHMARK_MODELS: readonly ModalModelSpec[] = [
     agent: "KimiAgent",
     reasoning: "max",
     auth_mode: "subscription"
+  },
+  {
+    slug: "deepseek-v4-pro",
+    model: "deepseek-v4-pro",
+    provider: "deepseek",
+    agent: "DeepSeekAgent",
+    reasoning: "max",
+    auth_mode: "api-key"
   }
 ] as const;

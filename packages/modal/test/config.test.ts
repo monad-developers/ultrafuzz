@@ -22,7 +22,7 @@ function minimalConfig(): Record<string, unknown> {
 }
 
 describe("Modal benchmark config", () => {
-  it("defaults to the seven benchmark models and production strategy loops", () => {
+  it("defaults to the eight benchmark models and production strategy loops", () => {
     const config = parseModalBenchmarkConfig(minimalConfig());
 
     expect(config.loops).toBe(3);
@@ -34,7 +34,8 @@ describe("Modal benchmark config", () => {
       "gpt-5.6-luna",
       "claude-fable-5",
       "claude-opus-4-8",
-      "kimi-k3"
+      "kimi-k3",
+      "deepseek-v4-pro"
     ]);
   });
 
@@ -122,6 +123,32 @@ describe("Modal benchmark config", () => {
         ]
       })
     ).toThrow(/Kimi reasoning must be low, high, or max/u);
+  });
+
+  it("accepts only supported DeepSeek V4 API-key model configs", () => {
+    const deepseek = {
+      slug: "deepseek-v4-pro",
+      model: "deepseek-v4-pro",
+      provider: "deepseek",
+      agent: "DeepSeekAgent",
+      reasoning: "max",
+      auth_mode: "api-key"
+    } as const;
+
+    const config = parseModalBenchmarkConfig({ ...minimalConfig(), models: [deepseek] });
+    expect(config.models[0]).toEqual(deepseek);
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        models: [{ ...deepseek, reasoning: "xhigh" }]
+      })
+    ).toThrow(/DeepSeek reasoning must be low, high, or max/u);
+    expect(() =>
+      parseModalBenchmarkConfig({
+        ...minimalConfig(),
+        models: [{ ...deepseek, auth_mode: "subscription" }]
+      })
+    ).toThrow(/DeepSeek authentication must use an API key/u);
   });
 
   it("accepts audit Markdown conversion and temporary judge credentials", () => {

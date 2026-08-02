@@ -308,9 +308,10 @@ evidence regardless of whether catalog pricing is available. `partial_pricing`
 remains the backward-compatible inverse of pricing completeness. An event's
 reported total is tracked separately in `provided_cost_usd`; it does not fill
 missing component rates or make component pricing complete. Kimi-family models
-are priced from the pinned Moonshot provider entry and stay listed in
-`pricing_catalog.unresolved_models` otherwise, rather than borrowing a
-same-named rate from another provider.
+are priced from the pinned Moonshot provider entry, while DeepSeek-family
+models are priced from the pinned first-party DeepSeek entry. Either family
+stays listed in `pricing_catalog.unresolved_models` when its first-party entry
+is absent rather than borrowing a same-named rate from another provider.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

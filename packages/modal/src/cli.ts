@@ -17,7 +17,7 @@ import {
 } from "./runner.js";
 
 const usage =
-  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic|kimi]";
+  "usage: ultrafuzz-modal <build|launch|status|overseer|terminate|terminate-build|collect|unpack-public|smoke> [--config path] [--model slug] [--state path] [--mode resume|fresh] [--fresh] [--public-results] [--bundle path] [--output path] [--provider openai|anthropic|deepseek|kimi]";
 
 async function main(): Promise<void> {
   const [command, ...argv] = process.argv.slice(2);
@@ -28,7 +28,10 @@ async function main(): Promise<void> {
   if (command === "smoke") {
     const provider = requiredProvider(argv);
     const { runRealModalSmoke } = await import("./smoke-modal.js");
-    const result = await runRealModalSmoke(provider, { imageName: option(argv, "--image") });
+    const result = await runRealModalSmoke(provider, {
+      imageName: option(argv, "--image"),
+      ...(provider === "deepseek" ? { apiKey: process.env.DEEPSEEK_API_KEY } : {})
+    });
     console.log(JSON.stringify(result, null, 2));
     if (result.status !== "passed") process.exitCode = 1;
     return;
@@ -179,8 +182,8 @@ function modalLaunchMode(argv: string[]): ModalLaunchMode {
 
 function requiredProvider(argv: string[]): ModelProvider {
   const value = requiredOption(argv, "--provider");
-  if (value !== "openai" && value !== "anthropic" && value !== "kimi") {
-    throw new Error("--provider must be openai, anthropic, or kimi");
+  if (value !== "openai" && value !== "anthropic" && value !== "deepseek" && value !== "kimi") {
+    throw new Error("--provider must be openai, anthropic, deepseek, or kimi");
   }
   return value;
 }

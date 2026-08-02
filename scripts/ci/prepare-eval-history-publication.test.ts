@@ -124,7 +124,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     const fullContext = fullPublicationContext();
     expect(
       validateAutomaticPublicationManifest(fullManifest(), fullContext).pairs.map((pair) => pair.provider)
-    ).toEqual(["openai", "anthropic", "kimi"]);
+    ).toEqual(["openai", "anthropic", "kimi", "deepseek"]);
 
     for (const mutate of [
       (manifest: ReturnType<typeof fullManifest>) => manifest.pairs.pop(),
@@ -133,7 +133,8 @@ describe("trusted automatic eval-history publication handoff", () => {
       (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[1]!.model_slug = manifest.pairs[0]!.model_slug),
       (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[1]!.config_path = manifest.pairs[0]!.config_path),
       (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[1]!.state_path = manifest.pairs[0]!.state_path),
-      (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[2]!.provider = "anthropic")
+      (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[2]!.provider = "anthropic"),
+      (manifest: ReturnType<typeof fullManifest>) => (manifest.pairs[3]!.provider = "kimi")
     ]) {
       const manifest = fullManifest();
       mutate(manifest);
@@ -448,7 +449,8 @@ function fullManifest() {
   const pairs = [
     ["openai", "benchmark-full-gpt-5-6-luna-high"],
     ["anthropic", "benchmark-full-claude-sonnet-5-high"],
-    ["kimi", "benchmark-full-kimi-k3-max"]
+    ["kimi", "benchmark-full-kimi-k3-max"],
+    ["deepseek", "benchmark-full-deepseek-v4-pro-max"]
   ].map(([provider, modelSlug]) => {
     const pair = `evmbench-${modelSlug}`;
     return {
@@ -476,8 +478,8 @@ function fullManifest() {
     concurrency: {
       max_parallel_eval_rows_per_sandbox: 20,
       max_parallel_workflow_nodes_per_row: 8,
-      max_live_runner_workflows_by_provider: { openai: 20, anthropic: 20, kimi: 20 },
-      max_live_judge_rows: 60
+      max_live_runner_workflows_by_provider: { openai: 20, anthropic: 20, kimi: 20, deepseek: 20 },
+      max_live_judge_rows: 80
     },
     pairs
   };

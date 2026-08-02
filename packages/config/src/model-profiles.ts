@@ -10,6 +10,7 @@ export interface DefaultProfileOverrides {
 
 const MODEL_TIMEOUT_SECONDS = 86_400;
 const KIMI_REASONING_EFFORTS = new Set(["low", "high", "max"]);
+const DEEPSEEK_REASONING_EFFORTS = new Set(["low", "high", "max"]);
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_AGENT_REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
 
@@ -76,7 +77,7 @@ export function validateModelProfiles(config: ResolvedConfig): ConfigDiagnostic[
     ...schemaIssues(modelProfileIdsSchema, config.models.profiles),
     ...schemaIssues(modelProfileValuesSchema, config.models.profiles)
   ].sort(compareModelProfileIssues);
-  return [...issues.map((issue) => modelProfileDiagnostic(issue, config)), ...validateKimiModelProfiles(config)];
+  return [...issues.map((issue) => modelProfileDiagnostic(issue, config)), ...validateProviderModelProfiles(config)];
 }
 
 export function syncDefaultModelProfile(config: ResolvedConfig): void {
@@ -200,7 +201,7 @@ function modelProfileId(issue: ZodIssue): string | undefined {
   return String(issue.path[0] ?? "");
 }
 
-function validateKimiModelProfiles(config: ResolvedConfig): ConfigDiagnostic[] {
+function validateProviderModelProfiles(config: ResolvedConfig): ConfigDiagnostic[] {
   const diagnostics: ConfigDiagnostic[] = [];
   for (const [id, profile] of Object.entries(config.models.profiles).sort()) {
     const reasoning = profile.reasoning;
@@ -214,6 +215,21 @@ function validateKimiModelProfiles(config: ResolvedConfig): ConfigDiagnostic[] {
         diagnostic(
           "CONFIG_MODEL_KIMI_REASONING_UNSUPPORTED",
           `Kimi model profile \`${id}\` reasoning must be low, high, or max`,
+          ["models", id, "reasoning"],
+          "validation"
+        )
+      );
+    }
+    if (
+      profile.agent === "DeepSeekAgent" &&
+      reasoning !== undefined &&
+      reasoning !== "" &&
+      !DEEPSEEK_REASONING_EFFORTS.has(reasoning)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          "CONFIG_MODEL_DEEPSEEK_REASONING_UNSUPPORTED",
+          `DeepSeek model profile \`${id}\` reasoning must be low, high, or max`,
           ["models", id, "reasoning"],
           "validation"
         )
