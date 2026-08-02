@@ -76,13 +76,13 @@ describe("smoke benchmark topology", () => {
     ).toBe(true);
   });
 
-  it("does not replace or trim the production topology", () => {
+  it("keeps the smoke graph separate from the no-fuzz production topology", () => {
     const smoke = loadTopology(REPOSITORY_ROOT, { topologyPath: SMOKE_TOPOLOGY_PATH });
     const production = loadTopology(REPOSITORY_ROOT);
 
     expect(production.nodes.some((node) => node.id === "smoke-context")).toBe(false);
     expect(production.nodes.length).toBeGreaterThan(smoke.nodes.length);
-    expect(production.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(true);
+    expect(production.nodes.some((node) => node.id === "stateful-invariant-campaign")).toBe(false);
     expect(production.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });

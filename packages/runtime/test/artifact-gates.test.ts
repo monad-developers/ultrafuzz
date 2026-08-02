@@ -62,25 +62,17 @@ function plannedNode(paths: string[]): PlannedGraphNode {
   };
 }
 
-test("the campaign provenance gate covers the campaign node the shipped topology runs", () => {
-  // Guards the regression this list fixes: the gate was previously keyed on a
-  // logical ID the default topology does not contain, so campaign property
-  // joins went unverified. A node rename must not silently reintroduce that.
+test("the no-fuzz topology ships without an invariant campaign node", () => {
   // The runtime build copies the shipped topology to dist/topology.yml, so this
-  // asserts against the exact file the package ships.
+  // asserts against the exact file the no-fuzz package ships.
   const topologyPath = path.join(import.meta.dirname, "..", "..", "dist", "topology.yml");
   const topologySource = fs.readFileSync(topologyPath, "utf8");
   const campaignIds = [...topologySource.matchAll(/^ {2}- id: (\S+)$/gmu)]
     .map((match) => match[1]!)
     .filter((id) => id.startsWith("stateful-invariant-") && id.includes("campaign"));
 
-  assert.ok(campaignIds.length > 0, "shipped topology declares no invariant campaign node");
-  for (const campaignId of campaignIds) {
-    assert.ok(
-      CAMPAIGN_LOGICAL_NODE_IDS.some((gated) => gated === campaignId),
-      `topology campaign node ${campaignId} is not covered by the provenance gate`
-    );
-  }
+  assert.deepEqual(campaignIds, []);
+  assert.ok(CAMPAIGN_LOGICAL_NODE_IDS.includes("stateful-invariant-campaign"));
 });
 
 test("required artifact gate validates generated-test manifest shape and listed files", () => {

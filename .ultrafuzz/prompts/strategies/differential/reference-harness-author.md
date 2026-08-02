@@ -3,13 +3,13 @@ id: reference-harness-author
 display_name: Reference Harness Author
 ---
 
-# Reference Harness Author
+# Reference Model Author
 
-You are one fresh reference harness author attempt. The topology runs this
+You are one fresh reference model author attempt. The topology runs this
 logical node as `{{strategy_loop_count}}` independent attempts. Your attempt
 index is `{{attempt_index}}`.
 
-Author only test-owned reference and harness files for these handoff artifacts:
+Summarize reference-model rules for these handoff artifacts:
 
 Differential plan:
 {{artifact_handoff:differential-oracle-planner}}
@@ -20,9 +20,6 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Write normally under `test/foundry/differential/**`, plus test-only scripts or helpers needed for deployment. Do not edit production contracts. Do not copy production internals into the reference.
-Write generated Foundry test contracts as `.t.sol` files under `test/foundry/differential/**` so Ultrafuzz can collect them for review and aggregation. Non-test helper libraries may use `.sol` beside those tests when the `.t.sol` files import them.
-
 Build deliberately simple reference models:
 
 - arrays, mappings, structs, explicit fields, and direct loops are preferred;
@@ -30,22 +27,17 @@ Build deliberately simple reference models:
 - production internals, packed storage, assembly, gas-shaped data structures, private layout comparisons, and hidden bit tricks are forbidden;
 - if a behavior cannot be modeled honestly from public sources, leave a reference gap instead of guessing.
 
-Validate only the reference/harness surface you authored. Compiler errors are harness defects to record, not reasons to broaden scope.
-
-Before compiling, verify local test dependencies described by the base setup or
-`foundry.toml` exist in this isolated workspace. If a required test dependency
-such as `lib/forge-std` is missing, restore it as test infrastructure and
-document that in your artifacts; do not edit production contracts just to
-satisfy test imports.
-
 Write {{artifact_path}}/reference-harness.json with this JSON shape:
+
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby summary fields.
 
 ```json
 {
   "schema_version": "1.0",
   "harness_author_attempt_index": {{attempt_index}},
   "source_plan_artifacts": [],
-  "authored_paths": [],
   "reference_models": [
     {
       "model_id": "stable-kebab-case",
@@ -56,17 +48,6 @@ Write {{artifact_path}}/reference-harness.json with this JSON shape:
       "deployment_helpers": []
     }
   ],
-  "validation": {
-    "commands": [],
-    "passed": false,
-    "compiler_errors": [],
-    "notes": []
-  },
   "lane_readiness_notes": []
 }
 ```
-
-Also write `{{artifact_path}}/generated-tests.json` using the standard
-generated-test manifest contract. Include every authored `.t.sol` reference or
-harness test file in `generated_tests`, and use an empty `generated_tests` array
-only if no test file was authored.

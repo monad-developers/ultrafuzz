@@ -8,7 +8,7 @@ display_name: Reference And Lane Auditor
 You are one fresh read-only auditor attempt. The topology runs this logical node
 as `{{strategy_loop_count}}` independent attempts. Your attempt index is
 `{{attempt_index}}`. Audit the proposed reference model and lane assignments
-against public sources before any lane author trusts them.
+against public sources before lane analysis uses them.
 
 Inputs:
 
@@ -24,17 +24,9 @@ Base Foundry setup:
 Property catalog:
 {{artifact_handoff:property-specification-fanin}}
 
-Do not edit repository source files; write only the required artifacts. Do not assume the reference, production, or tests are correct. Reject or narrow any lane whose strict oracle depends on guessed behavior, private layout, production internals, gas-shaped logic, or unstated preconditions.
-
-When carrying forward or narrowing a lane `focused_command`, require a direct
-`forge` invocation from `PATH`. If the planner supplied command substitution,
-shell conditionals, absolute binary paths, host-global searches, or a custom
-binary wrapper, rewrite only the command prefix so the lane author can run the
-same test with `forge`. If the planner supplied an inline environment
-assignment prefix, remove it so the command starts with `forge` and backend
-allowlists match it. Keep the original command's flags, match selectors, and
-test-root semantics. If `forge` is unavailable in `PATH`, the lane author should
-record validation as blocked by tool availability.
+Write the required artifacts from public evidence. Reject or narrow any lane
+whose strict oracle depends on guessed behavior, private layout, production
+internals, gas-shaped logic, or unstated preconditions.
 
 Planner and harness inputs may come from multiple looped producer attempts.
 Treat every upstream handoff as a separate candidate source. Preserve its
@@ -55,6 +47,10 @@ For each surface and lane, classify it as exactly one of:
 - `ready`
 
 Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
+
+For every `public_evidence_paths` string, use a plain safe relative file path
+such as `src/Contract.sol` or `README.md`. Place line numbers and ranges in the
+nearby rationale or notes fields.
 
 ```json
 {
@@ -80,8 +76,6 @@ Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
       "harness_author_attempt_index": 0,
       "source_plan_artifact": "",
       "source_harness_artifact": "",
-      "intended_t_sol_path": "test/foundry/differential/<Lane>.t.sol",
-      "focused_command": "forge test --match-path test/foundry/differential/<Lane>.t.sol --match-test <test_name>",
       "public_evidence_paths": [],
       "exact_observable_equality_assertions": []
     }
@@ -93,5 +87,5 @@ Write {{artifact_path}}/audited-differential-lanes.json with this JSON shape:
 ```
 
 Assign each emitted ready lane the current zero-based `attempt_index`. The lane
-author topology attempts use `{{attempt_index}}` and `auditor_attempt_index` to
-select exactly one matching lane payload.
+analysis topology attempts use `{{attempt_index}}` and `auditor_attempt_index`
+to select exactly one matching lane payload.

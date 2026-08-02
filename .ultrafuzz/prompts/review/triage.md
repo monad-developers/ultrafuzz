@@ -23,18 +23,18 @@ step:
 - Use sub-agents when they are available and useful for keeping those passes
   independent. The topology gives this review node an extended timeout so the
   independent passes can finish.
-- Each pass must independently inspect the finding, generated test, relevant
-  target code, public specifications, and any upstream evidence.
+- Each pass must independently inspect the finding, relevant target code,
+  public specifications, property context, and any upstream evidence.
 - Each pass must choose exactly one classification:
   - `true-positive`: credible production issue.
   - `false-positive`: invalid issue with no useful follow-up.
   - `undetermined`: needs more human review before classification.
   - `incomplete-spec`: public specification or policy is missing, ambiguous, or
     contradicted.
-  - `harness-defect`: the generated test or harness violates required
-    preconditions or models the protocol incorrectly.
-  - `repair-candidate`: a local generated test, prompt output, or campaign
-    artifact should be repaired before re-running.
+  - `harness-defect`: the upstream artifact violates required preconditions or
+    models the protocol incorrectly.
+  - `repair-candidate`: a prompt output or campaign artifact should be repaired
+    before further review.
   - `spec-gated`: behavior may be valid or invalid depending on an explicit
     product/spec decision.
   - `defensive-hardening`: not a production bug, but a guard, assertion, or
@@ -44,38 +44,24 @@ step:
 - If no classification reaches {{triage_quorum}}-of-{{triage_panel_size}}
   agreement, classify the finding as `undetermined`.
 
-When rerunning generated tests, focused proofs, temporary public wrappers, or
-any other Foundry command during triage, run `forge --version` as a separate
-Bash call first. If `forge` is available in `PATH`, run focused tests with
-direct `forge` commands while preserving the original command's environment
-variables, flags, match selectors, and test-root semantics. Do not add inline
-environment assignment prefixes to generated tests, project-native tests,
-temporary public wrappers, or focused proof reruns; commands should start with
-`forge` so backend allowlists match them. Do not use command substitution, shell
-conditionals, absolute binary paths, or host-global searches to resolve Foundry.
-If `forge` is unavailable in `PATH`, record validation as blocked by tool
-availability and do not treat
-`forge: command not found` as a reproducer result or classification signal.
+Use source, specification, property, and artifact evidence for triage.
 
 ## Helper reachability audit
 
-During each pass, check whether the failing proof depends on directly calling
-an internal helper, library function, generated wrapper, or test-only adapter
-instead of a production public/external entrypoint. For those findings, triage
-must audit public reachability before treating the result as production
-evidence:
+During each pass, check whether the finding depends on directly reasoning about
+an internal helper, library function, wrapper, or test-only adapter instead of a
+production public/external entrypoint. For those findings, triage must audit
+public reachability before treating the result as production evidence:
 
-- If a public/external entrypoint trace or generated public wrapper PoC reaches
-  the same helper behavior under production-like preconditions, the finding may
-  remain `true-positive`. Add a note with
-  `reachability=public-entrypoint-trace` or
-  `reachability=generated-public-wrapper-poc`.
-- If the proof is helper-only and public entrypoints enforce stricter bounds,
+- If a public/external entrypoint trace reaches the same helper behavior under
+  production-like preconditions, the finding may remain `true-positive`. Add a
+  note with `reachability=public-entrypoint-trace`.
+- If the finding is helper-only and public entrypoints enforce stricter bounds,
   classify it as `harness-defect`, `defensive-hardening`, or `false-positive`
   according to the evidence. Set `status` to `false-positive` for unreachable
   false positives, and record why production reachability is absent.
 - If direct public reachability is unclear, classify it as `undetermined` and
-  add `reachability=public-wrapper-required` plus the exact public wrapper or
+  add `reachability=public-entrypoint-evidence-required` plus the exact
   entrypoint evidence needed before severity can treat it as production
   exploitable.
 
@@ -95,7 +81,7 @@ before treating that dependency behavior as production evidence.
   acting maliciously, classify it as `false-positive`, `incomplete-spec`, or
   `spec-gated` according to the available evidence. Do not promote it to
   `true-positive`.
-- If the finding tests project-owned validation, wrapper, adapter,
+- If the finding exercises project-owned validation, wrapper, adapter,
   authorization, bounds, staleness, sanitization, rollback, or error-handling
   logic and cites explicit public evidence that the protocol promises that
   guard, it may remain eligible for `true-positive`. Add
@@ -135,8 +121,8 @@ Reachability fixture examples:
   "triage_classification": "harness-defect",
   "status": "false-positive",
   "notes": [
-    "reachability=helper-only: direct helper fuzzing bypasses public entrypoint bounds",
-    "classification_reason=harness defect: generated proof bypasses production entrypoint preconditions"
+    "reachability=helper-only: direct helper analysis bypasses public entrypoint bounds",
+    "classification_reason=harness defect: upstream artifact bypasses production entrypoint preconditions"
   ]
 }
 ```
@@ -147,8 +133,8 @@ Reachability fixture examples:
   "triage_classification": "true-positive",
   "notes": [
     "reachability=public-entrypoint-trace: external flow reaches the helper with production-like bounds",
-    "helper_proof=direct helper mismatch reproduced",
-    "public_exploitability=public entrypoint trace reproduces the same state transition"
+    "helper_evidence=direct helper mismatch identified",
+    "public_exploitability=public entrypoint trace reaches the same state transition"
   ]
 }
 ```
@@ -166,13 +152,9 @@ the upstream evidence already supports a more specific status.
 In particular, preserve `property_ids` unchanged for every property-derived
 finding.
 
-For stateful invariant records, preserve any upstream
-`stateful_failure_classification=<classification>` note exactly. Coverage-only
-success is not evidence that the record should be removed. Treat
-`production-bug`, `harness-defect`, `incomplete-spec`, `false-positive`, and
-`blocked-unreproduced` as distinct upstream outcomes that must remain visible in
-`triaged-findings.json`; triage may add consensus notes, but it must not erase
-the original classification, reproducer, blocker, or repair evidence.
+For upstream records, preserve existing classification and evidence fields
+exactly. Triage may add consensus notes, but it must keep the original
+classification and supporting evidence visible in `triaged-findings.json`.
 
 Save triaged findings to {{artifact_path}}/triaged-findings.json as a JSON
 array. Every object must include `triage_classification` set to exactly one of
