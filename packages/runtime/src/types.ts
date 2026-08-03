@@ -106,6 +106,15 @@ export interface PlanRunInput extends ValidateProjectInput {
   maxConcurrency?: number;
 }
 
+/**
+ * Inputs for a forensic artifact import into a new run. The source is a
+ * read-only checkpoint directory, not a native workflow-resume workspace.
+ */
+export interface ArtifactRecoveryRunInput {
+  manifestPath: string;
+  sourceRoot: string;
+}
+
 export interface TopologyTransform {
   strategyLoops?: number;
   excludedNodeIds?: string[];
@@ -194,7 +203,14 @@ export interface PlanRunValue {
   rendered_prompts: RenderedPromptPlan[];
 }
 
-export type StartRunInput = PlanRunInput;
+export interface StartRunInput extends PlanRunInput {
+  artifactRecovery?: ArtifactRecoveryRunInput;
+  /**
+   * Optional controller-owned, write-once marker created after recovery import
+   * and workflow compilation but immediately before scheduler admission.
+   */
+  modelWorkMarkerPath?: string;
+}
 
 export interface StartRunValue {
   run_id: string;
@@ -204,6 +220,12 @@ export interface StartRunValue {
   graph_fingerprint: string;
   config_fingerprint: string;
   workflow_ids: string[];
+  artifact_recovery?: {
+    source_run_id: string;
+    active_reused_nodes: string[];
+    retained_source_only_nodes: string[];
+    rerun_nodes: string[];
+  };
 }
 
 export interface RunListEntry {

@@ -26,8 +26,9 @@ import {
   type WorkflowLifecycleValue
 } from "./types.js";
 import { planRun, repairMissingRenderedPromptsForRun } from "./plan-run.js";
+import { importArtifactRecovery, loadArtifactRecoveryImport } from "./artifact-recovery.js";
 import { forgeGuardMetadata, prepareForgeGuardEnvironment } from "./forge-guard.js";
-import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
   compileSmithersWorkflow,
   requestSmithersPause,
@@ -39,12 +40,62 @@ import {
 import { loadResolvedProject, runsRootForProject } from "./validate.js";
 
 export async function startRun(input: StartRunInput) {
-  const planned = await planRun(input);
+  let loadedRecovery: ReturnType<typeof loadArtifactRecoveryImport> | undefined;
+  if (input.artifactRecovery !== undefined) {
+    try {
+      loadedRecovery = loadArtifactRecoveryImport(input.artifactRecovery);
+      if (input.sourceRunId !== undefined && input.sourceRunId !== loadedRecovery.source.runId) {
+        return runtimeFailure<StartRunValue>([
+          {
+            code: "ARTIFACT_RECOVERY_SOURCE_CONFLICT",
+            message: "sourceRunId conflicts with the attested artifact recovery source run ID",
+            severity: "error",
+            source: "artifact-recovery"
+          }
+        ]);
+      }
+    } catch (error) {
+      return runtimeFailure<StartRunValue>([
+        diagnosticFromError(error, "artifact-recovery", "ARTIFACT_RECOVERY_MANIFEST_INVALID")
+      ]);
+    }
+  }
+  const planned = await planRun({
+    ...input,
+    ...(loadedRecovery === undefined ? {} : { sourceRunId: loadedRecovery.source.runId })
+  });
   if (!planned.ok || !planned.value) {
     return runtimeFailure<StartRunValue>(planned.diagnostics);
   }
 
   const plan = planned.value;
+  let recovery;
+  if (loadedRecovery !== undefined) {
+    try {
+      recovery = importArtifactRecovery({
+        layout: plan.layout,
+        graph: plan.graph,
+        graphFingerprint: plan.graph_fingerprint,
+        configFingerprint: plan.config_fingerprint,
+        loaded: loadedRecovery
+      });
+      appendEvent(plan.layout, {
+        eventType: "artifact-recovery-imported",
+        status: "running",
+        payload: {
+          source_run_id: recovery.sourceRunId,
+          active_reused_nodes: recovery.activeReuse.map((entry) => entry.attemptId),
+          retained_source_only_nodes: recovery.retainedSourceOnlyNodeIds,
+          rerun_nodes: recovery.rerunNodeIds,
+          receipt_path: path.relative(plan.layout.root, recovery.receiptPath).split(path.sep).join("/")
+        }
+      });
+    } catch (error) {
+      return runtimeFailure<StartRunValue>([
+        diagnosticFromError(error, "artifact-recovery", "ARTIFACT_RECOVERY_IMPORT_FAILED")
+      ]);
+    }
+  }
   const compiled = compileSmithersWorkflow({
     config: plan.resolved_config,
     graph: plan.expanded_graph,
@@ -53,7 +104,8 @@ export async function startRun(input: StartRunInput) {
     workflowName: `ultrafuzz-${plan.run_id}`,
     renderedPrompts: plan.rendered_prompts,
     operatorPrompt: input.prompt,
-    operatorInput: input.workflowInput
+    operatorInput: input.workflowInput,
+    ...(recovery === undefined ? {} : { recoveredArtifacts: recovery.activeReuse })
   });
   persistSmithersEvidence(plan.layout, plan.graph, compiled);
   appendEvent(plan.layout, {
@@ -67,18 +119,8 @@ export async function startRun(input: StartRunInput) {
     }
   });
 
-  updateRunStatus(plan.layout, "running");
-  const controllerInvocation = appendEvent(plan.layout, {
-    eventType: "workflow-submitting",
-    status: "running",
-    payload: {
-      workflow_run_id: compiled.smithersRunId,
-      workflow_name: compiled.workflowName,
-      action: "start"
-    }
-  });
-
   const submitDiagnostics: RuntimeDiagnostic[] = [];
+  let submissionInput: Parameters<typeof submitSmithersWorkflow>[0];
   try {
     const forgeGuard = prepareForgeGuardEnvironment({
       layout: plan.layout,
@@ -86,7 +128,10 @@ export async function startRun(input: StartRunInput) {
       env: input.env
     });
     persistForgeGuardMetadata(plan.layout, plan.resolved_config, forgeGuard.active);
-    const submission = await submitSmithersWorkflow({
+    // Resolve every setup-dependent value before the recovery marker. The
+    // marker is the durable boundary after which scheduler/model admission is
+    // allowed, so a forge or environment failure must leave it absent.
+    submissionInput = {
       compiled,
       projectRoot: plan.validation.project_root,
       maxConcurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
@@ -103,7 +148,50 @@ export async function startRun(input: StartRunInput) {
       ),
       operatorPrompt: input.prompt,
       operatorInput: input.workflowInput
+    };
+  } catch (error) {
+    const diagnostic = smithersDiagnostic(error, "WORKFLOW_SUBMISSION_PREPARATION_FAILED");
+    submitDiagnostics.push(diagnostic);
+    updateRunStatus(plan.layout, "failed");
+    appendEvent(plan.layout, {
+      eventType: "workflow-submit-preparation-failed",
+      status: "failed",
+      payload: diagnostic
     });
+    return runtimeFailure<StartRunValue>(submitDiagnostics);
+  }
+
+  updateRunStatus(plan.layout, "running");
+  const controllerInvocation = appendEvent(plan.layout, {
+    eventType: "workflow-submitting",
+    status: "running",
+    payload: {
+      workflow_run_id: compiled.smithersRunId,
+      workflow_name: compiled.workflowName,
+      action: "start"
+    }
+  });
+  try {
+    writeModelWorkMarker(input.modelWorkMarkerPath, {
+      run_id: plan.layout.runId,
+      ...(recovery === undefined ? {} : { source_run_id: recovery.sourceRunId }),
+      workflow_run_id: compiled.smithersRunId,
+      created_at: new Date().toISOString()
+    });
+  } catch (error) {
+    const diagnostic = diagnosticFromError(error, "runtime", "MODEL_WORK_MARKER_WRITE_FAILED");
+    updateRunStatus(plan.layout, "failed");
+    appendEvent(plan.layout, {
+      eventType: "workflow-submit-failed",
+      status: "failed",
+      payload: diagnostic
+    });
+    return runtimeFailure<StartRunValue>([diagnostic]);
+  }
+
+  try {
+    // Keep scheduler admission immediately adjacent to the write-once marker.
+    const submission = await submitSmithersWorkflow(submissionInput);
     appendEvent(plan.layout, {
       eventType: "workflow-submitted",
       status: "running",
@@ -132,8 +220,31 @@ export async function startRun(input: StartRunInput) {
     ...(plan.source_run_id ? { source_run_id: plan.source_run_id } : {}),
     graph_fingerprint: plan.graph_fingerprint,
     config_fingerprint: plan.config_fingerprint,
-    workflow_ids: [compiled.smithersRunId]
+    workflow_ids: [compiled.smithersRunId],
+    ...(recovery === undefined
+      ? {}
+      : {
+          artifact_recovery: {
+            source_run_id: recovery.sourceRunId,
+            active_reused_nodes: recovery.activeReuse.map((entry) => entry.attemptId),
+            retained_source_only_nodes: [...recovery.retainedSourceOnlyNodeIds],
+            rerun_nodes: [...recovery.rerunNodeIds]
+          }
+        })
   });
+}
+
+function writeModelWorkMarker(markerPath: string | undefined, value: Record<string, unknown>): void {
+  if (markerPath === undefined) return;
+  const target = path.resolve(markerPath);
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  const descriptor = fs.openSync(target, "wx", 0o600);
+  try {
+    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 export async function resumeRun(input: WorkflowLifecycleInput) {

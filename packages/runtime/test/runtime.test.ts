@@ -3499,6 +3499,39 @@ test("startRun injects the configured Forge guard into the workflow environment 
   });
 });
 
+test("startRun leaves the model-work marker absent when Forge preparation fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const env = fakeSmithersEnv(project);
+  const binDir = path.dirname(env.SMITHERS_BIN!);
+  const realForge = path.join(binDir, "forge");
+  fs.writeFileSync(realForge, "#!/bin/sh\nexit 0\n", "utf8");
+  fs.chmodSync(realForge, 0o755);
+  const markerPath = path.join(project, "model-work-started.json");
+  const originalChmodSync = fs.chmodSync;
+  fs.chmodSync = ((target, mode) => {
+    if (String(target).endsWith(`${path.sep}safe-bin${path.sep}forge`)) {
+      throw new Error("forced Forge preparation failure");
+    }
+    return originalChmodSync(target, mode);
+  }) as typeof fs.chmodSync;
+  try {
+    const run = await startRun({
+      projectRoot: project,
+      runId: "forge-preparation-marker",
+      modelWorkMarkerPath: markerPath,
+      env
+    });
+    assert.equal(run.ok, false);
+    assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SUBMISSION_PREPARATION_FAILED"));
+    assert.equal(fs.existsSync(markerPath), false);
+    assert.equal(fs.existsSync(env.SMITHERS_FAKE_LOG!), false);
+  } finally {
+    fs.chmodSync = originalChmodSync;
+  }
+});
+
 test("startRun forwards configured and explicitly allowed environment variables only", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

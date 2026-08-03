@@ -22,7 +22,16 @@ export default class Run extends Command {
     prompt: Flags.string({ summary: "Operator prompt text" }),
     agent: Flags.string({ summary: "Override the default agent reference" }),
     model: Flags.string({ summary: "Override the default model metadata" }),
-    "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" })
+    "max-concurrency": Flags.integer({ summary: "Maximum parallel tasks" }),
+    "artifact-recovery-manifest": Flags.string({
+      summary: "Read-only-source recovery wrapper manifest for a fresh run"
+    }),
+    "artifact-recovery-source-root": Flags.string({
+      summary: "Read-only source checkpoint run directory for artifact recovery"
+    }),
+    "model-work-marker": Flags.string({
+      summary: "Write-once controller marker created immediately before workflow admission"
+    })
   };
 
   async run(): Promise<void> {
@@ -40,6 +49,21 @@ export default class Run extends Command {
       );
       return;
     }
+    const recoveryManifest = flags["artifact-recovery-manifest"];
+    const recoverySourceRoot = flags["artifact-recovery-source-root"];
+    if ((recoveryManifest === undefined) !== (recoverySourceRoot === undefined)) {
+      emitCommandResult(
+        this,
+        "run",
+        commandFailure(
+          "run",
+          "--artifact-recovery-manifest and --artifact-recovery-source-root must be supplied together",
+          "CLI_ARTIFACT_RECOVERY_INPUT_INVALID"
+        ),
+        flags.json === true
+      );
+      return;
+    }
     const result = await startRun({
       projectRoot: root,
       runId: flags["run-id"],
@@ -48,6 +72,15 @@ export default class Run extends Command {
       model: flags.model,
       workflowInput,
       maxConcurrency: flags["max-concurrency"],
+      ...(recoveryManifest === undefined
+        ? {}
+        : {
+            artifactRecovery: {
+              manifestPath: recoveryManifest,
+              sourceRoot: recoverySourceRoot!
+            }
+          }),
+      ...(flags["model-work-marker"] === undefined ? {} : { modelWorkMarkerPath: flags["model-work-marker"] }),
       env: cliIo().env
     });
     emitCommandResult(

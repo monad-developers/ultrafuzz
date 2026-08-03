@@ -20,6 +20,7 @@ import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import type { ArtifactRecoveryReuseTask } from "./artifact-recovery.js";
 import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
@@ -121,6 +122,11 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  /**
+   * Source-attested artifacts that must be validated in the scheduler without
+   * creating an agent/model task. These are keyed by concrete attempt ID.
+   */
+  recoveredArtifacts?: readonly ArtifactRecoveryReuseTask[];
 }
 
 export interface NodeAttemptProvenance {
@@ -171,6 +177,8 @@ export interface CompiledSmithersTask {
     };
     agentCredentialEnv: string[];
   };
+  /** Present only for a deterministic no-model reuse-validation task. */
+  recovery?: ArtifactRecoveryReuseTask;
   metadata: SmithersTaskMetadata;
 }
 
@@ -210,6 +218,12 @@ export interface SmithersTaskMetadata {
     reasoningEffort?: string;
     modelIndex: number;
     attemptIndex: number;
+  };
+  recovery?: {
+    sourceRunId: string;
+    sourceAttemptId: string;
+    sourceManifestSha256: string;
+    sourceInventorySha256: string;
   };
   workspace: {
     primitive: "worktree";
@@ -334,6 +348,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const projectRoot = path.resolve(input.projectRoot ?? inferProjectRootFromRunLayout(input.runLayout));
   const workflowName = input.workflowName ?? `ultrafuzz-${input.runLayout.runId}`;
   const smithersRunId = `ultrafuzz-${input.runLayout.runId}`;
+  const recoveryByAttempt = new Map<string, ArtifactRecoveryReuseTask>();
+  for (const recovery of input.recoveredArtifacts ?? []) {
+    if (recoveryByAttempt.has(recovery.attemptId)) {
+      throw new Error(`artifact recovery repeats attempt ${recovery.attemptId}`);
+    }
+    recoveryByAttempt.set(recovery.attemptId, recovery);
+  }
   const agenticAttemptsByNodeId = new Map<string, string[]>();
   const attemptsByNodeId = new Map<string, string[]>();
   for (const node of input.graph.nodes.filter((candidate) => candidate.kind !== "meta")) {
@@ -366,10 +387,17 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
           dependencyAgenticAttemptIds: node.dependsOn.flatMap(
             (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
-          )
+          ),
+          recovery: recoveryByAttempt.get(attempt.attemptId)
         })
       )
   );
+  const compiledAttemptIds = new Set(tasks.map((task) => task.attemptId));
+  for (const attemptId of recoveryByAttempt.keys()) {
+    if (!compiledAttemptIds.has(attemptId)) {
+      throw new Error(`artifact recovery attempt is not an executable agentic task: ${attemptId}`);
+    }
+  }
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
@@ -1702,6 +1730,7 @@ function compileTask(input: {
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
+  recovery?: ArtifactRecoveryReuseTask;
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -1711,7 +1740,7 @@ function compileTask(input: {
   // the configured node deadline so it does not silently replace a longer node
   // timeout with the old ten-minute cap.
   const heartbeatTimeoutMs = timeoutMs;
-  const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
+  const retries = input.recovery === undefined ? Math.max(0, input.node.retryPolicy.maxAttempts - 1) : 0;
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
   const dependencyArtifactDirs = input.dependencyAgenticAttemptIds.map((attemptId) =>
@@ -1764,14 +1793,25 @@ function compileTask(input: {
       mode: input.node.loop.mode,
       attemptIndex: input.node.loop.attemptIndex
     },
-    model: {
-      profileId: profile.id,
-      agentRef: profile.agent,
-      ...(profile.model ? { modelName: profile.model } : {}),
-      ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
-      modelIndex: input.attempt.modelIndex,
-      attemptIndex: input.attempt.attemptIndex
-    },
+    ...(input.recovery === undefined
+      ? {
+          model: {
+            profileId: profile.id,
+            agentRef: profile.agent,
+            ...(profile.model ? { modelName: profile.model } : {}),
+            ...(profile.reasoning ? { reasoningEffort: profile.reasoning } : {}),
+            modelIndex: input.attempt.modelIndex,
+            attemptIndex: input.attempt.attemptIndex
+          }
+        }
+      : {
+          recovery: {
+            sourceRunId: input.recovery.sourceRunId,
+            sourceAttemptId: input.recovery.sourceAttemptId,
+            sourceManifestSha256: input.recovery.sourceManifestSha256,
+            sourceInventorySha256: input.recovery.sourceInventorySha256
+          }
+        }),
     workspace: {
       primitive: "worktree",
       path: workspacePath,
@@ -1818,6 +1858,7 @@ function compileTask(input: {
     dependencyArtifactDirs,
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
     execution,
+    ...(input.recovery === undefined ? {} : { recovery: input.recovery }),
     metadata
   };
 }
@@ -1986,6 +2027,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       heartbeatTimeoutMs: task.heartbeatTimeoutMs,
       retries: task.retries,
       retryPolicy: task.retryPolicy,
+      recovery: task.recovery,
       metadata: executionMetadata(compiled.projectRoot, task),
       outputs: task.metadata.artifacts.outputs,
       execution: task.execution

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  ARTIFACT_MANIFEST_FILE,
   USAGE_FIELDS,
   USAGE_INCOMPLETE_REASON_CODES,
   appendUsageEvents,
@@ -9,6 +10,7 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  assertRegularFileInside,
   FindingsValidationError,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
@@ -16,6 +18,7 @@ import {
   normalizeFindings,
   manifestDigest,
   queryNodeAttempts,
+  readArtifactManifest,
   replayEvents,
   readRunState,
   replayUsageEvents,
@@ -25,6 +28,8 @@ import {
   updateNodeState,
   updateRunStatus,
   validateSafeId,
+  validateArtifactContract,
+  verifyArtifactManifestPrerequisites,
   writeArtifactManifest,
   writeJsonDurable,
   writeRunState,
@@ -78,6 +83,13 @@ import {
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
 
+interface StoredArtifactRecovery {
+  sourceRunId: string;
+  sourceAttemptId: string;
+  sourceManifestSha256: string;
+  sourceInventorySha256: string;
+}
+
 interface StoredWorkflowTask {
   attemptId: string;
   concreteNodeId: string;
@@ -87,6 +99,7 @@ interface StoredWorkflowTask {
   dependencies: string[];
   agentRef?: string;
   modelName?: string;
+  recovery?: StoredArtifactRecovery;
   metadata?: {
     node?: {
       concreteNodeId?: string;
@@ -304,6 +317,7 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
   "reused-from-prior-run",
   "invalidated"
 ]);
+const SHA256_DIGEST = /^[a-f0-9]{64}$/u;
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
 const ACCOUNTING_USD_PRECISION = 12;
@@ -1710,7 +1724,9 @@ async function synchronizeTasks(input: {
 
     const needsFinalization =
       evidence.status === "succeeded"
-        ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
+        ? task.recovery === undefined
+          ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
+          : previous?.status !== "reused-from-prior-run"
         : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
     const finalization = needsFinalization
       ? await finalizeTerminalTask({
@@ -1727,7 +1743,8 @@ async function synchronizeTasks(input: {
           control: input.control
         })
       : {
-          status: evidence.status,
+          status:
+            task.recovery !== undefined && evidence.status === "succeeded" ? "reused-from-prior-run" : evidence.status,
           diagnostics: [],
           ...(evidence.error ? { lastError: evidence.error } : {}),
           provenance: {},
@@ -1736,7 +1753,12 @@ async function synchronizeTasks(input: {
     diagnostics.push(...finalization.diagnostics);
     const patchStatus = finalization.status;
     nodeStatuses.set(task.attemptId, patchStatus);
-    workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
+    workflowStates.set(
+      task.attemptId,
+      task.recovery !== undefined && patchStatus === "reused-from-prior-run"
+        ? "reused-from-prior-run"
+        : (evidence.workflowState ?? patchStatus)
+    );
     const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
     concreteStatuses.push(patchStatus);
     taskStatusesByConcreteNode.set(task.concreteNodeId, concreteStatuses);
@@ -2007,6 +2029,10 @@ async function finalizeTerminalTask(input: {
     };
   }
 
+  if (input.task.recovery !== undefined) {
+    return finalizeReusedTerminalTask(input);
+  }
+
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
@@ -2226,6 +2252,276 @@ async function finalizeTerminalTask(input: {
   };
 }
 
+/**
+ * A recovered task has already produced its artifacts in R7.  Its R9
+ * workflow task is therefore a deterministic admission check, not a normal
+ * completion path: do not reconcile a workspace, normalize findings, or
+ * rewrite an R7 manifest under the new run ID.
+ */
+function finalizeReusedTerminalTask(input: {
+  layout: RunLayout;
+  node: PlannedGraphNode;
+  task: StoredWorkflowTask;
+  workflowRunId: string;
+  evidence: NodeWorkflowEvidence;
+  evidenceSource: "agent" | "verifier";
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
+  force: boolean;
+  previous: NodeState | undefined;
+  nowMs: number;
+  control: WorkflowSynchronizationControl;
+}): NodeFinalization {
+  const recovery = input.task.recovery;
+  if (recovery === undefined) {
+    throw new Error("recovery finalization requires recovery metadata");
+  }
+  const diagnostics: RuntimeDiagnostic[] = [];
+  try {
+    assertSynchronizationBudget(input.control);
+    const targetState = readRunState(input.layout);
+    if (targetState.source_run_id !== recovery.sourceRunId) {
+      throw new Error("artifact recovery target state is not linked to the attested source run");
+    }
+    assertRecoveryReceiptLink(input.layout, input.task.attemptId, recovery);
+    assertRecoveryArtifactManifest({
+      layout: input.layout,
+      node: input.node,
+      attemptId: input.task.attemptId,
+      expectedRunId: recovery.sourceRunId,
+      expectedManifestSha256: recovery.sourceManifestSha256,
+      label: "active recovered artifact"
+    });
+    const sourceLayout = recoverySourceLayout(input.layout, recovery.sourceRunId);
+    const sourceState = readRunState(sourceLayout);
+    if (sourceState.run_id !== recovery.sourceRunId) {
+      throw new Error("artifact recovery source overlay has an incompatible run ID");
+    }
+    assertRecoveryArtifactManifest({
+      layout: sourceLayout,
+      node: input.node,
+      attemptId: input.task.attemptId,
+      expectedRunId: recovery.sourceRunId,
+      expectedManifestSha256: recovery.sourceManifestSha256,
+      label: "source recovery overlay artifact"
+    });
+    assertRecoverySourceAttempt(sourceLayout, input.task.attemptId, recovery);
+    assertRecoveryManifestClosure(input.layout, input.task.attemptId, "active recovered artifact");
+    assertRecoveryManifestClosure(sourceLayout, input.task.attemptId, "source recovery overlay artifact");
+
+    const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+    diagnostics.push(...gate.diagnostics);
+    if (!gate.ok) {
+      return failedRecoveryFinalization(input, recovery, diagnostics, gate.missing);
+    }
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "artifact-recovery", "ARTIFACT_RECOVERY_REUSE_VALIDATION_FAILED"));
+    return failedRecoveryFinalization(input, recovery, diagnostics, []);
+  }
+
+  return {
+    status: "reused-from-prior-run",
+    diagnostics,
+    provenance: {
+      output_contracts: { ok: true, missing: [] },
+      artifact_recovery: {
+        disposition: "reused-from-prior-run",
+        deterministic_validation: true,
+        source_run_id: recovery.sourceRunId,
+        source_attempt_id: recovery.sourceAttemptId,
+        source_manifest_sha256: recovery.sourceManifestSha256,
+        source_inventory_sha256: recovery.sourceInventorySha256
+      }
+    },
+    events: [
+      {
+        eventType: "node-artifacts-reused-validated",
+        status: "reused-from-prior-run",
+        payload: {
+          source_run_id: recovery.sourceRunId,
+          source_attempt_id: recovery.sourceAttemptId,
+          source_manifest_sha256: recovery.sourceManifestSha256,
+          source_inventory_sha256: recovery.sourceInventorySha256
+        }
+      }
+    ]
+  };
+}
+
+function failedRecoveryFinalization(
+  input: { task: StoredWorkflowTask },
+  recovery: StoredArtifactRecovery,
+  diagnostics: RuntimeDiagnostic[],
+  missing: string[]
+): NodeFinalization {
+  return {
+    status: "failed",
+    diagnostics,
+    lastError: diagnostics.map((diagnostic) => diagnostic.message).join("; ") || "artifact recovery validation failed",
+    provenance: {
+      output_contracts: { ok: false, missing },
+      artifact_recovery: {
+        disposition: "reuse-validation-failed",
+        source_run_id: recovery.sourceRunId,
+        source_attempt_id: recovery.sourceAttemptId,
+        source_manifest_sha256: recovery.sourceManifestSha256,
+        source_inventory_sha256: recovery.sourceInventorySha256
+      },
+      failure: {
+        category: "artifact-contract",
+        causal_task_id: input.task.verifierSmithersNodeId,
+        causal_failure_category: "artifact-contract",
+        dependent_task_ids: []
+      }
+    },
+    events: [
+      {
+        eventType: "node-artifacts-reuse-validation-failed",
+        status: "failed",
+        payload: {
+          source_run_id: recovery.sourceRunId,
+          source_attempt_id: recovery.sourceAttemptId
+        }
+      }
+    ]
+  };
+}
+
+function assertRecoveryReceiptLink(layout: RunLayout, attemptId: string, recovery: StoredArtifactRecovery): void {
+  const receiptPath = safeResolveInside(
+    layout.root,
+    path.posix.join("recovery", "artifact-recovery-receipt.json"),
+    "artifact recovery receipt path"
+  );
+  assertRegularFileInside(layout.root, receiptPath, "artifact recovery receipt");
+  let receipt: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    if (!isRecord(parsed)) throw new Error("receipt must be an object");
+    receipt = parsed;
+  } catch (error) {
+    throw new Error("artifact recovery receipt is invalid", { cause: error });
+  }
+  const source = recordField(receipt, "source");
+  if (
+    source === undefined ||
+    stringField(source, "run_id") !== recovery.sourceRunId ||
+    stringField(source, "inventory_sha256") !== recovery.sourceInventorySha256
+  ) {
+    throw new Error("artifact recovery receipt source identity does not match the compiled task");
+  }
+  const active = receipt.active_reuse;
+  if (!Array.isArray(active)) {
+    throw new Error("artifact recovery receipt has no active reuse list");
+  }
+  const linked = active.some(
+    (entry) =>
+      isRecord(entry) &&
+      stringField(entry, "node_id") === attemptId &&
+      stringField(entry, "source_attempt_id") === recovery.sourceAttemptId &&
+      stringField(entry, "source_manifest_sha256") === recovery.sourceManifestSha256
+  );
+  if (!linked) {
+    throw new Error(`artifact recovery receipt does not attest reused attempt ${attemptId}`);
+  }
+}
+
+function recoverySourceLayout(layout: RunLayout, sourceRunId: string): RunLayout {
+  const safeSourceRunId = validateSafeId(sourceRunId, "artifact recovery source run ID");
+  const runsRoot = path.dirname(layout.root);
+  const sourceRoot = path.join(runsRoot, safeSourceRunId);
+  assertPathInside(runsRoot, sourceRoot, "artifact recovery source overlay root");
+  assertNoSymlinkComponents(runsRoot, sourceRoot, "artifact recovery source overlay root");
+  const stat = fs.lstatSync(sourceRoot);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("artifact recovery source overlay must be a real directory");
+  }
+  return layoutForRunRoot(sourceRoot, safeSourceRunId);
+}
+
+function assertRecoveryArtifactManifest(input: {
+  layout: RunLayout;
+  node: PlannedGraphNode;
+  attemptId: string;
+  expectedRunId: string;
+  expectedManifestSha256: string;
+  label: string;
+}): void {
+  const artifactDir = getNodeArtifactDir(input.layout, input.attemptId);
+  const manifestPath = path.join(artifactDir, ARTIFACT_MANIFEST_FILE);
+  assertRegularFileInside(input.layout.artifactsDir, manifestPath, `${input.label} manifest`);
+  if (sha256File(manifestPath) !== input.expectedManifestSha256) {
+    throw new Error(`${input.label} manifest digest no longer matches the R7 attestation`);
+  }
+  const manifest = readArtifactManifest(input.layout, input.attemptId);
+  if (manifest.run_id !== input.expectedRunId || manifest.node_id !== input.attemptId) {
+    throw new Error(`${input.label} manifest identity no longer matches the R7 attestation`);
+  }
+  for (const file of manifest.files) {
+    const filePath = safeResolveInside(artifactDir, file.path, `${input.label} file`);
+    assertRegularFileInside(artifactDir, filePath, `${input.label} file`);
+    const stat = fs.statSync(filePath);
+    if (stat.size !== file.size_bytes || sha256File(filePath) !== file.sha256) {
+      throw new Error(`${input.label} file digest mismatch for ${file.path}`);
+    }
+  }
+  const expectedOutputs = input.node.outputs
+    .map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contract_digest,
+      primary: output.primary
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const manifestOutputs = manifest.output_contracts
+    .map((output) => ({
+      path: output.path,
+      contract: output.contract,
+      contract_digest: output.contract_digest,
+      primary: output.primary
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (JSON.stringify(expectedOutputs) !== JSON.stringify(manifestOutputs)) {
+    throw new Error(`${input.label} output contract declaration no longer matches the fresh graph`);
+  }
+  for (const output of manifest.output_contracts) {
+    const outputPath = safeResolveInside(artifactDir, output.path, `${input.label} output`);
+    assertRegularFileInside(artifactDir, outputPath, `${input.label} output`);
+    const validation = validateArtifactContract(output.contract, fs.readFileSync(outputPath, "utf8"), output.path);
+    if (!validation.ok) {
+      throw new Error(
+        `${input.label} output contract failed for ${output.path}: ${validation.issues.map((issue) => issue.message).join("; ")}`
+      );
+    }
+  }
+}
+
+function assertRecoverySourceAttempt(
+  sourceLayout: RunLayout,
+  attemptId: string,
+  recovery: StoredArtifactRecovery
+): void {
+  const sourceAttempt = queryNodeAttempts(sourceLayout, { strategyAttemptId: attemptId }).find(
+    (entry) => entry.attempt_id === recovery.sourceAttemptId
+  );
+  if (
+    sourceAttempt === undefined ||
+    sourceAttempt.outcome !== "succeeded" ||
+    sourceAttempt.reuse.status !== "executed" ||
+    sourceAttempt.manifests.output_sha256 !== recovery.sourceManifestSha256
+  ) {
+    throw new Error("artifact recovery source attempt ledger does not attest the recovered manifest");
+  }
+}
+
+function assertRecoveryManifestClosure(layout: RunLayout, attemptId: string, label: string): void {
+  const closure = verifyArtifactManifestPrerequisites(layout, attemptId);
+  if (!closure.ok) {
+    throw new Error(
+      `${label} has an invalid causal manifest closure (changed: ${closure.changed.join(", ")}; missing: ${closure.missing.join(", ")})`
+    );
+  }
+}
+
 function dependencyCascadeFailure(
   layout: RunLayout,
   task: StoredWorkflowTask,
@@ -2368,7 +2664,8 @@ function appendTerminalTaskAttempts(input: {
               state.source_run_id,
               input.task.attemptId
             )),
-            outputManifestDigest: outputDigest
+            outputManifestDigest: outputDigest,
+            expectedSourceAttemptId: input.task.recovery?.sourceAttemptId
           })
         : undefined;
     if (reuseSource !== undefined && outputDigest === undefined) {
@@ -2642,6 +2939,7 @@ function reusedSourceAttempt(input: {
   existing: readonly NodeAttemptLedgerEntry[];
   sourceEntries: readonly NodeAttemptLedgerEntry[];
   outputManifestDigest?: string;
+  expectedSourceAttemptId?: string;
 }): { attemptId: NodeAttemptId; outputManifestDigest: string } {
   const candidates = [...input.sourceEntries, ...input.existing]
     .filter(
@@ -2649,7 +2947,14 @@ function reusedSourceAttempt(input: {
     )
     .reverse();
   const source =
-    candidates.find((entry) => entry.manifests.output_sha256 === input.outputManifestDigest) ?? candidates[0];
+    input.expectedSourceAttemptId === undefined
+      ? (candidates.find((entry) => entry.manifests.output_sha256 === input.outputManifestDigest) ?? candidates[0])
+      : input.sourceEntries.find(
+          (entry) =>
+            entry.attempt_id === input.expectedSourceAttemptId &&
+            (entry.outcome === "succeeded" || entry.outcome === "reused") &&
+            entry.manifests.output_sha256 === input.outputManifestDigest
+        );
   if (source === undefined) {
     throw new Error("reused node attempt has no recorded source attempt with an output manifest");
   }
@@ -3190,6 +3495,7 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
   validateSafeId(attemptId, "attempt ID");
   validateSafeId(concreteNodeId, "concrete node ID");
   validateSafeId(logicalNodeId, "logical node ID");
+  const recovery = value.recovery === undefined ? undefined : parseStoredArtifactRecovery(value.recovery);
   return [
     {
       attemptId,
@@ -3200,9 +3506,34 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
       dependencies: stringArrayField(value, "dependencies"),
       agentRef: stringField(value, "agentRef"),
       modelName: stringField(value, "modelName"),
+      ...(recovery === undefined ? {} : { recovery }),
       metadata: recordField(value, "metadata") as StoredWorkflowTask["metadata"]
     }
   ];
+}
+
+function parseStoredArtifactRecovery(value: unknown): StoredArtifactRecovery {
+  if (!isRecord(value)) {
+    throw new Error("stored artifact recovery task metadata must be an object");
+  }
+  const sourceRunId = stringField(value, "sourceRunId");
+  const sourceAttemptId = stringField(value, "sourceAttemptId");
+  const sourceManifestSha256 = stringField(value, "sourceManifestSha256");
+  const sourceInventorySha256 = stringField(value, "sourceInventorySha256");
+  if (
+    sourceRunId === undefined ||
+    sourceAttemptId === undefined ||
+    sourceManifestSha256 === undefined ||
+    sourceInventorySha256 === undefined
+  ) {
+    throw new Error("stored artifact recovery task metadata is incomplete");
+  }
+  validateSafeId(sourceRunId, "artifact recovery source run ID");
+  validateSafeId(sourceAttemptId, "artifact recovery source attempt ID");
+  if (!SHA256_DIGEST.test(sourceManifestSha256) || !SHA256_DIGEST.test(sourceInventorySha256)) {
+    throw new Error("stored artifact recovery task metadata has an invalid digest");
+  }
+  return { sourceRunId, sourceAttemptId, sourceManifestSha256, sourceInventorySha256 };
 }
 
 async function checkedRunLayout(

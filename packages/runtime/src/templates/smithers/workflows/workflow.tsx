@@ -27,6 +27,7 @@ import * as projectAgents from "../agents/index.ts";
 const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
 const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
+const { verifyArtifactManifestPrerequisites } = await import(artifactsModule);
 const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
@@ -1300,6 +1301,131 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
   return { artifacts, primary_artifact: primary.path };
 }
 
+/**
+ * Recovery tasks deliberately have no agent and no worktree.  They re-check
+ * the exact source-attested artifact bytes in the new run before the scheduler
+ * is allowed to record them as reused.
+ */
+function verifyReusedArtifact(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
+  const recovery = task.recovery;
+  if (recovery === undefined) {
+    throw new Error(`artifact-recovery failure: task ${task.attemptId} is missing recovery evidence`);
+  }
+  const artifactDir = realpathSync(task.artifactDir);
+  const manifestPath = resolveRegularArtifactFile(
+    artifactDir,
+    path.join(artifactDir, "artifact-manifest.json"),
+    `artifact-recovery failure: manifest is not a regular file for ${task.attemptId}`
+  );
+  const manifestBytes = readFileSync(manifestPath);
+  const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
+  if (manifestDigest !== recovery.sourceManifestSha256) {
+    throw new Error(`artifact-recovery failure: source manifest digest changed for ${task.attemptId}`);
+  }
+
+  let manifest: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(manifestBytes.toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("manifest must be an object");
+    }
+    manifest = parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`artifact-recovery failure: manifest is invalid for ${task.attemptId}`, { cause: error });
+  }
+  if (manifest.run_id !== recovery.sourceRunId || manifest.node_id !== task.attemptId) {
+    throw new Error(`artifact-recovery failure: manifest identity changed for ${task.attemptId}`);
+  }
+
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : undefined;
+  if (manifestFiles === undefined) {
+    throw new Error(`artifact-recovery failure: manifest files are missing for ${task.attemptId}`);
+  }
+  const expectedFiles = new Map(recovery.files.map((file) => [file.path, file]));
+  if (expectedFiles.size !== manifestFiles.length) {
+    throw new Error(`artifact-recovery failure: manifest file inventory changed for ${task.attemptId}`);
+  }
+  for (const entry of manifestFiles) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`artifact-recovery failure: manifest file record is invalid for ${task.attemptId}`);
+    }
+    const file = entry as { path?: unknown; size_bytes?: unknown; sha256?: unknown };
+    if (
+      typeof file.path !== "string" ||
+      typeof file.size_bytes !== "number" ||
+      !Number.isSafeInteger(file.size_bytes) ||
+      file.size_bytes < 0 ||
+      typeof file.sha256 !== "string"
+    ) {
+      throw new Error(`artifact-recovery failure: manifest file record is malformed for ${task.attemptId}`);
+    }
+    const expected = expectedFiles.get(file.path);
+    if (expected === undefined || expected.sizeBytes !== file.size_bytes || expected.sha256 !== file.sha256) {
+      throw new Error(`artifact-recovery failure: source file inventory changed for ${task.attemptId}/${file.path}`);
+    }
+    const artifactPath = path.resolve(artifactDir, file.path);
+    if (!isStrictlyInsideDirectory(artifactDir, artifactPath)) {
+      throw new Error(`artifact-recovery failure: unsafe source artifact path ${file.path}`);
+    }
+    const resolved = resolveRegularArtifactFile(
+      artifactDir,
+      artifactPath,
+      `artifact-recovery failure: source artifact is not a regular file ${file.path}`
+    );
+    if (statSync(resolved).size !== file.size_bytes) {
+      throw new Error(`artifact-recovery failure: source artifact size changed for ${task.attemptId}/${file.path}`);
+    }
+    if (createHash("sha256").update(readFileSync(resolved)).digest("hex") !== file.sha256) {
+      throw new Error(`artifact-recovery failure: source artifact digest changed for ${task.attemptId}/${file.path}`);
+    }
+  }
+
+  const manifestOutputs = Array.isArray(manifest.output_contracts) ? manifest.output_contracts : undefined;
+  if (manifestOutputs === undefined) {
+    throw new Error(`artifact-recovery failure: manifest output contracts are missing for ${task.attemptId}`);
+  }
+  const declaredOutputs = manifestOutputs.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`artifact-recovery failure: output contract is malformed for ${task.attemptId}`);
+    }
+    const output = entry as { path?: unknown; contract?: unknown; contract_digest?: unknown; primary?: unknown };
+    if (
+      typeof output.path !== "string" ||
+      typeof output.contract !== "string" ||
+      typeof output.contract_digest !== "string" ||
+      typeof output.primary !== "boolean"
+    ) {
+      throw new Error(`artifact-recovery failure: output contract is malformed for ${task.attemptId}`);
+    }
+    return {
+      path: output.path,
+      contract: output.contract,
+      contractDigest: output.contract_digest,
+      primary: output.primary
+    };
+  });
+  const sortedOutputs = (
+    values: readonly { path: string; contract: string; contractDigest: string; primary: boolean }[]
+  ) => [...values].sort((left, right) => left.path.localeCompare(right.path));
+  if (JSON.stringify(sortedOutputs(declaredOutputs)) !== JSON.stringify(sortedOutputs(task.outputs))) {
+    throw new Error(`artifact-recovery failure: output contract declaration changed for ${task.attemptId}`);
+  }
+
+  const runRoot = path.resolve(process.cwd(), task.runRoot);
+  const closure = verifyArtifactManifestPrerequisites(
+    { runId: __ULTRAFUZZ_RUN_ID_LITERAL__, root: runRoot, artifactsDir: path.join(runRoot, "artifacts") } as Parameters<
+      typeof verifyArtifactManifestPrerequisites
+    >[0],
+    task.attemptId
+  );
+  if (!closure.ok) {
+    throw new Error(
+      `artifact-recovery failure: causal manifest closure changed for ${task.attemptId} (changed: ${closure.changed.join(", ")}; missing: ${closure.missing.join(", ")})`
+    );
+  }
+  return verifyArtifacts(task);
+}
+
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
   const entries = (value as { generated_tests?: Array<{ path?: string }> }).generated_tests ?? [];
   for (const entry of entries) {
@@ -1338,6 +1464,44 @@ export default smithers((ctx) => {
       <Parallel id="ultrafuzz-agent-tasks">
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
+          if (task.recovery !== undefined) {
+            return (
+              <Fragment key={task.id}>
+                <Task
+                  id={task.id}
+                  output={outputs.task}
+                  dependsOn={task.dependsOn}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-recovery-validation",
+                    attemptId: task.attemptId,
+                    sourceRunId: task.recovery.sourceRunId,
+                    sourceAttemptId: task.recovery.sourceAttemptId
+                  }}
+                >
+                  {() => {
+                    verifyReusedArtifact(task);
+                    return { summary: `source-attested artifact reuse validated for ${task.attemptId}` };
+                  }}
+                </Task>
+                <Task
+                  id={task.verifierId}
+                  output={outputs.verification}
+                  dependsOn={[task.id]}
+                  retries={0}
+                  metadata={{
+                    category: "artifact-recovery-verification",
+                    agentTaskId: task.id,
+                    attemptId: task.attemptId,
+                    sourceRunId: task.recovery.sourceRunId,
+                    sourceAttemptId: task.recovery.sourceAttemptId
+                  }}
+                >
+                  {() => verifyReusedArtifact(task)}
+                </Task>
+              </Fragment>
+            );
+          }
           if (task.execution.mode === "cloud" && !cloudWorker) {
             if (cloudProvider === undefined || task.execution.provider !== "modal") {
               throw new Error("cloud execution provider is unavailable");

@@ -1,4 +1,5 @@
 export * from "./artifact-gates.js";
+export * from "./artifact-recovery.js";
 export * from "./clean.js";
 export * from "./doctor.js";
 export * from "./init.js";
