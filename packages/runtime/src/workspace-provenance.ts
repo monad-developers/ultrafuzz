@@ -17,6 +17,7 @@ import { assertRegularFileInside } from "@ultrafuzz/artifacts";
 const fullCommit = /^[0-9a-f]{40}$/u;
 const safeId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_ATTESTED_TASKS = 2_048;
+const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 
 export const WORKSPACE_SOURCE_ATTESTATION_SCHEMA_VERSION = "ultrafuzz.workspace-source-attestation.v1" as const;
 export const WORKSPACE_SOURCE_ATTESTATION_FILE = ".ultrafuzz-workspace-source-attestation.json" as const;
@@ -53,11 +54,13 @@ export interface ExpectedWorkspaceSourceTask {
 }
 
 export function resolveCheckedOutCommit(repositoryPath: string): string {
+  const repositoryRoot = realpathSync(path.resolve(repositoryPath));
   let revision: string;
   try {
     revision = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], {
-      cwd: repositoryPath,
+      cwd: repositoryRoot,
       encoding: "utf8",
+      env: gitWorkspaceEnvironment(repositoryRoot),
       stdio: ["ignore", "pipe", "pipe"]
     });
   } catch (error) {
@@ -88,15 +91,18 @@ export function assertAgentWorkspaceProvenance(
   workspacePath: string,
   expectedBaseCommit: string,
   agentRoot: string | undefined,
-  allowedUntrackedRoot?: string
+  allowedUntrackedRoots: readonly string[] = []
 ): AgentWorkspaceProvenance {
-  if (agentRoot === undefined || realpathSync(agentRoot) !== realpathSync(workspacePath)) {
+  const workspaceRoot = realpathSync(path.resolve(workspacePath));
+  if (agentRoot === undefined || realpathSync(agentRoot) !== workspaceRoot) {
     throw new Error("workspace-provenance failure: agent root does not match its task worktree");
   }
-  const base = assertWorkspaceBaseCommit(workspacePath, expectedBaseCommit);
+  const base = assertWorkspaceBaseCommit(workspaceRoot, expectedBaseCommit);
+  assertNoMaskedTrackedFiles(workspaceRoot);
   try {
     execFileSync("git", ["diff-index", "--quiet", "HEAD", "--"], {
-      cwd: workspacePath,
+      cwd: workspaceRoot,
+      env: gitWorkspaceEnvironment(workspaceRoot),
       stdio: "ignore"
     });
   } catch (error) {
@@ -104,12 +110,58 @@ export function assertAgentWorkspaceProvenance(
       cause: error
     });
   }
-  assertNoUnexpectedUntrackedFiles(workspacePath, allowedUntrackedRoot);
+  assertNoUnexpectedUntrackedFiles(workspaceRoot, allowedUntrackedRoots);
   return {
     ...base,
     agentRootVerified: true,
     trackedClean: true
   };
+}
+
+export function assertSingleLinkRegularFile(
+  filePath: string,
+  failureMessage = "workspace-provenance failure: artifact file is unsafe"
+): void {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(filePath);
+  } catch (error) {
+    throw new Error(failureMessage, { cause: error });
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+    throw new Error(failureMessage);
+  }
+}
+
+export function cleanWorkspaceOutputRootsForRetry(
+  workspacePath: string,
+  workspaceRelativeRoots: readonly string[]
+): void {
+  const workspaceRoot = realpathSync(path.resolve(workspacePath));
+  for (const relativeRoot of new Set(workspaceRelativeRoots)) {
+    if (relativeRoot.length === 0 || path.isAbsolute(relativeRoot)) {
+      throw new Error("workspace-provenance failure: retry output root is invalid");
+    }
+    const candidate = path.resolve(workspaceRoot, relativeRoot);
+    if (!candidate.startsWith(`${workspaceRoot}${path.sep}`)) {
+      throw new Error("workspace-provenance failure: retry output root escapes the task worktree");
+    }
+    const stat = lstatSync(candidate);
+    const resolved = realpathSync(candidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || resolved !== candidate) {
+      throw new Error("workspace-provenance failure: retry output root is unsafe");
+    }
+    const gitRelativeRoot = path.relative(workspaceRoot, resolved).split(path.sep).join("/");
+    try {
+      execFileSync("git", ["clean", "-ffdx", "--", `:(literal)${gitRelativeRoot}`], {
+        cwd: workspaceRoot,
+        env: gitWorkspaceEnvironment(workspaceRoot),
+        stdio: "ignore"
+      });
+    } catch (error) {
+      throw new Error("workspace-provenance failure: could not clean retry output root", { cause: error });
+    }
+  }
 }
 
 export function persistWorkspaceSourceAttestation(input: {
@@ -292,38 +344,121 @@ function normalizeCommit(value: string, label: string): string {
   return normalized;
 }
 
-function assertNoUnexpectedUntrackedFiles(workspacePath: string, allowedUntrackedRoot: string | undefined): void {
-  const workspaceRoot = realpathSync(workspacePath);
-  let allowedPrefix: string | undefined;
-  if (allowedUntrackedRoot !== undefined) {
-    const allowedCandidate = path.resolve(allowedUntrackedRoot);
-    if (!allowedCandidate.startsWith(`${workspaceRoot}${path.sep}`)) {
-      throw new Error("workspace-provenance failure: allowed untracked root is outside the task worktree");
-    }
-    const allowedRoot = realpathSync(allowedCandidate);
-    if (!allowedRoot.startsWith(`${workspaceRoot}${path.sep}`)) {
-      throw new Error("workspace-provenance failure: allowed untracked root escapes the task worktree");
-    }
-    allowedPrefix = `${path.relative(workspaceRoot, allowedRoot).split(path.sep).join("/")}/`;
-  }
-  let untracked: string;
+function gitWorkspaceEnvironment(workspaceRoot: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    // The task worktree itself is the security boundary. Mutable repository
+    // configuration must not redirect checks to a clean sibling, and mutable
+    // replace refs must not redefine the expected commit's tree.
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_WORK_TREE: realpathSync(path.resolve(workspaceRoot))
+  };
+}
+
+function assertNoMaskedTrackedFiles(workspacePath: string): void {
+  let tracked: string;
   try {
-    untracked = execFileSync("git", ["ls-files", "--others", "--full-name", "-z"], {
-      cwd: workspaceRoot,
+    tracked = execFileSync("git", ["ls-files", "-v", "-z"], {
+      cwd: workspacePath,
       encoding: "utf8",
+      env: gitWorkspaceEnvironment(workspacePath),
+      maxBuffer: MAX_GIT_LIST_BYTES,
       stdio: ["ignore", "pipe", "pipe"]
     });
   } catch (error) {
-    throw new Error("workspace-provenance failure: could not inspect untracked task source", { cause: error });
+    throw new Error("workspace-provenance failure: could not inspect tracked task source flags", {
+      cause: error
+    });
   }
-  const unexpected = untracked
+  const masked = tracked
     .split("\0")
-    .filter((entry) => entry.length > 0 && (allowedPrefix === undefined || !entry.startsWith(allowedPrefix)));
+    .filter((entry) => entry.length > 2 && (entry[0] === "S" || /[a-z]/u.test(entry[0] ?? "")));
+  if (masked.length > 0) {
+    throw new Error(
+      "workspace-provenance failure: tracked task source uses assume-unchanged or skip-worktree index flags"
+    );
+  }
+}
+
+function assertNoUnexpectedUntrackedFiles(workspacePath: string, allowedUntrackedRoots: readonly string[]): void {
+  const workspaceCandidate = path.resolve(workspacePath);
+  const workspaceRoot = realpathSync(workspaceCandidate);
+  const allowedPrefixes = allowedUntrackedRoots.map((allowedUntrackedRoot) => {
+    const allowedCandidate = path.resolve(allowedUntrackedRoot);
+    if (!allowedCandidate.startsWith(`${workspaceCandidate}${path.sep}`)) {
+      throw new Error("workspace-provenance failure: allowed untracked root is outside the task worktree");
+    }
+    const stat = lstatSync(allowedCandidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("workspace-provenance failure: allowed untracked root is unsafe");
+    }
+    const relative = path.relative(workspaceCandidate, allowedCandidate);
+    const allowedRoot = realpathSync(allowedCandidate);
+    if (allowedRoot !== path.join(workspaceRoot, relative) || !allowedRoot.startsWith(`${workspaceRoot}${path.sep}`)) {
+      throw new Error("workspace-provenance failure: allowed untracked root escapes the task worktree");
+    }
+    return `${relative.split(path.sep).join("/")}/`;
+  });
+  const rawUntracked = listRawUntrackedIgnoreFiles(workspaceRoot);
+  const unsafeIgnoreFiles = rawUntracked.filter(
+    (entry) =>
+      (entry === ".gitignore" || entry.endsWith("/.gitignore")) &&
+      !allowedPrefixes.some((prefix) => entry.startsWith(prefix))
+  );
+  if (unsafeIgnoreFiles.length > 0) {
+    throw new Error("workspace-provenance failure: task worktree has an untracked .gitignore outside its outputs");
+  }
+  // Use only the repository's per-directory .gitignore files. At this point
+  // tracked files are proven identical to HEAD and raw untracked .gitignore
+  // files outside task-owned roots have been rejected, so mutable Git-dir and
+  // user-level excludes cannot conceal source from this scan.
+  const untracked = listUntrackedFiles(workspaceRoot);
+  const unexpected = untracked.filter((entry) => !allowedPrefixes.some((prefix) => entry.startsWith(prefix)));
   if (unexpected.length > 0) {
     throw new Error(
       "workspace-provenance failure: task worktree has unexpected untracked source before agent execution"
     );
   }
+}
+
+function listRawUntrackedIgnoreFiles(workspaceRoot: string): string[] {
+  let untracked: string;
+  try {
+    untracked = execFileSync(
+      "git",
+      ["ls-files", "--others", "--full-name", "-z", "--", ".gitignore", ":(glob)**/.gitignore"],
+      {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        env: gitWorkspaceEnvironment(workspaceRoot),
+        maxBuffer: MAX_GIT_LIST_BYTES,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+  } catch (error) {
+    throw new Error("workspace-provenance failure: could not inspect untracked task ignore files", { cause: error });
+  }
+  return untracked.split("\0").filter((entry) => entry.length > 0);
+}
+
+function listUntrackedFiles(workspaceRoot: string): string[] {
+  let untracked: string;
+  try {
+    untracked = execFileSync(
+      "git",
+      ["ls-files", "--others", "--full-name", "-z", "--exclude-per-directory=.gitignore"],
+      {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        env: gitWorkspaceEnvironment(workspaceRoot),
+        maxBuffer: MAX_GIT_LIST_BYTES,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+  } catch (error) {
+    throw new Error("workspace-provenance failure: could not inspect untracked task source", { cause: error });
+  }
+  return untracked.split("\0").filter((entry) => entry.length > 0);
 }
 
 function canonicalArtifactRoot(artifactDir: string): string {

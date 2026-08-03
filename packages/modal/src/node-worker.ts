@@ -73,15 +73,14 @@ async function main(): Promise<void> {
       }
     );
 
-    const artifactDir = anchoredProjectPath(input.artifact_dir);
-    const workspaceDir = anchoredProjectPath(input.workspace_dir);
-    mergeWorkspaceArtifacts(workspaceDir, artifactDir, input.attempt_id);
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
-    copySafeTree(artifactDir, path.join(staging, "artifacts"));
-    if (fs.existsSync(workspaceDir)) {
-      copySafeTree(workspaceDir, path.join(staging, "workspace"));
-    }
+    stageCanonicalNodeResultBundle({
+      artifactDir: anchoredProjectPath(input.artifact_dir),
+      workspaceDir: anchoredProjectPath(input.workspace_dir),
+      attemptId: input.attempt_id,
+      stagingDir: staging
+    });
     const artifactArchive = path.join(publishing, "artifacts.tgz");
     await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT);
     const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
@@ -180,6 +179,23 @@ function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, atte
   const mirror = path.join(workspaceDir, "artifacts", attemptId);
   if (!fs.existsSync(mirror)) return;
   copySafeTree(mirror, artifactDir, true);
+}
+
+export function stageCanonicalNodeResultBundle(input: {
+  artifactDir: string;
+  workspaceDir: string;
+  attemptId: string;
+  stagingDir: string;
+}): void {
+  if (fs.readdirSync(input.stagingDir).length !== 0) {
+    throw new Error("cloud publication staging directory is not empty");
+  }
+  // Some agents write declared outputs to the task-local mirror. Reconcile
+  // only that exact mirror into the canonical artifact directory, then publish
+  // the canonical directory alone. The rest of the worktree is disposable
+  // tool state and must never become part of a cloud result archive.
+  mergeWorkspaceArtifacts(input.workspaceDir, input.artifactDir, input.attemptId);
+  copySafeTree(input.artifactDir, path.join(input.stagingDir, "artifacts"));
 }
 
 export function copySafeTree(source: string, destination: string, onlyMissing = false): void {

@@ -29,7 +29,9 @@ const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIM
 const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
 const {
   assertAgentWorkspaceProvenance,
+  assertSingleLinkRegularFile,
   assertWorkspaceBaseCommit,
+  cleanWorkspaceOutputRootsForRetry,
   normalizeFinalReportSeverityRecord,
   normalizeSeverityLevel,
   persistWorkspaceSourceAttestation,
@@ -153,7 +155,7 @@ function promptForTask(
 
 function prepareTask(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
   const workspace = assertWorkspaceBaseCommit(task.workspacePath, task.baseCommit);
-  prepareArtifactMirror(task);
+  prepareTaskWorkspaceOutputRoots(task);
   return {
     prepared: true,
     workspace: {
@@ -205,7 +207,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         task.workspacePath,
         task.baseCommit,
         typeof args?.rootDir === "string" ? args.rootDir : undefined,
-        mirroredArtifactDir(task)
+        taskWorkspaceOutputRoots(task)
       );
       persistWorkspaceSourceAttestation({
         artifactDir: task.artifactDir,
@@ -222,7 +224,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // Agent work may replace or clean its worktree, including the prepared
       // artifact mirror. Re-establish the same path-checked directories before
       // preserving outputs; this remains deterministic and model-free.
-      prepareArtifactMirror(task);
+      prepareTaskWorkspaceOutputRoots(task);
       // Re-check the exact repository identity and source tree after the model
       // returns. Evidence captured before invocation cannot prove the model did
       // not leave the worktree on a different revision or modify target source.
@@ -230,7 +232,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         task.workspacePath,
         task.baseCommit,
         typeof args?.rootDir === "string" ? args.rootDir : undefined,
-        mirroredArtifactDir(task)
+        taskWorkspaceOutputRoots(task)
       );
       // Rebuild the runner-owned attestation from the post-invocation check so
       // model access to the artifact directory cannot substitute stale evidence.
@@ -298,38 +300,56 @@ function mirroredArtifactDir(task: (typeof taskSpecs)[number]): string {
   return path.join(task.workspacePath, "artifacts", task.attemptId);
 }
 
+function taskTestOutputRelativeRoots(task: (typeof taskSpecs)[number]): string[] {
+  const artifactMirror = `artifacts/${task.attemptId}`;
+  return task.workspaceOutputRoots.filter((relativeRoot) => relativeRoot !== artifactMirror);
+}
+
+function taskWorkspaceOutputRoots(task: (typeof taskSpecs)[number]): string[] {
+  const workspaceRoot = realpathSync(task.workspacePath);
+  return task.workspaceOutputRoots.map((relativeRoot) => {
+    const candidate = path.resolve(workspaceRoot, relativeRoot);
+    if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
+      throw new Error(`artifact-contract failure: unsafe workspace output root ${task.attemptId}`);
+    }
+    const stat = lstatSync(candidate);
+    const resolved = realpathSync(candidate);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || resolved !== candidate) {
+      throw new Error(`artifact-contract failure: unsafe workspace output root ${task.attemptId}`);
+    }
+    return resolved;
+  });
+}
+
+function prepareTaskWorkspaceOutputRoots(task: (typeof taskSpecs)[number]): void {
+  const workspaceRoot = realpathSync(task.workspacePath);
+  for (const relativeRoot of task.workspaceOutputRoots) {
+    prepareAnchoredDirectory(
+      workspaceRoot,
+      relativeRoot,
+      `artifact-contract failure: unsafe workspace output root ${task.attemptId}`
+    );
+  }
+  prepareArtifactMirror(task);
+}
+
 function resetTaskArtifactsForRetry(task: (typeof taskSpecs)[number]): void {
   resetTaskArtifactContents(task.metadata.artifacts.dir, task.attemptId, "canonical", task.promptPath);
 
   const workspaceRoot = realpathSync(task.workspacePath);
-  const artifactsParentCandidate = path.resolve(workspaceRoot, "artifacts");
-  if (!isStrictlyInsideDirectory(workspaceRoot, artifactsParentCandidate)) {
-    throw new Error(`artifact-contract failure: unsafe task artifact parent ${task.attemptId}`);
-  }
-  mkdirSync(artifactsParentCandidate, { recursive: true });
-  const artifactsParent = realpathSync(artifactsParentCandidate);
-  if (!isStrictlyInsideDirectory(workspaceRoot, artifactsParent)) {
-    throw new Error(`artifact-contract failure: unsafe task artifact parent ${task.attemptId}`);
-  }
+  const artifactsParent = prepareAnchoredDirectory(
+    workspaceRoot,
+    "artifacts",
+    `artifact-contract failure: unsafe task artifact parent ${task.attemptId}`
+  );
   resetTaskArtifactContents(path.join(artifactsParent, task.attemptId), task.attemptId, "mirror");
 
-  if (task.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")) {
-    const foundryParentCandidate = path.resolve(workspaceRoot, "test", "foundry");
-    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParentCandidate)) {
-      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
-    }
-    mkdirSync(foundryParentCandidate, { recursive: true });
-    const foundryParent = realpathSync(foundryParentCandidate);
-    if (!isStrictlyInsideDirectory(workspaceRoot, foundryParent)) {
-      throw new Error(`artifact-contract failure: unsafe generated test parent ${task.attemptId}`);
-    }
-    resetTaskArtifactContents(
-      path.join(foundryParent, task.metadata.node.logicalNodeId),
-      task.metadata.node.logicalNodeId,
-      "generated-test"
-    );
+  const testOutputRoots = taskTestOutputRelativeRoots(task);
+  if (testOutputRoots.length > 0) {
+    prepareTaskWorkspaceOutputRoots(task);
+    cleanWorkspaceOutputRootsForRetry(workspaceRoot, testOutputRoots);
   }
-  prepareArtifactMirror(task);
+  prepareTaskWorkspaceOutputRoots(task);
 }
 
 function resetTaskArtifactContents(
@@ -397,33 +417,54 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
 
 function prepareArtifactMirror(task: (typeof taskSpecs)[number]): void {
   const workspaceRoot = realpathSync(task.workspacePath);
-  const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
-  if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
-    throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
-  }
-  mkdirSync(candidate, { recursive: true });
-  const mirrorRoot = realpathSync(candidate);
-  if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
-    throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
-  }
+  const mirrorRoot = prepareAnchoredDirectory(
+    workspaceRoot,
+    path.join("artifacts", task.attemptId),
+    `artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`
+  );
 
   for (const output of task.outputs) {
     const artifactPath = path.resolve(mirrorRoot, output.path);
     if (!isStrictlyInsideDirectory(mirrorRoot, artifactPath)) {
       throw new Error(`artifact-contract failure: unsafe output path ${output.path}`);
     }
-    const parentPath = path.dirname(artifactPath);
-    mkdirSync(parentPath, { recursive: true });
-    const resolvedParent = realpathSync(parentPath);
-    if (resolvedParent !== mirrorRoot && !isStrictlyInsideDirectory(mirrorRoot, resolvedParent)) {
-      throw new Error(`artifact-contract failure: unsafe output parent ${output.path}`);
-    }
+    prepareAnchoredDirectory(
+      mirrorRoot,
+      path.dirname(output.path),
+      `artifact-contract failure: unsafe output parent ${output.path}`
+    );
 
     const emptyArtifact = canonicalEmptyArtifact(task, output);
     if (emptyArtifact !== undefined && !existsSync(artifactPath)) {
       writeFileSync(artifactPath, emptyArtifact, { encoding: "utf8", flag: "wx", mode: 0o600 });
     }
   }
+}
+
+function prepareAnchoredDirectory(rootPath: string, relativePath: string, failureMessage: string): string {
+  const root = realpathSync(rootPath);
+  const candidate = path.resolve(root, relativePath);
+  if (candidate !== root && !isStrictlyInsideDirectory(root, candidate)) {
+    throw new Error(failureMessage);
+  }
+  let current = root;
+  for (const segment of path.relative(root, candidate).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(current) !== current) {
+        throw new Error(failureMessage);
+      }
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      mkdirSync(current, { mode: 0o700 });
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(current) !== current) {
+        throw new Error(failureMessage);
+      }
+    }
+  }
+  return current;
 }
 
 function canonicalEmptyArtifact(
@@ -595,9 +636,18 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
   if (!validateArtifactContract("ultrafuzz/findings@1", serialized, output.path).ok) {
     throw new Error(`artifact-contract failure: retained findings did not form ${output.path}`);
   }
+  let outputFlag: "w" | "wx" = "wx";
+  if (existsSync(outputPath)) {
+    resolveRegularArtifactFile(
+      mirrorRoot,
+      outputPath,
+      `artifact-contract failure: output is not a regular file ${output.path}`
+    );
+    outputFlag = "w";
+  }
   writeFileSync(outputPath, serialized, {
     encoding: "utf8",
-    flag: existsSync(outputPath) ? "w" : "wx",
+    flag: outputFlag,
     mode: 0o600
   });
 }
@@ -1123,7 +1173,7 @@ function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): v
         materializeGeneratedTestCompanion(
           workspaceRoot,
           candidateRoot,
-          task.metadata.node.concreteNodeId,
+          task.metadata.node.logicalNodeId,
           entry.path ?? ""
         );
       }
@@ -1135,7 +1185,7 @@ function materializeGeneratedTestCompanions(task: (typeof taskSpecs)[number]): v
 function materializeGeneratedTestCompanion(
   workspaceRoot: string,
   artifactRoot: string,
-  nodeId: string,
+  logicalNodeId: string,
   relativePath: string
 ): void {
   const generatedPrefix = "generated-tests/";
@@ -1158,7 +1208,13 @@ function materializeGeneratedTestCompanion(
 
   const workspaceRelativePath = relativePath.slice(generatedPrefix.length);
   const directSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", workspaceRelativePath);
-  const nodeScopedSourceCandidate = path.resolve(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath);
+  const nodeScopedSourceCandidate = path.resolve(
+    workspaceRoot,
+    "test",
+    "foundry",
+    logicalNodeId,
+    workspaceRelativePath
+  );
   const sourceCandidate = existsSync(directSourceCandidate)
     ? directSourceCandidate
     : existsSync(nodeScopedSourceCandidate)
@@ -1193,12 +1249,11 @@ function materializeGeneratedTestCompanion(
     throw new Error(`artifact-contract failure: generated test source changed ${relativePath}`);
   }
 
-  const artifactParent = path.dirname(artifactPath);
-  mkdirSync(artifactParent, { recursive: true });
-  const resolvedParent = realpathSync(artifactParent);
-  if (!isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
-    throw new Error(`artifact-contract failure: unsafe generated test parent ${relativePath}`);
-  }
+  const resolvedParent = prepareAnchoredDirectory(
+    artifactRoot,
+    path.dirname(relativePath),
+    `artifact-contract failure: unsafe generated test parent ${relativePath}`
+  );
   const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
   writeFileSync(anchoredArtifactPath, contents, { flag: "wx", mode: 0o600 });
   const resolvedArtifactPath = resolveNonEmptyRegularArtifactFile(
@@ -1219,9 +1274,10 @@ function resolveRegularArtifactFile(artifactDir: string, artifactPath: string, f
   try {
     assertRegularFileInside(artifactDir, artifactPath, failureMessage);
     const resolvedPath = realpathSync(artifactPath);
-    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath) || !statSync(resolvedPath).isFile()) {
+    if (!isStrictlyInsideDirectory(artifactDir, resolvedPath)) {
       throw new Error(failureMessage);
     }
+    assertSingleLinkRegularFile(resolvedPath, failureMessage);
     return resolvedPath;
   } catch {
     throw new Error(failureMessage);

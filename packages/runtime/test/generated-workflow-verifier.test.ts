@@ -35,6 +35,29 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.match(generatedTestVerifier, /generated test file is empty \$\{relativePath\}/u);
 });
 
+test("generated Smithers verifier rejects hard-linked artifacts before normalization", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const nonEmptyResolverStart = source.indexOf("function resolveNonEmptyRegularArtifactFile");
+  const dedupeStart = source.indexOf("function materializeMissingDedupeArtifact");
+  const finalReportStart = source.indexOf("function materializeMissingFinalReportArtifacts");
+
+  assert.ok(resolverStart >= 0, source);
+  assert.ok(nonEmptyResolverStart > resolverStart, source);
+  assert.ok(dedupeStart >= 0, source);
+  assert.ok(finalReportStart > dedupeStart, source);
+
+  const resolver = source.slice(resolverStart, nonEmptyResolverStart);
+  assert.match(source, /assertSingleLinkRegularFile,/u);
+  assert.match(resolver, /assertSingleLinkRegularFile\(resolvedPath, failureMessage\)/u);
+
+  const dedupe = source.slice(dedupeStart, finalReportStart);
+  assert.match(
+    dedupe,
+    /if \(existsSync\(outputPath\)\) \{[\s\S]*?resolveRegularArtifactFile\([\s\S]*?outputFlag = "w"/u
+  );
+});
+
 test("generated Smithers workflow prepares canonical empty sidecars and primary findings", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const preparationStart = source.indexOf("function prepareArtifactMirror");
@@ -79,12 +102,8 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     reset,
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
-  assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
-  assert.match(reset, /path\.resolve\(workspaceRoot, "test", "foundry"\)/u);
-  assert.match(
-    reset,
-    /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
-  );
+  assert.match(reset, /const testOutputRoots = taskTestOutputRelativeRoots\(task\)/u);
+  assert.match(reset, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/u);
   assert.match(reset, /path\.basename\(candidate\) !== attemptId/u);
   assert.match(reset, /const parent = realpathSync\(path\.dirname\(candidate\)\)/u);
   assert.match(reset, /const anchoredRoot = realpathSync\(candidate\)/u);
@@ -93,7 +112,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /candidate === preservedInput/u);
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
-  assert.match(reset, /prepareArtifactMirror\(task\)/u);
+  assert.match(reset, /prepareTaskWorkspaceOutputRoots\(task\)/u);
 });
 
 test("generated Smithers agent preserves its final response as missing Markdown", () => {
@@ -106,7 +125,7 @@ test("generated Smithers agent preserves its final response as missing Markdown"
 
   const agent = source.slice(agentStart, preparationStart);
   assert.match(agent, /const result = await agent\.generate\(args\)/u);
-  assert.match(agent, /prepareArtifactMirror\(task\)/u);
+  assert.match(agent, /prepareTaskWorkspaceOutputRoots\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
@@ -232,8 +251,10 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
 
   const materializer = source.slice(materializerStart, resolverStart);
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
+  assert.match(materializer, /task\.metadata\.node\.logicalNodeId/u);
+  assert.doesNotMatch(materializer, /task\.metadata\.node\.concreteNodeId/u);
   assert.match(materializer, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/u);
-  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/u);
+  assert.match(materializer, /logicalNodeId,[\s\S]*?workspaceRelativePath/u);
   assert.match(materializer, /existsSync\(directSourceCandidate\)/u);
   assert.match(materializer, /existsSync\(nodeScopedSourceCandidate\)/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);

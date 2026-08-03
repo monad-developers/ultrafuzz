@@ -153,6 +153,7 @@ export interface CompiledSmithersTask {
     maxDelayMs: number;
   };
   workspacePath: string;
+  workspaceOutputRoots: readonly string[];
   baseCommit: string;
   artifactDir: string;
   dependencyArtifactDirs: readonly string[];
@@ -1720,6 +1721,7 @@ function compileTask(input: {
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
+  const workspaceOutputRoots = workspaceOutputRootsForTask(input.node, input.attempt.attemptId);
   const dependencyArtifactDirs = input.dependencyAgenticAttemptIds.map((attemptId) =>
     getNodeArtifactDir(input.runLayout, attemptId, { create: true })
   );
@@ -1821,6 +1823,7 @@ function compileTask(input: {
     retries,
     retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
     workspacePath,
+    workspaceOutputRoots,
     baseCommit: input.baseCommit,
     artifactDir,
     dependencyArtifactDirs,
@@ -1828,6 +1831,29 @@ function compileTask(input: {
     execution,
     metadata
   };
+}
+
+const SHARED_TEST_OUTPUT_ROOTS = new Map<string, readonly string[]>([
+  ["reference-harness-author", ["test/foundry/differential"]],
+  ["differential-lane-author", ["test/foundry/differential"]],
+  ["differential-repair-and-report-review", ["test/foundry/differential"]],
+  ["stateful-invariant-setup", ["test/recon", "test/chimera", "test/invariants", "test/foundry/invariants"]],
+  ["stateful-invariant-handlers", ["test/recon", "test/chimera", "test/invariants", "test/foundry/invariants"]],
+  ["stateful-invariant-coverage", ["test/recon", "test/chimera", "test/invariants", "test/foundry/invariants"]],
+  [
+    "stateful-invariant-implement-properties",
+    ["test/recon", "test/chimera", "test/invariants", "test/foundry/invariants"]
+  ],
+  ["stateful-invariant-campaign", ["test/recon", "test/chimera", "test/invariants", "test/foundry/invariants"]]
+]);
+
+function workspaceOutputRootsForTask(node: ExpandedNode, attemptId: string): string[] {
+  const roots = [`artifacts/${attemptId}`];
+  if (node.outputs.some((output) => output.contract === "ultrafuzz/generated-tests@1")) {
+    roots.push(`test/foundry/${node.logicalId}`);
+  }
+  roots.push(...(SHARED_TEST_OUTPUT_ROOTS.get(node.logicalId) ?? []));
+  return [...new Set(roots)];
 }
 
 function cloudAgentCredentialEnv(
@@ -1981,6 +2007,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
           ? undefined
           : executionPath(compiled.projectRoot, task, task.renderedPromptPath, "rendered prompt"),
       workspacePath: executionPath(compiled.projectRoot, task, task.workspacePath, "task workspace"),
+      workspaceOutputRoots: [...task.workspaceOutputRoots],
       artifactDir: executionPath(compiled.projectRoot, task, task.artifactDir, "task artifact directory"),
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
         executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")

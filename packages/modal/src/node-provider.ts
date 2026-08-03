@@ -519,7 +519,6 @@ async function publishModalNodeResult(
 ): Promise<void> {
   const root = fs.realpathSync(path.resolve(projectRoot));
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
-  const workspaceDir = checkedPath(root, input.workspace_dir, "workspace directory", false);
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-"));
   fs.chmodSync(temporaryRoot, 0o700);
   try {
@@ -533,14 +532,18 @@ async function publishModalNodeResult(
     fs.mkdirSync(extracted, { recursive: true });
     await extractSafeTarArchive(archive, extracted, { gzip: true, label: "cloud node result" });
     assertSafeTree(extracted);
-    const workspace = path.join(extracted, "workspace");
-    if (fs.existsSync(workspace)) {
-      replacePublishedDirectory(workspace, workspaceDir);
-    }
-    replacePublishedDirectory(path.join(extracted, "artifacts"), artifactDir);
+    replacePublishedDirectory(canonicalResultArtifactDirectory(extracted), artifactDir);
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
+}
+
+function canonicalResultArtifactDirectory(extractedRoot: string): string {
+  const entries = fs.readdirSync(extractedRoot, { withFileTypes: true });
+  if (entries.length !== 1 || entries[0]?.name !== "artifacts" || !entries[0].isDirectory()) {
+    throw new Error("cloud node result must contain only canonical artifacts");
+  }
+  return path.join(extractedRoot, "artifacts");
 }
 
 async function findLiveSandbox(

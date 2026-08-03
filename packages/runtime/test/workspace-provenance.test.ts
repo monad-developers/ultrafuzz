@@ -7,7 +7,9 @@ import test from "node:test";
 
 import {
   assertAgentWorkspaceProvenance,
+  assertSingleLinkRegularFile,
   assertWorkspaceBaseCommit,
+  cleanWorkspaceOutputRootsForRetry,
   persistWorkspaceSourceAttestation,
   readWorkspaceSourceAttestation,
   resolveCheckedOutCommit,
@@ -52,10 +54,10 @@ test("workspace provenance resolves detached HEAD and rejects a different exact 
   const allowedArtifacts = path.join(repository, "artifacts", "task-a");
   fs.mkdirSync(allowedArtifacts, { recursive: true });
   fs.writeFileSync(path.join(allowedArtifacts, "runner-owned.json"), "{}\n", "utf8");
-  assert.equal(assertAgentWorkspaceProvenance(repository, first, repository, allowedArtifacts).trackedClean, true);
+  assert.equal(assertAgentWorkspaceProvenance(repository, first, repository, [allowedArtifacts]).trackedClean, true);
   fs.writeFileSync(path.join(repository, "untracked-source.sol"), "contract Unexpected {}\n", "utf8");
   assert.throws(
-    () => assertAgentWorkspaceProvenance(repository, first, repository, allowedArtifacts),
+    () => assertAgentWorkspaceProvenance(repository, first, repository, [allowedArtifacts]),
     /unexpected untracked source/u
   );
   fs.unlinkSync(path.join(repository, "untracked-source.sol"));
@@ -64,6 +66,274 @@ test("workspace provenance resolves detached HEAD and rejects a different exact 
     () => assertAgentWorkspaceProvenance(repository, first, repository),
     /tracked changes before agent execution/u
   );
+});
+
+test("workspace provenance permits ignored tool output and exact task-owned roots across retries", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-native-output-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(
+    path.join(repository, ".gitignore"),
+    [
+      "node_modules/",
+      "cache/",
+      "out/",
+      ".cache/",
+      "dist/",
+      "__pycache__/",
+      ".venv/",
+      "build/",
+      ".pytest_cache/",
+      ".build/"
+    ].join("\n") + "\n",
+    "utf8"
+  );
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Target {}\n", "utf8");
+  git(repository, ["add", ".gitignore", "target.sol"]);
+  git(repository, ["commit", "-m", "fixture"]);
+  const revision = git(repository, ["rev-parse", "HEAD"]);
+
+  const artifactRoot = path.join(repository, "artifacts", "attempt-one");
+  const testRoot = path.join(repository, "test");
+  const generatedTestRoot = path.join(testRoot, "foundry", "strategy-one");
+  fs.mkdirSync(artifactRoot, { recursive: true });
+  fs.mkdirSync(generatedTestRoot, { recursive: true });
+  fs.writeFileSync(path.join(artifactRoot, "findings.json"), "[]\n", "utf8");
+  fs.writeFileSync(path.join(generatedTestRoot, "Generated.t.sol"), "contract Generated {}\n", "utf8");
+  for (const relative of [
+    "node_modules/tool/index.js",
+    "cache/foundry.json",
+    "out/Target.json",
+    ".cache/hardhat.json",
+    "dist/bundle.js",
+    "__pycache__/module.pyc",
+    ".venv/installed-package",
+    "build/contract.json",
+    ".pytest_cache/state",
+    ".build/vyper.json"
+  ]) {
+    const output = path.join(repository, relative);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, "runtime output\n", "utf8");
+  }
+
+  const allowedRoots = [artifactRoot, generatedTestRoot];
+  assert.equal(assertAgentWorkspaceProvenance(repository, revision, repository, allowedRoots).trackedClean, true);
+  // Native caches survive a model retry; the next pre-agent check must still
+  // reach the agent while task-owned roots remain narrowly scoped.
+  fs.rmSync(path.join(generatedTestRoot, "Generated.t.sol"));
+  assert.equal(assertAgentWorkspaceProvenance(repository, revision, repository, allowedRoots).trackedClean, true);
+
+  const siblingTest = path.join(repository, "test", "foundry", "strategy-two", "Unexpected.t.sol");
+  fs.mkdirSync(path.dirname(siblingTest), { recursive: true });
+  fs.writeFileSync(siblingTest, "contract Unexpected {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository, allowedRoots),
+    /unexpected untracked source/u
+  );
+  fs.rmSync(path.join(repository, "test", "foundry", "strategy-two"), { recursive: true });
+
+  const unexpectedSource = path.join(repository, "contracts", "Unexpected.sol");
+  fs.mkdirSync(path.dirname(unexpectedSource), { recursive: true });
+  fs.writeFileSync(unexpectedSource, "contract Unexpected {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository, allowedRoots),
+    /unexpected untracked source/u
+  );
+  fs.rmSync(path.join(repository, "contracts"), { recursive: true });
+
+  const linkedRoot = path.join(repository, "test", "foundry", "linked-strategy");
+  fs.symlinkSync(generatedTestRoot, linkedRoot, "dir");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository, [artifactRoot, linkedRoot]),
+    /allowed untracked root is unsafe/u
+  );
+});
+
+test("retry cleanup removes nested repositories only below the exact task output root", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-retry-clean-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Target {}\n", "utf8");
+  git(repository, ["add", "target.sol"]);
+  git(repository, ["commit", "-m", "fixture"]);
+
+  const generatedTestRoot = path.join(repository, "test", "foundry", "strategy-one");
+  const nestedRepository = path.join(generatedTestRoot, "nested-fixture");
+  const siblingRoot = path.join(repository, "test", "foundry", "strategy-two");
+  fs.mkdirSync(nestedRepository, { recursive: true });
+  fs.mkdirSync(siblingRoot, { recursive: true });
+  git(nestedRepository, ["init"]);
+  git(nestedRepository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(nestedRepository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(nestedRepository, "Nested.t.sol"), "contract Nested {}\n", "utf8");
+  git(nestedRepository, ["add", "Nested.t.sol"]);
+  git(nestedRepository, ["commit", "-m", "nested fixture"]);
+  const siblingTest = path.join(siblingRoot, "Sibling.t.sol");
+  fs.writeFileSync(siblingTest, "contract Sibling {}\n", "utf8");
+
+  cleanWorkspaceOutputRootsForRetry(repository, ["test/foundry/strategy-one"]);
+
+  assert.equal(fs.existsSync(nestedRepository), false);
+  assert.equal(fs.readFileSync(siblingTest, "utf8"), "contract Sibling {}\n");
+});
+
+test("workspace provenance trusts committed gitignores but not mutable Git exclusion state", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-ignore-policy-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.mkdirSync(path.join(repository, "nested"), { recursive: true });
+  fs.writeFileSync(path.join(repository, ".gitignore"), "cache/\n", "utf8");
+  fs.writeFileSync(path.join(repository, "nested", ".gitignore"), "generated/\n", "utf8");
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Target {}\n", "utf8");
+  git(repository, ["add", ".gitignore", "nested/.gitignore", "target.sol"]);
+  git(repository, ["commit", "-m", "fixture"]);
+  const revision = git(repository, ["rev-parse", "HEAD"]);
+
+  for (const relative of ["cache/foundry.json", "nested/generated/compiler.json"]) {
+    const output = path.join(repository, relative);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, "committed ignore output\n", "utf8");
+  }
+  assert.equal(assertAgentWorkspaceProvenance(repository, revision, repository).trackedClean, true);
+
+  const infoExclude = path.join(repository, ".git", "info", "exclude");
+  fs.writeFileSync(infoExclude, "hidden-by-info.sol\n", "utf8");
+  fs.writeFileSync(path.join(repository, "hidden-by-info.sol"), "contract HiddenByInfo {}\n", "utf8");
+  assert.throws(() => assertAgentWorkspaceProvenance(repository, revision, repository), /unexpected untracked source/u);
+  fs.unlinkSync(path.join(repository, "hidden-by-info.sol"));
+
+  const configuredExclude = path.join(repository, ".git", "configured-excludes");
+  fs.writeFileSync(configuredExclude, "hidden-by-config.sol\n", "utf8");
+  git(repository, ["config", "core.excludesFile", configuredExclude]);
+  fs.writeFileSync(path.join(repository, "hidden-by-config.sol"), "contract HiddenByConfig {}\n", "utf8");
+  assert.throws(() => assertAgentWorkspaceProvenance(repository, revision, repository), /unexpected untracked source/u);
+  fs.unlinkSync(path.join(repository, "hidden-by-config.sol"));
+
+  const rogueDirectory = path.join(repository, "rogue");
+  fs.mkdirSync(rogueDirectory);
+  fs.writeFileSync(path.join(rogueDirectory, ".gitignore"), "*\n", "utf8");
+  fs.writeFileSync(path.join(rogueDirectory, "Hidden.sol"), "contract HiddenByUntrackedIgnore {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository),
+    /untracked \.gitignore outside its outputs/u
+  );
+});
+
+test("workspace provenance rejects index flags that can mask tracked mutations", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-index-flags-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Target {}\n", "utf8");
+  git(repository, ["add", "target.sol"]);
+  git(repository, ["commit", "-m", "fixture"]);
+  const revision = git(repository, ["rev-parse", "HEAD"]);
+
+  git(repository, ["update-index", "--assume-unchanged", "target.sol"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract AssumeHidden {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository),
+    /assume-unchanged or skip-worktree index flags/u
+  );
+
+  git(repository, ["update-index", "--no-assume-unchanged", "target.sol"]);
+  git(repository, ["checkout", "--", "target.sol"]);
+  git(repository, ["update-index", "--skip-worktree", "target.sol"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract SkipHidden {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository),
+    /assume-unchanged or skip-worktree index flags/u
+  );
+});
+
+test("workspace provenance ignores replace refs that redefine the expected HEAD tree", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-replace-ref-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Expected {}\n", "utf8");
+  git(repository, ["add", "target.sol"]);
+  git(repository, ["commit", "-m", "expected"]);
+  const expectedRevision = git(repository, ["rev-parse", "HEAD"]);
+
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Replacement {}\n", "utf8");
+  git(repository, ["commit", "-am", "replacement"]);
+  const replacementRevision = git(repository, ["rev-parse", "HEAD"]);
+  git(repository, ["checkout", "--detach", expectedRevision]);
+  git(repository, ["replace", expectedRevision, replacementRevision]);
+  git(repository, ["read-tree", replacementRevision]);
+  git(repository, ["checkout-index", "--all", "--force"]);
+
+  // The default object view resolves the expected commit through the malicious
+  // replacement, while provenance checks must compare against its real tree.
+  assert.equal(
+    execFileSync("git", ["show", "HEAD:target.sol"], {
+      cwd: repository,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }),
+    "contract Replacement {}\n"
+  );
+  assert.equal(resolveCheckedOutCommit(repository), expectedRevision);
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, expectedRevision, repository),
+    /tracked changes before agent execution/u
+  );
+});
+
+test("workspace provenance anchors Git checks to the actual task worktree", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-core-worktree-"));
+  const linkedParent = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-linked-parent-"));
+  const linkedWorktree = path.join(linkedParent, "task-worktree");
+  const cleanSibling = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-clean-sibling-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "target.sol"), "contract Expected {}\n", "utf8");
+  git(repository, ["add", "target.sol"]);
+  git(repository, ["commit", "-m", "expected"]);
+  const expectedRevision = git(repository, ["rev-parse", "HEAD"]);
+  git(repository, ["config", "extensions.worktreeConfig", "true"]);
+  git(repository, ["worktree", "add", "--detach", linkedWorktree, expectedRevision]);
+  fs.copyFileSync(path.join(linkedWorktree, "target.sol"), path.join(cleanSibling, "target.sol"));
+
+  git(linkedWorktree, ["config", "--worktree", "core.worktree", cleanSibling]);
+  git(linkedWorktree, ["update-index", "--refresh"]);
+  fs.writeFileSync(path.join(linkedWorktree, "target.sol"), "contract RedirectedCheck {}\n", "utf8");
+
+  // An unanchored Git command honors core.worktree and checks the clean sibling.
+  assert.doesNotThrow(() =>
+    execFileSync("git", ["diff-index", "--quiet", "HEAD", "--"], {
+      cwd: linkedWorktree,
+      stdio: "ignore"
+    })
+  );
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(linkedWorktree, expectedRevision, linkedWorktree),
+    /tracked changes before agent execution/u
+  );
+});
+
+test("artifact normalization guard rejects hardlink substitution without changing the outside inode", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-artifact-hardlink-"));
+  const artifactDir = path.join(root, "artifacts");
+  const outsidePath = path.join(root, "outside.json");
+  const artifactPath = path.join(artifactDir, "findings.json");
+  const original = "outside bytes must remain unchanged\n";
+  fs.mkdirSync(artifactDir);
+  fs.writeFileSync(outsidePath, original, "utf8");
+  assert.doesNotThrow(() => assertSingleLinkRegularFile(outsidePath));
+  fs.linkSync(outsidePath, artifactPath);
+
+  assert.throws(() => {
+    assertSingleLinkRegularFile(artifactPath, "artifact-contract failure: hard-linked artifact");
+    fs.writeFileSync(artifactPath, "normalized artifact\n", "utf8");
+  }, /hard-linked artifact/u);
+  assert.equal(fs.readFileSync(outsidePath, "utf8"), original);
 });
 
 test("workspace source attestations survive restart and merge an exact fan-in closure", () => {

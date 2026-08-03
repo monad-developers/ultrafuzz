@@ -605,7 +605,7 @@ function writeOutOfOrderTopology(project: string): void {
     path.join(project, ".ultrafuzz", "topology.yml"),
     `version: 2
 defaults:
-  strategy_loops: 1
+  strategy_loops: 2
 nodes:
   - id: __start__
     kind: meta
@@ -2886,6 +2886,158 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.match(workflowSource, /operator_prompt: operatorPromptInput/u);
 });
 
+test("compileSmithersWorkflow gives generated tests exact local and shared output roots in cloud specs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "workspace-output-roots.md"),
+    "Write outputs.\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+groups:
+  strategies:
+    label: Strategies
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: boundary-tests
+    kind: agentic
+    prompt: workspace-output-roots.md
+    group: strategies
+    loops: 2
+    depends_on: [__start__]
+    outputs:
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+        primary: true
+  - id: reference-harness-author
+    kind: agentic
+    prompt: workspace-output-roots.md
+    group: strategies
+    depends_on: [__start__]
+    outputs:
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+        primary: true
+  - id: stateful-invariant-setup
+    kind: agentic
+    prompt: workspace-output-roots.md
+    group: strategies
+    depends_on: [__start__]
+    outputs:
+      - path: setup.md
+        contract: ultrafuzz/nonempty-markdown@1
+        primary: true
+  - id: stateful-invariant-implement-properties
+    kind: agentic
+    prompt: workspace-output-roots.md
+    group: strategies
+    depends_on: [__start__]
+    outputs:
+      - path: generated-tests.json
+        contract: ultrafuzz/generated-tests@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - boundary-tests
+      - reference-harness-author
+      - stateful-invariant-setup
+      - stateful-invariant-implement-properties
+`,
+    "utf8"
+  );
+
+  const plan = await planRun({ projectRoot: project, runId: "workspace-output-roots", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  plan.value!.resolved_config.execution = {
+    mode: "cloud",
+    provider: "modal",
+    retentionDays: 30,
+    resources: { cpu: 4, memoryMiB: 8192, timeoutSeconds: 1800 },
+    nodes: {},
+    providers: {
+      modal: {
+        app: "ultrafuzz-test",
+        image: "ultrafuzz-test",
+        credentialEnv: []
+      }
+    }
+  };
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-workspace-output-roots",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  const roots = (logicalNodeId: string): readonly string[] | undefined =>
+    compiled.tasks.find((task) => task.logicalNodeId === logicalNodeId)?.workspaceOutputRoots;
+  const boundaryTasks = compiled.tasks.filter((task) => task.logicalNodeId === "boundary-tests");
+  assert.equal(boundaryTasks.length, 2);
+  assert.equal(new Set(boundaryTasks.map((task) => task.concreteNodeId)).size, 2);
+  assert.ok(
+    boundaryTasks.every(
+      (task) =>
+        JSON.stringify(task.workspaceOutputRoots) ===
+        JSON.stringify([`artifacts/${task.attemptId}`, "test/foundry/boundary-tests"])
+    )
+  );
+  assert.deepEqual(roots("reference-harness-author"), [
+    "artifacts/reference-harness-author",
+    "test/foundry/reference-harness-author",
+    "test/foundry/differential"
+  ]);
+  assert.deepEqual(roots("stateful-invariant-setup"), [
+    "artifacts/stateful-invariant-setup",
+    "test/recon",
+    "test/chimera",
+    "test/invariants",
+    "test/foundry/invariants"
+  ]);
+  assert.deepEqual(roots("stateful-invariant-implement-properties"), [
+    "artifacts/stateful-invariant-implement-properties",
+    "test/foundry/stateful-invariant-implement-properties",
+    "test/recon",
+    "test/chimera",
+    "test/invariants",
+    "test/foundry/invariants"
+  ]);
+  assert.equal(
+    compiled.tasks.some((task) => task.workspaceOutputRoots.includes("test")),
+    false
+  );
+
+  const workflowSource = fs.readFileSync(compiled.workflowPath, "utf8");
+  const startMarker = "const serializedTaskSpecs = ";
+  const start = workflowSource.indexOf(startMarker) + startMarker.length;
+  const end = workflowSource.indexOf(" as const;", start);
+  assert.ok(start >= startMarker.length && end > start);
+  const cloudSpecs = JSON.parse(workflowSource.slice(start, end)) as Array<{
+    metadata: { node: { concreteNodeId: string; logicalNodeId: string } };
+    workspaceOutputRoots: string[];
+  }>;
+  for (const spec of cloudSpecs) {
+    const compiledTask = compiled.tasks.find((task) => task.concreteNodeId === spec.metadata.node.concreteNodeId);
+    assert.ok(compiledTask);
+    assert.deepEqual(spec.workspaceOutputRoots, compiledTask.workspaceOutputRoots);
+    assert.equal(
+      spec.workspaceOutputRoots.some((root) => path.isAbsolute(root) || root === "test"),
+      false
+    );
+  }
+});
+
 test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fallback credentials", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -3205,6 +3357,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
       retries?: number;
       retryPolicy?: unknown;
       workspacePath?: string;
+      workspaceOutputRoots?: string[];
       baseCommit?: string;
       artifactDir?: string;
       metadata?: {
@@ -3236,6 +3389,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(smithersTasks.tasks[0]?.metadata?.workspace?.baseCommit, expectedBaseCommit);
   assert.equal(smithersTasks.tasks[0]?.artifactDir, path.join(run.value!.run_root, "artifacts", "project-discovery"));
   assert.notEqual(smithersTasks.tasks[0]?.artifactDir, smithersTasks.tasks[0]?.workspacePath);
+  assert.deepEqual(smithersTasks.tasks[0]?.workspaceOutputRoots, ["artifacts/project-discovery"]);
   assert.ok(smithersTasks.tasks.every((task) => typeof task.timeoutMs === "number"));
   assert.ok(smithersTasks.tasks.every((task) => typeof task.retries === "number"));
   assert.ok(smithersTasks.tasks.every((task) => task.retryPolicy !== null));
@@ -3264,11 +3418,16 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /assertWorkspaceBaseCommit\(task\.workspacePath, task\.baseCommit\)/);
   assert.match(workflowSource, /assertAgentWorkspaceProvenance/);
   assert.match(workflowSource, /typeof args\?\.rootDir === "string"/);
-  assert.match(workflowSource, /mirroredArtifactDir\(task\)\s*\n\s*\);/);
+  assert.match(workflowSource, /taskWorkspaceOutputRoots\(task\)\s*\n\s*\);/);
+  assert.match(workflowSource, /function taskTestOutputRelativeRoots/);
+  assert.match(workflowSource, /task\.workspaceOutputRoots\.filter/);
+  assert.match(workflowSource, /function prepareTaskWorkspaceOutputRoots/);
+  assert.match(workflowSource, /function prepareAnchoredDirectory/);
+  assert.match(workflowSource, /cleanWorkspaceOutputRootsForRetry\(workspaceRoot, testOutputRoots\)/);
   assert.match(workflowSource, /persistWorkspaceSourceAttestation\(\{/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);[\s\S]*?const verifiedWorkspace = assertAgentWorkspaceProvenance\([\s\S]*?persistWorkspaceSourceAttestation\(\{[\s\S]*?workspace: verifiedWorkspace/
+    /const result = await agent\.generate\(args\);[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\);[\s\S]*?const verifiedWorkspace = assertAgentWorkspaceProvenance\([\s\S]*?persistWorkspaceSourceAttestation\(\{[\s\S]*?workspace: verifiedWorkspace/
   );
   assert.doesNotMatch(workflowSource, /writeWorkspaceSourceAttestation/);
   assert.match(workflowSource, /readWorkspaceSourceAttestation\(\{/);
@@ -3287,14 +3446,20 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
   assert.match(workflowSource, /function artifactAwareAgent/);
-  assert.match(workflowSource, /const result = await agent\.generate\(args\);[\s\S]*?prepareArtifactMirror\(task\);/);
+  assert.match(
+    workflowSource,
+    /const result = await agent\.generate\(args\);[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\);/
+  );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
   assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
   assert.match(workflowSource, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/);
-  assert.match(workflowSource, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/);
+  assert.match(
+    workflowSource,
+    /const nodeScopedSourceCandidate = path\.resolve\(\s*workspaceRoot,\s*"test",\s*"foundry",\s*logicalNodeId,\s*workspaceRelativePath\s*\)/
+  );
   assert.match(workflowSource, /typeof entry === "string" \? \{ path: entry \} : entry/);
   assert.match(workflowSource, /typeof finding\.confidence === "number"/);
   assert.match(workflowSource, /finding\.confidence = String\(finding\.confidence\)/);

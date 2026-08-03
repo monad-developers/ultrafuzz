@@ -18,7 +18,7 @@ import {
   parseModalNodeSandboxInput,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
-import { copySafeTree } from "../src/node-worker.js";
+import { copySafeTree, stageCanonicalNodeResultBundle } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
@@ -184,6 +184,49 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("stages only canonical task artifacts while retaining mirrors and source attestation", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-worker-canonical-result-"));
+    try {
+      const artifactDir = path.join(root, "canonical", "attempt-one");
+      const workspaceDir = path.join(root, "workspace");
+      const mirror = path.join(workspaceDir, "artifacts", "attempt-one");
+      const stagingDir = path.join(root, "staging");
+      fs.mkdirSync(path.join(artifactDir, "generated-tests"), { recursive: true });
+      fs.mkdirSync(path.join(mirror, "generated-tests"), { recursive: true });
+      fs.mkdirSync(path.join(workspaceDir, "node_modules", ".bin"), { recursive: true });
+      fs.mkdirSync(stagingDir);
+
+      fs.writeFileSync(path.join(artifactDir, "report.md"), "# canonical report\n");
+      fs.writeFileSync(path.join(artifactDir, "report.json"), '{"schema_version":"1.0"}\n');
+      fs.writeFileSync(path.join(artifactDir, "findings.normalized.json"), "[]\n");
+      fs.writeFileSync(
+        path.join(artifactDir, ".ultrafuzz-workspace-source-attestation.json"),
+        '{"schema_version":"ultrafuzz.workspace-source-attestation.v1"}\n'
+      );
+      fs.writeFileSync(path.join(mirror, "report.md"), "# stale mirror report\n");
+      fs.writeFileSync(path.join(mirror, "generated-tests", "Generated.t.sol"), "contract GeneratedTest {}\n");
+      fs.symlinkSync("/usr/bin/env", path.join(workspaceDir, "node_modules", ".bin", "tool"));
+
+      stageCanonicalNodeResultBundle({ artifactDir, workspaceDir, attemptId: "attempt-one", stagingDir });
+
+      expect(fs.readdirSync(stagingDir)).toEqual(["artifacts"]);
+      const published = path.join(stagingDir, "artifacts");
+      expect(fs.readFileSync(path.join(published, "report.md"), "utf8")).toBe("# canonical report\n");
+      expect(fs.readFileSync(path.join(published, "report.json"), "utf8")).toContain('"schema_version":"1.0"');
+      expect(fs.readFileSync(path.join(published, "findings.normalized.json"), "utf8")).toBe("[]\n");
+      expect(fs.readFileSync(path.join(published, ".ultrafuzz-workspace-source-attestation.json"), "utf8")).toContain(
+        "ultrafuzz.workspace-source-attestation.v1"
+      );
+      expect(fs.readFileSync(path.join(published, "generated-tests", "Generated.t.sol"), "utf8")).toContain(
+        "GeneratedTest"
+      );
+      expect(fs.existsSync(path.join(stagingDir, "workspace"))).toBe(false);
+      expect(fs.existsSync(path.join(published, "node_modules"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("reattaches to one live attempt and atomically publishes its durable result", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
@@ -212,8 +255,18 @@ describe("Modal node sandbox provider", () => {
         '{"ok":true}\n'
       );
       expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(false);
-      expect(fs.readFileSync(path.join(fixture.root, fixture.input.workspace_dir, "work.txt"), "utf8")).toBe(
-        "remote workspace\n"
+      expect(
+        fs.readFileSync(
+          path.join(fixture.root, fixture.input.artifact_dir, ".ultrafuzz-workspace-source-attestation.json"),
+          "utf8"
+        )
+      ).toContain("ultrafuzz.workspace-source-attestation.v1");
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "report.md"), "utf8")).toBe(
+        "# remote report\n"
+      );
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.workspace_dir, "work.txt"))).toBe(false);
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.workspace_dir, "local.txt"), "utf8")).toBe(
+        "excluded\n"
       );
     } finally {
       result.cleanup();
@@ -240,6 +293,30 @@ describe("Modal node sandbox provider", () => {
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
       expect(sandbox.exec).not.toHaveBeenCalled();
       expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects legacy cloud results that include a recursively copied workspace", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeWorkspace: true });
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ listed: [sandbox] });
+    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/must contain only canonical artifacts/u);
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.workspace_dir, "work.txt"))).toBe(false);
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"), "utf8")).toBe("stale\n");
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -609,14 +686,23 @@ function createProjectFixture() {
   };
 }
 
-function createResultArchive() {
+function createResultArchive(options: { includeWorkspace?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
   fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
-  fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
   fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
-  fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
+  fs.writeFileSync(path.join(bundle, "artifacts", "report.md"), "# remote report\n");
+  fs.writeFileSync(path.join(bundle, "artifacts", "report.json"), '{"schema_version":"1.0"}\n');
+  fs.writeFileSync(path.join(bundle, "artifacts", "findings.normalized.json"), "[]\n");
+  fs.writeFileSync(
+    path.join(bundle, "artifacts", ".ultrafuzz-workspace-source-attestation.json"),
+    '{"schema_version":"ultrafuzz.workspace-source-attestation.v1"}\n'
+  );
+  if (options.includeWorkspace === true) {
+    fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
+    fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
+  }
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const tags = modalNodeTags("controller-run", "node:attempt");
