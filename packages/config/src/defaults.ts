@@ -172,7 +172,6 @@ export function normalizeEvalConfig(input: EvalConfigInput | undefined): EvalCon
         name,
         {
           ...(profile.apiKeyEnv !== undefined ? { apiKeyEnv: profile.apiKeyEnv } : {}),
-          ...(profile.workspaceIdEnv !== undefined ? { workspaceIdEnv: profile.workspaceIdEnv } : {}),
           ...(profile.project !== undefined ? { project: profile.project } : {}),
           ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {})
         }

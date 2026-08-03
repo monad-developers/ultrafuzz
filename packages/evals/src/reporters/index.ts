@@ -6,18 +6,13 @@ import { guardReporter } from "../reporter.js";
 import type { EvalReportingPolicy } from "../types.js";
 import { EvalError } from "../utils.js";
 import { BraintrustReporter } from "./braintrust.js";
-import { LangSmithReporter } from "./langsmith.js";
 
 export { BraintrustReporter, type BraintrustReporterOptions } from "./braintrust.js";
-export { LangSmithReporter, type LangSmithReporterOptions, dottedOrderSegment } from "./langsmith.js";
 
 export const EVAL_PROVIDER_NONE = "none";
-export const KNOWN_EVAL_PROVIDERS = ["braintrust", "langsmith", EVAL_PROVIDER_NONE] as const;
+export const KNOWN_EVAL_PROVIDERS = ["braintrust", EVAL_PROVIDER_NONE] as const;
 const BRAINTRUST_CREDENTIAL_ENV = "BRAINTRUST_API_KEY";
-const LANGSMITH_CREDENTIAL_ENV = "LANGSMITH_API_KEY";
-const LANGSMITH_WORKSPACE_ENV = "LANGSMITH_WORKSPACE_ID";
 const BRAINTRUST_TRUSTED_ENDPOINT_ENV = "ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT";
-const LANGSMITH_TRUSTED_ENDPOINT_ENV = "ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT";
 
 export interface ResolveEvalProviderInput {
   /** `--provider` CLI flag; highest precedence. */
@@ -114,27 +109,6 @@ export function createEvalReporters(input: CreateEvalReportersInput): EvalReport
         policy: input.policy,
         ...(profile.endpoint !== undefined ? { apiUrl: profile.endpoint } : {}),
         ...(trustedApiUrl !== undefined ? { trustedApiUrl } : {}),
-        ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {})
-      });
-      return [guardReporter(reporter, onWarning)];
-    }
-    case "langsmith": {
-      requireFixedEnvName(profile.apiKeyEnv, LANGSMITH_CREDENTIAL_ENV, resolved.provider, "api_key_env");
-      const apiKey = requireEnv(env, LANGSMITH_CREDENTIAL_ENV, resolved.provider);
-      if (profile.workspaceIdEnv !== undefined) {
-        requireFixedEnvName(profile.workspaceIdEnv, LANGSMITH_WORKSPACE_ENV, resolved.provider, "workspace_id_env");
-      }
-      const workspaceId =
-        profile.workspaceIdEnv !== undefined ? firstNonEmpty(env[LANGSMITH_WORKSPACE_ENV]) : undefined;
-      const trustedEndpoint = firstNonEmpty(env[LANGSMITH_TRUSTED_ENDPOINT_ENV]);
-      const reporter = new LangSmithReporter({
-        apiKey,
-        project: profile.project ?? "ultrafuzz-evals",
-        evalRunId: input.evalRunId,
-        policy: input.policy,
-        ...(workspaceId !== undefined ? { workspaceId } : {}),
-        ...(profile.endpoint !== undefined ? { endpoint: profile.endpoint } : {}),
-        ...(trustedEndpoint !== undefined ? { trustedEndpoint } : {}),
         ...(input.fetchImpl !== undefined ? { fetchImpl: input.fetchImpl } : {})
       });
       return [guardReporter(reporter, onWarning)];

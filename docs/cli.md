@@ -127,7 +127,7 @@ explicit `--copy` selections for files you have reviewed.
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
-provider (`braintrust | langsmith | none`) and credential env-var names.
+provider (`braintrust | none`) and credential env-var names.
 Common flags:
 
 - `--suite <suite-yaml-path>` (plan, run)

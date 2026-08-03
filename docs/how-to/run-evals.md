@@ -15,7 +15,7 @@ Two files split the configuration:
   provider, an endpoint, or an env var.
 - The `ultrafuzz.toml` `[eval]` section is per-environment: the default suite
   path, the machine-specific `ground_truth_root`, the active `provider`
-  (`braintrust | langsmith | none`), and `[eval.providers.<name>]` profiles
+  (`braintrust | none`), and `[eval.providers.<name>]` profiles
   holding credential env-var _names_.
 
 ```toml
@@ -109,7 +109,7 @@ credentials. Judge and reporter requests do not follow redirects.
 ## Publish Telemetry (Optional)
 
 ```bash
-ultrafuzz eval publish <eval-run-id> --provider langsmith
+ultrafuzz eval publish <eval-run-id> --provider braintrust
 ultrafuzz eval publish <eval-run-id> --resume
 ```
 

@@ -107,9 +107,3 @@ provider = "none"
 [eval.providers.braintrust]
 api_key_env = "BRAINTRUST_API_KEY"
 project = "ultrafuzz-evals"
-
-[eval.providers.langsmith]
-api_key_env = "LANGSMITH_API_KEY"
-workspace_id_env = "LANGSMITH_WORKSPACE_ID"
-project = "ultrafuzz-evals"
-# endpoint = "https://api.smith.langchain.com"
