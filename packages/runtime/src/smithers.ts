@@ -1967,7 +1967,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
-      prompt: task.renderedPromptPath === undefined ? "" : fs.readFileSync(task.renderedPromptPath, "utf8"),
+      prompt: "",
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined

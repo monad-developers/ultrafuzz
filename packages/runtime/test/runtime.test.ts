@@ -2810,6 +2810,12 @@ test("compileSmithersWorkflow gates native dependencies on deterministic artifac
 test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes", async () => {
   const project = tempProject();
   writeFanoutProject(project);
+  const promptMarker = "CLOUD_PROMPT_ONLY_PRIVATE_MARKER";
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
+    `\n${promptMarker}\n`,
+    "utf8"
+  );
 
   const plan = await planRun({ projectRoot: project, runId: "cloud-nodes", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -2864,6 +2870,8 @@ test("compileSmithersWorkflow maps cloud attempts to portable provider sandboxes
   assert.doesNotMatch(workflowSource, /run_id: cloud-nodes/u);
   assert.match(workflowSource, /execution_generation: cloudExecutionGeneration/u);
   assert.match(workflowSource, /"promptPath": "\.ultrafuzz\/runs\/cloud-nodes\//);
+  assert.match(workflowSource, /"prompt": ""/u);
+  assert.doesNotMatch(workflowSource, new RegExp(promptMarker, "u"));
   assert.match(workflowSource, /"workspacePath": "\.ultrafuzz\/runs\/cloud-nodes\//);
   assert.match(workflowSource, /"path": "\.ultrafuzz\/runs\/cloud-nodes\/workspaces\//);
   assert.match(workflowSource, /"dependencyArtifactDirs": \[/u);
@@ -3701,7 +3709,7 @@ test("startRun submits prompt paths instead of rendered prompt bodies", async ()
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
-  const marker = "ULTRAFUZZ_LARGE_PROMPT_BODY";
+  const marker = "ULTRAFUZZ_LARGE_PRIVATE_PROMPT_MARKER";
   fs.writeFileSync(
     path.join(project, ".ultrafuzz", "prompts", "setup", "project-discovery.md"),
     `---
@@ -3730,12 +3738,15 @@ ${`${marker} `.repeat(2000)}
     fs.readFileSync(path.join(run.value!.run_root, "smithers", "input.json"), "utf8")
   ) as { tasks?: Array<{ prompt?: string; prompt_path?: string }> };
   assert.equal(smithersInput.tasks?.[0]?.prompt, undefined);
-  assert.match(smithersInput.tasks?.[0]?.prompt_path ?? "", /prompt\.rendered\.md$/);
+  const promptPath = smithersInput.tasks?.[0]?.prompt_path ?? "";
+  assert.match(promptPath, /prompt\.rendered\.md$/);
   const workflowSource = fs.readFileSync(
     path.join(project, ".smithers", "workflows", "ultrafuzz-compact-input-run.tsx"),
     "utf8"
   );
-  assert.match(workflowSource, new RegExp(marker));
+  assert.match(workflowSource, /"prompt": ""/u);
+  assert.ok(workflowSource.includes(`"promptPath": ${JSON.stringify(promptPath)}`));
+  assert.doesNotMatch(workflowSource, new RegExp(marker, "u"));
 });
 
 test("startRun resolves the target-local Smithers binary when it is not on PATH", async () => {
@@ -7645,6 +7656,13 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const run = await startRun({ projectRoot: project, runId: "lifecycle-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+  const staleStatePath = path.join(run.value!.run_root, "state.json");
+  const staleState = JSON.parse(fs.readFileSync(staleStatePath, "utf8")) as RunState;
+  staleState.workflow_deadline_at = "2000-01-01T00:00:00.000Z";
+  staleState.status = "timed-out";
+  staleState.finished_at = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(staleStatePath, `${JSON.stringify(staleState, null, 2)}\n`, "utf8");
+  const resumeSubmittedAfterMs = Date.now();
 
   const resumed = await resumeRun({ projectRoot: project, runId: run.value!.run_id, maxConcurrency: 8, env });
   assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
@@ -7653,6 +7671,10 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   const resumedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;
   assert.equal(resumedState.concurrency.requested_concurrency, 8);
   assert.equal(resumedState.controller_lease.duration_ms, 30_000);
+  assert.equal(resumedState.status, "running");
+  assert.equal(resumedState.finished_at, undefined);
+  assert.notEqual(resumedState.workflow_deadline_at, "2000-01-01T00:00:00.000Z");
+  assert.ok(Date.parse(resumedState.workflow_deadline_at ?? "") > resumeSubmittedAfterMs);
 
   const resetResumed = await resumeRun({
     projectRoot: project,
