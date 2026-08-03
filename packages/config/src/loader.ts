@@ -58,7 +58,7 @@ const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_o
 const INVARIANT_KEYS = ["property_priority_threshold", "invariant_testing_fuzzer_timeout"] as const;
 const TRIAGE_KEYS = ["quorum", "panel_size"] as const;
 const EVAL_KEYS = ["eval_config", "ground_truth_root", "provider", "providers"] as const;
-const EVAL_PROVIDER_KEYS = ["api_key_env", "workspace_id_env", "project", "endpoint"] as const;
+const EVAL_PROVIDER_KEYS = ["api_key_env", "project", "endpoint"] as const;
 
 export interface LoadProjectConfigOptions {
   fileName?: string;
@@ -582,13 +582,6 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
             type: "string",
             assign: (value) => {
               profile.apiKeyEnv = value;
-            }
-          },
-          {
-            key: "workspace_id_env",
-            type: "string",
-            assign: (value) => {
-              profile.workspaceIdEnv = value;
             }
           },
           {

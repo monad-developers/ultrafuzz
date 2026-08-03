@@ -225,16 +225,15 @@ project = "ultrafuzz-evals"
 | ------------------- | ------ | ----------------------------------------------------------------------------- |
 | `eval_config`       | string | Eval suite YAML used when `--suite` is omitted.                               |
 | `ground_truth_root` | string | Machine-specific ground-truth directory; must resolve outside the repository. |
-| `provider`          | string | Active eval reporter: `braintrust`, `langsmith`, or `none`.                   |
+| `provider`          | string | Active eval reporter: `braintrust` or `none`.                                 |
 
 Each `[eval.providers.<name>]` connection profile supports:
 
-| Key                | Type   | Meaning                                                                                             |
-| ------------------ | ------ | --------------------------------------------------------------------------------------------------- |
-| `api_key_env`      | string | Canonical key variable: `BRAINTRUST_API_KEY` or `LANGSMITH_API_KEY`.                                |
-| `workspace_id_env` | string | For LangSmith, `LANGSMITH_WORKSPACE_ID`.                                                            |
-| `project`          | string | Provider project name for published experiments.                                                    |
-| `endpoint`         | string | Optional HTTPS origin; non-canonical origins require an exact operator environment acknowledgement. |
+| Key           | Type   | Meaning                                                                                             |
+| ------------- | ------ | --------------------------------------------------------------------------------------------------- |
+| `api_key_env` | string | Canonical key variable: `BRAINTRUST_API_KEY`.                                                       |
+| `project`     | string | Provider project name for published experiments.                                                    |
+| `endpoint`    | string | Optional HTTPS origin; non-canonical origins require an exact operator environment acknowledgement. |
 
 Profiles name credential environment variables and never contain secret
 values. An
@@ -246,10 +245,8 @@ experiment definition itself lives in the eval YAML — see
 
 Reporter credentials are sent only to canonical provider origins by default.
 For a self-hosted service, set the configured `endpoint` and independently set
-`ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` or
-`ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT` to that exact origin. Redirects
-are rejected; reporter requests have a 30-second timeout and a 1 MiB response
-limit.
+`ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` to that exact origin. Redirects are
+rejected; reporter requests have a 30-second timeout and a 1 MiB response limit.
 
 ## Environment Overrides
 

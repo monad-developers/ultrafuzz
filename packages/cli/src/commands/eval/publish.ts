@@ -17,7 +17,7 @@ export default class EvalPublish extends Command {
   static override args = { evalRunId: Args.string({ required: true, description: "Eval run ID" }) };
   static override flags = {
     ...globalFlags,
-    provider: Flags.string({ summary: "Eval reporter provider override (braintrust | langsmith)" }),
+    provider: Flags.string({ summary: "Eval reporter provider override (braintrust)" }),
     resume: Flags.boolean({ summary: "Resume from the persisted publish cursor instead of replaying from offset 0" })
   };
 
