@@ -220,7 +220,7 @@ GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
 model and reasoning inputs can override all full-lane runners. Full runs only
 through that manual dispatch; pushes always select smoke. Both modes retain
 the standard Modal CPU and memory allocation. Smoke rows receive a
-15,000-second watchdog, covering both allowed attempts across the smoke graph's
+15,000-second watchdog, covering all three allowed attempts across the smoke graph's
 four sequential agent stages plus transition slack. Full-lane rows retain the
 3,600-second watchdog, and both publish ordinary 30-day Actions artifacts. Missing
 credentials, revision drift, unavailable ground truth, failed model work,

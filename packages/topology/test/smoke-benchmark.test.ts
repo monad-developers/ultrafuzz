@@ -63,7 +63,8 @@ describe("smoke benchmark topology", () => {
     });
     const executable = graph.nodes.filter((node) => node.kind === "agentic");
     expect(executable).toHaveLength(7);
-    expect(executable.every((node) => node.retryPolicy.maxAttempts === 2)).toBe(true);
+    expect(executable.every((node) => node.retryPolicy.maxAttempts === 3)).toBe(true);
+    expect(executable.every((node) => node.timeoutSeconds === 1200)).toBe(true);
     expect(
       executable
         .filter((node) => STRATEGY_IDS.includes(node.logicalId))

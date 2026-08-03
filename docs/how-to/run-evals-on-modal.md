@@ -148,7 +148,7 @@ select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
-sequential agent stages may each use two 1,800-second attempts, with ten minutes
+sequential agent stages may each use three 1,200-second attempts, with ten minutes
 left for workflow transitions and final synchronization. Full-lane rows retain
 the 3,600-second bound. The smoke admits all three
 rows at a time; the full lane admits 20, keeping each checked-in cohort to two row

@@ -23,6 +23,18 @@ interface BenchmarkTarget {
   framework: string;
 }
 
+interface SmokeTopology {
+  groups: Record<string, { defaults?: { max_attempts?: number; timeout_seconds?: number } }>;
+  nodes: Array<{
+    id: string;
+    kind?: string;
+    group?: string;
+    depends_on: string[];
+    max_attempts?: number;
+    timeout_seconds?: number;
+  }>;
+}
+
 describe("public Modal benchmark configuration", () => {
   it("creates the exact three-target OpenAI smoke benchmark with bounded row and control budgets", () => {
     const workspace = path.resolve("../..");
@@ -89,6 +101,35 @@ describe("public Modal benchmark configuration", () => {
     );
     expect(manifest.control_timeout_seconds).toBe(19_800);
     expect(manifest.control_timeout_seconds).toBeLessThan(6 * 60 * 60);
+
+    const firstConfig = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
+      node_timeout_seconds: number;
+    };
+    const smokeTopology = parse(
+      fs.readFileSync(path.join(workspace, "benchmarks/smoke-benchmark.yml"), "utf8")
+    ) as SmokeTopology;
+    const topologyById = new Map(smokeTopology.nodes.map((node) => [node.id, node]));
+    const longestBudgets = new Map<string, number>();
+    const longestBudgetTo = (nodeId: string): number => {
+      const cached = longestBudgets.get(nodeId);
+      if (cached !== undefined) return cached;
+      const node = topologyById.get(nodeId);
+      if (node === undefined) throw new Error(`smoke topology dependency ${nodeId} is missing`);
+      const dependencyBudget = Math.max(0, ...node.depends_on.map(longestBudgetTo));
+      const groupDefaults = node.group === undefined ? undefined : smokeTopology.groups[node.group]?.defaults;
+      const ownBudget =
+        node.kind === "agentic"
+          ? (node.max_attempts ?? groupDefaults?.max_attempts ?? 1) *
+            (node.timeout_seconds ?? groupDefaults?.timeout_seconds ?? firstConfig.node_timeout_seconds)
+          : 0;
+      const total = dependencyBudget + ownBudget;
+      longestBudgets.set(nodeId, total);
+      return total;
+    };
+    const topologyBoundSeconds = longestBudgetTo("__finish__");
+    expect(topologyBoundSeconds).toBe(4 * 3 * 1_200);
+    expect(publicBenchmarkMaxRuntimeSeconds("smoke") - topologyBoundSeconds).toBeGreaterThanOrEqual(10 * 60);
+
     expect(manifest.concurrency).toEqual({
       max_parallel_eval_rows_per_sandbox: maxParallel,
       max_parallel_workflow_nodes_per_row: publicBenchmarkMaxParallelWorkflowNodes("smoke"),

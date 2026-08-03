@@ -2727,6 +2727,22 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
   assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
   assert.equal(coordination.length, 3);
   assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+
+  const { compileSmithersWorkflow } = await import("../src/smithers.js");
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-smoke-topology-retries",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  assert.equal(compiled.tasks.length, 7);
+  assert.ok(compiled.tasks.every((task) => task.retries === 2));
+  assert.ok(compiled.tasks.every((task) => task.timeoutMs === 1_200_000));
+  assert.ok(compiled.tasks.every((task) => task.heartbeatTimeoutMs === 1_200_000));
+  assert.ok(compiled.tasks.every((task) => task.metadata.retryPolicy.maxAttempts === 3));
+  assert.ok(compiled.tasks.every((task) => task.metadata.retryPolicy.smithersRetries === 2));
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {

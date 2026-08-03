@@ -6,7 +6,8 @@ groups:
     label: Smoke context
     color: "#2563eb"
     defaults:
-      max_attempts: 2
+      max_attempts: 3
+      timeout_seconds: 1200
       model_profiles:
         - smoke-coordination
   strategies:
@@ -14,14 +15,16 @@ groups:
     color: "#7c3aed"
     defaults:
       loops: 1
-      max_attempts: 2
+      max_attempts: 3
+      timeout_seconds: 1200
       model_profiles:
         - benchmark
   review:
     label: Bounded smoke review
     color: "#0f766e"
     defaults:
-      max_attempts: 2
+      max_attempts: 3
+      timeout_seconds: 1200
       model_profiles:
         - smoke-coordination
 nodes:
