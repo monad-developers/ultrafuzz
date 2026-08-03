@@ -20,6 +20,7 @@ const HISTORY_PATHS = [
   "benchmarks/history.json",
   "docs/assets/eval-history/latest-summary.svg",
   "docs/assets/eval-history/quality.svg",
+  "docs/assets/eval-history/performance-cost.svg",
   "docs/assets/eval-history/precision.svg",
   "docs/assets/eval-history/recall.svg",
   "docs/assets/eval-history/f1.svg",

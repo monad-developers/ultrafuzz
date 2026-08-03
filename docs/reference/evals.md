@@ -233,6 +233,20 @@ identity records the candidate commit itself, dashed segments provide a visual
 guide across scoring-identity changes without claiming strict comparability.
 Exact scoring identities remain available in point tooltips and continue to
 gate strict `eval compare` compatibility.
+
+The performance × cost overview uses the same complete-run aggregation for the
+smoke lane: its vertical value is target-macro F1 and its horizontal value is
+the sum of target costs. It groups runs by model, places the dot at the marginal
+median of each metric, and draws horizontal cost and vertical F1 bands from
+Type-7 first and third quartiles. These bands describe observed run dispersion,
+not confidence intervals. To avoid mixing Luna's old and current prices, its
+comparison starts at the first run in the non-overlapping current-price regime,
+`2026-07-31T14:52:13.635Z`; other models use all complete priced smoke runs. A
+run with any unavailable target cost is excluded from the bivariate summary
+rather than treated as zero. Models with no priced run retain their median F1
+and sample count in an explicit unplotted annotation; a one-run model has a dot
+and a collapsed IQR.
+
 `eval history` consumes complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or

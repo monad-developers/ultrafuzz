@@ -16,6 +16,7 @@ const TARGET_REF = "refs/heads/main";
 const CHARTS = [
   "latest-summary.svg",
   "quality.svg",
+  "performance-cost.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",
@@ -321,6 +322,7 @@ import path from "node:path";
 const charts = [
   "latest-summary.svg",
   "quality.svg",
+  "performance-cost.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",

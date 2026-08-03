@@ -83,3 +83,5 @@ Longitudinal results from the public benchmark suite. See [Eval Suites](docs/ref
 ![UltrafuzzBench quality over time](docs/assets/eval-history/quality.svg)
 
 ![Latest UltrafuzzBench result](docs/assets/eval-history/latest-summary.svg)
+
+![UltrafuzzBench model performance versus cost](docs/assets/eval-history/performance-cost.svg)
