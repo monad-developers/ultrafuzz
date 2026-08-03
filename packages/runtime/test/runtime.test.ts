@@ -9,7 +9,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import type { RunState } from "@ultrafuzz/artifacts";
+import { appendEvent, layoutForRunRoot, type RunState } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
@@ -378,15 +378,30 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
 
 function fakeLifecycleSmithersEnv(
   project: string,
-  input: { inspect: unknown; events?: string; inspectMarkerPath?: string; timeline?: unknown }
+  input: {
+    inspect: unknown;
+    events?: string;
+    tokenEvents?: string;
+    refreshedTokenEvents?: string;
+    failEvents?: boolean;
+    inspectMarkerPath?: string;
+    timeline?: unknown;
+  }
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
   const inspectPath = path.join(project, "fake-smithers-inspect.json");
   const eventsPath = path.join(project, "fake-smithers-events.ndjson");
+  const tokenEventsPath = path.join(project, "fake-smithers-token-events.ndjson");
+  const refreshedTokenEventsPath = path.join(project, "fake-smithers-refreshed-token-events.ndjson");
+  const tokenReadMarkerPath = path.join(project, "fake-smithers-token-read");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
   fs.writeFileSync(eventsPath, input.events ?? "", "utf8");
+  fs.writeFileSync(tokenEventsPath, input.tokenEvents ?? input.events ?? "", "utf8");
+  if (input.refreshedTokenEvents !== undefined) {
+    fs.writeFileSync(refreshedTokenEventsPath, input.refreshedTokenEvents, "utf8");
+  }
   fs.writeFileSync(
     timelinePath,
     `${JSON.stringify(input.timeline ?? { timeline: { frames: [] } }, null, 2)}\n`,
@@ -410,7 +425,24 @@ function fakeLifecycleSmithersEnv(
       "    exit 2",
       "    ;;",
       "  events)",
-      '    cat "$SMITHERS_FAKE_EVENTS"',
+      '    case " $* " in',
+      '      *" --type token "*)',
+      '        if [ -n "$SMITHERS_FAKE_REFRESHED_TOKEN_EVENTS" ] && [ -e "$SMITHERS_FAKE_TOKEN_READ_MARKER" ]; then',
+      '          cat "$SMITHERS_FAKE_REFRESHED_TOKEN_EVENTS"',
+      "        else",
+      '          [ -z "$SMITHERS_FAKE_REFRESHED_TOKEN_EVENTS" ] || touch "$SMITHERS_FAKE_TOKEN_READ_MARKER"',
+      '          cat "$SMITHERS_FAKE_TOKEN_EVENTS"',
+      "        fi",
+      "        ;;",
+      "      *)",
+      '        if [ -n "$SMITHERS_FAKE_FAIL_EVENTS" ]; then',
+      '          cat "$SMITHERS_FAKE_EVENTS"',
+      "          printf '%s\\n' 'fake events failure' >&2",
+      "          exit 1",
+      "        fi",
+      '        cat "$SMITHERS_FAKE_EVENTS"',
+      "        ;;",
+      "    esac",
       "    ;;",
       "  timeline)",
       '    cat "$SMITHERS_FAKE_TIMELINE"',
@@ -440,6 +472,11 @@ function fakeLifecycleSmithersEnv(
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     SMITHERS_FAKE_INSPECT: inspectPath,
     SMITHERS_FAKE_EVENTS: eventsPath,
+    SMITHERS_FAKE_TOKEN_EVENTS: input.tokenEvents === undefined ? eventsPath : tokenEventsPath,
+    SMITHERS_FAKE_FAIL_EVENTS: input.failEvents ? "1" : undefined,
+    SMITHERS_FAKE_REFRESHED_TOKEN_EVENTS:
+      input.refreshedTokenEvents === undefined ? undefined : refreshedTokenEventsPath,
+    SMITHERS_FAKE_TOKEN_READ_MARKER: tokenReadMarkerPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
     ULTRAFUZZ_PRICING_CATALOG_URL: "off"
   };
@@ -453,6 +490,7 @@ function workflowInspect(input: {
   workflowRunId: string;
   status?: string;
   state?: string;
+  computedAt?: string;
   error?: unknown;
   failedChildKeys?: string[];
   includeVerifierSteps?: boolean;
@@ -484,7 +522,7 @@ function workflowInspect(input: {
       },
       runState: {
         runId: input.workflowRunId,
-        computedAt: "2026-07-03T00:00:03.000Z",
+        computedAt: input.computedAt ?? "2026-07-03T00:00:03.000Z",
         state: input.state ?? (input.status === "running" ? "running" : "succeeded")
       },
       ...(input.failedChildKeys === undefined
@@ -7284,6 +7322,7 @@ test("syncRun finalizes same-attempt success events ahead of stale prerequisite 
   initProject({ projectRoot: project, force: true });
   writeOutOfOrderTopology(project);
   const workflowRunId = "ultrafuzz-sync-stale-prerequisite";
+  const afterInspection = Date.parse("2026-07-03T00:00:04.000Z");
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -7297,10 +7336,20 @@ test("syncRun finalizes same-attempt success events ahead of stale prerequisite 
       ]
     }),
     events: workflowEvents(workflowRunId, [
-      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
-      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
-      { type: "NodeFinished", nodeId: "verify:actors-flows", attempt: 1 }
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, timestampMs: afterInspection },
+      {
+        type: "NodeFinished",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        timestampMs: afterInspection + 100
+      },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1, timestampMs: afterInspection + 200 },
+      {
+        type: "NodeFinished",
+        nodeId: "verify:actors-flows",
+        attempt: 1,
+        timestampMs: afterInspection + 300
+      }
     ])
   });
   const run = await startRun({ projectRoot: project, runId: "sync-stale-prerequisite", env });
@@ -7308,7 +7357,10 @@ test("syncRun finalizes same-attempt success events ahead of stale prerequisite 
   writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
   writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
 
-  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-prerequisite", env });
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-stale-prerequisite", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   assert.equal(sync.value?.status, "running");
@@ -7324,6 +7376,785 @@ test("syncRun finalizes same-attempt success events ahead of stale prerequisite 
     descendantManifest.prerequisite_manifests?.map((entry) => entry.node_id),
     ["project-discovery"]
   );
+});
+
+test("syncRun discards inspection and node evidence older than a continuation observed after inspection", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-continuation-after-inspection";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      computedAt: "2026-07-03T00:00:03.000Z",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-continuation-after-inspection", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-continuation-after-inspection", env },
+    { now: () => Date.parse("2026-07-03T00:00:01.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_INSPECT_PREDATES_CONTINUATION"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "pending");
+});
+
+test("syncRun refreshes inspection when a continuation overlaps the first collection", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-refresh-after-continuation";
+  const inspectMarker = path.join(project, "continuation-inspect-completed");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      computedAt: "2026-07-03T00:00:03.000Z",
+      steps: [
+        { id: "node:project-discovery", state: "in-progress", attempt: 1 },
+        { id: "verify:project-discovery", state: "in-progress", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ]),
+    inspectMarkerPath: inspectMarker
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-refresh-after-continuation", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const beforeContinuation = Date.parse("2026-07-03T00:00:01.000Z");
+  const afterContinuation = Date.parse("2026-07-03T00:00:03.000Z");
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-refresh-after-continuation", env },
+    { now: () => (fs.existsSync(inspectMarker) ? afterContinuation : beforeContinuation) }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.equal(
+    sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_INSPECT_PREDATES_CONTINUATION"),
+    false
+  );
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.equal((commands.match(/^inspect /gmu) ?? []).length, 2);
+  assert.equal((commands.match(/^events .* --type token /gmu) ?? []).length, 2);
+});
+
+test("syncRun defers terminal inspection when lifecycle-event collection cannot establish a fence", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-events-fence-failure";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 }
+    ]),
+    failEvents: true
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-events-fence-failure", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-events-fence-failure", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_FAILED"));
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_EVENTS_REFRESH_FAILED"));
+  assert.ok(sync.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_INSPECT_PREDATES_CONTINUATION"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "pending");
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.equal((commands.match(/^inspect /gmu) ?? []).length, 2);
+});
+
+test("syncRun refreshes token accounting before accepting terminal refreshed state", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-refresh-terminal-accounting";
+  const inspectMarker = path.join(project, "terminal-accounting-inspect-completed");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") },
+      {
+        type: "NodeFinished",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        timestampMs: Date.parse("2026-07-03T00:00:02.100Z")
+      },
+      {
+        type: "NodeFinished",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        timestampMs: Date.parse("2026-07-03T00:00:02.200Z")
+      }
+    ]),
+    tokenEvents: "",
+    refreshedTokenEvents: workflowEvents(workflowRunId, [
+      {
+        type: "TokenUsageReported",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        timestampMs: Date.parse("2026-07-03T00:00:02.300Z"),
+        extra: {
+          iteration: 0,
+          inputTokens: 10,
+          outputTokens: 20,
+          costUsd: 0.2,
+          model: "deepseek-v4-flash",
+          agent: "deepseek"
+        }
+      }
+    ]),
+    inspectMarkerPath: inspectMarker
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-refresh-terminal-accounting", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const beforeContinuation = Date.parse("2026-07-03T00:00:01.000Z");
+  const afterContinuation = Date.parse("2026-07-03T00:00:03.000Z");
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-refresh-terminal-accounting", env },
+    { now: () => (fs.existsSync(inspectMarker) ? afterContinuation : beforeContinuation) }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+    accounting?: { current?: { total_tokens?: number; event_count?: number } };
+  };
+  assert.equal(metadata.accounting?.current?.total_tokens, 30);
+  assert.equal(metadata.accounting?.current?.event_count, 1);
+});
+
+test("syncRun uses lifecycle submission commit time as the fallback continuation boundary", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-lifecycle-commit-boundary";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      computedAt: "2026-07-03T00:00:03.000Z",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-lifecycle-commit-boundary", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  appendEvent(layoutForRunRoot(run.value!.run_root), {
+    eventType: "workflow-lifecycle-submitted",
+    status: "running",
+    timestamp: "2026-07-03T00:00:02.000Z",
+    payload: {
+      action: "resume",
+      workflow_run_id: workflowRunId,
+      controller_invocation_id: "controller-lifecycle-commit",
+      controller_invoked_at: "2026-07-03T00:00:00.500Z"
+    }
+  });
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-lifecycle-commit-boundary", env },
+    { now: () => Date.parse("2026-07-03T00:00:01.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "pending");
+});
+
+test("syncRun treats a repeated RunStarted event as a durable continuation boundary", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-repeated-run-started";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [
+        { id: "node:project-discovery", state: "in-progress", attempt: 1 },
+        { id: "verify:project-discovery", state: "in-progress", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "RunStarted" },
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunStarted", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-repeated-run-started", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-repeated-run-started", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+});
+
+test("syncRun rejects same-millisecond node evidence sequenced before a continuation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-equal-time-stale-events";
+  const boundaryTime = Date.parse("2026-07-03T00:00:02.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [
+        { id: "node:project-discovery", state: "in-progress", attempt: 1 },
+        { id: "verify:project-discovery", state: "in-progress", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, timestampMs: boundaryTime },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1, timestampMs: boundaryTime },
+      { type: "RunAutoResumed", timestampMs: boundaryTime }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-equal-time-stale-events", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-equal-time-stale-events", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+});
+
+test("syncRun aggregates only same-millisecond node events sequenced after a continuation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-equal-time-current-events";
+  const boundaryTime = Date.parse("2026-07-03T00:00:02.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, timestampMs: boundaryTime },
+      { type: "TaskHeartbeatTimeout", nodeId: "node:project-discovery", attempt: 1, timestampMs: boundaryTime },
+      { type: "RunAutoResumed", timestampMs: boundaryTime },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        timestampMs: boundaryTime,
+        error: { message: "current ordinary failure" }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-equal-time-current-events", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-equal-time-current-events", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; started_at?: string; last_error?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, "current ordinary failure");
+});
+
+test("syncRun rejects a stale same-number success event for a running continuation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-same-number-success";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-same-number-success", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-same-number-success", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun rejects stale same-number failure details for a matching inspected failure", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-same-number-failure-details";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "failure from the prior continuation" }
+      },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-same-number-failure-details", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-same-number-failure-details", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      { status?: string; started_at?: string; last_error?: string; provenance?: { workflow?: { attempt?: number } } }
+    >;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun rejects stale same-number timing for a matching inspected success", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-same-number-success-timing";
+  const staleFinishedAt = "2026-07-03T00:00:00.100Z";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-same-number-success-timing", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-same-number-success-timing", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; started_at?: string; finished_at?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, undefined);
+  assert.notEqual(state.nodes?.["project-discovery"]?.finished_at, staleFinishedAt);
+});
+
+test("syncRun preserves matching event timing from the initial workflow generation", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-initial-generation-success-timing";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-initial-generation-success-timing", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-initial-generation-success-timing", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; started_at?: string; finished_at?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.started_at, "2026-07-03T00:00:00.200Z");
+  assert.equal(state.nodes?.["project-discovery"]?.finished_at, "2026-07-03T00:00:00.300Z");
+});
+
+test("syncRun keeps newer inspected nonterminal state over an older same-attempt event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-newer-inspected-nonterminal";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodePending", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-newer-inspected-nonterminal", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-newer-inspected-nonterminal", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { state?: string } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "in-progress");
+});
+
+test("syncRun prefers a newer successful inspection attempt over an older failed event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-newer-inspection-attempt";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "older attempt failed" }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-newer-inspection-attempt", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-newer-inspection-attempt", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 2);
+});
+
+test("syncRun prefers a newer failed inspection attempt over an older successful event", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-newer-failed-inspection-attempt";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [{ type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 }])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-newer-failed-inspection-attempt", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-newer-failed-inspection-attempt", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "failed");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 2);
+});
+
+test("syncRun prefers inspection over a stale terminal event with the same restarted attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-restarted-event-attempt";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: "stale restarted attempt failed" }
+      },
+      { type: "RunAutoResumed", timestampMs: Date.parse("2026-07-03T00:00:02.000Z") }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-restarted-event-attempt", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-restarted-event-attempt", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun accepts a newer event attempt after a continuation counter restart", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-newer-restarted-event-attempt";
+  const afterInspection = Date.parse("2026-07-03T00:00:04.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [
+        { id: "node:project-discovery", state: "failed", attempt: 2 },
+        { id: "verify:project-discovery", state: "failed", attempt: 2 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, timestampMs: afterInspection },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, timestampMs: afterInspection + 100 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1, timestampMs: afterInspection + 200 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1, timestampMs: afterInspection + 300 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-newer-restarted-event-attempt", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-newer-restarted-event-attempt", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun accepts a terminal event that finishes after the inspection snapshot", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-event-finishes-after-inspection";
+  const beforeInspection = Date.parse("2026-07-03T00:00:02.900Z");
+  const afterInspection = Date.parse("2026-07-03T00:00:03.100Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "in-progress", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, timestampMs: beforeInspection },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1, timestampMs: afterInspection },
+      {
+        type: "NodeStarted",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        timestampMs: afterInspection + 100
+      },
+      {
+        type: "NodeFinished",
+        nodeId: "verify:project-discovery",
+        attempt: 1,
+        timestampMs: afterInspection + 200
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-event-finishes-after-inspection", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-event-finishes-after-inspection", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun accepts a newer same-number retry event over a terminal inspection row", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-newer-same-number-retry";
+  const afterInspection = Date.parse("2026-07-03T00:00:04.000Z");
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeRetrying", nodeId: "node:project-discovery", attempt: 1, timestampMs: afterInspection }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-newer-same-number-retry", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun(
+    { projectRoot: project, runId: "sync-newer-same-number-retry", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; provenance?: { workflow?: { state?: string; attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "running");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.state, "retrying");
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 1);
+});
+
+test("syncRun does not relabel a stale unnumbered terminal event as the inspected attempt", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-unnumbered-event";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 2 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        error: { message: "stale unnumbered failure" }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-unnumbered-event", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-unnumbered-event", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "succeeded");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string; last_error?: string; provenance?: { workflow?: { attempt?: number } } }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["project-discovery"]?.last_error, undefined);
+  assert.equal(state.nodes?.["project-discovery"]?.provenance?.workflow?.attempt, 2);
 });
 
 test("syncRun does not mark a completed workflow succeeded without task evidence", async () => {
@@ -8023,6 +8854,7 @@ test("syncRun records external wait reasons from workflow events", async () => {
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
   const workflowRunId = "ultrafuzz-wait-event-run";
+  const afterInspection = Date.parse("2026-07-03T00:00:04.000Z");
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({
       workflowRunId,
@@ -8032,13 +8864,21 @@ test("syncRun records external wait reasons from workflow events", async () => {
     }),
     events: workflowEvents(workflowRunId, [
       { type: "NodePending", nodeId: "node:project-discovery", attempt: 1 },
-      { type: "NodeWaitingApproval", nodeId: "node:project-discovery", attempt: 1 }
+      {
+        type: "NodeWaitingApproval",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        timestampMs: afterInspection
+      }
     ])
   });
   const run = await startRun({ projectRoot: project, runId: "wait-event-run", env });
   assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
 
-  const sync = await syncRun({ projectRoot: project, runId: "wait-event-run", env });
+  const sync = await syncRun(
+    { projectRoot: project, runId: "wait-event-run", env },
+    { now: () => Date.parse("2026-07-03T00:00:03.000Z") }
+  );
 
   assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
   const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as RunState;

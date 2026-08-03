@@ -163,6 +163,9 @@ interface TerminalWorkflowAttempt {
 interface ControllerInvocation {
   id: string;
   invokedAt: string;
+  continuation: boolean;
+  committedAt?: string;
+  workflowEventSequence?: number;
 }
 
 interface AccountingSummary {
@@ -256,6 +259,7 @@ interface NodeWorkflowEvidence {
   status: NodeStatus;
   workflowState?: string;
   attempt?: number;
+  observedAt?: string;
   startedAt?: string;
   finishedAt?: string;
   error?: string;
@@ -363,6 +367,12 @@ export async function synchronizeLinkedWorkflowRun(
   }
   const previousControlState = structuredClone(readRunState(layout));
 
+  synchronizationNowMs = synchronizationClock(control);
+  const preInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+  if (preInspectBudgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [preInspectBudgetDiagnostic] };
+  }
+  let inspectCollectionStartedAtMs = synchronizationNowMs;
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
@@ -370,6 +380,7 @@ export async function synchronizeLinkedWorkflowRun(
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
+  let inspectCollectionCompletedAtMs = synchronizationNowMs;
   const postInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (postInspectBudgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [postInspectBudgetDiagnostic] };
@@ -407,9 +418,84 @@ export async function synchronizeLinkedWorkflowRun(
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
   ];
 
-  const inspect = parseInspectSnapshot(inspectSnapshot.json);
-  const events = parseWorkflowEvents(eventsSnapshot.stdout);
-  const tokenEvents = parseWorkflowEvents(tokenEventsSnapshot.stdout);
+  let parsedInspect = parseInspectSnapshot(inspectSnapshot.json);
+  let events = eventsSnapshot.ok ? parseWorkflowEvents(eventsSnapshot.stdout) : [];
+  let tokenEvents = tokenEventsSnapshot.ok ? parseWorkflowEvents(tokenEventsSnapshot.stdout) : [];
+  let controllerInvocations = controllerInvocationsForSynchronization(layout, evidence.smithersRunId, events);
+  let currentContinuation = synchronizationContinuationBoundary(controllerInvocations);
+  let inspectionFenced =
+    eventsSnapshot.ok && inspectionCollectionFollowsContinuation(inspectCollectionStartedAtMs, currentContinuation);
+  if (!inspectionFenced) {
+    const refreshedInspectStartedAtMs = synchronizationClock(control);
+    const refreshedInspectSnapshot = await runSmithersInspectionCommand({
+      args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
+      projectRoot,
+      env: input.env,
+      ...inspectionExecutionControl(control, refreshedInspectStartedAtMs)
+    });
+    synchronizationNowMs = synchronizationClock(control);
+    const postRefreshInspectBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+    if (postRefreshInspectBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [postRefreshInspectBudgetDiagnostic] };
+    }
+    if (!refreshedInspectSnapshot.ok) {
+      diagnostics.push(workflowSnapshotDiagnostic(refreshedInspectSnapshot, "WORKFLOW_INSPECT_REFRESH_FAILED"));
+    } else {
+      const refreshedInspectCompletedAtMs = synchronizationNowMs;
+      const refreshedEventsSnapshot = await runSmithersInspectionCommand({
+        args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
+        projectRoot,
+        env: input.env,
+        ...inspectionExecutionControl(control, synchronizationNowMs)
+      });
+      synchronizationNowMs = synchronizationClock(control);
+      const postRefreshEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+      if (postRefreshEventsBudgetDiagnostic !== undefined) {
+        return { ok: false, diagnostics: [postRefreshEventsBudgetDiagnostic] };
+      }
+      if (!refreshedEventsSnapshot.ok) {
+        diagnostics.push(workflowSnapshotDiagnostic(refreshedEventsSnapshot, "WORKFLOW_EVENTS_REFRESH_FAILED"));
+      } else {
+        const refreshedTokenEventsSnapshot = await runSmithersInspectionCommand({
+          args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
+          projectRoot,
+          env: input.env,
+          ...inspectionExecutionControl(control, synchronizationNowMs)
+        });
+        synchronizationNowMs = synchronizationClock(control);
+        const postRefreshTokenEventsBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
+        if (postRefreshTokenEventsBudgetDiagnostic !== undefined) {
+          return { ok: false, diagnostics: [postRefreshTokenEventsBudgetDiagnostic] };
+        }
+        if (!refreshedTokenEventsSnapshot.ok) {
+          diagnostics.push(
+            workflowSnapshotDiagnostic(refreshedTokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_REFRESH_FAILED")
+          );
+        } else {
+          parsedInspect = parseInspectSnapshot(refreshedInspectSnapshot.json);
+          events = parseWorkflowEvents(refreshedEventsSnapshot.stdout);
+          tokenEvents = parseWorkflowEvents(refreshedTokenEventsSnapshot.stdout);
+          inspectCollectionStartedAtMs = refreshedInspectStartedAtMs;
+          inspectCollectionCompletedAtMs = refreshedInspectCompletedAtMs;
+          controllerInvocations = controllerInvocationsForSynchronization(layout, evidence.smithersRunId, events);
+          currentContinuation = synchronizationContinuationBoundary(controllerInvocations);
+          inspectionFenced = inspectionCollectionFollowsContinuation(inspectCollectionStartedAtMs, currentContinuation);
+        }
+      }
+    }
+  }
+  const inspect: WorkflowInspect = inspectionFenced
+    ? parsedInspect
+    : { ...parsedInspect, runStatus: "running", runState: "running", steps: [] };
+  if (!inspectionFenced) {
+    diagnostics.push({
+      code: "WORKFLOW_INSPECT_PREDATES_CONTINUATION",
+      message:
+        "workflow inspection did not establish a post-continuation collection fence; deferred inspection-derived state",
+      severity: "warning",
+      source: "workflow"
+    });
+  }
   let syncResult;
   try {
     syncResult = await synchronizeTasks({
@@ -419,6 +505,10 @@ export async function synchronizeLinkedWorkflowRun(
       workflowRunId: evidence.smithersRunId,
       inspect,
       events,
+      controllerInvocations,
+      currentContinuation,
+      inspectCollectionStartedAt: new Date(inspectCollectionStartedAtMs).toISOString(),
+      inspectCollectionCompletedAt: new Date(inspectCollectionCompletedAtMs).toISOString(),
       control
     });
   } catch (error) {
@@ -1657,6 +1747,10 @@ async function synchronizeTasks(input: {
   workflowRunId: string;
   inspect: WorkflowInspect;
   events: WorkflowEvent[];
+  controllerInvocations: ControllerInvocation[];
+  currentContinuation: ControllerInvocation | undefined;
+  inspectCollectionStartedAt: string;
+  inspectCollectionCompletedAt: string;
   control: WorkflowSynchronizationControl;
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
@@ -1670,10 +1764,8 @@ async function synchronizeTasks(input: {
   const workflowStates = new Map<string, string>();
   const steps = new Map(input.inspect.steps.map((step) => [step.id, step]));
   const eventsByNode = eventsByWorkflowNode(input.events);
-  const controllerInvocations = [
-    ...controllerInvocationsForWorkflow(input.layout, input.workflowRunId),
-    ...controllerInvocationsFromWorkflowEvents(input.events, input.workflowRunId)
-  ].sort((left, right) => left.invokedAt.localeCompare(right.invokedAt));
+  const controllerInvocations = input.controllerInvocations;
+  const currentContinuation = input.currentContinuation;
   const graphNodeById = new Map(input.graph.nodes.map((node) => [node.id, node]));
   const taskStatusesByConcreteNode = new Map<string, NodeStatus[]>();
   const taskAttemptsByConcreteNode = new Map<string, string[]>();
@@ -1681,11 +1773,17 @@ async function synchronizeTasks(input: {
     input.tasks.flatMap((task) => {
       const agentEvidence = mergeNodeWorkflowEvidence(
         steps.get(task.smithersNodeId),
-        eventsByNode.get(task.smithersNodeId) ?? []
+        eventsByNode.get(task.smithersNodeId) ?? [],
+        input.inspectCollectionStartedAt,
+        input.inspectCollectionCompletedAt,
+        currentContinuation
       );
       const verifierEvidence = mergeNodeWorkflowEvidence(
         steps.get(task.verifierSmithersNodeId),
-        eventsByNode.get(task.verifierSmithersNodeId) ?? []
+        eventsByNode.get(task.verifierSmithersNodeId) ?? [],
+        input.inspectCollectionStartedAt,
+        input.inspectCollectionCompletedAt,
+        currentContinuation
       );
       const evidence = completionEvidenceForTask(task, agentEvidence, verifierEvidence);
       return evidence === undefined ? [] : [[task.attemptId, evidence] as const];
@@ -2728,7 +2826,9 @@ function controllerInvocationsForWorkflow(layout: RunLayout, workflowRunId: stri
     return [
       {
         id: stringField(payload, "controller_invocation_id") ?? event.event_id,
-        invokedAt: stringField(payload, "controller_invoked_at") ?? event.timestamp
+        invokedAt: stringField(payload, "controller_invoked_at") ?? event.timestamp,
+        continuation: event.event_type === "workflow-lifecycle-submitted",
+        committedAt: event.timestamp
       }
     ];
   });
@@ -2739,32 +2839,90 @@ function controllerInvocationsFromWorkflowEvents(
   workflowRunId: string
 ): ControllerInvocation[] {
   const controllerEvents = new Set(["RunStarted", "RunAutoResumed", "RunHijacked", "ReplayStarted", "RunForked"]);
-  return events.flatMap((event): ControllerInvocation[] => {
+  const invocations: ControllerInvocation[] = [];
+  let observedRunStart = false;
+  for (const event of events) {
     if (!controllerEvents.has(event.type) || event.timestampMs === undefined) {
-      return [];
+      continue;
     }
     const payload = event.payload ?? {};
     const payloadRunId = stringField(payload, "runId") ?? stringField(payload, "run_id");
     if (payloadRunId !== undefined && payloadRunId !== workflowRunId) {
-      return [];
+      continue;
     }
     const explicitId = firstStringField(payload, ["controllerInvocationId", "controller_invocation_id"]);
-    return [
-      {
-        id:
-          explicitId ??
-          stableLedgerDimension("controller", [
-            workflowRunId,
-            event.type,
-            String(event.sequence ?? ""),
-            String(event.timestampMs),
-            stringField(payload, "nodeId") ?? "",
-            String(numberField(payload, "attempt") ?? "")
-          ]),
-        invokedAt: new Date(event.timestampMs).toISOString()
-      }
-    ];
-  });
+    const continuation = event.type === "RunStarted" ? observedRunStart : true;
+    if (event.type === "RunStarted") {
+      observedRunStart = true;
+    }
+    invocations.push({
+      id:
+        explicitId ??
+        stableLedgerDimension("controller", [
+          workflowRunId,
+          event.type,
+          String(event.sequence ?? ""),
+          String(event.timestampMs),
+          stringField(payload, "nodeId") ?? "",
+          String(numberField(payload, "attempt") ?? "")
+        ]),
+      invokedAt: new Date(event.timestampMs).toISOString(),
+      continuation,
+      ...(event.sequence === undefined ? {} : { workflowEventSequence: event.sequence })
+    });
+  }
+  return invocations;
+}
+
+function controllerInvocationsForSynchronization(
+  layout: RunLayout,
+  workflowRunId: string,
+  events: readonly WorkflowEvent[]
+): ControllerInvocation[] {
+  return [
+    ...controllerInvocationsForWorkflow(layout, workflowRunId),
+    ...controllerInvocationsFromWorkflowEvents(events, workflowRunId)
+  ].sort(
+    (left, right) =>
+      left.invokedAt.localeCompare(right.invokedAt) ||
+      (left.workflowEventSequence ?? -1) - (right.workflowEventSequence ?? -1)
+  );
+}
+
+function inspectionCollectionFollowsContinuation(
+  inspectCollectionStartedAtMs: number,
+  continuation: ControllerInvocation | undefined
+): boolean {
+  if (continuation === undefined) {
+    return true;
+  }
+  const continuationMs = Date.parse(continuation.invokedAt);
+  return (
+    Number.isFinite(inspectCollectionStartedAtMs) &&
+    Number.isFinite(continuationMs) &&
+    inspectCollectionStartedAtMs > continuationMs
+  );
+}
+
+function synchronizationContinuationBoundary(
+  invocations: readonly ControllerInvocation[]
+): ControllerInvocation | undefined {
+  const continuations = invocations.filter((invocation) => invocation.continuation);
+  const productContinuation = continuations.filter((invocation) => invocation.committedAt !== undefined).at(-1);
+  const workflowContinuations = continuations.filter((invocation) => invocation.workflowEventSequence !== undefined);
+  if (productContinuation === undefined) {
+    return workflowContinuations.at(-1);
+  }
+  const matchingWorkflowContinuation = workflowContinuations
+    .filter((invocation) => !timestampIsAfter(productContinuation.invokedAt, invocation.invokedAt))
+    .at(-1);
+  if (matchingWorkflowContinuation !== undefined) {
+    return matchingWorkflowContinuation;
+  }
+  return {
+    ...productContinuation,
+    invokedAt: productContinuation.committedAt ?? productContinuation.invokedAt
+  };
 }
 
 function controllerInvocationForAttempt(
@@ -2929,35 +3087,80 @@ function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask
 
 function mergeNodeWorkflowEvidence(
   step: WorkflowStep | undefined,
-  events: WorkflowEvent[]
+  events: WorkflowEvent[],
+  inspectCollectionStartedAt: string,
+  inspectCollectionCompletedAt: string,
+  currentContinuation: ControllerInvocation | undefined
 ): NodeWorkflowEvidence | undefined {
-  const fromEvents = evidenceFromEvents(events);
-  const fromStep = step === undefined ? undefined : evidenceFromStep(step);
+  const currentEvents =
+    currentContinuation === undefined
+      ? events
+      : events.filter((event) => workflowEventFollowsContinuation(event, currentContinuation));
+  const fromEvents = evidenceFromEvents(currentEvents);
+  const stepEvidence = step === undefined ? undefined : evidenceFromStep(step);
+  const fromStep =
+    currentContinuation === undefined || timestampIsAfter(inspectCollectionStartedAt, currentContinuation.invokedAt)
+      ? stepEvidence
+      : undefined;
   if (fromEvents === undefined) {
     return fromStep;
   }
   if (fromStep === undefined) {
     return fromEvents;
   }
+  const eventObservedAfterInspection = timestampIsAfter(fromEvents.observedAt, inspectCollectionCompletedAt);
+  // Inspect and event snapshots are not atomic. A state transition observed
+  // after the inspection snapshot is unambiguously newer.
+  if (eventObservedAfterInspection) {
+    return fromEvents;
+  }
+  // Across distinct or unidentified attempts, inspection remains canonical.
+  if (fromEvents.attempt !== fromStep.attempt) {
+    return fromStep;
+  }
   const stepIsTerminal = terminalStatus(fromStep.status);
   const eventIsTerminal = terminalStatus(fromEvents.status);
-  const attempt = maxDefinedNumber(fromEvents.attempt, fromStep.attempt);
-  if (!stepIsTerminal && eventIsTerminal) {
-    const eventAttemptIsOlder =
-      fromEvents.attempt !== undefined && fromStep.attempt !== undefined && fromEvents.attempt < fromStep.attempt;
-    const successfulEventCanFinalizeRunningStep = fromEvents.status === "succeeded" && fromStep.status === "running";
-    if (eventAttemptIsOlder || !successfulEventCanFinalizeRunningStep) {
-      return {
-        ...fromStep,
-        ...(attempt === undefined ? {} : { attempt })
-      };
+  if (stepIsTerminal) {
+    if (!eventIsTerminal) {
+      return fromStep;
     }
+    const eventRefinesInspectedFailure = fromStep.status === "failed" && fromEvents.status === "timed-out";
+    return fromStep.status === fromEvents.status || eventRefinesInspectedFailure ? fromEvents : fromStep;
   }
-  return {
-    ...fromEvents,
-    ...(stepIsTerminal && !eventIsTerminal ? { status: fromStep.status, workflowState: fromStep.workflowState } : {}),
-    ...(attempt === undefined ? {} : { attempt })
-  };
+  if (eventIsTerminal) {
+    return fromStep;
+  }
+  return fromEvents.status === fromStep.status && fromEvents.workflowState === fromStep.workflowState
+    ? fromEvents
+    : fromStep;
+}
+
+function workflowEventFollowsContinuation(event: WorkflowEvent, continuation: ControllerInvocation): boolean {
+  if (event.timestampMs === undefined) {
+    return false;
+  }
+  const evidenceMs = event.timestampMs;
+  const continuationMs = Date.parse(continuation.invokedAt);
+  if (!Number.isFinite(evidenceMs) || !Number.isFinite(continuationMs)) {
+    return false;
+  }
+  if (evidenceMs !== continuationMs) {
+    return evidenceMs > continuationMs;
+  }
+  return (
+    event.sequence !== undefined &&
+    continuation.workflowEventSequence !== undefined &&
+    event.sequence > continuation.workflowEventSequence
+  );
+}
+
+function timestampIsAfter(candidate: string | undefined, reference: string | undefined): boolean {
+  if (candidate === undefined || reference === undefined) {
+    return false;
+  }
+  const candidateMs = Date.parse(candidate);
+  const referenceMs = Date.parse(reference);
+  return Number.isFinite(candidateMs) && Number.isFinite(referenceMs) && candidateMs > referenceMs;
 }
 
 function completionEvidenceForTask(
@@ -2993,9 +3196,10 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
     const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
     const attempt = numberField(payload, "attempt");
     const attemptPatch = attempt === undefined ? {} : { attempt };
+    const observationPatch = timestamp === undefined ? {} : { observedAt: timestamp };
     switch (event.type) {
       case "NodePending":
-        evidence = { status: "pending", workflowState: "pending", ...attemptPatch };
+        evidence = { status: "pending", workflowState: "pending", ...attemptPatch, ...observationPatch };
         break;
       case "NodeStarted":
         evidence = {
@@ -3003,6 +3207,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: "in-progress",
           timedOut: false,
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { startedAt: timestamp } : {})
         };
         break;
@@ -3012,6 +3217,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "succeeded",
           workflowState: "finished",
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {})
         };
         break;
@@ -3022,6 +3228,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: "timeout",
           timedOut: true,
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           error: stringField(payload, "message") ?? "workflow task timed out"
         };
@@ -3036,6 +3243,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: timedOut ? "timeout" : "failed",
           timedOut,
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           ...(error ? { error } : {})
         };
@@ -3047,6 +3255,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "skipped",
           workflowState: "skipped",
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {})
         };
         break;
@@ -3056,21 +3265,46 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "failed",
           workflowState: "cancelled",
           ...attemptPatch,
+          ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           error: "workflow task was cancelled"
         };
         break;
       case "NodeRetrying":
-        evidence = { status: "running", workflowState: "retrying", timedOut: false, ...attemptPatch };
+        evidence = {
+          status: "running",
+          workflowState: "retrying",
+          timedOut: false,
+          ...attemptPatch,
+          ...observationPatch
+        };
         break;
       case "NodeWaitingApproval":
-        evidence = { ...evidence, status: "running", workflowState: "waiting-approval", ...attemptPatch };
+        evidence = {
+          ...evidence,
+          status: "running",
+          workflowState: "waiting-approval",
+          ...attemptPatch,
+          ...observationPatch
+        };
         break;
       case "NodeWaitingEvent":
-        evidence = { ...evidence, status: "running", workflowState: "waiting-event", ...attemptPatch };
+        evidence = {
+          ...evidence,
+          status: "running",
+          workflowState: "waiting-event",
+          ...attemptPatch,
+          ...observationPatch
+        };
         break;
       case "NodeWaitingTimer":
-        evidence = { ...evidence, status: "running", workflowState: "waiting-timer", ...attemptPatch };
+        evidence = {
+          ...evidence,
+          status: "running",
+          workflowState: "waiting-timer",
+          ...attemptPatch,
+          ...observationPatch
+        };
         break;
       default:
         break;
@@ -3660,16 +3894,6 @@ function uniqueByJson<T>(values: readonly T[]): T[] {
     seen.add(key);
     return true;
   });
-}
-
-function maxDefinedNumber(left: number | undefined, right: number | undefined): number | undefined {
-  if (left === undefined) {
-    return right;
-  }
-  if (right === undefined) {
-    return left;
-  }
-  return Math.max(left, right);
 }
 
 function errorText(value: unknown): string | undefined {
