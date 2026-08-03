@@ -341,6 +341,8 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain("Recon-Fuzz/recon-fuzzer");
     expect(standaloneDockerfile).not.toContain("crytic/echidna");
     expect(standaloneDockerfile).not.toContain("crytic/medusa");
+    expect(commands).toContain("@anthropic-ai/claude-code@2.1.220");
+    expect(standaloneDockerfile).toContain("@anthropic-ai/claude-code@2.1.220");
     expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 

@@ -19,7 +19,7 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && rm /tmp/node.tar.xz \
     && npm install -g \
       pnpm@11.1.1 bun@1.3.14 @openai/codex@0.144.3 \
-      @anthropic-ai/claude-code@2.1.207 @moonshot-ai/kimi-code@0.29.1 \
+      @anthropic-ai/claude-code@2.1.220 @moonshot-ai/kimi-code@0.29.1 \
       recon-generate@0.0.42
 
 RUN curl -fsSL "https://github.com/foundry-rs/foundry/releases/download/v${FOUNDRY_VERSION}/foundry_v${FOUNDRY_VERSION}_linux_amd64.tar.gz" -o /tmp/foundry.tar.gz \
