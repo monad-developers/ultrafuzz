@@ -107,7 +107,7 @@ const definitions = defineContracts([
     id: "ultrafuzz/findings@1",
     format: "json",
     description:
-      "A JSON array of findings. Every entry must satisfy the Ultrafuzz finding schema, including schema_version, id, title, status, severity_guess, confidence, and summary.",
+      'A top-level JSON array only: never an object, JSON string, Markdown fence, or prose wrapper. Use `[]` when there are no findings. Otherwise write a canonical non-empty array of one or more finding objects, for example `[{"schema_version":"1.0","id":"<id>","title":"<title>","status":"<status>","severity_guess":"<severity>","confidence":"<confidence>","summary":"<summary>"}]`; every entry must have exact `schema_version: "1.0"` and non-empty string `id`, `title`, `status`, `severity_guess`, `confidence`, and `summary` fields.',
     validEmptyExample: "[]"
   },
   {

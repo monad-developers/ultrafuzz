@@ -9,7 +9,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import type { RunState } from "@ultrafuzz/artifacts";
+import { artifactContractDefinition, type RunState } from "@ultrafuzz/artifacts";
 import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
 
 import {
@@ -2458,7 +2458,8 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   const plan = await planRun({ projectRoot: project, runId: "planned-run", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   assert.equal(fs.existsSync(path.join(plan.value!.run_root, "plan.json")), true);
-  assert.equal(fs.existsSync(path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md")), true);
+  const renderedPromptPath = path.join(plan.value!.run_root, "artifacts/project-discovery/prompt.rendered.md");
+  assert.equal(fs.existsSync(renderedPromptPath), true);
   const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
     execution?: { mode?: string; retentionDays?: number };
     rendered_prompts: Array<{ rendered_prompt_snapshot_path?: string }>;
@@ -2472,6 +2473,10 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   );
   assert.match(plan.value!.graph_fingerprint, /^[a-f0-9]{64}$/);
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
+  const renderedPrompt = fs.readFileSync(renderedPromptPath, "utf8");
+  assert.match(renderedPrompt, /Contract: `ultrafuzz\/findings@1`/u);
+  assert.ok(renderedPrompt.includes(artifactContractDefinition("ultrafuzz/findings@1").description), renderedPrompt);
+  assert.match(renderedPrompt, /Valid empty form: `\[\]`/u);
 });
 
 test("repairs only missing rendered prompts from compatible persisted run metadata", async () => {
