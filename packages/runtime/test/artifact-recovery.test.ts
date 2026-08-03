@@ -486,9 +486,9 @@ test("compiled recovery attempts are deterministic no-model validators", async (
             {
               path: "result.md",
               contract: "ultrafuzz/nonempty-markdown@1",
-              contractDigest: "a".repeat(64),
+              contract_digest: "a".repeat(64),
               primary: true
-            }
+            } as never
           ],
           modelFanout: []
         }
@@ -506,8 +506,10 @@ test("compiled recovery attempts are deterministic no-model validators", async (
     workflow.indexOf('if (task.execution.mode === "cloud"')
   );
   assert.match(recoveryBranch, /verifyReusedArtifact\(task\)/u);
+  assert.match(workflow, /normalizedRecoveryOutputContract/u);
   assert.match(recoveryBranch, /retries=\{0\}/u);
   assert.doesNotMatch(recoveryBranch, /<Worktree|agent=\{/u);
+  assert.match(workflow, /"contract_digest": "a{64}"/u);
 });
 
 function fakeLifecycleEnv(project: string, workflowRunId: string): Record<string, string> {

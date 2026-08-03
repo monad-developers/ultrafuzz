@@ -1384,30 +1384,11 @@ function verifyReusedArtifact(task: (typeof taskSpecs)[number]): z.infer<typeof 
   if (manifestOutputs === undefined) {
     throw new Error(`artifact-recovery failure: manifest output contracts are missing for ${task.attemptId}`);
   }
-  const declaredOutputs = manifestOutputs.map((entry) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      throw new Error(`artifact-recovery failure: output contract is malformed for ${task.attemptId}`);
-    }
-    const output = entry as { path?: unknown; contract?: unknown; contract_digest?: unknown; primary?: unknown };
-    if (
-      typeof output.path !== "string" ||
-      typeof output.contract !== "string" ||
-      typeof output.contract_digest !== "string" ||
-      typeof output.primary !== "boolean"
-    ) {
-      throw new Error(`artifact-recovery failure: output contract is malformed for ${task.attemptId}`);
-    }
-    return {
-      path: output.path,
-      contract: output.contract,
-      contractDigest: output.contract_digest,
-      primary: output.primary
-    };
-  });
-  const sortedOutputs = (
-    values: readonly { path: string; contract: string; contractDigest: string; primary: boolean }[]
-  ) => [...values].sort((left, right) => left.path.localeCompare(right.path));
-  if (JSON.stringify(sortedOutputs(declaredOutputs)) !== JSON.stringify(sortedOutputs(task.outputs))) {
+  const declaredOutputs = manifestOutputs.map((entry) => normalizedRecoveryOutputContract(entry, task.attemptId));
+  const taskOutputs = task.outputs.map((entry) => normalizedRecoveryOutputContract(entry, task.attemptId));
+  const sortedOutputs = (values: readonly RecoveryOutputContract[]) =>
+    [...values].sort((left, right) => left.path.localeCompare(right.path));
+  if (JSON.stringify(sortedOutputs(declaredOutputs)) !== JSON.stringify(sortedOutputs(taskOutputs))) {
     throw new Error(`artifact-recovery failure: output contract declaration changed for ${task.attemptId}`);
   }
 
@@ -1424,6 +1405,46 @@ function verifyReusedArtifact(task: (typeof taskSpecs)[number]): z.infer<typeof 
     );
   }
   return verifyArtifacts(task);
+}
+
+interface RecoveryOutputContract {
+  path: string;
+  contract: string;
+  contractDigest: string;
+  primary: boolean;
+}
+
+function normalizedRecoveryOutputContract(value: unknown, attemptId: string): RecoveryOutputContract {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`artifact-recovery failure: output contract is malformed for ${attemptId}`);
+  }
+  const output = value as {
+    path?: unknown;
+    contract?: unknown;
+    contractDigest?: unknown;
+    contract_digest?: unknown;
+    primary?: unknown;
+  };
+  const contractDigest =
+    typeof output.contractDigest === "string"
+      ? output.contractDigest
+      : typeof output.contract_digest === "string"
+        ? output.contract_digest
+        : undefined;
+  if (
+    typeof output.path !== "string" ||
+    typeof output.contract !== "string" ||
+    contractDigest === undefined ||
+    typeof output.primary !== "boolean"
+  ) {
+    throw new Error(`artifact-recovery failure: output contract is malformed for ${attemptId}`);
+  }
+  return {
+    path: output.path,
+    contract: output.contract,
+    contractDigest,
+    primary: output.primary
+  };
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
