@@ -1299,9 +1299,8 @@ export function aggregateEvalHistoryModelPerformanceCost(
 ): EvalHistoryModelPerformanceCostAggregate[] {
   const byModel = new Map<string, EvalHistoryBenchmarkAggregate[]>();
   for (const aggregate of aggregates) {
+    if (!isCurrentPerformanceCostPricing(aggregate)) continue;
     if (aggregate.cost_usd === null) continue;
-    const cutoff = EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[aggregate.model];
-    if (cutoff !== undefined && compareText(aggregate.run_timestamp, cutoff) < 0) continue;
     byModel.set(aggregate.model, [...(byModel.get(aggregate.model) ?? []), aggregate]);
   }
 
@@ -1324,6 +1323,11 @@ export function aggregateEvalHistoryModelPerformanceCost(
       };
     })
     .sort((left, right) => compareText(left.model, right.model));
+}
+
+function isCurrentPerformanceCostPricing(aggregate: EvalHistoryBenchmarkAggregate): boolean {
+  const cutoff = EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[aggregate.model];
+  return cutoff === undefined || compareText(aggregate.run_timestamp, cutoff) >= 0;
 }
 
 function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
@@ -1645,7 +1649,9 @@ function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregat
   const plotHeight = 320;
   const plotBottom = top + plotHeight;
   const legendTop = plotBottom + 94;
-  const comparableAggregates = aggregates.filter((aggregate) => aggregate.lane === "smoke");
+  const comparableAggregates = aggregates.filter(
+    (aggregate) => aggregate.lane === "smoke" && isCurrentPerformanceCostPricing(aggregate)
+  );
   const summaries = aggregateEvalHistoryModelPerformanceCost(comparableAggregates);
   const plottedModels = new Set(summaries.map((summary) => summary.model));
   const unavailableModels = [...new Set(comparableAggregates.map((aggregate) => aggregate.model))]

@@ -939,6 +939,32 @@ describe("longitudinal eval history", () => {
     const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
     expect(deepseek).toBeDefined();
     expect(deepseek).not.toContain('data-iqr="');
+
+    const currentUnpricedLuna = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          ...completeRun({
+            id: "old-priced-luna",
+            timestamp: "2026-07-30T23:23:30.883Z",
+            commitCharacter: "a",
+            model: "gpt-5.6-luna",
+            f1: 0.9,
+            costUsd: 100
+          }),
+          ...completeRun({
+            id: "current-unpriced-luna",
+            timestamp: "2026-07-31T14:52:13.635Z",
+            commitCharacter: "b",
+            model: "gpt-5.6-luna",
+            f1: 0.2,
+            costUsd: null
+          })
+        ]
+      })
+    ).get("performance-cost.svg")!;
+    expect(currentUnpricedLuna).toContain("Not plotted · gpt-5.6-luna · median 20.0% · n=1 · cost unavailable");
+    expect(currentUnpricedLuna).not.toContain("median 55.0% · n=2");
   });
 
   it("renders one complete-run overview and breaks quality lines when lineage changes", () => {
