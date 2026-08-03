@@ -115,6 +115,42 @@ test("artifact contract registry validates structured, empty, and malformed outp
   }
 });
 
+test("findings artifact contract states its exact canonical JSON shape", () => {
+  const definition = artifactContractDefinition("ultrafuzz/findings@1");
+  const finding = {
+    schema_version: FINDINGS_SCHEMA_VERSION,
+    id: "finding-1",
+    title: "Unbounded input",
+    status: "needs-review",
+    severity_guess: "high",
+    confidence: "medium",
+    summary: "The input reaches an expensive path."
+  };
+
+  assert.match(definition.description, /top-level JSON array only/u);
+  assert.match(definition.description, /never an object, JSON string, Markdown fence, or prose wrapper/u);
+  assert.match(definition.description, /Use `\[\]` when there are no findings/u);
+  assert.match(definition.description, /canonical non-empty array of one or more finding objects/u);
+  assert.ok(definition.description.includes('[{"schema_version":"1.0","id":"<id>"'));
+  assert.match(definition.description, /exact `schema_version: "1\.0"`/u);
+  assert.match(
+    definition.description,
+    /non-empty string `id`, `title`, `status`, `severity_guess`, `confidence`, and `summary` fields/u
+  );
+  assert.equal(definition.validEmptyExample, "[]");
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([finding])).ok, true);
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", JSON.stringify(finding)).ok, false);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([{ ...finding, schema_version: "1.1" }])).ok,
+    false
+  );
+  assert.equal(
+    validateArtifactContract("ultrafuzz/findings@1", JSON.stringify([{ ...finding, summary: "" }])).ok,
+    false
+  );
+  assert.equal(validateArtifactContract("ultrafuzz/findings@1", "```json\n[]\n```").ok, false);
+});
+
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
   const finding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
