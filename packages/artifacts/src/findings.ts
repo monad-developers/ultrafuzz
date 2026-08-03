@@ -154,10 +154,14 @@ function normalizeFinding(value: unknown, index: number, input: NormalizeFinding
   assignIfMissing(normalized, "model_index", provenance.modelIndex);
   assignIfMissing(normalized, "loop_index", provenance.loopIndex);
 
+  for (const key of ["affected_files", "affected_functions", "patch_refs", "property_ids", "notes"] as const) {
+    normalizeOptionalStringArray(normalized, key);
+  }
+  normalizeOptionalPathReferenceArray(normalized, "affected_files");
+  normalizeOptionalPathReferenceArray(normalized, "patch_refs");
   validateOptionalStringArray(normalized, "affected_files", true);
   validateOptionalStringArray(normalized, "affected_functions", false);
   validateOptionalStringArray(normalized, "patch_refs", true);
-  normalizeOptionalStringArray(normalized, "notes");
   validateEvidence(normalized.evidence, index);
 
   return normalized as NormalizedFinding;
@@ -239,6 +243,23 @@ function normalizeOptionalStringArray(record: Record<string, unknown>, key: stri
     return;
   }
   validateOptionalStringArray(record, key, false);
+}
+
+function normalizeOptionalPathReferenceArray(record: Record<string, unknown>, key: string): void {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return;
+  }
+  record[key] = value.map((entry) => (typeof entry === "string" ? findingFilePath(entry) : entry));
+}
+
+function findingFilePath(value: string): string {
+  const trimmed = value.trim();
+  const hashReference = /^(?<path>.+?)#L[1-9][0-9]*(?:-L?[1-9][0-9]*)?$/u.exec(trimmed)?.groups?.path;
+  if (hashReference !== undefined) {
+    return hashReference;
+  }
+  return /^(?<path>.+?):[1-9][0-9]*(?:(?::[1-9][0-9]*)|(?:-[1-9][0-9]*))?$/u.exec(trimmed)?.groups?.path ?? trimmed;
 }
 
 function validateFindingMetadataRelativePath(relativePath: string, key: string): void {
