@@ -7023,6 +7023,53 @@ test("syncRun finalizes prerequisite manifests before out-of-order descendants",
   );
 });
 
+test("syncRun finalizes same-attempt success events ahead of stale prerequisite inspection", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-stale-prerequisite";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "running",
+      state: "running",
+      steps: [
+        { id: "node:actors-flows", state: "finished", attempt: 1 },
+        { id: "verify:actors-flows", state: "finished", attempt: 1 },
+        { id: "node:project-discovery", state: "in-progress", attempt: 1 },
+        { id: "verify:project-discovery", state: "in-progress", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:actors-flows", attempt: 1 }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-stale-prerequisite", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-stale-prerequisite", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  assert.equal(sync.value?.status, "running");
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["actors-flows"]?.status, "succeeded");
+  const descendantManifest = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json"), "utf8")
+  ) as { prerequisite_manifests?: Array<{ node_id?: string }> };
+  assert.deepEqual(
+    descendantManifest.prerequisite_manifests?.map((entry) => entry.node_id),
+    ["project-discovery"]
+  );
+});
+
 test("syncRun does not mark a completed workflow succeeded without task evidence", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
