@@ -231,6 +231,8 @@ test("generated Smithers agent normalizes legacy finding field shapes", () => {
   assert.match(normalizer, /finding\.strategy = legacyStrategy\.trim\(\)/u);
   assert.match(normalizer, /typeof evidence === "string"/u);
   assert.match(normalizer, /finding\.evidence = \[evidence\]/u);
+  assert.match(normalizer, /typeof notes === "string" && notes\.trim\(\)\.length > 0/u);
+  assert.match(normalizer, /finding\.notes = \[notes\]/u);
   assert.match(normalizer, /validateArtifactContract\(output\.contract, normalized, output\.path\)\.ok/u);
   assert.match(normalizer, /writeFileSync\(resolvedPath, normalized/u);
 });

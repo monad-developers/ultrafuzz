@@ -936,6 +936,11 @@ function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed
     finding.evidence = [evidence];
     changed = true;
   }
+  const notes = finding.notes;
+  if (typeof notes === "string" && notes.trim().length > 0) {
+    finding.notes = [notes];
+    changed = true;
+  }
   return changed ? { value: finding, changed: true } : { value: entry, changed: false };
 }
 
