@@ -4164,6 +4164,216 @@
           ]
         }
       }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:stableswap-ng-vyper:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "stableswap-ng-vyper",
+      "variant": "benchmark-smoke-kimi-k3-max",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-03T11:31:37.493Z",
+      "candidate_commit": "5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:7d061c80bb7cd3b684da91dd2a64b5ca702312774824d12194225a03caf9f325",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-kimi-k3-max",
+      "model": "kimi-k3",
+      "reasoning_effort": "max",
+      "execution_policy_fingerprint": "sha256:33b8d296d60e49afb72d5070b74be0ff8a1634600f96ab4f2d1800dee8c4dcb4",
+      "scoring_fingerprint": "sha256:51c3924f223ceb9d5417eacc8e7a4f5814e4e0b6f8d2e84d39a4005bbfbc7d24",
+      "precision": 1,
+      "recall": 0.1429,
+      "f1": 0.2501,
+      "cumulative_unique_true_positives": 1,
+      "wall_clock_seconds": 3288.128,
+      "wall_clock_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "cost_usd": 5.931537,
+      "cost_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "source_eval_run_id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max",
+      "source_artifact": "modal:manual-kimi-smoke-5771bbc-cost-20260803/benchmark-smoke-kimi-k3-max",
+      "ground_truth_bug_count": 7,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "target_publication": {
+        "target": "stableswap-ng-vyper",
+        "repository": "https://github.com/curvefi/stableswap-ng",
+        "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386",
+        "framework": "vyper",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/stableswap-ng-vyper-benchmark-smoke-kimi-k3-max-trial-1/report.md",
+            "reports/stableswap-ng-vyper-benchmark-smoke-kimi-k3-max-trial-1/report.json",
+            "reports/stableswap-ng-vyper-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
+          ]
+        }
+      }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:venus-isolated-pools-hardhat:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "venus-isolated-pools-hardhat",
+      "variant": "benchmark-smoke-kimi-k3-max",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-03T11:31:37.493Z",
+      "candidate_commit": "5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:7d061c80bb7cd3b684da91dd2a64b5ca702312774824d12194225a03caf9f325",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-kimi-k3-max",
+      "model": "kimi-k3",
+      "reasoning_effort": "max",
+      "execution_policy_fingerprint": "sha256:33b8d296d60e49afb72d5070b74be0ff8a1634600f96ab4f2d1800dee8c4dcb4",
+      "scoring_fingerprint": "sha256:51c3924f223ceb9d5417eacc8e7a4f5814e4e0b6f8d2e84d39a4005bbfbc7d24",
+      "precision": 1,
+      "recall": 0.2353,
+      "f1": 0.381,
+      "cumulative_unique_true_positives": 4,
+      "wall_clock_seconds": 2803.368,
+      "wall_clock_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "cost_usd": 5.4155334,
+      "cost_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "source_eval_run_id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max",
+      "source_artifact": "modal:manual-kimi-smoke-5771bbc-cost-20260803/benchmark-smoke-kimi-k3-max",
+      "ground_truth_bug_count": 17,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "target_publication": {
+        "target": "venus-isolated-pools-hardhat",
+        "repository": "https://github.com/code-423n4/2023-05-venus",
+        "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b",
+        "framework": "hardhat",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-kimi-k3-max-trial-1/report.md",
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-kimi-k3-max-trial-1/report.json",
+            "reports/venus-isolated-pools-hardhat-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
+          ]
+        }
+      }
+    },
+    {
+      "schema_version": "ultrafuzz.eval.history.observation.v4",
+      "id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max:very-liquid-vaults-foundry:benchmark-smoke-kimi-k3-max:benchmark-smoke-kimi-k3-max",
+      "benchmark": "ultrafuzz-bench",
+      "lane": "smoke",
+      "target": "very-liquid-vaults-foundry",
+      "variant": "benchmark-smoke-kimi-k3-max",
+      "trial_count": 1,
+      "run_timestamp": "2026-08-03T11:31:37.493Z",
+      "candidate_commit": "5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "candidate_repository_url": "https://github.com/monad-developers/ultrafuzz",
+      "cohort_fingerprint": "sha256:7d061c80bb7cd3b684da91dd2a64b5ca702312774824d12194225a03caf9f325",
+      "target_revisions": [
+        {
+          "target": "stableswap-ng-vyper",
+          "revision": "8c78731ed43c22e6bcdcb5d39b0a7d02f8cb0386"
+        },
+        {
+          "target": "venus-isolated-pools-hardhat",
+          "revision": "9853f6f4fe906b635e214b22de9f627c6a17ba5b"
+        },
+        {
+          "target": "very-liquid-vaults-foundry",
+          "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec"
+        }
+      ],
+      "model_profile": "benchmark-smoke-kimi-k3-max",
+      "model": "kimi-k3",
+      "reasoning_effort": "max",
+      "execution_policy_fingerprint": "sha256:33b8d296d60e49afb72d5070b74be0ff8a1634600f96ab4f2d1800dee8c4dcb4",
+      "scoring_fingerprint": "sha256:51c3924f223ceb9d5417eacc8e7a4f5814e4e0b6f8d2e84d39a4005bbfbc7d24",
+      "precision": 1,
+      "recall": 0.1429,
+      "f1": 0.2501,
+      "cumulative_unique_true_positives": 1,
+      "wall_clock_seconds": 2319.223,
+      "wall_clock_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "cost_usd": 5.316636,
+      "cost_completeness": {
+        "status": "complete",
+        "reasons": []
+      },
+      "source_eval_run_id": "manual-kimi-smoke-5771bbc-cost-20260803-benchmark-smoke-kimi-k3-max",
+      "source_artifact": "modal:manual-kimi-smoke-5771bbc-cost-20260803/benchmark-smoke-kimi-k3-max",
+      "ground_truth_bug_count": 7,
+      "status": "succeeded",
+      "executed_case_count": 1,
+      "graded_case_count": 1,
+      "publication_url": "https://github.com/monad-developers/ultrafuzz/tree/main/benchmarks/public-results/ultrafuzz-bench/smoke/kimi-k3-max-5771bbcb44218fd64e14580443b2502cdf11dad8",
+      "target_publication": {
+        "target": "very-liquid-vaults-foundry",
+        "repository": "https://github.com/rheo-xyz/very-liquid-vaults",
+        "revision": "e50384709a696c86ab0440bbbc3dd14a5f4ff6ec",
+        "framework": "foundry",
+        "status": "succeeded",
+        "executed_case_count": 1,
+        "graded_case_count": 1,
+        "publication_location": {
+          "bundle_path": "public-results.json",
+          "report_paths": [
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-kimi-k3-max-trial-1/report.md",
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-kimi-k3-max-trial-1/report.json",
+            "reports/very-liquid-vaults-foundry-benchmark-smoke-kimi-k3-max-trial-1/findings.normalized.json"
+          ]
+        }
+      }
     }
   ]
 }
