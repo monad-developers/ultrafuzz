@@ -26,6 +26,7 @@ test("eval history renders and checks deterministic public charts", async () => 
     "cumulative-unique-true-positives.svg",
     "f1.svg",
     "latest-summary.svg",
+    "performance-cost.svg",
     "precision.svg",
     "quality.svg",
     "recall.svg",

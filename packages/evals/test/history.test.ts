@@ -12,6 +12,7 @@ import {
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
   aggregateEvalHistoryBenchmarkRuns,
+  aggregateEvalHistoryModelPerformanceCost,
   assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
@@ -852,6 +853,92 @@ describe("longitudinal eval history", () => {
         cost_usd: 3.25
       }
     ]);
+  });
+
+  it("plots current-price model medians with Type-7 cost and F1 IQRs", () => {
+    const completeRun = (input: {
+      id: string;
+      timestamp: string;
+      commitCharacter: string;
+      model: string;
+      f1: number;
+      costUsd: number | null;
+    }): EvalHistoryObservation[] =>
+      (["target-a", "target-b"] as const).map((target) =>
+        cohortObservation(target, {
+          id: `${input.id}:${target}:benchmark-smoke`,
+          source_eval_run_id: input.id,
+          run_timestamp: input.timestamp,
+          candidate_commit: input.commitCharacter.repeat(40),
+          variant: `benchmark-smoke-${input.model}`,
+          model_profile: `benchmark-smoke-${input.model}`,
+          model: input.model,
+          f1: input.f1,
+          cost_usd: input.costUsd === null ? null : input.costUsd / 2,
+          cost_completeness:
+            input.costUsd === null
+              ? { status: "unavailable", reasons: ["accounting-unavailable"] }
+              : { status: "complete", reasons: [] }
+        })
+      );
+    const lunaRuns = [
+      ["old-luna", "2026-07-30T23:23:30.883Z", "1", 0.9, 100],
+      ["luna-1", "2026-07-31T14:52:13.635Z", "2", 0.1, 10],
+      ["luna-2", "2026-07-31T15:52:13.635Z", "3", 0.2, 12],
+      ["luna-3", "2026-07-31T16:52:13.635Z", "4", 0.3, 14],
+      ["luna-4", "2026-07-31T17:52:13.635Z", "5", 0.4, 16],
+      ["luna-5", "2026-07-31T18:52:13.635Z", "6", 0.5, 18],
+      ["luna-6", "2026-07-31T19:52:13.635Z", "7", 0.6, 20]
+    ] as const;
+    const observations = [
+      ...lunaRuns.flatMap(([id, timestamp, commitCharacter, f1, costUsd]) =>
+        completeRun({ id, timestamp, commitCharacter, model: "gpt-5.6-luna", f1, costUsd })
+      ),
+      ...completeRun({
+        id: "deepseek",
+        timestamp: "2026-08-01T00:00:00.000Z",
+        commitCharacter: "8",
+        model: "deepseek-v4-pro",
+        f1: 0.1,
+        costUsd: 1.25
+      }),
+      ...completeRun({
+        id: "kimi",
+        timestamp: "2026-08-02T00:00:00.000Z",
+        commitCharacter: "9",
+        model: "kimi-k3",
+        f1: 0.4,
+        costUsd: null
+      })
+    ];
+    const summaries = aggregateEvalHistoryModelPerformanceCost(aggregateEvalHistoryBenchmarkRuns(observations));
+
+    expect(summaries).toMatchObject([
+      {
+        model: "deepseek-v4-pro",
+        runCount: 1,
+        costUsd: { q1: 1.25, median: 1.25, q3: 1.25 },
+        f1: { q1: 0.1, median: 0.1, q3: 0.1 }
+      },
+      {
+        model: "gpt-5.6-luna",
+        runCount: 6,
+        firstRunTimestamp: "2026-07-31T14:52:13.635Z",
+        costUsd: { q1: 12.5, median: 15, q3: 17.5 },
+        f1: { q1: 0.225, median: 0.35, q3: 0.475 }
+      }
+    ]);
+
+    const svg = renderEvalHistoryCharts(
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+    ).get("performance-cost.svg")!;
+    expect(svg).toContain('data-model="gpt-5.6-luna" data-run-count="6"');
+    expect(svg).toContain('data-cost-q1="12.5" data-cost-median="15" data-cost-q3="17.5"');
+    expect(svg).toContain('data-f1-q1="0.225" data-f1-median="0.35" data-f1-q3="0.475"');
+    expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable");
+    const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
+    expect(deepseek).toBeDefined();
+    expect(deepseek).not.toContain('data-iqr="');
   });
 
   it("renders one complete-run overview and breaks quality lines when lineage changes", () => {
