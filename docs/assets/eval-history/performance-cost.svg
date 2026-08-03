@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="636" viewBox="0 0 960 636" role="img" aria-labelledby="title desc">
 <title id="title">UltrafuzzBench performance versus cost</title>
-<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges. Cost is unavailable for kimi-k3.</desc>
+<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges.</desc>
 <rect width="960" height="636" fill="#ffffff"/>
 <text x="90" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">Performance × cost</text>
 <text x="90" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete runs in each model&apos;s current pricing regime</text>
@@ -38,9 +38,13 @@
 <line data-iqr="f1" x1="686.97" y1="284.43" x2="686.97" y2="204.59" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
 <rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="678.97" y="242.48" width="16" height="16"/>
 </g>
+<g data-model="kimi-k3" data-run-count="1" data-cost-q1="16.6637064" data-cost-median="16.6637064" data-cost-q3="16.6637064" data-f1-q1="0.29373333" data-f1-median="0.29373333" data-f1-q3="0.29373333"><title>kimi-k3: median 29.4% at $16.66; 1 run from 2026-08-03 to 2026-08-03</title>
+<polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="781.54,196.01 790.54,205.01 781.54,214.01 772.54,205.01"/>
+</g>
 <circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="98" cy="530" r="6"/>
 <text x="114" y="534" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-pro</tspan><tspan fill="#6b7280"> · median 10.0% · $1.27 · n=1</tspan></text>
 <rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="92" y="550" width="12" height="12"/>
 <text x="114" y="560" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">gpt-5.6-luna</tspan><tspan fill="#6b7280"> · median 23.7% · $14.38 · n=7</tspan></text>
-<text x="90" y="586" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Not plotted · kimi-k3 · median 39.6% · n=1 · cost unavailable</text>
+<polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="98,575 105,582 98,589 91,582"/>
+<text x="114" y="586" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">kimi-k3</tspan><tspan fill="#6b7280"> · median 29.4% · $16.66 · n=1</tspan></text>
 </svg>

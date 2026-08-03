@@ -26,7 +26,8 @@ import * as projectAgents from "../agents/index.ts";
 
 const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_ARTIFACTS_MODULE__;
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
-const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
+const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract, writeFileDurable } =
+  await import(artifactsModule);
 const {
   runAgentWithPostflight,
   assertAgentWorkspaceProvenance,
@@ -34,7 +35,6 @@ const {
   assertWorkspaceBaseCommit,
   cleanWorkspaceOutputRootsForRetry,
   normalizeFinalReportSeverityRecord,
-  normalizeSeverityLevel,
   persistWorkspaceSourceAttestation,
   readWorkspaceSourceAttestation
 } = await import(runtimeModule);
@@ -551,7 +551,10 @@ function materializeMissingMarkdownArtifacts(task: (typeof taskSpecs)[number], r
   const fallback = `# ${title}\n\n${summary}\n`;
 
   for (const output of task.outputs) {
-    if (output.contract !== "ultrafuzz/nonempty-markdown@1") {
+    if (
+      output.contract !== "ultrafuzz/nonempty-markdown@1" ||
+      (task.metadata.node.logicalNodeId === "final-report" && output.path === "report.md")
+    ) {
       continue;
     }
     let invalidArtifactPath: string | undefined;
@@ -642,7 +645,7 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
           Array.isArray(normalizedValidation.value) &&
           normalizedValidation.value.length > 0
         ) {
-          writeFileSync(candidatePath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
+          writeFileDurable(candidatePath, normalized);
           return;
         }
       }
@@ -689,20 +692,7 @@ function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): voi
   if (!validateArtifactContract("ultrafuzz/findings@1", serialized, output.path).ok) {
     throw new Error(`artifact-contract failure: retained findings did not form ${output.path}`);
   }
-  let outputFlag: "w" | "wx" = "wx";
-  if (existsSync(outputPath)) {
-    resolveRegularArtifactFile(
-      mirrorRoot,
-      outputPath,
-      `artifact-contract failure: output is not a regular file ${output.path}`
-    );
-    outputFlag = "w";
-  }
-  writeFileSync(outputPath, serialized, {
-    encoding: "utf8",
-    flag: outputFlag,
-    mode: 0o600
-  });
+  writeFileDurable(outputPath, serialized);
 }
 
 function materializeMissingFinalReportArtifacts(task: (typeof taskSpecs)[number]): void {
@@ -715,53 +705,26 @@ function materializeMissingFinalReportArtifacts(task: (typeof taskSpecs)[number]
   const findingsOutput = task.outputs.find(
     (candidate) => candidate.path === "findings.normalized.json" && candidate.contract === "ultrafuzz/findings@1"
   );
-  // Only bounded workflows that explicitly publish normalized findings opt in
-  // to this recovery. Production topologies without that declared output keep
-  // their existing final-review behavior.
-  if (reportOutput === undefined || findingsOutput === undefined) {
+  if (reportOutput === undefined) {
     return;
   }
 
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const report = meaningfulFinalReport(artifactRoots, reportOutput.path);
-  if (report !== undefined) {
-    writeValidatedTaskArtifact(task, reportOutput, report);
-  }
-  let findings = report === undefined ? undefined : normalizedFindingArray(report.issues);
-  if (findings === undefined || findings.length === 0) {
-    findings = normalizedFindingsArtifact(artifactRoots, findingsOutput.path);
-  }
-  if (report !== undefined && Array.isArray(report.issues) && report.issues.length === 0) {
-    // A populated run_metadata/non-production report is an intentional bounded
-    // review result. Do not promote its dependency findings behind the model's
-    // back; the smoke publication floor should surface that result.
-    writeNormalizedFindings(task, findingsOutput.path, findings ?? []);
+  if (report === undefined) {
+    // Only the final-review worker may decide which findings are production
+    // issues. Leave its required output missing so strict verification fails closed.
     return;
   }
-  if (findings === undefined || findings.length === 0) {
-    findings = retainedDedupeFindings(task);
+  writeValidatedTaskArtifact(task, reportOutput, report);
+  let findings = normalizedFindingArray(report.issues);
+  if (findingsOutput !== undefined && (findings === undefined || findings.length === 0)) {
+    findings = normalizedFindingsArtifact(artifactRoots, findingsOutput.path) ?? findings;
   }
-  if (findings === undefined || findings.length === 0) {
-    return;
+  if (findingsOutput !== undefined && findings !== undefined) {
+    writeNormalizedFindings(task, findingsOutput.path, findings);
   }
-
-  writeNormalizedFindings(task, findingsOutput.path, findings);
-  if (report !== undefined) {
-    return;
-  }
-
-  const recoveredReport = {
-    schema_version: "1.0",
-    run_metadata: {
-      run_id: task.metadata.run.ultrafuzzRunId,
-      artifact_recovery: "retained-validated-dedupe-findings"
-    },
-    issues: findings.map(normalizedFallbackReportIssue),
-    non_production_outcomes: [],
-    property_provenance: []
-  };
-  writeValidatedTaskArtifact(task, reportOutput, recoveredReport);
 }
 
 function meaningfulFinalReport(
@@ -821,39 +784,6 @@ function normalizedFindingsArtifact(artifactRoots: string[], relativePath: strin
   return undefined;
 }
 
-function retainedDedupeFindings(task: (typeof taskSpecs)[number]): unknown[] | undefined {
-  for (const dependencyAttemptId of task.metadata.dependencies.attemptIds) {
-    const dependency = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
-    if (dependency === undefined || dependency.metadata.node.logicalNodeId !== "dedupe-findings") {
-      continue;
-    }
-    for (const candidateRootPath of [dependency.metadata.artifacts.dir, mirroredArtifactDir(dependency)]) {
-      try {
-        const candidateRoot = realpathSync(candidateRootPath);
-        const dedupePath = resolveRegularArtifactFile(
-          candidateRoot,
-          path.resolve(candidateRoot, "deduped-findings.json"),
-          "artifact-contract failure: dedupe findings are not a regular file"
-        );
-        const parsed = validateArtifactContract(
-          "ultrafuzz/json-array@1",
-          readFileSync(dedupePath, "utf8"),
-          "deduped-findings.json"
-        );
-        if (parsed.ok && Array.isArray(parsed.value)) {
-          const normalized = normalizedFindingArray(parsed.value);
-          if (normalized !== undefined && normalized.length > 0) {
-            return normalized;
-          }
-        }
-      } catch {
-        // Try the dependency's task-owned mirror when canonical publication is still catching up.
-      }
-    }
-  }
-  return undefined;
-}
-
 function normalizedFindingArray(value: unknown): unknown[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -898,8 +828,12 @@ function writeValidatedTaskArtifact(
     writeFileSync(existingCanonical, serialized, { encoding: "utf8", flag: "w", mode: 0o600 });
     return;
   } catch {
-    // A missing or unsafe canonical path is left untouched; publish through the
-    // exact task-owned mirror so the strict verifier can fail closed or reconcile it.
+    if (!existsSync(canonicalPath)) {
+      writeFileSync(canonicalPath, serialized, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      return;
+    }
+    // An unsafe canonical path is left untouched; publish through the exact
+    // task-owned mirror so the strict verifier can fail closed or reconcile it.
   }
 
   const mirrorRoot = realpathSync(mirroredArtifactDir(task));
@@ -917,24 +851,6 @@ function writeValidatedTaskArtifact(
     flag = "w";
   }
   writeFileSync(mirrorPath, serialized, { encoding: "utf8", flag, mode: 0o600 });
-}
-
-function normalizedFallbackReportIssue(entry: unknown): unknown {
-  if (!isPlainRecord(entry)) {
-    return entry;
-  }
-  const issue = { ...entry };
-  const severity = normalizeSeverityLevel(issue.severity) ?? normalizeSeverityLevel(issue.severity_guess);
-  if (severity === undefined) {
-    return issue;
-  }
-  issue.severity = severity;
-  issue.severity_guess = severity;
-  if (normalizeSeverityLevel(issue.impact) === undefined || normalizeSeverityLevel(issue.likelihood) === undefined) {
-    issue.impact = severity;
-    issue.likelihood = severity;
-  }
-  return normalizeFinalReportSeverityRecord(issue).value;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -1000,6 +916,20 @@ function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed
   }
   const finding = { ...entry } as Record<string, unknown>;
   let changed = false;
+  for (const key of ["affected_files", "affected_functions", "patch_refs", "property_ids", "notes"] as const) {
+    const value = finding[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      finding[key] = [value.trim()];
+      changed = true;
+    }
+  }
+  for (const key of ["affected_files", "patch_refs"] as const) {
+    const normalizedPaths = normalizeLegacyPathReferences(finding[key]);
+    if (normalizedPaths.changed) {
+      finding[key] = normalizedPaths.value;
+      changed = true;
+    }
+  }
   if (
     typeof finding.confidence === "number" &&
     Number.isFinite(finding.confidence) &&
@@ -1026,6 +956,31 @@ function normalizeLegacyFindingRecord(entry: unknown): { value: unknown; changed
     changed = true;
   }
   return changed ? { value: finding, changed: true } : { value: entry, changed: false };
+}
+
+function normalizeLegacyPathReferences(value: unknown): { value: unknown; changed: boolean } {
+  if (!Array.isArray(value)) {
+    return { value, changed: false };
+  }
+  let changed = false;
+  const normalized = value.map((entry) => {
+    if (typeof entry !== "string") {
+      return entry;
+    }
+    const normalizedPath = normalizeLegacyPathReference(entry);
+    changed ||= normalizedPath.changed;
+    return normalizedPath.value;
+  });
+  return changed ? { value: normalized, changed: true } : { value, changed: false };
+}
+
+function normalizeLegacyPathReference(value: string): { value: string; changed: boolean } {
+  const trimmed = value.trim();
+  const hashLineSuffix = trimmed.match(/^(.+?)#L\d+(?:-L?\d+)?$/u);
+  const withoutHashLineSuffix = hashLineSuffix?.[1] ?? trimmed;
+  const colonLineSuffix = withoutHashLineSuffix.match(/^(.+?):\d+(?::\d+)?$/u);
+  const normalized = colonLineSuffix?.[1] ?? withoutHashLineSuffix;
+  return normalized === value ? { value, changed: false } : { value: normalized, changed: true };
 }
 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {

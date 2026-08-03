@@ -14,6 +14,7 @@ import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 import AdmZip from "adm-zip";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../../command-shared.js";
+import { reconcileReportArtifacts } from "../../report-artifacts.js";
 
 const TOP_LEVEL_RUN_FILES = [
   "attempts.jsonl",
@@ -89,6 +90,9 @@ export default class ReportBundle extends Command {
       assertNoSymlinkComponents(outputGuardRoot, outputDirectory, "output directory");
 
       const diagnostics: RuntimeDiagnostic[] = [];
+      if (hasFinalReportJson(layout.root, layout.artifactsDir)) {
+        reconcileReportArtifacts(layout.root);
+      }
       const files = collectBundleFiles(layout.root, diagnostics);
       if (files.length === 0) {
         throw new Error("run has no report bundle artifacts to package");
@@ -154,6 +158,31 @@ function assertOutputIsOutsideRun(runRoot: string, outputPath: string): void {
   if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
     throw new Error("output ZIP must be outside the run root to avoid self-including bundles");
   }
+}
+
+function hasFinalReportJson(runRoot: string, artifactsDirectory: string): boolean {
+  if (!fs.existsSync(artifactsDirectory)) {
+    return false;
+  }
+  assertPathInside(runRoot, artifactsDirectory, "report artifacts directory");
+  assertNoSymlinkComponents(runRoot, artifactsDirectory, "report artifacts directory");
+
+  const entries = fs.readdirSync(artifactsDirectory, { withFileTypes: true });
+  const reportDirectories = [
+    ...entries.filter((entry) => entry.isDirectory() && entry.name === "final-report"),
+    ...entries.filter(
+      (entry) => entry.isDirectory() && entry.name !== "final-report" && entry.name.startsWith("final-report")
+    )
+  ];
+  for (const entry of reportDirectories) {
+    const reportJsonPath = path.join(artifactsDirectory, entry.name, "report.json");
+    if (lstatIfPresent(reportJsonPath) === undefined) {
+      continue;
+    }
+    assertRegularFileInside(runRoot, reportJsonPath, "report JSON path");
+    return true;
+  }
+  return false;
 }
 
 function collectBundleFiles(runRoot: string, diagnostics: RuntimeDiagnostic[]): BundleFile[] {
