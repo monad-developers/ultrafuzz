@@ -33,6 +33,7 @@ import {
   pauseRun,
   replayRun,
   repairMissingRenderedPromptsForRun,
+  runAgentWithPostflight,
   resumeRun,
   startRun,
   syncRun,
@@ -1171,6 +1172,204 @@ test(
     }
     assert.ok(failure instanceof Error);
     assert.deepEqual((failure as Error & { usage?: unknown }).usage, normalizedUsage);
+  }
+);
+
+test(
+  "generated DeepSeek postflight failure preserves real engine usage through sync and ledger replay",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    writeSmallTopology(project);
+
+    const productRunId = "generated-deepseek-postflight-engine";
+    const workflowRunId = `ultrafuzz-${productRunId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      }),
+      events: ""
+    });
+    const run = await startRun({
+      projectRoot: project,
+      runId: productRunId,
+      agent: "DeepSeekAgent",
+      model: "deepseek-v4-flash",
+      env
+    });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+    const engineRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-postflight-engine-"));
+    const smithersEntry = fs.realpathSync(
+      path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js")
+    );
+    const smithersRequire = createRequire(smithersEntry);
+    const smithersModule = await import(pathToFileURL(smithersEntry).href);
+    const jsxModule = await import(pathToFileURL(path.join(path.dirname(smithersEntry), "jsx-runtime.js")).href);
+    const effectModule = await import(pathToFileURL(smithersRequire.resolve("effect")).href);
+    const zodModule = await import(pathToFileURL(smithersRequire.resolve("zod")).href);
+    const api = smithersModule.createSmithers(
+      { result: zodModule.z.object({ summary: zodModule.z.string() }) },
+      { dbPath: path.join(engineRoot, "smithers.db") }
+    );
+    const usage = {
+      inputTokens: 11,
+      inputTokenDetails: { noCacheTokens: 11, cacheReadTokens: 3, cacheWriteTokens: 0 },
+      outputTokens: 7,
+      outputTokenDetails: { textTokens: undefined, reasoningTokens: undefined },
+      totalTokens: 21
+    };
+    let providerCalls = 0;
+    const baseAgent = {
+      id: "DeepSeekAgent",
+      model: "deepseek-v4-flash",
+      supportsNativeStructuredOutput: true,
+      generate: async (_args?: unknown) => {
+        providerCalls += 1;
+        return {
+          usage,
+          response: { modelId: "deepseek-v4-flash" },
+          output: { summary: "provider completed" },
+          text: "provider completed"
+        };
+      }
+    };
+    const wrappedAgent = {
+      id: "DeepSeekAgent:ultrafuzz-artifacts",
+      model: baseAgent.model,
+      supportsNativeStructuredOutput: true,
+      generate: (args: unknown) =>
+        runAgentWithPostflight(
+          () => baseAgent.generate(args),
+          async (_result, postflight) =>
+            postflight("artifact-validation-postflight", () => {
+              throw new Error("private postflight detail");
+            })
+        )
+    };
+    const workflow = api.smithers(() =>
+      jsxModule.jsx(api.Workflow, {
+        name: "postflight-engine-proof",
+        children: jsxModule.jsx(api.Task, {
+          id: "node:project-discovery",
+          agent: wrappedAgent,
+          output: api.outputs.result,
+          retries: 2,
+          children: "local fake"
+        })
+      })
+    );
+    const engineEvents: Array<Record<string, unknown>> = [];
+    smithersModule.reopenSingleRunnerRuntime();
+    try {
+      await effectModule.Effect.runPromise(
+        smithersModule.runWorkflow(workflow, {
+          input: {},
+          runId: workflowRunId,
+          rootDir: engineRoot,
+          onProgress: (event: Record<string, unknown>) => engineEvents.push(event)
+        })
+      );
+    } finally {
+      await smithersModule.closeSingleRunnerRuntime();
+    }
+
+    const relevantEvents = engineEvents.filter((event) =>
+      ["NodeStarted", "TokenUsageReported", "NodeFailed", "RunFailed"].includes(String(event.type))
+    );
+    assert.deepEqual(
+      relevantEvents.map((event) => event.type),
+      ["NodeStarted", "TokenUsageReported", "NodeFailed", "RunFailed"]
+    );
+    assert.equal(providerCalls, 1);
+    assert.equal(
+      engineEvents.some((event) => event.type === "NodeRetrying"),
+      false
+    );
+    const usageEvent = relevantEvents[1];
+    assert.equal(usageEvent?.model, "deepseek-v4-flash");
+    assert.equal(usageEvent?.inputTokens, 11);
+    assert.equal(usageEvent?.outputTokens, 7);
+    assert.equal(usageEvent?.cacheReadTokens, 3);
+    assert.equal(usageEvent?.cacheWriteTokens, 0);
+    assert.equal(usageEvent?.reasoningTokens, undefined);
+    const nodeFailure = relevantEvents[2]?.error as { code?: unknown; message?: unknown; usage?: unknown } | undefined;
+    assert.equal(nodeFailure?.code, "artifact-validation-postflight");
+    assert.match(String(nodeFailure?.message), /^ultrafuzz-agent-postflight:artifact-validation-postflight:/u);
+    assert.deepEqual(nodeFailure?.usage, {
+      ...usage,
+      outputTokenDetails: {}
+    });
+
+    const serializedEvents = `${relevantEvents
+      .map((event, index) =>
+        JSON.stringify({
+          runId: workflowRunId,
+          seq: index,
+          timestampMs: event.timestampMs,
+          type: event.type,
+          payload: event
+        })
+      )
+      .join("\n")}\n`;
+    fs.writeFileSync(env.SMITHERS_FAKE_EVENTS!, serializedEvents, "utf8");
+    fs.writeFileSync(env.SMITHERS_FAKE_TOKEN_EVENTS!, serializedEvents, "utf8");
+
+    const sync = await syncRun({ projectRoot: project, runId: productRunId, env });
+    assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+    const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+      nodes?: Record<string, { provenance?: { failure?: { category?: string; code?: string } } }>;
+    };
+    assert.equal(state.nodes?.["project-discovery"]?.provenance?.failure?.category, "artifact-contract");
+    assert.equal(state.nodes?.["project-discovery"]?.provenance?.failure?.code, "artifact-validation-postflight");
+    const metadataPath = path.join(run.value!.run_root, "run.json");
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+      accounting?: {
+        current?: {
+          uncached_input_tokens?: number;
+          output_tokens?: number;
+          cache_read_tokens?: number;
+          cache_write_tokens?: number;
+          reasoning_tokens?: number;
+          total_tokens?: number;
+          event_count?: number;
+          models?: string[];
+        };
+      };
+      [key: string]: unknown;
+    };
+    assert.deepEqual(metadata.accounting?.current, {
+      ...metadata.accounting?.current,
+      uncached_input_tokens: 11,
+      output_tokens: 7,
+      cache_read_tokens: 3,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      total_tokens: 21,
+      event_count: 1,
+      models: ["deepseek-v4-flash"]
+    });
+
+    delete metadata.accounting;
+    fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    fs.writeFileSync(env.SMITHERS_FAKE_TOKEN_EVENTS!, "", "utf8");
+    const replayed = await syncRun({ projectRoot: project, runId: productRunId, env });
+    assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+    const replayedMetadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+      accounting?: {
+        source?: string;
+        current?: { total_tokens?: number; event_count?: number; models?: string[] };
+      };
+    };
+    assert.equal(replayedMetadata.accounting?.source, "usage-ledger");
+    assert.equal(replayedMetadata.accounting?.current?.total_tokens, 21);
+    assert.equal(replayedMetadata.accounting?.current?.event_count, 1);
+    assert.deepEqual(replayedMetadata.accounting?.current?.models, ["deepseek-v4-flash"]);
   }
 );
 
@@ -3481,7 +3680,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /persistWorkspaceSourceAttestation\(\{/);
   assert.match(
     workflowSource,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\);[\s\S]*?const verifiedWorkspace = assertAgentWorkspaceProvenance\([\s\S]*?persistWorkspaceSourceAttestation\(\{[\s\S]*?workspace: verifiedWorkspace/
+    /\(\) => agent\.generate\(args\),[\s\S]*?await postflight\("artifact-preparation-postflight",[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\)[\s\S]*?const verifiedWorkspace = await postflight\("workspace-provenance-postflight",[\s\S]*?assertAgentWorkspaceProvenance\([\s\S]*?await postflight\("source-attestation-persistence-postflight",[\s\S]*?persistWorkspaceSourceAttestation\(\{[\s\S]*?workspace: verifiedWorkspace/
   );
   assert.doesNotMatch(workflowSource, /writeWorkspaceSourceAttestation/);
   assert.match(workflowSource, /readWorkspaceSourceAttestation\(\{/);
@@ -3500,10 +3699,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);
   assert.match(workflowSource, /function artifactAwareAgent/);
-  assert.match(
-    workflowSource,
-    /const result = await agent\.generate\(args\);[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\);/
-  );
+  assert.match(workflowSource, /return runAgentWithPostflight\(/);
+  assert.match(workflowSource, /\(\) => agent\.generate\(args\)/);
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
   assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
@@ -3523,7 +3720,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /report\.issues\.map/);
   assert.match(workflowSource, /\["implementation_paths", "test_paths"\]/);
   assert.match(workflowSource, /\["fuzzer_backend", "fuzzer_backends"\]/);
-  assert.match(workflowSource, /verifyArtifacts\(task\);/);
+  assert.match(workflowSource, /await postflight\("artifact-validation-postflight", \(\) => verifyArtifacts\(task\)\)/);
   assert.doesNotMatch(workflowSource, /addDir:\s*\[(?:task\.)?(?:workspacePath|repoPath|runRoot)\]/);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(expectedArtifactDir)}`), true);
   assert.equal(workflowSource.includes(`"artifactDir": ${JSON.stringify(run.value!.run_root)}`), false);
@@ -8330,6 +8527,69 @@ test("syncRun maps failed workflow nodes into durable failed run state", async (
   assert.equal(resumedState.nodes?.["project-discovery"]?.status, "running");
   assert.equal(resumedState.nodes?.["project-discovery"]?.last_error, undefined);
   assert.equal(resumedState.nodes?.["project-discovery"]?.finished_at, undefined);
+});
+
+test("syncRun classifies allowlisted agent postflight failures as artifact contract failures", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const workflowRunId = "ultrafuzz-sync-agent-postflight-failed";
+  const privateDetail = "private artifact detail Authorization: Bearer sk-private-state-secret";
+  const failureMessage = `ultrafuzz-agent-postflight:artifact-validation-postflight: ${privateDetail}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      status: "failed",
+      state: "failed",
+      steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      {
+        type: "NodeFailed",
+        nodeId: "node:project-discovery",
+        attempt: 1,
+        error: { message: failureMessage }
+      }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-agent-postflight-failed", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+
+  const sync = await syncRun({ projectRoot: project, runId: "sync-agent-postflight-failed", env });
+
+  assert.equal(sync.ok, true, JSON.stringify(sync.diagnostics));
+  const diagnostic = sync.diagnostics.find((entry) => entry.code === "AGENT_POSTFLIGHT_FAILED");
+  assert.deepEqual(diagnostic, {
+    code: "AGENT_POSTFLIGHT_FAILED",
+    message: "agent postflight failed at artifact-validation-postflight for project-discovery",
+    severity: "error",
+    source: "artifact-contracts",
+    path: "node:project-discovery"
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /private artifact detail|sk-private-state-secret/u);
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        provenance?: {
+          failure?: {
+            category?: string;
+            code?: string;
+            causal_task_id?: string;
+            causal_failure_category?: string;
+          };
+        };
+      }
+    >;
+  };
+  assert.deepEqual(state.nodes?.["project-discovery"]?.provenance?.failure, {
+    category: "artifact-contract",
+    code: "artifact-validation-postflight",
+    causal_task_id: "node:project-discovery",
+    causal_failure_category: "artifact-contract",
+    dependent_task_ids: []
+  });
 });
 
 test("syncRun preserves retry and checkpoint generations in the immutable attempt ledger", async () => {

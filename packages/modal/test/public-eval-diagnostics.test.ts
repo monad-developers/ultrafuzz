@@ -271,7 +271,12 @@ describe("public post-eval diagnostics", () => {
             provenance: {
               failure: {
                 category:
-                  index === 0 ? "artifact-contract" : index === 1 ? "provider-interruption" : "private-category",
+                  index === 0 || index === 2
+                    ? "artifact-contract"
+                    : index === 1
+                      ? "provider-interruption"
+                      : "private-category",
+                code: index === 2 ? "artifact-validation-postflight" : "private-code",
                 causal_task_id: `/private/workspace/${nodeId}`,
                 causal_failure_category: "private-causal-category",
                 dependent_task_ids: ["private-dependent-task"]
@@ -317,7 +322,13 @@ describe("public post-eval diagnostics", () => {
         timed_out: true,
         failure_category: "provider-interruption"
       },
-      { node_id: "failed-node-02", status: "failed", timed_out: false }
+      {
+        node_id: "failed-node-02",
+        status: "failed",
+        timed_out: false,
+        failure_category: "artifact-contract",
+        failure_code: "artifact-validation-postflight"
+      }
     ]);
     expect(diagnostics.rows[0]?.failed_nodes.at(-1)?.node_id).toBe("failed-node-31");
     const serialized = JSON.stringify(diagnostics);
@@ -325,6 +336,7 @@ describe("public post-eval diagnostics", () => {
       "private failure detail",
       "sk-ant-secret-value",
       "private-category",
+      "private-code",
       "private-causal-category",
       "private-dependent-task",
       "/private/workspace"

@@ -1,3 +1,4 @@
+export * from "./agent-postflight.js";
 export * from "./artifact-gates.js";
 export * from "./clean.js";
 export * from "./doctor.js";

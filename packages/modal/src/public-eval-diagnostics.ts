@@ -307,9 +307,10 @@ function publicEvalFailedNodes(record: Pick<EvalRunRecord, "ultrafuzz_run_root">
       const failure = recordValue(provenance?.failure);
       const disposition = recordValue(provenance?.terminal_disposition);
       const category = failureCategory.safeParse(failure?.category);
-      const code = failureCode.safeParse(
-        disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined
-      );
+      const dispositionCode =
+        disposition?.schema_version === "ultrafuzz.terminal-disposition.v1" ? disposition.kind : undefined;
+      const directCode = failureCode.safeParse(failure?.code);
+      const code = directCode.success ? directCode : failureCode.safeParse(dispositionCode);
       failedNodes.push({
         node_id: parsed.data.node_id,
         status: parsed.data.status,

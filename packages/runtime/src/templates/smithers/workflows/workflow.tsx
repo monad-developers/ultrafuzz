@@ -28,6 +28,7 @@ const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_AR
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
 const { artifactContractDefinition, assertRegularFileInside, validateArtifactContract } = await import(artifactsModule);
 const {
+  runAgentWithPostflight,
   assertAgentWorkspaceProvenance,
   assertSingleLinkRegularFile,
   assertWorkspaceBaseCommit,
@@ -37,6 +38,22 @@ const {
   persistWorkspaceSourceAttestation,
   readWorkspaceSourceAttestation
 } = await import(runtimeModule);
+
+type AgentPostflightRunner = <T>(
+  code:
+    | "workspace-provenance-postflight"
+    | "artifact-preparation-postflight"
+    | "source-attestation-persistence-postflight"
+    | "markdown-materialization-postflight"
+    | "dedupe-materialization-postflight"
+    | "final-report-materialization-postflight"
+    | "findings-normalization-postflight"
+    | "report-provenance-normalization-postflight"
+    | "generated-test-manifest-normalization-postflight"
+    | "generated-test-companion-materialization-postflight"
+    | "artifact-validation-postflight",
+  operation: () => T | Promise<T>
+) => Promise<T>;
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -188,8 +205,10 @@ function agentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLike[]
 }
 
 function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike): AgentLike {
-  return {
+  const model = boundedAgentModel(agent) ?? boundedModelName(task.modelName);
+  const wrappedAgent: AgentLike & { model?: string } = {
     ...(agent.id === undefined ? {} : { id: `${agent.id}:ultrafuzz-artifacts` }),
+    ...(model === undefined ? {} : { model }),
     ...(agent.tools === undefined ? {} : { tools: agent.tools }),
     ...(agent.capabilities === undefined ? {} : { capabilities: agent.capabilities }),
     ...(agent.supportsNativeStructuredOutput === undefined
@@ -220,50 +239,84 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
         expectedTasks: sourceAttestationClosure(task)
       });
-      const result = await agent.generate(args);
-      // Agent work may replace or clean its worktree, including the prepared
-      // artifact mirror. Re-establish the same path-checked directories before
-      // preserving outputs; this remains deterministic and model-free.
-      prepareTaskWorkspaceOutputRoots(task);
-      // Re-check the exact repository identity and source tree after the model
-      // returns. Evidence captured before invocation cannot prove the model did
-      // not leave the worktree on a different revision or modify target source.
-      const verifiedWorkspace = assertAgentWorkspaceProvenance(
-        task.workspacePath,
-        task.baseCommit,
-        typeof args?.rootDir === "string" ? args.rootDir : undefined,
-        taskWorkspaceOutputRoots(task)
+      return runAgentWithPostflight(
+        () => agent.generate(args),
+        async (result: unknown, postflight: AgentPostflightRunner) => {
+          // Agent work may replace or clean its worktree, including the prepared
+          // artifact mirror. Re-establish the same path-checked directories before
+          // preserving outputs; this remains deterministic and model-free.
+          await postflight("artifact-preparation-postflight", () => prepareTaskWorkspaceOutputRoots(task));
+          const verifiedWorkspace = await postflight("workspace-provenance-postflight", () =>
+            // Re-check the exact repository identity and source tree after the model
+            // returns. Evidence captured before invocation cannot prove the model did
+            // not leave the worktree on a different revision or modify target source.
+            assertAgentWorkspaceProvenance(
+              task.workspacePath,
+              task.baseCommit,
+              typeof args?.rootDir === "string" ? args.rootDir : undefined,
+              taskWorkspaceOutputRoots(task)
+            )
+          );
+          await postflight("source-attestation-persistence-postflight", () => {
+            // Rebuild the runner-owned attestation from the post-invocation check so
+            // model access to the artifact directory cannot substitute stale evidence.
+            persistWorkspaceSourceAttestation({
+              artifactDir: task.artifactDir,
+              targetRevision: task.baseCommit,
+              current: {
+                attemptId: task.attemptId,
+                nodeId: task.metadata.node.logicalNodeId,
+                workspace: verifiedWorkspace
+              },
+              dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
+                path.resolve(process.cwd(), directory)
+              ),
+              expectedTasks: sourceAttestationClosure(task)
+            });
+          });
+          await postflight("markdown-materialization-postflight", () =>
+            materializeMissingMarkdownArtifacts(task, result)
+          );
+          await postflight("dedupe-materialization-postflight", () => materializeMissingDedupeArtifact(task));
+          await postflight("final-report-materialization-postflight", () =>
+            materializeMissingFinalReportArtifacts(task)
+          );
+          await postflight("findings-normalization-postflight", () => normalizeLegacyFindingFields(task));
+          await postflight("report-provenance-normalization-postflight", () => normalizeLegacyReportProvenance(task));
+          await postflight("generated-test-manifest-normalization-postflight", () =>
+            normalizeLegacyGeneratedTestManifests(task)
+          );
+          await postflight("generated-test-companion-materialization-postflight", () =>
+            materializeGeneratedTestCompanions(task)
+          );
+          // Keep artifact validation inside the agent task completion boundary.
+          // This does not create a second model opportunity; it validates and, for
+          // Markdown only, preserves the same agent's final response as its output.
+          // Compatibility handling only adapts known legacy field representations;
+          // generated-test companions are mirrored from their mandated workspace
+          // path, and the strict verifier still validates every resulting artifact.
+          await postflight("artifact-validation-postflight", () => verifyArtifacts(task));
+        }
       );
-      // Rebuild the runner-owned attestation from the post-invocation check so
-      // model access to the artifact directory cannot substitute stale evidence.
-      persistWorkspaceSourceAttestation({
-        artifactDir: task.artifactDir,
-        targetRevision: task.baseCommit,
-        current: {
-          attemptId: task.attemptId,
-          nodeId: task.metadata.node.logicalNodeId,
-          workspace: verifiedWorkspace
-        },
-        dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
-        expectedTasks: sourceAttestationClosure(task)
-      });
-      materializeMissingMarkdownArtifacts(task, result);
-      materializeMissingDedupeArtifact(task);
-      materializeMissingFinalReportArtifacts(task);
-      normalizeLegacyFindingFields(task);
-      normalizeLegacyReportProvenance(task);
-      normalizeLegacyGeneratedTestManifests(task);
-      materializeGeneratedTestCompanions(task);
-      // Keep artifact validation inside the agent task completion boundary.
-      // This does not create a second model opportunity; it validates and, for
-      // Markdown only, preserves the same agent's final response as its output.
-      // Compatibility handling only adapts known legacy field representations;
-      // generated-test companions are mirrored from their mandated workspace
-      // path, and the strict verifier still validates every resulting artifact.
-      verifyArtifacts(task);
-      return result;
     }
   };
+  return wrappedAgent;
+}
+
+function boundedAgentModel(agent: AgentLike): string | undefined {
+  try {
+    return boundedModelName((agent as AgentLike & { model?: unknown }).model);
+  } catch {
+    return undefined;
+  }
+}
+
+function boundedModelName(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 256 ? normalized : undefined;
 }
 
 function sourceAttestationClosure(task: (typeof taskSpecs)[number]): Array<{ attemptId: string; nodeId: string }> {

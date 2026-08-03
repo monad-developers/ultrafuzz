@@ -14,7 +14,20 @@ export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
   "dependency-cascade",
   "provider-interruption"
 ] as const;
-export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure"] as const;
+export const PUBLIC_EVAL_FAILURE_CODES = [
+  "task-output-validation-failure",
+  "workspace-provenance-postflight",
+  "artifact-preparation-postflight",
+  "source-attestation-persistence-postflight",
+  "markdown-materialization-postflight",
+  "dedupe-materialization-postflight",
+  "final-report-materialization-postflight",
+  "findings-normalization-postflight",
+  "report-provenance-normalization-postflight",
+  "generated-test-manifest-normalization-postflight",
+  "generated-test-companion-materialization-postflight",
+  "artifact-validation-postflight"
+] as const;
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);

@@ -91,7 +91,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
 
   const agent = source.slice(agentStart, rootsStart);
   assert.match(agent, /if \(\(args\?\.taskContext\?\.attempt \?\? 1\) > 1\)/u);
-  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("await agent.generate(args)"), agent);
+  assert.ok(agent.indexOf("resetTaskArtifactsForRetry(task)") < agent.indexOf("() => agent.generate(args)"), agent);
 
   const reset = source.slice(rootsStart, preparationStart);
   assert.match(
@@ -124,7 +124,22 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   assert.ok(preparationStart > agentStart, source);
 
   const agent = source.slice(agentStart, preparationStart);
-  assert.match(agent, /const result = await agent\.generate\(args\)/u);
+  assert.match(agent, /return runAgentWithPostflight\(/u);
+  assert.match(agent, /\(\) => agent\.generate\(args\)/u);
+  assert.match(agent, /await postflight\("artifact-preparation-postflight"/u);
+  assert.match(agent, /await postflight\("workspace-provenance-postflight"/u);
+  assert.match(agent, /await postflight\("source-attestation-persistence-postflight"/u);
+  assert.match(agent, /await postflight\("markdown-materialization-postflight"/u);
+  assert.match(agent, /await postflight\("dedupe-materialization-postflight"/u);
+  assert.match(agent, /await postflight\("final-report-materialization-postflight"/u);
+  assert.match(agent, /await postflight\("findings-normalization-postflight"/u);
+  assert.match(agent, /await postflight\("report-provenance-normalization-postflight"/u);
+  assert.match(agent, /await postflight\("generated-test-manifest-normalization-postflight"/u);
+  assert.match(agent, /await postflight\("generated-test-companion-materialization-postflight"/u);
+  assert.match(agent, /await postflight\("artifact-validation-postflight"/u);
+  assert.match(agent, /const model = boundedAgentModel\(agent\) \?\? boundedModelName\(task\.modelName\)/u);
+  assert.match(agent, /value\.trim\(\)/u);
+  assert.match(agent, /normalized\.length > 0 && normalized\.length <= 256/u);
   assert.match(agent, /prepareTaskWorkspaceOutputRoots\(task\)/u);
   assert.match(agent, /materializeMissingMarkdownArtifacts\(task, result\)/u);
   assert.match(agent, /materializeMissingFinalReportArtifacts\(task\)/u);

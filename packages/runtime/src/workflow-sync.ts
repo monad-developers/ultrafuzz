@@ -47,6 +47,7 @@ import {
   type UsageLedgerReplay
 } from "@ultrafuzz/artifacts";
 
+import { agentPostflightFailureCode } from "./agent-postflight.js";
 import { verifyRequiredArtifactsForAttempt } from "./artifact-gates.js";
 import {
   ArtifactReconciliationInterruptedError,
@@ -2237,28 +2238,38 @@ async function finalizeTerminalTask(input: {
   control: WorkflowSynchronizationControl;
 }): Promise<NodeFinalization> {
   if (input.evidence.status !== "succeeded") {
+    const postflightFailureCode =
+      input.evidenceSource === "agent" && input.evidence.status === "failed"
+        ? agentPostflightFailureCode(input.evidence.error)
+        : undefined;
     const category =
       input.evidence.status === "skipped"
         ? "dependency-cascade"
         : input.evidenceSource === "verifier"
           ? "artifact-contract"
-          : input.evidence.status === "timed-out"
-            ? "provider-interruption"
-            : "agent-failure";
+          : postflightFailureCode !== undefined
+            ? "artifact-contract"
+            : input.evidence.status === "timed-out"
+              ? "provider-interruption"
+              : "agent-failure";
     const verifierFailure = input.evidenceSource === "verifier" && category === "artifact-contract";
+    const postflightFailure = postflightFailureCode !== undefined && category === "artifact-contract";
     return {
       status: input.evidence.status,
-      diagnostics: verifierFailure
-        ? [
-            {
-              code: "ARTIFACT_VERIFIER_FAILED",
-              message: `artifact verifier did not complete successfully for ${input.task.attemptId}`,
-              severity: "error",
-              source: "artifact-contracts",
-              path: input.task.verifierSmithersNodeId
-            }
-          ]
-        : [],
+      diagnostics:
+        verifierFailure || postflightFailure
+          ? [
+              {
+                code: postflightFailure ? "AGENT_POSTFLIGHT_FAILED" : "ARTIFACT_VERIFIER_FAILED",
+                message: postflightFailure
+                  ? `agent postflight failed at ${postflightFailureCode} for ${input.task.attemptId}`
+                  : `artifact verifier did not complete successfully for ${input.task.attemptId}`,
+                severity: "error",
+                source: "artifact-contracts",
+                path: postflightFailure ? input.task.smithersNodeId : input.task.verifierSmithersNodeId
+              }
+            ]
+          : [],
       ...(input.evidence.error
         ? { lastError: input.evidence.error }
         : verifierFailure
@@ -2270,6 +2281,7 @@ async function finalizeTerminalTask(input: {
             ? dependencyCascadeFailure(input.layout, input.task, input.tasksByAttempt)
             : {
                 category,
+                ...(postflightFailureCode === undefined ? {} : { code: postflightFailureCode }),
                 causal_task_id: verifierFailure ? input.task.verifierSmithersNodeId : input.task.smithersNodeId,
                 causal_failure_category: category,
                 dependent_task_ids: []
