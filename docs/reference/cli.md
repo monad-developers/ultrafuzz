@@ -408,7 +408,7 @@ writing, and guards mutating requests with a per-session token.
 ultrafuzz eval plan \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|langsmith|none] \
+  [--provider braintrust|none] \
   [--target-root <path>] \
   [--ground-truth-root <external-path>] \
   [--skip-target-validation] \
@@ -416,7 +416,7 @@ ultrafuzz eval plan \
 ultrafuzz eval run \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|langsmith|none] \
+  [--provider braintrust|none] \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
@@ -445,7 +445,7 @@ ultrafuzz eval analyze all \
   [--json]
 ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
-  [--provider braintrust|langsmith] \
+  [--provider braintrust] \
   [--resume] \
   [--json]
 ultrafuzz eval history [eval-run-id] \

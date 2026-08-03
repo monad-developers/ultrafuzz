@@ -11,12 +11,6 @@ provider = "braintrust"
 [eval.providers.braintrust]
 api_key_env = "BRAINTRUST_API_KEY"
 project = "ultrafuzz-evals"
-
-[eval.providers.langsmith]
-api_key_env = "LANGSMITH_API_KEY"
-workspace_id_env = "LANGSMITH_WORKSPACE_ID"
-project = "ultrafuzz-evals"
-endpoint = "https://api.smith.langchain.com"
 `;
 
 describe("[eval] config section", () => {
@@ -29,13 +23,7 @@ describe("[eval] config section", () => {
       groundTruthRoot: "/secure/eval-ground-truth",
       provider: "braintrust",
       providers: {
-        braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", project: "ultrafuzz-evals" },
-        langsmith: {
-          apiKeyEnv: "LANGSMITH_API_KEY",
-          workspaceIdEnv: "LANGSMITH_WORKSPACE_ID",
-          project: "ultrafuzz-evals",
-          endpoint: "https://api.smith.langchain.com"
-        }
+        braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", project: "ultrafuzz-evals" }
       }
     });
   });
@@ -64,11 +52,11 @@ api_key = "not-allowed-here"
     if (!parsed.ok) return;
     const resolved = resolveConfig({
       projectConfig: parsed.value,
-      env: { ULTRAFUZZ_EVAL_PROVIDER: "langsmith", ULTRAFUZZ_EVAL_CONFIG: "custom-suite.yml" }
+      env: { ULTRAFUZZ_EVAL_PROVIDER: "none", ULTRAFUZZ_EVAL_CONFIG: "custom-suite.yml" }
     });
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
-    expect(resolved.value.eval.provider).toBe("langsmith");
+    expect(resolved.value.eval.provider).toBe("none");
     expect(resolved.value.eval.evalConfig).toBe("custom-suite.yml");
     expect(resolved.value.eval.providers.braintrust).toEqual({
       apiKeyEnv: "BRAINTRUST_API_KEY",

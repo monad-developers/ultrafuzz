@@ -4,9 +4,8 @@ Ultrafuzz eval suites benchmark the fuzzing pipeline against targets with
 known ground-truth bugs, with a **provider-agnostic `EvalReporter`
 abstraction** and **first-class node telemetry**: every node of the
 `topology.yml` DAG (lifecycle, heartbeats, and intermediary artifacts —
-reports, markdown, JSON) is streamed to the configured eval cloud provider
-(Braintrust, LangSmith, …) as spans/child runs, live during a run and
-replayable after it.
+reports, markdown, JSON) is streamed to Braintrust as spans, live during a run
+and replayable after it.
 
 ## Configuration split
 
@@ -22,38 +21,29 @@ variables, never inline secret values.
 [eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"   # suite used when --suite is omitted
 ground_truth_root = "/secure/eval-ground-truth"    # machine-specific, MUST resolve outside the repo
-provider = "braintrust"                            # active reporter: braintrust | langsmith | none
+provider = "braintrust"                            # active reporter: braintrust | none
 
 [eval.providers.braintrust]
 api_key_env = "BRAINTRUST_API_KEY"
 project = "ultrafuzz-evals"
-
-[eval.providers.langsmith]
-api_key_env = "LANGSMITH_API_KEY"
-workspace_id_env = "LANGSMITH_WORKSPACE_ID"
-project = "ultrafuzz-evals"
-# endpoint = "https://langsmith.internal.example" # requires the exact operator acknowledgement below
 ```
 
-- `provider` selects the active reporter; `[eval.providers.*]` entries are
-  connection profiles, so switching providers (or adding a new one) is a
-  one-line change with no YAML edits.
+- `provider` selects Braintrust reporting or disables cloud reporting with
+  `none`; `[eval.providers.*]` entries are connection profiles.
 - Precedence: CLI flag (`--provider`, `--suite`) > env
   (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
 - `ground_truth_root` is machine-specific and security-sensitive: ground truth
   must live **outside** the repository; suite targets reference files relative
   to this root. Absolute entries, traversal, symlinks, non-regular files, and
   files larger than 1 MiB are rejected.
-- Built-in reporters bind credentials to their canonical names
-  (`BRAINTRUST_API_KEY`, `LANGSMITH_API_KEY`, and, when configured,
-  `LANGSMITH_WORKSPACE_ID`) and canonical HTTPS origins. Requests reject
+- The built-in reporter binds credentials to the canonical
+  `BRAINTRUST_API_KEY` name and canonical HTTPS origin. Requests reject
   redirects, time out after 30 seconds, and accept at most 1 MiB of response
   data.
 - A self-hosted endpoint must be an HTTPS origin and requires an exact,
   operator-owned environment acknowledgement. Set
-  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` or
-  `ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT` to the same origin as the
-  corresponding `endpoint`. Repository configuration alone cannot redirect a
+  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` to the same origin as the
+  configured `endpoint`. Repository configuration alone cannot redirect a
   provider credential.
 - Validation: an unknown `provider` or a missing `[eval.providers.<name>]`
   profile is a config error at `eval plan` time; a missing env var named by
@@ -124,11 +114,8 @@ the workflow runner:
   degrade to warnings.
 - `packages/evals/src/reporters/braintrust.ts` maps rows to a three-level span
   tree (row root → topology group → node attempt) with backdated
-  `start`/`end` metrics; `reporters/langsmith.ts` maps the same stream to
-  root/child runs via `parent_run_id`/`dotted_order`, creating runs live on
-  `node-started` and patching them on `node-finished`. Both reporters speak
-  the providers' REST APIs directly over `fetch` — `packages/runtime` never
-  imports a provider SDK.
+  `start`/`end` metrics. The reporter speaks the provider's REST API directly
+  over `fetch` — `packages/runtime` never imports a provider SDK.
 - Heartbeat liveness is bounded by the sync poll cadence: state transitions
   and partial artifacts appear within one poll interval. That is the correct
   trade for a detached orchestrator.
@@ -262,7 +249,7 @@ a scored datapoint; two failed rows or missing terminal evidence still block
 publication. Bundle path, size, and SHA-256 checks are distinct from
 the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
-`eval publish --provider langsmith <eval-run-id>` replays the journal from
+`eval publish --provider braintrust <eval-run-id>` replays the journal from
 offset 0 and reconstructs the entire node trace on a provider after the fact
 (CI runs with reporting off, backfilling a newly added provider). Live and
 post-hoc publishing share one code path; `--resume` continues from the

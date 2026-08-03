@@ -153,7 +153,6 @@ export interface TriageConfig {
 export interface EvalProviderProfile {
   /** Built-in providers require their canonical API-key environment variable name. */
   apiKeyEnv?: string;
-  workspaceIdEnv?: string;
   project?: string;
   endpoint?: string;
 }
@@ -163,7 +162,7 @@ export interface EvalConfig {
   evalConfig?: string;
   /** Machine-specific root for ground-truth files; must resolve outside the repository. */
   groundTruthRoot?: string;
-  /** Active reporter binding: `braintrust`, `langsmith`, `none`, or any configured profile name. */
+  /** Active reporter binding: `braintrust` or `none`. */
   provider: string;
   /** Connection profiles keyed by provider name; values are env-var NAMES, never secrets. */
   providers: Record<string, EvalProviderProfile>;

@@ -15,7 +15,7 @@ export default class EvalPlan extends Command {
   static override flags = {
     ...globalFlags,
     suite: Flags.string({ summary: "Eval suite YAML path (defaults to [eval].eval_config)" }),
-    provider: Flags.string({ summary: "Eval reporter provider override (braintrust | langsmith | none)" }),
+    provider: Flags.string({ summary: "Eval reporter provider override (braintrust | none)" }),
     "target-root": Flags.string({ summary: "Directory containing local target checkouts, one per target id" }),
     "ground-truth-root": Flags.string({ summary: "External directory containing benchmark ground truth" }),
     "skip-target-validation": Flags.boolean({ summary: "Skip local target git ref validation" })
