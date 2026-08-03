@@ -159,7 +159,7 @@ into the normal `EvalSuiteSpec` and can project one runner for an isolated Modal
 pair while retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
-eight SVG charts in one transaction:
+nine SVG charts in one transaction:
 
 ```bash
 ultrafuzz eval history <eval-run-id> \
@@ -233,7 +233,7 @@ supplies the benchmark policy, and observations and regenerated charts stay
 keyed to that candidate commit. This compare-and-swap loop retains every
 complete generation without relying on a GitHub concurrency queue, which can
 discard a pending job. Its commit is restricted to `benchmarks/history.json`
-and the eight `docs/assets/eval-history/*.svg` charts.
+and the nine `docs/assets/eval-history/*.svg` charts.
 
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
 variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions

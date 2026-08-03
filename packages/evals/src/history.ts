@@ -272,7 +272,15 @@ export const EVAL_HISTORY_CHARTS = [
   { file: "cost.svg", metric: "cost_usd", title: "Cost (USD)", ratio: false }
 ] as const;
 
-export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg"] as const;
+export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg", "performance-cost.svg"] as const;
+
+// Luna's repository history has a non-overlapping cost regime beginning with
+// this run: the 11 earlier complete runs cost $56.04-$82.40, while the six
+// runs at and after the cutoff cost $11.54-$15.05. Keep current-price model
+// comparisons from mixing those regimes as new results are published.
+export const EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS: Readonly<Record<string, string>> = {
+  "gpt-5.6-luna": "2026-07-31T14:52:13.635Z"
+};
 
 type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
@@ -1178,6 +1186,22 @@ export interface EvalHistoryBenchmarkAggregate {
   cost_usd: number | null;
 }
 
+export interface EvalHistoryModelPerformanceCostAggregate {
+  model: string;
+  runCount: number;
+  firstRunTimestamp: string;
+  lastRunTimestamp: string;
+  pricingCutoff: string | null;
+  costUsd: EvalHistoryQuartiles;
+  f1: EvalHistoryQuartiles;
+}
+
+export interface EvalHistoryQuartiles {
+  q1: number;
+  median: number;
+  q3: number;
+}
+
 function canonicalTargetRevisions(observation: EvalHistoryObservation): string {
   return observation.target_revisions
     .map(({ target, revision }) => `${target}:${revision}`)
@@ -1268,6 +1292,42 @@ export function aggregateEvalHistoryBenchmarkRuns(
       compareText(left.candidate_commit, right.candidate_commit) ||
       compareText(left.key, right.key)
   );
+}
+
+export function aggregateEvalHistoryModelPerformanceCost(
+  aggregates: EvalHistoryBenchmarkAggregate[]
+): EvalHistoryModelPerformanceCostAggregate[] {
+  const byModel = new Map<string, EvalHistoryBenchmarkAggregate[]>();
+  for (const aggregate of aggregates) {
+    if (!isCurrentPerformanceCostPricing(aggregate)) continue;
+    if (aggregate.cost_usd === null) continue;
+    byModel.set(aggregate.model, [...(byModel.get(aggregate.model) ?? []), aggregate]);
+  }
+
+  return [...byModel.entries()]
+    .map(([model, modelAggregates]) => {
+      const selected = modelAggregates.sort(
+        (left, right) =>
+          compareText(left.run_timestamp, right.run_timestamp) ||
+          compareText(left.candidate_commit, right.candidate_commit) ||
+          compareText(left.source_eval_run_id, right.source_eval_run_id)
+      );
+      return {
+        model,
+        runCount: selected.length,
+        firstRunTimestamp: selected[0]!.run_timestamp,
+        lastRunTimestamp: selected.at(-1)!.run_timestamp,
+        pricingCutoff: EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[model] ?? null,
+        costUsd: quartiles(selected.map((aggregate) => aggregate.cost_usd ?? 0)),
+        f1: quartiles(selected.map((aggregate) => aggregate.f1))
+      };
+    })
+    .sort((left, right) => compareText(left.model, right.model));
+}
+
+function isCurrentPerformanceCostPricing(aggregate: EvalHistoryBenchmarkAggregate): boolean {
+  const cutoff = EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[aggregate.model];
+  return cutoff === undefined || compareText(aggregate.run_timestamp, cutoff) >= 0;
 }
 
 function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
@@ -1580,6 +1640,119 @@ function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): st
   return `${lines.join("\n")}\n`;
 }
 
+function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 90;
+  const right = 40;
+  const top = 120;
+  const plotWidth = width - left - right;
+  const plotHeight = 320;
+  const plotBottom = top + plotHeight;
+  const legendTop = plotBottom + 94;
+  const comparableAggregates = aggregates.filter(
+    (aggregate) => aggregate.lane === "smoke" && isCurrentPerformanceCostPricing(aggregate)
+  );
+  const summaries = aggregateEvalHistoryModelPerformanceCost(comparableAggregates);
+  const plottedModels = new Set(summaries.map((summary) => summary.model));
+  const unavailableModels = [...new Set(comparableAggregates.map((aggregate) => aggregate.model))]
+    .filter((model) => !plottedModels.has(model))
+    .sort(compareText)
+    .map((model) => {
+      const modelAggregates = comparableAggregates.filter((aggregate) => aggregate.model === model);
+      return {
+        model,
+        runCount: modelAggregates.length,
+        medianF1: quantile(
+          modelAggregates.map((aggregate) => aggregate.f1),
+          0.5
+        )
+      };
+    });
+  const legendRows = Math.max(1, summaries.length) + unavailableModels.length;
+  const height = legendTop + legendRows * 26 + 24;
+  const costMaximum = niceCostMaximum(summaries.map((summary) => summary.costUsd.q3));
+  const f1Maximum = niceF1Maximum(summaries.map((summary) => summary.f1.q3));
+  const x = (value: number): number => left + (value / costMaximum) * plotWidth;
+  const y = (value: number): number => top + plotHeight - (value / f1Maximum) * plotHeight;
+  const unavailableDescription =
+    unavailableModels.length === 0
+      ? ""
+      : ` Cost is unavailable for ${unavailableModels.map(({ model }) => model).join(", ")}.`;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">UltrafuzzBench performance versus cost</title>',
+    `<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges.${xml(unavailableDescription)}</desc>`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">Performance × cost</text>`,
+    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete runs in each model&apos;s current pricing regime</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Dots are medians; horizontal cost bands and vertical macro-F1 bands show the IQR.</text>`,
+    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<text transform="translate(22,${top + plotHeight / 2}) rotate(-90)" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>`,
+    `<text x="${left + plotWidth / 2}" y="${plotBottom + 58}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">Cost per complete run (USD)</text>`
+  ];
+
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const cost = (costMaximum * tick) / 4;
+    const tickX = x(cost);
+    lines.push(
+      `<line x1="${format(tickX)}" y1="${top}" x2="${format(tickX)}" y2="${plotBottom}" stroke="#e5e7eb"/>`,
+      `<text x="${format(tickX)}" y="${plotBottom + 24}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">${xml(formatCostTick(cost))}</text>`
+    );
+    const f1 = (f1Maximum * tick) / 4;
+    const tickY = y(f1);
+    lines.push(
+      `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
+      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">${formatOverviewPercent(f1)}</text>`
+    );
+  }
+
+  if (summaries.length === 0) {
+    lines.push(
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete priced benchmark runs</text>`
+    );
+  } else {
+    summaries.forEach((summary, index) => {
+      const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
+      const medianX = x(summary.costUsd.median);
+      const medianY = y(summary.f1.median);
+      const attributes = `data-model="${xml(summary.model)}" data-run-count="${summary.runCount}" data-cost-q1="${summary.costUsd.q1}" data-cost-median="${summary.costUsd.median}" data-cost-q3="${summary.costUsd.q3}" data-f1-q1="${summary.f1.q1}" data-f1-median="${summary.f1.median}" data-f1-q3="${summary.f1.q3}"`;
+      lines.push(
+        `<g ${attributes}><title>${xml(`${summary.model}: median ${formatOverviewPercent(summary.f1.median)} at ${formatCost(summary.costUsd.median)}; ${summary.runCount} ${summary.runCount === 1 ? "run" : "runs"} from ${summary.firstRunTimestamp.slice(0, 10)} to ${summary.lastRunTimestamp.slice(0, 10)}${summary.pricingCutoff === null ? "" : ` (current pricing since ${summary.pricingCutoff.slice(0, 10)})`}`)}</title>`
+      );
+      if (summary.costUsd.q1 < summary.costUsd.q3) {
+        lines.push(
+          `<line data-iqr="cost" x1="${format(x(summary.costUsd.q1))}" y1="${format(medianY)}" x2="${format(x(summary.costUsd.q3))}" y2="${format(medianY)}" stroke="${color}" stroke-width="10" stroke-linecap="round" opacity="0.22"/>`
+        );
+      }
+      if (summary.f1.q1 < summary.f1.q3) {
+        lines.push(
+          `<line data-iqr="f1" x1="${format(medianX)}" y1="${format(y(summary.f1.q1))}" x2="${format(medianX)}" y2="${format(y(summary.f1.q3))}" stroke="${color}" stroke-width="10" stroke-linecap="round" opacity="0.22"/>`
+        );
+      }
+      lines.push(renderProfileMarker(index, medianX, medianY, color, 8), "</g>");
+    });
+  }
+
+  summaries.forEach((summary, index) => {
+    const rowY = legendTop + index * 26;
+    const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
+    lines.push(
+      renderProfileMarker(index, left + 8, rowY - 4, color, 6),
+      `<text x="${left + 24}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">${xml(summary.model)}</tspan><tspan fill="#6b7280"> · median ${formatOverviewPercent(summary.f1.median)} · ${xml(formatCost(summary.costUsd.median))} · n=${summary.runCount}</tspan></text>`
+    );
+  });
+  unavailableModels.forEach((summary, index) => {
+    const rowY = legendTop + (Math.max(1, summaries.length) + index) * 26;
+    lines.push(
+      `<text x="${left}" y="${rowY}" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Not plotted · ${xml(summary.model)} · median ${formatOverviewPercent(summary.medianF1)} · n=${summary.runCount} · cost unavailable</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
 function formatOverviewPercent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
@@ -1598,6 +1771,7 @@ export function renderEvalHistoryCharts(history: EvalHistory): Map<string, strin
   return new Map([
     [EVAL_HISTORY_OVERVIEW_FILES[0], renderLatestEvalSummary(aggregates)],
     [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
+    [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)],
     ...EVAL_HISTORY_CHARTS.map(
       (chart) => [chart.file, renderChart(validated.observations, chart.metric, chart.title, chart.ratio)] as const
     )
@@ -2010,6 +2184,35 @@ function mean(values: number[]): number {
   return round(values.reduce((sum, value) => sum + value, 0) / values.length);
 }
 
+function quartiles(values: number[]): EvalHistoryQuartiles {
+  return {
+    q1: quantile(values, 0.25),
+    median: quantile(values, 0.5),
+    q3: quantile(values, 0.75)
+  };
+}
+
+function quantile(values: number[], probability: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * probability;
+  const lowerIndex = Math.floor(index);
+  const lower = sorted[lowerIndex]!;
+  const upper = sorted[Math.min(lowerIndex + 1, sorted.length - 1)]!;
+  return round(lower + (upper - lower) * (index - lowerIndex));
+}
+
+function niceCostMaximum(values: number[]): number {
+  const padded = Math.max(1, ...values) * 1.15;
+  const magnitude = 10 ** Math.floor(Math.log10(padded));
+  const normalized = padded / magnitude;
+  const factor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return factor * magnitude;
+}
+
+function niceF1Maximum(values: number[]): number {
+  return Math.min(1, Math.max(0.4, Math.ceil(Math.max(0, ...values) * 11) / 10));
+}
+
 function round(value: number): number {
   return Number(value.toFixed(8));
 }
@@ -2039,6 +2242,14 @@ function compareText(left: string, right: string): number {
 function format(value: number): string {
   const rounded = Number(value.toFixed(2));
   return Object.is(rounded, -0) ? "0" : String(rounded);
+}
+
+function formatCost(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function formatCostTick(value: number): string {
+  return `$${Number(value.toFixed(2)).toLocaleString("en-US", { useGrouping: false })}`;
 }
 
 function formatMetric(value: number, ratioMetric: boolean): string {
