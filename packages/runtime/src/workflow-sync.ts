@@ -25,6 +25,7 @@ import {
   updateNodeState,
   updateRunStatus,
   validateSafeId,
+  verifyArtifactManifestPrerequisites,
   writeArtifactManifest,
   writeJsonDurable,
   writeRunState,
@@ -1708,13 +1709,26 @@ async function synchronizeTasks(input: {
       continue;
     }
     const evidence = attemptEvidence.evidence;
+    const closureInvalidatedForCurrentAttempt = artifactClosureInvalidatedForCurrentAttempt(previous, evidence);
+    const invalidPrerequisiteClosure =
+      evidence.status !== "succeeded"
+        ? undefined
+        : closureInvalidatedForCurrentAttempt
+          ? ((artifactManifestExists(input.layout, task.attemptId)
+              ? invalidArtifactManifestClosure(input.layout, task.attemptId)
+              : undefined) ?? { changed: [task.attemptId], missing: [] })
+          : previous?.status === "succeeded" && artifactManifestExists(input.layout, task.attemptId)
+            ? invalidArtifactManifestClosure(input.layout, task.attemptId)
+            : undefined;
 
     const needsFinalization =
       evidence.status === "succeeded"
-        ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
+        ? previous?.status !== "succeeded" ||
+          !artifactManifestExists(input.layout, task.attemptId) ||
+          invalidPrerequisiteClosure !== undefined
         : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
     const prerequisiteFinalization =
-      needsFinalization && evidence.status === "succeeded"
+      needsFinalization && evidence.status === "succeeded" && invalidPrerequisiteClosure === undefined
         ? prerequisiteFinalizationForTask({
             layout: input.layout,
             task,
@@ -1724,20 +1738,22 @@ async function synchronizeTasks(input: {
           })
         : undefined;
     const finalization = needsFinalization
-      ? (prerequisiteFinalization ??
-        (await finalizeTerminalTask({
-          layout: input.layout,
-          node,
-          task,
-          workflowRunId: input.workflowRunId,
-          evidence,
-          evidenceSource: attemptEvidence.source,
-          tasksByAttempt,
-          force: previous?.status === "succeeded",
-          previous,
-          nowMs: synchronizationClock(input.control),
-          control: input.control
-        })))
+      ? invalidPrerequisiteClosure === undefined
+        ? (prerequisiteFinalization ??
+          (await finalizeTerminalTask({
+            layout: input.layout,
+            node,
+            task,
+            workflowRunId: input.workflowRunId,
+            evidence,
+            evidenceSource: attemptEvidence.source,
+            tasksByAttempt,
+            force: previous?.status === "succeeded",
+            previous,
+            nowMs: synchronizationClock(input.control),
+            control: input.control
+          })))
+        : invalidArtifactManifestClosureFinalization(task, invalidPrerequisiteClosure)
       : {
           status: evidence.status,
           diagnostics: [],
@@ -1850,6 +1866,77 @@ async function synchronizeTasks(input: {
   }
 
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
+}
+
+function artifactClosureInvalidatedForCurrentAttempt(
+  previous: NodeState | undefined,
+  evidence: NodeWorkflowEvidence
+): boolean {
+  if (previous?.status !== "invalidated") {
+    return false;
+  }
+  const prerequisiteFinalization = recordField(previous.provenance, "prerequisite_finalization");
+  if (stringField(prerequisiteFinalization, "status") !== "invalidated") {
+    return false;
+  }
+  const previousWorkflow = recordField(previous.provenance, "workflow");
+  const previousAttempt = numberField(previousWorkflow, "attempt");
+  return previousAttempt === undefined || evidence.attempt === undefined || previousAttempt === evidence.attempt;
+}
+
+function invalidArtifactManifestClosure(
+  layout: RunLayout,
+  nodeId: string
+): { changed: string[]; missing: string[] } | undefined {
+  try {
+    const closure = verifyArtifactManifestPrerequisites(layout, nodeId);
+    return closure.ok ? undefined : { changed: closure.changed, missing: closure.missing };
+  } catch {
+    return { changed: [nodeId], missing: [] };
+  }
+}
+
+function invalidArtifactManifestClosureFinalization(
+  task: StoredWorkflowTask,
+  closure: { changed: string[]; missing: string[] }
+): NodeFinalization {
+  const affected = [...new Set([...closure.changed, ...closure.missing])].sort();
+  const message = `artifact prerequisite closure is no longer valid for ${task.attemptId}`;
+  return {
+    status: "invalidated",
+    diagnostics: [
+      {
+        code: "PREREQUISITE_ARTIFACT_CLOSURE_INVALID",
+        message,
+        severity: "error",
+        source: "artifact-gates",
+        details: {
+          changed_prerequisite_node_ids: closure.changed,
+          missing_prerequisite_node_ids: closure.missing
+        }
+      }
+    ],
+    lastError: message,
+    provenance: {
+      prerequisite_finalization: { status: "invalidated", prerequisite_node_ids: affected },
+      failure: {
+        category: "artifact-contract",
+        causal_task_id: task.verifierSmithersNodeId,
+        causal_failure_category: "artifact-contract",
+        dependent_task_ids: []
+      }
+    },
+    events: [
+      {
+        eventType: "node-prerequisite-artifact-closure-invalidated",
+        status: "invalidated",
+        payload: {
+          changed_prerequisite_node_ids: closure.changed,
+          missing_prerequisite_node_ids: closure.missing
+        }
+      }
+    ]
+  };
 }
 
 function artifactReconciliationGrace(

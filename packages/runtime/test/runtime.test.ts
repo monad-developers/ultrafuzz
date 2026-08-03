@@ -7207,6 +7207,78 @@ test("syncRun fails descendants closed after prerequisite artifact finalization 
   );
 });
 
+test("syncRun invalidates a finalized descendant when its prerequisite manifest digest changes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-prerequisite-closure-changed";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:actors-flows", state: "finished", attempt: 1 },
+        { id: "node:project-discovery", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:actors-flows", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-prerequisite-closure-changed", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+  const completed = await syncRun({ projectRoot: project, runId: "sync-prerequisite-closure-changed", env });
+  assert.equal(completed.value?.status, "succeeded", JSON.stringify(completed.diagnostics));
+  const prerequisiteManifestPath = path.join(
+    run.value!.run_root,
+    "artifacts",
+    "project-discovery",
+    "artifact-manifest.json"
+  );
+  const descendantManifestPath = path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json");
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const descendantManifest = fs.readFileSync(descendantManifestPath, "utf8");
+  const ledger = fs.readFileSync(ledgerPath, "utf8");
+  fs.appendFileSync(prerequisiteManifestPath, "\n", "utf8");
+
+  const invalidated = await syncRun({
+    projectRoot: project,
+    runId: "sync-prerequisite-closure-changed",
+    env
+  });
+
+  assert.equal(invalidated.ok, true, JSON.stringify(invalidated.diagnostics));
+  assert.equal(invalidated.value?.status, "failed");
+  assert.ok(invalidated.diagnostics.some((diagnostic) => diagnostic.code === "PREREQUISITE_ARTIFACT_CLOSURE_INVALID"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(state.nodes?.["actors-flows"]?.status, "invalidated");
+  assert.equal(fs.readFileSync(descendantManifestPath, "utf8"), descendantManifest);
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), ledger);
+
+  const replayed = await syncRun({
+    projectRoot: project,
+    runId: "sync-prerequisite-closure-changed",
+    env
+  });
+  assert.equal(replayed.value?.status, "failed");
+  const replayedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(replayedState.nodes?.["actors-flows"]?.status, "invalidated");
+  assert.equal(fs.readFileSync(descendantManifestPath, "utf8"), descendantManifest);
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), ledger);
+});
+
 test("syncRun finalizes same-attempt success events ahead of stale prerequisite inspection", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
