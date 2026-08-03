@@ -20,7 +20,7 @@ const MAX_ATTESTED_TASKS = 2_048;
 const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 
 export const WORKSPACE_SOURCE_ATTESTATION_SCHEMA_VERSION = "ultrafuzz.workspace-source-attestation.v1" as const;
-export const WORKSPACE_SOURCE_ATTESTATION_FILE = ".ultrafuzz-workspace-source-attestation.json" as const;
+export const WORKSPACE_SOURCE_ATTESTATION_FILE = "ultrafuzz-workspace-source-attestation.json" as const;
 
 export interface WorkspaceBaseProvenance {
   baseCommit: string;

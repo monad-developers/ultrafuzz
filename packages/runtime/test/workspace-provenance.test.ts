@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createRunLayout, getNodeArtifactDir, writeArtifactManifest } from "@ultrafuzz/artifacts";
+
 import {
   assertAgentWorkspaceProvenance,
   assertSingleLinkRegularFile,
@@ -388,6 +390,29 @@ test("workspace source attestations survive restart and merge an exact fan-in cl
         [rootTask, leftTask, rightTask, finalTask]
       ),
     /workspace source attestation does not exist/u
+  );
+});
+
+test("workspace source attestations are valid canonical artifact manifest entries", () => {
+  assert.equal(WORKSPACE_SOURCE_ATTESTATION_FILE, "ultrafuzz-workspace-source-attestation.json");
+  const layout = createRunLayout({
+    projectRoot: fs.mkdtempSync(path.join(os.tmpdir(), "ufz-attestation-manifest-")),
+    runId: "run-one"
+  });
+  const artifactDir = getNodeArtifactDir(layout, "attempt-one", { create: true });
+  const revision = "a".repeat(40);
+  writeWorkspaceSourceAttestation(artifactDir, {
+    schema_version: "ultrafuzz.workspace-source-attestation.v1",
+    target_revision: revision,
+    task_count: 1,
+    tasks: [attested(expected("attempt-one"), revision)]
+  });
+
+  const manifest = writeArtifactManifest({ layout, nodeId: "attempt-one" });
+
+  assert.deepEqual(
+    manifest.files.map((file) => file.path),
+    [WORKSPACE_SOURCE_ATTESTATION_FILE]
   );
 });
 

@@ -7,6 +7,8 @@ import path from "node:path";
 import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
+import { WORKSPACE_SOURCE_ATTESTATION_FILE } from "@ultrafuzz/runtime";
+
 import {
   cleanupModalNodeRun,
   createModalNodeHandoffArchive,
@@ -200,7 +202,7 @@ describe("Modal node sandbox provider", () => {
       fs.writeFileSync(path.join(artifactDir, "report.json"), '{"schema_version":"1.0"}\n');
       fs.writeFileSync(path.join(artifactDir, "findings.normalized.json"), "[]\n");
       fs.writeFileSync(
-        path.join(artifactDir, ".ultrafuzz-workspace-source-attestation.json"),
+        path.join(artifactDir, WORKSPACE_SOURCE_ATTESTATION_FILE),
         '{"schema_version":"ultrafuzz.workspace-source-attestation.v1"}\n'
       );
       fs.writeFileSync(path.join(mirror, "report.md"), "# stale mirror report\n");
@@ -214,7 +216,7 @@ describe("Modal node sandbox provider", () => {
       expect(fs.readFileSync(path.join(published, "report.md"), "utf8")).toBe("# canonical report\n");
       expect(fs.readFileSync(path.join(published, "report.json"), "utf8")).toContain('"schema_version":"1.0"');
       expect(fs.readFileSync(path.join(published, "findings.normalized.json"), "utf8")).toBe("[]\n");
-      expect(fs.readFileSync(path.join(published, ".ultrafuzz-workspace-source-attestation.json"), "utf8")).toContain(
+      expect(fs.readFileSync(path.join(published, WORKSPACE_SOURCE_ATTESTATION_FILE), "utf8")).toContain(
         "ultrafuzz.workspace-source-attestation.v1"
       );
       expect(fs.readFileSync(path.join(published, "generated-tests", "Generated.t.sol"), "utf8")).toContain(
@@ -256,10 +258,7 @@ describe("Modal node sandbox provider", () => {
       );
       expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(false);
       expect(
-        fs.readFileSync(
-          path.join(fixture.root, fixture.input.artifact_dir, ".ultrafuzz-workspace-source-attestation.json"),
-          "utf8"
-        )
+        fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, WORKSPACE_SOURCE_ATTESTATION_FILE), "utf8")
       ).toContain("ultrafuzz.workspace-source-attestation.v1");
       expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "report.md"), "utf8")).toBe(
         "# remote report\n"
@@ -696,7 +695,7 @@ function createResultArchive(options: { includeWorkspace?: boolean } = {}) {
   fs.writeFileSync(path.join(bundle, "artifacts", "report.json"), '{"schema_version":"1.0"}\n');
   fs.writeFileSync(path.join(bundle, "artifacts", "findings.normalized.json"), "[]\n");
   fs.writeFileSync(
-    path.join(bundle, "artifacts", ".ultrafuzz-workspace-source-attestation.json"),
+    path.join(bundle, "artifacts", WORKSPACE_SOURCE_ATTESTATION_FILE),
     '{"schema_version":"ultrafuzz.workspace-source-attestation.v1"}\n'
   );
   if (options.includeWorkspace === true) {
