@@ -1701,7 +1701,8 @@ async function synchronizeTasks(input: {
     if (node === undefined) {
       continue;
     }
-    const previous = readRunState(input.layout).nodes[task.attemptId];
+    const currentState = readRunState(input.layout);
+    const previous = currentState.nodes[task.attemptId];
     const attemptEvidence = evidenceByAttempt.get(task.attemptId);
     if (attemptEvidence === undefined) {
       continue;
@@ -1712,8 +1713,19 @@ async function synchronizeTasks(input: {
       evidence.status === "succeeded"
         ? previous?.status !== "succeeded" || !artifactManifestExists(input.layout, task.attemptId)
         : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
+    const prerequisiteFinalization =
+      needsFinalization && evidence.status === "succeeded"
+        ? prerequisiteFinalizationForTask({
+            layout: input.layout,
+            task,
+            tasksByAttempt,
+            state: currentState,
+            nodeStatuses
+          })
+        : undefined;
     const finalization = needsFinalization
-      ? await finalizeTerminalTask({
+      ? (prerequisiteFinalization ??
+        (await finalizeTerminalTask({
           layout: input.layout,
           node,
           task,
@@ -1725,7 +1737,7 @@ async function synchronizeTasks(input: {
           previous,
           nowMs: synchronizationClock(input.control),
           control: input.control
-        })
+        })))
       : {
           status: evidence.status,
           diagnostics: [],
@@ -1897,6 +1909,81 @@ function artifactReconciliationGrace(
     attempts: Math.trunc(attempts),
     last_attempt_at: lastAttemptAt,
     missing_count: Math.trunc(missingCount)
+  };
+}
+
+function prerequisiteFinalizationForTask(input: {
+  layout: RunLayout;
+  task: StoredWorkflowTask;
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
+  state: ReturnType<typeof readRunState>;
+  nodeStatuses: Map<string, NodeStatus>;
+}): NodeFinalization | undefined {
+  const pending: string[] = [];
+  const failed: string[] = [];
+  for (const dependencyId of input.task.dependencies) {
+    const status = input.nodeStatuses.get(dependencyId) ?? input.state.nodes[dependencyId]?.status;
+    const manifestExists = artifactManifestExists(input.layout, dependencyId);
+    if ((status === "succeeded" || status === "reused-from-prior-run") && manifestExists) {
+      continue;
+    }
+    if (status !== undefined && !terminalStatus(status) && !manifestExists) {
+      pending.push(dependencyId);
+      continue;
+    }
+    failed.push(dependencyId);
+  }
+  if (failed.length > 0) {
+    const message = `prerequisite artifact finalization failed for ${failed.join(", ")}`;
+    return {
+      status: "failed",
+      diagnostics: [
+        {
+          code: "PREREQUISITE_ARTIFACT_MANIFEST_INVALID",
+          message,
+          severity: "error",
+          source: "artifact-gates",
+          details: { prerequisite_node_ids: failed }
+        }
+      ],
+      lastError: message,
+      provenance: {
+        prerequisite_finalization: { status: "failed", prerequisite_node_ids: failed },
+        failure: dependencyCascadeFailure(input.layout, input.task, input.tasksByAttempt)
+      },
+      events: [
+        {
+          eventType: "node-prerequisite-artifact-finalization-failed",
+          status: "failed",
+          payload: { prerequisite_node_ids: failed }
+        }
+      ]
+    };
+  }
+  if (pending.length === 0) {
+    return undefined;
+  }
+  return {
+    status: "running",
+    diagnostics: [
+      {
+        code: "PREREQUISITE_ARTIFACT_MANIFEST_PENDING",
+        message: `prerequisite artifact finalization remains pending for ${pending.join(", ")}`,
+        severity: "warning",
+        source: "artifact-gates",
+        details: { prerequisite_node_ids: pending }
+      }
+    ],
+    provenance: {
+      prerequisite_finalization: { status: "pending", prerequisite_node_ids: pending }
+    },
+    events: [
+      {
+        eventType: "node-prerequisite-artifact-finalization-pending",
+        status: "running",
+        payload: { prerequisite_node_ids: pending }
+      }
+    ]
   };
 }
 
@@ -2309,6 +2396,9 @@ function appendTerminalTaskAttempts(input: {
   }> = [];
   const preparedById = new Map<string, (typeof prepared)[number]>();
   for (const attempt of terminalAttempts) {
+    if (attempt === currentTerminalAttempt && attempt.outcome === "succeeded" && !terminalStatus(input.currentStatus)) {
+      continue;
+    }
     const controllerInvocationId = dimensionId(
       "controller",
       attempt.controllerInvocationId ??
@@ -2624,6 +2714,9 @@ function finalizationFailureCategory(
   }
   if (outcome !== "failed") {
     return undefined;
+  }
+  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "PREREQUISITE_ARTIFACT_MANIFEST_INVALID")) {
+    return "dependency";
   }
   if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "FINDINGS_NORMALIZE_FAILED")) {
     return "invalid-output";

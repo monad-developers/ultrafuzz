@@ -7023,6 +7023,190 @@ test("syncRun finalizes prerequisite manifests before out-of-order descendants",
   );
 });
 
+test("syncRun defers successful descendants until prerequisite artifact finalization completes", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-prerequisite-grace";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:actors-flows", state: "finished", attempt: 1 },
+        { id: "node:project-discovery", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:actors-flows", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-prerequisite-grace", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+  const startedAt = Date.parse("2026-07-03T00:01:00.000Z");
+
+  const pending = await syncRun(
+    { projectRoot: project, runId: "sync-prerequisite-grace", env },
+    { now: () => startedAt }
+  );
+
+  assert.equal(pending.ok, true, JSON.stringify(pending.diagnostics));
+  assert.equal(pending.value?.status, "running");
+  assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "REQUIRED_ARTIFACT_GRACE_PENDING"));
+  assert.ok(pending.diagnostics.some((diagnostic) => diagnostic.code === "PREREQUISITE_ARTIFACT_MANIFEST_PENDING"));
+  const pendingState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(pendingState.nodes?.["project-discovery"]?.status, "running");
+  assert.equal(pendingState.nodes?.["actors-flows"]?.status, "running");
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
+    false
+  );
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json")),
+    false
+  );
+  assert.equal(fs.readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8"), "");
+
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md"]);
+  const completed = await syncRun(
+    { projectRoot: project, runId: "sync-prerequisite-grace", env },
+    { now: () => startedAt + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+  );
+
+  assert.equal(completed.ok, true, JSON.stringify(completed.diagnostics));
+  assert.equal(completed.value?.status, "succeeded");
+  const completedState = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<string, { status?: string }>;
+  };
+  assert.equal(completedState.nodes?.["project-discovery"]?.status, "succeeded");
+  assert.equal(completedState.nodes?.["actors-flows"]?.status, "succeeded");
+  const descendantManifest = JSON.parse(
+    fs.readFileSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json"), "utf8")
+  ) as { prerequisite_manifests?: Array<{ node_id?: string }> };
+  assert.deepEqual(
+    descendantManifest.prerequisite_manifests?.map((entry) => entry.node_id),
+    ["project-discovery"]
+  );
+  const ledgerPath = path.join(run.value!.run_root, "attempts.jsonl");
+  const ledgerText = fs.readFileSync(ledgerPath, "utf8");
+  const ledger = ledgerText
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { outcome?: string; failure_category?: string });
+  assert.equal(ledger.length, 2);
+  assert.deepEqual(
+    ledger.map((entry) => entry.outcome),
+    ["succeeded", "succeeded"]
+  );
+  assert.equal(
+    ledger.some((entry) => entry.failure_category === "artifact-validation"),
+    false
+  );
+
+  const replayed = await syncRun(
+    { projectRoot: project, runId: "sync-prerequisite-grace", env },
+    { now: () => startedAt + ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS }
+  );
+  assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
+  assert.equal(replayed.value?.status, "succeeded");
+  assert.equal(fs.readFileSync(ledgerPath, "utf8"), ledgerText);
+});
+
+test("syncRun fails descendants closed after prerequisite artifact finalization fails", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeOutOfOrderTopology(project);
+  const workflowRunId = "ultrafuzz-sync-prerequisite-failed";
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [
+        { id: "node:actors-flows", state: "finished", attempt: 1 },
+        { id: "node:project-discovery", state: "finished", attempt: 1 }
+      ]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:actors-flows", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:actors-flows", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId: "sync-prerequisite-failed", env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "actors-flows", ["setup/actors-flows.md"]);
+  const startedAt = Date.parse("2026-07-03T00:02:00.000Z");
+  const pending = await syncRun(
+    { projectRoot: project, runId: "sync-prerequisite-failed", env },
+    { now: () => startedAt }
+  );
+  assert.equal(pending.value?.status, "running");
+
+  const failed = await syncRun(
+    { projectRoot: project, runId: "sync-prerequisite-failed", env },
+    { now: () => startedAt + ARTIFACT_RECONCILIATION_GRACE_MS }
+  );
+
+  assert.equal(failed.ok, true, JSON.stringify(failed.diagnostics));
+  assert.equal(failed.value?.status, "failed");
+  assert.ok(failed.diagnostics.some((diagnostic) => diagnostic.code === "PREREQUISITE_ARTIFACT_MANIFEST_INVALID"));
+  const state = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "state.json"), "utf8")) as {
+    nodes?: Record<
+      string,
+      {
+        status?: string;
+        provenance?: {
+          failure?: {
+            category?: string;
+            causal_task_id?: string;
+            causal_failure_category?: string;
+            dependent_task_ids?: string[];
+          };
+        };
+      }
+    >;
+  };
+  assert.equal(state.nodes?.["project-discovery"]?.status, "failed");
+  assert.equal(state.nodes?.["actors-flows"]?.status, "failed");
+  assert.deepEqual(state.nodes?.["actors-flows"]?.provenance?.failure, {
+    category: "dependency-cascade",
+    causal_task_id: "verify:project-discovery",
+    causal_failure_category: "artifact-contract",
+    dependent_task_ids: ["node:actors-flows"]
+  });
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "project-discovery", "artifact-manifest.json")),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.join(run.value!.run_root, "artifacts", "actors-flows", "artifact-manifest.json")),
+    false
+  );
+  const ledger = fs
+    .readFileSync(path.join(run.value!.run_root, "attempts.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { outcome?: string; failure_category?: string });
+  assert.deepEqual(
+    ledger.map((entry) => [entry.outcome, entry.failure_category]),
+    [
+      ["failed", "artifact-validation"],
+      ["failed", "dependency"]
+    ]
+  );
+});
+
 test("syncRun finalizes same-attempt success events ahead of stale prerequisite inspection", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
