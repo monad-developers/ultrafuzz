@@ -183,6 +183,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // artifact mirror. Re-establish the same path-checked directories before
       // preserving outputs; this remains deterministic and model-free.
       prepareArtifactMirror(task);
+      recoverFinalReceiptWrittenAsFindings(task, result);
       materializeMissingMarkdownArtifacts(task, result);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
@@ -426,6 +427,106 @@ function agentResultSummary(result: unknown): string | undefined {
     }
   }
   return typeof record.text === "string" && record.text.trim().length > 0 ? record.text.trim() : undefined;
+}
+
+// A few model backends can return the required final task receipt through the
+// same file-writing path used for artifacts.  Recover only the exact receipt
+// we received from this invocation; arbitrary malformed findings must keep
+// failing the strict contract below.
+function recoverFinalReceiptWrittenAsFindings(task: (typeof taskSpecs)[number], result: unknown): void {
+  const receiptSummary = finalReceiptSummaryFromAgentResult(result);
+  if (receiptSummary === undefined) {
+    return;
+  }
+
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const artifactRoots = taskArtifactRoots(task, artifactDir);
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/findings@1") {
+      continue;
+    }
+
+    let receiptSeen = false;
+    let unexpectedInvalidArtifact = false;
+    let recoveredValue: unknown = [];
+    let hasRecoveredValue = false;
+    for (const candidateRoot of artifactRoots) {
+      try {
+        const candidatePath = resolveRegularArtifactFile(
+          candidateRoot,
+          path.resolve(candidateRoot, output.path),
+          `artifact-contract failure: output is not a regular file ${output.path}`
+        );
+        const validation = validateArtifactContract(output.contract, readFileSync(candidatePath, "utf8"), output.path);
+        if (validation.ok) {
+          if (candidateRoot === artifactDir) {
+            // Canonical valid findings always win over any mirrored receipt.
+            unexpectedInvalidArtifact = true;
+            break;
+          }
+          recoveredValue = validation.value;
+          hasRecoveredValue = true;
+        } else if (finalReceiptSummaryFromJsonText(readFileSync(candidatePath, "utf8")) === receiptSummary) {
+          receiptSeen = true;
+        } else {
+          unexpectedInvalidArtifact = true;
+        }
+      } catch {
+        // The normal verifier remains responsible for missing or unsafe paths.
+      }
+    }
+    if (!receiptSeen || unexpectedInvalidArtifact) {
+      continue;
+    }
+    // Prefer a separately written, valid findings array when one exists. The
+    // prepared mirror otherwise contains the canonical empty array, which is
+    // the declared no-findings representation for this contract.
+    if (!hasRecoveredValue) {
+      recoveredValue = [];
+    }
+    writeValidatedTaskArtifact(task, output, recoveredValue);
+  }
+}
+
+function finalReceiptSummaryFromAgentResult(result: unknown): string | undefined {
+  if (!isPlainRecord(result)) {
+    return undefined;
+  }
+  const outputReceipt =
+    result.output === undefined
+      ? undefined
+      : typeof result.output === "string"
+        ? finalReceiptSummaryFromJsonText(result.output)
+        : finalReceiptSummary(result.output);
+  if (outputReceipt !== undefined) {
+    return outputReceipt;
+  }
+  return typeof result.text === "string" ? finalReceiptSummaryFromJsonText(result.text) : undefined;
+}
+
+function finalReceiptSummaryFromJsonText(contents: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return undefined;
+  }
+  const direct = finalReceiptSummary(parsed);
+  if (direct !== undefined || typeof parsed !== "string") {
+    return direct;
+  }
+  try {
+    return finalReceiptSummary(JSON.parse(parsed));
+  } catch {
+    return undefined;
+  }
+}
+
+function finalReceiptSummary(value: unknown): string | undefined {
+  if (!isPlainRecord(value) || Object.keys(value).length !== 1 || typeof value.summary !== "string") {
+    return undefined;
+  }
+  return value.summary.trim().length > 0 ? value.summary : undefined;
 }
 
 function materializeMissingDedupeArtifact(task: (typeof taskSpecs)[number]): void {

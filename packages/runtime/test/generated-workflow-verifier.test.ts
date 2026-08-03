@@ -117,6 +117,42 @@ test("generated Smithers agent preserves its final response as missing Markdown"
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
 });
 
+test("generated Smithers agent recovers only its matching final receipt from findings", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const agentStart = source.indexOf("function artifactAwareAgent");
+  const receiptRecoveryStart = source.indexOf("function recoverFinalReceiptWrittenAsFindings");
+  const findingNormalizerStart = source.indexOf("function normalizeLegacyFindingFields");
+
+  assert.ok(agentStart >= 0, source);
+  assert.ok(receiptRecoveryStart > agentStart, source);
+  assert.ok(findingNormalizerStart > receiptRecoveryStart, source);
+
+  const agent = source.slice(agentStart, receiptRecoveryStart);
+  assert.ok(
+    agent.indexOf("recoverFinalReceiptWrittenAsFindings(task, result)") <
+      agent.indexOf("materializeMissingMarkdownArtifacts(task, result)"),
+    agent
+  );
+
+  const recovery = source.slice(receiptRecoveryStart, findingNormalizerStart);
+  assert.match(recovery, /output\.contract !== "ultrafuzz\/findings@1"/u);
+  assert.match(
+    recovery,
+    /finalReceiptSummaryFromJsonText\(readFileSync\(candidatePath, "utf8"\)\) === receiptSummary/u
+  );
+  assert.match(recovery, /Object\.keys\(value\)\.length !== 1/u);
+  assert.match(recovery, /typeof value\.summary !== "string"/u);
+  assert.match(recovery, /result\.output === undefined/u);
+  assert.match(recovery, /typeof result\.output === "string"/u);
+  assert.match(recovery, /finalReceiptSummaryFromJsonText\(result\.output\)/u);
+  assert.match(recovery, /const outputReceipt =/u);
+  assert.match(recovery, /if \(outputReceipt !== undefined\)/u);
+  assert.match(recovery, /typeof result\.text === "string" \? finalReceiptSummaryFromJsonText\(result\.text\)/u);
+  assert.match(recovery, /unexpectedInvalidArtifact/u);
+  assert.match(recovery, /writeValidatedTaskArtifact\(task, output, recoveredValue\)/u);
+  assert.match(recovery, /let recoveredValue: unknown = \[\]/u);
+});
+
 test("generated Smithers agent retains validated strategy findings when dedupe output is missing", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const fallbackStart = source.indexOf("function materializeMissingDedupeArtifact");
