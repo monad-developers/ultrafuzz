@@ -208,6 +208,15 @@ equal weight. Macro precision and recall use the same equal-target weighting.
 Precision and recall remain available in `benchmarks/history.json` but are omitted
 from the overview charts.
 
+The `model` shown in history and charts is the provider-reported API identifier
+recorded for the observation at its timestamp. Public diagnostics distinguish a
+provider-reported model ID from a documented moving API alias. For example,
+DeepSeek reports `deepseek-v4-flash` through the Anthropic-compatible runner, so
+that identity is published as `provider-reported-alias` with
+`provider_version_status: unverified`. Alias equality still has to hold for
+every invocation, but neither the label nor its timestamp attests immutable
+backend weights or a concrete provider version.
+
 The latest-result summary sums target cost and uses the slowest target as the
 parallel run's wall clock. If any target lacks complete cost or runtime
 evidence, that summary value is unavailable. When the latest run contains

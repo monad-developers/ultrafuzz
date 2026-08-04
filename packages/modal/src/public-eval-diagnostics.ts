@@ -16,6 +16,7 @@ import {
   boundedEvalId,
   comparePublicEvalDiagnosticIds,
   parsePublicEvalDiagnostics,
+  publicModelIdentityScope,
   publicEvalDiagnosticsReadinessReasonCodes,
   summarizePublicEvalDiagnosticsRows,
   verifyRecordedTerminalDisposition,
@@ -655,6 +656,8 @@ function publicEvalRecordModelEvidence(
     schema_version: PUBLIC_MODEL_IDENTITY_SCHEMA_VERSION,
     configured_model: expectedConfiguredModel,
     provider_reported_model: expectedReportedModel,
+    identity_scope: publicModelIdentityScope(expectedReportedModel),
+    provider_version_status: "unverified",
     invocation_count: identity.invocation_count,
     invocations: [...identity.invocations]
       .sort((left, right) => comparePublicEvalDiagnosticIds(left.invocation_id, right.invocation_id))

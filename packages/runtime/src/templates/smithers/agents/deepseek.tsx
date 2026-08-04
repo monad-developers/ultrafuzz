@@ -5,7 +5,7 @@ import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrato
 import { readStringTable, stringField } from "./toml";
 
 type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
-type DeepSeekAuthOptions = { ultrafuzzApiKey: string; configDir: string };
+type DeepSeekAuthOptions = { ultrafuzzApiKey: string; apiKeyEnv: string; configDir: string };
 export type DeepSeekTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 type DeepSeekAgentOptions = ConstructorParameters<typeof SmithersClaudeCodeAgent>[0] & DeepSeekAuthOptions;
 type DeepSeekCommandParams = Parameters<SmithersClaudeCodeAgent["buildCommand"]>[0];
@@ -136,19 +136,23 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
   override async buildCommand(params: DeepSeekCommandParams): Promise<DeepSeekCommand> {
     const command = await super.buildCommand(params);
     const opts = this.opts as DeepSeekAgentOptions;
+    const apiKeyEnv = opts.apiKeyEnv ?? "DEEPSEEK_API_KEY";
     return {
       ...command,
       env: {
         ...command.env,
+        // The generated workflow needs the configured source variable only
+        // long enough to construct this adapter. Clear that exact variable
+        // before assigning the credential to Claude Code's documented token.
+        [apiKeyEnv]: "",
         // Claude Code's documented custom-provider credential is
         // ANTHROPIC_AUTH_TOKEN. Clear the first-party key explicitly so a host
         // Anthropic credential can never win over the DeepSeek route.
         ANTHROPIC_API_KEY: "",
         ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
         ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
-        // The generated workflow needs the configured source variable only
-        // long enough to construct this adapter. Do not leave a second copy of
-        // the credential in the actual Claude Code process environment.
+        // Also clear the canonical source when a custom variable was selected,
+        // so an unrelated host credential cannot leak into the child.
         DEEPSEEK_API_KEY: "",
         // Keep first-party Claude auth, alternate provider routing, and host
         // proxies from competing with the explicit DeepSeek endpoint/token.
@@ -299,8 +303,10 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
   if (auth !== "api-key") {
     throw new Error(`DeepSeekAgent supports only api-key auth in ultrafuzz.toml, not ${auth}`);
   }
+  const apiKeyEnv = config.api_key_env ?? "DEEPSEEK_API_KEY";
   return {
-    ultrafuzzApiKey: requiredEnv(config.api_key_env ?? "DEEPSEEK_API_KEY"),
+    ultrafuzzApiKey: requiredEnv(apiKeyEnv),
+    apiKeyEnv,
     configDir: resolveConfigDir(config.config_dir ?? DEEPSEEK_CLAUDE_CONFIG_DIR)
   };
 }

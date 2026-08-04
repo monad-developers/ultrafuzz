@@ -245,6 +245,26 @@ describe("public Modal benchmark bundles", () => {
     }
   });
 
+  it("retains explicitly selected v6 compatibility for historical framework-less bundles", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-v6-framework-"));
+    const current = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1"])
+    });
+    const matrix = JSON.parse(bundleFileText(current, "eval/matrix.json")) as Array<Record<string, unknown>>;
+    for (const row of matrix) Reflect.deleteProperty(row, "workflow_input");
+    const frameworkless = replaceBundleContents(current, "eval/matrix.json", `${JSON.stringify(matrix, null, 2)}\n`);
+    const legacy = asLegacyPublicBenchmarkBundle(frameworkless, "ultrafuzz.modal.public-benchmark-bundle.v6");
+    const targets = legacy.targets.map(({ framework: _framework, ...target }) => target);
+
+    expect(
+      parsePublicBenchmarkBundle({ ...legacy, targets }, [], "ultrafuzz.modal.public-benchmark-bundle.v6")
+    ).toMatchObject({
+      schema_version: "ultrafuzz.modal.public-benchmark-bundle.v6",
+      targets: [{ id: "target-1" }]
+    });
+  });
+
   it("rejects traversal, duplicate paths, and tampered contents", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-"));
     const bundle = createPublicBenchmarkBundle({
@@ -1408,6 +1428,9 @@ describe("public Modal benchmark bundles", () => {
             id: "target-a",
             repo: "https://github.com/example/benchmark-target",
             ref: "1".repeat(40)
+          },
+          workflow_input: {
+            target_frameworks: { "target-a": "foundry" }
           }
         },
         {
@@ -1419,11 +1442,44 @@ describe("public Modal benchmark bundles", () => {
             id: "target-a",
             repo: "https://github.com/example/benchmark-target",
             ref: "1".repeat(40)
+          },
+          workflow_input: {
+            target_frameworks: { "target-a": "foundry" }
           }
         }
       ])}\n`
     );
     expect(() => createPublicBenchmarkBundle(input)).toThrow(/repeats row ID/u);
+  });
+
+  it("requires a valid target framework on every current v7 matrix row", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-matrix-framework-"));
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, ["target-a-runner-trial-1", "target-b-runner-trial-1"])
+    });
+    const originalMatrix = JSON.parse(bundleFileText(bundle, "eval/matrix.json")) as Array<{
+      target_id: string;
+      workflow_input?: { target_frameworks?: Record<string, string> };
+    }>;
+
+    const missingAllFrameworks = structuredClone(originalMatrix);
+    for (const row of missingAllFrameworks) Reflect.deleteProperty(row, "workflow_input");
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, "eval/matrix.json", `${JSON.stringify(missingAllFrameworks, null, 2)}\n`)
+      )
+    ).toThrow(/matrix row 0 is missing its target framework/u);
+
+    const missingOneTargetKey = structuredClone(originalMatrix);
+    const partialRow = missingOneTargetKey[1]!;
+    if (partialRow.workflow_input?.target_frameworks === undefined) throw new Error("missing framework fixture");
+    Reflect.deleteProperty(partialRow.workflow_input.target_frameworks, partialRow.target_id);
+    expect(() =>
+      parsePublicBenchmarkBundle(
+        replaceBundleContents(bundle, "eval/matrix.json", `${JSON.stringify(missingOneTargetKey, null, 2)}\n`)
+      )
+    ).toThrow(/matrix row 1 is missing its target framework/u);
   });
 
   it("refuses to follow an agent-controlled report symlink", () => {
@@ -2311,6 +2367,8 @@ function asDeepSeekFlashBundle(
         schema_version: "ultrafuzz.eval.model-identity.v1",
         configured_model: "deepseek-v4-flash",
         provider_reported_model: "deepseek-v4-flash",
+        identity_scope: "provider-reported-alias",
+        provider_version_status: "unverified",
         invocation_count: invocations.length,
         invocations
       },
@@ -2722,6 +2780,8 @@ function fixturePublicModelIdentity(rowIndex: number) {
     schema_version: "ultrafuzz.eval.model-identity.v1",
     configured_model: TEST_MODEL,
     provider_reported_model: TEST_MODEL,
+    identity_scope: "provider-reported-model-id",
+    provider_version_status: "unverified",
     invocation_count: invocations.length,
     invocations
   } as const;

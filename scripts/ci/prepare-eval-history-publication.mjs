@@ -978,6 +978,10 @@ export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
     throw new Error(`public benchmark bundle ${pair} matrix is not a non-empty array`);
   }
   const targetIds = expected.targetIds === undefined ? undefined : validatedTargetIds(expected.targetIds);
+  const expectedTargets =
+    expected.targets === undefined
+      ? undefined
+      : new Map(validatedTargets(expected.targets).map((target) => [target.id, target]));
   if (targetIds === undefined) {
     if (matrix.length !== expectedRows) {
       throw new Error(`public benchmark bundle ${pair} matrix row count does not match the trusted lane`);
@@ -989,6 +993,12 @@ export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
   const modelSlug = safeLowerId(expected.modelSlug, `public benchmark bundle ${pair} model slug`);
   if (checkedProduct(targetIds.length, trialsPerVariant, "benchmark bundle target matrix row count") !== expectedRows) {
     throw new Error(`public benchmark bundle ${pair} trusted target IDs do not match the expected row count`);
+  }
+  if (
+    expectedTargets !== undefined &&
+    (expectedTargets.size !== targetIds.length || targetIds.some((targetId) => !expectedTargets.has(targetId)))
+  ) {
+    throw new Error(`public benchmark bundle ${pair} trusted targets do not match the trusted target IDs`);
   }
 
   const expectedRowsByScope = new Set();
@@ -1003,6 +1013,18 @@ export function assertPublicBenchmarkBundleMatrixScope(bundle, expected, pair) {
   const unexpectedRows = [];
   for (const [index, row] of matrix.entries()) {
     const identity = matrixRowIdentity(row, index, pair);
+    const expectedTarget = expectedTargets?.get(identity.targetId);
+    if (expectedTargets !== undefined && expectedTarget === undefined) {
+      throw new Error(`public benchmark bundle ${pair} matrix row ${index} has no trusted target policy`);
+    }
+    if (expectedTarget !== undefined) {
+      const framework = matrixRowTargetFramework(row, identity.targetId, index, pair);
+      if (framework !== expectedTarget.framework) {
+        throw new Error(
+          `public benchmark bundle ${pair} matrix row ${index} target framework does not match the trusted benchmark policy`
+        );
+      }
+    }
     const key = matrixScopeKey(identity.targetId, identity.variantId, identity.trialId);
     if (seenRows.has(key)) duplicateRows.push(key);
     seenRows.add(key);
@@ -1127,10 +1149,14 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
   for (const [index, value] of diagnostics.rows.entries()) {
     const row = looseRecord(value, `public benchmark bundle ${pair} diagnostics row ${index}`);
     const rowId = safeId(row.row_id, `public benchmark bundle ${pair} diagnostics row ${index} ID`);
+    const expectedIdentityScope =
+      configuredModel === DEEPSEEK_V4_FLASH_MODEL ? "provider-reported-alias" : "provider-reported-model-id";
     const identity = strictRecord(row.model_identity, `public benchmark bundle ${pair} row ${rowId} model identity`, [
       "schema_version",
       "configured_model",
       "provider_reported_model",
+      "identity_scope",
+      "provider_version_status",
       "invocation_count",
       "invocations"
     ]);
@@ -1138,6 +1164,8 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
       identity.schema_version !== "ultrafuzz.eval.model-identity.v1" ||
       identity.configured_model !== configuredModel ||
       identity.provider_reported_model !== configuredModel ||
+      identity.identity_scope !== expectedIdentityScope ||
+      identity.provider_version_status !== "unverified" ||
       !Number.isSafeInteger(identity.invocation_count) ||
       identity.invocation_count <= 0 ||
       !Array.isArray(identity.invocations) ||
@@ -1329,7 +1357,7 @@ function validatedBundleTargets(value, pair) {
       "executed_case_count",
       "graded_case_count",
       "publication_location",
-      ...(entry.framework === undefined ? [] : ["framework"])
+      "framework"
     ]);
     const id = safeLowerId(target.id, `public benchmark bundle ${pair} target ${index} ID`);
     assertUnique(seen, id, "public benchmark bundle target ID");
@@ -1345,9 +1373,7 @@ function validatedBundleTargets(value, pair) {
       id,
       repository: canonicalRepository(target.repository),
       revision: fullCommit(target.revision, `public benchmark bundle ${pair} target ${id} revision`),
-      ...(target.framework === undefined
-        ? {}
-        : { framework: safeId(target.framework, `public benchmark bundle ${pair} target ${id} framework`) }),
+      framework: safeId(target.framework, `public benchmark bundle ${pair} target ${id} framework`),
       status: safeBundleStatus(target.status, `public benchmark bundle ${pair} target ${id} status`),
       executed_case_count: executed,
       graded_case_count: graded
@@ -1359,7 +1385,9 @@ function assertBundleTargetsMatchExpected(bundleTargets, expectedTargetsValue, t
   if (JSON.stringify([...bundleTargets.map((target) => target.id)].sort()) !== JSON.stringify([...targetIds].sort())) {
     throw new Error(`public benchmark bundle ${pair} target IDs do not match the trusted lane`);
   }
-  if (expectedTargetsValue === undefined) return;
+  if (expectedTargetsValue === undefined) {
+    throw new Error(`public benchmark bundle ${pair} is missing trusted target policy`);
+  }
   const expectedTargets = new Map(validatedTargets(expectedTargetsValue).map((target) => [target.id, target]));
   for (const target of bundleTargets) {
     const expected = expectedTargets.get(target.id);
@@ -1367,7 +1395,7 @@ function assertBundleTargetsMatchExpected(bundleTargets, expectedTargetsValue, t
       expected === undefined ||
       target.repository !== expected.repository ||
       target.revision !== expected.revision ||
-      (target.framework !== undefined && target.framework !== expected.framework)
+      target.framework !== expected.framework
     ) {
       throw new Error(
         `public benchmark bundle ${pair} target ${target.id} does not match the trusted benchmark policy`
@@ -1402,6 +1430,18 @@ function matrixRowIdentity(row, index, pair) {
     variantId: safeLowerId(row.variant_id, `public benchmark bundle ${pair} matrix row ${index} variant ID`),
     trialId: safeLowerId(row.trial_id, `public benchmark bundle ${pair} matrix row ${index} trial ID`)
   };
+}
+
+function matrixRowTargetFramework(row, targetId, index, pair) {
+  const input = looseRecord(row.workflow_input, `public benchmark bundle ${pair} matrix row ${index} workflow input`);
+  const frameworks = looseRecord(
+    input.target_frameworks,
+    `public benchmark bundle ${pair} matrix row ${index} target frameworks`
+  );
+  return safeId(
+    frameworks[targetId],
+    `public benchmark bundle ${pair} matrix row ${index} target ${targetId} framework`
+  );
 }
 
 function validatedTargetIds(value) {

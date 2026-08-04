@@ -157,6 +157,14 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
 }
 
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
+  createDeepSeekAgent: (options?: Record<string, unknown>) => {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      command?: string;
+      args: string[];
+      env?: Record<string, string>;
+      outputFormat?: string;
+    }>;
+  };
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{
       usage?: Record<string, unknown>;
@@ -204,6 +212,14 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
     "utf8"
   );
   const deepSeekModule = (await import(pathToFileURL(path.join(fixture, "deepseek.mjs")).href)) as {
+    createDeepSeekAgent: (options?: Record<string, unknown>) => {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        command?: string;
+        args: string[];
+        env?: Record<string, string>;
+        outputFormat?: string;
+      }>;
+    };
     DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
       generate(options: Record<string, unknown>): Promise<{
         usage?: Record<string, unknown>;
@@ -226,7 +242,10 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
       };
     };
   };
-  return { DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent };
+  return {
+    createDeepSeekAgent: deepSeekModule.createDeepSeekAgent,
+    DeepSeekClaudeCodeAgent: deepSeekModule.DeepSeekClaudeCodeAgent
+  };
 }
 
 function shellQuote(value: string): string {
@@ -1581,6 +1600,47 @@ test(
     });
   }
 );
+
+test("generated DeepSeek adapter clears a custom API-key source variable", { skip: !runningUnderBun }, async () => {
+  const project = tempProject();
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  const configPath = path.join(project, "ultrafuzz.toml");
+  const defaultConfig = fs.readFileSync(configPath, "utf8");
+  const customConfig = defaultConfig.replace('api_key_env = "DEEPSEEK_API_KEY"', 'api_key_env = "MY_DEEPSEEK_SECRET"');
+  assert.notEqual(customConfig, defaultConfig, "generated config must contain the default DeepSeek key source");
+  fs.writeFileSync(configPath, customConfig, "utf8");
+
+  const previousConfigPath = process.env.ULTRAFUZZ_CONFIG_PATH;
+  const previousCustomSecret = process.env.MY_DEEPSEEK_SECRET;
+  const previousCanonicalSecret = process.env.DEEPSEEK_API_KEY;
+  process.env.ULTRAFUZZ_CONFIG_PATH = configPath;
+  process.env.MY_DEEPSEEK_SECRET = "custom-deepseek-test-key";
+  process.env.DEEPSEEK_API_KEY = "unrelated-canonical-host-key";
+  try {
+    const { createDeepSeekAgent } = await loadGeneratedDeepSeekAgent(project);
+    const agent = createDeepSeekAgent({ model: "deepseek-v4-flash" });
+    process.env.MY_DEEPSEEK_SECRET = "must-not-be-reread";
+
+    const command = await agent.buildCommand({ prompt: "Contract only", cwd: project, options: {} });
+    assert.equal(command.env?.ANTHROPIC_AUTH_TOKEN, "custom-deepseek-test-key");
+    assert.equal(command.env?.MY_DEEPSEEK_SECRET, "");
+    assert.equal(command.env?.DEEPSEEK_API_KEY, "");
+    assert.deepEqual(
+      Object.entries(command.env ?? {})
+        .filter(([, value]) => value === "custom-deepseek-test-key")
+        .map(([name]) => name),
+      ["ANTHROPIC_AUTH_TOKEN"]
+    );
+  } finally {
+    if (previousConfigPath === undefined) delete process.env.ULTRAFUZZ_CONFIG_PATH;
+    else process.env.ULTRAFUZZ_CONFIG_PATH = previousConfigPath;
+    if (previousCustomSecret === undefined) delete process.env.MY_DEEPSEEK_SECRET;
+    else process.env.MY_DEEPSEEK_SECRET = previousCustomSecret;
+    if (previousCanonicalSecret === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousCanonicalSecret;
+  }
+});
 
 test(
   "generated DeepSeek adapter corrects Smithers result and failed-attempt telemetry",

@@ -39,6 +39,11 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(assertAutomaticPublicationModelEvidence(bundle, model, pair)).toBeUndefined();
   });
 
+  it("accepts provider-reported model-ID scope for non-alias model identifiers", () => {
+    const { bundle, model, pair } = deepSeekAutomaticPublicationBundle("gpt-5.6-luna");
+    expect(assertAutomaticPublicationModelEvidence(bundle, model, pair)).toBeUndefined();
+  });
+
   it("accepts a self-consistent current v7/v4 profile after the bound catalog rate changes", () => {
     const fixture = deepSeekAutomaticPublicationBundle();
     const pricing = fixture.diagnostics.rows[0]!.pricing;
@@ -60,6 +65,22 @@ describe("trusted automatic eval-history publication handoff", () => {
         "missing invocation identity",
         ({ diagnostics }) =>
           Reflect.deleteProperty(diagnostics.rows[0]!.model_identity.invocations[0]!, "provider_reported_model")
+      ],
+      [
+        "missing identity scope",
+        ({ diagnostics }) => Reflect.deleteProperty(diagnostics.rows[0]!.model_identity, "identity_scope")
+      ],
+      [
+        "substituted identity scope",
+        ({ diagnostics }) => (diagnostics.rows[0]!.model_identity.identity_scope = "provider-reported-model-id")
+      ],
+      [
+        "missing provider version status",
+        ({ diagnostics }) => Reflect.deleteProperty(diagnostics.rows[0]!.model_identity, "provider_version_status")
+      ],
+      [
+        "unsupported provider version claim",
+        ({ diagnostics }) => (diagnostics.rows[0]!.model_identity.provider_version_status = "verified")
       ],
       ["partial pricing", ({ diagnostics }) => (diagnostics.rows[0]!.pricing.pricing_complete = false)],
       [
@@ -627,6 +648,7 @@ describe("trusted automatic eval-history publication handoff", () => {
     const expected = {
       matrixRowsPerPair: 3,
       targetIds,
+      targets: smokeTargets(),
       trialsPerVariant: 1,
       modelSlug,
       evalRunId: "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high"
@@ -671,6 +693,81 @@ describe("trusted automatic eval-history publication handoff", () => {
         publicationUrl
       )
     ).toThrow(/graded case count/u);
+  });
+
+  it("rejects omitted, partial, or mismatched matrix target frameworks during automatic preparation", () => {
+    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
+    const modelSlug = smokeManifest().pairs[0]!.model_slug;
+    const pair = smokeManifest().pairs[0]!.pair;
+    const expected = {
+      matrixRowsPerPair: 3,
+      targetIds,
+      targets: smokeTargets(),
+      trialsPerVariant: 1,
+      modelSlug,
+      evalRunId: "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high"
+    };
+    const publicationUrl = "https://github.com/monad-developers/ultrafuzz/actions/runs/12345/artifacts";
+
+    const cases: Array<[string, (matrix: PublicationMatrixRow[]) => void]> = [
+      [
+        "all framework maps omitted",
+        (matrix) => matrix.forEach((row) => Reflect.deleteProperty(row, "workflow_input"))
+      ],
+      [
+        "one target key omitted",
+        (matrix) => {
+          const row = matrix[1]!;
+          if (row.workflow_input?.target_frameworks === undefined) throw new Error("missing framework fixture");
+          Reflect.deleteProperty(row.workflow_input.target_frameworks, row.target_id);
+        }
+      ],
+      ["one row omitted", (matrix) => Reflect.deleteProperty(matrix[2]!, "workflow_input")],
+      [
+        "one framework substituted",
+        (matrix) => {
+          const row = matrix[0]!;
+          if (row.workflow_input?.target_frameworks === undefined) throw new Error("missing framework fixture");
+          row.workflow_input.target_frameworks[row.target_id] = "hardhat";
+        }
+      ]
+    ];
+
+    for (const [label, mutate] of cases) {
+      const matrix = matrixRows(targetIds, modelSlug);
+      mutate(matrix);
+      const bundle = completeHistoryBundle(matrix, expected.evalRunId);
+      expect(() => summarizePublicBenchmarkBundlePublication(bundle, expected, pair, publicationUrl), label).toThrow(
+        /matrix row .*?(?:workflow input|target frameworks|framework)/u
+      );
+    }
+  });
+
+  it("requires every bundle target framework to exactly match trusted policy during automatic preparation", () => {
+    const targetIds = ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"];
+    const modelSlug = smokeManifest().pairs[0]!.model_slug;
+    const pair = smokeManifest().pairs[0]!.pair;
+    const expected = {
+      matrixRowsPerPair: 3,
+      targetIds,
+      targets: smokeTargets(),
+      trialsPerVariant: 1,
+      modelSlug,
+      evalRunId: "ci-12345-2-smoke-ultrafuzz-bench-openai-benchmark-smoke-gpt-5-6-luna-high"
+    };
+    const publicationUrl = "https://github.com/monad-developers/ultrafuzz/actions/runs/12345/artifacts";
+
+    const missing = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
+    Reflect.deleteProperty(missing.targets[0]!, "framework");
+    expect(() => summarizePublicBenchmarkBundlePublication(missing, expected, pair, publicationUrl)).toThrow(
+      /target 0 must contain exactly .*framework/u
+    );
+
+    const substituted = completeHistoryBundle(matrixRows(targetIds, modelSlug), expected.evalRunId);
+    substituted.targets[0]!.framework = "hardhat";
+    expect(() => summarizePublicBenchmarkBundlePublication(substituted, expected, pair, publicationUrl)).toThrow(
+      /does not match the trusted benchmark policy/u
+    );
   });
 
   it("rejects symlinked and oversized producer manifests before parsing", () => {
@@ -725,9 +822,8 @@ function smokeContext() {
   return { ...context, targets: smokeTargets() };
 }
 
-function deepSeekAutomaticPublicationBundle() {
-  const model = "deepseek-v4-flash";
-  const pair = "ultrafuzz-bench-benchmark-smoke-deepseek-v4-flash-max";
+function deepSeekAutomaticPublicationBundle(model = "deepseek-v4-flash") {
+  const pair = `ultrafuzz-bench-benchmark-smoke-${model}-max`;
   const rowId = "very-liquid-vaults-foundry-row-1";
   const totalTokens = 1_750;
   const costUsd = 0.0002114;
@@ -741,6 +837,8 @@ function deepSeekAutomaticPublicationBundle() {
           schema_version: "ultrafuzz.eval.model-identity.v1",
           configured_model: model,
           provider_reported_model: model,
+          identity_scope: model === "deepseek-v4-flash" ? "provider-reported-alias" : "provider-reported-model-id",
+          provider_version_status: "unverified",
           invocation_count: 1,
           invocations: [
             {
@@ -1127,7 +1225,15 @@ function fullTargets() {
   }));
 }
 
-function bundleWithMatrix(matrix: Array<Record<string, string>>) {
+interface PublicationMatrixRow {
+  id: string;
+  target_id: string;
+  variant_id: string;
+  trial_id: string;
+  workflow_input?: { target_frameworks?: Record<string, string> };
+}
+
+function bundleWithMatrix(matrix: PublicationMatrixRow[]) {
   return {
     files: [
       {
@@ -1139,11 +1245,12 @@ function bundleWithMatrix(matrix: Array<Record<string, string>>) {
 }
 
 function completeHistoryBundle(
-  matrix: Array<Record<string, string>>,
+  matrix: PublicationMatrixRow[],
   evalRunId: string,
   diagnosticsSummaryOverrides: Record<string, unknown> = {},
   scoreSummaryOverrides: Record<string, unknown> = {}
 ) {
+  const trustedTargets = new Map(smokeTargets().map((target) => [target.id, target]));
   const diagnosticsRows = matrix.map((row, index) => ({
     row_id: row.id,
     target_id: row.target_id,
@@ -1187,23 +1294,26 @@ function completeHistoryBundle(
     status: "succeeded",
     executed_case_count: matrix.length,
     graded_case_count: matrix.length,
-    targets: matrix.map((row, index) => ({
-      id: row.target_id,
-      repository: `https://github.com/benchmark-targets/${row.target_id}`,
-      revision: String(index + 1).repeat(40),
-      framework: index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper",
-      status: "succeeded",
-      executed_case_count: 1,
-      graded_case_count: 1,
-      publication_location: {
-        bundle_path: "public-results.json",
-        report_paths: [
-          `reports/${row.id}/report.md`,
-          `reports/${row.id}/report.json`,
-          `reports/${row.id}/findings.normalized.json`
-        ]
-      }
-    })),
+    targets: matrix.map((row, index) => {
+      const trustedTarget = trustedTargets.get(row.target_id);
+      return {
+        id: row.target_id,
+        repository: trustedTarget?.repository ?? `https://github.com/benchmark-targets/${row.target_id}`,
+        revision: trustedTarget?.revision ?? String(index + 1).repeat(40),
+        framework: trustedTarget?.framework ?? (index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper"),
+        status: "succeeded",
+        executed_case_count: 1,
+        graded_case_count: 1,
+        publication_location: {
+          bundle_path: "public-results.json",
+          report_paths: [
+            `reports/${row.id}/report.md`,
+            `reports/${row.id}/report.json`,
+            `reports/${row.id}/findings.normalized.json`
+          ]
+        }
+      };
+    }),
     files: [
       {
         path: "eval/matrix.json",
@@ -1221,12 +1331,17 @@ function completeHistoryBundle(
   };
 }
 
-function matrixRows(targetIds: string[], modelSlug: string): Array<Record<string, string>> {
+function matrixRows(targetIds: string[], modelSlug: string): PublicationMatrixRow[] {
   return targetIds.map((targetId, index) => ({
     id: `${targetId}-row-${index + 1}`,
     target_id: targetId,
     variant_id: modelSlug,
-    trial_id: "trial-1"
+    trial_id: "trial-1",
+    workflow_input: {
+      target_frameworks: {
+        [targetId]: index % 3 === 0 ? "foundry" : index % 3 === 1 ? "hardhat" : "vyper"
+      }
+    }
   }));
 }
 

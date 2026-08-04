@@ -11,6 +11,8 @@ const PUBLIC_EVAL_DIAGNOSTICS_LEGACY_SCHEMA_VERSION = "ultrafuzz.modal.public-ev
 export const PUBLIC_MODEL_IDENTITY_SCHEMA_VERSION = "ultrafuzz.eval.model-identity.v1" as const;
 export const PUBLIC_PRICING_EVIDENCE_SCHEMA_VERSION = "ultrafuzz.eval.pricing-evidence.v1" as const;
 export const DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash" as const;
+export const PUBLIC_MODEL_IDENTITY_SCOPES = ["provider-reported-alias", "provider-reported-model-id"] as const;
+export const PUBLIC_PROVIDER_VERSION_STATUSES = ["unverified"] as const;
 export const DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION = {
   uncached_input: 0.14,
   cache_read: 0.0028,
@@ -118,13 +120,25 @@ const modelInvocationSchema = z.strictObject({
   provider_reported_model: modelName
 });
 
-const modelIdentitySchema = z.strictObject({
-  schema_version: z.literal(PUBLIC_MODEL_IDENTITY_SCHEMA_VERSION),
-  configured_model: modelName,
-  provider_reported_model: modelName,
-  invocation_count: z.number().int().positive().max(MAX_PUBLIC_MODEL_INVOCATIONS_PER_ROW),
-  invocations: z.array(modelInvocationSchema).min(1).max(MAX_PUBLIC_MODEL_INVOCATIONS_PER_ROW)
-});
+const modelIdentitySchema = z
+  .strictObject({
+    schema_version: z.literal(PUBLIC_MODEL_IDENTITY_SCHEMA_VERSION),
+    configured_model: modelName,
+    provider_reported_model: modelName,
+    identity_scope: z.enum(PUBLIC_MODEL_IDENTITY_SCOPES),
+    provider_version_status: z.literal(PUBLIC_PROVIDER_VERSION_STATUSES[0]),
+    invocation_count: z.number().int().positive().max(MAX_PUBLIC_MODEL_INVOCATIONS_PER_ROW),
+    invocations: z.array(modelInvocationSchema).min(1).max(MAX_PUBLIC_MODEL_INVOCATIONS_PER_ROW)
+  })
+  .superRefine((identity, context) => {
+    if (identity.identity_scope !== publicModelIdentityScope(identity.provider_reported_model)) {
+      context.addIssue({
+        code: "custom",
+        path: ["identity_scope"],
+        message: "public model identity scope does not match the provider-reported API identifier"
+      });
+    }
+  });
 
 const pricingCatalogSchema = z.strictObject({
   source: z.enum(["models.dev", "configured-catalog"]),
@@ -261,7 +275,21 @@ export type PublicEvalDiagnosticsRow = z.infer<typeof rowSchema>;
 export type PublicEvalDiagnosticsReasonCode = z.infer<typeof reasonCode>;
 export type PublicEvalFailedNode = z.infer<typeof failedNodeSchema>;
 export type PublicModelIdentity = z.infer<typeof modelIdentitySchema>;
+export type PublicModelIdentityScope = (typeof PUBLIC_MODEL_IDENTITY_SCOPES)[number];
+export type PublicProviderVersionStatus = (typeof PUBLIC_PROVIDER_VERSION_STATUSES)[number];
 export type PublicPricingEvidence = z.infer<typeof pricingEvidenceSchema>;
+
+/**
+ * Classify only API identifiers whose moving-alias semantics are explicitly
+ * documented. This is evidence scope, not an inference about provider weights.
+ */
+export function publicModelIdentityScope(providerReportedModel: string): PublicModelIdentityScope {
+  return providerReportedModel === DEEPSEEK_V4_FLASH_MODEL ? "provider-reported-alias" : "provider-reported-model-id";
+}
+
+export function parsePublicModelIdentity(value: unknown): PublicModelIdentity {
+  return modelIdentitySchema.parse(value);
+}
 
 export function comparePublicEvalDiagnosticIds(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;

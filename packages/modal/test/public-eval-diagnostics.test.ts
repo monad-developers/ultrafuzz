@@ -106,6 +106,10 @@ describe("public post-eval diagnostics", () => {
       row_id: "target-a-runner-trial-1",
       workflow_status: "succeeded",
       terminal_report_present: true,
+      model_identity: {
+        identity_scope: "provider-reported-model-id",
+        provider_version_status: "unverified"
+      },
       scoring_ready: true,
       reason_codes: [],
       diagnostic_codes: ["SAFE_CODE"]
@@ -116,7 +120,7 @@ describe("public post-eval diagnostics", () => {
     expect(serialized).not.toContain("details");
   });
 
-  it("derives exact DeepSeek V4 Flash identity and models.dev pricing from run.json", () => {
+  it("derives alias-scoped DeepSeek V4 Flash identity and models.dev pricing from run.json", () => {
     const config: PublicModalBenchmarkConfig = {
       ...CONFIG,
       models: [DEEPSEEK_FLASH_MODEL],
@@ -152,6 +156,8 @@ describe("public post-eval diagnostics", () => {
         schema_version: "ultrafuzz.eval.model-identity.v1",
         configured_model: "deepseek-v4-flash",
         provider_reported_model: "deepseek-v4-flash",
+        identity_scope: "provider-reported-alias",
+        provider_version_status: "unverified",
         invocation_count: 1,
         invocations: [
           {
@@ -209,6 +215,24 @@ describe("public post-eval diagnostics", () => {
       scoring_ready: true,
       reason_codes: []
     });
+
+    const missingScope = structuredClone(diagnostics) as unknown as {
+      rows: Array<{ model_identity: Record<string, unknown> }>;
+    };
+    Reflect.deleteProperty(missingScope.rows[0]!.model_identity, "identity_scope");
+    expect(() => parsePublicEvalDiagnostics(missingScope)).toThrow();
+
+    const relabeled = structuredClone(diagnostics) as unknown as {
+      rows: Array<{ model_identity: Record<string, unknown> }>;
+    };
+    relabeled.rows[0]!.model_identity.identity_scope = "provider-reported-model-id";
+    expect(() => parsePublicEvalDiagnostics(relabeled)).toThrow(/scope/u);
+
+    const versionClaim = structuredClone(diagnostics) as unknown as {
+      rows: Array<{ model_identity: Record<string, unknown> }>;
+    };
+    versionClaim.rows[0]!.model_identity.provider_version_status = "verified";
+    expect(() => parsePublicEvalDiagnostics(versionClaim)).toThrow();
   });
 
   it("accepts the runtime-prefixed workflow ID emitted for a maximum-length eval child run", () => {

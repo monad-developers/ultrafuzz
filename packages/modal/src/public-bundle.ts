@@ -241,6 +241,17 @@ const targetPublicationLocationSchema = z.strictObject({
     .max(MAX_ROWS * PUBLIC_REPORT_FILES.length)
 });
 
+const currentBundleTargetSchema = z.strictObject({
+  id: safeId,
+  repository: repositoryUrl,
+  revision: fullSha,
+  framework: safeId,
+  status: bundleStatus,
+  executed_case_count: caseCount,
+  graded_case_count: caseCount,
+  publication_location: targetPublicationLocationSchema
+});
+
 const bundleTargetSchema = z.strictObject({
   id: safeId,
   repository: repositoryUrl,
@@ -299,7 +310,7 @@ const currentBundleSchema = z.strictObject({
   ...bundleShape,
   provider_reported_model: z.string().min(1).max(256),
   status: bundleStatus,
-  targets: z.array(bundleTargetSchema).min(1).max(MAX_ROWS)
+  targets: z.array(currentBundleTargetSchema).min(1).max(MAX_ROWS)
 });
 
 const previousBundleSchema = z.strictObject({
@@ -902,7 +913,7 @@ export function parsePublicBenchmarkBundle(
   }
   const matrixContents = contentsByPath.get("eval/matrix.json");
   if (matrixContents === undefined) throw new Error("public benchmark bundle is missing eval/matrix.json");
-  const matrixRows = parseMatrixRows(matrixContents);
+  const matrixRows = parseMatrixRows(matrixContents, parsed.schema_version === PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
   const runContents = contentsByPath.get("eval/runs.jsonl");
   if (runContents === undefined) throw new Error("public benchmark bundle is missing eval/runs.jsonl");
   const finalRunRecords = hasImmutableExecutionEvidence
@@ -2163,7 +2174,7 @@ interface PublicBundleMatrixRow {
   judge_reasoning?: string;
 }
 
-function parseMatrixRows(contents: Buffer): Map<string, PublicBundleMatrixRow> {
+function parseMatrixRows(contents: Buffer, requireTargetFramework = false): Map<string, PublicBundleMatrixRow> {
   let value: unknown;
   try {
     value = JSON.parse(contents.toString("utf8")) as unknown;
@@ -2188,7 +2199,7 @@ function parseMatrixRows(contents: Buffer): Map<string, PublicBundleMatrixRow> {
       throw new Error(`public benchmark bundle matrix row ${index} has an invalid identity`);
     }
     const target = parseMatrixTargetIdentity(input.target, targetId.data, index);
-    const framework = parseMatrixTargetFramework(input, targetId.data, index);
+    const framework = parseMatrixTargetFramework(input, targetId.data, index, requireTargetFramework);
     if (rows.has(id.data)) throw new Error(`public benchmark bundle matrix repeats row ID ${id.data}`);
     rows.set(id.data, {
       id: id.data,
@@ -2231,10 +2242,20 @@ function parseMatrixTargetIdentity(value: unknown, targetId: string, index: numb
   return { id: id.data, repo: repo.data, ref: ref.data };
 }
 
-function parseMatrixTargetFramework(row: Record<string, unknown>, targetId: string, index: number): string | undefined {
+function parseMatrixTargetFramework(
+  row: Record<string, unknown>,
+  targetId: string,
+  index: number,
+  required: boolean
+): string | undefined {
   const workflowInput = recordValue(row.workflow_input);
   const frameworks = recordValue(workflowInput?.target_frameworks);
-  if (frameworks === undefined || !(targetId in frameworks)) return undefined;
+  if (frameworks === undefined || !(targetId in frameworks)) {
+    if (required) {
+      throw new Error(`public benchmark bundle matrix row ${index} is missing its target framework`);
+    }
+    return undefined;
+  }
   const framework = safeId.safeParse(frameworks[targetId]);
   if (!framework.success) {
     throw new Error(`public benchmark bundle matrix row ${index} has an invalid target framework`);
@@ -2284,7 +2305,7 @@ function summarizePublicBenchmarkBundleFiles(
     throw new Error(`public benchmark bundle is missing eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`);
   }
   return summarizePublicBenchmarkBundleContents({
-    matrixRows: parseMatrixRows(matrixContents),
+    matrixRows: parseMatrixRows(matrixContents, true),
     diagnostics: parseBundleDiagnostics(diagnosticsContents),
     summaryRows: parseSummaryRows(summaryContents),
     publicationBundlePath,

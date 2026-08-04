@@ -160,6 +160,15 @@ manifest, config, terminal evidence, and public bundle validation. Dispatch this
 scope on `main`; feature-branch runs retain review artifacts but cannot publish
 history automatically.
 
+Here “fixed” describes the requested API profile and benchmark plan, not an
+immutable provider release. DeepSeek documents `deepseek-v4-flash` as a moving
+API alias, and its Anthropic-compatible response reports that alias without a
+concrete backend version. Public diagnostics therefore retain the exact alias
+observed on every invocation, mark its identity scope as
+`provider-reported-alias`, and leave the provider version `unverified`. The
+history model label and observation timestamp must not be read as an attestation
+of immutable backend weights.
+
 ```bash
 gh workflow run eval-benchmarks.yml \
   --ref main \
