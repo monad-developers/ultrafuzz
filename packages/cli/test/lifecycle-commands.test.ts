@@ -301,13 +301,14 @@ test("why reports the diagnosis in human and JSON output", async () => {
   assert.equal(data.blockers[0]?.kind, "waiting-approval");
 });
 
-test("timeline surfaces frame numbers for fork --frame", async () => {
+test("timeline surfaces frame numbers for replay --frame and fork --frame", async () => {
   const { project, env } = await launchedProject();
 
   const human = await cli(project, ["timeline", RUN_ID], env);
   assert.equal(human.code, 0, human.stderr);
   assert.match(human.stdout, /^Frames: 2$/mu);
   assert.match(human.stdout, /^Latest frame: 7$/mu);
+  assert.match(human.stdout, /ultrafuzz replay <run-id> --frame <n>/u);
   assert.match(human.stdout, /ultrafuzz fork <run-id> --frame <n>/u);
   assert.match(human.stdout, /^frame 2: /mu);
 

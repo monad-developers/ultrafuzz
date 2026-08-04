@@ -500,6 +500,21 @@ pre {
   gap: var(--mds-space-1);
 }
 
+.lifecycle-frame {
+  width: 116px;
+  display: grid;
+  gap: 2px;
+  color: var(--mds-text-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.lifecycle-frame .text-input {
+  min-height: 32px;
+  padding: 6px 8px;
+}
+
 .theme-select {
   min-width: 160px;
   display: grid;

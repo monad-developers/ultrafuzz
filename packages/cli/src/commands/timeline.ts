@@ -29,7 +29,9 @@ function renderTimeline(value: RunTimelineValue): string {
     lines.push("No checkpoint frames recorded yet.");
   } else {
     lines.push(`Latest frame: ${value.latest_frame ?? "none"}`);
-    lines.push("Use `ultrafuzz fork <run-id> --frame <n>` with a frame number below.");
+    lines.push(
+      "Use `ultrafuzz replay <run-id> --frame <n>` or `ultrafuzz fork <run-id> --frame <n>` with a frame number below."
+    );
     for (const frame of value.frames) {
       lines.push(renderFrame(frame, ""));
     }

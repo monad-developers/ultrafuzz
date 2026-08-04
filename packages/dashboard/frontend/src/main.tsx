@@ -1815,9 +1815,20 @@ function Toolbar({
   themePreference: ThemePreference;
   togglePanel: (panel: PanelToggle) => void;
 }) {
+  const [lifecycleFrameInput, setLifecycleFrameInput] = useState("");
   const can = (command: string) => {
     const capability = capabilityForCommand(command);
     return Boolean(flow && capability && flow.capabilities[capability]);
+  };
+  const lifecycleFrame = lifecycleFrameInput.trim() === "" ? undefined : Number(lifecycleFrameInput);
+  const hasValidLifecycleFrame =
+    lifecycleFrame !== undefined && Number.isSafeInteger(lifecycleFrame) && lifecycleFrame >= 0;
+
+  const runLifecycleCommand = (command: "replay" | "fork") => {
+    if (!hasValidLifecycleFrame) {
+      return;
+    }
+    runCommand(command, { forkFrame: lifecycleFrame });
   };
 
   return (
@@ -1878,10 +1889,34 @@ function Toolbar({
                 <CommandButton disabled={!can("resume")} onClick={() => runCommand("resume")} variant="secondary">
                   Resume
                 </CommandButton>
-                <CommandButton disabled={!can("replay")} onClick={() => runCommand("replay")} variant="secondary">
+                <label className="lifecycle-frame">
+                  <span>Checkpoint frame</span>
+                  <input
+                    aria-label="Replay or fork checkpoint frame"
+                    className="text-input"
+                    inputMode="numeric"
+                    min="0"
+                    onChange={(event) => setLifecycleFrameInput(event.target.value)}
+                    placeholder="e.g. 12"
+                    step="1"
+                    type="number"
+                    value={lifecycleFrameInput}
+                  />
+                </label>
+                <CommandButton
+                  disabled={!can("replay") || !hasValidLifecycleFrame}
+                  onClick={() => runLifecycleCommand("replay")}
+                  title="Replay from the selected timeline checkpoint frame"
+                  variant="secondary"
+                >
                   Replay
                 </CommandButton>
-                <CommandButton disabled={!can("fork")} onClick={() => runCommand("fork")} variant="secondary">
+                <CommandButton
+                  disabled={!can("fork") || !hasValidLifecycleFrame}
+                  onClick={() => runLifecycleCommand("fork")}
+                  title="Fork from the selected timeline checkpoint frame"
+                  variant="secondary"
+                >
                   Fork
                 </CommandButton>
               </ActionGroup>

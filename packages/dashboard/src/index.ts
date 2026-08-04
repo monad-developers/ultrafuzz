@@ -1189,6 +1189,9 @@ class DashboardApp {
     if ((command === "materialize" || command === "clean") && body.confirmed !== true) {
       throw new HttpError(400, `${command} requires explicit confirmation`);
     }
+    if (command === "replay" || command === "fork") {
+      requiredLifecycleFrame(body);
+    }
     const job: CommandJob = {
       jobId: `job-${Date.now().toString(36)}-${crypto.randomBytes(4).toString("hex")}`,
       command,
@@ -1225,6 +1228,9 @@ class DashboardApp {
       case "validate":
       case "run":
         return [...base, command, "--json"];
+      case "replay":
+      case "fork":
+        return [...base, command, runId ?? "<run-id>", "--frame", String(requiredLifecycleFrame(body)), "--json"];
       default:
         return [...base, command, runId ?? "<run-id>", "--json"];
     }
@@ -1271,7 +1277,7 @@ class DashboardApp {
         result = await replayRun({
           projectRoot: this.projectRoot,
           runId: runId!,
-          forkFrame: optionalNumberField(body, "forkFrame"),
+          forkFrame: requiredLifecycleFrame(body),
           env: this.env
         });
         break;
@@ -1279,7 +1285,7 @@ class DashboardApp {
         result = await forkRun({
           projectRoot: this.projectRoot,
           runId: runId!,
-          forkFrame: optionalNumberField(body, "forkFrame"),
+          forkFrame: requiredLifecycleFrame(body),
           resetNode: optionalStringField(body, "resetNode"),
           label: optionalStringField(body, "label"),
           maxConcurrency: optionalNumberField(body, "maxConcurrency"),
@@ -1996,6 +2002,14 @@ function optionalNumberField(record: JsonObject, key: string): number | undefine
     throw new HttpError(400, `${key} must be a number`);
   }
   return value;
+}
+
+function requiredLifecycleFrame(record: JsonObject): number {
+  const frame = optionalNumberField(record, "forkFrame");
+  if (frame === undefined || !Number.isSafeInteger(frame) || frame < 0) {
+    throw new HttpError(400, "forkFrame must be a non-negative safe integer");
+  }
+  return frame;
 }
 
 function stringArrayField(record: JsonObject, key: string): string[] {

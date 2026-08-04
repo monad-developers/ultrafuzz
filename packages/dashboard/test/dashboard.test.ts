@@ -117,6 +117,43 @@ test("mutating APIs require the session token and reject invalid saves without w
   }
 });
 
+test("dashboard replay and fork require a checkpoint frame and expose it in argv", async () => {
+  const projectRoot = makeProject();
+  const handle = await serveDashboard({ projectRoot, port: 0 });
+  const postLifecycle = (command: "replay" | "fork", body: Record<string, unknown>) =>
+    fetch(apiUrl(handle.url, `/api/commands/${command}`), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-ultrafuzz-session": handle.sessionToken
+      },
+      body: JSON.stringify(body)
+    });
+  try {
+    const missing = await postLifecycle("replay", { runId: "dashboard-frame-test" });
+    assert.equal(missing.status, 400);
+    assert.match(await missing.text(), /forkFrame must be a non-negative safe integer/u);
+
+    for (const forkFrame of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = await postLifecycle("replay", { forkFrame, runId: "dashboard-frame-test" });
+      assert.equal(invalid.status, 400);
+      assert.match(await invalid.text(), /forkFrame must be a non-negative safe integer/u);
+    }
+
+    for (const command of ["replay", "fork"] as const) {
+      const accepted = await postLifecycle(command, { forkFrame: 12, runId: "dashboard-frame-test" });
+      if (accepted.status !== 202) {
+        assert.fail(await accepted.text());
+      }
+      const job = (await accepted.json()) as { argv: string[]; command: string };
+      assert.equal(job.command, command);
+      assert.deepEqual(job.argv, ["ultrafuzz", command, "dashboard-frame-test", "--frame", "12", "--json"]);
+    }
+  } finally {
+    await handle.close();
+  }
+});
+
 test("API requests reject non-loopback host headers", async () => {
   const projectRoot = makeProject();
   const handle = await serveDashboard({ projectRoot, port: 0 });
