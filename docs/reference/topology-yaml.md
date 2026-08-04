@@ -183,6 +183,28 @@ Downstream prompts can consume the normalized Markdown primary artifact with:
 {{artifact_handoff:reference-properties-montyly-rounding}}
 ```
 
+The external vulnerability database uses the same reference-node lifecycle but
+declares its machine-readable catalog as the primary output:
+
+```yaml
+- id: reference-vulnerability-database
+  kind: reference
+  reference: vulnerability-database.web3
+  group: references
+  depends_on:
+    - __start__
+  outputs:
+    - path: vulnerability-db/catalog.json
+      contract: ultrafuzz/json-object@1
+      primary: true
+    - path: references/manifest.json
+      contract: ultrafuzz/json-object@1
+```
+
+The reference catalog entry's `kind: vulnerability-database` makes the runtime
+materialize and validate `database.yml`, `capabilities.yml`, `catalog.json`, and
+the catalog-declared `classes/**/*.md` tree instead of concatenating them.
+
 ## Loop Expansion
 
 Loop expansion is deterministic:

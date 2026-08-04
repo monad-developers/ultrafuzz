@@ -309,9 +309,14 @@ an explicit operator action.
 
 Reference materialization MUST write durable artifacts under the reference node
 artifact directory, including normalized Markdown and `references/manifest.json`
-when declared by topology. Missing cache entries, digest mismatches, unsafe
-paths, unknown reference IDs, or missing required reference artifacts MUST fail
-before dependent agentic nodes run.
+when declared by topology. A `kind: vulnerability-database` reference MUST
+instead preserve the validated external database tree byte-for-byte, discover
+record paths only from its pinned `catalog.json`, and retain repository, commit,
+schema, aggregate, and per-file digests. Missing cache entries, digest
+mismatches, unsafe paths, unknown reference IDs, malformed database contracts,
+or missing required reference artifacts MUST fail before dependent agentic
+nodes run. Ultrafuzz MUST NOT execute code from the external reference while
+validating it.
 
 ## Execution And Lifecycle
 

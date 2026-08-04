@@ -16,6 +16,20 @@ import {
 } from "@ultrafuzz/artifacts";
 import { parse, stringify } from "yaml";
 
+import {
+  VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH,
+  VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY,
+  VULNERABILITY_DATABASE_REFERENCE_KIND,
+  VULNERABILITY_DATABASE_REQUIRED_PATHS,
+  parseVulnerabilityDatabaseCatalog,
+  validateVulnerabilityDatabaseDirectory,
+  validateVulnerabilityDatabaseGitTree,
+  vulnerabilityDatabaseReferencePaths,
+  type VulnerabilityDatabaseGitTreeEntry
+} from "./vulnerability-database.js";
+
+export * from "./vulnerability-database.js";
+
 export const PROJECT_REFERENCES_FILE = ".ultrafuzz/references.yml";
 export const REFERENCES_VERSION = 1;
 export const CACHE_MANIFEST_FILE = ".ultrafuzz-reference-manifest.json";
@@ -24,6 +38,7 @@ export const REFERENCE_CACHE_SCHEMA_VERSION = "1.0";
 export const RUN_REFERENCE_MANIFEST_SCHEMA_VERSION = "1.0";
 
 export type ReferenceProvider = "github";
+export type ReferenceKind = "document" | typeof VULNERABILITY_DATABASE_REFERENCE_KIND;
 
 export interface ReferenceCatalog {
   version: number;
@@ -31,6 +46,7 @@ export interface ReferenceCatalog {
 }
 
 export interface ReferenceEntry {
+  kind?: ReferenceKind;
   provider: ReferenceProvider;
   repo: string;
   commit: string;
@@ -111,6 +127,7 @@ export interface RunReferenceManifest {
   repo: string;
   commit: string;
   resolved_at: string;
+  kind?: ReferenceKind;
   source_files: ReferenceManifestFile[];
   artifacts: ReferenceManifestFile[];
 }
@@ -362,9 +379,35 @@ export function materializeReferenceArtifacts(input: {
 
   const artifactDir = path.resolve(input.artifactDir);
   const referenceArtifact = prepareSafeFilePath(artifactDir, primaryArtifact);
-  writeFileDurable(referenceArtifact, normalizedReferenceMarkdown(input.id, reference, cacheDir));
+  const artifactFiles: ReferenceManifestFile[] = [];
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    if (primaryArtifact !== VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH) {
+      throw referenceError(
+        "INVALID_VULNERABILITY_DATABASE_OUTPUT",
+        `vulnerability database reference \`${input.id}\` primary output must be ${VULNERABILITY_DATABASE_CATALOG_ARTIFACT_PATH}`
+      );
+    }
+    const database = validateVulnerabilityDatabaseDirectory(cacheDir);
+    for (const sourcePath of vulnerabilityDatabaseReferencePaths(database.catalog)) {
+      const source = safeResolveInside(cacheDir, sourcePath, "cached vulnerability database path");
+      const artifactPath = path.posix.join(VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY, sourcePath);
+      const destination = prepareSafeFilePath(artifactDir, artifactPath);
+      writeFileDurable(destination, fs.readFileSync(source));
+      artifactFiles.push(manifestFileForPath(artifactDir, artifactPath));
+    }
+    validateVulnerabilityDatabaseDirectory(path.join(artifactDir, VULNERABILITY_DATABASE_MATERIALIZED_DIRECTORY), {
+      provider: reference.provider,
+      repo: reference.repo,
+      commit: reference.commit,
+      resolved_at: reference.resolved_at
+    });
+  } else {
+    writeFileDurable(referenceArtifact, normalizedReferenceMarkdown(input.id, reference, cacheDir));
+    artifactFiles.push(manifestFileForPath(artifactDir, primaryArtifact));
+  }
 
   const manifestArtifact = prepareSafeFilePath(artifactDir, RUN_REFERENCE_MANIFEST_FILE);
+  const sourcePaths = effectiveCachedReferencePaths(reference, cacheDir);
   const runManifest: RunReferenceManifest = {
     schema_version: RUN_REFERENCE_MANIFEST_SCHEMA_VERSION,
     reference: input.id,
@@ -372,8 +415,9 @@ export function materializeReferenceArtifacts(input: {
     repo: reference.repo,
     commit: reference.commit,
     resolved_at: reference.resolved_at,
-    source_files: cacheManifest.files.filter((file) => reference.paths.includes(file.path)),
-    artifacts: [manifestFileForPath(artifactDir, primaryArtifact)]
+    ...(reference.kind === undefined ? {} : { kind: reference.kind }),
+    source_files: cacheManifest.files.filter((file) => sourcePaths.includes(file.path)),
+    artifacts: artifactFiles
   };
   writeJsonDurable(manifestArtifact, runManifest);
 
@@ -430,6 +474,11 @@ function normalizeReferenceEntry(id: string, value: unknown): ReferenceEntry {
   if (value.provider !== "github") {
     throw referenceError("UNSUPPORTED_PROVIDER", `reference \`${id}\` must use provider \`github\``, { id });
   }
+  if (value.kind !== undefined && value.kind !== "document" && value.kind !== VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    throw referenceError("INVALID_REFERENCE_KIND", `reference \`${id}\` has invalid kind \`${String(value.kind)}\``, {
+      id
+    });
+  }
   if (typeof value.repo !== "string" || typeof value.commit !== "string" || typeof value.resolved_at !== "string") {
     throw referenceError("INVALID_REFERENCE", `reference \`${id}\` must define repo, commit, and resolved_at`, { id });
   }
@@ -437,6 +486,7 @@ function normalizeReferenceEntry(id: string, value: unknown): ReferenceEntry {
     throw referenceError("INVALID_REFERENCE", `reference \`${id}\` paths must be a string array`, { id });
   }
   return {
+    ...(value.kind === undefined ? {} : { kind: value.kind }),
     provider: "github",
     repo: value.repo,
     commit: value.commit,
@@ -467,6 +517,17 @@ function validateReference(id: string, reference: ReferenceEntry): void {
       });
     }
     seen.add(referencePath);
+  }
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    const required = [...VULNERABILITY_DATABASE_REQUIRED_PATHS].sort();
+    const actual = [...reference.paths].sort();
+    if (JSON.stringify(actual) !== JSON.stringify(required)) {
+      throw referenceError(
+        "INVALID_VULNERABILITY_DATABASE_PATHS",
+        `reference \`${id}\` must list exactly ${required.join(", ")}; record paths are discovered from catalog.json`,
+        { id }
+      );
+    }
   }
 }
 
@@ -554,7 +615,7 @@ function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: stri
     );
   }
   const manifestFiles = new Map(manifest.files.map((file) => [file.path, file]));
-  for (const referencePath of reference.paths) {
+  for (const referencePath of effectiveCachedReferencePaths(reference, cacheDir)) {
     const cachePath = safeResolveInside(cacheDir, referencePath, "cached reference path");
     if (!fs.existsSync(cachePath) || !fs.statSync(cachePath).isFile()) {
       throw referenceError(
@@ -586,6 +647,9 @@ function cachedReferenceOk(id: string, reference: ReferenceEntry, cacheDir: stri
       });
     }
   }
+  if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+    validateVulnerabilityDatabaseDirectory(cacheDir);
+  }
 }
 
 interface ReferenceCacheGroup {
@@ -598,12 +662,13 @@ function referenceCacheGroups(catalog: ReferenceCatalog): ReferenceCacheGroup[] 
   for (const [id, reference] of Object.entries(catalog.references).sort(([left], [right]) =>
     left.localeCompare(right)
   )) {
-    const key = `${reference.provider}\0${reference.repo}\0${reference.commit}`;
+    const key = `${reference.provider}\0${reference.repo}\0${reference.commit}\0${referenceKind(reference)}`;
     const group =
       groups.get(key) ??
       ({
         ids: [],
         reference: {
+          ...(reference.kind === undefined ? {} : { kind: reference.kind }),
           provider: reference.provider,
           repo: reference.repo,
           commit: reference.commit,
@@ -637,12 +702,16 @@ function fetchReference(id: string, reference: ReferenceEntry, cacheDir: string)
     const staging = path.join(tempRoot, "cache");
     fs.mkdirSync(staging, { recursive: true });
     const files: ReferenceManifestFile[] = [];
-    for (const referencePath of reference.paths) {
+    const sourcePaths = referencePathsAtCommit(id, reference, tempRoot);
+    for (const referencePath of sourcePaths) {
       const data = gitBlob(id, tempRoot, reference.commit, referencePath);
       const destination = safeResolveInside(staging, referencePath, "reference cache path");
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.writeFileSync(destination, data);
       files.push(manifestFileForPath(staging, referencePath));
+    }
+    if (referenceKind(reference) === VULNERABILITY_DATABASE_REFERENCE_KIND) {
+      validateVulnerabilityDatabaseDirectory(staging);
     }
     files.sort((left, right) => left.path.localeCompare(right.path));
     writeJsonDurable(path.join(staging, CACHE_MANIFEST_FILE), {
@@ -743,6 +812,41 @@ function gitOutput(cwd: string, args: string[]): string {
       command: ["git", ...args]
     });
   }
+}
+
+function referencePathsAtCommit(id: string, reference: ReferenceEntry, checkout: string): string[] {
+  if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
+  const catalog = parseVulnerabilityDatabaseCatalog(gitBlob(id, checkout, reference.commit, "catalog.json"));
+  const entries = gitTreeEntries(checkout, reference.commit);
+  validateVulnerabilityDatabaseGitTree(entries, catalog);
+  return vulnerabilityDatabaseReferencePaths(catalog);
+}
+
+function effectiveCachedReferencePaths(reference: ReferenceEntry, cacheDir: string): string[] {
+  if (referenceKind(reference) !== VULNERABILITY_DATABASE_REFERENCE_KIND) return [...reference.paths];
+  const catalogPath = safeResolveInside(cacheDir, "catalog.json", "cached vulnerability database catalog");
+  return vulnerabilityDatabaseReferencePaths(parseVulnerabilityDatabaseCatalog(fs.readFileSync(catalogPath)));
+}
+
+function gitTreeEntries(cwd: string, commit: string): VulnerabilityDatabaseGitTreeEntry[] {
+  const output = gitOutput(cwd, ["ls-tree", "-r", commit]);
+  return output
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => {
+      const separator = line.indexOf("\t");
+      const metadata = line.slice(0, separator).split(" ");
+      const entryPath = line.slice(separator + 1);
+      const [mode, type] = metadata;
+      if (separator < 0 || mode === undefined || type === undefined || entryPath === "") {
+        throw referenceError("INVALID_GIT_TREE", `git tree for ${commit} contains an invalid entry`);
+      }
+      return { mode, type, path: entryPath };
+    });
+}
+
+function referenceKind(reference: ReferenceEntry): ReferenceKind {
+  return reference.kind ?? "document";
 }
 
 function normalizedReferenceMarkdown(id: string, reference: ReferenceEntry, cacheDir: string): string {

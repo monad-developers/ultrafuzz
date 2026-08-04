@@ -222,8 +222,9 @@ stay in root `ultrafuzz.toml` and editable product surfaces under
 `.ultrafuzz/**`.
 
 `ultrafuzz init` also writes `.ultrafuzz/references.yml`. That catalog pins
-property reference material to full GitHub commit SHAs and traversal-free
-relative paths. It is not configured through `ultrafuzz.toml`; use
+property and specialized vulnerability-database reference material to full
+GitHub commit SHAs and traversal-free relative paths. It is not configured
+through `ultrafuzz.toml`; use
 `ultrafuzz references status`, `ultrafuzz references sync`, and guarded
 `ultrafuzz references update --latest` for the reference cache flow.
 

@@ -31,6 +31,31 @@ Reference IDs must start with a lowercase letter or digit and may contain
 lowercase letters, digits, dots, underscores, and hyphens. Paths must be
 relative, traversal-free paths inside the referenced repository.
 
+### Web3 vulnerability database
+
+The vulnerability database uses a dedicated reference kind. A project must pin
+an immutable commit that already contains the complete external contract:
+
+```yaml
+vulnerability-database.web3:
+  kind: vulnerability-database
+  provider: github
+  repo: monad-developers/web3-vulnerability-database
+  commit: cccccccccccccccccccccccccccccccccccccccc
+  paths:
+    - database.yml
+    - capabilities.yml
+    - catalog.json
+  resolved_at: "2026-08-04T00:00:00Z"
+```
+
+Replace the example commit with the reviewed database release commit. The three
+configured paths are fixed. Ultrafuzz reads the canonically ordered record
+paths from `catalog.json`, verifies that the pinned Git tree contains exactly
+those regular Markdown files below `classes/`, and adds them to the same
+digest-checked cache entry. Mutable branches and an external checkout that has
+not yet published the contract fail closed.
+
 ## Cache
 
 Synced content is stored outside the project repository:
@@ -83,10 +108,17 @@ ultrafuzz references sync
 ultrafuzz run
 ```
 
-During planning, reference nodes materialize cached content into their node
-artifact directory. The primary artifact is normalized Markdown headed with the
-reference ID, repo, commit, and resolved timestamp. Non-Markdown source files
-are included as fenced code blocks.
+During planning, normal document reference nodes materialize normalized
+Markdown headed with the reference ID, repo, commit, and resolved timestamp.
+Non-Markdown source files are included as fenced code blocks.
+
+A `kind: vulnerability-database` reference instead materializes the validated
+checkout byte-for-byte below `vulnerability-db/` in its node artifact directory.
+Its primary output is `vulnerability-db/catalog.json`. Validation independently
+checks the top-level schema, capability registry, strict record frontmatter and
+required sections, catalog normalization, related-class and capability
+references, every source digest and byte size, and the aggregate digest. The
+runtime never executes code from the external repository.
 
 Every reference node must also write:
 
@@ -119,3 +151,6 @@ Reference validation fails for:
 - Unknown topology reference IDs.
 - Missing cache directories or source files.
 - Cache manifest provider, repo, commit, size, or digest mismatches.
+- Vulnerability-database catalog traversal, Git symlinks, undeclared class
+  files, malformed records, unknown capabilities, broken related classes, or
+  aggregate/source digest mismatches.
