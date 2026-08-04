@@ -18,6 +18,8 @@ const WORKFLOW_LIFECYCLE_ACTION_JOURNAL = "lifecycle-action-journal.json";
 const WORKFLOW_RUN_LINK_JOURNAL = "workflow-run-link-journal.json";
 const WORKFLOW_MUTATION_LOCK_STALE_MS = 30 * 60 * 1_000;
 const WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS = 10 * 60 * 1_000;
+const WORKFLOW_MUTATION_LOCK_OWNER = "owner.json";
+const WORKFLOW_MUTATION_LOCK_OWNER_GRACE_MS = 2_000;
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
 const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
 const LIFECYCLE_EVENT_TYPES = new Set([
@@ -75,6 +77,13 @@ export interface WorkflowLifecycleActionJournalEntry {
   workflow_link_id?: string;
 }
 
+export interface WorkflowTimelineDirectFork {
+  workflow_run_id: string;
+  source_workflow_run_id: string;
+  branch_label: string;
+  frame: number;
+}
+
 interface WorkflowLifecycleActionJournal {
   schema_version: typeof WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION;
   entries: WorkflowLifecycleActionJournalEntry[];
@@ -119,16 +128,16 @@ export interface WorkflowLifecycleGeneration {
 }
 
 export async function acquireWorkflowMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
-  return acquireRunLock(layout, WORKFLOW_MUTATION_LOCK, WORKFLOW_MUTATION_LOCK_STALE_MS, {
-    retries: 120,
-    factor: 1,
-    minTimeout: 50,
-    maxTimeout: 250
-  });
+  return acquireOwnedWorkflowMutationLock(layout);
 }
 
 export async function acquireWorkflowLifecycleActionLock(layout: RunLayout): Promise<() => Promise<void>> {
-  return acquireRunLock(layout, WORKFLOW_LIFECYCLE_ACTION_LOCK, WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS, 0);
+  return acquireOwnedRunLock(layout, {
+    lockName: WORKFLOW_LIFECYCLE_ACTION_LOCK,
+    stale: WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS,
+    waitMs: 0,
+    label: "workflow lifecycle action lock"
+  });
 }
 
 export function prepareWorkflowLifecycleAction(
@@ -166,6 +175,11 @@ export function prepareWorkflowLifecycleAction(
   journal.entries.push(entry);
   writeWorkflowLifecycleActionJournal(layout, journal);
   return structuredClone(entry);
+}
+
+export function workflowLifecycleCorrelationLabel(actionId: string): string {
+  const digest = crypto.createHash("sha256").update(requiredJournalString(actionId, "action ID"), "utf8").digest("hex");
+  return `ultrafuzz-lifecycle-${digest}`;
 }
 
 export function transitionWorkflowLifecycleAction(
@@ -445,23 +459,177 @@ export function workflowRunIdsFromTimeline(value: unknown): string[] | undefined
   return [...ids].sort();
 }
 
-async function acquireRunLock(
+export function workflowDirectForksFromTimeline(value: unknown): WorkflowTimelineDirectFork[] | undefined {
+  const root = timelineRecord(value);
+  if (root === undefined) return undefined;
+  const sourceWorkflowRunId = nonEmptyTimelineString(root.runId);
+  if (sourceWorkflowRunId === undefined) return [];
+  const forks = new Map<string, WorkflowTimelineDirectFork>();
+  if (!Array.isArray(root.frames)) return [];
+  for (const frameValue of root.frames) {
+    const frame = objectRecord(frameValue);
+    if (frame === undefined || !Number.isSafeInteger(frame.frameNo) || Number(frame.frameNo) < 0) continue;
+    if (!Array.isArray(frame.forks)) continue;
+    for (const forkValue of frame.forks) {
+      const fork = objectRecord(forkValue);
+      const workflowRunId = nonEmptyTimelineString(fork?.runId);
+      const branchLabel = nonEmptyTimelineString(fork?.branchLabel);
+      if (workflowRunId === undefined || branchLabel === undefined) continue;
+      const record: WorkflowTimelineDirectFork = {
+        workflow_run_id: workflowRunId,
+        source_workflow_run_id: sourceWorkflowRunId,
+        branch_label: branchLabel,
+        frame: Number(frame.frameNo)
+      };
+      forks.set(JSON.stringify(record), record);
+    }
+  }
+  return [...forks.values()].sort((left, right) => {
+    return (
+      left.frame - right.frame ||
+      left.workflow_run_id.localeCompare(right.workflow_run_id) ||
+      left.branch_label.localeCompare(right.branch_label)
+    );
+  });
+}
+
+interface WorkflowRunLockOwner {
+  pid: number;
+  process_start: string;
+  acquired_at: string;
+}
+
+async function acquireOwnedWorkflowMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
+  return acquireOwnedRunLock(layout, {
+    lockName: WORKFLOW_MUTATION_LOCK,
+    stale: WORKFLOW_MUTATION_LOCK_STALE_MS,
+    waitMs: 5 * 60 * 1_000,
+    label: "workflow mutation lock"
+  });
+}
+
+async function acquireOwnedRunLock(
   layout: RunLayout,
-  lockName: string,
-  stale: number,
-  retries: number | { retries: number; factor: number; minTimeout: number; maxTimeout: number }
+  options: { lockName: string; stale: number; waitMs: number; label: string }
 ): Promise<() => Promise<void>> {
   const root = anchoredRunRoot(layout);
-  const lockPath = path.join(root, lockName);
-  assertPathInside(root, lockPath, "workflow mutation lock");
-  assertNoSymlinkComponents(root, lockPath, "workflow mutation lock");
-  return lockfile.lock(lockPath, {
-    lockfilePath: lockPath,
-    realpath: false,
-    stale,
-    update: 30_000,
-    retries
-  });
+  const lockPath = path.join(root, options.lockName);
+  assertPathInside(root, lockPath, options.label);
+  assertNoSymlinkComponents(root, lockPath, options.label);
+  const deadline = Date.now() + options.waitMs;
+  let release: (() => Promise<void>) | undefined;
+  while (release === undefined) {
+    try {
+      reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label);
+      release = await lockfile.lock(lockPath, {
+        lockfilePath: lockPath,
+        realpath: false,
+        stale: options.stale,
+        update: 30_000,
+        retries: 0
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ELOCKED" && code !== "ENOENT") throw error;
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
+  const processStart = workflowMutationProcessStartToken(process.pid);
+  if (processStart === null) {
+    await release();
+    throw new Error(`${options.label} cannot bind the current process start token`);
+  }
+  const owner: WorkflowRunLockOwner = {
+    pid: process.pid,
+    process_start: processStart,
+    acquired_at: new Date().toISOString()
+  };
+  try {
+    writeJsonDurable(ownerPath, owner);
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    const observed = readWorkflowRunLockOwner(layout, ownerPath, options.label);
+    if (JSON.stringify(observed) !== JSON.stringify(owner)) {
+      throw new Error(`${options.label} ownership changed before release`);
+    }
+    fs.unlinkSync(ownerPath);
+    await release();
+  };
+}
+
+function reclaimTerminatedWorkflowRunLock(layout: RunLayout, lockPath: string, label: string): void {
+  if (!fs.existsSync(lockPath)) return;
+  assertNoSymlinkComponents(layout.root, lockPath, label);
+  const lockStat = fs.lstatSync(lockPath);
+  if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) throw new Error(`${label} is unsafe`);
+  const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
+  if (!fs.existsSync(ownerPath)) {
+    if (Date.now() - lockStat.mtimeMs < WORKFLOW_MUTATION_LOCK_OWNER_GRACE_MS) return;
+    if (fs.readdirSync(lockPath).length !== 0) {
+      throw new Error(`ownerless ${label} contains unexpected evidence`);
+    }
+    fs.rmdirSync(lockPath);
+    return;
+  }
+  const owner = readWorkflowRunLockOwner(layout, ownerPath, label);
+  if (workflowMutationLockOwnerIsAlive(owner)) return;
+  const entries = fs.readdirSync(lockPath);
+  if (entries.length !== 1 || entries[0] !== WORKFLOW_MUTATION_LOCK_OWNER) {
+    throw new Error(`terminated ${label} contains unexpected evidence`);
+  }
+  fs.unlinkSync(ownerPath);
+  fs.rmdirSync(lockPath);
+}
+
+function readWorkflowRunLockOwner(layout: RunLayout, ownerPath: string, label: string): WorkflowRunLockOwner {
+  assertSafeJournalFile(layout, ownerPath, `${label} owner`);
+  const value = JSON.parse(fs.readFileSync(ownerPath, "utf8")) as Partial<WorkflowRunLockOwner>;
+  if (
+    !Number.isInteger(value.pid) ||
+    (value.pid ?? 0) <= 0 ||
+    typeof value.process_start !== "string" ||
+    value.process_start.length === 0 ||
+    typeof value.acquired_at !== "string"
+  ) {
+    throw new Error(`${label} owner is invalid`);
+  }
+  return value as WorkflowRunLockOwner;
+}
+
+function workflowMutationLockOwnerIsAlive(owner: WorkflowRunLockOwner): boolean {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+  const observedStart = workflowMutationProcessStartToken(owner.pid);
+  return observedStart === null || owner.process_start === observedStart;
+}
+
+function workflowMutationProcessStartToken(pid: number): string | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closingParenthesis = stat.lastIndexOf(")");
+    if (closingParenthesis < 0) return null;
+    const fields = stat
+      .slice(closingParenthesis + 2)
+      .trim()
+      .split(/\s+/u);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function workflowLifecycleGeneration(layout: RunLayout): WorkflowLifecycleGeneration {
@@ -890,6 +1058,10 @@ function timelineRecord(value: unknown): Record<string, unknown> | undefined {
   const root = objectRecord(value);
   const data = objectRecord(root?.data) ?? root;
   return objectRecord(data?.timeline);
+}
+
+function nonEmptyTimelineString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") ? value : undefined;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

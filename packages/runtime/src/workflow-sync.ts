@@ -69,7 +69,7 @@ import {
   type PricingCatalogMetadata,
   type PricingCatalogResult
 } from "./model-pricing.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
+import { readLinkedWorkflowEvidence, type LinkedWorkflowEvidence } from "./start-run.js";
 import {
   type PlannedGraph,
   type PlannedGraphNode,
@@ -79,6 +79,8 @@ import {
 } from "./types.js";
 import { diagnosticFromError, readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import {
+  assertSmithersRunEvidenceIdentity,
+  classifySmithersRunSnapshot,
   requestSmithersCancel,
   runSmithersInspectionCommand,
   smithersDiagnostic,
@@ -91,6 +93,7 @@ import {
   sameWorkflowLifecycleGeneration,
   workflowLifecycleGeneration
 } from "./workflow-mutation.js";
+import { disposeWorkflowExecutionSnapshot, materializeWorkflowExecutionSnapshot } from "./workflow-integrity.js";
 import {
   assertVerificationOutputMatchesArtifacts,
   buildVerifierReceipt,
@@ -412,18 +415,110 @@ export async function syncRun(input: SyncRunInput, control: WorkflowSynchronizat
   return runtimeResult(true, result.value, result.diagnostics);
 }
 
+type LinkedWorkflowSynchronizationResult =
+  { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] };
+
+interface LinkedWorkflowExecutionContext {
+  evidence: LinkedWorkflowEvidence;
+  env: Record<string, string | undefined>;
+  synchronize: (control?: WorkflowSynchronizationControl) => Promise<LinkedWorkflowSynchronizationResult>;
+}
+
+/**
+ * Runs one top-level linked-workflow operation against one verified,
+ * materialized execution snapshot. The synchronization callback is bound here
+ * so public callers cannot supply an environment that bypasses materialization.
+ */
+export async function withLinkedWorkflowExecution<T>(
+  input: SyncRunInput,
+  operation: (context: LinkedWorkflowExecutionContext) => Promise<T>
+): Promise<{ ok: true; value: T; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }> {
+  const projectRoot = path.resolve(input.projectRoot);
+  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+  if (!evidence.ok) {
+    return { ok: false, diagnostics: evidence.diagnostics };
+  }
+  let executionSnapshot;
+  try {
+    executionSnapshot = materializeWorkflowExecutionSnapshot({
+      projectRoot,
+      layout: evidence.layout,
+      snapshot: evidence.verifiedControl
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_FAILED")]
+    };
+  }
+  const env = { ...input.env, ...executionSnapshot.env };
+  // Keep the operation outside the materialization catch so command-specific
+  // errors retain their existing diagnostic codes and cleanup paths.
+  let value: T;
+  try {
+    value = await operation({
+      evidence,
+      env,
+      synchronize: (control = {}) =>
+        synchronizeLinkedWorkflowRunWithExecution(input, control, {
+          projectRoot,
+          evidence,
+          env
+        })
+    });
+  } catch (error) {
+    try {
+      disposeWorkflowExecutionSnapshot(executionSnapshot);
+    } catch {
+      // Preserve the operation failure exactly; cleanup must never mask it.
+    }
+    throw error;
+  }
+  const diagnostics: RuntimeDiagnostic[] = [];
+  try {
+    disposeWorkflowExecutionSnapshot(executionSnapshot);
+  } catch (error) {
+    diagnostics.push({
+      ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),
+      severity: "warning"
+    });
+  }
+  return {
+    ok: true,
+    value,
+    diagnostics
+  };
+}
+
 export async function synchronizeLinkedWorkflowRun(
   input: SyncRunInput,
   control: WorkflowSynchronizationControl = {}
-): Promise<
-  { ok: true; value: SyncRunValue; diagnostics: RuntimeDiagnostic[] } | { ok: false; diagnostics: RuntimeDiagnostic[] }
-> {
+): Promise<LinkedWorkflowSynchronizationResult> {
+  const budgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+  if (budgetDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [budgetDiagnostic] };
+  }
+  const execution = await withLinkedWorkflowExecution(input, ({ synchronize }) => synchronize(control));
+  return execution.ok
+    ? { ...execution.value, diagnostics: [...execution.value.diagnostics, ...execution.diagnostics] }
+    : execution;
+}
+
+async function synchronizeLinkedWorkflowRunWithExecution(
+  input: SyncRunInput,
+  control: WorkflowSynchronizationControl,
+  execution: {
+    projectRoot: string;
+    evidence: LinkedWorkflowEvidence;
+    env: Record<string, string | undefined>;
+  }
+): Promise<LinkedWorkflowSynchronizationResult> {
   let synchronizationNowMs = synchronizationClock(control);
   const budgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationNowMs);
   if (budgetDiagnostic !== undefined) {
     return { ok: false, diagnostics: [budgetDiagnostic] };
   }
-  const projectRoot = path.resolve(input.projectRoot);
+  const projectRoot = execution.projectRoot;
   const layoutResult = await checkedRunLayout(projectRoot, input.runId);
   if (!layoutResult.ok) {
     return { ok: false, diagnostics: layoutResult.diagnostics };
@@ -445,10 +540,8 @@ export async function synchronizeLinkedWorkflowRun(
   }
   const evidenceCollectionLifecycleGeneration = workflowLifecycleGeneration(layout);
 
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return { ok: false, diagnostics: evidence.diagnostics };
-  }
+  const evidence = execution.evidence;
+  const executionEnv = execution.env;
   const loaded = loadSynchronizationInputs(evidence.verifiedControl.contents);
   if (!loaded.ok) {
     return { ok: false, diagnostics: loaded.diagnostics };
@@ -464,7 +557,7 @@ export async function synchronizeLinkedWorkflowRun(
   const inspectSnapshot = await runSmithersInspectionCommand({
     args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
     projectRoot,
-    env: input.env,
+    env: executionEnv,
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -482,7 +575,7 @@ export async function synchronizeLinkedWorkflowRun(
   const eventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env,
+    env: executionEnv,
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -493,7 +586,7 @@ export async function synchronizeLinkedWorkflowRun(
   const tokenEventsSnapshot = await runSmithersInspectionCommand({
     args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
     projectRoot,
-    env: input.env,
+    env: executionEnv,
     ...inspectionExecutionControl(control, synchronizationNowMs)
   });
   synchronizationNowMs = synchronizationClock(control);
@@ -505,6 +598,14 @@ export async function synchronizeLinkedWorkflowRun(
     ...(eventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(eventsSnapshot, "WORKFLOW_EVENTS_FAILED")]),
     ...(tokenEventsSnapshot.ok ? [] : [workflowSnapshotDiagnostic(tokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_FAILED")])
   ];
+
+  const evidenceIdentityDiagnostic = workflowEvidenceIdentityDiagnostic(evidence.smithersRunId, inspectSnapshot, [
+    eventsSnapshot,
+    tokenEventsSnapshot
+  ]);
+  if (evidenceIdentityDiagnostic !== undefined) {
+    return { ok: false, diagnostics: [evidenceIdentityDiagnostic] };
+  }
 
   let parsedInspect = parseInspectSnapshot(inspectSnapshot.json);
   let events = eventsSnapshot.ok ? parseWorkflowEvents(eventsSnapshot.stdout) : [];
@@ -518,7 +619,7 @@ export async function synchronizeLinkedWorkflowRun(
     const refreshedInspectSnapshot = await runSmithersInspectionCommand({
       args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
       projectRoot,
-      env: input.env,
+      env: executionEnv,
       ...inspectionExecutionControl(control, refreshedInspectStartedAtMs)
     });
     synchronizationNowMs = synchronizationClock(control);
@@ -533,7 +634,7 @@ export async function synchronizeLinkedWorkflowRun(
       const refreshedEventsSnapshot = await runSmithersInspectionCommand({
         args: ["events", evidence.smithersRunId, "--limit", "100000", "--json"],
         projectRoot,
-        env: input.env,
+        env: executionEnv,
         ...inspectionExecutionControl(control, synchronizationNowMs)
       });
       synchronizationNowMs = synchronizationClock(control);
@@ -547,7 +648,7 @@ export async function synchronizeLinkedWorkflowRun(
         const refreshedTokenEventsSnapshot = await runSmithersInspectionCommand({
           args: ["events", evidence.smithersRunId, "--type", "token", "--limit", "100000", "--json"],
           projectRoot,
-          env: input.env,
+          env: executionEnv,
           ...inspectionExecutionControl(control, synchronizationNowMs)
         });
         synchronizationNowMs = synchronizationClock(control);
@@ -560,6 +661,14 @@ export async function synchronizeLinkedWorkflowRun(
             workflowSnapshotDiagnostic(refreshedTokenEventsSnapshot, "WORKFLOW_TOKEN_EVENTS_REFRESH_FAILED")
           );
         } else {
+          const refreshedIdentityDiagnostic = workflowEvidenceIdentityDiagnostic(
+            evidence.smithersRunId,
+            refreshedInspectSnapshot,
+            [refreshedEventsSnapshot, refreshedTokenEventsSnapshot]
+          );
+          if (refreshedIdentityDiagnostic !== undefined) {
+            return { ok: false, diagnostics: [refreshedIdentityDiagnostic] };
+          }
           parsedInspect = parseInspectSnapshot(refreshedInspectSnapshot.json);
           events = parseWorkflowEvents(refreshedEventsSnapshot.stdout);
           tokenEvents = parseWorkflowEvents(refreshedTokenEventsSnapshot.stdout);
@@ -652,7 +761,7 @@ export async function synchronizeLinkedWorkflowRun(
         inspectCollectionStartedAt: new Date(inspectCollectionStartedAtMs).toISOString(),
         inspectCollectionCompletedAt: new Date(inspectCollectionCompletedAtMs).toISOString(),
         projectRoot,
-        env: input.env,
+        executionEnv,
         control
       });
     } catch (error) {
@@ -723,7 +832,8 @@ export async function synchronizeLinkedWorkflowRun(
         await requestSmithersCancel({
           smithersRunId: evidence.smithersRunId,
           projectRoot,
-          env: input.env
+          env: executionEnv,
+          ...inspectionExecutionControl(control, synchronizationClock(control))
         });
         workflowControl.state.status = "timed-out";
         workflowControl.state.finished_at = new Date(observedAtMs).toISOString();
@@ -1321,24 +1431,39 @@ function normalizedUsageLedgerInput(
   lifecycleInvocation: LifecycleModelInvocation
 ): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
   const payload = event.payload ?? {};
-  const fields = [
-    normalizedNumericUsageField(payload, "input_tokens", [
-      "inputTokens",
-      "input_tokens",
-      "promptTokens",
-      "prompt_tokens"
-    ]),
-    normalizedNumericUsageField(payload, "output_tokens", [
-      "outputTokens",
-      "output_tokens",
-      "completionTokens",
-      "completion_tokens"
-    ]),
-    normalizedNumericUsageField(payload, "cache_read_tokens", ["cacheReadTokens", "cache_read_tokens"]),
-    normalizedNumericUsageField(payload, "cache_write_tokens", ["cacheWriteTokens", "cache_write_tokens"]),
-    normalizedNumericUsageField(payload, "reasoning_tokens", ["reasoningTokens", "reasoning_tokens"]),
-    normalizedNumericUsageField(payload, "total_tokens", ["totalTokens", "total_tokens"])
+  const inputTokensField = normalizedNumericUsageField(payload, "input_tokens", [
+    "inputTokens",
+    "input_tokens",
+    "promptTokens",
+    "prompt_tokens"
+  ]);
+  const outputTokensField = normalizedNumericUsageField(payload, "output_tokens", [
+    "outputTokens",
+    "output_tokens",
+    "completionTokens",
+    "completion_tokens"
+  ]);
+  const cacheReadTokensField = normalizedNumericUsageField(payload, "cache_read_tokens", [
+    "cacheReadTokens",
+    "cache_read_tokens"
+  ]);
+  const cacheWriteTokensField = normalizedNumericUsageField(payload, "cache_write_tokens", [
+    "cacheWriteTokens",
+    "cache_write_tokens"
+  ]);
+  const reasoningTokensField = normalizedNumericUsageField(payload, "reasoning_tokens", [
+    "reasoningTokens",
+    "reasoning_tokens"
+  ]);
+  const totalTokensField = normalizedNumericUsageField(payload, "total_tokens", ["totalTokens", "total_tokens"]);
+  const componentFields = [
+    inputTokensField,
+    outputTokensField,
+    cacheReadTokensField,
+    cacheWriteTokensField,
+    reasoningTokensField
   ];
+  const fields = [...componentFields, totalTokensField];
   const usage = Object.fromEntries(
     fields.flatMap((field) => (field.value === undefined ? [] : [[field.field, field.value]]))
   ) as NormalizedUsage;
@@ -1353,6 +1478,7 @@ function normalizedUsageLedgerInput(
     usage.cost_usd = costUsd;
   }
   const providerReportedModel = providerModelEvidence(payload.model);
+  const configuredModel = configuredModelEvidence(task);
   usage.model = providerReportedModel;
   const agent = stringField(payload, "agent");
   if (agent !== undefined) {
@@ -1364,6 +1490,37 @@ function normalizedUsageLedgerInput(
     .map((field) => ({ code: "usage-malformed", field: field.field }));
   if (!fields.some((field) => field.present)) {
     usageIncompleteReasons.push({ code: "usage-missing" });
+  }
+  if (isDeepSeekModel(configuredModel) && isDeepSeekModel(providerReportedModel)) {
+    const missingComponent = componentFields.some((field) => !field.present);
+    if (missingComponent) {
+      usageIncompleteReasons.push({ code: "usage-missing" });
+    }
+    for (const field of [...componentFields, ...(totalTokensField.present ? [totalTokensField] : [])]) {
+      if (field.value !== undefined && !Number.isSafeInteger(field.value)) {
+        usageIncompleteReasons.push({ code: "usage-malformed", field: field.field });
+      }
+    }
+    const componentsComplete = componentFields.every(
+      (field) => field.present && !field.malformed && field.value !== undefined && Number.isSafeInteger(field.value)
+    );
+    if (componentsComplete && reasoningTokensField.value !== 0) {
+      usageIncompleteReasons.push({ code: "usage-malformed", field: "reasoning_tokens" });
+    } else if (componentsComplete) {
+      const derivedTotal = componentFields.reduce((total, field) => total + field.value!, 0);
+      if (!Number.isSafeInteger(derivedTotal)) {
+        usageIncompleteReasons.push({ code: "usage-malformed", field: "total_tokens" });
+      } else if (!totalTokensField.present) {
+        // Smithers 0.31 intentionally omits totalTokens from
+        // TokenUsageReported. DeepSeek's input, cache, and output counters are
+        // independent here, while reasoning is an explicit zero because
+        // thinking is already included in output. Their safe sum is therefore
+        // the exact provider total without counting thinking twice.
+        usage.total_tokens = derivedTotal;
+      } else if (!totalTokensField.malformed && totalTokensField.value !== derivedTotal) {
+        usageIncompleteReasons.push({ code: "usage-malformed", field: "total_tokens" });
+      }
+    }
   }
   const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
   const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
@@ -1388,7 +1545,7 @@ function normalizedUsageLedgerInput(
       : {
           modelInvocation: {
             invocationId: lifecycleInvocation.invocationId,
-            configuredModel: configuredModelEvidence(task),
+            configuredModel,
             providerReportedModel,
             terminalEvidenceComplete: lifecycleInvocation.terminalEvidenceComplete && task !== undefined
           }
@@ -2548,7 +2705,7 @@ async function synchronizeTasks(input: {
   inspectCollectionStartedAt: string;
   inspectCollectionCompletedAt: string;
   projectRoot: string;
-  env?: Record<string, string | undefined>;
+  executionEnv: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
@@ -2617,7 +2774,7 @@ async function synchronizeTasks(input: {
           verifierAttempt: attemptEvidence.verifierAttempt,
           verifierIteration: attemptEvidence.verifierIteration,
           projectRoot: input.projectRoot,
-          env: input.env,
+          executionEnv: input.executionEnv,
           control: input.control
         });
       } catch (error) {
@@ -2864,14 +3021,14 @@ async function fetchVerifierOutputEvidence(input: {
   verifierAttempt?: number;
   verifierIteration?: number;
   projectRoot: string;
-  env?: Record<string, string | undefined>;
+  executionEnv: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<VerifierOutputEvidence> {
   assertSynchronizationBudget(input.control);
   const snapshot = await runSmithersInspectionCommand({
     args: ["output", input.workflowRunId, input.task.verifierSmithersNodeId, "--json"],
     projectRoot: input.projectRoot,
-    env: input.env,
+    env: input.executionEnv,
     ...inspectionExecutionControl(input.control, synchronizationClock(input.control))
   });
   assertSynchronizationBudget(input.control);
@@ -4986,6 +5143,39 @@ function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: str
     severity: "error",
     source: "workflow"
   };
+}
+
+function workflowEvidenceIdentityDiagnostic(
+  workflowRunId: string,
+  inspectSnapshot: SmithersCommandSnapshot,
+  eventSnapshots: readonly SmithersCommandSnapshot[]
+): RuntimeDiagnostic | undefined {
+  try {
+    const classification = classifySmithersRunSnapshot(inspectSnapshot, workflowRunId);
+    if (classification.status !== "present") {
+      throw new Error(`workflow inspection is not exact present-run evidence: ${classification.reason}`);
+    }
+    for (const snapshot of eventSnapshots) {
+      if (snapshot.json !== undefined) {
+        assertSmithersRunEvidenceIdentity(snapshot.json, workflowRunId, "workflow event response");
+      }
+      for (const line of snapshot.stdout.split(/\r?\n/u)) {
+        if (line.trim().length === 0) continue;
+        try {
+          assertSmithersRunEvidenceIdentity(JSON.parse(line) as unknown, workflowRunId, "workflow event");
+        } catch (error) {
+          if (error instanceof SyntaxError) continue;
+          throw error;
+        }
+      }
+    }
+    return undefined;
+  } catch (error) {
+    return {
+      ...smithersDiagnostic(error, "WORKFLOW_EVIDENCE_IDENTITY_INVALID"),
+      severity: "error"
+    };
+  }
 }
 
 function commandData(value: unknown): Record<string, unknown> | undefined {

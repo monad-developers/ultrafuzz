@@ -1191,6 +1191,33 @@ describe("public Modal benchmark bundles", () => {
       provider_reported_model: "deepseek-v4-flash"
     });
 
+    const evidenceRoot = `reports/${rowId}/execution-evidence`;
+    const usagePath = `${evidenceRoot}/${PUBLIC_USAGE_LEDGER_FILE}`;
+    const runMetadataPath = `${evidenceRoot}/${PUBLIC_RUN_METADATA_FILE}`;
+    const usageEntries = bundleFileText(bundle, usagePath)
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(
+      usageEntries.every((entry) => {
+        const usage = entry.usage as Record<string, unknown>;
+        return usage.reasoning_tokens === 0 && Number.isSafeInteger(usage.total_tokens);
+      })
+    ).toBe(true);
+    for (const field of ["reasoning_tokens", "total_tokens"] as const) {
+      const missingComponentEntries = structuredClone(usageEntries);
+      delete (missingComponentEntries[0]!.usage as Record<string, unknown>)[field];
+      const usageContents = `${missingComponentEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+      const runMetadataContents = bundleFileText(bundle, runMetadataPath);
+      let rebound = replaceBundleContents(bundle, usagePath, usageContents);
+      rebound = mutateFinalRunRecords(rebound, rowId, (record) => {
+        const binding = record.terminal_evidence as Record<string, unknown>;
+        binding.run_metadata_sha256 = crypto.createHash("sha256").update(runMetadataContents).digest("hex");
+        binding.usage_ledger_sha256 = crypto.createHash("sha256").update(usageContents).digest("hex");
+      });
+      expect(() => parsePublicBenchmarkBundle(rebound)).toThrow(new RegExp(`invalid ${field}`, "u"));
+    }
+
     const mutations: Array<(diagnostics: Record<string, unknown>) => void> = [
       (diagnostics) => {
         delete diagnosticRow(diagnostics).model_identity;
@@ -1251,6 +1278,34 @@ describe("public Modal benchmark bundles", () => {
         )
       ).toThrow();
     }
+  });
+
+  it("rejects a coherently rebound DeepSeek Flash bundle whose raw catalog substitutes an exact rate", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-deepseek-rate-substitution-"));
+    const bundle = asDeepSeekFlashBundle(
+      createPublicBenchmarkBundle({
+        ...TEST_BUNDLE_METADATA,
+        files: completePublicSources(root, ["target-a-runner-trial-1"])
+      }),
+      {
+        input: 0.14,
+        cache_read: 0.0028,
+        output: 0.3,
+        reasoning: 0.28
+      }
+    );
+
+    let rejected: unknown;
+    try {
+      parsePublicBenchmarkBundle(bundle);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(Error);
+    expect((rejected as Error).message).toMatch(/diagnostics are invalid/u);
+    expect((rejected as Error & { cause?: unknown }).cause).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/invalid DeepSeek V4 Flash pricing/u) })
+    );
   });
 
   it("rejects seven attested smoke attempts backed by only one self-consistent accounted invocation", () => {
@@ -2224,9 +2279,44 @@ function diagnosticRow(diagnostics: Record<string, unknown>): Record<string, unk
   return rows[0];
 }
 
+interface DeepSeekFlashCatalogRates {
+  input: number;
+  cache_read: number;
+  output: number;
+  reasoning: number;
+}
+
+const EXACT_DEEPSEEK_FLASH_CATALOG_RATES: DeepSeekFlashCatalogRates = {
+  input: 0.14,
+  cache_read: 0.0028,
+  output: 0.28,
+  reasoning: 0.28
+};
+
+function deepSeekFlashComponentCosts(rates: DeepSeekFlashCatalogRates) {
+  return {
+    uncached_input: roundDeepSeekFlashUsd((1_000 * rates.input) / 1_000_000),
+    cache_read: roundDeepSeekFlashUsd((100 * rates.cache_read) / 1_000_000),
+    cache_write: 0,
+    output: roundDeepSeekFlashUsd((20 * rates.output) / 1_000_000),
+    reasoning: 0
+  };
+}
+
+function roundDeepSeekFlashUsd(value: number): number {
+  return Number(value.toFixed(12));
+}
+
+function sumDeepSeekFlashUsd(values: Iterable<number>): number {
+  return [...values].reduce((total, value) => roundDeepSeekFlashUsd(total + value), 0);
+}
+
 function asDeepSeekFlashBundle(
-  input: ReturnType<typeof createPublicBenchmarkBundle>
+  input: ReturnType<typeof createPublicBenchmarkBundle>,
+  catalogRates: DeepSeekFlashCatalogRates = EXACT_DEEPSEEK_FLASH_CATALOG_RATES
 ): ReturnType<typeof createPublicBenchmarkBundle> {
+  const componentCosts = deepSeekFlashComponentCosts(catalogRates);
+  const costUsd = sumDeepSeekFlashUsd(Object.values(componentCosts));
   let bundle = {
     ...input,
     model: "deepseek-v4-flash",
@@ -2237,7 +2327,7 @@ function asDeepSeekFlashBundle(
       deepseek: {
         models: {
           "deepseek-v4-flash": {
-            cost: { input: 0.14, cache_read: 0.0028, output: 0.28, reasoning: 0.28 }
+            cost: catalogRates
           }
         }
       }
@@ -2305,14 +2395,8 @@ function asDeepSeekFlashBundle(
       inclusive_token_total: 1_120,
       billable_token_total: 1_120,
       total_tokens: 1_120,
-      estimated_spend_usd: 0.00014588,
-      component_costs_usd: {
-        uncached_input: 0.00014,
-        cache_read: 0.00000028,
-        cache_write: 0,
-        output: 0.0000056,
-        reasoning: 0
-      },
+      estimated_spend_usd: costUsd,
+      component_costs_usd: componentCosts,
       usage_complete: true,
       pricing_complete: true,
       partial_pricing: false,
@@ -2332,10 +2416,10 @@ function asDeepSeekFlashBundle(
       unresolved_models: [],
       model_prices: {
         "deepseek-v4-flash": {
-          inputUsdPerMillion: 0.14,
-          cachedInputUsdPerMillion: 0.0028,
-          outputUsdPerMillion: 0.28,
-          reasoningUsdPerMillion: 0.28
+          inputUsdPerMillion: catalogRates.input,
+          cachedInputUsdPerMillion: catalogRates.cache_read,
+          outputUsdPerMillion: catalogRates.output,
+          reasoningUsdPerMillion: catalogRates.reasoning
         }
       }
     };
@@ -2372,7 +2456,7 @@ function asDeepSeekFlashBundle(
         invocation_count: invocations.length,
         invocations
       },
-      pricing: deepSeekFlashPricingFixture(catalogSha256, invocations.length)
+      pricing: deepSeekFlashPricingFixture(catalogSha256, invocations.length, catalogRates)
     };
   });
   bundle = replaceBundleContents(
@@ -2400,7 +2484,7 @@ function asDeepSeekFlashBundle(
   const summary = JSON.parse(bundleFileText(bundle, "eval/summary.json")) as {
     rows: Array<{ efficiency: { cost_usd: number } }>;
   };
-  for (const row of summary.rows) row.efficiency.cost_usd = 0.00014588;
+  for (const row of summary.rows) row.efficiency.cost_usd = costUsd;
   bundle = replaceBundleContents(bundle, "eval/summary.json", `${JSON.stringify(summary, null, 2)}\n`);
 
   for (const target of bundle.targets) {
@@ -2415,7 +2499,12 @@ function asDeepSeekFlashBundle(
   return bundle;
 }
 
-function deepSeekFlashPricingFixture(catalogSha256: string, invocationCount: number) {
+function deepSeekFlashPricingFixture(
+  catalogSha256: string,
+  invocationCount: number,
+  catalogRates: DeepSeekFlashCatalogRates = EXACT_DEEPSEEK_FLASH_CATALOG_RATES
+) {
+  const componentCosts = deepSeekFlashComponentCosts(catalogRates);
   return {
     schema_version: "ultrafuzz.eval.pricing-evidence.v1",
     configured_model: "deepseek-v4-flash",
@@ -2429,11 +2518,11 @@ function deepSeekFlashPricingFixture(catalogSha256: string, invocationCount: num
       unresolved_models: []
     },
     rates_usd_per_million: {
-      uncached_input: 0.14,
-      cache_read: 0.0028,
+      uncached_input: catalogRates.input,
+      cache_read: catalogRates.cache_read,
       cache_write: null,
-      output: 0.28,
-      reasoning: 0.28
+      output: catalogRates.output,
+      reasoning: catalogRates.reasoning
     },
     usage: {
       uncached_input_tokens: 1_000,
@@ -2445,14 +2534,8 @@ function deepSeekFlashPricingFixture(catalogSha256: string, invocationCount: num
       billable_token_total: 1_120,
       total_tokens: 1_120
     },
-    component_costs_usd: {
-      uncached_input: 0.00014,
-      cache_read: 0.00000028,
-      cache_write: 0,
-      output: 0.0000056,
-      reasoning: 0
-    },
-    cost_usd: 0.00014588,
+    component_costs_usd: componentCosts,
+    cost_usd: sumDeepSeekFlashUsd(Object.values(componentCosts)),
     usage_complete: true,
     pricing_complete: true,
     partial_pricing: false,

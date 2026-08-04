@@ -21,7 +21,13 @@ import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import { acquireSmithersExecutableAnchor, smithersExecutableCapability } from "./smithers-executable-capability.js";
 import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
+import {
+  acquireWorkflowExecutionSnapshotAnchor,
+  hasWorkflowExecutionSnapshotCapability,
+  type WorkflowExecutionSnapshotAnchor
+} from "./workflow-execution-snapshot-capability.js";
 import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
@@ -34,8 +40,19 @@ import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
+const ONE_SHOT_TERMINATION_GRACE_MS = 500;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
+const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
+const WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES = [
+  "@smithers-orchestrator/tool-context",
+  "react",
+  "smithers-orchestrator",
+  "zod"
+] as const;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
 const SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE = `        const supervisor = spawn("bun", supervisorArgs, {
@@ -54,6 +71,41 @@ const SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH = `        const supervisorFd = openSy
         } finally {
           closeSync(supervisorFd);
         }`;
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE =
+  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, statSync, writeFileSync, writeSync } from "node:fs";';
+const SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH =
+  'import { closeSync, readFileSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync, writeSync } from "node:fs";';
+const SMITHERS_CLI_WORKFLOW_PATH_SOURCE = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
+    const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_CLI_WORKFLOW_PATH_PATCH = `    const resolvedWorkflowPath = resolve(process.cwd(), workflowPath);
+    const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+    const persistedWorkflowPath = persistedWorkflowPathValue
+      ? resolve(process.cwd(), persistedWorkflowPathValue)
+      : resolvedWorkflowPath;
+    if (realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)) {
+      return fail({
+        code: "INVALID_WORKFLOW_PATH",
+        message: "Controller workflow path does not match its persisted workflow path",
+        exitCode: 4,
+      });
+    }
+    const { resume, resumeRunId } = normalizeResumeOption(options.resume);`;
+const SMITHERS_CLI_POST_FAILURE_PATH_SOURCE = `        launchPostFailureAutopsy({
+          failedRunId: result.runId,
+          workflowPath: resolvedWorkflowPath,
+          enabled: options.postFailure !== false,
+        });`;
+const SMITHERS_CLI_POST_FAILURE_PATH_PATCH = `        launchPostFailureAutopsy({
+          failedRunId: result.runId,
+          workflowPath: persistedWorkflowPath,
+          enabled: options.postFailure !== false,
+        });`;
+const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
+  "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
+const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+  const resolvedWorkflowPath = opts.workflowPath
+    ? resolve(persistedWorkflowPath || opts.workflowPath)
+    : null;`;
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
   "APPDATA",
@@ -88,6 +140,7 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CONFIG_PATH",
   "ULTRAFUZZ_MODAL_MODULE",
   "ULTRAFUZZ_RUNTIME_MODULE",
+  ULTRAFUZZ_WORKFLOW_PERSISTED_PATH,
   "USER",
   "USERPROFILE",
   "WINDIR",
@@ -316,6 +369,57 @@ export interface SubmitSmithersInput {
   operatorInput?: unknown;
   workflowPath?: string;
   inputJson?: string;
+  submissionBinding?: {
+    workflowLinkId: string;
+    controlGeneration: string;
+    controllerInvocationId: string;
+    controllerInvokedAt: string;
+    executionSnapshotRoot: string;
+  };
+}
+
+export interface SmithersStartCorrelation {
+  harness: string;
+  sessionId: string;
+  prompt: string;
+}
+
+const SMITHERS_START_CORRELATION_HARNESS = "ultrafuzz-runtime";
+
+export function smithersStartCorrelation(input: {
+  workflowLinkId: string;
+  controlGeneration: string;
+  controllerInvocationId: string;
+}): SmithersStartCorrelation {
+  return {
+    harness: SMITHERS_START_CORRELATION_HARNESS,
+    sessionId: input.workflowLinkId,
+    prompt: JSON.stringify({
+      schema_version: "ultrafuzz.smithers-start-correlation.v1",
+      control_generation: input.controlGeneration,
+      controller_invocation_id: input.controllerInvocationId
+    })
+  };
+}
+
+export function smithersStartCorrelationCommandArgs(input: {
+  workflowLinkId: string;
+  controlGeneration: string;
+  controllerInvocationId: string;
+}): string[] {
+  const correlation = smithersStartCorrelation(input);
+  return [
+    "--started-by-harness",
+    correlation.harness,
+    "--started-by-session",
+    correlation.sessionId,
+    "--started-by-prompt",
+    correlation.prompt
+  ];
+}
+
+export function smithersStartCorrelationSha256(correlation: SmithersStartCorrelation): string {
+  return crypto.createHash("sha256").update(JSON.stringify(correlation), "utf8").digest("hex");
 }
 
 export interface SmithersSubmissionResult {
@@ -323,6 +427,22 @@ export interface SmithersSubmissionResult {
   command: readonly string[];
   stdout: string;
   stderr: string;
+}
+
+export interface SmithersRunExistenceEvidence {
+  status: "present" | "absent" | "unknown";
+  workflowRunId: string;
+  inspectedAt: string;
+  reason: string;
+  correlationSha256?: string;
+  snapshot: {
+    command: string[];
+    ok: boolean;
+    stdout: string;
+    stderr: string;
+    json?: unknown;
+    error?: string;
+  };
 }
 
 export interface SmithersPauseResult {
@@ -368,6 +488,7 @@ export interface SmithersInstallationPosture {
   compatibility_patches: {
     detached_admission: SmithersPatchPosture;
     supervisor_descriptor: SmithersPatchPosture;
+    workflow_path_persistence: SmithersPatchPosture;
   };
 }
 
@@ -454,35 +575,85 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     tasksPath,
     logsDir
   };
-  writeJsonDurable(expandedGraphPath, input.graph);
-  writeFileDurable(configPath, stableJson(input.config));
-  writeJsonDurable(tasksPath, {
-    schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
-    run_id: input.runLayout.runId,
-    smithers_run_id: smithersRunId,
-    workflow_name: workflowName,
-    tasks
-  });
-  writeJsonDurable(
-    inputPath,
-    redactSecretsInValue(smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput))
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    expandedGraphPath,
+    `${JSON.stringify(input.graph, null, 2)}\n`,
+    "expanded workflow graph"
   );
-  writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
-  writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    configPath,
+    stableJson(input.config),
+    "workflow config fingerprint input"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    tasksPath,
+    `${JSON.stringify(
+      {
+        schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
+        run_id: input.runLayout.runId,
+        smithers_run_id: smithersRunId,
+        workflow_name: workflowName,
+        tasks
+      },
+      null,
+      2
+    )}\n`,
+    "workflow task manifest"
+  );
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    inputPath,
+    `${JSON.stringify(
+      redactSecretsInValue(smithersInputDocument(compiled, input.operatorPrompt, input.operatorInput)),
+      null,
+      2
+    )}\n`,
+    "workflow input"
+  );
+  writePreparedWorkflowFile(projectRoot, workflowPath, renderWorkflowSource(compiled), "generated Smithers workflow");
+  writePreparedWorkflowFile(
+    input.runLayout.root,
+    evidenceWorkflowPath,
+    renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath),
+    "evidence workflow"
+  );
   return compiled;
 }
 
-export function smithersExecutionControlFiles(
+export async function smithersExecutionControlFiles(
   compiled: CompiledSmithersWorkflow,
-  layout: RunLayout
-): WorkflowExecutionControlFile[] {
+  layout: RunLayout,
+  env?: Record<string, string | undefined>
+): Promise<WorkflowExecutionControlFile[]> {
   const files = new Map<string, WorkflowExecutionControlFile>();
+  const snapshotSources = new Map<string, string>();
   const add = (sourcePath: string, snapshotPath: string): void => {
     const source = fs.realpathSync(path.resolve(sourcePath));
+    const normalizedSnapshotPath = snapshotPath.split(path.sep).join("/");
     const existing = files.get(source);
-    if (existing !== undefined) return;
-    files.set(source, { sourcePath: source, snapshotPath: snapshotPath.split(path.sep).join("/") });
+    if (existing !== undefined) {
+      if (existing.snapshotPath !== normalizedSnapshotPath) {
+        throw new Error(`workflow execution source file has multiple snapshot paths: ${source}`);
+      }
+      return;
+    }
+    const existingSource = snapshotSources.get(normalizedSnapshotPath);
+    if (existingSource !== undefined) {
+      throw new Error(`workflow execution snapshot path has multiple source files: ${normalizedSnapshotPath}`);
+    }
+    files.set(source, { sourcePath: source, snapshotPath: normalizedSnapshotPath });
+    snapshotSources.set(normalizedSnapshotPath, source);
   };
+
+  const externalRunner = explicitSmithersExecutable(env) !== undefined;
+  if (!externalRunner) {
+    await ensureSmithersDependencies(compiled.projectRoot, env, {
+      timeoutMs: SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS
+    });
+  }
 
   const planPath = path.join(layout.root, "plan.json");
   add(planPath, "controls/plan.json");
@@ -530,21 +701,30 @@ export function smithersExecutionControlFiles(
   const queuedModules = Object.values(workflowModuleEntryUrls(compiled)).filter(
     (value): value is string => value.length > 0
   );
-  const visitedPackages = new Set<string>();
+  const modulesByRoot = new Map<string, WorkflowExecutionModule>();
+  const modulesByName = new Map<string, WorkflowExecutionModule>();
   while (queuedModules.length > 0) {
     const entryUrl = queuedModules.shift()!;
     const entryPath = fileURLToPath(entryUrl);
     const packageRoot = workflowPackageRoot(entryPath);
-    if (visitedPackages.has(packageRoot)) continue;
-    visitedPackages.add(packageRoot);
+    if (modulesByRoot.has(packageRoot)) continue;
     const packageJsonPath = path.join(packageRoot, "package.json");
-    const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
-      name?: unknown;
-      dependencies?: unknown;
-    };
+    const manifest = readWorkflowPackageManifest(packageJsonPath);
     if (typeof manifest.name !== "string" || !manifest.name.startsWith("@ultrafuzz/")) {
       throw new Error(`workflow module is not an Ultrafuzz runtime package: ${entryPath}`);
     }
+    if (modulesByName.has(manifest.name)) {
+      throw new Error(`workflow execution closure resolved multiple roots for ${manifest.name}`);
+    }
+    const module: WorkflowExecutionModule = {
+      id: `module:${manifest.name}`,
+      name: manifest.name,
+      root: packageRoot,
+      snapshotPath: path.posix.join("modules", manifest.name),
+      manifest
+    };
+    modulesByRoot.set(packageRoot, module);
+    modulesByName.set(manifest.name, module);
     add(packageJsonPath, path.posix.join("modules", manifest.name, "package.json"));
     for (const directory of ["dist", "schema"]) {
       const sourceRoot = path.join(packageRoot, directory);
@@ -563,7 +743,283 @@ export function smithersExecutionControlFiles(
     }
   }
 
-  return [...files.values()].sort((left, right) => left.snapshotPath.localeCompare(right.snapshotPath));
+  const dependencyMap = collectWorkflowExecutionDependencies({
+    projectRoot: compiled.projectRoot,
+    modules: [...modulesByRoot.values()],
+    externalRunner,
+    add
+  });
+  const dependencyMapPath = path.join(layout.root, "smithers", "execution-dependencies.json");
+  writePreparedWorkflowFile(
+    layout.root,
+    dependencyMapPath,
+    `${stableWorkflowDependencyJson(dependencyMap)}\n`,
+    "workflow execution dependency map"
+  );
+  add(dependencyMapPath, WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH);
+
+  return [...files.values()].sort((left, right) =>
+    compareWorkflowExecutionStrings(left.snapshotPath, right.snapshotPath)
+  );
+}
+
+interface WorkflowPackageManifest {
+  name?: unknown;
+  version?: unknown;
+  bin?: unknown;
+  dependencies?: unknown;
+  optionalDependencies?: unknown;
+  peerDependencies?: unknown;
+  peerDependenciesMeta?: unknown;
+}
+
+interface WorkflowExecutionModule {
+  id: string;
+  name: string;
+  root: string;
+  snapshotPath: string;
+  manifest: WorkflowPackageManifest;
+}
+
+interface WorkflowExecutionPackage extends WorkflowExecutionModule {
+  version: string;
+}
+
+interface WorkflowExecutionDependencyIssuer {
+  id: string;
+  root: string;
+  snapshotPath: string;
+  manifest: WorkflowPackageManifest;
+  rootDependencies?: readonly string[];
+}
+
+function collectWorkflowExecutionDependencies(input: {
+  projectRoot: string;
+  modules: readonly WorkflowExecutionModule[];
+  externalRunner: boolean;
+  add: (sourcePath: string, snapshotPath: string) => void;
+}): Record<string, unknown> {
+  const modules = [...input.modules].sort((left, right) => compareWorkflowExecutionStrings(left.id, right.id));
+  const modulesByName = new Map(modules.map((module) => [module.name, module]));
+  const packagesByRoot = new Map<string, WorkflowExecutionPackage>();
+  const packages: WorkflowExecutionPackage[] = [];
+  const issuers: Array<{ id: string; snapshot_path: string; dependencies: Record<string, string> }> = [];
+  const executablePaths = new Set<string>();
+  const smithersRoot = path.join(input.projectRoot, ".smithers");
+  const rootPackageJson = path.join(smithersRoot, "package.json");
+  const rootManifest = readWorkflowPackageManifest(rootPackageJson);
+  input.add(rootPackageJson, "dependencies/root-package.json");
+  const rootDependencies = input.externalRunner
+    ? []
+    : [...new Set([...requiredWorkflowDependencies(rootManifest), ...WORKFLOW_DIRECT_EXTERNAL_DEPENDENCIES])].sort();
+  const pending: WorkflowExecutionDependencyIssuer[] = [
+    {
+      id: "root",
+      root: smithersRoot,
+      snapshotPath: ".",
+      manifest: rootManifest,
+      rootDependencies
+    },
+    ...modules
+  ];
+
+  for (let index = 0; index < pending.length; index += 1) {
+    const issuer = pending[index]!;
+    const dependencies: Record<string, string> = {};
+    const requested =
+      issuer.rootDependencies === undefined
+        ? workflowPackageDependencies(issuer.manifest)
+        : issuer.rootDependencies.map((name) => ({ name, optional: false }));
+    for (const dependency of requested) {
+      const module = modulesByName.get(dependency.name);
+      if (module !== undefined) {
+        dependencies[dependency.name] = module.id;
+        continue;
+      }
+      if (input.externalRunner) continue;
+      const dependencyRoot = resolveWorkflowPackageDependency(issuer.root, dependency.name);
+      if (dependencyRoot === undefined) {
+        if (dependency.optional) continue;
+        throw new Error(`workflow dependency is unavailable for snapshot: ${issuer.id} -> ${dependency.name}`);
+      }
+      const internalTarget = input.modules.find((candidate) => candidate.root === dependencyRoot);
+      if (internalTarget !== undefined) {
+        dependencies[dependency.name] = internalTarget.id;
+        continue;
+      }
+      let target = packagesByRoot.get(dependencyRoot);
+      if (target === undefined) {
+        const packageJsonPath = path.join(dependencyRoot, "package.json");
+        const manifest = readWorkflowPackageManifest(packageJsonPath);
+        if (typeof manifest.name !== "string" || !isWorkflowPackageName(manifest.name)) {
+          throw new Error(`workflow dependency has an invalid package name: ${dependencyRoot}`);
+        }
+        if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+          throw new Error(`workflow dependency has an invalid package version: ${manifest.name}`);
+        }
+        const sequence = String(packages.length + 1).padStart(6, "0");
+        target = {
+          id: `package:${sequence}`,
+          name: manifest.name,
+          version: manifest.version,
+          root: dependencyRoot,
+          snapshotPath: `dependencies/packages/${sequence}`,
+          manifest
+        };
+        packagesByRoot.set(dependencyRoot, target);
+        packages.push(target);
+        for (const sourcePath of walkPackageExecutionFiles(dependencyRoot)) {
+          const snapshotPath = path.posix.join(target.snapshotPath, relativeExecutionPath(dependencyRoot, sourcePath));
+          input.add(sourcePath, snapshotPath);
+          if ((fs.statSync(sourcePath).mode & 0o111) !== 0) executablePaths.add(snapshotPath);
+        }
+        pending.push(target);
+      }
+      dependencies[dependency.name] = target.id;
+    }
+    issuers.push({ id: issuer.id, snapshot_path: issuer.snapshotPath, dependencies });
+  }
+
+  const rootIssuer = issuers.find((issuer) => issuer.id === "root");
+  const runnerId = rootIssuer?.dependencies["smithers-orchestrator"];
+  const runner = runnerId === undefined ? undefined : packages.find((candidate) => candidate.id === runnerId);
+  let smithersBin: string | null = null;
+  if (!input.externalRunner) {
+    if (runner === undefined) throw new Error("workflow dependency snapshot is missing the pinned runner package");
+    const binTarget = workflowPackageBinTarget(runner.manifest, "smithers");
+    if (binTarget !== SMITHERS_ORCHESTRATOR_BIN_PATH && binTarget !== `./${SMITHERS_ORCHESTRATOR_BIN_PATH}`) {
+      throw new Error("workflow dependency snapshot has an unexpected runner executable");
+    }
+    const normalizedBinTarget = binTarget.replace(/^\.\//u, "");
+    smithersBin = path.posix.join(runner.snapshotPath, normalizedBinTarget);
+    const sourceBin = path.resolve(runner.root, ...normalizedBinTarget.split("/"));
+    assertPathInside(runner.root, sourceBin, "workflow runner executable");
+    if (!fs.existsSync(sourceBin)) throw new Error("workflow dependency snapshot is missing the runner executable");
+    executablePaths.add(smithersBin);
+  }
+
+  return {
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    modules: modules.map((module) => ({
+      id: module.id,
+      name: module.name,
+      snapshot_path: module.snapshotPath
+    })),
+    packages: packages
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        version: entry.version,
+        snapshot_path: entry.snapshotPath
+      }))
+      .sort((left, right) => compareWorkflowExecutionStrings(left.id, right.id)),
+    issuers: issuers.sort((left, right) => compareWorkflowExecutionStrings(left.id, right.id)),
+    executable_paths: [...executablePaths].sort(),
+    smithers_bin: smithersBin
+  };
+}
+
+function readWorkflowPackageManifest(packageJsonPath: string): WorkflowPackageManifest {
+  const value = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as unknown;
+  if (!isObjectRecord(value)) throw new Error(`workflow package manifest is invalid: ${packageJsonPath}`);
+  return value;
+}
+
+function requiredWorkflowDependencies(manifest: WorkflowPackageManifest): string[] {
+  return workflowPackageDependencies(manifest)
+    .filter((dependency) => !dependency.optional)
+    .map((dependency) => dependency.name);
+}
+
+function workflowPackageDependencies(manifest: WorkflowPackageManifest): Array<{ name: string; optional: boolean }> {
+  const dependencies = new Map<string, boolean>();
+  if (isObjectRecord(manifest.dependencies)) {
+    for (const name of Object.keys(manifest.dependencies)) dependencies.set(name, false);
+  }
+  if (isObjectRecord(manifest.optionalDependencies)) {
+    for (const name of Object.keys(manifest.optionalDependencies)) dependencies.set(name, true);
+  }
+  if (isObjectRecord(manifest.peerDependencies)) {
+    const peerDependenciesMeta = isObjectRecord(manifest.peerDependenciesMeta) ? manifest.peerDependenciesMeta : {};
+    for (const name of Object.keys(manifest.peerDependencies)) {
+      const peerMeta = peerDependenciesMeta[name];
+      const optional = isObjectRecord(peerMeta) && peerMeta.optional === true;
+      const existing = dependencies.get(name);
+      if (existing === undefined || !optional) dependencies.set(name, optional);
+    }
+  }
+  return [...dependencies]
+    .map(([name, optional]) => ({ name, optional }))
+    .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
+}
+
+function resolveWorkflowPackageDependency(issuerRoot: string, dependency: string): string | undefined {
+  if (!isWorkflowPackageName(dependency)) throw new Error(`workflow dependency name is invalid: ${dependency}`);
+  let current = path.resolve(issuerRoot);
+  for (;;) {
+    const candidate = path.join(current, "node_modules", ...dependency.split("/"));
+    if (fs.existsSync(candidate)) {
+      const packageRoot = fs.realpathSync(candidate);
+      const packageJson = path.join(packageRoot, "package.json");
+      if (!fs.existsSync(packageJson)) {
+        throw new Error(`workflow dependency package metadata is missing: ${dependency}`);
+      }
+      return packageRoot;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function isWorkflowPackageName(value: string): boolean {
+  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
+}
+
+function workflowPackageBinTarget(manifest: WorkflowPackageManifest, name: string): string | undefined {
+  if (typeof manifest.bin === "string") return manifest.bin;
+  return isObjectRecord(manifest.bin) && typeof manifest.bin[name] === "string" ? manifest.bin[name] : undefined;
+}
+
+function walkPackageExecutionFiles(root: string): string[] {
+  const resolvedRoot = path.resolve(root);
+  const pending = [resolvedRoot];
+  const files: string[] = [];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const entries = fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
+    for (const entry of entries) {
+      if (entry.name === "node_modules" && entry.isDirectory()) continue;
+      const candidate = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`workflow dependency package cannot contain a symlink: ${candidate}`);
+      }
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile()) files.push(candidate);
+      else throw new Error(`workflow dependency package contains a non-regular entry: ${candidate}`);
+      if (files.length + pending.length > 50_000) {
+        throw new Error(`workflow dependency package exceeds the file limit: ${resolvedRoot}`);
+      }
+    }
+  }
+  return files.sort();
+}
+
+function compareWorkflowExecutionStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function stableWorkflowDependencyJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => stableWorkflowDependencyJson(entry)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => compareWorkflowExecutionStrings(left, right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableWorkflowDependencyJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function workflowModuleEntryUrls(compiled: CompiledSmithersWorkflow): {
@@ -597,7 +1053,7 @@ function walkExecutionFiles(root: string): string[] {
     const current = pending.pop()!;
     const entries = fs
       .readdirSync(current, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) => compareWorkflowExecutionStrings(left.name, right.name));
     for (const entry of entries) {
       const candidate = path.join(current, entry.name);
       if (entry.isSymbolicLink()) throw new Error(`workflow execution closure cannot contain a symlink: ${candidate}`);
@@ -638,6 +1094,8 @@ function smithersInputDocument(
 }
 
 export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promise<SmithersSubmissionResult> {
+  const submissionPath = path.join(path.dirname(input.compiled.inputPath), "submission.json");
+  assertSmithersSubmissionEvidenceAbsent(submissionPath);
   const inputJson =
     input.inputJson ??
     `${JSON.stringify(smithersInputDocument(input.compiled, input.operatorPrompt, input.operatorInput), null, 2)}\n`;
@@ -657,6 +1115,7 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     inputJson,
     "--format",
     "json",
+    ...(input.submissionBinding === undefined ? [] : smithersStartCorrelationCommandArgs(input.submissionBinding)),
     ...supervisorCommandArgs(input.controllerLeaseSeconds)
   ];
   fs.mkdirSync(input.compiled.logsDir, { recursive: true });
@@ -671,9 +1130,18 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
     environmentVariableNames: input.environmentVariableNames,
     keepWorkspaces: input.keepWorkspaces
   });
-  writeJsonDurable(path.join(path.dirname(input.compiled.inputPath), "submission.json"), {
+  writeJsonExclusiveDurable(submissionPath, {
     schema_version: SMITHERS_SUBMISSION_SCHEMA_VERSION,
     smithers_run_id: input.compiled.smithersRunId,
+    ...(input.submissionBinding === undefined
+      ? {}
+      : {
+          workflow_link_id: input.submissionBinding.workflowLinkId,
+          control_generation: input.submissionBinding.controlGeneration,
+          controller_invocation_id: input.submissionBinding.controllerInvocationId,
+          controller_invoked_at: input.submissionBinding.controllerInvokedAt,
+          execution_snapshot_root: path.resolve(input.submissionBinding.executionSnapshotRoot)
+        }),
     command: displayCommand,
     stdout: redactedEvidenceText(stdout),
     stderr: redactedEvidenceText(stderr),
@@ -687,6 +1155,159 @@ export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promis
   };
 }
 
+function assertSmithersSubmissionEvidenceAbsent(submissionPath: string): void {
+  try {
+    fs.lstatSync(submissionPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error("Smithers submission evidence already exists before detached invocation");
+}
+
+function writeJsonExclusiveDurable(filePath: string, value: unknown): void {
+  const contents = `${JSON.stringify(value, null, 2)}\n`;
+  let descriptor: number;
+  try {
+    descriptor = fs.openSync(filePath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("Smithers submission evidence appeared during detached invocation", { cause: error });
+    }
+    throw error;
+  }
+  try {
+    fs.writeFileSync(descriptor, contents, "utf8");
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const parentDescriptor = fs.openSync(path.dirname(filePath), "r");
+  try {
+    fs.fsyncSync(parentDescriptor);
+  } finally {
+    fs.closeSync(parentDescriptor);
+  }
+}
+
+/**
+ * Establishes whether a deterministic Smithers run ID exists without treating
+ * an arbitrary CLI failure (or an unbound success response) as proof of
+ * absence. Start recovery may retry `up` only after this reports `absent`.
+ */
+export async function inspectSmithersRunExistence(input: {
+  smithersRunId: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  expectedCorrelation?: SmithersStartCorrelation;
+}): Promise<SmithersRunExistenceEvidence> {
+  const inspectedAt = new Date().toISOString();
+  const observed = await runSmithersInspectionCommand({
+    args: ["inspect", input.smithersRunId, "--format", "json"],
+    projectRoot: input.projectRoot,
+    env: input.env
+  });
+  const snapshot: SmithersRunExistenceEvidence["snapshot"] = {
+    command: [...observed.command],
+    ok: observed.ok,
+    stdout: redactedEvidenceText(observed.stdout),
+    stderr: redactedEvidenceText(observed.stderr),
+    ...(observed.json === undefined ? {} : { json: redactSecretsInValue(observed.json) }),
+    ...(observed.error === undefined ? {} : { error: sanitizedDiagnosticText(observed.error) })
+  };
+  const classification = classifySmithersRunSnapshot(observed, input.smithersRunId, input.expectedCorrelation);
+  return {
+    status: classification.status,
+    workflowRunId: input.smithersRunId,
+    inspectedAt,
+    reason: classification.reason,
+    ...(input.expectedCorrelation === undefined || classification.status !== "present"
+      ? {}
+      : {
+          correlationSha256: smithersStartCorrelationSha256(input.expectedCorrelation)
+        }),
+    snapshot
+  };
+}
+
+export function classifySmithersRunSnapshot(
+  snapshot: SmithersCommandSnapshot,
+  expectedRunId: string,
+  expectedCorrelation?: SmithersStartCorrelation
+): Pick<SmithersRunExistenceEvidence, "status" | "reason"> {
+  const identifiers = smithersSnapshotRunIdentifiers(snapshot.json);
+  const claimsMissing =
+    smithersSnapshotHasErrorCode(snapshot, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(snapshot);
+  const structuredMissing = jsonHasErrorCode(snapshot.json, "RUN_NOT_FOUND");
+  let states: string[];
+  try {
+    states = smithersSnapshotRunStateValues(snapshot);
+    smithersSnapshotRunStateClass(snapshot);
+  } catch (error) {
+    return {
+      status: "unknown",
+      reason: error instanceof Error ? error.message : "Smithers inspection returned contradictory run states"
+    };
+  }
+  const correlations = smithersSnapshotStartCorrelations(snapshot.json);
+  const correlationMatches =
+    expectedCorrelation === undefined ||
+    (correlations.length > 0 &&
+      correlations.every((candidate) => JSON.stringify(candidate) === JSON.stringify(expectedCorrelation)));
+  if (
+    snapshot.ok &&
+    !claimsMissing &&
+    identifiers.length > 0 &&
+    identifiers.every((candidate) => candidate === expectedRunId) &&
+    correlationMatches
+  ) {
+    return {
+      status: "present",
+      reason:
+        expectedCorrelation === undefined
+          ? "Smithers inspection exactly matched the deterministic run ID"
+          : "Smithers inspection exactly matched the detached invocation correlation"
+    };
+  }
+  if (!snapshot.ok && structuredMissing && identifiers.length === 0 && states.length === 0) {
+    return { status: "absent", reason: "Smithers returned failed structured missing-run evidence" };
+  }
+  return {
+    status: "unknown",
+    reason:
+      claimsMissing && (snapshot.ok || identifiers.length > 0 || states.length > 0)
+        ? "Smithers inspection returned contradictory present and missing-run evidence"
+        : identifiers.length === 0
+          ? "Smithers inspection did not return a bound workflow run ID"
+          : identifiers.some((candidate) => candidate !== expectedRunId)
+            ? "Smithers inspection returned conflicting workflow run identity"
+            : expectedCorrelation !== undefined && !correlationMatches
+              ? "Smithers inspection did not match the detached invocation correlation"
+              : "Smithers inspection did not prove exact run presence or absence"
+  };
+}
+
+export function assertSmithersRunEvidenceIdentity(value: unknown, expectedRunId: string, label: string): void {
+  const identifiers = smithersSnapshotRunIdentifiers(value);
+  if (identifiers.some((candidate) => candidate !== expectedRunId)) {
+    throw new Error(`${label} returned conflicting workflow run identity`);
+  }
+}
+
+function assertSmithersCommandOutputIdentity(stdout: string, expectedRunId: string, label: string): void {
+  const responseJson = jsonField(stdout).json;
+  if (responseJson !== undefined) assertSmithersRunEvidenceIdentity(responseJson, expectedRunId, label);
+  for (const line of stdout.split(/\r?\n/u)) {
+    if (line.trim().length === 0) continue;
+    try {
+      assertSmithersRunEvidenceIdentity(JSON.parse(line) as unknown, expectedRunId, label);
+    } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      throw error;
+    }
+  }
+}
+
 export async function requestSmithersPause(input: {
   smithersRunId: string;
   projectRoot: string;
@@ -698,7 +1319,9 @@ export async function requestSmithersPause(input: {
     env: input.env,
     acceptedExitCodes: [2]
   });
-  const reportedStatus = firstStringField(jsonField(result.stdout).json, ["status"]);
+  const responseJson = jsonField(result.stdout).json;
+  assertSmithersCommandOutputIdentity(result.stdout, input.smithersRunId, "workflow pause response");
+  const reportedStatus = firstStringField(responseJson, ["status"]);
   const status = result.exitCode === 0 && reportedStatus === "paused" ? "paused" : "pause-requested";
   return { ...result, status };
 }
@@ -707,6 +1330,8 @@ export async function requestSmithersCancel(input: {
   smithersRunId: string;
   projectRoot: string;
   env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<SmithersCancelResult> {
   // Exit 2 carries a durable cancel request. Exit 4 is the engine reporting the
   // run is no longer active, which for cancellation is a completed outcome, not
@@ -716,8 +1341,11 @@ export async function requestSmithersCancel(input: {
     args: ["cancel", input.smithersRunId, "--format", "json"],
     projectRoot: input.projectRoot,
     env: input.env,
-    acceptedExitCodes: [2, 4]
+    acceptedExitCodes: [2, 4],
+    signal: input.signal,
+    timeoutMs: input.timeoutMs
   });
+  assertSmithersCommandOutputIdentity(result.stdout, input.smithersRunId, "workflow cancel response");
   if (result.exitCode === 4 && !smithersStdoutHasErrorCode(result.stdout, "RUN_NOT_ACTIVE")) {
     throw new Error(sanitizedDiagnosticText(result.stderr.trim() || "workflow runner cancel failed"));
   }
@@ -753,8 +1381,23 @@ export async function streamSmithersCommand(input: {
   maxLines: number;
   onLine: (line: string) => void | Promise<void>;
 }): Promise<SmithersStreamResult> {
+  return withWorkflowExecutionSnapshotAnchor(input.env, (anchor) => {
+    const anchored = anchoredSmithersControllerInput(input.args, input.env, anchor);
+    return streamSmithersCommandUnanchored({ ...input, ...anchored, displayArgs: input.args });
+  });
+}
+
+async function streamSmithersCommandUnanchored(input: {
+  args: readonly string[];
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  maxLines: number;
+  onLine: (line: string) => void | Promise<void>;
+  displayArgs?: readonly string[];
+}): Promise<SmithersStreamResult> {
   const command = [...input.args];
-  const displayCommand = smithersDisplayCommand(command);
+  const displayCommand = smithersDisplayCommand(input.displayArgs ?? command);
   // An already-aborted caller must not spawn a process at all: `abort` has
   // already been dispatched, so an abort listener registered later never fires
   // and the doomed child would run until it exited on its own.
@@ -770,11 +1413,22 @@ export async function streamSmithersCommand(input: {
     };
   }
   await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
-  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
-    cwd: input.projectRoot,
-    env: smithersCommandEnv(input.projectRoot, input.env),
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  const executableAnchor = acquireSmithersExecutableAnchor(input.env);
+  let child;
+  try {
+    child = spawn(
+      executableAnchor?.executable ?? smithersExecutable(input.projectRoot, input.env),
+      [...(executableAnchor?.argumentPrefix ?? []), ...command],
+      {
+        cwd: input.projectRoot,
+        env: smithersCommandEnv(input.projectRoot, input.env),
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+  } catch (error) {
+    executableAnchor?.close();
+    throw error;
+  }
   const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
   let lines = 0;
   let truncated = false;
@@ -872,6 +1526,11 @@ export async function streamSmithersCommand(input: {
     if (killTimer !== undefined) {
       clearTimeout(killTimer);
     }
+    try {
+      executableAnchor?.assertCurrent();
+    } finally {
+      executableAnchor?.close();
+    }
   }
 }
 
@@ -919,9 +1578,17 @@ function inspectSmithersCompatibilityPatches(
     path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
   ].filter((candidate) => fs.existsSync(candidate));
   if (packageRoots.length !== 1) {
-    return { detached_admission: "unknown", supervisor_descriptor: "unknown" };
+    return {
+      detached_admission: "unknown",
+      supervisor_descriptor: "unknown",
+      workflow_path_persistence: "unknown"
+    };
   }
   const packageRoot = packageRoots[0]!;
+  const engineRoots = [
+    path.join(nodeModules, "@smithers-orchestrator", "engine"),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
+  ].filter((candidate) => fs.existsSync(candidate));
   return {
     detached_admission: patchPosture(
       path.join(packageRoot, "src", "detached-admission.js"),
@@ -932,7 +1599,15 @@ function inspectSmithersCompatibilityPatches(
       path.join(packageRoot, "src", "index.js"),
       SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
       SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
-    )
+    ),
+    workflow_path_persistence:
+      engineRoots.length !== 1
+        ? "unknown"
+        : patchPosture(
+            path.join(engineRoots[0]!, "src", "engine.js"),
+            SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+            SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE
+          )
   };
 }
 
@@ -974,7 +1649,7 @@ export async function runSmithersLifecycleCommand(input: {
   resetNode?: string;
   force?: boolean;
   retryFailed?: boolean;
-  label?: string;
+  correlationLabel?: string;
   resumeRecovery?: {
     runRoot: string;
     inputPath: string;
@@ -985,6 +1660,7 @@ export async function runSmithersLifecycleCommand(input: {
   controllerLeaseSeconds: number;
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
+  onDetachedInvocation?: () => void;
 }): Promise<{
   stdout: string;
   stderr: string;
@@ -993,6 +1669,12 @@ export async function runSmithersLifecycleCommand(input: {
   recoveredMissingRun?: boolean;
   alreadyRunning?: boolean;
 }> {
+  if (
+    (input.action === "fork" || input.action === "replay") &&
+    (input.correlationLabel === undefined || input.correlationLabel.length === 0)
+  ) {
+    throw new Error("fork and replay require a lifecycle correlation label");
+  }
   let preResumeStderr = "";
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
     const inspection = await runSmithersInspectionCommand({
@@ -1000,7 +1682,8 @@ export async function runSmithersLifecycleCommand(input: {
       projectRoot: input.projectRoot,
       env: input.env
     });
-    if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
+    const existence = classifySmithersRunSnapshot(inspection, input.smithersRunId);
+    if (existence.status === "absent") {
       assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
       fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
       assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
@@ -1022,6 +1705,7 @@ export async function runSmithersLifecycleCommand(input: {
         "json",
         ...supervisorCommandArgs(input.controllerLeaseSeconds)
       ];
+      input.onDetachedInvocation?.();
       const recoveryResult = await execSmithersCli({
         args: recoveryCommand,
         projectRoot: input.projectRoot,
@@ -1040,10 +1724,8 @@ export async function runSmithersLifecycleCommand(input: {
       });
       return { ...recoveryResult, recoveredMissingRun: true };
     }
-    if (!inspection.ok) {
-      throw new Error(
-        `workflow inspection failed before resume: ${inspection.error ?? (inspection.stderr.trim() || "unknown error")}`
-      );
+    if (existence.status !== "present") {
+      throw new Error(`workflow inspection could not prove the linked run before resume: ${existence.reason}`);
     }
     if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
       return {
@@ -1099,24 +1781,26 @@ export async function runSmithersLifecycleCommand(input: {
             "workflow log directory"
           );
           const replacementRunId = compatibleRecoveryRunId(input.smithersRunId);
+          const recoveryCommand = [
+            "up",
+            input.workflowPath,
+            "--detach",
+            "--run-id",
+            replacementRunId,
+            ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+            "--root",
+            input.projectRoot,
+            "--log-dir",
+            input.resumeRecovery.logsDir,
+            "--input",
+            input.resumeRecovery.inputJson,
+            "--format",
+            "json",
+            ...supervisorCommandArgs(input.controllerLeaseSeconds)
+          ];
+          input.onDetachedInvocation?.();
           const recovery = await execSmithersCli({
-            args: [
-              "up",
-              input.workflowPath,
-              "--detach",
-              "--run-id",
-              replacementRunId,
-              ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-              "--root",
-              input.projectRoot,
-              "--log-dir",
-              input.resumeRecovery.logsDir,
-              "--input",
-              input.resumeRecovery.inputJson,
-              "--format",
-              "json",
-              ...supervisorCommandArgs(input.controllerLeaseSeconds)
-            ],
+            args: recoveryCommand,
             projectRoot: input.projectRoot,
             env: input.env,
             environmentVariableNames: input.environmentVariableNames,
@@ -1193,23 +1877,25 @@ export async function runSmithersLifecycleCommand(input: {
         });
       }
     }
+    const resumeCommand = [
+      "up",
+      input.workflowPath,
+      "--resume",
+      input.smithersRunId,
+      "--run-id",
+      input.smithersRunId,
+      "--force",
+      "--detach",
+      ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+      "--format",
+      "json",
+      ...supervisorCommandArgs(input.controllerLeaseSeconds)
+    ];
     let resumeResult: Awaited<ReturnType<typeof execSmithersCli>>;
     try {
+      input.onDetachedInvocation?.();
       resumeResult = await execSmithersCli({
-        args: [
-          "up",
-          input.workflowPath,
-          "--resume",
-          input.smithersRunId,
-          "--run-id",
-          input.smithersRunId,
-          "--force",
-          "--detach",
-          ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
-          "--format",
-          "json",
-          ...supervisorCommandArgs(input.controllerLeaseSeconds)
-        ],
+        args: resumeCommand,
         projectRoot: input.projectRoot,
         env: input.env,
         environmentVariableNames: input.environmentVariableNames,
@@ -1242,7 +1928,8 @@ export async function runSmithersLifecycleCommand(input: {
       "--frame",
       String(input.forkFrame),
       ...(input.resetNode === undefined ? [] : ["--reset-node", input.resetNode]),
-      ...(input.label === undefined ? [] : ["--label", input.label]),
+      "--label",
+      input.correlationLabel!,
       "--format",
       "json"
     ];
@@ -1271,6 +1958,7 @@ export async function runSmithersLifecycleCommand(input: {
       "json",
       ...supervisorCommandArgs(input.controllerLeaseSeconds)
     ];
+    input.onDetachedInvocation?.();
     const resumeResult = await execSmithersCli({
       args: resumeCommand,
       projectRoot: input.projectRoot,
@@ -1303,8 +1991,28 @@ export async function runSmithersLifecycleCommand(input: {
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
       : input.action === "fork"
-        ? [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--run", "--format", "json"]
-        : [input.action, input.workflowPath, "--run-id", input.smithersRunId, "--format", "json"];
+        ? [
+            input.action,
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--run",
+            "--label",
+            input.correlationLabel!,
+            "--format",
+            "json"
+          ]
+        : [
+            input.action,
+            input.workflowPath,
+            "--run-id",
+            input.smithersRunId,
+            "--label",
+            input.correlationLabel!,
+            "--format",
+            "json"
+          ];
+  if (input.action === "resume" || input.action === "fork") input.onDetachedInvocation?.();
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
@@ -1375,29 +2083,126 @@ function smithersSnapshotHasMissingRunHistory(snapshot: SmithersCommandSnapshot)
   return evidence.includes("No Smithers run history found") || evidence.includes("No workflow run history found");
 }
 
-function smithersSnapshotRunState(snapshot: SmithersCommandSnapshot): string | undefined {
-  const parsed = isObjectRecord(snapshot.json) ? snapshot.json : {};
-  const data = isObjectRecord(parsed.data) ? parsed.data : parsed;
-  const runState = isObjectRecord(data.runState) ? data.runState.state : undefined;
-  if (typeof runState === "string") {
-    return runState;
+function smithersSnapshotRunIdentifiers(value: unknown): string[] {
+  const identifiers: string[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (!isObjectRecord(candidate)) return;
+    for (const [key, entry] of Object.entries(candidate)) {
+      if (
+        ["runId", "run_id", "workflowRunId", "workflow_run_id"].includes(key) &&
+        typeof entry === "string" &&
+        entry.length > 0
+      ) {
+        identifiers.push(entry);
+      }
+      if (key === "run" && isObjectRecord(entry) && typeof entry.id === "string" && entry.id.length > 0) {
+        identifiers.push(entry.id);
+      }
+      visit(entry);
+    }
+  };
+  visit(value);
+  return [...new Set(identifiers)];
+}
+
+function smithersSnapshotRunStateClass(snapshot: SmithersCommandSnapshot): string | undefined {
+  const states = smithersSnapshotRunStateValues(snapshot);
+  const classes = [...new Set(states.map(smithersRunStateClass))];
+  if (classes.length > 1) {
+    throw new Error("workflow inspection returned contradictory top-level and nested run states");
   }
-  const runStatus = isObjectRecord(data.run) ? data.run.status : undefined;
-  return typeof runStatus === "string" ? runStatus : undefined;
+  return classes[0];
+}
+
+function smithersSnapshotRunStateValues(snapshot: SmithersCommandSnapshot): string[] {
+  const states: string[] = [];
+  const collect = (candidate: Record<string, unknown>): void => {
+    for (const value of [candidate.state, candidate.status]) {
+      if (typeof value === "string" && value.trim().length > 0) states.push(value);
+    }
+  };
+  const visit = (candidate: unknown, envelope: boolean): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry, false);
+      return;
+    }
+    if (!isObjectRecord(candidate)) return;
+    if (
+      envelope ||
+      [candidate.runId, candidate.run_id, candidate.workflowRunId, candidate.workflow_run_id].some(
+        (value) => typeof value === "string" && value.length > 0
+      )
+    ) {
+      collect(candidate);
+    }
+    for (const [key, entry] of Object.entries(candidate)) {
+      if (["run", "runState", "run_state"].includes(key) && isObjectRecord(entry)) {
+        collect(entry);
+      }
+      // Smithers commands use these as JSON envelopes. Traverse every branch
+      // to find nested run/runState records, but collect a direct state/status
+      // only from an envelope or a record already bound to a run ID so task
+      // states do not masquerade as contradictory run states.
+      visit(entry, ["data", "result", "value"].includes(key));
+    }
+  };
+  visit(snapshot.json, true);
+  return states;
+}
+
+function smithersSnapshotStartCorrelations(value: unknown): SmithersStartCorrelation[] {
+  const correlations: SmithersStartCorrelation[] = [];
+  const visit = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      for (const entry of candidate) visit(entry);
+      return;
+    }
+    if (!isObjectRecord(candidate)) return;
+    for (const [key, entry] of Object.entries(candidate)) {
+      if (key === "startedBy" && isObjectRecord(entry)) {
+        correlations.push({
+          harness: typeof entry.harness === "string" ? entry.harness : "",
+          sessionId: typeof entry.sessionId === "string" ? entry.sessionId : "",
+          prompt: typeof entry.prompt === "string" ? entry.prompt : ""
+        });
+      }
+      visit(entry);
+    }
+  };
+  visit(value);
+  return correlations.filter(
+    (candidate, index, values) =>
+      values.findIndex((other) => JSON.stringify(other) === JSON.stringify(candidate)) === index
+  );
+}
+
+function smithersRunStateClass(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (SMITHERS_ACTIVE_RUN_STATES.has(normalized)) return "active";
+  if (["failed", "failure", "error", "errored", "timed-out", "timed_out", "timeout", "timedout"].includes(normalized)) {
+    return "failed";
+  }
+  if (normalized === "stale") return "stale";
+  if (["finished", "succeeded", "success", "complete", "completed"].includes(normalized)) return "succeeded";
+  if (["canceled", "cancelled"].includes(normalized)) return "cancelled";
+  if (normalized === "paused") return "paused";
+  return `other:${normalized}`;
 }
 
 function smithersSnapshotRunStateIsActive(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && SMITHERS_ACTIVE_RUN_STATES.has(state.toLowerCase());
+  return smithersSnapshotRunStateClass(snapshot) === "active";
 }
 
 function smithersSnapshotRunStateIsFailed(snapshot: SmithersCommandSnapshot): boolean {
-  const state = smithersSnapshotRunState(snapshot);
-  return state !== undefined && ["failed", "error", "timed-out", "timeout"].includes(state.toLowerCase());
+  return smithersSnapshotRunStateClass(snapshot) === "failed";
 }
 
 function smithersSnapshotRunStateIsStale(snapshot: SmithersCommandSnapshot): boolean {
-  return smithersSnapshotRunState(snapshot)?.toLowerCase() === "stale";
+  return smithersSnapshotRunStateClass(snapshot) === "stale";
 }
 
 function smithersSnapshotFailedTasks(snapshot: SmithersCommandSnapshot): Array<{ nodeId: string; iteration: number }> {
@@ -1501,6 +2306,23 @@ async function execSmithersCli(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
+  return withWorkflowExecutionSnapshotAnchor(input.env, (anchor) => {
+    const anchored = anchoredSmithersControllerInput(input.args, input.env, anchor);
+    return execSmithersCliUnanchored({ ...input, ...anchored, displayArgs: input.args });
+  });
+}
+
+async function execSmithersCliUnanchored(input: {
+  args: readonly string[];
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  environmentVariableNames?: readonly string[];
+  keepWorkspaces?: boolean;
+  acceptedExitCodes?: readonly number[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  displayArgs?: readonly string[];
+}): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
   await ensureSmithersDependencies(input.projectRoot, input.env, {
@@ -1509,29 +2331,221 @@ async function execSmithersCli(input: {
   });
   const commandTimeoutMs =
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
-  const executable = smithersExecutable(input.projectRoot, input.env);
+  const executableAnchor = acquireSmithersExecutableAnchor(input.env);
   try {
-    const { stdout, stderr } = await execFileAsync(executable, command, {
+    const result = await executeBoundedSmithersCommand({
+      executable: executableAnchor?.executable ?? smithersExecutable(input.projectRoot, input.env),
+      args: [...(executableAnchor?.argumentPrefix ?? []), ...command],
       cwd: input.projectRoot,
       env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
-      maxBuffer: SMITHERS_CLI_MAX_BUFFER_BYTES,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(commandTimeoutMs === undefined ? {} : { timeout: commandTimeoutMs })
+      signal: input.signal,
+      timeoutMs: commandTimeoutMs
     });
-    return { stdout, stderr, command: smithersDisplayCommand(command), exitCode: 0 };
-  } catch (error) {
-    const record =
-      error && typeof error === "object" ? (error as { code?: unknown; stdout?: unknown; stderr?: unknown }) : {};
-    if (typeof record.code === "number" && input.acceptedExitCodes?.includes(record.code)) {
+    executableAnchor?.assertCurrent();
+    if (result.exitCode === 0) {
       return {
-        stdout: typeof record.stdout === "string" ? record.stdout : "",
-        stderr: typeof record.stderr === "string" ? record.stderr : "",
-        command: smithersDisplayCommand(command),
-        exitCode: record.code
+        stdout: result.stdout,
+        stderr: result.stderr,
+        command: smithersDisplayCommand(input.displayArgs ?? command),
+        exitCode: 0
       };
     }
+    if (result.exitCode !== null && input.acceptedExitCodes?.includes(result.exitCode)) {
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        command: smithersDisplayCommand(input.displayArgs ?? command),
+        exitCode: result.exitCode
+      };
+    }
+    throw smithersCommandExitError(result);
+  } catch (error) {
+    executableAnchor?.assertCurrent();
     throw error;
+  } finally {
+    executableAnchor?.close();
   }
+}
+
+interface BoundedSmithersCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+type SmithersTerminationReason = "abort" | "timeout" | "stdout-max-buffer" | "stderr-max-buffer";
+
+async function executeBoundedSmithersCommand(input: {
+  executable: string;
+  args: readonly string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<BoundedSmithersCommandResult> {
+  if (isAbortedSignal(input.signal)) {
+    throw smithersCommandTerminationError("abort", "", "", null);
+  }
+  const child = spawn(input.executable, [...input.args], {
+    cwd: input.cwd,
+    env: input.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let processError: Error | undefined;
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    // `spawn()` reports an unavailable executable or cwd asynchronously. Keep
+    // the executable/snapshot anchors open until Node's guaranteed `close`
+    // boundary, even when an earlier `error` event describes the launch
+    // failure.
+    child.once("error", (error) => {
+      processError ??= error;
+    });
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let terminationReason: SmithersTerminationReason | undefined;
+  let escalationTimer: NodeJS.Timeout | undefined;
+  let timeoutTimer: NodeJS.Timeout | undefined;
+  const terminate = (reason: SmithersTerminationReason): void => {
+    if (terminationReason !== undefined) return;
+    terminationReason = reason;
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      escalationTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, ONE_SHOT_TERMINATION_GRACE_MS).unref();
+    }
+  };
+  const append = (target: Buffer[], chunk: Buffer | string, stream: "stdout" | "stderr"): void => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const previous = stream === "stdout" ? stdoutBytes : stderrBytes;
+    const remaining = Math.max(0, SMITHERS_CLI_MAX_BUFFER_BYTES - previous);
+    if (remaining > 0) target.push(bytes.subarray(0, remaining));
+    if (stream === "stdout") stdoutBytes += bytes.length;
+    else stderrBytes += bytes.length;
+    if (previous + bytes.length > SMITHERS_CLI_MAX_BUFFER_BYTES) {
+      terminate(stream === "stdout" ? "stdout-max-buffer" : "stderr-max-buffer");
+    }
+  };
+  child.stdout.on("data", (chunk: Buffer | string) => append(stdoutChunks, chunk, "stdout"));
+  child.stderr.on("data", (chunk: Buffer | string) => append(stderrChunks, chunk, "stderr"));
+  const onAbort = (): void => terminate("abort");
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  if (input.timeoutMs !== undefined) {
+    timeoutTimer = setTimeout(() => terminate("timeout"), input.timeoutMs).unref();
+  }
+  if (isAbortedSignal(input.signal)) terminate("abort");
+  try {
+    const outcome = await closed;
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    if (terminationReason !== undefined) {
+      throw smithersCommandTerminationError(terminationReason, stdout, stderr, outcome.signal);
+    }
+    if (processError !== undefined) throw processError;
+    return { stdout, stderr, exitCode: outcome.code, signal: outcome.signal };
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+    if (escalationTimer !== undefined) clearTimeout(escalationTimer);
+  }
+}
+
+function smithersCommandTerminationError(
+  reason: SmithersTerminationReason,
+  stdout: string,
+  stderr: string,
+  signal: NodeJS.Signals | null
+): Error {
+  const classification =
+    reason === "abort"
+      ? { name: "AbortError", code: "ABORT_ERR", message: "workflow runner command was aborted" }
+      : reason === "timeout"
+        ? { name: "Error", code: "ETIMEDOUT", message: "workflow runner command timed out" }
+        : {
+            name: "Error",
+            code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            message: `workflow runner command exceeded the ${reason.startsWith("stdout") ? "stdout" : "stderr"} buffer limit`
+          };
+  const error = new Error(classification.message) as Error & {
+    code: string;
+    stdout: string;
+    stderr: string;
+    killed: boolean;
+    signal: NodeJS.Signals | null;
+  };
+  error.name = classification.name;
+  error.code = classification.code;
+  error.stdout = stdout;
+  error.stderr = stderr;
+  error.killed = true;
+  error.signal = signal;
+  return error;
+}
+
+function smithersCommandExitError(result: BoundedSmithersCommandResult): Error {
+  const error = new Error(
+    result.exitCode === null
+      ? `workflow runner command terminated by ${result.signal ?? "an unknown signal"}`
+      : `workflow runner command exited with code ${result.exitCode}`
+  ) as Error & {
+    code: number | null;
+    stdout: string;
+    stderr: string;
+    killed: boolean;
+    signal: NodeJS.Signals | null;
+  };
+  error.code = result.exitCode;
+  error.stdout = result.stdout;
+  error.stderr = result.stderr;
+  error.killed = result.signal !== null;
+  error.signal = result.signal;
+  return error;
+}
+
+async function withWorkflowExecutionSnapshotAnchor<T>(
+  env: Record<string, string | undefined> | undefined,
+  operation: (anchor: WorkflowExecutionSnapshotAnchor | undefined) => Promise<T>
+): Promise<T> {
+  const anchor = acquireWorkflowExecutionSnapshotAnchor(env);
+  try {
+    anchor?.assertCurrent();
+    const result = await operation(anchor);
+    // Detached `up` is admitted only when its controller command returns. Keep
+    // both ownership descriptors open through that boundary and reject a path
+    // replacement observed while the trusted controller was consuming it.
+    anchor?.assertCurrent();
+    return result;
+  } catch (error) {
+    // A simultaneous integrity failure is authoritative: never report an
+    // ordinary runner error after the sealed snapshot identity was replaced.
+    anchor?.assertCurrent();
+    throw error;
+  } finally {
+    anchor?.close();
+  }
+}
+
+function anchoredSmithersControllerInput(
+  args: readonly string[],
+  env: Record<string, string | undefined> | undefined,
+  anchor: WorkflowExecutionSnapshotAnchor | undefined
+): { args: string[]; env: Record<string, string | undefined> | undefined } {
+  if (anchor === undefined) return { args: [...args], env };
+  const anchoredEnv = { ...env };
+  for (const [key, value] of Object.entries(anchoredEnv)) {
+    if (value !== undefined && key.toUpperCase() !== ULTRAFUZZ_WORKFLOW_PERSISTED_PATH) {
+      anchoredEnv[key] = anchor.rewriteControllerValue(value);
+    }
+  }
+  return {
+    args: args.map((argument) => anchor.rewriteControllerValue(argument)),
+    env: anchoredEnv
+  };
 }
 
 function smithersDisplayCommand(command: readonly string[]): string[] {
@@ -1738,18 +2752,67 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
       admissionContents.replace(SMITHERS_CLI_DETACHED_ADMISSION_SOURCE, SMITHERS_CLI_DETACHED_ADMISSION_PATCH)
     );
   }
-  const cliContents = fs.readFileSync(cliSource, "utf8");
-  if (cliContents.includes(SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)) return;
-  if (cliContents.split(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE).length !== 2) {
-    throw new Error("pinned workflow runner detached supervisor implementation is incompatible");
-  }
-  // Smithers 0.31 closes the detached-engine log descriptor before reusing it
-  // for the supervisor spawn. Open a dedicated descriptor so supervised public
-  // runs do not fail nondeterministically with posix_spawn EBADF.
-  writeFileDurable(
-    cliSource,
-    cliContents.replace(SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE, SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH)
+  let cliContents = fs.readFileSync(cliSource, "utf8");
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
+    SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
+    "detached supervisor implementation"
   );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE,
+    SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
+    "workflow path import"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_WORKFLOW_PATH_SOURCE,
+    SMITHERS_CLI_WORKFLOW_PATH_PATCH,
+    "workflow path validation"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
+    SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
+    "post-failure workflow path"
+  );
+  writeFileDurable(cliSource, cliContents);
+
+  const enginePackageRoots = [
+    path.join(nodeModules, "@smithers-orchestrator", "engine"),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
+  ].filter((candidate) => fs.existsSync(candidate));
+  if (enginePackageRoots.length !== 1) {
+    throw new Error("pinned workflow runner did not resolve exactly one engine package root");
+  }
+  const engineRoot = enginePackageRoots[0]!;
+  const enginePackageJson = path.join(engineRoot, "package.json");
+  const engineSource = path.join(engineRoot, "src", "engine.js");
+  assertRegularFileInside(nodeModules, enginePackageJson, "installed Smithers engine package metadata");
+  assertRegularFileInside(nodeModules, engineSource, "installed Smithers engine implementation");
+  const engineMetadata = JSON.parse(fs.readFileSync(enginePackageJson, "utf8")) as unknown;
+  if (!isObjectRecord(engineMetadata) || engineMetadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+    throw new Error(`installed Smithers engine package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
+  }
+  const engineContents = fs.readFileSync(engineSource, "utf8");
+  writeFileDurable(
+    engineSource,
+    applyRequiredSmithersPatch(
+      engineContents,
+      SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+      "durable workflow path"
+    )
+  );
+}
+
+function applyRequiredSmithersPatch(contents: string, source: string, patch: string, label: string): string {
+  if (contents.includes(patch)) return contents;
+  if (contents.split(source).length !== 2) {
+    throw new Error(`pinned workflow runner ${label} is incompatible`);
+  }
+  return contents.replace(source, patch);
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {
@@ -1844,8 +2907,21 @@ function smithersExecutable(projectRoot: string, env: Record<string, string | un
 }
 
 function explicitSmithersExecutable(env: Record<string, string | undefined> | undefined): string | undefined {
-  const explicit = env?.SMITHERS_BIN ?? process.env.SMITHERS_BIN;
-  return explicit && explicit.trim().length > 0 ? explicit : undefined;
+  const capability = smithersExecutableCapability(env);
+  const requested = env?.SMITHERS_BIN;
+  if (capability !== undefined) {
+    const executable = requested !== undefined && requested.trim().length > 0 ? requested : capability.runner.path;
+    // A controller snapshot anchor rewrites SMITHERS_BIN through the held root
+    // descriptor. Return that attested spelling so exec cannot be redirected
+    // by swapping the lexical snapshot parent after materialization. Exact
+    // inode and digest validation occurs when the executable anchor is opened.
+    return executable;
+  }
+  const untrusted = requested ?? process.env.SMITHERS_BIN;
+  if (untrusted !== undefined && untrusted.trim().length > 0) {
+    throw new Error("SMITHERS_BIN cannot override the pinned workflow runner without an internal capability");
+  }
+  return undefined;
 }
 
 function localSmithersExecutable(projectRoot: string): string {
@@ -1859,6 +2935,7 @@ function smithersCommandEnv(
   keepWorkspaces?: boolean
 ): NodeJS.ProcessEnv {
   const source: NodeJS.ProcessEnv = { ...process.env, ...(env ?? {}) };
+  const hasSnapshotCapability = hasWorkflowExecutionSnapshotCapability(env);
   if (keepWorkspaces !== undefined) {
     source.SMITHERS_KEEP_WORKTREES = keepWorkspaces ? "1" : undefined;
   }
@@ -1871,6 +2948,7 @@ function smithersCommandEnv(
       sourcePath = value;
       continue;
     }
+    if (normalizedKey === ULTRAFUZZ_WORKFLOW_PERSISTED_PATH && !hasSnapshotCapability) continue;
     if (
       value !== undefined &&
       (SMITHERS_BASE_ENVIRONMENT_VARIABLES.has(normalizedKey) ||
@@ -1881,11 +2959,44 @@ function smithersCommandEnv(
       merged[key] = value;
     }
   }
-  const localBin = path.join(projectRoot, ".smithers", "node_modules", ".bin");
-  merged.PATH = [localBin, sourcePath]
+  const localBin =
+    explicitSmithersExecutable(env) === undefined
+      ? path.join(projectRoot, ".smithers", "node_modules", ".bin")
+      : undefined;
+  const filteredSourcePath = filterLiveProjectBinAliases(projectRoot, sourcePath);
+  merged.PATH = [localBin, filteredSourcePath]
     .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
     .join(path.delimiter);
   return merged;
+}
+
+function filterLiveProjectBinAliases(projectRoot: string, sourcePath: string | undefined): string | undefined {
+  if (sourcePath === undefined) return undefined;
+  const liveBin = path.resolve(projectRoot, ".smithers", "node_modules", ".bin");
+  const liveBinReal = comparableCommandPath(liveBin);
+  return sourcePath
+    .split(path.delimiter)
+    .filter((entry) => {
+      const resolved = path.resolve(projectRoot, entry.length === 0 ? "." : entry);
+      return !sameCommandPath(resolved, liveBin) && !sameCommandPath(comparableCommandPath(resolved), liveBinReal);
+    })
+    .join(path.delimiter);
+}
+
+function comparableCommandPath(value: string): string {
+  let resolved: string;
+  try {
+    resolved = fs.realpathSync(value);
+  } catch {
+    resolved = path.resolve(value);
+  }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function sameCommandPath(left: string, right: string): boolean {
+  const normalizedLeft = process.platform === "win32" ? path.resolve(left).toLowerCase() : path.resolve(left);
+  const normalizedRight = process.platform === "win32" ? path.resolve(right).toLowerCase() : path.resolve(right);
+  return normalizedLeft === normalizedRight;
 }
 
 function smithersBinaryName(): string {
@@ -2288,11 +3399,25 @@ function workflowFileStem(runId: string): string {
   return `ultrafuzz-${runId.replace(/[^A-Za-z0-9._-]/gu, "-")}`;
 }
 
-function writeExecutableWorkflow(projectRoot: string, workflowPath: string, source: string): void {
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
-  fs.mkdirSync(path.dirname(workflowPath), { recursive: true });
-  assertNoSymlinkComponents(projectRoot, workflowPath, "Smithers workflow");
-  writeFileDurable(workflowPath, source);
+function writePreparedWorkflowFile(root: string, filePath: string, contents: string, label: string): void {
+  const resolvedRoot = path.resolve(root);
+  const resolvedPath = path.resolve(filePath);
+  assertPathInside(resolvedRoot, resolvedPath, label);
+  fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
+  assertNoSymlinkComponents(resolvedRoot, resolvedPath, label);
+  if (fs.existsSync(resolvedPath)) {
+    assertRegularFileInside(resolvedRoot, resolvedPath, label);
+    const observed = fs.readFileSync(resolvedPath);
+    if (!observed.equals(Buffer.from(contents))) {
+      throw new Error(`existing ${label} conflicts with the prepared workflow start`);
+    }
+    return;
+  }
+  writeFileDurable(resolvedPath, contents);
+  assertRegularFileInside(resolvedRoot, resolvedPath, label);
+  if (!fs.readFileSync(resolvedPath).equals(Buffer.from(contents))) {
+    throw new Error(`${label} changed while the prepared workflow start was written`);
+  }
 }
 
 function renderEvidenceWorkflowSource(workflowPath: string, evidenceWorkflowPath: string): string {

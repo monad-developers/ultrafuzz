@@ -3,18 +3,20 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 import { ModalClient, SandboxFilesystemNotFoundError, type App, type Image, type Sandbox, type Secret } from "modal";
 import { getToolContext, type ToolContext } from "@smithers-orchestrator/tool-context";
 import type { CompiledCloudAgentAuthDescriptor } from "@ultrafuzz/runtime";
 
 import {
+  acquireKimiModalNodeExecutionLease,
   brokerKimiSubscriptionAuthRotation,
   kimiSubscriptionAuthSecretValuesFromRoots,
-  kimiSubscriptionCredentialFileName,
   kimiSubscriptionCredentialLineageSha256,
-  prepareSubscriptionAuthCopy,
-  reconcileKimiSubscriptionAuthCredential
+  localSubscriptionAuthPath,
+  type KimiModalNodeExecutionLease,
+  type reconcileKimiSubscriptionAuthCredential
 } from "./auth.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
@@ -26,6 +28,13 @@ const REMOTE_KIMI_AUTH_ARCHIVE = `${REMOTE_TRANSPORT_ROOT}/kimi-auth.tgz`;
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
 const REMOTE_DATA_ROOT = "/run/ultrafuzz-node-results";
 const MODAL_NODE_ISOLATION_PROTOCOL = "rootless-ephemeral-v2";
+const KIMI_CREDENTIAL_LEASE_TAG = "credential_lease";
+const KIMI_CREDENTIAL_LEASE_OWNER_TAG = "credential_lease_owner";
+const KIMI_REMOTE_QUIESCENCE_SETTLEMENT_MS = 5_000;
+const KIMI_REMOTE_QUIESCENCE_TIMEOUT_MS = 30_000;
+const KIMI_REMOTE_QUIESCENCE_INITIAL_DELAY_MS = 250;
+const KIMI_REMOTE_QUIESCENCE_MAX_DELAY_MS = 2_000;
+const KIMI_CREDENTIAL_RECOVERY_FILE = "kimi-credential-recovery.json";
 const MAX_KIMI_CREDENTIAL_CANDIDATE_BYTES = 1024 * 1024;
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
 
@@ -40,6 +49,10 @@ export interface ModalNodeSandboxProviderOptions {
   kimiBroker?: typeof brokerKimiSubscriptionAuthRotation;
   /** @internal Test-only reconciliation injection. */
   kimiReconcile?: typeof reconcileKimiSubscriptionAuthCredential;
+  /** @internal Test-only execution lease injection. */
+  kimiExecutionLease?: typeof acquireKimiModalNodeExecutionLease;
+  /** @internal Test-only remote quiescence timing injection. */
+  kimiRemoteQuiescence?: KimiRemoteQuiescenceHooks;
 }
 
 export class ModalNodeCleanupRefusedError extends Error {
@@ -146,6 +159,26 @@ interface ModalNodeClient {
   close(): void;
 }
 
+interface KimiRemoteProofScope {
+  app: App;
+  client: ModalNodeClient;
+  credentialLeaseId: string;
+  legacyAttemptTags: Record<string, string>;
+  exactExecutionTags?: Record<string, string>;
+}
+
+interface KimiRemoteQuiescenceHooks {
+  now?: () => number;
+  pause?: (ms: number) => Promise<void>;
+  settlementMs?: number;
+  timeoutMs?: number;
+}
+
+interface MonotonicDeadline {
+  deadline: number;
+  now: () => number;
+}
+
 export function createModalNodeSandboxProvider(options: ModalNodeSandboxProviderOptions): NodeSandboxProvider {
   validateProviderOptions(options);
   return {
@@ -162,14 +195,19 @@ async function runModalNodeSandbox(
 ): Promise<NodeSandboxProviderResult> {
   const input = parseModalNodeSandboxInput(request.input);
   const env = options.env ?? process.env;
-  const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
   const credentialRedactionValues: string[] = [];
+  const authPathRedactionValues = kimiAuthPathRedactionValues(input.agent_auth, env);
+  let kimiExecutionLease: KimiModalNodeExecutionLease | undefined;
+  let kimiRotationPossible = false;
   let preparedAuth: PreparedModalAgentAuth | undefined;
   let archive: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
   let stagedCredentialCandidate: StagedKimiCredentialCandidate | undefined;
   let client: ModalNodeClient | undefined;
+  let app: App | undefined;
   let sandbox: Sandbox | undefined;
   let sandboxTerminationHandled = false;
+  let kimiRemoteProofRequired = false;
+  let kimiRemoteProofScope: KimiRemoteProofScope | undefined;
   let stagedPublication: StagedModalNodePublication | undefined;
   let executionResult: NodeSandboxProviderResult | undefined;
   let publishedHeartbeat: Record<string, unknown> | undefined;
@@ -179,7 +217,43 @@ async function runModalNodeSandbox(
     const tokenId = requiredCredential(env, tokenIdName);
     const tokenSecret = requiredCredential(env, tokenSecretName);
     credentialRedactionValues.push(tokenId, tokenSecret);
-    preparedAuth = await prepareModalAgentAuth(input, env, options.credentialEnv);
+    if (input.agent_auth.auth.mode === "subscription") {
+      if (input.agent_model === undefined) {
+        throw new Error("cloud Kimi subscription authentication requires an exact model alias");
+      }
+      const brokerEnv = kimiSubscriptionBrokerEnvironment(input.agent_auth, env);
+      kimiExecutionLease = await (options.kimiExecutionLease ?? acquireKimiModalNodeExecutionLease)(
+        input.agent_model,
+        brokerEnv,
+        os.homedir(),
+        { timeoutMs: input.resources.timeout_seconds * 1000 }
+      );
+      assertKimiExecutionLeaseIdentity(kimiExecutionLease);
+      authPathRedactionValues.push(
+        kimiExecutionLease.source,
+        kimiExecutionLease.credentialPath,
+        kimiExecutionLease.leasePath
+      );
+      // From acquisition onward, release is fenced on a fresh remote listing
+      // and poll-proven quiescence. This also makes a proper-lockfile stale
+      // takeover safe before any credential bytes are snapshotted.
+      kimiRemoteProofRequired = true;
+      client =
+        options.clientFactory?.({ tokenId, tokenSecret }) ??
+        (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
+      app = await client.apps.fromName(options.app, { createIfMissing: true });
+      kimiRemoteProofScope = {
+        app,
+        client,
+        credentialLeaseId: kimiExecutionLease.credentialLeaseId,
+        legacyAttemptTags: modalNodeAttemptLookupTags(
+          modalNodeTags(request.runId, request.sandboxId, input.execution_generation)
+        )
+      };
+      await proveKimiCredentialLeaseQuiescence(kimiRemoteProofScope, options.kimiRemoteQuiescence);
+      await kimiExecutionLease.assertOwner();
+    }
+    preparedAuth = await prepareModalAgentAuth(input, env, options.credentialEnv, kimiExecutionLease);
     credentialRedactionValues.push(...preparedAuth.sensitiveValues);
 
     archive = await createModalNodeHandoffArchive(request.rootDir, input);
@@ -201,24 +275,38 @@ async function runModalNodeSandbox(
     };
     fs.writeFileSync(requestFile, `${JSON.stringify(workerInput)}\n`, { mode: 0o600 });
 
-    client =
+    client ??=
       options.clientFactory?.({ tokenId, tokenSecret }) ??
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
-    const app = await client.apps.fromName(options.app, { createIfMissing: true });
+    app ??= await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
-    const tags = modalNodeTags(
-      request.runId,
-      request.sandboxId,
-      input.execution_generation,
-      workerInput.execution_identity
-    );
+    const tags = {
+      ...modalNodeTags(request.runId, request.sandboxId, input.execution_generation, workerInput.execution_identity),
+      ...(kimiExecutionLease === undefined ? {} : kimiCredentialLeaseTags(kimiExecutionLease))
+    };
+    if (kimiRemoteProofScope !== undefined) kimiRemoteProofScope.exactExecutionTags = tags;
+    await kimiExecutionLease?.assertOwner();
+    // Remote credential settlement and local auth staging have their own
+    // explicit bounds; do not silently subtract them from the model budget.
+    const executionDeadline = Date.now() + input.resources.timeout_seconds * 1000;
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
+    let recovery: ModalNodeKimiCredentialRecovery | undefined;
+    let pendingExecutionError: unknown;
+    const markRotationPossible = async (): Promise<void> => {
+      if (kimiExecutionLease === undefined || kimiRotationPossible) return;
+      await kimiExecutionLease.markRotationPossible();
+      kimiRotationPossible = true;
+    };
     if (sandbox === undefined) {
       const secret =
         Object.keys(preparedAuth.secretValues).length === 0
           ? undefined
           : await client.secrets.fromObject(preparedAuth.secretValues);
+      await kimiExecutionLease?.assertOwner();
+      // The remote-may-exist fence is already active before this commit-ambiguous
+      // RPC. A thrown create is therefore followed by an exact-tag relist and
+      // termination proof before the credential lease can be released.
       sandbox = await client.sandboxes.create(app, image, {
         name: modalNodeSandboxName(request.runId, request.sandboxId, input.execution_generation),
         command: ["sleep", String(Math.max(60, input.resources.timeout_seconds + 300))],
@@ -238,11 +326,19 @@ async function runModalNodeSandbox(
         providerExecutionId: sandbox.sandboxId
       });
       result = await readModalNodeResult(sandbox, request, workerInput, credentialRedactionValues);
-      if (result === undefined) {
+      if (result === undefined && preparedAuth.kimi !== undefined) {
+        recovery = await readModalNodeKimiCredentialRecovery(sandbox, request, workerInput, credentialRedactionValues);
+      }
+      if (result === undefined && recovery === undefined) {
         await prepareRemoteNodeTransport(sandbox);
         await sandbox.filesystem.copyFromLocal(archive.path, REMOTE_PROJECT_ARCHIVE);
         await sandbox.filesystem.copyFromLocal(requestFile, REMOTE_REQUEST);
         if (preparedAuth.kimi !== undefined) {
+          await kimiExecutionLease?.assertOwner();
+          // From this point a commit-ambiguous copy or worker launch may have
+          // exposed the rotating credential. Persist the unresolved marker
+          // before either RPC so process exit cannot silently drop the fence.
+          await markRotationPossible();
           await sandbox.filesystem.copyFromLocal(preparedAuth.kimi.archivePath, REMOTE_KIMI_AUTH_ARCHIVE);
         }
         await secureRemoteNodeTransportFiles(sandbox, preparedAuth.kimi !== undefined);
@@ -262,9 +358,38 @@ async function runModalNodeSandbox(
         const exitCode = await waitForProcess(processHandle.wait(), request.signal, executionDeadline);
         const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
         if (exitCode !== 0) {
-          throw new Error(formatWorkerExitMessage(exitCode, stdoutText, stderrText));
+          // A Kimi worker may have observed a successor credential generation
+          // that recovery can no longer reveal. Never place its raw streams in
+          // any Error/cause/AggregateError node; candidate-based redaction alone
+          // cannot prove knowledge of every intermediate generation.
+          const workerError = new Error(
+            preparedAuth.kimi === undefined
+              ? formatWorkerExitMessage(exitCode, stdoutText, stderrText)
+              : formatCredentialOpaqueWorkerExitMessage(exitCode)
+          );
+          if (preparedAuth.kimi === undefined) throw workerError;
+          try {
+            recovery = await readModalNodeKimiCredentialRecovery(
+              sandbox,
+              request,
+              workerInput,
+              credentialRedactionValues
+            );
+            if (recovery === undefined) {
+              throw new Error("cloud Kimi subscription credential recovery manifest is missing");
+            }
+          } catch (recoveryError) {
+            throw aggregateWithPrimary(workerError, recoveryError);
+          }
+          pendingExecutionError = workerError;
         }
       } else {
+        if (preparedAuth.kimi !== undefined) await markRotationPossible();
+        if (recovery !== undefined) {
+          pendingExecutionError = new Error(
+            "cloud node worker previously failed after quarantining a Kimi credential candidate"
+          );
+        }
         request.heartbeat({
           stage: "recovered",
           provider: "modal",
@@ -272,6 +397,7 @@ async function runModalNodeSandbox(
         });
       }
     } else {
+      if (preparedAuth.kimi !== undefined) await markRotationPossible();
       request.heartbeat({
         stage: "resumed",
         provider: "modal",
@@ -279,27 +405,53 @@ async function runModalNodeSandbox(
       });
     }
 
-    result ??= await waitForModalNodeResult(
-      sandbox,
-      request,
-      workerInput,
-      executionDeadline,
-      credentialRedactionValues
-    );
-    stagedPublication = await stageModalNodeResult(
-      sandbox,
-      request.rootDir,
-      workerInput,
-      result,
-      credentialRedactionValues
-    );
+    if (result === undefined && recovery === undefined && pendingExecutionError === undefined) {
+      const outcome = await waitForModalNodeOutcome(
+        sandbox,
+        request,
+        workerInput,
+        executionDeadline,
+        credentialRedactionValues
+      );
+      result = outcome.result;
+      recovery = outcome.recovery;
+      if (recovery !== undefined) {
+        pendingExecutionError = new Error("cloud node worker failed after quarantining a Kimi credential candidate");
+      }
+    }
     if (preparedAuth.kimi !== undefined) {
-      stagedCredentialCandidate = await stageKimiCredentialCandidate(sandbox, result);
+      const candidatePath = result?.credential_candidate ?? recovery?.credential_candidate;
+      try {
+        stagedCredentialCandidate = await stageKimiCredentialCandidate(sandbox, candidatePath);
+        credentialRedactionValues.push(...stagedCredentialCandidate.sensitiveValues);
+      } catch (candidateError) {
+        if (pendingExecutionError !== undefined) {
+          throw aggregateWithPrimary(pendingExecutionError, candidateError);
+        }
+        throw candidateError;
+      }
+    }
+    if (result !== undefined) {
+      try {
+        stagedPublication = await stageModalNodeResult(
+          sandbox,
+          request.rootDir,
+          workerInput,
+          result,
+          credentialRedactionValues
+        );
+      } catch (publicationError) {
+        pendingExecutionError =
+          pendingExecutionError === undefined
+            ? publicationError
+            : aggregateWithPrimary(pendingExecutionError, publicationError);
+      }
     }
     await terminateAndConfirmStopped(sandbox);
     sandboxTerminationHandled = true;
 
     if (preparedAuth.kimi !== undefined) {
+      await kimiExecutionLease?.assertOwner();
       if (stagedCredentialCandidate === undefined) {
         throw new Error("cloud Kimi subscription credential candidate is missing");
       }
@@ -310,15 +462,32 @@ async function runModalNodeSandbox(
         source: preparedAuth.kimi.snapshotRoot,
         env: preparedAuth.kimi.brokerEnv
       });
-      await (options.kimiReconcile ?? reconcileKimiSubscriptionAuthCredential)(
-        preparedAuth.kimi.model,
-        `${JSON.stringify(brokered)}\n`,
-        preparedAuth.kimi.brokerEnv,
-        os.homedir(),
-        { sourceRefreshTokenSha256: preparedAuth.kimi.sourceRefreshTokenSha256 }
-      );
+      credentialRedactionValues.push(...kimiCredentialSecretValues(JSON.stringify(brokered)));
+      const serializedBrokered = `${JSON.stringify(brokered)}\n`;
+      const reconcileOptions = {
+        sourceRefreshTokenSha256: preparedAuth.kimi.sourceRefreshTokenSha256
+      };
+      const reconciled =
+        options.kimiReconcile === undefined
+          ? await kimiExecutionLease!.reconcileCredential(serializedBrokered, reconcileOptions)
+          : await options.kimiReconcile(
+              preparedAuth.kimi.model,
+              serializedBrokered,
+              preparedAuth.kimi.brokerEnv,
+              os.homedir(),
+              reconcileOptions
+            );
+      if (!reconciled) {
+        throw new Error("cloud Kimi subscription credential lineage could not be reconciled");
+      }
+      await kimiExecutionLease?.markRotationResolved();
+      kimiRotationPossible = false;
     }
 
+    if (pendingExecutionError !== undefined) throw pendingExecutionError;
+    if (result === undefined || stagedPublication === undefined) {
+      throw new Error("cloud node execution did not produce a publishable result");
+    }
     stagedPublication.commit();
     publishedHeartbeat = {
       stage: "published",
@@ -336,7 +505,7 @@ async function runModalNodeSandbox(
       containerId: sandbox.sandboxId
     };
   } catch (error) {
-    executionError = normalizedModalNodeError(error, credentialRedactionValues);
+    executionError = normalizedModalNodeError(error, credentialRedactionValues, authPathRedactionValues);
   }
   let finalizationError: Error | undefined;
   let finalizationTerminationUnproven = false;
@@ -350,18 +519,59 @@ async function runModalNodeSandbox(
           preparedAuth?.cleanup
         ),
       sandboxTerminationHandled ? undefined : sandbox,
-      () => client?.close()
+      () => client?.close(),
+      kimiExecutionLease === undefined
+        ? undefined
+        : async () => {
+            if (!kimiRemoteProofRequired) return;
+            if (kimiRemoteProofScope === undefined) {
+              throw new Error("cloud Kimi credential lease remote quiescence scope is unavailable");
+            }
+            let proofError: unknown;
+            try {
+              await kimiExecutionLease.assertOwner();
+              await proveKimiCredentialLeaseQuiescence(kimiRemoteProofScope, options.kimiRemoteQuiescence);
+            } catch (error) {
+              proofError = error;
+            }
+            if (proofError !== undefined) {
+              const disposalErrors: unknown[] = [];
+              // A failed proof makes the credential generation conservatively
+              // unresolved. Persist that state before disposing the in-process
+              // lock/FD handles; the dual journal, rather than a leaked timer,
+              // is the durable authority for the next acquisition.
+              try {
+                await kimiExecutionLease.markRotationPossible();
+              } catch (error) {
+                disposalErrors.push(error);
+              }
+              try {
+                await kimiExecutionLease.release();
+              } catch (error) {
+                disposalErrors.push(error);
+              }
+              if (disposalErrors.length > 0) {
+                throw serializableAggregateError([proofError, ...disposalErrors], errorMessage(proofError), {
+                  cause: proofError
+                });
+              }
+              throw proofError;
+            }
+            await kimiExecutionLease.release();
+            kimiRemoteProofRequired = false;
+          }
     );
   } catch (error) {
     finalizationTerminationUnproven = error instanceof ModalNodeFinalizationError && error.terminationUnproven;
-    finalizationError = normalizedModalNodeError(error, credentialRedactionValues);
+    finalizationError = normalizedModalNodeError(error, credentialRedactionValues, authPathRedactionValues);
   }
   if (finalizationError !== undefined) {
     if (executionError === undefined) throw finalizationError;
     const primary = finalizationTerminationUnproven ? finalizationError : executionError;
-    throw serializableAggregateError([executionError, ...aggregateErrorEntries(finalizationError)], primary.message, {
-      cause: primary
-    });
+    const errors = finalizationTerminationUnproven
+      ? [...aggregateErrorEntries(finalizationError), executionError]
+      : [executionError, ...aggregateErrorEntries(finalizationError)];
+    throw serializableAggregateError(errors, primary.message, { cause: primary });
   }
   if (executionError !== undefined) throw executionError;
   if (executionResult === undefined) throw new Error("cloud node execution did not produce a result");
@@ -419,10 +629,12 @@ function modalNodeLineageId(prefix: "execution" | "controller" | "checkpoint" | 
 export async function finalizeModalNodeSandbox(
   cleanup: () => void,
   sandbox: Sandbox | undefined,
-  close: () => void
+  close: () => void,
+  afterTermination?: () => Promise<void> | void
 ): Promise<void> {
   let cleanupError: unknown;
   let terminationError: unknown;
+  let afterTerminationError: unknown;
   let closeError: unknown;
   try {
     cleanup();
@@ -434,17 +646,27 @@ export async function finalizeModalNodeSandbox(
   } catch (error) {
     terminationError = error;
   }
+  if (terminationError === undefined && afterTermination !== undefined) {
+    try {
+      await afterTermination();
+    } catch (error) {
+      afterTerminationError = error;
+    }
+  }
   try {
     close();
   } catch (error) {
     closeError = error;
   }
-  const failures = [terminationError, cleanupError, closeError].filter((error) => error !== undefined);
+  const failures = [terminationError, afterTerminationError, cleanupError, closeError].filter(
+    (error) => error !== undefined
+  );
   if (failures.length === 0) return;
-  if (failures.length === 1 && terminationError === undefined) throw failures[0];
-  const primary = terminationError ?? cleanupError ?? closeError;
+  if (failures.length === 1 && terminationError === undefined && afterTerminationError === undefined) throw failures[0];
+  const primary = terminationError ?? afterTerminationError ?? cleanupError ?? closeError;
   const aggregatedFailures = [
     ...(terminationError === undefined ? [] : aggregateErrorEntries(terminationError)),
+    ...(afterTerminationError === undefined ? [] : [afterTerminationError]),
     ...(cleanupError === undefined ? [] : [cleanupError]),
     ...(closeError === undefined ? [] : [closeError])
   ];
@@ -456,11 +678,11 @@ export async function finalizeModalNodeSandbox(
     aggregatedFailures,
     errorMessage(primary),
     cause,
-    terminationError !== undefined
+    terminationError !== undefined || afterTerminationError !== undefined
   );
 }
 
-function cleanupModalNodeLocalState(...cleanups: Array<(() => void) | undefined>): void {
+export function cleanupModalNodeLocalState(...cleanups: Array<(() => void) | undefined>): void {
   const failures: unknown[] = [];
   for (const cleanup of cleanups) {
     if (cleanup === undefined) continue;
@@ -567,6 +789,7 @@ const RESERVED_CLOUD_AUTH_ENVIRONMENT_VARIABLES = new Set([
   "ULTRAFUZZ_CLOUD_AGENT_WORKSPACE",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CLOUD_WORKER",
+  "ULTRAFUZZ_KIMI_SESSION_HOME",
   "ULTRAFUZZ_RUNTIME_MODULE",
   "USER",
   "XDG_CACHE_HOME",
@@ -767,6 +990,38 @@ export function modalNodeTags(
   };
 }
 
+function modalNodeAttemptLookupTags(tags: Record<string, string>): Record<string, string> {
+  return {
+    purpose: tags.purpose!,
+    run: tags.run!,
+    attempt: tags.attempt!
+  };
+}
+
+function assertKimiExecutionLeaseIdentity(lease: KimiModalNodeExecutionLease): void {
+  if (
+    !/^[0-9a-f]{64}$/u.test(lease.credentialLeaseId) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(lease.ownerId) ||
+    typeof lease.assertOwner !== "function" ||
+    typeof lease.prepareAuthCopy !== "function" ||
+    typeof lease.reconcileCredential !== "function" ||
+    typeof lease.markRotationPossible !== "function" ||
+    typeof lease.markRotationResolved !== "function" ||
+    typeof lease.release !== "function"
+  ) {
+    throw new Error("cloud Kimi credential execution lease identity is invalid");
+  }
+}
+
+function kimiCredentialLeaseTags(
+  lease: Pick<KimiModalNodeExecutionLease, "credentialLeaseId" | "ownerId">
+): Record<string, string> {
+  return {
+    [KIMI_CREDENTIAL_LEASE_TAG]: lease.credentialLeaseId,
+    [KIMI_CREDENTIAL_LEASE_OWNER_TAG]: lease.ownerId
+  };
+}
+
 export function modalNodeRequestFingerprint(input: ModalNodeSandboxInput): string {
   const { request_fingerprint: _requestFingerprint, execution_identity: _executionIdentity, ...payload } = input;
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
@@ -891,19 +1146,34 @@ interface ModalNodeResult {
   credential_candidate?: string;
 }
 
-async function waitForModalNodeResult(
+interface ModalNodeKimiCredentialRecovery {
+  schema_version: "ultrafuzz.modal.kimi-credential-recovery.v1";
+  status: "quarantined";
+  storage_lineage: string;
+  execution_identity: string;
+  credential_candidate: string;
+}
+
+type ModalNodeOutcome =
+  { result: ModalNodeResult; recovery?: undefined } | { result?: undefined; recovery: ModalNodeKimiCredentialRecovery };
+
+async function waitForModalNodeOutcome(
   sandbox: Sandbox,
   request: NodeSandboxProviderRequest,
   input: ModalNodeSandboxInput,
   deadline: number,
   forwardedCredentialValues: readonly string[]
-): Promise<ModalNodeResult> {
+): Promise<ModalNodeOutcome> {
   for (;;) {
     if (request.signal?.aborted) {
       throw new Error("cloud node execution was cancelled");
     }
     const result = await readModalNodeResult(sandbox, request, input, forwardedCredentialValues);
-    if (result !== undefined) return result;
+    if (result !== undefined) return { result };
+    if (input.agent_auth.auth.mode === "subscription") {
+      const recovery = await readModalNodeKimiCredentialRecovery(sandbox, request, input, forwardedCredentialValues);
+      if (recovery !== undefined) return { recovery };
+    }
     const exitCode = await sandbox.poll();
     if (exitCode !== null) {
       throw new Error(`cloud node sandbox stopped before publication with code ${exitCode}`);
@@ -955,25 +1225,66 @@ async function readModalNodeResult(
   throw new Error("cloud node result is invalid");
 }
 
+async function readModalNodeKimiCredentialRecovery(
+  sandbox: Sandbox,
+  request: NodeSandboxProviderRequest,
+  input: ModalNodeSandboxInput,
+  forwardedCredentialValues: readonly string[]
+): Promise<ModalNodeKimiCredentialRecovery | undefined> {
+  const attemptRoot = remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
+  const recoveryPath = path.posix.join(attemptRoot, KIMI_CREDENTIAL_RECOVERY_FILE);
+  let serialized: string;
+  try {
+    serialized = await sandbox.filesystem.readText(recoveryPath);
+    assertNoCredentialText(serialized, forwardedCredentialValues, "cloud Kimi credential recovery metadata");
+  } catch (error) {
+    if (error instanceof SandboxFilesystemNotFoundError) return undefined;
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    // JSON.parse diagnostics can include attacker-controlled source excerpts.
+    // Recovery metadata is written by the credential-observing worker, so keep
+    // malformed contents out of the entire surfaced error graph.
+    throw new Error("cloud Kimi credential recovery manifest is invalid");
+  }
+  if (
+    isRecord(parsed) &&
+    parsed.schema_version === "ultrafuzz.modal.kimi-credential-recovery.v1" &&
+    parsed.status === "quarantined" &&
+    parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
+    parsed.execution_identity === input.execution_identity &&
+    parsed.credential_candidate === path.posix.join(attemptRoot, "kimi-credential-candidate.json")
+  ) {
+    return parsed as unknown as ModalNodeKimiCredentialRecovery;
+  }
+  throw new Error("cloud Kimi credential recovery manifest is invalid");
+}
+
 interface StagedKimiCredentialCandidate {
   cleanup: () => void;
   credential: string;
+  sensitiveValues: string[];
 }
 
 async function stageKimiCredentialCandidate(
   sandbox: Sandbox,
-  result: ModalNodeResult
+  credentialCandidate: string | undefined
 ): Promise<StagedKimiCredentialCandidate> {
-  if (result.credential_candidate === undefined) {
+  if (credentialCandidate === undefined) {
     throw new Error("cloud Kimi subscription credential candidate is missing");
   }
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-kimi-candidate-"));
   fs.chmodSync(temporaryRoot, 0o700);
   const candidate = path.join(temporaryRoot, "candidate.json");
   try {
-    await sandbox.filesystem.copyToLocal(result.credential_candidate, candidate);
+    await sandbox.filesystem.copyToLocal(credentialCandidate, candidate);
+    const credential = readBoundedKimiCredential(candidate);
     return {
-      credential: readBoundedKimiCredential(candidate),
+      credential,
+      sensitiveValues: kimiCredentialSecretValues(credential),
       cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
     };
   } catch (error) {
@@ -1083,11 +1394,7 @@ async function findLiveSandbox(
     }
   };
   await collect(expectedTags);
-  const lookupTags = {
-    purpose: expectedTags.purpose!,
-    run: expectedTags.run!,
-    attempt: expectedTags.attempt!
-  };
+  const lookupTags = modalNodeAttemptLookupTags(expectedTags);
   await collect(lookupTags);
 
   const matching: Sandbox[] = [];
@@ -1132,14 +1439,99 @@ async function findLiveSandbox(
   return matching[0];
 }
 
+async function proveKimiCredentialLeaseQuiescence(
+  scope: KimiRemoteProofScope,
+  hooks: KimiRemoteQuiescenceHooks = {}
+): Promise<void> {
+  const filters = [
+    { purpose: "ultrafuzz-node", [KIMI_CREDENTIAL_LEASE_TAG]: scope.credentialLeaseId },
+    scope.legacyAttemptTags,
+    ...(scope.exactExecutionTags === undefined ? [] : [scope.exactExecutionTags])
+  ];
+  const uniqueFilters = new Map(filters.map((filter) => [JSON.stringify(filter), filter]));
+  const now = hooks.now ?? (() => performance.now());
+  const pause = hooks.pause ?? delay;
+  const settlementMs = Math.max(1, Math.floor(hooks.settlementMs ?? KIMI_REMOTE_QUIESCENCE_SETTLEMENT_MS));
+  const timeoutMs = Math.max(settlementMs + 1, Math.floor(hooks.timeoutMs ?? KIMI_REMOTE_QUIESCENCE_TIMEOUT_MS));
+  const deadline = now() + timeoutMs;
+  const budget: MonotonicDeadline = { deadline, now };
+  let quietSince: number | undefined;
+  let delayMs = KIMI_REMOTE_QUIESCENCE_INITIAL_DELAY_MS;
+  let completedSweeps = 0;
+  for (;;) {
+    const candidates = new Map<string, Sandbox>();
+    try {
+      for (const tags of uniqueFilters.values()) {
+        await collectKimiRemoteSandboxes(scope, tags, candidates, budget);
+      }
+    } catch (error) {
+      throw new Error("cloud Kimi credential lease remote enumeration could not be proven", { cause: error });
+    }
+    let terminated: number;
+    try {
+      terminated = await terminateEverySandbox(
+        [...candidates.values()],
+        "cloud Kimi credential lease quiescence failed",
+        budget
+      );
+    } catch (error) {
+      throw new Error("cloud Kimi credential lease remote quiescence could not be proven", { cause: error });
+    }
+    completedSweeps += 1;
+    const observedAt = now();
+    if (terminated > 0) quietSince = undefined;
+    else quietSince ??= observedAt;
+    // Modal documents that list returns currently running sandboxes, but does
+    // not publish a list-visibility SLA. Require a continuous empty window
+    // across complete delayed sweeps; if it cannot be established within the
+    // explicit cap, fail closed and retain the local credential lease.
+    if (observedAt >= deadline) {
+      throw new Error("cloud Kimi credential lease remote quiescence did not stabilize before its deadline");
+    }
+    if (completedSweeps > 1 && quietSince !== undefined && observedAt - quietSince >= settlementMs) {
+      return;
+    }
+    const remainingSettlementMs =
+      quietSince === undefined ? settlementMs : Math.max(1, settlementMs - (observedAt - quietSince));
+    const waitMs = Math.max(1, Math.min(delayMs, remainingSettlementMs, deadline - observedAt));
+    await beforeMonotonicDeadline(() => pause(waitMs), budget, "remote quiescence settlement wait");
+    delayMs = Math.min(KIMI_REMOTE_QUIESCENCE_MAX_DELAY_MS, delayMs * 2);
+  }
+}
+
+async function collectKimiRemoteSandboxes(
+  scope: KimiRemoteProofScope,
+  tags: Record<string, string>,
+  candidates: Map<string, Sandbox>,
+  budget: MonotonicDeadline
+): Promise<void> {
+  const iterator = scope.client.sandboxes.list({ appId: scope.app.appId, tags })[Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      const next = await beforeMonotonicDeadline(() => iterator.next(), budget, "remote sandbox enumeration");
+      if (next.done) return;
+      candidates.set(next.value.sandboxId, next.value);
+    }
+  } finally {
+    // A timed-out SDK iterator is untrusted and may never settle. Request
+    // cancellation when supported, but never let iterator cleanup exceed the
+    // credential-fence deadline.
+    if (iterator.return !== undefined) void iterator.return().catch(() => undefined);
+  }
+}
+
 function exactTagsEqual(left: Record<string, string>, right: Record<string, string>): boolean {
   const leftEntries = Object.entries(left).sort(([a], [b]) => a.localeCompare(b));
   const rightEntries = Object.entries(right).sort(([a], [b]) => a.localeCompare(b));
   return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
 }
 
-async function terminateEverySandbox(sandboxes: readonly Sandbox[], message: string): Promise<number> {
-  const settled = await Promise.allSettled(sandboxes.map((sandbox) => terminateAndConfirmStopped(sandbox)));
+async function terminateEverySandbox(
+  sandboxes: readonly Sandbox[],
+  message: string,
+  budget?: MonotonicDeadline
+): Promise<number> {
+  const settled = await Promise.allSettled(sandboxes.map((sandbox) => terminateAndConfirmStopped(sandbox, budget)));
   const failures: unknown[] = [];
   let terminated = 0;
   for (let index = 0; index < settled.length; index += 1) {
@@ -1297,7 +1689,8 @@ interface PreparedModalAgentAuth {
 async function prepareModalAgentAuth(
   input: ModalNodeSandboxInput,
   env: Record<string, string | undefined>,
-  controllerCredentialNames: readonly string[]
+  controllerCredentialNames: readonly string[],
+  kimiExecutionLease: KimiModalNodeExecutionLease | undefined
 ): Promise<PreparedModalAgentAuth> {
   const descriptor = parseCloudAgentAuthDescriptor(input.agent_auth);
   if (descriptor.auth.mode === "api-key") {
@@ -1341,24 +1734,20 @@ async function prepareModalAgentAuth(
   if (input.agent_model === undefined) {
     throw new Error("cloud Kimi subscription authentication requires an exact model alias");
   }
-  const configuredSource =
-    descriptor.auth.config_dir === undefined ? undefined : path.resolve(descriptor.auth.config_dir);
-  const brokerEnv = {
-    ...env,
-    ...(configuredSource === undefined ? {} : { KIMI_CODE_HOME: configuredSource })
-  };
-  const prepared = await prepareSubscriptionAuthCopy(
-    { provider: "kimi", auth_mode: "subscription", model: input.agent_model },
-    brokerEnv
-  );
-  if (prepared === undefined || prepared.entries === undefined) {
+  const brokerEnv = kimiSubscriptionBrokerEnvironment(descriptor, env);
+  if (kimiExecutionLease === undefined) {
+    throw new Error("cloud Kimi subscription execution lease is unavailable");
+  }
+  const prepared = await kimiExecutionLease.prepareAuthCopy(brokerEnv);
+  if (prepared.entries === undefined) {
     throw new Error("cloud Kimi subscription authentication snapshot is unavailable");
   }
   let archiveRoot: string | undefined;
   try {
-    const credentialName = await kimiSubscriptionCredentialFileName(input.agent_model, {
-      KIMI_CODE_HOME: prepared.source
-    });
+    const credentialName = path.basename(kimiExecutionLease.credentialPath);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(credentialName)) {
+      throw new Error("cloud Kimi subscription credential name is unsafe");
+    }
     assertExactKimiSubscriptionSnapshot(prepared.source, credentialName);
     const credentialPath = path.join(prepared.source, "credentials", credentialName);
     const initialCredential = readBoundedKimiCredential(credentialPath);
@@ -1377,8 +1766,10 @@ async function prepareModalAgentAuth(
       secretValues: {},
       sensitiveValues,
       cleanup: () => {
-        fs.rmSync(archiveRoot!, { recursive: true, force: true });
-        fs.rmSync(prepared.source, { recursive: true, force: true });
+        cleanupModalNodeLocalState(
+          () => fs.rmSync(archiveRoot!, { recursive: true, force: true }),
+          () => fs.rmSync(prepared.source, { recursive: true, force: true })
+        );
       },
       kimi: {
         archivePath,
@@ -1390,10 +1781,51 @@ async function prepareModalAgentAuth(
       }
     };
   } catch (error) {
-    if (archiveRoot !== undefined) fs.rmSync(archiveRoot, { recursive: true, force: true });
-    fs.rmSync(prepared.source, { recursive: true, force: true });
+    let cleanupError: unknown;
+    try {
+      cleanupModalNodeLocalState(
+        archiveRoot === undefined ? undefined : () => fs.rmSync(archiveRoot!, { recursive: true, force: true }),
+        () => fs.rmSync(prepared.source, { recursive: true, force: true })
+      );
+    } catch (failure) {
+      cleanupError = failure;
+    }
+    if (cleanupError !== undefined) throw aggregateWithPrimary(error, cleanupError);
     throw error;
   }
+}
+
+function kimiSubscriptionBrokerEnvironment(
+  descriptor: CompiledCloudAgentAuthDescriptor,
+  env: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  if (descriptor.auth.mode !== "subscription") {
+    throw new Error("cloud Kimi subscription authentication descriptor is unavailable");
+  }
+  const configuredSource =
+    descriptor.auth.config_dir === undefined ? undefined : path.resolve(descriptor.auth.config_dir);
+  return {
+    ...env,
+    ...(configuredSource === undefined ? {} : { KIMI_CODE_HOME: configuredSource })
+  };
+}
+
+function kimiAuthPathRedactionValues(
+  descriptor: CompiledCloudAgentAuthDescriptor,
+  env: Record<string, string | undefined>
+): string[] {
+  if (descriptor.auth.mode !== "subscription") return [];
+  const configured = path.resolve(
+    localSubscriptionAuthPath("kimi", kimiSubscriptionBrokerEnvironment(descriptor, env))
+  );
+  const paths = [configured];
+  try {
+    paths.push(fs.realpathSync(configured));
+  } catch {
+    // The configured spelling still redacts the path from ENOENT and access
+    // errors. A canonical spelling is added once lease acquisition succeeds.
+  }
+  return [...new Set(paths)];
 }
 
 function assertExactKimiSubscriptionSnapshot(root: string, credentialName: string): void {
@@ -1435,6 +1867,18 @@ function readBoundedKimiCredential(file: string): string {
   return fs.readFileSync(file, "utf8");
 }
 
+function kimiCredentialSecretValues(serialized: string): string[] {
+  try {
+    const parsed = JSON.parse(serialized) as unknown;
+    if (!isRecord(parsed)) return [];
+    return [parsed.access_token, parsed.refresh_token].filter(
+      (value): value is string => typeof value === "string" && value !== ""
+    );
+  } catch {
+    return [];
+  }
+}
+
 function validateProviderOptions(options: ModalNodeSandboxProviderOptions): void {
   if (options.app.trim() === "" || options.image.trim() === "") {
     throw new Error("Modal node provider app and image must be non-empty");
@@ -1448,13 +1892,18 @@ function validateProviderOptions(options: ModalNodeSandboxProviderOptions): void
   }
 }
 
-function normalizedModalNodeError(error: unknown, secretValues: readonly string[]): Error {
-  return normalizeModalNodeError(error, secretValues, true, new Set<unknown>());
+function normalizedModalNodeError(
+  error: unknown,
+  secretValues: readonly string[],
+  authPathValues: readonly string[]
+): Error {
+  return normalizeModalNodeError(error, secretValues, authPathValues, true, new Set<unknown>());
 }
 
 function normalizeModalNodeError(
   error: unknown,
   secretValues: readonly string[],
+  authPathValues: readonly string[],
   topLevel: boolean,
   ancestors: Set<unknown>
 ): Error {
@@ -1462,16 +1911,16 @@ function normalizeModalNodeError(
     if (ancestors.has(error)) return new Error(topLevel ? "Modal node execution failed: cyclic error" : "cyclic error");
     ancestors.add(error);
   }
-  const sanitized = redactModalNodeErrorMessage(error, secretValues);
+  const sanitized = redactModalNodeErrorMessage(error, secretValues, authPathValues);
   const message = topLevel ? `Modal node execution failed: ${sanitized}` : sanitized;
   try {
     const cause =
       error instanceof Error && error.cause !== undefined
-        ? normalizeModalNodeError(error.cause, secretValues, false, ancestors)
+        ? normalizeModalNodeError(error.cause, secretValues, authPathValues, false, ancestors)
         : undefined;
     if (error instanceof AggregateError) {
       const errors = aggregateErrorEntries(error).map((failure) =>
-        normalizeModalNodeError(failure, secretValues, false, ancestors)
+        normalizeModalNodeError(failure, secretValues, authPathValues, false, ancestors)
       );
       return serializableAggregateError(errors, message, cause === undefined ? undefined : { cause });
     }
@@ -1481,12 +1930,24 @@ function normalizeModalNodeError(
   }
 }
 
-function redactModalNodeErrorMessage(error: unknown, secretValues: readonly string[]): string {
+function redactModalNodeErrorMessage(
+  error: unknown,
+  secretValues: readonly string[],
+  authPathValues: readonly string[]
+): string {
   let message = errorMessage(error);
   for (const secret of [...secretValues].filter(Boolean).sort((left, right) => right.length - left.length)) {
     message = message.replaceAll(secret, "[credential]");
   }
+  for (const authPath of [...new Set(authPathValues)]
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)) {
+    message = message.replaceAll(authPath, "[auth-path]");
+    message = message.replaceAll(JSON.stringify(authPath).slice(1, -1), "[auth-path]");
+  }
   return message
+    .replace(/((?:access_token|refresh_token)["']?\s*[:=]\s*["']?)[^"'\s,&}\]]+/giu, "$1[credential]")
+    .replace(/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1[credential]")
     .replace(/[A-Za-z_][A-Za-z0-9_]*(?=\s+(?:is|was)\s+(?:missing|unavailable|not set))/gu, "[credential]")
     .slice(0, 4_096);
 }
@@ -1506,6 +1967,10 @@ function formatWorkerExitMessage(exitCode: number, stdout: string, stderr: strin
   return details === ""
     ? `cloud node worker exited with code ${exitCode}`
     : `cloud node worker exited with code ${exitCode}: ${details}`;
+}
+
+function formatCredentialOpaqueWorkerExitMessage(exitCode: number): string {
+  return `cloud node worker exited with code ${exitCode}; credential-observing worker output was withheld`;
 }
 
 function formatWorkerStream(label: string, value: string): string {
@@ -1537,6 +2002,43 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function beforeMonotonicDeadline<T>(
+  operation: () => Promise<T>,
+  budget: MonotonicDeadline,
+  label: string
+): Promise<T> {
+  const remaining = budget.deadline - budget.now();
+  if (remaining <= 0) {
+    throw new Error(`${label} exceeded the remote quiescence deadline`);
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(
+      () => finish(() => reject(new Error(`${label} exceeded the remote quiescence deadline`))),
+      Math.max(1, Math.ceil(remaining))
+    );
+    void Promise.resolve()
+      .then(operation)
+      .then(
+        (value) =>
+          finish(() => {
+            if (budget.now() >= budget.deadline) {
+              reject(new Error(`${label} exceeded the remote quiescence deadline`));
+            } else {
+              resolve(value);
+            }
+          }),
+        (error: unknown) => finish(() => reject(error))
+      );
+  });
 }
 
 async function waitForProcess(
@@ -1585,23 +2087,25 @@ async function waitForProcess(
   });
 }
 
-async function terminateAndConfirmStopped(sandbox: Sandbox): Promise<boolean> {
+async function terminateAndConfirmStopped(sandbox: Sandbox, budget?: MonotonicDeadline): Promise<boolean> {
+  const invoke = <T>(operation: () => Promise<T>, label: string): Promise<T> =>
+    budget === undefined ? operation() : beforeMonotonicDeadline(operation, budget, label);
   let state: number | null | undefined;
   let initialPollError: unknown;
   try {
-    state = await sandbox.poll();
+    state = await invoke(() => sandbox.poll(), "remote sandbox state query");
   } catch (error) {
     initialPollError = error;
   }
   if (state !== undefined && state !== null) return false;
   let terminationError: unknown;
   try {
-    await sandbox.terminate({ wait: true });
+    await invoke(() => sandbox.terminate({ wait: true }), "remote sandbox termination");
   } catch (error) {
     terminationError = error;
   }
   try {
-    state = await sandbox.poll();
+    state = await invoke(() => sandbox.poll(), "remote sandbox termination verification");
   } catch (error) {
     throw serializableAggregateError(
       [initialPollError, terminationError, error].filter((failure) => failure !== undefined),
@@ -1621,6 +2125,12 @@ function terminationFailureCause(...errors: unknown[]): unknown {
   const present = errors.filter((error) => error !== undefined);
   if (present.length <= 1) return present[0];
   return serializableAggregateError(present, "cloud node sandbox termination failed");
+}
+
+function aggregateWithPrimary(primary: unknown, secondary: unknown): AggregateError {
+  return serializableAggregateError([primary, ...aggregateErrorEntries(secondary)], errorMessage(primary), {
+    cause: primary
+  });
 }
 
 function serializableAggregateError(

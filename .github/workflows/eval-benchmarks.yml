@@ -10,6 +10,10 @@ on:
       - docs/assets/eval-history/**
   workflow_dispatch:
     inputs:
+      expected_candidate:
+        description: Full lowercase commit SHA expected for this manual benchmark run
+        required: true
+        type: string
       benchmark_scope:
         description: Benchmark lane and fixed manual model profile
         required: true
@@ -92,6 +96,27 @@ jobs:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Bind the manual dispatch to the exact benchmark candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.expected_candidate }}
+          EVENT_CANDIDATE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_candidate="$(git rev-parse HEAD)"
+          if [[ ! "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_candidate must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$EVENT_CANDIDATE" ]; then
+            echo "expected_candidate does not match github.sha" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$checked_out_candidate" ]; then
+            echo "expected_candidate does not match the checked-out commit" >&2
+            exit 1
+          fi
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -273,6 +298,27 @@ jobs:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Bind the manual dispatch to the exact benchmark candidate
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.expected_candidate }}
+          EVENT_CANDIDATE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_candidate="$(git rev-parse HEAD)"
+          if [[ ! "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_candidate must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$EVENT_CANDIDATE" ]; then
+            echo "expected_candidate does not match github.sha" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$checked_out_candidate" ]; then
+            echo "expected_candidate does not match the checked-out commit" >&2
+            exit 1
+          fi
 
       - name: Set up pnpm
         uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -785,6 +831,29 @@ jobs:
           ref: ${{ env.BENCHMARK_CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Bind the manual dispatch to the exact benchmark candidate
+        if: >-
+          steps.incomplete_plan.outputs.available == 'true' &&
+          github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_CANDIDATE: ${{ inputs.expected_candidate }}
+          EVENT_CANDIDATE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_candidate="$(git rev-parse HEAD)"
+          if [[ ! "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_candidate must be a full lowercase commit SHA" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$EVENT_CANDIDATE" ]; then
+            echo "expected_candidate does not match github.sha" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_CANDIDATE" != "$checked_out_candidate" ]; then
+            echo "expected_candidate does not match the checked-out commit" >&2
+            exit 1
+          fi
 
       - name: Set up pnpm
         if: steps.incomplete_plan.outputs.available == 'true'

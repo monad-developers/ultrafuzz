@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  acquireKimiModalNodeExecutionLease,
   brokerKimiSubscriptionAuthRotation,
   kimiSubscriptionAuthSecretValues,
   kimiSubscriptionAuthSecretValuesFromRoots,
@@ -124,6 +126,1085 @@ describe("runtime-only subscription auth", () => {
       expires_at: 2_003_600
     });
     expect(fs.existsSync(path.join(source, "oauth", "kimi-code.lock"))).toBe(false);
+  });
+
+  it("serializes Modal node-provider Kimi attempts and removes the lock directory on release", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const env = { KIMI_CODE_HOME: source };
+    const leaseFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution");
+    const lockDirectory = `${leaseFile}.lock`;
+    let first: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let second: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      first = await acquireKimiModalNodeExecutionLease("kimi-k3", env, "/unused", { timeoutMs: 5_000 });
+      expect(first.source).toBe(source);
+      expect(first.credentialPath).toBe(path.join(source, "credentials", "kimi-code.json"));
+      expect(first.credentialLeaseId).toMatch(/^[0-9a-f]{64}$/u);
+      expect(first.ownerId).toMatch(/^[0-9a-f-]{36}$/u);
+      const firstMetadata = JSON.parse(fs.readFileSync(leaseFile, "utf8")) as Record<string, unknown>;
+      expect(firstMetadata).toMatchObject({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: first.credentialLeaseId,
+        owner_id: first.ownerId,
+        journal_pair_id: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+        transition_sequence: 1,
+        rotation_state: "active"
+      });
+      await expect(first.assertOwner()).resolves.toBeUndefined();
+      fs.writeFileSync(leaseFile, `${JSON.stringify({ ...firstMetadata, owner_id: "superseding-owner" })}\n`);
+      await expect(first.assertOwner()).rejects.toThrow(/ownership was superseded/u);
+      fs.writeFileSync(leaseFile, `${JSON.stringify(firstMetadata)}\n`);
+      expect(fs.existsSync(lockDirectory)).toBe(true);
+
+      let secondAcquired = false;
+      const waiting = acquireKimiModalNodeExecutionLease("kimi-k3", env, "/unused", {
+        timeoutMs: 5_000
+      }).then((lease) => {
+        secondAcquired = true;
+        second = lease;
+        return lease;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(secondAcquired).toBe(false);
+
+      await first.release();
+      const acquiredSecond = await waiting;
+      expect(secondAcquired).toBe(true);
+      expect(acquiredSecond.credentialLeaseId).toBe(first.credentialLeaseId);
+      expect(acquiredSecond.ownerId).not.toBe(first.ownerId);
+      expect(fs.existsSync(lockDirectory)).toBe(true);
+
+      await first.release();
+      expect(fs.existsSync(lockDirectory)).toBe(true);
+      await acquiredSecond.release();
+      expect(fs.existsSync(lockDirectory)).toBe(false);
+    } finally {
+      await second?.release();
+      await first?.release();
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("fsyncs a new Kimi execution fence from file through both containing directories", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialsDirectory = path.join(source, "credentials");
+    const target = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-execution");
+    const fence = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-fence");
+    const probe = await fs.promises.open(source, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    const synced: string[] = [];
+    const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+      synced.push(fs.readlinkSync(`/proc/self/fd/${this.fd}`));
+      await originalSync.call(this);
+    });
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      expect(synced).toEqual([fence, target, credentialsDirectory, source]);
+    } finally {
+      syncSpy.mockRestore();
+      await lease?.release();
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed and releases every acquisition resource when directory fsync fails", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialsDirectory = path.join(source, "credentials");
+    const target = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-execution");
+    const fence = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-fence");
+    const lockDirectory = `${target}.lock`;
+    const probe = await fs.promises.open(source, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    const synced: string[] = [];
+    const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+      const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+      synced.push(openedPath);
+      if (openedPath === credentialsDirectory) {
+        throw Object.assign(new Error("injected credentials directory fsync failure"), { code: "EIO" });
+      }
+      await originalSync.call(this);
+    });
+    try {
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/unable to initialize Kimi Modal execution lease metadata/u);
+      expect(synced).toEqual([fence, target, credentialsDirectory]);
+      expect(fs.existsSync(lockDirectory)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+
+      syncSpy.mockRestore();
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+      expect(fs.existsSync(lockDirectory)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+    } finally {
+      syncSpy.mockRestore();
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("disposes an unresolved lease while leaving its dual-journal fence authoritative", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const lockDirectory = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution.lock");
+    const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+      timeoutMs: 5_000
+    });
+    try {
+      await lease.markRotationPossible();
+      await expect(lease.release()).rejects.toThrow(/rotation remains durably unresolved/u);
+      expect(fs.existsSync(lockDirectory)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+      await expect(lease.assertOwner()).rejects.toThrow(/no longer usable/u);
+      await expect(lease.release()).resolves.toBeUndefined();
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+    } finally {
+      await lease.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("closes every handle and poisons the lease when post-unlock directory fsync fails", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialsDirectory = path.join(source, "credentials");
+    const lockDirectory = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-execution.lock");
+    const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+      timeoutMs: 5_000
+    });
+    const probe = await fs.promises.open(source, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    let injected = false;
+    const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+      const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+      if (!injected && openedPath === credentialsDirectory) {
+        injected = true;
+        throw Object.assign(new Error("injected post-unlock credentials fsync failure"), { code: "EIO" });
+      }
+      await originalSync.call(this);
+    });
+    try {
+      await expect(lease.release()).rejects.toThrow(/post-unlock credentials fsync failure/u);
+      expect(fs.existsSync(lockDirectory)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+      await expect(lease.assertOwner()).rejects.toThrow(/no longer usable/u);
+      await expect(lease.release()).resolves.toBeUndefined();
+    } finally {
+      syncSpy.mockRestore();
+      await lease.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects nested aliases and hard links to a shared Kimi credential", async () => {
+    const physical = kimiAuthFixture({ fresh: true });
+    const credentialName = "kimi-code.json";
+    const physicalCredential = path.join(physical, "credentials", credentialName);
+
+    const credentialAliasHome = kimiAuthFixture({ fresh: true });
+    const credentialAlias = path.join(credentialAliasHome, "credentials", credentialName);
+    fs.rmSync(credentialAlias);
+    fs.symlinkSync(physicalCredential, credentialAlias);
+
+    const directoryAliasHome = kimiAuthFixture({ fresh: true });
+    fs.rmSync(path.join(directoryAliasHome, "credentials"), { recursive: true });
+    fs.symlinkSync(path.join(physical, "credentials"), path.join(directoryAliasHome, "credentials"), "dir");
+
+    const hardLinkHome = kimiAuthFixture({ fresh: true });
+    const hardLinkCredential = path.join(hardLinkHome, "credentials", credentialName);
+    fs.rmSync(hardLinkCredential);
+    fs.linkSync(physicalCredential, hardLinkCredential);
+
+    try {
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: credentialAliasHome }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/credential is unsafe/u);
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: directoryAliasHome }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/credential directory is unsafe/u);
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: hardLinkHome }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/credential is unsafe/u);
+    } finally {
+      fs.rmSync(hardLinkHome, { recursive: true, force: true });
+      fs.rmSync(directoryAliasHome, { recursive: true, force: true });
+      fs.rmSync(credentialAliasHome, { recursive: true, force: true });
+      fs.rmSync(physical, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes whole-home aliases on the same physical credential-directory lock", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const alias = `${source}-alias`;
+    fs.symlinkSync(source, alias, "dir");
+    let first: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let second: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      first = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      let acquired = false;
+      const waiting = acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: alias }, "/unused", {
+        timeoutMs: 5_000
+      }).then((value) => {
+        acquired = true;
+        second = value;
+        return value;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(acquired).toBe(false);
+      await first.release();
+      first = undefined;
+      second = await waiting;
+      expect(second.source).toBe(source);
+      expect(second.credentialPath).toBe(path.join(source, "credentials", "kimi-code.json"));
+      expect(second.leasePath).toBe(path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution"));
+    } finally {
+      await second?.release();
+      await first?.release();
+      fs.rmSync(alias, { force: true });
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("proves the held credential still owns its directory entry before OAuth exchange", async () => {
+    const source = kimiAuthFixture();
+    const credential = path.join(source, "credentials", "kimi-code.json");
+    const heldCredential = `${credential}.held`;
+    let exchanges = 0;
+    const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+      timeoutMs: 5_000
+    });
+    try {
+      fs.renameSync(credential, heldCredential);
+      fs.writeFileSync(
+        credential,
+        `${JSON.stringify({
+          access_token: "replacement-access",
+          refresh_token: "replacement-refresh",
+          expires_at: 9_999_999_999,
+          expires_in: 3600
+        })}\n`,
+        { mode: 0o600 }
+      );
+      const replacementBefore = fs.readFileSync(credential);
+      const heldBefore = fs.readFileSync(heldCredential);
+
+      await expect(
+        lease.prepareAuthCopy(
+          {},
+          {
+            now: () => 2_000_000_000,
+            fetch: async () => {
+              exchanges += 1;
+              throw new Error("OAuth exchange must not be reached");
+            }
+          }
+        )
+      ).rejects.toThrow(/ownership could not be verified/u);
+      expect(exchanges).toBe(0);
+      expect(fs.readFileSync(credential)).toEqual(replacementBefore);
+      expect(fs.readFileSync(heldCredential)).toEqual(heldBefore);
+      await expect(lease.release()).rejects.toThrow(/ownership could not be verified/u);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+    } finally {
+      await lease.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("fences before local OAuth refresh and rearms a fresh generation after durable commit", async () => {
+    const source = kimiAuthFixture();
+    const leaseFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution");
+    const fenceFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-fence");
+    let prepared: { cleanup?: () => Promise<void> } | undefined;
+    const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+      timeoutMs: 5_000
+    });
+    try {
+      prepared = await lease.prepareAuthCopy(
+        {},
+        {
+          now: () => 2_000_000_000,
+          fetch: async () => {
+            expect(lastKimiLeaseJournalState(leaseFile)).toBe("rotation-possible");
+            expect(lastKimiLeaseJournalState(fenceFile)).toBe("rotation-possible");
+            return new Response(
+              JSON.stringify({
+                access_token: "local-successor-access",
+                refresh_token: "local-successor-refresh",
+                expires_in: 3600
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            );
+          }
+        }
+      );
+      expect(lastKimiLeaseJournalState(leaseFile)).toBe("active");
+      expect(lastKimiLeaseJournalState(fenceFile)).toBe("active");
+      expect(fs.readFileSync(leaseFile, "utf8")).toMatch(/rotation-possible.*resolved.*active/su);
+
+      // The successful local generation must not make the later remote-worker
+      // generation impossible.
+      await lease.markRotationPossible();
+      await lease.markRotationResolved();
+      await lease.release();
+    } finally {
+      await prepared?.cleanup?.();
+      await lease.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a committed local refresh after the first credentials-directory fsync fails", async () => {
+    const source = kimiAuthFixture();
+    const credentialsDirectory = path.join(source, "credentials");
+    const leaseFile = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-execution");
+    const fenceFile = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-fence");
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let reacquired: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let prepared:
+      | Awaited<ReturnType<Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>>["prepareAuthCopy"]>>
+      | undefined;
+    const probe = await fs.promises.open(source, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    let armed = false;
+    let injected = false;
+    let credentialsDirectorySyncs = 0;
+    const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+      const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+      if (armed && openedPath === credentialsDirectory) {
+        credentialsDirectorySyncs += 1;
+        if (!injected) {
+          injected = true;
+          throw Object.assign(new Error("injected first local-refresh directory fsync failure"), { code: "EIO" });
+        }
+      }
+      await originalSync.call(this);
+    });
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      // Acquisition itself must remain durable; inject only into the refresh
+      // commit after the lease has initialized its direct journals.
+      armed = true;
+      injected = false;
+      credentialsDirectorySyncs = 0;
+      prepared = await lease.prepareAuthCopy(
+        {},
+        {
+          now: () => 2_000_000_000,
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                access_token: "fsync-successor-access",
+                refresh_token: "fsync-successor-refresh",
+                expires_in: 3600
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            )
+        }
+      );
+      expect(injected).toBe(true);
+      expect(credentialsDirectorySyncs).toBeGreaterThanOrEqual(2);
+      expect(lastKimiLeaseJournalState(leaseFile)).toBe("active");
+      expect(lastKimiLeaseJournalState(fenceFile)).toBe("active");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(prepared.source, "credentials", "kimi-code.json"), "utf8"))
+      ).toMatchObject({
+        access_token: "fsync-successor-access",
+        refresh_token: "fsync-successor-refresh"
+      });
+      await prepared.cleanup?.();
+      prepared = undefined;
+      syncSpy.mockRestore();
+      await expect(lease.release()).resolves.toBeUndefined();
+      lease = undefined;
+
+      reacquired = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      await expect(reacquired.assertOwner()).resolves.toBeUndefined();
+    } finally {
+      syncSpy.mockRestore();
+      await prepared?.cleanup?.();
+      await reacquired?.release().catch(() => undefined);
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers pending local-refresh intent on the next preparation when the bounded retry also fails", async () => {
+    const source = kimiAuthFixture();
+    const credentialsDirectory = path.join(source, "credentials");
+    const leaseFile = path.join(credentialsDirectory, ".kimi-code.ultrafuzz-modal-node-execution");
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let reacquired: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let prepared:
+      | Awaited<ReturnType<Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>>["prepareAuthCopy"]>>
+      | undefined;
+    let syncSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      const probe = await fs.promises.open(source, "r");
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let injected = 0;
+      syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+        const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+        if (openedPath === credentialsDirectory && injected < 2) {
+          injected += 1;
+          throw Object.assign(new Error(`injected deferred local-refresh fsync failure ${injected}`), { code: "EIO" });
+        }
+        await originalSync.call(this);
+      });
+
+      await expect(
+        lease.prepareAuthCopy(
+          {},
+          {
+            now: () => 2_000_000_000,
+            fetch: async () =>
+              new Response(
+                JSON.stringify({
+                  access_token: "deferred-successor-access",
+                  refresh_token: "deferred-successor-refresh",
+                  expires_in: 3600
+                }),
+                { status: 200, headers: { "content-type": "application/json" } }
+              )
+          }
+        )
+      ).rejects.toThrow(/injected deferred local-refresh fsync failure 1/u);
+      expect(injected).toBe(2);
+      expect(lastKimiLeaseJournalState(leaseFile)).toBe("rotation-possible");
+
+      syncSpy.mockRestore();
+      syncSpy = undefined;
+      const unexpectedFetch = vi.fn(async () => {
+        throw new Error("pending successor recovery must precede token freshness and OAuth exchange");
+      });
+      prepared = await lease.prepareAuthCopy({}, { now: () => 2_000_000_000, fetch: unexpectedFetch });
+      expect(unexpectedFetch).not.toHaveBeenCalled();
+      expect(lastKimiLeaseJournalState(leaseFile)).toBe("active");
+      expect(
+        JSON.parse(fs.readFileSync(path.join(prepared.source, "credentials", "kimi-code.json"), "utf8"))
+      ).toMatchObject({
+        access_token: "deferred-successor-access",
+        refresh_token: "deferred-successor-refresh"
+      });
+      await prepared.cleanup?.();
+      prepared = undefined;
+      await lease.release();
+      lease = undefined;
+
+      reacquired = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      await expect(reacquired.assertOwner()).resolves.toBeUndefined();
+    } finally {
+      syncSpy?.mockRestore();
+      await prepared?.cleanup?.();
+      await reacquired?.release().catch(() => undefined);
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["credential-commit", "rotation-resolve", "active-rearm"] as const)(
+    "retains a durable local-refresh fence across the %s crash boundary",
+    async (failureBoundary) => {
+      const source = kimiAuthFixture();
+      const leaseFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution");
+      const fenceFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-fence");
+      const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      const probe = await fs.promises.open(source, "r");
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let injected = false;
+      const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+        const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+        const isCredentialTemporary =
+          path.dirname(openedPath) === path.join(source, "credentials") &&
+          path.basename(openedPath).startsWith("ultrafuzz-");
+        const journalState =
+          openedPath === leaseFile || openedPath === fenceFile ? lastKimiLeaseJournalState(openedPath) : undefined;
+        const journal = journalState === undefined ? "" : fs.readFileSync(openedPath, "utf8");
+        if (
+          !injected &&
+          ((failureBoundary === "credential-commit" && isCredentialTemporary) ||
+            (failureBoundary === "rotation-resolve" && openedPath === leaseFile && journalState === "resolved") ||
+            (failureBoundary === "active-rearm" &&
+              openedPath === fenceFile &&
+              journalState === "active" &&
+              journal.includes('"rotation_state":"resolved"')))
+        ) {
+          injected = true;
+          throw Object.assign(new Error(`injected ${failureBoundary} failure`), { code: "EIO" });
+        }
+        await originalSync.call(this);
+      });
+      try {
+        await expect(
+          lease.prepareAuthCopy(
+            {},
+            {
+              now: () => 2_000_000_000,
+              fetch: async () =>
+                new Response(
+                  JSON.stringify({
+                    access_token: "cut-successor-access",
+                    refresh_token: "cut-successor-refresh",
+                    expires_in: 3600
+                  }),
+                  { status: 200, headers: { "content-type": "application/json" } }
+                )
+            }
+          )
+        ).rejects.toThrow(new RegExp(`injected ${failureBoundary} failure`, "u"));
+        expect(injected).toBe(true);
+        await expect(lease.release()).rejects.toThrow(/unresolved|ownership (?:could not be verified|was superseded)/u);
+        syncSpy.mockRestore();
+        expect(openFileDescriptorsBelow(source)).toEqual([]);
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+      } finally {
+        syncSpy.mockRestore();
+        await lease.release().catch(() => undefined);
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("retains an unresolved sidecar fence when the primary lease pathname is replaced", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      const heldInode = `${lease.leasePath}.held-inode`;
+      fs.renameSync(lease.leasePath, heldInode);
+      const replacementRecord = (rotationState: "active" | "resolved") =>
+        JSON.stringify({
+          schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+          credential_lease: "f".repeat(64),
+          owner_id: "replacement-owner",
+          rotation_state: rotationState
+        });
+      fs.writeFileSync(lease.leasePath, `${replacementRecord("active")}\n${replacementRecord("resolved")}\n`, {
+        mode: 0o600
+      });
+
+      await expect(lease.markRotationPossible()).rejects.toThrow(/ownership could not be verified/u);
+      await expect(lease.release()).rejects.toThrow(/ownership could not be verified/u);
+      expect(fs.existsSync(`${lease.leasePath}.lock`)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+      expect(fs.readFileSync(heldInode, "utf8")).not.toContain('"rotation_state":"resolved"');
+
+      // Exercise proper-lockfile's stale-owner takeover path explicitly. The
+      // stale lock directory can be reclaimed, but the untouched sidecar still
+      // makes reacquisition fail closed despite the syntactically resolved
+      // replacement primary journal.
+      fs.mkdirSync(`${lease.leasePath}.lock`, { mode: 0o700 });
+      const staleTime = new Date(0);
+      fs.utimesSync(`${lease.leasePath}.lock`, staleTime, staleTime);
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+    } finally {
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["empty", "stale-resolved"] as const)(
+    "rejects a %s sidecar replacement at the primary-resolved write boundary",
+    async (replacementKind) => {
+      const source = kimiAuthFixture({ fresh: true });
+      const leaseFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution");
+      const fenceFile = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-fence");
+      const detachedFence = `${fenceFile}.detached`;
+      const lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      await lease.markRotationPossible();
+      await lease.markRotationResolved();
+      const staleResolvedJournal = `${fs
+        .readFileSync(fenceFile, "utf8")
+        .trimEnd()
+        .split("\n")
+        .slice(0, 3)
+        .join("\n")}\n`;
+      await lease.markRotationPossible();
+
+      const probe = await fs.promises.open(source, "r");
+      const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let replaced = false;
+      const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+        const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+        if (
+          !replaced &&
+          openedPath === leaseFile &&
+          lastKimiLeaseJournalState(leaseFile) === "resolved" &&
+          lastKimiLeaseJournalSequence(leaseFile) === 6
+        ) {
+          replaced = true;
+          fs.renameSync(fenceFile, detachedFence);
+          fs.writeFileSync(fenceFile, replacementKind === "empty" ? "" : staleResolvedJournal, { mode: 0o600 });
+        }
+        await originalSync.call(this);
+      });
+      try {
+        await expect(lease.markRotationResolved()).rejects.toThrow(/no longer owned/u);
+        expect(replaced).toBe(true);
+        await expect(lease.release()).rejects.toThrow(/ownership could not be verified/u);
+        syncSpy.mockRestore();
+        expect(openFileDescriptorsBelow(source)).toEqual([]);
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/durable unresolved|paired journals are inconsistent/u);
+      } finally {
+        syncSpy.mockRestore();
+        await lease.release().catch(() => undefined);
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("detects a renamed OAuth namespace without redirecting its credential-directory proper lock", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-oauth-replacement-"));
+    const originalOauth = path.join(source, "oauth");
+    const heldOauth = path.join(source, "oauth-held");
+    const outsideOauth = path.join(outsideRoot, "oauth");
+    fs.mkdirSync(outsideOauth, { mode: 0o700 });
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000,
+        lockUpdateMs: 1_000
+      });
+      const lockName = `${path.basename(lease.leasePath)}.lock`;
+      const realLock = `${lease.leasePath}.lock`;
+      const initialRealLockMtime = fs.statSync(realLock).mtimeMs;
+
+      fs.renameSync(originalOauth, heldOauth);
+      const replacementLock = path.join(outsideOauth, lockName);
+      const sentinel = path.join(replacementLock, "sentinel.txt");
+      fs.mkdirSync(replacementLock, { mode: 0o750 });
+      fs.writeFileSync(sentinel, "replacement-must-not-change\n", { mode: 0o640 });
+      const fixedTime = new Date("2020-01-02T03:04:05.000Z");
+      fs.utimesSync(replacementLock, fixedTime, fixedTime);
+      fs.utimesSync(sentinel, fixedTime, fixedTime);
+      const replacementBefore = fs.statSync(replacementLock);
+      const sentinelBefore = fs.statSync(sentinel);
+      fs.symlinkSync(outsideOauth, originalOauth, "dir");
+
+      await vi.waitFor(() => expect(fs.statSync(realLock).mtimeMs).toBeGreaterThan(initialRealLockMtime), {
+        timeout: 3_000,
+        interval: 25
+      });
+      expect(fs.existsSync(realLock)).toBe(true);
+      await expect(lease.release()).rejects.toThrow(/ownership could not be verified/u);
+
+      expect(fs.existsSync(realLock)).toBe(false);
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+      expect(fs.readFileSync(sentinel, "utf8")).toBe("replacement-must-not-change\n");
+      expect(fs.statSync(replacementLock).mode & 0o777).toBe(replacementBefore.mode & 0o777);
+      expect(fs.statSync(replacementLock).mtimeMs).toBe(replacementBefore.mtimeMs);
+      expect(fs.statSync(sentinel).mode & 0o777).toBe(sentinelBefore.mode & 0o777);
+      expect(fs.statSync(sentinel).mtimeMs).toBe(sentinelBefore.mtimeMs);
+    } finally {
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+      fs.rmSync(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["empty", "stale-paired", "legacy-resolved"] as const)(
+    "cannot reset an active direct execution fence with a %s OAuth namespace replacement",
+    async (replacementKind) => {
+      const source = kimiAuthFixture({ fresh: true });
+      const originalOauth = path.join(source, "oauth");
+      const heldOauth = path.join(source, "oauth-held");
+      let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+      try {
+        lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        });
+        const directFence = path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-fence");
+        const stalePrimary = fs.readFileSync(lease.leasePath, "utf8");
+        const staleFence = fs.readFileSync(directFence, "utf8");
+
+        fs.renameSync(originalOauth, heldOauth);
+        fs.mkdirSync(originalOauth, { mode: 0o700 });
+        const legacyPrimary = path.join(originalOauth, "kimi-code.ultrafuzz-modal-node-execution");
+        const legacyFence = path.join(originalOauth, "kimi-code.ultrafuzz-modal-node-fence");
+        if (replacementKind === "stale-paired") {
+          fs.writeFileSync(legacyPrimary, stalePrimary, { mode: 0o600 });
+          fs.writeFileSync(legacyFence, staleFence, { mode: 0o600 });
+        } else if (replacementKind === "legacy-resolved") {
+          const record = (rotationState: "active" | "rotation-possible" | "resolved") =>
+            JSON.stringify({
+              schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+              credential_lease: "e".repeat(64),
+              owner_id: "legacy-replacement-owner",
+              rotation_state: rotationState
+            });
+          fs.writeFileSync(
+            legacyPrimary,
+            `${record("active")}\n${record("rotation-possible")}\n${record("resolved")}\n`,
+            { mode: 0o600 }
+          );
+          fs.writeFileSync(legacyFence, "", { mode: 0o600 });
+        }
+
+        await expect(lease.release()).rejects.toThrow(/ownership could not be verified/u);
+        lease = undefined;
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/durable unresolved|paired journals are inconsistent/u);
+      } finally {
+        await lease?.release().catch(() => undefined);
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("fails an old lease closed when its canonical auth root is replaced by a new physical namespace", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const heldSource = `${source}-held`;
+    let oldLease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let replacementLease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      oldLease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      fs.renameSync(source, heldSource);
+
+      const replacement = kimiAuthFixture({ fresh: true });
+      const replacementCredential = path.join(replacement, "credentials", "kimi-code.json");
+      fs.writeFileSync(
+        replacementCredential,
+        `${JSON.stringify({
+          access_token: "attacker-access",
+          refresh_token: "attacker-refresh",
+          expires_at: 9_999_999_999,
+          expires_in: 3600
+        })}\n`,
+        { mode: 0o640 }
+      );
+      fs.writeFileSync(path.join(replacement, "device_id"), "attacker-device\n", { mode: 0o640 });
+      const replacementBytes = fs.readFileSync(replacementCredential);
+      const replacementMetadata = fs.statSync(replacementCredential);
+      fs.renameSync(replacement, source);
+      const installedReplacementCredential = path.join(source, "credentials", "kimi-code.json");
+
+      replacementLease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      expect(replacementLease.credentialLeaseId).not.toBe(oldLease.credentialLeaseId);
+      await expect(oldLease.assertOwner()).rejects.toThrow(/ownership could not be verified/u);
+      await expect(oldLease.prepareAuthCopy({}, { now: () => 2_000_000_000 })).rejects.toThrow(
+        /ownership could not be verified/u
+      );
+      await expect(
+        oldLease.reconcileCredential(
+          `${JSON.stringify({
+            access_token: "successor-access",
+            refresh_token: "successor-refresh",
+            expires_at: 2_020_000,
+            expires_in: 3600
+          })}\n`,
+          { sourceRefreshTokenSha256: createHash("sha256").update("old-refresh").digest("hex") }
+        )
+      ).rejects.toThrow(/ownership could not be verified/u);
+      expect(fs.readFileSync(installedReplacementCredential)).toEqual(replacementBytes);
+      expect(fs.statSync(installedReplacementCredential).mode & 0o777).toBe(replacementMetadata.mode & 0o777);
+      expect(fs.statSync(installedReplacementCredential).mtimeMs).toBe(replacementMetadata.mtimeMs);
+      await expect(oldLease.release()).rejects.toThrow(/ownership could not be verified/u);
+      expect(openFileDescriptorsBelow(heldSource)).toEqual([]);
+    } finally {
+      await replacementLease?.release().catch(() => undefined);
+      await oldLease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+      fs.rmSync(heldSource, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically replaces and rebinds a lease credential across fsync failure boundaries", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialPath = path.join(source, "credentials", "kimi-code.json");
+    const originalBytes = fs.readFileSync(credentialPath);
+    const originalInode = fs.statSync(credentialPath).ino;
+    const probe = await fs.promises.open(source, "r");
+    const fileHandlePrototype = Object.getPrototypeOf(probe) as FileHandle;
+    const originalSync = fileHandlePrototype.sync;
+    await probe.close();
+    let failureBoundary: "temporary-file" | "credentials-directory" | undefined = "temporary-file";
+    const syncSpy = vi.spyOn(fileHandlePrototype, "sync").mockImplementation(async function (this: FileHandle) {
+      const openedPath = fs.readlinkSync(`/proc/self/fd/${this.fd}`);
+      if (
+        failureBoundary === "temporary-file" &&
+        path.dirname(openedPath) === path.join(source, "credentials") &&
+        path.basename(openedPath).startsWith("ultrafuzz-")
+      ) {
+        failureBoundary = undefined;
+        throw Object.assign(new Error("injected temporary credential fsync failure"), { code: "EIO" });
+      }
+      if (failureBoundary === "credentials-directory" && openedPath === path.join(source, "credentials")) {
+        failureBoundary = undefined;
+        throw Object.assign(new Error("injected credential directory fsync failure"), { code: "EIO" });
+      }
+      await originalSync.call(this);
+    });
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let prepared:
+      | Awaited<ReturnType<Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>>["prepareAuthCopy"]>>
+      | undefined;
+    const firstRemoteCredential = `${JSON.stringify({
+      access_token: "atomic-access",
+      refresh_token: "atomic-refresh",
+      expires_at: 2_020_000,
+      expires_in: 3600
+    })}\n`;
+    const ambiguousRemoteCredential = `${JSON.stringify({
+      access_token: "ambiguous-access",
+      refresh_token: "ambiguous-refresh",
+      expires_at: 2_030_000,
+      expires_in: 3600
+    })}\n`;
+    const reconcileOptions = {
+      sourceRefreshTokenSha256: createHash("sha256").update("old-refresh").digest("hex")
+    };
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      await lease.markRotationPossible();
+      await expect(lease.reconcileCredential(firstRemoteCredential, reconcileOptions)).rejects.toThrow(
+        /injected temporary credential fsync failure/u
+      );
+      expect(fs.readFileSync(credentialPath)).toEqual(originalBytes);
+      expect(fs.statSync(credentialPath).ino).toBe(originalInode);
+      expect(fs.readdirSync(path.dirname(credentialPath)).sort()).toEqual([
+        ".kimi-code.ultrafuzz-modal-node-execution",
+        ".kimi-code.ultrafuzz-modal-node-execution.lock",
+        ".kimi-code.ultrafuzz-modal-node-fence",
+        "kimi-code.json"
+      ]);
+      await expect(lease.reconcileCredential(firstRemoteCredential, reconcileOptions)).resolves.toBe(true);
+      await lease.markRotationResolved();
+      const firstReplacementInode = fs.statSync(credentialPath).ino;
+      expect(firstReplacementInode).not.toBe(originalInode);
+
+      failureBoundary = "credentials-directory";
+      await lease.markRotationPossible();
+      await expect(
+        lease.reconcileCredential(ambiguousRemoteCredential, {
+          sourceRefreshTokenSha256: createHash("sha256").update("atomic-refresh").digest("hex")
+        })
+      ).rejects.toThrow(/injected credential directory fsync failure/u);
+      expect(fs.statSync(credentialPath).ino).not.toBe(firstReplacementInode);
+      expect(JSON.parse(fs.readFileSync(credentialPath, "utf8"))).toMatchObject({
+        access_token: "ambiguous-access",
+        refresh_token: "ambiguous-refresh"
+      });
+      expect(fs.readdirSync(path.dirname(credentialPath)).sort()).toEqual([
+        ".kimi-code.ultrafuzz-modal-node-execution",
+        ".kimi-code.ultrafuzz-modal-node-execution.lock",
+        ".kimi-code.ultrafuzz-modal-node-fence",
+        "kimi-code.json"
+      ]);
+
+      syncSpy.mockRestore();
+      await expect(
+        lease.reconcileCredential(ambiguousRemoteCredential, {
+          sourceRefreshTokenSha256: createHash("sha256").update("atomic-refresh").digest("hex")
+        })
+      ).resolves.toBe(true);
+      await lease.markRotationResolved();
+      prepared = await lease.prepareAuthCopy({}, { now: () => 2_000_000_000 });
+      expect(
+        JSON.parse(fs.readFileSync(path.join(prepared.source, "credentials", "kimi-code.json"), "utf8"))
+      ).toMatchObject({ access_token: "ambiguous-access", refresh_token: "ambiguous-refresh" });
+      await prepared.cleanup?.();
+      prepared = undefined;
+      await expect(lease.release()).resolves.toBeUndefined();
+      lease = undefined;
+    } finally {
+      syncSpy.mockRestore();
+      await prepared?.cleanup?.();
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects linked OAuth ancestors and direct lease targets without touching a victim", async () => {
+    const victimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-lease-links-"));
+    const victim = path.join(victimRoot, "victim.txt");
+    fs.writeFileSync(victim, "untouched\n", { mode: 0o640 });
+    const victimMode = fs.statSync(victim).mode & 0o777;
+    const targetName = ".kimi-code.ultrafuzz-modal-node-execution";
+    const linkedTargets = ["symbolic", "hard"] as const;
+    try {
+      for (const kind of linkedTargets) {
+        const source = kimiAuthFixture({ fresh: true });
+        const target = path.join(source, "credentials", targetName);
+        if (kind === "symbolic") fs.symlinkSync(victim, target);
+        else fs.linkSync(victim, target);
+        try {
+          await expect(
+            acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+              timeoutMs: 5_000
+            })
+          ).rejects.toThrow(/unsafe|symbolic link|too many levels/u);
+        } finally {
+          fs.rmSync(source, { recursive: true, force: true });
+        }
+      }
+
+      const ancestorSource = kimiAuthFixture({ fresh: true });
+      fs.symlinkSync(victimRoot, path.join(ancestorSource, "oauth"), "dir");
+      try {
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: ancestorSource }, "/unused", {
+            timeoutMs: 5_000
+          })
+        ).rejects.toThrow(/OAuth lock directory is unsafe/u);
+      } finally {
+        fs.rmSync(ancestorSource, { recursive: true, force: true });
+      }
+
+      expect(fs.readFileSync(victim, "utf8")).toBe("untouched\n");
+      expect(fs.statSync(victim).mode & 0o777).toBe(victimMode);
+    } finally {
+      fs.rmSync(victimRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on crash-torn lease journal transitions", async () => {
+    const record = (state: "active" | "rotation-possible" | "resolved") =>
+      JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "a".repeat(64),
+        owner_id: "crashed-owner",
+        rotation_state: state
+      });
+    const journals = [
+      `${record("active")}\n`,
+      `${record("active")}\n${record("rotation-possible").slice(0, 37)}`,
+      `${record("active")}\n${record("rotation-possible")}\n${record("resolved").slice(0, 51)}`
+    ];
+
+    for (const journal of journals) {
+      const source = kimiAuthFixture({ fresh: true });
+      const oauth = path.join(source, "oauth");
+      fs.mkdirSync(oauth, { mode: 0o700 });
+      fs.writeFileSync(path.join(oauth, "kimi-code.ultrafuzz-modal-node-execution"), journal, { mode: 0o600 });
+      try {
+        await expect(
+          acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", { timeoutMs: 5_000 })
+        ).rejects.toThrow(/durable unresolved|torn record|legacy .* is unsafe/u);
+      } finally {
+        fs.rmSync(source, { recursive: true, force: true });
+      }
+    }
+
+    const resolvedSource = kimiAuthFixture({ fresh: true });
+    const oauth = path.join(resolvedSource, "oauth");
+    fs.mkdirSync(oauth, { mode: 0o700 });
+    fs.writeFileSync(
+      path.join(oauth, "kimi-code.ultrafuzz-modal-node-execution"),
+      `${record("active")}\n${record("rotation-possible")}\n${record("resolved")}\n`,
+      { mode: 0o600 }
+    );
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: resolvedSource }, "/unused", {
+        timeoutMs: 5_000
+      });
+      await expect(lease.assertOwner()).resolves.toBeUndefined();
+    } finally {
+      await lease?.release();
+      fs.rmSync(resolvedSource, { recursive: true, force: true });
+    }
+  });
+
+  it("never migrates paired execution journals from the replaceable OAuth namespace", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const oauth = path.join(source, "oauth");
+    fs.mkdirSync(oauth, { mode: 0o700 });
+    const record = (rotationState: "active" | "rotation-possible" | "resolved", transitionSequence: number) =>
+      JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "b".repeat(64),
+        owner_id: "paired-legacy-owner",
+        journal_pair_id: "11111111-2222-4333-8444-555555555555",
+        transition_sequence: transitionSequence,
+        rotation_state: rotationState
+      });
+    const pairedResolved = `${record("active", 1)}\n${record("rotation-possible", 2)}\n${record("resolved", 3)}\n`;
+    fs.writeFileSync(path.join(oauth, "kimi-code.ultrafuzz-modal-node-execution"), pairedResolved, {
+      mode: 0o600
+    });
+    fs.writeFileSync(path.join(oauth, "kimi-code.ultrafuzz-modal-node-fence"), pairedResolved, { mode: 0o600 });
+    try {
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/legacy journals are unsafe/u);
+      expect(fs.existsSync(path.join(source, "credentials", ".kimi-code.ultrafuzz-modal-node-execution.lock"))).toBe(
+        false
+      );
+      expect(openFileDescriptorsBelow(source)).toEqual([]);
+    } finally {
+      fs.rmSync(source, { recursive: true, force: true });
+    }
   });
 
   it("brokers Kimi rotation from only the candidate refresh token and validated provider fields", async () => {
@@ -692,4 +1773,31 @@ default_effort = "max"
   );
   fs.writeFileSync(path.join(source, "device_id"), "device-test\n", { mode: 0o600 });
   return source;
+}
+
+function openFileDescriptorsBelow(root: string): string[] {
+  return fs
+    .readdirSync("/proc/self/fd")
+    .flatMap((entry) => {
+      try {
+        return [fs.readlinkSync(path.join("/proc/self/fd", entry))];
+      } catch {
+        return [];
+      }
+    })
+    .filter((openedPath) => openedPath === root || openedPath.startsWith(`${root}${path.sep}`));
+}
+
+function lastKimiLeaseJournalState(file: string): string | undefined {
+  const records = fs.readFileSync(file, "utf8").trimEnd().split("\n");
+  const last = records.at(-1);
+  if (last === undefined || last === "") return undefined;
+  return (JSON.parse(last) as { rotation_state?: string }).rotation_state;
+}
+
+function lastKimiLeaseJournalSequence(file: string): number | undefined {
+  const records = fs.readFileSync(file, "utf8").trimEnd().split("\n");
+  const last = records.at(-1);
+  if (last === undefined || last === "") return undefined;
+  return (JSON.parse(last) as { transition_sequence?: number }).transition_sequence;
 }

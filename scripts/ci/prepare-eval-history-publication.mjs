@@ -5,16 +5,25 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
-export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
+export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v2";
 
-const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v2";
 const AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v7";
 const AUTOMATIC_PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v4";
 const DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash";
+const DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION = {
+  uncached_input: 0.14,
+  cache_read: 0.0028,
+  cache_write: null,
+  output: 0.28,
+  reasoning: 0.28
+};
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_LAUNCH_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
+const MAX_AUTOMATIC_BUNDLE_BYTES = 256 * 1024 * 1024;
+const MAX_PUBLICATION_TREE_BYTES = 256 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_LOWER_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
@@ -233,9 +242,11 @@ export async function prepareAutomaticPublication(input) {
       bundleModule.MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
       `public benchmark bundle ${pair.pair}`
     );
-    const bundle = bundleModule.readPublicBenchmarkBundle(bundlePath, {
-      expectedSchemaVersion: bundleModule.PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION
-    });
+    const {
+      bundle,
+      bundle_sha256: bundleSha256,
+      publication_tree_sha256: publicationTreeSha256
+    } = readValidatedAutomaticPublicationBundle(bundlePath, bundleModule, `public benchmark bundle ${pair.pair}`);
     const expectedEvalRunId = workerModule.publicEvalRunId(config.run_id, model.slug);
     assertAutomaticPublicationFinalLaunch({
       pair: pair.pair,
@@ -264,18 +275,26 @@ export async function prepareAutomaticPublication(input) {
       pair.pair,
       publicationUrl
     );
+    const observationIds = automaticPublicationObservationIds(
+      bundle.eval_run_id,
+      pair.model_slug,
+      publicationSummary.target_ids
+    );
     assertUnique(evalRunIds, bundle.eval_run_id, "public eval run ID");
     pairs.push({
       pair: pair.pair,
       provider: pair.provider,
       model_slug: pair.model_slug,
       bundle_path: bundleRelativePath,
+      bundle_sha256: bundleSha256,
       unpack_path: pair.pair,
+      publication_tree_sha256: publicationTreeSha256,
       eval_run_id: bundle.eval_run_id,
       benchmark: context.benchmark,
       lane: context.mode,
       status: publicationSummary.status,
       target_ids: publicationSummary.target_ids,
+      observation_ids: observationIds,
       executed_case_count: publicationSummary.executed_case_count,
       graded_case_count: publicationSummary.graded_case_count,
       publication_url: publicationSummary.publication_url
@@ -293,8 +312,11 @@ export async function prepareAutomaticPublication(input) {
       benchmark: pair.benchmark,
       lane: pair.lane,
       status: pair.status,
-      input_path: `${pair.unpack_path}/eval`,
+      input_path: pair.unpack_path,
+      bundle_sha256: pair.bundle_sha256,
+      publication_tree_sha256: pair.publication_tree_sha256,
       target_ids: pair.target_ids,
+      observation_ids: pair.observation_ids,
       executed_case_count: pair.executed_case_count,
       graded_case_count: pair.graded_case_count,
       publication_url: pair.publication_url
@@ -881,6 +903,20 @@ function positiveSafeInteger(value, label) {
   return value;
 }
 
+function nonNegativeSafeInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a non-negative safe integer`);
+  return value;
+}
+
+function sha256Value(value, label) {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/u.test(value)) throw new Error(`${label} is invalid`);
+  return value;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function nonNegativeFinite(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`${label} must be a non-negative finite number`);
@@ -1262,7 +1298,12 @@ export function assertAutomaticPublicationModelEvidence(bundle, configuredModelV
     assertAutomaticPricingArithmetic({ rates, usage, componentCosts, pricing, pair, rowId });
     if (
       configuredModel === DEEPSEEK_V4_FLASH_MODEL &&
-      (pricing.thinking_tokens_included_in_output !== true ||
+      (rates.uncached_input !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.uncached_input ||
+        rates.cache_read !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.cache_read ||
+        rates.cache_write !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.cache_write ||
+        rates.output !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.output ||
+        rates.reasoning !== DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION.reasoning ||
+        pricing.thinking_tokens_included_in_output !== true ||
         usage.cache_write_tokens !== 0 ||
         usage.reasoning_tokens !== 0 ||
         componentCosts.cache_write !== 0 ||
@@ -1478,26 +1519,178 @@ function matrixScopeKey(targetId, variantId, trialId) {
   return [targetId, variantId, trialId].join("\u0000");
 }
 
+export function automaticPublicationObservationIds(evalRunIdValue, modelSlugValue, targetIdValues) {
+  const evalRunId = safeLowerId(evalRunIdValue, "automatic publication eval run ID");
+  const modelSlug = safeLowerId(modelSlugValue, "automatic publication model slug");
+  return validatedTargetIds(targetIdValues).map((targetId) => [evalRunId, targetId, modelSlug, modelSlug].join(":"));
+}
+
+export function readValidatedAutomaticPublicationBundle(bundlePath, bundleModule, label = "public benchmark bundle") {
+  const contents = readRegularBytes(bundlePath, bundleModule.MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES, label);
+  let value;
+  try {
+    value = JSON.parse(contents.toString("utf8"));
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON`, { cause: error });
+  }
+  const bundle = bundleModule.parsePublicBenchmarkBundle(
+    value,
+    [],
+    bundleModule.PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION
+  );
+  return {
+    bundle,
+    bundle_sha256: sha256(contents),
+    publication_tree_sha256: publicationTreeDigestFromBundle(bundle)
+  };
+}
+
+export function assertAutomaticBundleDigest(bundlePath, expectedDigestValue) {
+  const expectedDigest = sha256Value(expectedDigestValue, "expected automatic bundle SHA-256");
+  const actualDigest = sha256(
+    readRegularBytes(bundlePath, MAX_AUTOMATIC_BUNDLE_BYTES, "automatic public benchmark bundle")
+  );
+  if (actualDigest !== expectedDigest) {
+    throw new Error("automatic public benchmark bundle digest changed after trusted preparation");
+  }
+}
+
+export function publicationTreeDigestFromBundle(bundle) {
+  if (!Array.isArray(bundle?.files) || bundle.files.length === 0) {
+    throw new Error("public benchmark bundle files must be a non-empty array");
+  }
+  const entries = bundle.files
+    .map((file, index) => {
+      const entry = looseRecord(file, `public benchmark bundle file ${index}`);
+      const relativePath = canonicalPublicationTreePath(entry.path, `public benchmark bundle file ${index} path`);
+      const sizeBytes = nonNegativeSafeInteger(entry.size_bytes, `public benchmark bundle file ${relativePath} size`);
+      const contentsSha256 = sha256Value(entry.sha256, `public benchmark bundle file ${relativePath} SHA-256`);
+      return { path: relativePath, size_bytes: sizeBytes, sha256: contentsSha256 };
+    })
+    .sort((left, right) => compareText(left.path, right.path));
+  if (new Set(entries.map((entry) => entry.path)).size !== entries.length) {
+    throw new Error("public benchmark bundle repeats an extracted tree path");
+  }
+  return publicationTreeManifestDigest(entries);
+}
+
+export function publicationTreeDigest(rootValue) {
+  const root = regularDirectory(rootValue, "publication tree root");
+  const entries = [];
+  let totalBytes = 0;
+  function walk(directory, relativeDirectory) {
+    for (const entry of fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => compareText(left.name, right.name))) {
+      const entryPath = path.join(directory, entry.name);
+      const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) throw new Error(`publication tree contains a symbolic link: ${relativePath}`);
+      if (stat.isDirectory()) {
+        walk(entryPath, relativePath);
+        continue;
+      }
+      if (!stat.isFile()) throw new Error(`publication tree contains a non-regular entry: ${relativePath}`);
+      const contents = readRegularBytes(
+        entryPath,
+        MAX_PUBLICATION_TREE_BYTES,
+        `publication tree file ${relativePath}`,
+        true
+      );
+      totalBytes += contents.byteLength;
+      if (totalBytes > MAX_PUBLICATION_TREE_BYTES) throw new Error("publication tree exceeds the size limit");
+      entries.push({ path: relativePath, size_bytes: contents.byteLength, sha256: sha256(contents) });
+    }
+  }
+  walk(root, "");
+  if (entries.length === 0) throw new Error("publication tree must contain at least one file");
+  return publicationTreeManifestDigest(entries);
+}
+
+export function verifyAutomaticPublicationUnpacked(planPath, unpackedRootValue) {
+  const plan = looseRecord(
+    readJsonRegular(planPath, MAX_MANIFEST_BYTES, "automatic publication plan"),
+    "automatic publication plan"
+  );
+  if (plan.schema_version !== AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION || !Array.isArray(plan.pairs)) {
+    throw new Error("automatic publication plan has an invalid schema or pair set");
+  }
+  const unpackedRoot = regularDirectory(unpackedRootValue, "automatic publication unpacked root");
+  const expectedDirectories = new Set();
+  for (const [index, value] of plan.pairs.entries()) {
+    const pair = looseRecord(value, `automatic publication plan pair ${index}`);
+    const unpackPath = safeBasename(pair.unpack_path, `automatic publication plan pair ${index} unpack path`);
+    assertUnique(expectedDirectories, unpackPath, "automatic publication unpack path");
+    const expectedDigest = sha256Value(
+      pair.publication_tree_sha256,
+      `automatic publication plan pair ${index} publication tree SHA-256`
+    );
+    const actualDigest = publicationTreeDigest(path.join(unpackedRoot, unpackPath));
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`automatic publication unpacked tree digest does not match ${unpackPath}`);
+    }
+  }
+  const actualDirectories = fs.readdirSync(unpackedRoot, { withFileTypes: true }).map((entry) => {
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(`automatic publication unpacked root contains an unexpected entry: ${entry.name}`);
+    }
+    return entry.name;
+  });
+  const unexpected = actualDirectories.filter((entry) => !expectedDirectories.has(entry));
+  if (actualDirectories.length !== expectedDirectories.size || unexpected.length > 0) {
+    throw new Error(`automatic publication unpacked root does not match its plan: ${unexpected.join(", ")}`);
+  }
+  return { pairs: expectedDirectories.size };
+}
+
+function publicationTreeManifestDigest(entries) {
+  return sha256(Buffer.from(JSON.stringify(entries), "utf8"));
+}
+
+function canonicalPublicationTreePath(value, label) {
+  const text = requiredString(value, label);
+  if (text.includes("\\") || path.posix.isAbsolute(text) || path.win32.isAbsolute(text)) {
+    throw new Error(`${label} must be a canonical relative POSIX path`);
+  }
+  const parts = text.split("/");
+  if (parts.some((part) => !SAFE_ID.test(part))) {
+    throw new Error(`${label} must contain only safe path segments`);
+  }
+  return parts.join("/");
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function formatMatrixScopeList(keys) {
   const values = keys.map((key) => key.split("\u0000").join("/"));
   const shown = values.slice(0, 8);
   return `${shown.join(", ")}${values.length > shown.length ? `, and ${values.length - shown.length} more` : ""}`;
 }
 
-function readJsonRegular(filePath, maxBytes, label) {
+function readRegularBytes(filePath, maxBytes, label, allowEmpty = false) {
   const absolute = path.resolve(filePath);
   const noFollow = fs.constants.O_NOFOLLOW ?? 0;
   const descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | noFollow);
   try {
     const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.size < 1 || stat.size > maxBytes) {
-      throw new Error(`${label} must be a non-empty regular file within its size limit`);
+    if (!stat.isFile() || stat.size < (allowEmpty ? 0 : 1) || stat.size > maxBytes) {
+      throw new Error(`${label} must be a regular file within its size limit`);
     }
-    return JSON.parse(fs.readFileSync(descriptor, "utf8"));
+    return fs.readFileSync(descriptor);
   } catch (error) {
     throw new Error(`failed to read ${label}`, { cause: error });
   } finally {
     fs.closeSync(descriptor);
+  }
+}
+
+function readJsonRegular(filePath, maxBytes, label) {
+  try {
+    return JSON.parse(readRegularBytes(filePath, maxBytes, label).toString("utf8"));
+  } catch (error) {
+    throw new Error(`failed to read ${label}`, { cause: error });
   }
 }
 
@@ -1672,6 +1865,24 @@ async function main() {
       );
     }
     validateBenchmarkPolicyFiles({ policyRoot, candidateCommit, benchmark });
+    return;
+  }
+  if (command === "verify-unpacked") {
+    const [planPath, unpackedRoot, ...extra] = args;
+    if (planPath === undefined || unpackedRoot === undefined || extra.length > 0) {
+      throw new Error("usage: prepare-eval-history-publication.mjs verify-unpacked <publication-plan> <unpacked-root>");
+    }
+    process.stdout.write(`${JSON.stringify(verifyAutomaticPublicationUnpacked(planPath, unpackedRoot))}\n`);
+    return;
+  }
+  if (command === "verify-bundle") {
+    const [bundlePath, expectedDigest, ...extra] = args;
+    if (bundlePath === undefined || expectedDigest === undefined || extra.length > 0) {
+      throw new Error(
+        "usage: prepare-eval-history-publication.mjs verify-bundle <public-results.json> <expected-sha256>"
+      );
+    }
+    assertAutomaticBundleDigest(bundlePath, expectedDigest);
     return;
   }
   if (command !== "automatic") {

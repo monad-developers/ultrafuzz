@@ -10,8 +10,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { WORKSPACE_SOURCE_ATTESTATION_FILE } from "@ultrafuzz/runtime";
 
+import { acquireKimiModalNodeExecutionLease, prepareSubscriptionAuthCopy } from "../src/auth.js";
+
 import {
   cleanupModalNodeRun,
+  cleanupModalNodeLocalState,
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider as createRawModalNodeSandboxProvider,
   finalizeModalNodeSandbox,
@@ -27,20 +30,27 @@ import {
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
+  assertAgentRuntimeTree,
   cloudAgentCommandRole,
   cloudAgentInvocation,
   cloudAgentSubprocessInvocation,
+  CloudWorkerCommandError,
   cloudPublicationBoundary,
   copySafeTree,
+  finalizeWorkerHandoffCleanup,
+  finalizeWorkerSecretCleanup,
   rewriteCloudAgentAuthConfig,
   runAfterCloudAgentQuiescence,
-  stageCanonicalNodeResultBundle
+  stageCanonicalNodeResultBundle,
+  workerErrorPayload
 } from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
 const PROVIDER_SECRET_ENV = "ULTRAFUZZ_TEST_PROVIDER_SECRET";
 const AGENT_ENV = "ULTRAFUZZ_TEST_AGENT_KEY";
+const KIMI_CREDENTIAL_LEASE_ID = "9".repeat(64);
+const KIMI_CREDENTIAL_LEASE_OWNER = "lease-owner-test";
 
 function deepSeekAgentAuth(sourceEnv = AGENT_ENV): ModalNodeSandboxInput["agent_auth"] {
   return {
@@ -142,16 +152,19 @@ describe("Modal node sandbox provider", () => {
   it("terminates and closes even when local archive cleanup fails", async () => {
     const sandbox = fakeSandbox(undefined);
     const close = vi.fn();
+    const release = vi.fn(async () => undefined);
     await expect(
       finalizeModalNodeSandbox(
         () => {
           throw new Error("local cleanup failed");
         },
         sandbox,
-        close
+        close,
+        release
       )
     ).rejects.toThrow("local cleanup failed");
     expect(sandbox.terminate).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -173,11 +186,60 @@ describe("Modal node sandbox provider", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("prioritizes remote credential proof over local cleanup failure", async () => {
+    const cleanupError = new Error("local cleanup failed");
+    const remoteProofError = new Error("credential fence remote proof failed");
+    const failure = await finalizeModalNodeSandbox(
+      () => {
+        throw cleanupError;
+      },
+      undefined,
+      () => undefined,
+      async () => {
+        throw remoteProofError;
+      }
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({
+      cause: remoteProofError,
+      errors: [remoteProofError, cleanupError],
+      message: remoteProofError.message
+    });
+  });
+
+  it("attempts every prepared-auth and staging cleanup independently", () => {
+    const first = new Error("archive cleanup failed");
+    const second = new Error("snapshot cleanup failed");
+    const events: string[] = [];
+    let failure: unknown;
+    try {
+      cleanupModalNodeLocalState(
+        () => {
+          events.push("archive");
+          throw first;
+        },
+        () => {
+          events.push("snapshot");
+          throw second;
+        },
+        () => events.push("handoff")
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(events).toEqual(["archive", "snapshot", "handoff"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([first, second]);
+  });
+
   it("preserves termination, cleanup, and close failures while surfacing unproven termination", async () => {
     const sandbox = fakeSandbox(undefined);
     const terminationError = new Error("termination failed");
     const cleanupError = new Error("local cleanup failed");
     const closeError = new Error("client close failed");
+    const release = vi.fn(async () => undefined);
     sandbox.terminate = vi.fn(async () => {
       throw terminationError;
     });
@@ -189,7 +251,8 @@ describe("Modal node sandbox provider", () => {
       sandbox,
       () => {
         throw closeError;
-      }
+      },
+      release
     ).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AggregateError);
@@ -210,6 +273,7 @@ describe("Modal node sandbox provider", () => {
       message: "cloud node sandbox remained live after termination"
     });
     expect(sandbox.terminate).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
     expect(closeError.message).toBe("client close failed");
   });
 
@@ -280,6 +344,9 @@ describe("Modal node sandbox provider", () => {
       })
     ).toThrow(/API-key authentication source is invalid/u);
     expect(() => parseCloudAgentAuthDescriptor(deepSeekAgentAuth("NODE_OPTIONS"))).toThrow(/reserved or invalid/u);
+    expect(() => parseCloudAgentAuthDescriptor(deepSeekAgentAuth("ULTRAFUZZ_KIMI_SESSION_HOME"))).toThrow(
+      /reserved or invalid/u
+    );
     expect(() =>
       parseCloudAgentAuthDescriptor({
         agent: "KimiAgent",
@@ -373,6 +440,19 @@ describe("Modal node sandbox provider", () => {
     expect(invocation.env).not.toHaveProperty("NODE_OPTIONS");
   });
 
+  it("pins Kimi sessions to the pre-owned agent home", () => {
+    const invocation = cloudAgentInvocation(
+      "/workspace/project/.smithers/node_modules/.bin/smithers",
+      [],
+      kimiApiAgentAuth(),
+      {
+        KIMI_API_KEY: "agent-key-value"
+      }
+    );
+
+    expect(invocation.env.ULTRAFUZZ_KIMI_SESSION_HOME).toBe("/workspace/agent-home/.kimi-code-sessions");
+  });
+
   it("drops only the model CLI subprocess to a capability-free uid", () => {
     const invocation = cloudAgentSubprocessInvocation("/usr/local/bin/claude", ["--print", "prompt"]);
 
@@ -418,13 +498,39 @@ describe("Modal node sandbox provider", () => {
         ].join("\n")
       );
       rewriteCloudAgentAuthConfig(deepSeekAgentAuth(), root);
-      expect(fs.readFileSync(configPath, "utf8")).toContain('api_key_env = "DEEPSEEK_API_KEY"');
+      const deepSeekConfig = fs.readFileSync(configPath, "utf8");
+      expect(deepSeekConfig).toContain('api_key_env = "DEEPSEEK_API_KEY"');
+      expect(deepSeekConfig).toContain('config_dir = "/workspace/agent-home/.deepseek-claude"');
 
       rewriteCloudAgentAuthConfig({ agent: "KimiAgent", provider: "kimi", auth: { mode: "subscription" } }, root);
       expect(fs.readFileSync(configPath, "utf8")).toContain('config_dir = "/workspace/agent-home/.kimi-code"');
       expect(fs.lstatSync(configPath).isSymbolicLink()).toBe(false);
     } finally {
       chown.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts only runtime trees and symlink targets contained by the agent home", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-agent-runtime-tree-"));
+    const agentHome = path.join(root, "agent-home");
+    const safeTarget = path.join(agentHome, "kimi-sessions");
+    const safeLink = path.join(agentHome, "current-kimi-sessions");
+    const outside = path.join(root, "outside");
+    const escapingLink = path.join(agentHome, "escaping-kimi-sessions");
+    const outsideLexicalLink = path.join(root, "project-kimi-sessions");
+    try {
+      fs.mkdirSync(safeTarget, { recursive: true });
+      fs.writeFileSync(path.join(safeTarget, "session.json"), "{}\n");
+      fs.mkdirSync(outside);
+      fs.symlinkSync(safeTarget, safeLink, "dir");
+      fs.symlinkSync(outside, escapingLink, "dir");
+      fs.symlinkSync(safeTarget, outsideLexicalLink, "dir");
+
+      expect(() => assertAgentRuntimeTree(safeLink, agentHome)).not.toThrow();
+      expect(() => assertAgentRuntimeTree(escapingLink, agentHome)).toThrow(/escapes its writable boundaries/u);
+      expect(() => assertAgentRuntimeTree(outsideLexicalLink, agentHome)).toThrow(/escapes its writable boundaries/u);
+    } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
@@ -481,6 +587,182 @@ describe("Modal node sandbox provider", () => {
       })
     ).rejects.toThrow("proc unavailable");
     expect(postflight).not.toHaveBeenCalled();
+  });
+
+  it("runs credential quarantine after a failed workflow once UID quiescence is proven", async () => {
+    const workflowError = new Error("workflow failed after rotating credentials");
+    const postflight = vi.fn(async (agentError: unknown) => {
+      expect(agentError).toBe(workflowError);
+      return "candidate-quarantined";
+    });
+
+    const failure = await runAfterCloudAgentQuiescence(
+      async () => {
+        throw workflowError;
+      },
+      postflight,
+      { scan: () => [], pause: async () => undefined }
+    ).catch((error: unknown) => error);
+
+    expect(failure).toBe(workflowError);
+    expect(postflight).toHaveBeenCalledOnce();
+  });
+
+  it.each(["candidate read", "UID quiescence"])(
+    "suppresses opaque successor-token streams when %s fails before classification",
+    async (failurePhase) => {
+      const opaqueSuccessor = "opaque-successor-token-without-a-label";
+      const commandError = new CloudWorkerCommandError(
+        "run-workflow",
+        "smithers",
+        7,
+        `stdout ${opaqueSuccessor}`,
+        `stderr ${opaqueSuccessor}`,
+        true
+      );
+      const failure =
+        failurePhase === "UID quiescence"
+          ? await runAfterCloudAgentQuiescence(
+              async () => {
+                throw commandError;
+              },
+              async () => undefined,
+              {
+                scan: () => {
+                  throw new Error("proc unavailable");
+                }
+              }
+            ).catch((error: unknown) => error)
+          : new AggregateError([commandError, new Error("candidate validation failed")], commandError.message, {
+              cause: commandError
+            });
+
+      const payload = workerErrorPayload(failure, ["initial-access", "initial-refresh"], {
+        rotationPossible: true,
+        successorSecretsClassified: false
+      });
+      expect(payload).toMatchObject({
+        schema_version: "ultrafuzz.modal.node-worker-error.v1",
+        phase: "run-workflow",
+        streams_suppressed: true
+      });
+      expect(JSON.stringify(payload)).not.toContain(opaqueSuccessor);
+      expect(payload).not.toHaveProperty("stdout");
+      expect(payload).not.toHaveProperty("stderr");
+    }
+  );
+
+  it("never retains intermediate command streams after the final successor is classified", () => {
+    const intermediateSuccessor = "opaque-intermediate-g1-token";
+    const finalSuccessor = "classified-final-g2-token";
+    const commandError = new CloudWorkerCommandError(
+      "run-workflow",
+      "smithers",
+      9,
+      `stdout ${intermediateSuccessor}`,
+      `stderr ${intermediateSuccessor}`,
+      true
+    );
+    const failure = new AggregateError([commandError, new Error("final candidate publication failed")], "failed", {
+      cause: commandError
+    });
+
+    expect(recursiveOwnValueContains(failure, intermediateSuccessor)).toBe(false);
+    const payload = workerErrorPayload(failure, ["initial-access", "initial-refresh", finalSuccessor], {
+      rotationPossible: true,
+      successorSecretsClassified: true
+    });
+    expect(payload).toMatchObject({
+      schema_version: "ultrafuzz.modal.node-worker-error.v1",
+      phase: "run-workflow",
+      command: "smithers",
+      exit_code: 9,
+      streams_suppressed: true
+    });
+    expect(JSON.stringify(payload)).not.toContain(intermediateSuccessor);
+    expect(JSON.stringify(payload)).not.toContain(finalSuccessor);
+    expect(payload).not.toHaveProperty("stdout");
+    expect(payload).not.toHaveProperty("stderr");
+  });
+
+  it("preserves bounded command diagnostics when subscription rotation is impossible", () => {
+    const commandError = new CloudWorkerCommandError(
+      "install-smithers",
+      "npm",
+      11,
+      "ordinary stdout",
+      "ordinary stderr"
+    );
+    const payload = workerErrorPayload(commandError, [], {
+      rotationPossible: false,
+      successorSecretsClassified: true
+    });
+    expect(payload).toMatchObject({
+      phase: "install-smithers",
+      command: "npm",
+      exit_code: 11,
+      stdout: "ordinary stdout",
+      stderr: "ordinary stderr"
+    });
+    expect(payload).not.toHaveProperty("streams_suppressed");
+  });
+
+  it("removes the trusted snapshot after a transport-first cleanup failure and aggregates both failures", () => {
+    const events: string[] = [];
+    const transportError = new Error("transport cleanup failed");
+    const snapshotError = new Error("snapshot cleanup failed");
+    let failure: unknown;
+    try {
+      finalizeWorkerHandoffCleanup(
+        undefined,
+        () => {
+          events.push("transport");
+          throw transportError;
+        },
+        () => {
+          events.push("trusted-snapshot");
+          throw snapshotError;
+        }
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(events).toEqual(["transport", "trusted-snapshot"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toEqual([transportError, snapshotError]);
+  });
+
+  it("attempts every final secret cleanup while preserving the workflow failure as primary", () => {
+    const workflowError = new Error("workflow failed");
+    const launcherError = new Error("launcher cleanup failed");
+    const snapshotError = new Error("snapshot cleanup failed");
+    const events: string[] = [];
+    let failure: unknown;
+    try {
+      finalizeWorkerSecretCleanup(
+        workflowError,
+        () => {
+          events.push("launcher");
+          throw launcherError;
+        },
+        () => {
+          events.push("snapshot");
+          throw snapshotError;
+        },
+        () => events.push("agent-home")
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(events).toEqual(["launcher", "snapshot", "agent-home"]);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({
+      cause: workflowError,
+      errors: [workflowError, launcherError, snapshotError],
+      message: workflowError.message
+    });
   });
 
   it("waits for registered diagnostics before exposing the postflight tree", async () => {
@@ -1094,13 +1376,13 @@ describe("Modal node sandbox provider", () => {
       expect(failure).toMatchObject({
         message: "Modal node execution failed: cloud node sandbox remained live after termination"
       });
-      const [executionFailure, terminationFailure, closeFailure] = (failure as AggregateError).errors as Error[];
-      expect(executionFailure?.message).toMatch(/\[credential\] run-workflow failed/u);
+      const [terminationFailure, closeFailure, executionFailure] = (failure as AggregateError).errors as Error[];
       expect(terminationFailure).toMatchObject({
         cause: expect.objectContaining({ message: "[credential] termination failed" }),
         message: "cloud node sandbox remained live after termination"
       });
       expect(closeFailure?.message).toBe("[credential] close failed");
+      expect(executionFailure?.message).toMatch(/\[credential\] run-workflow failed/u);
       expect((failure as AggregateError).errors).toHaveLength(3);
       expect(JSON.stringify(aggregateErrorMessages(failure))).not.toMatch(/provider-secret-value|agent-key-value/u);
     } finally {
@@ -1209,8 +1491,25 @@ describe("Modal node sandbox provider", () => {
     })}\n`;
     const result = createResultArchive({ candidateCredential: rawCandidate });
     const sandbox = fakeSandbox(result);
-    const client = fakeClient({ listed: [sandbox] });
+    const client = fakeClient({ created: sandbox });
     const events: string[] = [];
+    const releaseLease = vi.fn(async () => {
+      events.push("lease-release");
+    });
+    const acquireLease = vi.fn(
+      async (
+        model: string,
+        env: Record<string, string | undefined>,
+        _home: string,
+        options: { timeoutMs?: number }
+      ) => {
+        events.push("lease-acquire");
+        expect(model).toBe("kimi-k3");
+        expect(env.KIMI_CODE_HOME).toBe(kimiSource);
+        expect(options).toEqual({ timeoutMs: 60_000 });
+        return testKimiExecutionLease(kimiSource, releaseLease);
+      }
+    );
     let candidateLocalPath: string | undefined;
     const copyToLocal = sandbox.filesystem.copyToLocal;
     sandbox.filesystem.copyToLocal = vi.fn(async (remote: string, local: string) => {
@@ -1231,6 +1530,7 @@ describe("Modal node sandbox provider", () => {
       async (input: { candidateCredential: string; initialCredential: string; model: string; source: string }) => {
         events.push("broker");
         expect(sandbox.terminate).toHaveBeenCalledOnce();
+        expect(releaseLease).not.toHaveBeenCalled();
         expect(input.candidateCredential).toBe(rawCandidate);
         expect(JSON.parse(input.initialCredential)).toMatchObject({ refresh_token: "initial-refresh" });
         expect(input.model).toBe("kimi-k3");
@@ -1252,6 +1552,7 @@ describe("Modal node sandbox provider", () => {
         options: { sourceRefreshTokenSha256: string }
       ) => {
         events.push("reconcile");
+        expect(releaseLease).not.toHaveBeenCalled();
         expect(model).toBe("kimi-k3");
         expect(JSON.parse(credential)).toMatchObject({
           access_token: "provider-validated-access",
@@ -1263,6 +1564,7 @@ describe("Modal node sandbox provider", () => {
           "stale\n"
         );
         expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"))).toBe(false);
+        return true;
       }
     );
     client.close = vi.fn(() => events.push("close"));
@@ -1275,7 +1577,8 @@ describe("Modal node sandbox provider", () => {
     const provider = createModalNodeSandboxProvider({
       ...providerOptions(client),
       kimiBroker: broker as never,
-      kimiReconcile: reconcile as never
+      kimiReconcile: reconcile as never,
+      kimiExecutionLease: acquireLease as never
     });
     const heartbeat = vi.fn((data?: unknown) => {
       if ((data as { stage?: string } | undefined)?.stage === "published") events.push("published");
@@ -1291,16 +1594,26 @@ describe("Modal node sandbox provider", () => {
         })
       ).resolves.toMatchObject({ status: "finished" });
       expect(events).toEqual([
-        "artifacts-quarantined",
+        "lease-acquire",
         "candidate-quarantined",
+        "artifacts-quarantined",
         "terminate",
         "broker",
         "reconcile",
+        "lease-release",
         "close",
         "published"
       ]);
       expect(broker).toHaveBeenCalledOnce();
       expect(reconcile).toHaveBeenCalledOnce();
+      expect(acquireLease).toHaveBeenCalledOnce();
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(client.sandboxes.create.mock.calls[0]?.[2]).toMatchObject({
+        tags: expect.objectContaining({
+          credential_lease: KIMI_CREDENTIAL_LEASE_ID,
+          credential_lease_owner: KIMI_CREDENTIAL_LEASE_OWNER
+        })
+      });
       expect(candidateLocalPath).toBeDefined();
       expect(fs.existsSync(candidateLocalPath!)).toBe(false);
       expect(client.secrets.fromObject).not.toHaveBeenCalled();
@@ -1319,6 +1632,848 @@ describe("Modal node sandbox provider", () => {
       ).not.toContain("rotated-refresh");
     } finally {
       result.cleanup();
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("never stages or reconciles a replacement Kimi root installed after lease acquisition", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const heldSource = `${kimiSource}-held`;
+    const rawCandidate = `${JSON.stringify({
+      access_token: "child-access",
+      refresh_token: "child-refresh",
+      expires_at: 9_999_999_999
+    })}\n`;
+    const result = createResultArchive({ candidateCredential: rawCandidate });
+    const sandbox = fakeSandbox(result);
+    let acquiredLease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    let replacementBytes: Buffer | undefined;
+    const acquireLease = vi.fn(async (...args: Parameters<typeof acquireKimiModalNodeExecutionLease>) => {
+      acquiredLease = await acquireKimiModalNodeExecutionLease(...args);
+      fs.renameSync(kimiSource, heldSource);
+      const replacement = createKimiSubscriptionFixture();
+      const replacementCredential = path.join(replacement, "credentials", "kimi-code.json");
+      fs.writeFileSync(
+        replacementCredential,
+        `${JSON.stringify({
+          access_token: "attacker-access",
+          refresh_token: "attacker-refresh",
+          expires_at: 9_999_999_999,
+          expires_in: 3600
+        })}\n`,
+        { mode: 0o640 }
+      );
+      replacementBytes = fs.readFileSync(replacementCredential);
+      fs.renameSync(replacement, kimiSource);
+      return acquiredLease;
+    });
+    const broker = vi.fn(async (input: { initialCredential: string; source: string }) => {
+      expect(JSON.parse(input.initialCredential)).toMatchObject({
+        access_token: "initial-access",
+        refresh_token: "initial-refresh"
+      });
+      expect(
+        JSON.parse(fs.readFileSync(path.join(input.source, "credentials", "kimi-code.json"), "utf8"))
+      ).toMatchObject({ access_token: "initial-access", refresh_token: "initial-refresh" });
+      expect(fs.readFileSync(path.join(input.source, "device_id"), "utf8")).toBe("device-test\n");
+      return {
+        access_token: "provider-successor-access",
+        refresh_token: "provider-successor-refresh",
+        expires_at: Math.floor(Date.now() / 1000) + 10_000,
+        expires_in: 3600
+      };
+    });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(fakeClient({ created: sandbox })),
+      kimiBroker: broker as never,
+      kimiExecutionLease: acquireLease
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+
+      expect(errorGraphText(failure)).toContain("different physical directory");
+      expect(broker).not.toHaveBeenCalled();
+      expect(JSON.parse(fs.readFileSync(path.join(heldSource, "credentials", "kimi-code.json"), "utf8"))).toMatchObject(
+        { access_token: "initial-access", refresh_token: "initial-refresh" }
+      );
+      expect(fs.readFileSync(path.join(kimiSource, "credentials", "kimi-code.json"))).toEqual(replacementBytes);
+      expect(openFileDescriptorsBelow(heldSource)).toEqual([]);
+    } finally {
+      await acquiredLease?.release().catch(() => undefined);
+      result.cleanup();
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+      fs.rmSync(heldSource, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers, reconciles, and redacts a rotated Kimi credential after workflow failure", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const successorAccess = "opaque-successor-access";
+    const successorRefresh = "opaque-successor-refresh";
+    const rawCandidate = `${JSON.stringify({
+      access_token: successorAccess,
+      refresh_token: successorRefresh,
+      expires_at: 9_999_999_999
+    })}\n`;
+    const sandbox = fakeSandbox(undefined, { sandboxId: "failed-rotation-sandbox" });
+    const events: string[] = [];
+    let workerLaunched = false;
+    sandbox.filesystem.readText = vi.fn(async (remote: string) => {
+      if (!workerLaunched || !remote.endsWith("/kimi-credential-recovery.json")) {
+        throw new SandboxFilesystemNotFoundError("not found");
+      }
+      const tags = await sandbox.getTags();
+      return `${JSON.stringify({
+        schema_version: "ultrafuzz.modal.kimi-credential-recovery.v1",
+        status: "quarantined",
+        storage_lineage: "run-one/attempt-one/base",
+        execution_identity: tags.execution_identity,
+        credential_candidate: path.posix.join(path.posix.dirname(remote), "kimi-credential-candidate.json")
+      })}\n`;
+    });
+    sandbox.filesystem.copyToLocal = vi.fn(async (remote: string, local: string) => {
+      expect(remote).toMatch(/kimi-credential-candidate\.json$/u);
+      events.push("candidate-quarantined");
+      fs.writeFileSync(local, rawCandidate, { mode: 0o600 });
+    });
+    sandbox.exec = vi.fn(async (command: string[]) => {
+      if (command[0] !== "node") return fakeContainerProcess();
+      workerLaunched = true;
+      events.push("worker-failed");
+      return fakeContainerProcess({
+        exitCode: 7,
+        stderr: `workflow failed after rotation: ${successorRefresh}`
+      });
+    }) as never;
+    const originalTerminate = sandbox.terminate;
+    sandbox.terminate = vi.fn(async (...args: unknown[]) => {
+      events.push("terminate");
+      await (originalTerminate as unknown as (...values: unknown[]) => Promise<void>)(...args);
+    }) as never;
+    const lease = testKimiExecutionLease(
+      kimiSource,
+      vi.fn(async () => {
+        events.push("lease-release");
+      })
+    );
+    lease.markRotationPossible = vi.fn(async () => {
+      events.push("rotation-possible");
+    });
+    lease.markRotationResolved = vi.fn(async () => {
+      events.push("rotation-resolved");
+    });
+    const client = fakeClient({ created: sandbox });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiBroker: vi.fn(async (brokerInput: { candidateCredential: string }) => {
+        events.push("broker");
+        expect(brokerInput.candidateCredential).toBe(rawCandidate);
+        return {
+          access_token: "provider-access",
+          refresh_token: "provider-refresh",
+          expires_at: 9_999_999_999
+        };
+      }) as never,
+      kimiReconcile: vi.fn(async () => {
+        events.push("reconcile");
+        return true;
+      }) as never
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(errorGraphText(failure)).toContain("credential-observing worker output was withheld");
+      expect(errorGraphText(failure)).not.toContain("workflow failed after rotation");
+      expect(errorGraphText(failure)).not.toContain(successorAccess);
+      expect(errorGraphText(failure)).not.toContain(successorRefresh);
+      expect(events).toEqual([
+        "rotation-possible",
+        "worker-failed",
+        "candidate-quarantined",
+        "terminate",
+        "broker",
+        "reconcile",
+        "rotation-resolved",
+        "lease-release"
+      ]);
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"), "utf8")).toBe("stale\n");
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces and retains a durable Kimi fence when failed rotation recovery is missing", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const opaqueSuccessor = "missing-recovery-opaque-successor-refresh";
+    const sandbox = fakeSandbox(undefined, { sandboxId: "missing-recovery-sandbox" });
+    sandbox.exec = vi.fn(async (command: string[]) =>
+      command[0] === "node"
+        ? fakeContainerProcess({
+            exitCode: 7,
+            stderr: `workflow failed before candidate recovery: ${opaqueSuccessor}`
+          })
+        : fakeContainerProcess()
+    ) as never;
+    let rotationPossible = false;
+    const releaseLease = vi.fn(async () => {
+      if (rotationPossible) {
+        throw new Error("Kimi Modal credential rotation remains durably unresolved; credential fence was retained");
+      }
+    });
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    lease.markRotationPossible = vi.fn(async () => {
+      rotationPossible = true;
+    });
+    lease.markRotationResolved = vi.fn(async () => {
+      rotationPossible = false;
+    });
+    const client = fakeClient({ created: sandbox });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect((failure as Error).message).toMatch(/remains durably unresolved/u);
+      expect((failure as Error).message).toMatch(/credential fence was retained/u);
+      expect(((failure as AggregateError).errors[0] as Error).message).toMatch(/credential fence was retained/u);
+      expect(errorGraphText(failure)).toMatch(/credential recovery.*is missing/su);
+      expect(errorGraphText(failure)).toContain("credential-observing worker output was withheld");
+      expect(errorGraphText(failure)).not.toContain(opaqueSuccessor);
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(lease.markRotationResolved).not.toHaveBeenCalled();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("never surfaces successor-bearing worker output when rotation recovery is malformed", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const opaqueSuccessor = "malformed-recovery-opaque-successor-refresh";
+    const sandbox = fakeSandbox(undefined, { sandboxId: "malformed-recovery-sandbox" });
+    let workerLaunched = false;
+    sandbox.filesystem.readText = vi.fn(async (remote: string) => {
+      if (!workerLaunched || !remote.endsWith("/kimi-credential-recovery.json")) {
+        throw new SandboxFilesystemNotFoundError("not found");
+      }
+      return `{"refresh_token":"${opaqueSuccessor}", invalid-json`;
+    });
+    sandbox.exec = vi.fn(async (command: string[]) => {
+      if (command[0] !== "node") return fakeContainerProcess();
+      workerLaunched = true;
+      return fakeContainerProcess({
+        exitCode: 9,
+        stdout: `successor appeared on stdout: ${opaqueSuccessor}`,
+        stderr: `successor appeared on stderr: ${opaqueSuccessor}`
+      });
+    }) as never;
+    let rotationPossible = false;
+    const releaseLease = vi.fn(async () => {
+      if (rotationPossible) {
+        throw new Error("Kimi Modal credential rotation remains durably unresolved; credential fence was retained");
+      }
+    });
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    lease.markRotationPossible = vi.fn(async () => {
+      rotationPossible = true;
+    });
+    lease.markRotationResolved = vi.fn(async () => {
+      rotationPossible = false;
+    });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(fakeClient({ created: sandbox })),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      const graph = errorGraphText(failure);
+      expect(graph).toContain("credential-observing worker output was withheld");
+      expect(graph).toContain("credential recovery manifest is invalid");
+      expect(graph).not.toContain(opaqueSuccessor);
+      expect(lease.markRotationResolved).not.toHaveBeenCalled();
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the durable Kimi fence when successor lineage cannot be reconciled", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const result = createResultArchive({
+      candidateCredential: `${JSON.stringify({
+        access_token: "successor-access",
+        refresh_token: "successor-refresh",
+        expires_at: 9_999_999_999
+      })}\n`
+    });
+    const sandbox = fakeSandbox(result, { sandboxId: "unreconciled-lineage-sandbox" });
+    let rotationPossible = false;
+    const releaseLease = vi.fn(async () => {
+      if (rotationPossible) {
+        throw new Error("Kimi Modal credential rotation remains durably unresolved; credential fence was retained");
+      }
+    });
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    lease.markRotationPossible = vi.fn(async () => {
+      rotationPossible = true;
+    });
+    lease.markRotationResolved = vi.fn(async () => {
+      rotationPossible = false;
+    });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(fakeClient({ created: sandbox })),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiBroker: vi.fn(async () => ({
+        access_token: "provider-access",
+        refresh_token: "provider-refresh",
+        expires_at: 9_999_999_999
+      })) as never,
+      kimiReconcile: vi.fn(async () => false) as never
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+
+      expect((failure as Error).message).toMatch(/remains durably unresolved/u);
+      expect(errorGraphText(failure)).toContain("lineage could not be reconciled");
+      expect(lease.markRotationResolved).not.toHaveBeenCalled();
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(fs.readFileSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"), "utf8")).toBe("stale\n");
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("releases a Kimi execution lease when auth preparation fails before sandbox creation", async () => {
+    const fixture = createProjectFixture();
+    const missingSource = path.join(path.dirname(fixture.root), "missing-kimi-source");
+    const releaseLease = vi.fn(async () => undefined);
+    const acquireLease = vi.fn(async () => testKimiExecutionLease(missingSource, releaseLease));
+    const client = fakeClient({});
+    fixture.input.agent_auth = {
+      agent: "KimiAgent",
+      provider: "kimi",
+      auth: { mode: "subscription", config_dir: missingSource }
+    };
+    fixture.input.agent_model = "kimi-k3";
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: acquireLease as never
+    });
+    try {
+      const failure = await Promise.resolve(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/ENOENT|no such file/u);
+      expect(errorGraphText(failure)).toContain("[auth-path]");
+      expect(errorGraphText(failure)).not.toContain(missingSource);
+      expect(acquireLease).toHaveBeenCalledOnce();
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(client.apps.fromName).toHaveBeenCalledOnce();
+      expect(client.sandboxes.create).not.toHaveBeenCalled();
+      expect(client.close).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("re-lists and stops an unassigned live candidate after recovery discovery fails", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const candidate = fakeSandbox(undefined, {
+      sandboxId: "unassigned-find-candidate",
+      tags: modalNodeTags("controller-run", "node:attempt")
+    });
+    let stopped = false;
+    let terminationAttempts = 0;
+    candidate.poll = vi.fn(async () => (stopped ? 0 : null));
+    candidate.terminate = vi.fn(async () => {
+      terminationAttempts += 1;
+      if (terminationAttempts === 1) throw new Error("first candidate termination failed");
+      stopped = true;
+    }) as never;
+    const client = fakeClient({});
+    let listCalls = 0;
+    client.sandboxes.list = vi.fn(async function* () {
+      listCalls += 1;
+      // The first four calls are the two delayed pre-snapshot proof sweeps.
+      if (listCalls > 4) yield candidate;
+    }) as never;
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/first candidate termination failed|remained live/u);
+      expect(candidate.terminate).toHaveBeenCalledTimes(2);
+      expect(client.sandboxes.create).not.toHaveBeenCalled();
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("re-lists an ambiguously committed create and stops it before releasing the lease", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const committed = fakeSandbox(undefined, { sandboxId: "ambiguous-create-candidate" });
+    const client = fakeClient({});
+    let createCommitted = false;
+    let postCommitListCalls = 0;
+    let firstVisiblePostCommitSweep: number | undefined;
+    client.sandboxes.create = vi.fn(
+      async (_app: unknown, _image: unknown, params: { tags?: Record<string, string> }) => {
+        committed.setTestTags(params.tags ?? {});
+        createCommitted = true;
+        throw new Error("create response lost after commit");
+      }
+    ) as never;
+    client.sandboxes.list = vi.fn(async function* (params: { tags: Record<string, string> }) {
+      if (!createCommitted) return;
+      postCommitListCalls += 1;
+      const completedFilterSet = Math.ceil(postCommitListCalls / 3);
+      // All three filters in the first complete post-create proof sweep are
+      // empty; the sandbox becomes visible only in the following sweep.
+      if (completedFilterSet === 1) return;
+      const tags = await committed.getTags();
+      if (Object.entries(params.tags).every(([key, value]) => tags[key] === value)) {
+        firstVisiblePostCommitSweep ??= completedFilterSet;
+        yield committed;
+      }
+    }) as never;
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow("create response lost after commit");
+      expect(committed.terminate).toHaveBeenCalledOnce();
+      expect(postCommitListCalls).toBeGreaterThan(3);
+      expect(firstVisiblePostCommitSweep).toBe(2);
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(
+        client.sandboxes.list.mock.calls.some(
+          ([params]) =>
+            params.tags.credential_lease === KIMI_CREDENTIAL_LEASE_ID &&
+            typeof params.tags.execution_identity === "string"
+        )
+      ).toBe(true);
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans up a stale credential-lease owner before taking the credential snapshot", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    fs.rmSync(path.join(kimiSource, "device_id"));
+    const rawCandidate = `${JSON.stringify({
+      access_token: "child-access",
+      refresh_token: "child-refresh",
+      expires_at: 9_999_999_999
+    })}\n`;
+    const result = createResultArchive({ candidateCredential: rawCandidate });
+    const stale = fakeSandbox(undefined, {
+      sandboxId: "stale-lease-owner",
+      tags: {
+        ...modalNodeTags("prior-controller-run", "prior-node:attempt"),
+        credential_lease: KIMI_CREDENTIAL_LEASE_ID,
+        credential_lease_owner: "prior-lease-owner"
+      }
+    });
+    const fresh = fakeSandbox(result, { sandboxId: "fresh-kimi-sandbox" });
+    const events: string[] = [];
+    const terminateStale = stale.terminate;
+    stale.terminate = vi.fn(async (...args: unknown[]) => {
+      events.push("stale-owner-terminated");
+      fs.writeFileSync(path.join(kimiSource, "device_id"), "device-restored-before-snapshot\n", { mode: 0o600 });
+      await (terminateStale as unknown as (...values: unknown[]) => Promise<void>)(...args);
+    }) as never;
+    const client = fakeClient({ listed: [stale], created: fresh, preserveListedTags: true });
+    client.images.fromName = vi.fn(async () => {
+      events.push("image-after-snapshot");
+      expect(fs.existsSync(path.join(kimiSource, "device_id"))).toBe(true);
+      return {};
+    }) as never;
+    const releaseLease = vi.fn(async () => {
+      events.push("lease-release");
+      return undefined;
+    });
+    const lease = testKimiExecutionLease(kimiSource, releaseLease, "replacement-lease-owner");
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiBroker: vi.fn(async () => ({ access_token: "brokered", refresh_token: "brokered-refresh" })) as never,
+      kimiReconcile: vi.fn(async () => true) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished", remoteRunId: "fresh-kimi-sandbox" });
+      expect(stale.terminate).toHaveBeenCalledOnce();
+      expect(events.indexOf("stale-owner-terminated")).toBeLessThan(events.indexOf("image-after-snapshot"));
+      expect(events.at(-1)).toBe("lease-release");
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("prevents a superseded lease owner from creating a sandbox and disposes its local handles", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    lease.assertOwner = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValue(new Error("Kimi Modal execution lease ownership was superseded"));
+    const client = fakeClient({});
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/ownership was superseded/u);
+      expect(lease.assertOwner).toHaveBeenCalledTimes(4);
+      expect(client.sandboxes.create).not.toHaveBeenCalled();
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the durable Kimi fence when remote enumeration cannot be proven", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const client = fakeClient({});
+    client.sandboxes.list = vi.fn(async function* () {
+      yield* [];
+      throw new Error("remote list unavailable");
+    }) as never;
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/remote enumeration could not be proven/u);
+      expect(client.sandboxes.list).toHaveBeenCalledTimes(2);
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the durable Kimi fence when fresh remote candidates prevent settlement", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const client = fakeClient({});
+    let candidateId = 0;
+    client.sandboxes.list = vi.fn(async function* () {
+      candidateId += 1;
+      yield fakeSandbox(undefined, { sandboxId: `still-appearing-${candidateId}` });
+    }) as never;
+    let remoteClock = 0;
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiRemoteQuiescence: {
+        now: () => remoteClock,
+        pause: async (ms) => {
+          remoteClock += ms;
+        },
+        settlementMs: 5,
+        timeoutMs: 20
+      }
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/deadline|remote enumeration could not be proven/u);
+      expect(client.sandboxes.create).not.toHaveBeenCalled();
+      expect(candidateId).toBeGreaterThan(4);
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the durable Kimi fence when a remote candidate cannot be poll-proven stopped", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const candidate = fakeSandbox(undefined, {
+      sandboxId: "unprovable-remote-candidate",
+      tags: {
+        ...modalNodeTags("prior-controller-run", "prior-node:attempt"),
+        credential_lease: KIMI_CREDENTIAL_LEASE_ID,
+        credential_lease_owner: "prior-lease-owner"
+      }
+    });
+    candidate.poll = vi.fn(async () => {
+      throw new Error("remote poll unavailable");
+    });
+    const client = fakeClient({ listed: [candidate], preserveListedTags: true });
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/remote quiescence could not be proven/u);
+      expect(candidate.terminate).toHaveBeenCalledTimes(2);
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["list", "poll", "terminate"] as const)(
+    "bounds a never-settling remote %s RPC and retains the durable Kimi fence",
+    async (operation) => {
+      const fixture = createProjectFixture();
+      const kimiSource = createKimiSubscriptionFixture();
+      const releaseLease = vi.fn(async () => undefined);
+      const lease = testKimiExecutionLease(kimiSource, releaseLease);
+      const candidate = fakeSandbox(undefined, { sandboxId: `never-settling-${operation}` });
+      const client = fakeClient({});
+      if (operation === "list") {
+        client.sandboxes.list = vi.fn(
+          () =>
+            ({
+              [Symbol.asyncIterator]: () => ({
+                next: () => new Promise<IteratorResult<Sandbox>>(() => undefined),
+                return: async () => ({ done: true, value: undefined })
+              })
+            }) as AsyncIterable<Sandbox>
+        ) as never;
+      } else {
+        client.sandboxes.list = vi.fn(async function* () {
+          yield candidate;
+        }) as never;
+        if (operation === "poll") {
+          candidate.poll = vi.fn(() => new Promise<number | null>(() => undefined));
+        } else {
+          candidate.poll = vi.fn(async () => null);
+          candidate.terminate = vi.fn(() => new Promise<void>(() => undefined)) as never;
+        }
+      }
+      selectKimiSubscription(fixture.input, kimiSource);
+      const provider = createModalNodeSandboxProvider({
+        ...providerOptions(client),
+        kimiExecutionLease: vi.fn(async () => lease) as never,
+        kimiRemoteQuiescence: {
+          settlementMs: 1,
+          timeoutMs: 20
+        }
+      });
+      try {
+        await expect(
+          provider.run({
+            runId: "controller-run",
+            sandboxId: "node:attempt",
+            input: fixture.input,
+            rootDir: fixture.root,
+            heartbeat: vi.fn()
+          })
+        ).rejects.toThrow(/deadline|remote (?:enumeration|quiescence) could not be proven/u);
+        expect(releaseLease).toHaveBeenCalledOnce();
+      } finally {
+        fixture.cleanup();
+        fs.rmSync(kimiSource, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("uses a monotonic remote settlement clock despite a forward wall-clock jump", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    fs.rmSync(path.join(kimiSource, "device_id"));
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    const client = fakeClient({});
+    let listCalls = 0;
+    client.sandboxes.list = vi.fn(() => {
+      listCalls += 1;
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: async () => ({ done: true, value: undefined })
+        })
+      } as AsyncIterable<Sandbox>;
+    }) as never;
+    let wallClock = 1_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => wallClock);
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiRemoteQuiescence: {
+        pause: async (ms) => {
+          wallClock += 10_000_000;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        },
+        settlementMs: 5,
+        timeoutMs: 100
+      }
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/ENOENT|no such file/u);
+      expect(listCalls).toBeGreaterThanOrEqual(8);
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
+      dateNow.mockRestore();
       fixture.cleanup();
       fs.rmSync(kimiSource, { recursive: true, force: true });
     }
@@ -1553,6 +2708,58 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("keeps a Kimi execution lease held when sandbox termination cannot be proven", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    const sandbox = fakeSandbox(undefined);
+    sandbox.filesystem.readText = vi.fn(async () => {
+      throw new SandboxFilesystemNotFoundError("not found");
+    });
+    sandbox.exec = vi.fn(async (command: string[]) =>
+      command[0] === "node"
+        ? fakeContainerProcess({ wait: () => new Promise<number>(() => undefined) })
+        : fakeContainerProcess()
+    ) as never;
+    sandbox.terminate = vi.fn(async () => {
+      throw new Error("termination failed");
+    });
+    const releaseLease = vi.fn(async () => undefined);
+    const acquireLease = vi.fn(async () => testKimiExecutionLease(kimiSource, releaseLease));
+    fixture.input.agent_auth = {
+      agent: "KimiAgent",
+      provider: "kimi",
+      auth: { mode: "subscription", config_dir: kimiSource }
+    };
+    fixture.input.agent_model = "kimi-k3";
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(fakeClient({ created: sandbox })),
+      kimiExecutionLease: acquireLease as never
+    });
+    const controller = new AbortController();
+    try {
+      const running = provider.run({
+        runId: "controller-run",
+        sandboxId: "node:attempt",
+        input: fixture.input,
+        rootDir: fixture.root,
+        signal: controller.signal,
+        heartbeat: vi.fn()
+      });
+      await vi.waitFor(() =>
+        expect(sandbox.exec).toHaveBeenCalledWith(
+          expect.arrayContaining(["node", expect.stringContaining("node-worker")])
+        )
+      );
+      controller.abort();
+      await expect(running).rejects.toThrow("remained live after termination");
+      expect(acquireLease).toHaveBeenCalledOnce();
+      expect(releaseLease).not.toHaveBeenCalled();
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
   it("requires force before terminating ephemeral sandboxes for a run", async () => {
     const active = fakeSandbox(undefined);
     const refusedClient = fakeClient({ listed: [active] });
@@ -1689,6 +2896,7 @@ function testLineageId(prefix: string, value: unknown): string {
 }
 
 function providerOptions(client: ReturnType<typeof fakeClient>) {
+  let remoteClock = 0;
   return {
     app: "ultrafuzz-test",
     image: "ultrafuzz-test-image",
@@ -1698,7 +2906,15 @@ function providerOptions(client: ReturnType<typeof fakeClient>) {
       [PROVIDER_SECRET_ENV]: "provider-secret-value",
       [AGENT_ENV]: "agent-key-value"
     },
-    clientFactory: () => client as never
+    clientFactory: () => client as never,
+    kimiRemoteQuiescence: {
+      now: () => remoteClock,
+      pause: async (ms: number) => {
+        remoteClock += ms;
+      },
+      settlementMs: 5,
+      timeoutMs: 100
+    }
   };
 }
 
@@ -1777,6 +2993,42 @@ function createProjectFixture() {
   };
 }
 
+function selectKimiSubscription(input: ModalNodeSandboxInput, source: string): void {
+  input.agent_auth = {
+    agent: "KimiAgent",
+    provider: "kimi",
+    auth: { mode: "subscription", config_dir: source }
+  };
+  input.agent_model = "kimi-k3";
+}
+
+function testKimiExecutionLease(
+  source: string,
+  release = vi.fn(async () => undefined),
+  ownerId = KIMI_CREDENTIAL_LEASE_OWNER
+) {
+  return {
+    assertOwner: vi.fn(async () => undefined),
+    credentialLeaseId: KIMI_CREDENTIAL_LEASE_ID,
+    credentialPath: path.join(source, "credentials", "kimi-code.json"),
+    leasePath: path.join(source, "oauth", "modal-execution"),
+    markRotationPossible: vi.fn(async () => undefined),
+    markRotationResolved: vi.fn(async () => undefined),
+    ownerId,
+    prepareAuthCopy: vi.fn(async (env: Record<string, string | undefined> = {}) => {
+      const prepared = await prepareSubscriptionAuthCopy(
+        { provider: "kimi", auth_mode: "subscription", model: "kimi-k3" },
+        { ...env, KIMI_CODE_HOME: source }
+      );
+      if (prepared === undefined) throw new Error("test Kimi subscription snapshot is unavailable");
+      return prepared;
+    }),
+    reconcileCredential: vi.fn(async () => true),
+    source,
+    release
+  };
+}
+
 function createKimiSubscriptionFixture(): string {
   const source = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-kimi-source-"));
   fs.mkdirSync(path.join(source, "credentials"), { recursive: true });
@@ -1809,6 +3061,19 @@ default_effort = "max"
   );
   fs.writeFileSync(path.join(source, "device_id"), "device-test\n", { mode: 0o600 });
   return source;
+}
+
+function openFileDescriptorsBelow(root: string): string[] {
+  return fs
+    .readdirSync("/proc/self/fd")
+    .flatMap((entry) => {
+      try {
+        return [fs.readlinkSync(path.join("/proc/self/fd", entry))];
+      } catch {
+        return [];
+      }
+    })
+    .filter((openedPath) => openedPath === root || openedPath.startsWith(`${root}${path.sep}`));
 }
 
 function createResultArchive(
@@ -1936,6 +3201,7 @@ function fakeSandbox(
 
 function fakeClient(options: { listed?: Sandbox[]; created?: Sandbox; preserveListedTags?: boolean }) {
   const listed = options.listed ?? [];
+  const createdSandboxes: Sandbox[] = [];
   return {
     apps: {
       fromName: vi.fn(async () => ({ appId: "app-one" }))
@@ -1956,17 +3222,57 @@ function fakeClient(options: { listed?: Sandbox[]; created?: Sandbox; preserveLi
         (sandbox as unknown as { setTestTags?: (tags: Record<string, string>) => void }).setTestTags?.(
           params.tags ?? {}
         );
+        createdSandboxes.push(sandbox);
         return sandbox;
       }),
       list: vi.fn(async function* (params: { tags: Record<string, string> }) {
         for (const sandbox of listed) {
-          if (params.tags.execution_identity !== undefined && options.preserveListedTags !== true) {
+          if (options.preserveListedTags === true) {
+            const tags = await sandbox.getTags();
+            if (Object.entries(params.tags).every(([key, value]) => tags[key] === value)) yield sandbox;
+            continue;
+          }
+          if (params.tags.execution_identity !== undefined) {
             (sandbox as unknown as { setTestTags?: (tags: Record<string, string>) => void }).setTestTags?.(params.tags);
           }
           yield sandbox;
+        }
+        for (const sandbox of createdSandboxes) {
+          if (listed.some((candidate) => candidate.sandboxId === sandbox.sandboxId)) continue;
+          const tags = await sandbox.getTags();
+          if (Object.entries(params.tags).every(([key, value]) => tags[key] === value)) yield sandbox;
         }
       })
     },
     close: vi.fn()
   };
+}
+
+function errorGraphText(error: unknown, seen = new Set<unknown>()): string {
+  if (typeof error !== "object" || error === null || seen.has(error)) return String(error);
+  seen.add(error);
+  const values = [error instanceof Error ? error.message : String(error)];
+  if (error instanceof Error && error.cause !== undefined) values.push(errorGraphText(error.cause, seen));
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) values.push(errorGraphText(nested, seen));
+  }
+  return values.join("\n");
+}
+
+function recursiveOwnValueContains(value: unknown, needle: string, seen = new Set<unknown>()): boolean {
+  if (typeof value === "string") return value.includes(needle);
+  if ((typeof value !== "object" && typeof value !== "function") || value === null || seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    let nested: unknown;
+    try {
+      nested = Reflect.get(value, key);
+    } catch {
+      continue;
+    }
+    if (recursiveOwnValueContains(nested, needle, seen)) return true;
+  }
+  return false;
 }

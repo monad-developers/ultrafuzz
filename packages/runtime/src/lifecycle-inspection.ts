@@ -30,6 +30,7 @@ import type {
   RunTimelineFrame,
   RunTimelineValue,
   RuntimeDiagnostic,
+  RuntimeResult,
   WorkflowEventsQueryInput,
   WorkflowEventsValue,
   WorkflowLifecycleEvent,
@@ -40,7 +41,8 @@ import type {
   WorkflowRunQueryInput
 } from "./types.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import { withLinkedWorkflowExecution } from "./workflow-sync.js";
+import { disposeWorkflowExecutionSnapshot, materializeWorkflowExecutionSnapshot } from "./workflow-integrity.js";
 import { acquireWorkflowLifecycleActionLock, acquireWorkflowMutationLock } from "./workflow-mutation.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
@@ -76,11 +78,29 @@ export async function cancelRun(input: CancelRunInput) {
     } finally {
       await releaseInvocationLock();
     }
-    const result = await requestSmithersCancel({
-      smithersRunId: evidence.smithersRunId,
+    const executionSnapshot = materializeWorkflowExecutionSnapshot({
       projectRoot,
-      env: input.env
+      layout: evidence.layout,
+      snapshot: evidence.verifiedControl
     });
+    const cleanupDiagnostics: RuntimeDiagnostic[] = [];
+    let result;
+    try {
+      result = await requestSmithersCancel({
+        smithersRunId: evidence.smithersRunId,
+        projectRoot,
+        env: { ...input.env, ...executionSnapshot.env }
+      });
+    } finally {
+      try {
+        disposeWorkflowExecutionSnapshot(executionSnapshot);
+      } catch (error) {
+        cleanupDiagnostics.push({
+          ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),
+          severity: "warning"
+        });
+      }
+    }
     const confirmed = result.status === "cancelled";
     let persistedStatus: ReturnType<typeof readRunState>["status"] | "pending" = "pending";
     let state: ReturnType<typeof updateRunStatus> | undefined;
@@ -110,15 +130,19 @@ export async function cancelRun(input: CancelRunInput) {
     } finally {
       await releaseCompletionLock();
     }
-    return runtimeResult<CancelRunValue>(true, {
-      run_id: input.runId,
-      workflow_run_id: evidence.smithersRunId,
-      action: "cancel",
-      status: confirmed ? "canceled" : "cancel-requested",
-      submitted: !confirmed,
-      confirmed,
-      run_status: state?.status ?? persistedStatus
-    });
+    return runtimeResult<CancelRunValue>(
+      true,
+      {
+        run_id: input.runId,
+        workflow_run_id: evidence.smithersRunId,
+        action: "cancel",
+        status: confirmed ? "canceled" : "cancel-requested",
+        submitted: !confirmed,
+        confirmed,
+        run_status: state?.status ?? persistedStatus
+      },
+      cleanupDiagnostics
+    );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED");
     if (controllerInvocation !== undefined) {
@@ -169,147 +193,143 @@ async function appendCancelFailureBestEffort(
 
 export async function diagnoseRun(input: WorkflowRunQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<DiagnoseRunValue>(evidence.diagnostics);
-  }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = downgradedSyncDiagnostics(sync);
-  const snapshot = await runSmithersInspectionCommand({
-    args: ["why", evidence.smithersRunId, "--format", "json"],
-    projectRoot,
-    env: input.env
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env, synchronize }) => {
+    const sync = await synchronize();
+    const syncDiagnostics = downgradedSyncDiagnostics(sync);
+    const snapshot = await runSmithersInspectionCommand({
+      args: ["why", evidence.smithersRunId, "--format", "json"],
+      projectRoot,
+      env
+    });
+    if (!snapshot.ok) {
+      return runtimeFailure<DiagnoseRunValue>([
+        ...syncDiagnostics,
+        workflowSnapshotDiagnostic(snapshot, "WORKFLOW_DIAGNOSIS_FAILED")
+      ]);
+    }
+    const payload = commandPayload(snapshot.json);
+    if (payload === undefined) {
+      return runtimeFailure<DiagnoseRunValue>([
+        ...syncDiagnostics,
+        invalidPayloadDiagnostic("WORKFLOW_DIAGNOSIS_INVALID")
+      ]);
+    }
+    const blockerRows = recordArray(payload.blockers);
+    return runtimeResult<DiagnoseRunValue>(
+      true,
+      {
+        run_id: input.runId,
+        workflow_run_id: evidence.smithersRunId,
+        run_status:
+          (sync.ok ? sync.value.status : undefined) ??
+          (fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "unknown"),
+        workflow_status: stringOr(payload.status, "unknown"),
+        summary: publicWorkflowText(stringOr(payload.summary, "no diagnosis available")),
+        current_node_id: nullableString(payload.currentNodeId),
+        blockers: blockerRows.map(adaptBlocker),
+        notes: stringArray(payload.information).map(publicWorkflowText),
+        generated_at: timestampFromMs(nullableNumber(payload.generatedAtMs))
+      },
+      syncDiagnostics
+    );
   });
-  if (!snapshot.ok) {
-    return runtimeFailure<DiagnoseRunValue>([
-      ...syncDiagnostics,
-      workflowSnapshotDiagnostic(snapshot, "WORKFLOW_DIAGNOSIS_FAILED")
-    ]);
-  }
-  const payload = commandPayload(snapshot.json);
-  if (payload === undefined) {
-    return runtimeFailure<DiagnoseRunValue>([
-      ...syncDiagnostics,
-      invalidPayloadDiagnostic("WORKFLOW_DIAGNOSIS_INVALID")
-    ]);
-  }
-  const blockerRows = recordArray(payload.blockers);
-  return runtimeResult<DiagnoseRunValue>(
-    true,
-    {
-      run_id: input.runId,
-      workflow_run_id: evidence.smithersRunId,
-      run_status:
-        (sync.ok ? sync.value.status : undefined) ??
-        (fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "unknown"),
-      workflow_status: stringOr(payload.status, "unknown"),
-      summary: publicWorkflowText(stringOr(payload.summary, "no diagnosis available")),
-      current_node_id: nullableString(payload.currentNodeId),
-      blockers: blockerRows.map(adaptBlocker),
-      notes: stringArray(payload.information).map(publicWorkflowText),
-      generated_at: timestampFromMs(nullableNumber(payload.generatedAtMs))
-    },
-    syncDiagnostics
-  );
+  return completedLinkedWorkflowOperation(execution);
 }
 
 export async function getRunTimeline(input: WorkflowRunQueryInput & { tree?: boolean }) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<RunTimelineValue>(evidence.diagnostics);
-  }
-  const snapshot = await runSmithersInspectionCommand({
-    args: ["timeline", evidence.smithersRunId, ...(input.tree === true ? ["--tree"] : []), "--json"],
-    projectRoot,
-    env: input.env
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    const snapshot = await runSmithersInspectionCommand({
+      args: ["timeline", evidence.smithersRunId, ...(input.tree === true ? ["--tree"] : []), "--json"],
+      projectRoot,
+      env
+    });
+    if (!snapshot.ok) {
+      return runtimeFailure<RunTimelineValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_TIMELINE_FAILED")]);
+    }
+    const payload = commandPayload(snapshot.json);
+    const timeline = payload === undefined ? undefined : objectRecord(payload.timeline);
+    if (timeline === undefined) {
+      return runtimeFailure<RunTimelineValue>([invalidPayloadDiagnostic("WORKFLOW_TIMELINE_INVALID")]);
+    }
+    const frames = recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? []);
+    const lineage: RunTimelineBranch[] = [];
+    collectTimelineLineage(timeline, 0, lineage);
+    return runtimeResult<RunTimelineValue>(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      tree: input.tree === true,
+      branch: nullableString(timeline.branch),
+      frames,
+      latest_frame: frames.length === 0 ? null : Math.max(...frames.map((frame) => frame.frame)),
+      lineage
+    });
   });
-  if (!snapshot.ok) {
-    return runtimeFailure<RunTimelineValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_TIMELINE_FAILED")]);
-  }
-  const payload = commandPayload(snapshot.json);
-  const timeline = payload === undefined ? undefined : objectRecord(payload.timeline);
-  if (timeline === undefined) {
-    return runtimeFailure<RunTimelineValue>([invalidPayloadDiagnostic("WORKFLOW_TIMELINE_INVALID")]);
-  }
-  const frames = recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? []);
-  const lineage: RunTimelineBranch[] = [];
-  collectTimelineLineage(timeline, 0, lineage);
-  return runtimeResult<RunTimelineValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    tree: input.tree === true,
-    branch: nullableString(timeline.branch),
-    frames,
-    latest_frame: frames.length === 0 ? null : Math.max(...frames.map((frame) => frame.frame)),
-    lineage
-  });
+  return completedLinkedWorkflowOperation(execution);
 }
 
 export async function listRunSnapshots(input: WorkflowRunQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<RunSnapshotsValue>(evidence.diagnostics);
-  }
-  const snapshot = await runSmithersInspectionCommand({
-    args: ["snapshots", evidence.smithersRunId, "--json"],
-    projectRoot,
-    env: input.env
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    const snapshot = await runSmithersInspectionCommand({
+      args: ["snapshots", evidence.smithersRunId, "--json"],
+      projectRoot,
+      env
+    });
+    if (!snapshot.ok) {
+      return runtimeFailure<RunSnapshotsValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_SNAPSHOTS_FAILED")]);
+    }
+    const payload = commandPayload(snapshot.json);
+    if (payload === undefined || !Array.isArray(payload.snapshots)) {
+      return runtimeFailure<RunSnapshotsValue>([invalidPayloadDiagnostic("WORKFLOW_SNAPSHOTS_INVALID")]);
+    }
+    return runtimeResult<RunSnapshotsValue>(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      snapshots: recordArray(payload.snapshots).map(adaptSnapshot)
+    });
   });
-  if (!snapshot.ok) {
-    return runtimeFailure<RunSnapshotsValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_SNAPSHOTS_FAILED")]);
-  }
-  const payload = commandPayload(snapshot.json);
-  if (payload === undefined || !Array.isArray(payload.snapshots)) {
-    return runtimeFailure<RunSnapshotsValue>([invalidPayloadDiagnostic("WORKFLOW_SNAPSHOTS_INVALID")]);
-  }
-  return runtimeResult<RunSnapshotsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    snapshots: recordArray(payload.snapshots).map(adaptSnapshot)
-  });
+  return completedLinkedWorkflowOperation(execution);
 }
 
 export async function queryWorkflowEvents(input: WorkflowEventsQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
-  }
-  const limit = boundedEventLimit(input.limit);
-  const events: WorkflowLifecycleEvent[] = [];
-  let stream: SmithersStreamResult;
-  try {
-    stream = await streamSmithersCommand({
-      args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
-      projectRoot,
-      env: input.env,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      // One line past the limit so an exact-limit result is not called truncated.
-      maxLines: limit + 1,
-      onLine: (line) => {
-        const event = adaptEventLine(line);
-        if (event !== undefined) {
-          events.push(event);
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    const limit = boundedEventLimit(input.limit);
+    const events: WorkflowLifecycleEvent[] = [];
+    let stream: SmithersStreamResult;
+    try {
+      stream = await streamSmithersCommand({
+        args: workflowEventsArgs(evidence.smithersRunId, input, { watch: false, limit }),
+        projectRoot,
+        env,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        // One line past the limit so an exact-limit result is not called truncated.
+        maxLines: limit + 1,
+        onLine: (line) => {
+          const event = adaptEventLine(line);
+          if (event !== undefined) {
+            events.push(event);
+          }
         }
-      }
+      });
+    } catch (error) {
+      return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
+    }
+    const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_QUERY_FAILED");
+    if (streamFailure !== undefined) {
+      return runtimeFailure<WorkflowEventsValue>([streamFailure]);
+    }
+    const truncated = stream.truncated && stream.lines > limit;
+    return runtimeResult<WorkflowEventsValue>(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      events: events.slice(0, limit),
+      limit,
+      truncated: truncated || events.length > limit
     });
-  } catch (error) {
-    return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_QUERY_FAILED")]);
-  }
-  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_QUERY_FAILED");
-  if (streamFailure !== undefined) {
-    return runtimeFailure<WorkflowEventsValue>([streamFailure]);
-  }
-  const truncated = stream.truncated && stream.lines > limit;
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: events.slice(0, limit),
-    limit,
-    truncated: truncated || events.length > limit
   });
+  return completedLinkedWorkflowOperation(execution);
 }
 
 /**
@@ -320,109 +340,119 @@ export async function watchWorkflowEvents(
   input: WorkflowEventsQueryInput & { intervalSeconds?: number; onEvent: (event: WorkflowLifecycleEvent) => void }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowEventsValue>(evidence.diagnostics);
-  }
-  const limit = boundedEventLimit(input.limit);
-  let observed = 0;
-  let stream: SmithersStreamResult;
-  try {
-    stream = await streamSmithersCommand({
-      args: [
-        ...workflowEventsArgs(evidence.smithersRunId, input, { watch: true, limit }),
-        ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
-      ],
-      projectRoot,
-      env: input.env,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      maxLines: MAX_WATCH_LINES,
-      onLine: (line) => {
-        const event = adaptEventLine(line);
-        if (event !== undefined) {
-          observed += 1;
-          input.onEvent(event);
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    const limit = boundedEventLimit(input.limit);
+    let observed = 0;
+    let stream: SmithersStreamResult;
+    try {
+      stream = await streamSmithersCommand({
+        args: [
+          ...workflowEventsArgs(evidence.smithersRunId, input, { watch: true, limit }),
+          ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
+        ],
+        projectRoot,
+        env,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        maxLines: MAX_WATCH_LINES,
+        onLine: (line) => {
+          const event = adaptEventLine(line);
+          if (event !== undefined) {
+            observed += 1;
+            input.onEvent(event);
+          }
         }
-      }
+      });
+    } catch (error) {
+      return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_WATCH_FAILED")]);
+    }
+    const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_WATCH_FAILED");
+    if (streamFailure !== undefined) {
+      return runtimeFailure<WorkflowEventsValue>([streamFailure]);
+    }
+    return runtimeResult<WorkflowEventsValue>(true, {
+      run_id: input.runId,
+      workflow_run_id: evidence.smithersRunId,
+      events: [],
+      limit: observed,
+      truncated: stream.truncated
     });
-  } catch (error) {
-    return runtimeFailure<WorkflowEventsValue>([smithersDiagnostic(error, "WORKFLOW_EVENTS_WATCH_FAILED")]);
-  }
-  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_EVENTS_WATCH_FAILED");
-  if (streamFailure !== undefined) {
-    return runtimeFailure<WorkflowEventsValue>([streamFailure]);
-  }
-  return runtimeResult<WorkflowEventsValue>(true, {
-    run_id: input.runId,
-    workflow_run_id: evidence.smithersRunId,
-    events: [],
-    limit: observed,
-    truncated: stream.truncated
   });
+  return completedLinkedWorkflowOperation(execution);
 }
 
 export async function getWorkflowNode(input: WorkflowNodeQueryInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowNodeValue>(evidence.diagnostics);
-  }
-  const snapshot = await runSmithersInspectionCommand({
-    args: workflowNodeArgs(evidence.smithersRunId, input),
-    projectRoot,
-    env: input.env
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    const snapshot = await runSmithersInspectionCommand({
+      args: workflowNodeArgs(evidence.smithersRunId, input),
+      projectRoot,
+      env
+    });
+    if (!snapshot.ok) {
+      return runtimeFailure<WorkflowNodeValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_NODE_FAILED")]);
+    }
+    const value = adaptNodeDetail(input, evidence.smithersRunId, commandPayload(snapshot.json));
+    if (value === undefined) {
+      return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
+    }
+    return runtimeResult<WorkflowNodeValue>(true, value);
   });
-  if (!snapshot.ok) {
-    return runtimeFailure<WorkflowNodeValue>([workflowSnapshotDiagnostic(snapshot, "WORKFLOW_NODE_FAILED")]);
-  }
-  const value = adaptNodeDetail(input, evidence.smithersRunId, commandPayload(snapshot.json));
-  if (value === undefined) {
-    return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
-  }
-  return runtimeResult<WorkflowNodeValue>(true, value);
+  return completedLinkedWorkflowOperation(execution);
 }
 
 export async function watchWorkflowNode(
   input: WorkflowNodeQueryInput & { intervalSeconds?: number; onSnapshot: (value: WorkflowNodeValue) => void }
 ) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<WorkflowNodeValue>(evidence.diagnostics);
-  }
-  let last: WorkflowNodeValue | undefined;
-  let stream: SmithersStreamResult;
-  try {
-    stream = await streamSmithersCommand({
-      args: [
-        ...workflowNodeArgs(evidence.smithersRunId, input, "jsonl"),
-        "--watch",
-        ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
-      ],
-      projectRoot,
-      env: input.env,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-      maxLines: MAX_WATCH_LINES,
-      onLine: (line) => {
-        const parsed = parseJsonLine(line);
-        const value = adaptNodeDetail(input, evidence.smithersRunId, commandPayload(parsed));
-        if (value !== undefined) {
-          last = value;
-          input.onSnapshot(value);
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env }) => {
+    let last: WorkflowNodeValue | undefined;
+    let stream: SmithersStreamResult;
+    try {
+      stream = await streamSmithersCommand({
+        args: [
+          ...workflowNodeArgs(evidence.smithersRunId, input, "jsonl"),
+          "--watch",
+          ...(input.intervalSeconds === undefined ? [] : ["--interval", String(input.intervalSeconds)])
+        ],
+        projectRoot,
+        env,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        maxLines: MAX_WATCH_LINES,
+        onLine: (line) => {
+          const parsed = parseJsonLine(line);
+          const value = adaptNodeDetail(input, evidence.smithersRunId, commandPayload(parsed));
+          if (value !== undefined) {
+            last = value;
+            input.onSnapshot(value);
+          }
         }
-      }
-    });
-  } catch (error) {
-    return runtimeFailure<WorkflowNodeValue>([smithersDiagnostic(error, "WORKFLOW_NODE_WATCH_FAILED")]);
-  }
-  const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_NODE_WATCH_FAILED");
-  if (streamFailure !== undefined) {
-    return runtimeFailure<WorkflowNodeValue>([streamFailure]);
-  }
-  if (last === undefined) {
-    return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
-  }
-  return runtimeResult<WorkflowNodeValue>(true, last);
+      });
+    } catch (error) {
+      return runtimeFailure<WorkflowNodeValue>([smithersDiagnostic(error, "WORKFLOW_NODE_WATCH_FAILED")]);
+    }
+    const streamFailure = streamFailureDiagnostic(stream, "WORKFLOW_NODE_WATCH_FAILED");
+    if (streamFailure !== undefined) {
+      return runtimeFailure<WorkflowNodeValue>([streamFailure]);
+    }
+    if (last === undefined) {
+      return runtimeFailure<WorkflowNodeValue>([invalidPayloadDiagnostic("WORKFLOW_NODE_INVALID")]);
+    }
+    return runtimeResult<WorkflowNodeValue>(true, last);
+  });
+  return completedLinkedWorkflowOperation(execution);
+}
+
+function completedLinkedWorkflowOperation<T>(
+  execution:
+    | { ok: true; value: RuntimeResult<T>; diagnostics: RuntimeDiagnostic[] }
+    | { ok: false; diagnostics: RuntimeDiagnostic[] }
+): RuntimeResult<T> {
+  if (!execution.ok) return runtimeFailure<T>(execution.diagnostics);
+  if (execution.diagnostics.length === 0) return execution.value;
+  return {
+    ...execution.value,
+    diagnostics: [...execution.value.diagnostics, ...execution.diagnostics]
+  };
 }
 
 /**

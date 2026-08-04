@@ -24,6 +24,7 @@ import type { Dirent } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { KimiAgent as SmithersKimiAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type KimiAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -100,6 +101,7 @@ export function createKimiAgent(options: KimiTaskOptions = {}): SmithersKimiAgen
   return new KimiCode029Agent({
     ...(options.model === undefined ? {} : { model: options.model }),
     extraArgs: kimiExtraArgs(options),
+    env: workflowControlChildEnvironment(),
     ...kimiAuthOptions(reasoningEffort)
   });
 }

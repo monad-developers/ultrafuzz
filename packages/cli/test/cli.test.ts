@@ -10,6 +10,7 @@ import { artifactContractDefinition, layoutForRunRoot, writeArtifactManifest } f
 import AdmZip from "adm-zip";
 
 import { runCli } from "../src/index.js";
+import { installPinnedFakeRunner } from "./helpers/pinned-fake-runner.js";
 
 interface Capture {
   stdout: string;
@@ -30,15 +31,15 @@ function tempProject(): string {
 }
 
 function fakeSmithersEnv(project: string): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const smithers = path.join(binDir, "smithers");
-  fs.writeFileSync(
-    smithers,
+  installPinnedFakeRunner(
+    project,
     [
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
       'case "$1" in',
+      "  inspect)",
+      '    printf \'{"ok":true,"data":{"run":{"id":"%s"},"steps":[]}}\\n\' "$2"',
+      "    ;;",
       "  replay)",
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-replayed\"}'",
       "    ;;",
@@ -60,13 +61,10 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "    ;;",
       "esac",
       ""
-    ].join("\n"),
-    "utf8"
+    ].join("\n")
   );
-  fs.chmodSync(smithers, 0o755);
   return {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
+    PATH: process.env.PATH ?? "",
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
   };
 }
@@ -101,7 +99,12 @@ nodes:
   );
 }
 
-async function cli(project: string, argv: string[], env: Record<string, string | undefined> = {}): Promise<Capture> {
+async function cli(
+  project: string,
+  argv: string[],
+  env: Record<string, string | undefined> = {},
+  observeStdout?: (stdout: string) => void
+): Promise<Capture> {
   let stdout = "";
   let stderr = "";
   const code = await runCli([...argv, "--project", project], {
@@ -110,6 +113,7 @@ async function cli(project: string, argv: string[], env: Record<string, string |
     stdout: {
       write: (chunk: string | Uint8Array) => {
         stdout += String(chunk);
+        observeStdout?.(stdout);
         return true;
       }
     },
@@ -418,11 +422,25 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   };
   fs.writeFileSync(statePath, `${JSON.stringify(restored, null, 2)}\n`, "utf8");
 
-  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  let firstWatchLineObserved = false;
+  let releaseFirstWatchLine!: () => void;
+  const firstWatchLine = new Promise<void>((resolve) => {
+    releaseFirstWatchLine = resolve;
+  });
+  const firstWatchLineTimeout = setTimeout(releaseFirstWatchLine, 30_000);
+  const watching = cli(project, ["status", runData.run_id, "--watch", "--interval", "1", "--json"], env, (stdout) => {
+    if (!firstWatchLineObserved && stdout.includes("\n")) {
+      firstWatchLineObserved = true;
+      clearTimeout(firstWatchLineTimeout);
+      releaseFirstWatchLine();
+    }
+  });
+  await firstWatchLine;
   const terminalState = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
   fs.writeFileSync(statePath, `${JSON.stringify({ ...terminalState, status: "succeeded" }, null, 2)}\n`, "utf8");
   const watched = await watching;
+  clearTimeout(firstWatchLineTimeout);
+  assert.equal(firstWatchLineObserved, true, "status --watch did not emit its initial running snapshot");
   assert.equal(watched.code, 0, watched.stderr);
   const watchedLines = watched.stdout.split("\n").filter(Boolean);
   assert.equal(watchedLines.length, 2);

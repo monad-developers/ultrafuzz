@@ -25,13 +25,16 @@ import type {
 import { summarizeRunProgress } from "./run-progress.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
-import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import { withLinkedWorkflowExecution } from "./workflow-sync.js";
 import { runsRootForProject } from "./validate.js";
 
 export async function listRuns(input: { projectRoot: string; env?: Record<string, string | undefined> }) {
   const projectRoot = path.resolve(input.projectRoot);
   const runsRoot = await runsRootForProject(projectRoot);
+  // `ps --all` is intentionally project-global: it includes workflow runs that
+  // have no Ultrafuzz product run or linked control evidence, so there is no
+  // single verified execution snapshot that could authorize this command.
+  // Run-specific surfaces below must never inherit this live-runner boundary.
   const workflowSnapshot = await runSmithersInspectionCommand({
     args: ["ps", "--all", "--format", "json"],
     projectRoot,
@@ -86,35 +89,36 @@ export async function getRunStatus(input: {
       }
     ]);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
-  const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({
-        ...diagnostic,
-        severity: "warning" as const
-      }));
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env, synchronize }) => ({
+    sync: await synchronize(),
+    workflowSnapshots: {
+      run_id: evidence.smithersRunId,
+      inspect: await runSmithersInspectionCommand({
+        args: ["inspect", evidence.smithersRunId, "--format", "json", "--full-output"],
+        projectRoot,
+        env
+      }),
+      events: await runSmithersInspectionCommand({
+        args: ["events", evidence.smithersRunId, "--limit", "200", "--format", "json"],
+        projectRoot,
+        env
+      })
+    }
+  }));
+  const syncDiagnostics = [
+    ...(execution.ok ? execution.value.sync.diagnostics : execution.diagnostics),
+    ...(execution.ok ? execution.diagnostics : [])
+  ].map((diagnostic) => ({
+    ...diagnostic,
+    ...(execution.ok && execution.value.sync.ok ? {} : { severity: "warning" as const })
+  }));
+  const workflowSnapshots = execution.ok ? execution.value.workflowSnapshots : undefined;
   const base = readRunListEntry(layout.root, layout.runId);
   const state = fs.existsSync(layout.statePath) ? readRunState(layout) : undefined;
   const events = fs.existsSync(layout.eventsPath)
     ? fs.readFileSync(layout.eventsPath, "utf8").split(/\r?\n/u).filter(Boolean).length
     : 0;
   const metadata = readJsonIfExists<Record<string, unknown>>(layout.runMetadataPath);
-  const workflowRunId = linkedWorkflowRunId(base, metadata);
-  const workflowSnapshots = workflowRunId
-    ? {
-        run_id: workflowRunId,
-        inspect: await runSmithersInspectionCommand({
-          args: ["inspect", workflowRunId, "--format", "json", "--full-output"],
-          projectRoot,
-          env: input.env
-        }),
-        events: await runSmithersInspectionCommand({
-          args: ["events", workflowRunId, "--limit", "200", "--format", "json"],
-          projectRoot,
-          env: input.env
-        })
-      }
-    : undefined;
   return runtimeResult(
     true,
     {
@@ -126,13 +130,13 @@ export async function getRunStatus(input: {
       metadata: publicRunMetadata(metadata),
       ...(workflowSnapshots ? { workflow: workflowSummary(workflowSnapshots) } : {})
     },
-    workflowSnapshots
-      ? [
+    workflowSnapshots === undefined
+      ? syncDiagnostics
+      : [
           ...syncDiagnostics,
           ...diagnosticsForWorkflowSnapshot(workflowSnapshots.inspect, "WORKFLOW_INSPECT_FAILED"),
           ...diagnosticsForWorkflowSnapshot(workflowSnapshots.events, "WORKFLOW_EVENTS_FAILED")
         ]
-      : syncDiagnostics
   );
 }
 
@@ -153,25 +157,31 @@ export async function getRunHealth(input: {
     ]);
   }
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<RunHealthValue>(evidence.diagnostics);
+  const execution = await withLinkedWorkflowExecution(input, async ({ evidence, env, synchronize }) => ({
+    evidence,
+    sync: await synchronize(),
+    snapshot: await runSmithersInspectionCommand({
+      args: [
+        "status",
+        evidence.smithersRunId,
+        ...(input.windowMinutes === undefined ? [] : ["--window", String(input.windowMinutes)]),
+        "--format",
+        "json"
+      ],
+      projectRoot,
+      env
+    })
+  }));
+  if (!execution.ok) {
+    return runtimeFailure<RunHealthValue>(execution.diagnostics);
   }
-  const sync = await synchronizeLinkedWorkflowRun({ projectRoot, runId: input.runId, env: input.env });
+  const { evidence, sync, snapshot } = execution.value;
   const syncDiagnostics = sync.ok
-    ? sync.diagnostics
-    : sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const }));
-  const snapshot = await runSmithersInspectionCommand({
-    args: [
-      "status",
-      evidence.smithersRunId,
-      ...(input.windowMinutes === undefined ? [] : ["--window", String(input.windowMinutes)]),
-      "--format",
-      "json"
-    ],
-    projectRoot,
-    env: input.env
-  });
+    ? [...sync.diagnostics, ...execution.diagnostics]
+    : [
+        ...sync.diagnostics.map((diagnostic) => ({ ...diagnostic, severity: "warning" as const })),
+        ...execution.diagnostics
+      ];
   if (!snapshot.ok) {
     return runtimeFailure<RunHealthValue>([
       ...syncDiagnostics,
@@ -279,28 +289,6 @@ function readRunListEntry(runRoot: string, runId: string): RunListEntry {
     ...(state?.source_run_id ? { source_run_id: state.source_run_id } : {}),
     workflow_ids: workflowIdsFromMetadata(metadata)
   };
-}
-
-function linkedWorkflowRunId(entry: RunListEntry, metadata: Record<string, unknown> | undefined): string | undefined {
-  const workflow = metadata?.workflow;
-  if (workflow && typeof workflow === "object") {
-    const runId =
-      stringField(workflow as Record<string, unknown>, "run_id") ??
-      stringField(workflow as Record<string, unknown>, "workflowRunId");
-    if (runId !== undefined) {
-      return runId;
-    }
-  }
-  const smithers = metadata?.smithers;
-  if (
-    smithers &&
-    typeof smithers === "object" &&
-    "workflowRunId" in smithers &&
-    typeof smithers.workflowRunId === "string"
-  ) {
-    return smithers.workflowRunId;
-  }
-  return entry.workflow_ids[0];
 }
 
 function workflowRunsWithProductEvidence(workflowJson: unknown, productRuns: RunListEntry[]): RunListValue["runs"] {

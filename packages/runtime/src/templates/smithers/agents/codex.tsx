@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -8,13 +9,15 @@ type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<stri
 export type CodexTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
+  const auth = codexAuthOptions();
   return new SmithersCodexAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     sandbox: "workspace-write",
     skipGitRepoCheck: true,
-    ...codexAuthOptions()
+    ...auth,
+    env: { ...workflowControlChildEnvironment(), ...auth.env }
   });
 }
 

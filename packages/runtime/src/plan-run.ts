@@ -1,4 +1,6 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import lockfile from "proper-lockfile";
@@ -6,17 +8,25 @@ import lockfile from "proper-lockfile";
 import {
   appendEvent,
   assertNoSymlinkComponents,
+  assertPathInside,
   assertRegularFileInside,
+  createEventRecord,
+  createEventQueryFacadeInputs,
   createInitialRunState,
   artifactContractDefinition,
   createRunLayout,
   getNodeArtifactDir,
   layoutForRunRoot,
+  readRunState,
+  replayEvents,
+  RUN_LAYOUT_SCHEMA_VERSION,
   safeResolveInside,
   updateNodeState,
+  validateSafeId,
   writeArtifactManifest,
   writeFileDurable,
   writeJsonDurable,
+  type NodeState,
   type NodeStateInput,
   type RunLayout
 } from "@ultrafuzz/artifacts";
@@ -29,13 +39,16 @@ import {
   loadPromptCatalog,
   RENDERED_PROMPT_FILE,
   renderPrompt,
-  writeRenderedPrompt,
   type PromptCatalog,
   type PromptCatalogEntry,
   type PromptConcreteNode,
   type PromptGraphNode
 } from "@ultrafuzz/prompts";
-import { loadReferenceCatalog, materializeReferenceArtifacts } from "@ultrafuzz/references";
+import {
+  loadReferenceCatalog,
+  materializeReferenceArtifacts,
+  RUN_REFERENCE_MANIFEST_FILE
+} from "@ultrafuzz/references";
 import {
   expandTopology,
   fingerprintGraph,
@@ -65,11 +78,20 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 const PROMPT_REPAIR_LOCK = ".prompt-repair";
+const START_PREPARATION_SCHEMA_VERSION = "ultrafuzz.start-preparation.v1" as const;
+const START_PREPARATION_FILE = "start-preparation.json";
+const START_PREPARATION_INTENT_SCHEMA_VERSION = "ultrafuzz.start-preparation-intent.v1" as const;
+const START_PREPARATION_INTENT_FILE = "start-preparation-intent.json";
+const START_PREPARATION_LOCK = ".start-preparation-lock";
+const START_PREPARATION_LOCK_OWNER = "owner.json";
+const START_PREPARATION_LOCK_STALE_MS = 30 * 60 * 1_000;
+const START_PREPARATION_OWNER_GRACE_MS = 2_000;
 
-export async function planRun(input: PlanRunInput) {
+export async function planRun(input: PlanRunInput, options: { prepareWorkflowStart?: boolean } = {}) {
   const projectRoot = path.resolve(input.projectRoot);
   const validation = await validateProject(input);
   if (!validation.ok || !validation.value) {
@@ -82,13 +104,19 @@ export async function planRun(input: PlanRunInput) {
   }
   applyWorkflowRunOverrides(resolved.config, input);
 
-  const runId = input.runId ?? generateRunId(input.mode ?? "run");
+  let runId: string;
+  try {
+    runId = validateSafeId(input.runId ?? generateRunId(input.mode ?? "run"), "run ID");
+    if (input.sourceRunId !== undefined) validateSafeId(input.sourceRunId, "source run ID");
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_ID_INVALID")]);
+  }
   const configFingerprint = sha256Stable(resolved.config);
   const redacted = redactResolvedConfig(resolved.config);
   const redactedConfigFingerprint = sha256Stable(redacted.config);
   const outputRoot = outputRootForConfig(projectRoot, resolved.config);
   const runRoot = path.join(outputRoot, runId);
-  if (fs.existsSync(runRoot)) {
+  if (fs.existsSync(runRoot) && options.prepareWorkflowStart !== true) {
     return runtimeFailure<PlanRunValue>([
       {
         code: "RUN_ALREADY_EXISTS",
@@ -131,110 +159,978 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
   }
   const graphFingerprint = fingerprintGraph(expandedGraph);
-  const createdAt = new Date().toISOString();
-  const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
-    id: node.id,
-    logicalNodeId: node.logical_id,
-    artifactDir: node.artifact_dir,
-    outputs: node.outputs,
-    attemptIndex: node.loop.attempt_index,
-    loopIndex: node.loop.index,
-    modelId: node.model_fanout[0]?.model_profile_id,
-    model: node.model_fanout[0]?.model_name,
-    modelIndex: node.model_fanout[0]?.model_index,
-    waitSince: createdAt,
-    waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
-    nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
-  }));
-  const initialState = createInitialRunState({
-    runId,
-    ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
-    graphFingerprint,
-    configFingerprint,
-    createdAt,
-    workflowDeadlineSeconds: resolved.config.run.workflowDeadlineSeconds,
-    controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
-    requestedConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
-    nodes: stateNodes
-  });
+  let createdAt = new Date().toISOString();
+  let releaseStartPreparation: (() => Promise<void>) | undefined;
+  let preparedLayout: RunLayout | undefined;
+  if (options.prepareWorkflowStart === true) {
+    try {
+      preparedLayout = ensureStartPreparationRoot(projectRoot, outputRoot, runId);
+      releaseStartPreparation = await acquireWorkflowStartPreparationLock(preparedLayout);
+      const intent = ensureStartPreparationIntent({
+        input,
+        projectRoot,
+        layout: preparedLayout,
+        graph,
+        expandedGraph,
+        graphFingerprint,
+        configFingerprint,
+        redactedConfigFingerprint,
+        createdAt
+      });
+      createdAt = intent.created_at;
+    } catch (error) {
+      if (releaseStartPreparation !== undefined) await releaseStartPreparation();
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "START_PREPARATION_INVALID")]);
+    }
+  }
 
-  let layout;
   try {
-    layout = createRunLayout({
-      projectRoot,
-      outputRoot,
+    if (
+      options.prepareWorkflowStart === true &&
+      preparedLayout !== undefined &&
+      startPreparationExists(preparedLayout)
+    ) {
+      return recoverPreparedStartPlan({
+        input,
+        projectRoot,
+        runId,
+        outputRoot,
+        configFingerprint,
+        redactedConfigFingerprint,
+        resolvedConfig: resolved.config,
+        validation: validation.value
+      });
+    }
+    if (preparedLayout !== undefined) assertIncompletePreparationRootClosure(preparedLayout);
+    const stateNodes = graph.nodes.map<NodeStateInput>((node) => ({
+      id: node.id,
+      logicalNodeId: node.logical_id,
+      artifactDir: node.artifact_dir,
+      outputs: node.outputs,
+      attemptIndex: node.loop.attempt_index,
+      loopIndex: node.loop.index,
+      modelId: node.model_fanout[0]?.model_profile_id,
+      model: node.model_fanout[0]?.model_name,
+      modelIndex: node.model_fanout[0]?.model_index,
+      waitSince: createdAt,
+      waitReason: node.depends_on.length > 0 ? "dependency" : "ready",
+      nextEligibleAction: node.depends_on.length > 0 ? "dependency-complete" : "dispatch"
+    }));
+    const initialState = createInitialRunState({
       runId,
-      sourceRunId: input.sourceRunId,
-      createdAt,
-      resolvedConfigToml: serializeRedactedResolvedConfigToml(redacted),
-      configRedactions: redacted.manifest,
-      graph,
+      ...(input.sourceRunId ? { sourceRunId: input.sourceRunId } : {}),
       graphFingerprint,
       configFingerprint,
-      state: initialState,
-      runMetadata: {
+      createdAt,
+      workflowDeadlineSeconds: resolved.config.run.workflowDeadlineSeconds,
+      controllerLeaseSeconds: resolved.config.run.controllerLeaseSeconds,
+      requestedConcurrency: input.maxConcurrency ?? resolved.config.run.maxParallelAgents,
+      nodes: stateNodes
+    });
+
+    let layout;
+    try {
+      const prospectiveLayout = preparedLayout ?? layoutForRunRoot(runRoot, runId);
+      if (pathEntryExists(prospectiveLayout.root)) assertPreparedLayoutPathsSafe(prospectiveLayout);
+      layout = createRunLayout({
+        projectRoot,
+        outputRoot,
+        runId,
+        sourceRunId: input.sourceRunId,
+        createdAt,
+        resolvedConfigToml: serializeRedactedResolvedConfigToml(redacted),
+        configRedactions: redacted.manifest,
+        graph,
+        graphFingerprint,
+        configFingerprint,
+        state: initialState,
+        runMetadata: {
+          mode: input.mode ?? "run",
+          workflow_ids: [],
+          redacted_config_fingerprint: redactedConfigFingerprint,
+          forge_guard: forgeGuardMetadata(resolved.config, false)
+        }
+      });
+      assertPreparedRunLayout({
+        layout,
+        runId,
+        sourceRunId: input.sourceRunId,
+        createdAt,
+        resolvedConfigToml: serializeRedactedResolvedConfigToml(redacted),
+        configRedactions: redacted.manifest,
+        graph,
+        graphFingerprint,
+        configFingerprint,
+        redactedConfigFingerprint,
+        initialState,
         mode: input.mode ?? "run",
-        workflow_ids: [],
-        redacted_config_fingerprint: redactedConfigFingerprint,
-        forge_guard: forgeGuardMetadata(resolved.config, false)
-      }
-    });
-  } catch (error) {
-    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
-  }
+        forgeGuard: forgeGuardMetadata(resolved.config, false)
+      });
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
+    }
 
-  try {
-    materializeReferenceNodesForPlan({ projectRoot, graph, layout });
-  } catch (error) {
-    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
-  }
+    try {
+      materializeReferenceNodesForPlan({ projectRoot, graph, layout, initialState, createdAt });
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
+    }
 
-  let renderedPrompts: RenderedPromptPlan[];
-  try {
-    renderedPrompts = renderPromptsForPlan({
-      catalog,
+    let renderedPrompts: RenderedPromptPlan[];
+    try {
+      renderedPrompts = renderPromptsForPlan({
+        catalog,
+        graph,
+        layout,
+        projectRoot,
+        resolvedConfig: resolved.config,
+        runId
+      });
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
+    }
+
+    const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+    const planDocument = {
+      schema_version: RUNTIME_SCHEMA_VERSION,
+      run_id: runId,
+      mode: input.mode ?? "run",
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
+      execution: resolved.config.execution,
+      topology: validation.value.topology,
+      rendered_prompts: persistedRenderedPrompts,
+      policy_posture: Object.fromEntries(
+        Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
+      )
+    };
+    writePreparedPlanFile(layout, path.join(layout.root, "plan.json"), planDocument, "persisted run plan");
+    assertPreparedPlanningClosure(layout, graph, renderedPrompts, persistedRenderedPrompts);
+
+    const value: PlanRunValue = {
+      run_id: runId,
+      run_root: layout.root,
+      ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
       graph,
+      expanded_graph: expandedGraph,
+      graph_fingerprint: graphFingerprint,
+      config_fingerprint: configFingerprint,
+      redacted_config_fingerprint: redactedConfigFingerprint,
+      output_root: outputRoot,
+      state_nodes: stateNodes,
+      resolved_config: resolved.config,
+      validation: validation.value,
       layout,
-      projectRoot,
-      resolvedConfig: resolved.config,
-      runId
-    });
+      rendered_prompts: renderedPrompts
+    };
+    if (options.prepareWorkflowStart === true) writeStartPreparation(input, value);
+    return runtimeResult(true, value);
   } catch (error) {
-    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
+    if (options.prepareWorkflowStart === true) {
+      return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "START_PREPARATION_INVALID")]);
+    }
+    throw error;
+  } finally {
+    if (releaseStartPreparation !== undefined) await releaseStartPreparation();
+  }
+}
+
+interface StartPreparationDocument {
+  schema_version: typeof START_PREPARATION_SCHEMA_VERSION;
+  run_id: string;
+  run_root: string;
+  project_root: string;
+  source_commit: string;
+  request_fingerprint: string;
+  plan_sha256: string;
+  graph_fingerprint: string;
+  config_fingerprint: string;
+  redacted_config_fingerprint: string;
+  source_run_id?: string;
+  graph: PlannedGraph;
+  expanded_graph: ExpandedGraph;
+  state_nodes: NodeStateInput[];
+  rendered_prompts: RenderedPromptPlan[];
+  start_command: {
+    project_root: string;
+    logs_dir: string;
+    max_concurrency: number;
+    controller_lease_seconds: number;
+  };
+}
+
+interface StartPreparationIntentDocument {
+  schema_version: typeof START_PREPARATION_INTENT_SCHEMA_VERSION;
+  run_id: string;
+  run_root: string;
+  project_root: string;
+  source_commit: string;
+  request_fingerprint: string;
+  graph_fingerprint: string;
+  graph_sha256: string;
+  expanded_graph_sha256: string;
+  config_fingerprint: string;
+  redacted_config_fingerprint: string;
+  created_at: string;
+}
+
+function ensureStartPreparationRoot(projectRoot: string, outputRoot: string, runId: string): RunLayout {
+  const resolvedOutputRoot = path.resolve(outputRoot);
+  const safeRunId = validateSafeId(runId, "run ID");
+  const runRoot = path.resolve(resolvedOutputRoot, safeRunId);
+  assertPathInside(resolvedOutputRoot, runRoot, "prepared workflow run root");
+  if (path.dirname(runRoot) !== resolvedOutputRoot) {
+    throw new Error("prepared workflow run root must be a direct child of the output root");
+  }
+  assertNoSymlinkComponents(projectRoot, resolvedOutputRoot, "workflow start output root");
+  fs.mkdirSync(resolvedOutputRoot, { recursive: true });
+  assertNoSymlinkComponents(projectRoot, resolvedOutputRoot, "workflow start output root");
+  try {
+    fs.mkdirSync(runRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  assertNoSymlinkComponents(projectRoot, runRoot, "prepared workflow run root");
+  const stat = fs.lstatSync(runRoot);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync.native(runRoot) !== runRoot) {
+    throw new Error("prepared workflow run root is not an anchored directory");
+  }
+  return layoutForRunRoot(runRoot, safeRunId);
+}
+
+export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Promise<() => Promise<void>> {
+  const lockPath = path.join(layout.root, START_PREPARATION_LOCK);
+  assertNoSymlinkComponents(layout.root, lockPath, "workflow start preparation lock");
+  const deadline = Date.now() + 5 * 60 * 1_000;
+  let release: (() => Promise<void>) | undefined;
+  while (release === undefined) {
+    try {
+      reclaimTerminatedStartPreparationLock(layout, lockPath);
+      release = await lockfile.lock(layout.root, {
+        lockfilePath: lockPath,
+        realpath: false,
+        stale: START_PREPARATION_LOCK_STALE_MS,
+        update: 30_000,
+        retries: 0
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ELOCKED" && code !== "ENOENT") throw error;
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
+  const owner = startPreparationLockOwner();
+  try {
+    writeJsonDurable(ownerPath, owner);
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    const observed = readStartPreparationLockOwner(layout, ownerPath);
+    if (sha256Stable(observed) !== sha256Stable(owner)) {
+      throw new Error("workflow start preparation lock ownership changed before release");
+    }
+    fs.unlinkSync(ownerPath);
+    await release();
+  };
+}
+
+interface StartPreparationLockOwner {
+  pid: number;
+  process_start: string | null;
+  acquired_at: string;
+}
+
+function startPreparationLockOwner(): StartPreparationLockOwner {
+  return {
+    pid: process.pid,
+    process_start: processStartToken(process.pid),
+    acquired_at: new Date().toISOString()
+  };
+}
+
+function reclaimTerminatedStartPreparationLock(layout: RunLayout, lockPath: string): void {
+  if (!pathEntryExists(lockPath)) return;
+  assertNoSymlinkComponents(layout.root, lockPath, "workflow start preparation lock");
+  const lockStat = fs.lstatSync(lockPath);
+  if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) {
+    throw new Error("workflow start preparation lock is unsafe");
+  }
+  const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
+  if (!pathEntryExists(ownerPath)) {
+    if (Date.now() - lockStat.mtimeMs < START_PREPARATION_OWNER_GRACE_MS) return;
+    if (fs.readdirSync(lockPath).length !== 0) {
+      throw new Error("ownerless workflow start preparation lock contains unexpected evidence");
+    }
+    fs.rmdirSync(lockPath);
+    return;
+  }
+  const owner = readStartPreparationLockOwner(layout, ownerPath);
+  if (startPreparationOwnerIsAlive(owner)) return;
+  if (fs.readdirSync(lockPath).length !== 1 || fs.readdirSync(lockPath)[0] !== START_PREPARATION_LOCK_OWNER) {
+    throw new Error("terminated workflow start preparation lock contains unexpected evidence");
+  }
+  fs.unlinkSync(ownerPath);
+  fs.rmdirSync(lockPath);
+}
+
+function readStartPreparationLockOwner(layout: RunLayout, ownerPath: string): StartPreparationLockOwner {
+  assertRegularFileInside(layout.root, ownerPath, "workflow start preparation lock owner");
+  const value = JSON.parse(fs.readFileSync(ownerPath, "utf8")) as Partial<StartPreparationLockOwner>;
+  if (
+    !Number.isInteger(value.pid) ||
+    (value.pid ?? 0) <= 0 ||
+    (value.process_start !== null && typeof value.process_start !== "string") ||
+    typeof value.acquired_at !== "string"
+  ) {
+    throw new Error("workflow start preparation lock owner is invalid");
+  }
+  return value as StartPreparationLockOwner;
+}
+
+function startPreparationOwnerIsAlive(owner: StartPreparationLockOwner): boolean {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+  const observedStart = processStartToken(owner.pid);
+  return owner.process_start === null || observedStart === null || owner.process_start === observedStart;
+}
+
+function processStartToken(pid: number): string | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closingParenthesis = stat.lastIndexOf(")");
+    if (closingParenthesis < 0) return null;
+    const fields = stat
+      .slice(closingParenthesis + 2)
+      .trim()
+      .split(/\s+/u);
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function ensureStartPreparationIntent(input: {
+  input: PlanRunInput;
+  projectRoot: string;
+  layout: RunLayout;
+  graph: PlannedGraph;
+  expandedGraph: ExpandedGraph;
+  graphFingerprint: string;
+  configFingerprint: string;
+  redactedConfigFingerprint: string;
+  createdAt: string;
+}): StartPreparationIntentDocument {
+  const intentPath = startPreparationIntentPath(input.layout);
+  if (!pathEntryExists(intentPath)) {
+    const unexpected = fs.readdirSync(input.layout.root).filter((entry) => entry !== START_PREPARATION_LOCK);
+    if (unexpected.length > 0) {
+      throw new Error("existing workflow run root has no durable start intent and is not empty");
+    }
+    const intent = startPreparationIntentDocument(input);
+    writeJsonDurable(intentPath, intent);
+    return intent;
+  }
+  const observed = readStartPreparationIntent(input.layout);
+  const expected = startPreparationIntentDocument({ ...input, createdAt: observed.created_at });
+  if (sha256Stable(observed) !== sha256Stable(expected)) {
+    throw new Error("durable workflow start intent conflicts with the requested run");
+  }
+  return observed;
+}
+
+function startPreparationIntentDocument(input: {
+  input: PlanRunInput;
+  projectRoot: string;
+  layout: RunLayout;
+  graph: PlannedGraph;
+  expandedGraph: ExpandedGraph;
+  graphFingerprint: string;
+  configFingerprint: string;
+  redactedConfigFingerprint: string;
+  createdAt: string;
+}): StartPreparationIntentDocument {
+  return {
+    schema_version: START_PREPARATION_INTENT_SCHEMA_VERSION,
+    run_id: input.layout.runId,
+    run_root: path.resolve(input.layout.root),
+    project_root: path.resolve(input.projectRoot),
+    source_commit: resolveCheckedOutCommit(input.projectRoot),
+    request_fingerprint: startPreparationRequestFingerprint(input.input),
+    graph_fingerprint: input.graphFingerprint,
+    graph_sha256: sha256Stable(input.graph),
+    expanded_graph_sha256: sha256Stable(input.expandedGraph),
+    config_fingerprint: input.configFingerprint,
+    redacted_config_fingerprint: input.redactedConfigFingerprint,
+    created_at: input.createdAt
+  };
+}
+
+function readStartPreparationIntent(layout: RunLayout): StartPreparationIntentDocument {
+  const intentPath = startPreparationIntentPath(layout);
+  assertRegularFileInside(layout.root, intentPath, "durable workflow start intent");
+  const value = JSON.parse(fs.readFileSync(intentPath, "utf8")) as Partial<StartPreparationIntentDocument>;
+  if (
+    value.schema_version !== START_PREPARATION_INTENT_SCHEMA_VERSION ||
+    typeof value.run_id !== "string" ||
+    typeof value.run_root !== "string" ||
+    typeof value.project_root !== "string" ||
+    typeof value.source_commit !== "string" ||
+    typeof value.request_fingerprint !== "string" ||
+    typeof value.graph_fingerprint !== "string" ||
+    typeof value.graph_sha256 !== "string" ||
+    typeof value.expanded_graph_sha256 !== "string" ||
+    typeof value.config_fingerprint !== "string" ||
+    typeof value.redacted_config_fingerprint !== "string" ||
+    typeof value.created_at !== "string"
+  ) {
+    throw new Error("durable workflow start intent is invalid");
+  }
+  return value as StartPreparationIntentDocument;
+}
+
+function startPreparationIntentPath(layout: RunLayout): string {
+  return safeResolveInside(layout.root, START_PREPARATION_INTENT_FILE, "durable workflow start intent");
+}
+
+function startPreparationExists(layout: RunLayout): boolean {
+  return pathEntryExists(startPreparationPath(layout));
+}
+
+function pathEntryExists(filePath: string): boolean {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function assertPreparedLayoutPathsSafe(layout: RunLayout): void {
+  const directories = [
+    layout.root,
+    layout.artifactsDir,
+    layout.workspacesDir,
+    layout.eventsIndexDir,
+    layout.reviewDir,
+    layout.pricingCatalogsDir
+  ];
+  for (const directory of directories) {
+    assertNoSymlinkComponents(layout.root, directory, "prepared run layout directory");
+    if (!pathEntryExists(directory)) continue;
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`prepared run layout directory is unsafe: ${directory}`);
+    }
+  }
+  for (const filePath of [
+    layout.runMetadataPath,
+    layout.sourceRunPath,
+    layout.resolvedConfigPath,
+    layout.configRedactionsPath,
+    layout.graphPath,
+    layout.graphFingerprintPath,
+    layout.statePath,
+    layout.eventsPath,
+    layout.usageLedgerPath,
+    layout.attemptLedgerPath,
+    layout.workspacesPath
+  ]) {
+    assertNoSymlinkComponents(layout.root, filePath, "prepared run layout file");
+    if (!pathEntryExists(filePath)) continue;
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {
+      throw new Error(`prepared run layout file is unsafe: ${filePath}`);
+    }
+  }
+}
+
+function assertPreparedRunLayout(input: {
+  layout: RunLayout;
+  runId: string;
+  sourceRunId?: string;
+  createdAt: string;
+  resolvedConfigToml: string;
+  configRedactions: unknown;
+  graph: PlannedGraph;
+  graphFingerprint: string;
+  configFingerprint: string;
+  redactedConfigFingerprint: string;
+  initialState: ReturnType<typeof createInitialRunState>;
+  mode: string;
+  forgeGuard: ReturnType<typeof forgeGuardMetadata>;
+}): void {
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.runMetadataPath,
+    `${JSON.stringify(
+      {
+        schema_version: RUN_LAYOUT_SCHEMA_VERSION,
+        run_id: input.runId,
+        created_at: input.createdAt,
+        ...(input.sourceRunId === undefined ? {} : { source_run_id: input.sourceRunId }),
+        mode: input.mode,
+        workflow_ids: [],
+        redacted_config_fingerprint: input.redactedConfigFingerprint,
+        forge_guard: input.forgeGuard
+      },
+      null,
+      2
+    )}\n`,
+    "prepared run metadata"
+  );
+  if (input.sourceRunId !== undefined) {
+    assertExactPreparedFile(
+      input.layout,
+      input.layout.sourceRunPath,
+      `${JSON.stringify(
+        {
+          schema_version: RUN_LAYOUT_SCHEMA_VERSION,
+          run_id: input.runId,
+          source_run_id: input.sourceRunId,
+          created_at: input.createdAt
+        },
+        null,
+        2
+      )}\n`,
+      "prepared source run metadata"
+    );
+  }
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.resolvedConfigPath,
+    input.resolvedConfigToml,
+    "prepared resolved config"
+  );
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.configRedactionsPath,
+    `${JSON.stringify(input.configRedactions, null, 2)}\n`,
+    "prepared config redactions"
+  );
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.graphPath,
+    `${JSON.stringify(input.graph, null, 2)}\n`,
+    "prepared run graph"
+  );
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.graphFingerprintPath,
+    `${input.graphFingerprint}\n`,
+    "prepared graph fingerprint"
+  );
+  assertExactPreparedFile(input.layout, input.layout.usageLedgerPath, "", "prepared usage ledger");
+  assertExactPreparedFile(input.layout, input.layout.attemptLedgerPath, "", "prepared attempt ledger");
+  assertExactPreparedFile(
+    input.layout,
+    input.layout.workspacesPath,
+    `${JSON.stringify({ schema_version: RUN_LAYOUT_SCHEMA_VERSION, run_id: input.runId, workspaces: [] }, null, 2)}\n`,
+    "prepared workspace manifest"
+  );
+
+  const observedState = readRunState(input.layout);
+  const observedWithoutNodes = { ...observedState, nodes: {} };
+  const initialWithoutNodes = { ...input.initialState, nodes: {} };
+  if (sha256Stable(observedWithoutNodes) !== sha256Stable(initialWithoutNodes)) {
+    throw new Error("prepared run state identity conflicts with its durable start intent");
+  }
+  const graphById = new Map(input.graph.nodes.map((node) => [node.id, node]));
+  if (
+    sha256Stable(Object.keys(observedState.nodes).sort()) !== sha256Stable(Object.keys(input.initialState.nodes).sort())
+  ) {
+    throw new Error("prepared run state node set conflicts with its durable start intent");
+  }
+  for (const [nodeId, observedNode] of Object.entries(observedState.nodes)) {
+    const initialNode = input.initialState.nodes[nodeId];
+    if (initialNode !== undefined && sha256Stable(observedNode) === sha256Stable(initialNode)) continue;
+    const graphNode = graphById.get(nodeId);
+    if (
+      initialNode === undefined ||
+      graphNode?.kind !== "reference" ||
+      sha256Stable(observedNode) !== sha256Stable(completedReferenceNodeState(initialNode, graphNode, input.createdAt))
+    ) {
+      throw new Error(`prepared run state contains conflicting node evidence: ${nodeId}`);
+    }
+  }
+  reconcilePreparedReferenceEvents(input.layout, input.graph, input.initialState, input.createdAt);
+}
+
+function assertIncompletePreparationRootClosure(layout: RunLayout): void {
+  const allowed = new Set([
+    START_PREPARATION_INTENT_FILE,
+    START_PREPARATION_LOCK,
+    path.basename(layout.artifactsDir),
+    path.basename(layout.workspacesDir),
+    path.basename(layout.eventsIndexDir),
+    path.basename(layout.reviewDir),
+    path.basename(layout.pricingCatalogsDir),
+    path.basename(layout.runMetadataPath),
+    path.basename(layout.sourceRunPath),
+    path.basename(layout.resolvedConfigPath),
+    path.basename(layout.configRedactionsPath),
+    path.basename(layout.graphPath),
+    path.basename(layout.graphFingerprintPath),
+    path.basename(layout.statePath),
+    path.basename(layout.eventsPath),
+    path.basename(layout.usageLedgerPath),
+    path.basename(layout.attemptLedgerPath),
+    path.basename(layout.workspacesPath),
+    RENDERED_PROMPT_SNAPSHOT_DIR,
+    "plan.json",
+    "smithers"
+  ]);
+  for (const entry of fs.readdirSync(layout.root)) {
+    if (!allowed.has(entry)) throw new Error(`prepared workflow run root contains an unexpected entry: ${entry}`);
+  }
+  const smithersDir = path.join(layout.root, "smithers");
+  if (pathEntryExists(smithersDir)) {
+    assertNoSymlinkComponents(layout.root, smithersDir, "incomplete workflow control directory");
+    const stat = fs.lstatSync(smithersDir);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || fs.readdirSync(smithersDir).length !== 0) {
+      throw new Error("incomplete workflow start contains unexpected control evidence");
+    }
+  }
+}
+
+function reconcilePreparedReferenceEvents(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  initialState: ReturnType<typeof createInitialRunState>,
+  createdAt: string
+): void {
+  const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
+  if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
+    throw new Error("prepared workflow start contains malformed event evidence");
+  }
+  const references = graph.nodes.filter((node) => node.kind === "reference");
+  const expectedEvents = references.map((node) => referenceMaterializedEvent(layout, node, createdAt));
+  if (replay.records.length > expectedEvents.length) {
+    throw new Error("prepared workflow start contains unexpected event evidence");
+  }
+  for (let index = 0; index < replay.records.length; index += 1) {
+    if (sha256Stable(replay.records[index]) !== sha256Stable(expectedEvents[index])) {
+      throw new Error("prepared workflow start event history is not a reference-materialization prefix");
+    }
+  }
+  const state = readRunState(layout);
+  for (let index = 0; index < references.length; index += 1) {
+    const node = references[index]!;
+    const initialNode = initialState.nodes[node.id]!;
+    const observedNode = state.nodes[node.id];
+    const isInitial = sha256Stable(observedNode) === sha256Stable(initialNode);
+    const isCompleted =
+      sha256Stable(observedNode) === sha256Stable(completedReferenceNodeState(initialNode, node, createdAt));
+    if (
+      (index < replay.records.length && !isCompleted) ||
+      (index > replay.records.length && !isInitial) ||
+      (index === replay.records.length && !isInitial && !isCompleted)
+    ) {
+      throw new Error(`prepared reference state is inconsistent with its event prefix: ${node.id}`);
+    }
+  }
+  reconcilePreparedEventIndexes(layout, replay.records);
+}
+
+function reconcilePreparedEventIndexes(layout: RunLayout, events: ReturnType<typeof replayEvents>["records"]): void {
+  const expected = new Map<string, string>();
+  const append = (relativePath: string, line: string): void => {
+    expected.set(relativePath, `${expected.get(relativePath) ?? ""}${line}\n`);
+  };
+  for (const event of events) {
+    const line = JSON.stringify(event);
+    append(preparedEventIndexPath("run", event.run_id), line);
+    append(preparedEventIndexPath("type", event.event_type), line);
+    append(preparedEventIndexPath("timestamp", event.timestamp.slice(0, 10)), line);
+    if (event.node_id !== undefined) append(preparedEventIndexPath("node", event.node_id), line);
+    if (event.status !== undefined) append(preparedEventIndexPath("status", event.status), line);
+  }
+  expected.set("query-inputs.json", `${JSON.stringify(createEventQueryFacadeInputs(layout), null, 2)}\n`);
+  const existingFiles = pathEntryExists(layout.eventsIndexDir) ? walkPreparedFiles(layout.eventsIndexDir) : [];
+  for (const filePath of existingFiles) {
+    const relativePath = path.relative(layout.eventsIndexDir, filePath).split(path.sep).join("/");
+    if (!expected.has(relativePath)) {
+      throw new Error(`prepared workflow start contains an unexpected event index: ${relativePath}`);
+    }
+  }
+  for (const [relativePath, expectedContents] of expected) {
+    const filePath = safeResolveInside(layout.eventsIndexDir, relativePath, "prepared event index");
+    if (!pathEntryExists(filePath)) {
+      writeFileDurable(filePath, expectedContents);
+      continue;
+    }
+    assertRegularFileInside(layout.eventsIndexDir, filePath, "prepared event index");
+    const observed = fs.readFileSync(filePath, "utf8");
+    if (observed === expectedContents) continue;
+    if (relativePath !== "query-inputs.json" && observed.endsWith("\n") && expectedContents.startsWith(observed)) {
+      writeFileDurable(filePath, expectedContents);
+      continue;
+    }
+    throw new Error(`prepared event index conflicts with its reference-materialization prefix: ${relativePath}`);
+  }
+}
+
+function preparedEventIndexPath(dimension: string, value: string): string {
+  const direct = `${value}.jsonl`;
+  if (direct.length <= 128) return `${dimension}/${direct}`;
+  return `${dimension}/sha256/${sha256Text(value)}.jsonl`;
+}
+
+function sha256Text(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function assertExactPreparedFile(layout: RunLayout, filePath: string, expected: string, label: string): void {
+  assertRegularFileInside(layout.root, filePath, label);
+  if (fs.readFileSync(filePath, "utf8") === expected) return;
+  throw new Error(`${label} conflicts with the durable workflow start intent`);
+}
+
+function writePreparedPlanFile(layout: RunLayout, filePath: string, value: unknown, label: string): void {
+  const expected = `${JSON.stringify(value, null, 2)}\n`;
+  if (pathEntryExists(filePath)) {
+    assertExactPreparedFile(layout, filePath, expected, label);
+    return;
+  }
+  writeJsonDurable(filePath, value);
+  assertExactPreparedFile(layout, filePath, expected, label);
+}
+
+function writePreparedBytes(layout: RunLayout, filePath: string, expected: Buffer, label: string): void {
+  assertPathInside(layout.root, filePath, label);
+  assertNoSymlinkComponents(layout.root, filePath, label);
+  if (pathEntryExists(filePath)) {
+    assertRegularFileInside(layout.root, filePath, label);
+    if (!fs.readFileSync(filePath).equals(expected)) {
+      throw new Error(`${label} conflicts with the durable workflow start intent`);
+    }
+    return;
+  }
+  writeFileDurable(filePath, expected);
+  assertRegularFileInside(layout.root, filePath, label);
+  if (!fs.readFileSync(filePath).equals(expected)) {
+    throw new Error(`${label} changed while it was durably prepared`);
+  }
+}
+
+function assertPreparedPlanningClosure(
+  layout: RunLayout,
+  graph: PlannedGraph,
+  renderedPrompts: readonly RenderedPromptPlan[],
+  persistedPrompts: readonly (RenderedPromptPlan & { rendered_prompt_snapshot_path: string })[]
+): void {
+  const expectedArtifactFiles = new Set(renderedPrompts.map((prompt) => path.resolve(prompt.rendered_prompt_path)));
+  for (const node of graph.nodes.filter((candidate) => candidate.kind === "reference")) {
+    const artifactDir = getNodeArtifactDir(layout, node.id);
+    for (const filePath of walkPreparedFiles(artifactDir)) expectedArtifactFiles.add(path.resolve(filePath));
+  }
+  const observedArtifactFiles = pathEntryExists(layout.artifactsDir) ? walkPreparedFiles(layout.artifactsDir) : [];
+  for (const filePath of observedArtifactFiles) {
+    if (!expectedArtifactFiles.has(path.resolve(filePath))) {
+      throw new Error(`prepared workflow start contains an unexpected artifact file: ${filePath}`);
+    }
+  }
+  if (observedArtifactFiles.length !== expectedArtifactFiles.size) {
+    throw new Error("prepared workflow start is missing expected prompt or reference evidence");
   }
 
-  const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
-  writeJsonDurable(path.join(layout.root, "plan.json"), {
-    schema_version: RUNTIME_SCHEMA_VERSION,
-    run_id: runId,
-    mode: input.mode ?? "run",
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    execution: resolved.config.execution,
-    topology: validation.value.topology,
-    rendered_prompts: persistedRenderedPrompts,
-    policy_posture: Object.fromEntries(
-      Object.entries(validation.value.policy_posture).map(([key, value]) => [key, value.status])
-    )
-  });
+  const snapshotRoot = path.join(layout.root, RENDERED_PROMPT_SNAPSHOT_DIR);
+  const expectedSnapshots = new Set(
+    persistedPrompts.map((prompt) => path.resolve(layout.root, ...prompt.rendered_prompt_snapshot_path.split("/")))
+  );
+  const observedSnapshots = pathEntryExists(snapshotRoot) ? walkPreparedFiles(snapshotRoot) : [];
+  if (
+    observedSnapshots.length !== expectedSnapshots.size ||
+    observedSnapshots.some((filePath) => !expectedSnapshots.has(path.resolve(filePath)))
+  ) {
+    throw new Error("prepared workflow start contains an unexpected rendered prompt snapshot");
+  }
+}
 
-  return runtimeResult(true, {
-    run_id: runId,
-    run_root: layout.root,
-    ...(input.sourceRunId ? { source_run_id: input.sourceRunId } : {}),
-    graph,
-    expanded_graph: expandedGraph,
-    graph_fingerprint: graphFingerprint,
-    config_fingerprint: configFingerprint,
-    redacted_config_fingerprint: redactedConfigFingerprint,
-    output_root: outputRoot,
-    state_nodes: stateNodes,
-    resolved_config: resolved.config,
-    validation: validation.value,
-    layout,
-    rendered_prompts: renderedPrompts
+export function verifyStartPreparation(input: PlanRunInput, plan: PlanRunValue): void {
+  const observed = readStartPreparation(plan.layout);
+  const expected = startPreparationDocument(input, plan);
+  for (const key of Object.keys(expected) as Array<keyof StartPreparationDocument>) {
+    if (sha256Stable(observed[key]) !== sha256Stable(expected[key])) {
+      throw new Error(`durable start preparation does not match the requested run: ${key}`);
+    }
+  }
+  if (sha256Stable(Object.keys(observed).sort()) !== sha256Stable(Object.keys(expected).sort())) {
+    throw new Error("durable start preparation contains unexpected fields");
+  }
+}
+
+function writeStartPreparation(input: PlanRunInput, plan: PlanRunValue): void {
+  const document = startPreparationDocument(input, plan);
+  const preparationPath = startPreparationPath(plan.layout);
+  if (fs.existsSync(preparationPath)) {
+    if (sha256Stable(readStartPreparation(plan.layout)) !== sha256Stable(document)) {
+      throw new Error("existing durable start preparation conflicts with the requested run");
+    }
+    return;
+  }
+  writeJsonDurable(preparationPath, document);
+}
+
+function startPreparationDocument(input: PlanRunInput, plan: PlanRunValue): StartPreparationDocument {
+  const planPath = safeResolveInside(plan.layout.root, "plan.json", "persisted run plan");
+  assertRegularFileInside(plan.layout.root, planPath, "persisted run plan");
+  return {
+    schema_version: START_PREPARATION_SCHEMA_VERSION,
+    run_id: plan.run_id,
+    run_root: path.resolve(plan.run_root),
+    project_root: path.resolve(plan.validation.project_root),
+    source_commit: resolveCheckedOutCommit(plan.validation.project_root),
+    request_fingerprint: startPreparationRequestFingerprint(input),
+    plan_sha256: sha256Stable(fs.readFileSync(planPath, "utf8")),
+    graph_fingerprint: plan.graph_fingerprint,
+    config_fingerprint: plan.config_fingerprint,
+    redacted_config_fingerprint: plan.redacted_config_fingerprint,
+    ...(plan.source_run_id === undefined ? {} : { source_run_id: plan.source_run_id }),
+    graph: jsonDocumentValue(plan.graph),
+    expanded_graph: jsonDocumentValue(plan.expanded_graph),
+    state_nodes: jsonDocumentValue(plan.state_nodes),
+    rendered_prompts: jsonDocumentValue(plan.rendered_prompts),
+    start_command: {
+      project_root: path.resolve(plan.validation.project_root),
+      logs_dir: path.join(plan.layout.root, "smithers", "logs"),
+      max_concurrency: input.maxConcurrency ?? plan.resolved_config.run.maxParallelAgents,
+      controller_lease_seconds: plan.resolved_config.run.controllerLeaseSeconds
+    }
+  };
+}
+
+function jsonDocumentValue<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function recoverPreparedStartPlan(input: {
+  input: PlanRunInput;
+  projectRoot: string;
+  runId: string;
+  outputRoot: string;
+  configFingerprint: string;
+  redactedConfigFingerprint: string;
+  resolvedConfig: PlanRunValue["resolved_config"];
+  validation: PlanRunValue["validation"];
+}) {
+  const layout = layoutForRunRoot(path.join(input.outputRoot, input.runId), input.runId);
+  try {
+    const preparation = readStartPreparation(layout);
+    const planPath = safeResolveInside(layout.root, "plan.json", "persisted run plan");
+    assertRegularFileInside(layout.root, planPath, "persisted run plan");
+    if (
+      preparation.run_id !== input.runId ||
+      preparation.run_root !== path.resolve(layout.root) ||
+      preparation.project_root !== input.projectRoot ||
+      preparation.source_commit !== resolveCheckedOutCommit(input.projectRoot) ||
+      preparation.request_fingerprint !== startPreparationRequestFingerprint(input.input) ||
+      preparation.plan_sha256 !== sha256Stable(fs.readFileSync(planPath, "utf8")) ||
+      preparation.config_fingerprint !== input.configFingerprint ||
+      preparation.redacted_config_fingerprint !== input.redactedConfigFingerprint
+    ) {
+      throw new Error("durable start preparation identity changed");
+    }
+    const value: PlanRunValue = {
+      run_id: input.runId,
+      run_root: layout.root,
+      ...(preparation.source_run_id === undefined ? {} : { source_run_id: preparation.source_run_id }),
+      graph: preparation.graph,
+      expanded_graph: preparation.expanded_graph,
+      graph_fingerprint: preparation.graph_fingerprint,
+      config_fingerprint: preparation.config_fingerprint,
+      redacted_config_fingerprint: preparation.redacted_config_fingerprint,
+      output_root: input.outputRoot,
+      state_nodes: preparation.state_nodes,
+      resolved_config: input.resolvedConfig,
+      validation: input.validation,
+      layout,
+      rendered_prompts: preparation.rendered_prompts
+    };
+    verifyStartPreparation(input.input, value);
+    return runtimeResult(true, value);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "START_PREPARATION_INVALID")]);
+  }
+}
+
+function readStartPreparation(layout: RunLayout): StartPreparationDocument {
+  const preparationPath = startPreparationPath(layout);
+  assertRegularFileInside(layout.root, preparationPath, "durable start preparation");
+  const value = JSON.parse(fs.readFileSync(preparationPath, "utf8")) as unknown;
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value as Record<string, unknown>).schema_version !== START_PREPARATION_SCHEMA_VERSION
+  ) {
+    throw new Error("durable start preparation is invalid");
+  }
+  const preparation = value as Partial<StartPreparationDocument>;
+  if (
+    typeof preparation.run_id !== "string" ||
+    typeof preparation.run_root !== "string" ||
+    typeof preparation.project_root !== "string" ||
+    typeof preparation.source_commit !== "string" ||
+    typeof preparation.request_fingerprint !== "string" ||
+    typeof preparation.plan_sha256 !== "string" ||
+    typeof preparation.graph_fingerprint !== "string" ||
+    typeof preparation.config_fingerprint !== "string" ||
+    typeof preparation.redacted_config_fingerprint !== "string" ||
+    preparation.graph === undefined ||
+    preparation.expanded_graph === undefined ||
+    !Array.isArray(preparation.state_nodes) ||
+    !Array.isArray(preparation.rendered_prompts) ||
+    preparation.start_command === undefined ||
+    typeof preparation.start_command.project_root !== "string" ||
+    typeof preparation.start_command.logs_dir !== "string" ||
+    !Number.isSafeInteger(preparation.start_command.max_concurrency) ||
+    preparation.start_command.max_concurrency <= 0 ||
+    !Number.isFinite(preparation.start_command.controller_lease_seconds) ||
+    preparation.start_command.controller_lease_seconds <= 0
+  ) {
+    throw new Error("durable start preparation is incomplete");
+  }
+  return preparation as StartPreparationDocument;
+}
+
+function startPreparationPath(layout: RunLayout): string {
+  return safeResolveInside(
+    safeResolveInside(layout.root, "smithers", "workflow control directory"),
+    START_PREPARATION_FILE,
+    "durable start preparation"
+  );
+}
+
+function startPreparationRequestFingerprint(input: PlanRunInput): string {
+  return sha256Stable({
+    run_id: input.runId ?? null,
+    source_run_id: input.sourceRunId ?? null,
+    mode: input.mode ?? "run",
+    operator_prompt: input.prompt ?? null,
+    operator_input: input.workflowInput ?? null,
+    topology_path: input.topologyPath ?? null,
+    topology_transform: input.topologyTransform ?? null,
+    max_concurrency: input.maxConcurrency ?? null,
+    runtime_overrides: input.runtimeOverrides ?? null,
+    agent: input.agent ?? null,
+    model: input.model ?? null,
+    reasoning: input.reasoning ?? null
   });
 }
 
@@ -523,6 +1419,8 @@ function materializeReferenceNodesForPlan(input: {
   projectRoot: string;
   graph: PlannedGraph;
   layout: RunLayout;
+  initialState: ReturnType<typeof createInitialRunState>;
+  createdAt: string;
 }): void {
   const referenceNodes = input.graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
@@ -533,58 +1431,165 @@ function materializeReferenceNodesForPlan(input: {
     if (!node.reference) {
       throw new Error(`reference graph node ${node.id} is missing reference id`);
     }
-    const startedAt = new Date().toISOString();
     const artifactDir = getNodeArtifactDir(input.layout, node.id, { create: true });
-    const materialized = materializeReferenceArtifacts({
-      catalog,
-      id: node.reference,
-      artifactDir,
-      outputs: node.outputs
-    });
-    const finishedAt = new Date().toISOString();
-    writeArtifactManifest({
-      layout: input.layout,
-      nodeId: node.id,
-      outputs: node.outputs,
-      provenance: {
-        logical_node_id: node.logical_id,
-        origin: "pinned-reference",
-        metadata: {
-          reference: node.reference,
-          repo: node.reference_revision?.repo,
-          commit: node.reference_revision?.commit,
-          reference_artifact: materialized.referenceArtifact,
-          manifest_artifact: materialized.manifestArtifact
-        }
+    const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-reference-preparation-"));
+    let referenceArtifact!: string;
+    let manifestArtifact!: string;
+    let expectedRelativeFiles!: string[];
+    try {
+      const stagingLayout = layoutForRunRoot(stagingRoot, input.layout.runId);
+      const stagingArtifactDir = getNodeArtifactDir(stagingLayout, node.id, { create: true });
+      const materialized = materializeReferenceArtifacts({
+        catalog,
+        id: node.reference,
+        artifactDir: stagingArtifactDir,
+        outputs: node.outputs
+      });
+      referenceArtifact = path.join(artifactDir, path.relative(stagingArtifactDir, materialized.referenceArtifact));
+      manifestArtifact = path.join(artifactDir, path.relative(stagingArtifactDir, materialized.manifestArtifact));
+      writeArtifactManifest({
+        layout: stagingLayout,
+        nodeId: node.id,
+        outputs: node.outputs,
+        createdAt: input.createdAt,
+        provenance: referenceArtifactProvenance(node, referenceArtifact, manifestArtifact)
+      });
+      const stagedFiles = walkPreparedFiles(stagingArtifactDir);
+      expectedRelativeFiles = stagedFiles.map((stagedPath) =>
+        path.relative(stagingArtifactDir, stagedPath).split(path.sep).join("/")
+      );
+      for (const stagedPath of stagedFiles) {
+        const relativePath = path.relative(stagingArtifactDir, stagedPath);
+        const targetPath = path.resolve(artifactDir, relativePath);
+        assertPathInside(artifactDir, targetPath, `prepared reference artifact for ${node.id}`);
+        writePreparedBytes(input.layout, targetPath, fs.readFileSync(stagedPath), `reference artifact for ${node.id}`);
       }
-    });
-    updateNodeState(input.layout, node.id, {
-      status: "succeeded",
-      started_at: startedAt,
-      finished_at: finishedAt,
-      wait_since: undefined,
-      wait_reason: undefined,
-      next_eligible_action: undefined,
-      provenance: {
-        origin: "pinned-reference",
-        reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit
-      }
-    });
-    appendEvent(input.layout, {
-      eventType: "reference-materialized",
-      nodeId: node.id,
-      status: "succeeded",
-      payload: {
-        reference: node.reference,
-        repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit,
-        artifact: materialized.referenceArtifact,
-        manifest: materialized.manifestArtifact
-      }
-    });
+    } finally {
+      fs.rmSync(stagingRoot, { recursive: true, force: true });
+    }
+    const observedRelativeFiles = walkPreparedFiles(artifactDir).map((filePath) =>
+      path.relative(artifactDir, filePath).split(path.sep).join("/")
+    );
+    if (sha256Stable(observedRelativeFiles) !== sha256Stable(expectedRelativeFiles)) {
+      throw new Error(`reference node ${node.id} contains unexpected artifact evidence`);
+    }
+
+    const initialNode = input.initialState.nodes[node.id];
+    if (initialNode === undefined) throw new Error(`reference node ${node.id} is missing its initial state`);
+    const expectedNode = completedReferenceNodeState(initialNode, node, input.createdAt);
+    const observedNode = readRunState(input.layout).nodes[node.id];
+    if (sha256Stable(observedNode) === sha256Stable(initialNode)) {
+      updateNodeState(
+        input.layout,
+        node.id,
+        {
+          status: "succeeded",
+          started_at: input.createdAt,
+          finished_at: input.createdAt,
+          wait_since: undefined,
+          wait_reason: undefined,
+          next_eligible_action: undefined,
+          provenance: referenceNodeProvenance(node)
+        },
+        input.createdAt
+      );
+    } else if (sha256Stable(observedNode) !== sha256Stable(expectedNode)) {
+      throw new Error(`reference node ${node.id} has conflicting durable state`);
+    }
+
+    const expectedEvent = referenceMaterializedEvent(input.layout, node, input.createdAt);
+    const matchingEvents = replayEvents(input.layout, Number.MAX_SAFE_INTEGER).records.filter(
+      (event) => event.event_type === "reference-materialized" && event.node_id === node.id
+    );
+    if (matchingEvents.length === 0) {
+      appendEvent(input.layout, {
+        eventType: "reference-materialized",
+        nodeId: node.id,
+        status: "succeeded",
+        timestamp: input.createdAt,
+        payload: expectedEvent.payload
+      });
+    } else if (matchingEvents.length !== 1 || sha256Stable(matchingEvents[0]) !== sha256Stable(expectedEvent)) {
+      throw new Error(`reference node ${node.id} has conflicting durable event evidence`);
+    }
   }
+}
+
+function referenceMaterializedEvent(layout: RunLayout, node: PlannedGraphNode, createdAt: string) {
+  const primaryArtifact = node.outputs.find((output) => output.primary)?.path;
+  if (primaryArtifact === undefined) {
+    throw new Error(`reference node ${node.id} has no primary artifact`);
+  }
+  const artifactDir = getNodeArtifactDir(layout, node.id);
+  return createEventRecord(layout, {
+    eventType: "reference-materialized",
+    nodeId: node.id,
+    status: "succeeded",
+    timestamp: createdAt,
+    payload: {
+      reference: node.reference,
+      repo: node.reference_revision?.repo,
+      commit: node.reference_revision?.commit,
+      artifact: path.join(artifactDir, primaryArtifact),
+      manifest: path.join(artifactDir, RUN_REFERENCE_MANIFEST_FILE)
+    }
+  });
+}
+
+function referenceArtifactProvenance(
+  node: PlannedGraphNode,
+  referenceArtifact: string,
+  manifestArtifact: string
+): Parameters<typeof writeArtifactManifest>[0]["provenance"] {
+  return {
+    logical_node_id: node.logical_id,
+    origin: "pinned-reference",
+    metadata: {
+      reference: node.reference,
+      repo: node.reference_revision?.repo,
+      commit: node.reference_revision?.commit,
+      reference_artifact: referenceArtifact,
+      manifest_artifact: manifestArtifact
+    }
+  };
+}
+
+function referenceNodeProvenance(node: PlannedGraphNode): Record<string, unknown> {
+  return {
+    origin: "pinned-reference",
+    reference: node.reference,
+    repo: node.reference_revision?.repo,
+    commit: node.reference_revision?.commit
+  };
+}
+
+function completedReferenceNodeState(initialNode: NodeState, node: PlannedGraphNode, createdAt: string): NodeState {
+  const completed: NodeState = {
+    ...structuredClone(initialNode),
+    status: "succeeded",
+    started_at: createdAt,
+    finished_at: createdAt,
+    provenance: referenceNodeProvenance(node)
+  };
+  delete completed.wait_since;
+  delete completed.wait_reason;
+  delete completed.next_eligible_action;
+  return completed;
+}
+
+function walkPreparedFiles(root: string): string[] {
+  const pending = [path.resolve(root)];
+  const files: string[] = [];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && !entry.isSymbolicLink()) files.push(candidate);
+      else throw new Error(`prepared reference staging contains an unsafe entry: ${candidate}`);
+    }
+  }
+  return files.sort();
 }
 
 export function toPlannedGraph(expanded: ExpandedGraph, catalog?: PromptCatalog): PlannedGraph {
@@ -713,7 +1718,12 @@ function renderPromptsForPlan(input: {
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });
-      writeRenderedPrompt(result);
+      writePreparedBytes(
+        input.layout,
+        result.renderedPromptPath,
+        Buffer.from(result.renderedMarkdown),
+        `rendered prompt for ${attempt.attemptId}`
+      );
       rendered.push({
         node_id: node.id,
         logical_node_id: node.logical_id,

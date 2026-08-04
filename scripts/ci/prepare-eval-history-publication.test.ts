@@ -1,19 +1,25 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import {
+  AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
   automaticProducerPolicyDimensions,
+  assertAutomaticBundleDigest,
   assertAutomaticPublicationFinalLaunch,
   assertAutomaticPublicationModelEvidence,
   assertPublicBenchmarkBundleMatrixScope,
   parseAutomaticPublicationProfileOptions,
+  publicationTreeDigest,
+  readValidatedAutomaticPublicationBundle,
   readAutomaticPublicationManifest,
   readAutomaticPublicationLaunchState,
   summarizePublicBenchmarkBundlePublication,
   trustedCandidateRuntimePolicyDimensions,
+  verifyAutomaticPublicationUnpacked,
   validateAutomaticPublicationManifest,
   validateAutomaticPairConfig,
   validateBenchmarkPolicyFiles,
@@ -34,6 +40,64 @@ afterEach(() => {
 });
 
 describe("trusted automatic eval-history publication handoff", () => {
+  it("binds the exact bundle bytes and deterministic extracted publication tree", () => {
+    const root = temporaryRoot("ultrafuzz-publication-digest-");
+    const bundlePath = path.join(root, "public-results.json");
+    const extractedRoot = path.join(root, "unpacked");
+    const pairRoot = path.join(extractedRoot, "pair-a");
+    const summaryContents = Buffer.from(`${JSON.stringify({ eval_run_id: "run-a", score: 1 })}\n`, "utf8");
+    const emptyContents = Buffer.alloc(0);
+    const bundle = {
+      schema_version: "test.public-bundle.v1",
+      files: [
+        {
+          path: "eval/summary.json",
+          size_bytes: summaryContents.byteLength,
+          sha256: sha256(summaryContents),
+          contents_base64: summaryContents.toString("base64")
+        },
+        {
+          path: "eval/empty.jsonl",
+          size_bytes: emptyContents.byteLength,
+          sha256: sha256(emptyContents),
+          contents_base64: emptyContents.toString("base64")
+        }
+      ]
+    };
+    const bundleBytes = Buffer.from(`${JSON.stringify(bundle, null, 2)}\n`, "utf8");
+    fs.writeFileSync(bundlePath, bundleBytes);
+    const bundleModule = {
+      MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES: 1024 * 1024,
+      PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION: "test.public-bundle.v1",
+      parsePublicBenchmarkBundle(value: unknown) {
+        return value as typeof bundle;
+      }
+    };
+
+    const prepared = readValidatedAutomaticPublicationBundle(bundlePath, bundleModule);
+    expect(prepared.bundle_sha256).toBe(sha256(bundleBytes));
+    writeFile(path.join(pairRoot, "eval", "summary.json"), summaryContents.toString("utf8"));
+    writeFile(path.join(pairRoot, "eval", "empty.jsonl"), "");
+    expect(publicationTreeDigest(pairRoot)).toBe(prepared.publication_tree_sha256);
+    const planPath = path.join(root, "plan.json");
+    fs.writeFileSync(
+      planPath,
+      `${JSON.stringify({
+        schema_version: AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION,
+        pairs: [{ unpack_path: "pair-a", publication_tree_sha256: prepared.publication_tree_sha256 }]
+      })}\n`
+    );
+    expect(verifyAutomaticPublicationUnpacked(planPath, extractedRoot)).toEqual({ pairs: 1 });
+
+    const substitutedBundle = Buffer.from(`${JSON.stringify({ ...bundle, substituted: true }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(bundlePath, substitutedBundle);
+    expect(() => assertAutomaticBundleDigest(bundlePath, prepared.bundle_sha256)).toThrow(
+      /bundle digest changed after trusted preparation/u
+    );
+    writeFile(path.join(pairRoot, "eval", "summary.json"), `${JSON.stringify({ eval_run_id: "run-a", score: 2 })}\n`);
+    expect(() => verifyAutomaticPublicationUnpacked(planPath, extractedRoot)).toThrow(/tree digest does not match/u);
+  });
+
   it("accepts complete exact DeepSeek V4 Flash identity and pricing evidence", () => {
     const { bundle, model, pair } = deepSeekAutomaticPublicationBundle();
     expect(assertAutomaticPublicationModelEvidence(bundle, model, pair)).toBeUndefined();
@@ -44,15 +108,36 @@ describe("trusted automatic eval-history publication handoff", () => {
     expect(assertAutomaticPublicationModelEvidence(bundle, model, pair)).toBeUndefined();
   });
 
-  it("accepts a self-consistent current v7/v4 profile after the bound catalog rate changes", () => {
-    const fixture = deepSeekAutomaticPublicationBundle();
-    const pricing = fixture.diagnostics.rows[0]!.pricing;
-    pricing.rates_usd_per_million.output = 0.3;
-    pricing.component_costs_usd.output = 0.000075;
-    pricing.cost_usd = 0.0002164;
-    fixture.summary.rows[0]!.efficiency.cost_usd = pricing.cost_usd;
-    fixture.syncBundleFiles();
-    expect(assertAutomaticPublicationModelEvidence(fixture.bundle, fixture.model, fixture.pair)).toBeUndefined();
+  it("rejects self-consistent current v7/v4 profiles with substituted DeepSeek Flash rates", () => {
+    const substitutions = [
+      ["uncached_input", 0.15],
+      ["cache_read", 0.003],
+      ["cache_write", 0],
+      ["output", 0.3],
+      ["reasoning", 0.3]
+    ] as const;
+
+    for (const [component, replacement] of substitutions) {
+      const fixture = deepSeekAutomaticPublicationBundle();
+      const pricing = fixture.diagnostics.rows[0]!.pricing;
+      const rates = pricing.rates_usd_per_million as Record<string, number | null>;
+      const usage = pricing.usage as Record<string, number>;
+      const componentCosts = pricing.component_costs_usd as Record<string, number>;
+      rates[component] = replacement;
+      componentCosts.uncached_input = (usage.uncached_input_tokens! * rates.uncached_input!) / 1_000_000;
+      componentCosts.cache_read = (usage.cache_read_tokens! * rates.cache_read!) / 1_000_000;
+      componentCosts.cache_write =
+        rates.cache_write === null ? 0 : (usage.cache_write_tokens! * rates.cache_write) / 1_000_000;
+      componentCosts.output = (usage.output_tokens! * rates.output!) / 1_000_000;
+      componentCosts.reasoning = (usage.reasoning_tokens! * rates.reasoning!) / 1_000_000;
+      pricing.cost_usd = Object.values(componentCosts).reduce((total, value) => total + value, 0);
+      fixture.summary.rows[0]!.efficiency.cost_usd = pricing.cost_usd;
+      fixture.syncBundleFiles();
+      expect(
+        () => assertAutomaticPublicationModelEvidence(fixture.bundle, fixture.model, fixture.pair),
+        component
+      ).toThrow(/invalid DeepSeek Flash accounting/u);
+    }
   });
 
   it("rejects missing, partial, mixed, or substituted DeepSeek V4 Flash evidence", () => {
@@ -1349,6 +1434,15 @@ function temporaryRoot(prefix: string): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   roots.push(root);
   return root;
+}
+
+function writeFile(filePath: string, contents: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents, "utf8");
+}
+
+function sha256(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function git(cwd: string, args: string[]): string {

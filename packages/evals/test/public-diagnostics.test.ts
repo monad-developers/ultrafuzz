@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { AGENT_POSTFLIGHT_FAILURE_CODES } from "@ultrafuzz/runtime";
 
-import { parsePublicModelIdentity, publicModelIdentityScope } from "../src/public-diagnostics.js";
+import {
+  PUBLIC_EVAL_FAILURE_CODES,
+  parsePublicModelIdentity,
+  publicModelIdentityScope
+} from "../src/public-diagnostics.js";
 
 const DEEPSEEK_ALIAS_IDENTITY = {
   schema_version: "ultrafuzz.eval.model-identity.v1",
@@ -50,5 +55,12 @@ describe("public model identity", () => {
         provider_version: "DeepSeek-V4-Flash-0731"
       })
     ).toThrow();
+  });
+});
+
+describe("public failure diagnostics", () => {
+  it("publishes the canonical findings normalization postflight code", () => {
+    expect(PUBLIC_EVAL_FAILURE_CODES).toContain("canonical-findings-normalization-postflight");
+    expect(PUBLIC_EVAL_FAILURE_CODES).toEqual(["task-output-validation-failure", ...AGENT_POSTFLIGHT_FAILURE_CODES]);
   });
 });

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { runCli } from "../src/index.js";
+import { installPinnedFakeRunner } from "./helpers/pinned-fake-runner.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-lifecycle-cli-run";
 const RUN_ID = "lifecycle-cli-run";
@@ -92,9 +93,10 @@ nodes:
   );
 }
 
-function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Record<string, string | undefined> {
-  const binDir = path.join(project, "fake-bin");
-  fs.mkdirSync(binDir, { recursive: true });
+function fakeEnv(
+  project: string,
+  options: { cancelStatus?: string; failEvents?: boolean } = {}
+): Record<string, string | undefined> {
   const whyPath = path.join(project, "fake-why.json");
   const timelinePath = path.join(project, "fake-timeline.json");
   const snapshotsPath = path.join(project, "fake-snapshots.json");
@@ -236,9 +238,8 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
     "utf8"
   );
 
-  const smithers = path.join(binDir, "smithers");
-  fs.writeFileSync(
-    smithers,
+  installPinnedFakeRunner(
+    project,
     [
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
@@ -247,7 +248,9 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       `  timeline) cat ${shellQuote(timelinePath)} ;;`,
       `  snapshots) cat ${shellQuote(snapshotsPath)} ;;`,
       `  node) cat ${shellQuote(nodePath)} ;;`,
-      `  events) cat ${shellQuote(eventsPath)} ;;`,
+      options.failEvents === true
+        ? "  events) printf '%s\\n' 'stream broke' >&2; exit 3 ;;"
+        : `  events) cat ${shellQuote(eventsPath)} ;;`,
       "  cancel)",
       `    printf '%s\\n' '{"data":{"status":"${options.cancelStatus ?? "cancel-requested"}"}}'`,
       "    exit 2",
@@ -255,19 +258,16 @@ function fakeEnv(project: string, options: { cancelStatus?: string } = {}): Reco
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
       "esac",
       ""
-    ].join("\n"),
-    "utf8"
+    ].join("\n")
   );
-  fs.chmodSync(smithers, 0o755);
   return {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
+    PATH: process.env.PATH ?? "",
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log")
   };
 }
 
 async function launchedProject(
-  options: { cancelStatus?: string } = {}
+  options: { cancelStatus?: string; failEvents?: boolean } = {}
 ): Promise<{ project: string; env: Record<string, string | undefined>; runRoot: string }> {
   const project = tempProject();
   const env = fakeEnv(project, options);
@@ -438,9 +438,7 @@ test("events rejects a raw event category instead of widening the view", async (
 });
 
 test("events --watch --json keeps a stream failure on one NDJSON line", async () => {
-  const { project, env } = await launchedProject();
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'stream broke' >&2\nexit 3\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  const { project, env } = await launchedProject({ failEvents: true });
 
   const watched = await cli(project, ["events", RUN_ID, "--watch", "--json"], env);
 
@@ -505,11 +503,8 @@ test("doctor reports install posture in human and JSON output", async () => {
 
 test("status recommends ultrafuzz why instead of the engine command", async () => {
   const project = tempProject();
-  const binDir = path.join(project, "fake-bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const smithers = path.join(binDir, "smithers");
-  fs.writeFileSync(
-    smithers,
+  installPinnedFakeRunner(
+    project,
     [
       "#!/bin/sh",
       'case "$1" in',
@@ -543,13 +538,10 @@ test("status recommends ultrafuzz why instead of the engine command", async () =
       "  *) printf '%s\\n' '{\"ok\":true}' ;;",
       "esac",
       ""
-    ].join("\n"),
-    "utf8"
+    ].join("\n")
   );
-  fs.chmodSync(smithers, 0o755);
   const env = {
-    PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers
+    PATH: process.env.PATH ?? ""
   };
   const init = await cli(project, ["init", "--json"], env);
   assert.equal(init.code, 0, init.stderr);

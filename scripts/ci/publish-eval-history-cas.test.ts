@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import {
   EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION,
   parseEvalHistoryPublicationGeneration,
-  publishEvalHistoryGeneration
+  publicationTreeDigest,
+  publishEvalHistoryGeneration,
+  validateEvalHistoryPublicationHandoff
 } from "./publish-eval-history-cas.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
@@ -157,6 +160,343 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(publishedTarget);
   }, 30_000);
 
+  it("atomically publishes exactly three observations and all nine charts", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-three", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-three.json", ["run-three"], candidateCommit);
+
+    const published = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
+
+    expect(published).toMatchObject({ published: true, attempts: 1 });
+    const parent = git(fixture.bare, ["rev-parse", `${TARGET_REF}^`]).trim();
+    expect(git(fixture.bare, ["diff", "--name-only", parent, TARGET_REF]).trim().split("\n").sort()).toEqual(
+      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
+    );
+    const history = JSON.parse(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])) as {
+      observations: Array<{ id: string }>;
+    };
+    expect(history.observations.map((observation) => observation.id)).toEqual([
+      "observation-a",
+      "observation-b",
+      "observation-c"
+    ]);
+  });
+
+  it("rejects a partial generation already preseeded with one expected observation", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-partial", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-partial.json", ["run-partial"], candidateCommit);
+    const run = JSON.parse(fs.readFileSync(path.join(inputRoot, "run-partial", "eval", "eval.json"), "utf8")) as {
+      observations: Array<ReturnType<typeof fixtureObservation>>;
+    };
+    appendFixtureHistoryValue(fixture.seed, run.observations[0]!);
+    git(fixture.seed, ["add", "benchmarks/history.json", "docs/assets/eval-history"]);
+    git(fixture.seed, ["commit", "-m", "Preseed one generation observation"]);
+    git(fixture.seed, ["push", "origin", "main"]);
+
+    expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
+      /partial or foreign observation set/u
+    );
+  });
+
+  it("rejects a first publication when the history CLI changes only a subset of charts", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-subset", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-subset.json", ["run-subset"], candidateCommit);
+    const previous = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = "1";
+    try {
+      expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
+        /must change history and all nine charts/u
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
+      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = previous;
+    }
+  });
+
+  it("rejects a coherently parseable publication tree substituted after generation preparation", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-substituted", "observation-a", candidateCommit);
+    const generation = writeGeneration(
+      fixture.root,
+      "generation-substituted.json",
+      ["run-substituted"],
+      candidateCommit
+    );
+    writeFile(
+      path.join(inputRoot, "run-substituted", "eval", "summary.json"),
+      `${JSON.stringify({ eval_run_id: "run-substituted", score_revision: 2 }, null, 2)}\n`
+    );
+
+    expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
+      /publication tree digest does not match generation/u
+    );
+  });
+
+  it("rejects digest rebinding when generation bytes no longer match the trusted workflow output", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-rebound", "observation-a", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-rebound.json", ["run-rebound"], candidateCommit);
+    const trustedGenerationSha256 = sha256(fs.readFileSync(generation));
+    writeFile(
+      path.join(inputRoot, "run-rebound", "eval", "summary.json"),
+      `${JSON.stringify({ eval_run_id: "run-rebound", score_revision: 2 }, null, 2)}\n`
+    );
+    const rebound = JSON.parse(fs.readFileSync(generation, "utf8")) as {
+      runs: Array<{ publication_tree_sha256: string }>;
+    };
+    rebound.runs[0]!.publication_tree_sha256 = publicationTreeDigest(path.join(inputRoot, "run-rebound"));
+    writeFile(generation, `${JSON.stringify(rebound, null, 2)}\n`);
+
+    expect(() =>
+      publishEvalHistoryGeneration({
+        generationPath: generation,
+        inputRoot,
+        repositoryRoot: fixture.checkoutA,
+        expectedGenerationSha256: trustedGenerationSha256
+      })
+    ).toThrow(/generation SHA-256 does not match the trusted workflow output/u);
+  });
+
+  it("validates only an exact digest-bound publication handoff", () => {
+    const fixture = createHandoffFixture();
+    const expectedGenerationSha256 = sha256(fs.readFileSync(fixture.generation));
+
+    expect(
+      validateEvalHistoryPublicationHandoff({
+        handoffRoot: fixture.handoff,
+        expectedGenerationSha256,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedRepositoryUrl: "https://github.com/monad-developers/ultrafuzz"
+      })
+    ).toMatchObject({ candidate_commit: fixture.candidateCommit, eval_run_ids: ["run-handoff"] });
+    expect(() =>
+      validateEvalHistoryPublicationHandoff({
+        handoffRoot: fixture.handoff,
+        expectedGenerationSha256,
+        expectedCandidateCommit: "b".repeat(40),
+        expectedRepositoryUrl: "https://github.com/monad-developers/ultrafuzz"
+      })
+    ).toThrow(/candidate commit does not match the trusted workflow output/u);
+
+    writeFile(path.join(fixture.handoff, "unexpected.txt"), "unexpected\n");
+    expect(() =>
+      validateEvalHistoryPublicationHandoff({ handoffRoot: fixture.handoff, expectedGenerationSha256 })
+    ).toThrow(/must contain exactly generation.json, unpacked/u);
+    fs.rmSync(path.join(fixture.handoff, "unexpected.txt"));
+
+    fs.mkdirSync(path.join(fixture.inputRoot, "unbound-run"));
+    expect(() =>
+      validateEvalHistoryPublicationHandoff({ handoffRoot: fixture.handoff, expectedGenerationSha256 })
+    ).toThrow(/publication input layout must contain exactly run-handoff/u);
+    fs.rmdirSync(path.join(fixture.inputRoot, "unbound-run"));
+
+    writeFile(path.join(fixture.inputRoot, "run-handoff", "eval", "summary.json"), "{}\n");
+    expect(() =>
+      validateEvalHistoryPublicationHandoff({ handoffRoot: fixture.handoff, expectedGenerationSha256 })
+    ).toThrow(/publication tree digest does not match generation/u);
+  });
+
+  it("rejects linked handoff roots and generation files", () => {
+    const fixture = createHandoffFixture();
+    const expectedGenerationSha256 = sha256(fs.readFileSync(fixture.generation));
+    const linkedRoot = path.join(path.dirname(fixture.handoff), "linked-handoff");
+    fs.symlinkSync(fixture.handoff, linkedRoot);
+    expect(() => validateEvalHistoryPublicationHandoff({ handoffRoot: linkedRoot, expectedGenerationSha256 })).toThrow(
+      /handoff root must be a regular directory/u
+    );
+
+    const originalGeneration = path.join(path.dirname(fixture.handoff), "original-generation.json");
+    fs.renameSync(fixture.generation, originalGeneration);
+    fs.symlinkSync(originalGeneration, fixture.generation);
+    expect(() =>
+      validateEvalHistoryPublicationHandoff({ handoffRoot: fixture.handoff, expectedGenerationSha256 })
+    ).toThrow(/handoff generation JSON must be a regular file/u);
+  });
+
+  it("keeps publisher authority out of the history CLI and bypasses repository hooks", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-authority", "observation-authority", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-authority.json", ["run-authority"], candidateCommit);
+    const childEnvironment = path.join(fixture.root, "child-environment.json");
+    const hookEnvironment = path.join(fixture.root, "hook-environment.txt");
+    const hooksRoot = git(fixture.checkoutA, ["rev-parse", "--git-path", "hooks"]).trim();
+    const hooksPath = path.isAbsolute(hooksRoot) ? hooksRoot : path.join(fixture.checkoutA, hooksRoot);
+    writeFile(path.join(hooksPath, "pre-push"), `#!/bin/sh\nenv > ${JSON.stringify(hookEnvironment)}\nexit 99\n`);
+    fs.chmodSync(path.join(hooksPath, "pre-push"), 0o700);
+    const hostileEnvironment = [
+      "CURL_CA_BUNDLE",
+      "CURL_HOME",
+      "CURL_SSL_BACKEND",
+      "OPENSSL_CONF",
+      "OPENSSL_CONF_INCLUDE",
+      "OPENSSL_ENGINES",
+      "OPENSSL_MODULES",
+      "QLOGDIR",
+      "SSL_CERT_DIR",
+      "SSL_CERT_FILE",
+      "SSLKEYLOGFILE"
+    ];
+    const previous = new Map<string, string | undefined>();
+    for (const name of ["ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV", ...hostileEnvironment]) {
+      previous.set(name, process.env[name]);
+    }
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV = childEnvironment;
+    for (const name of hostileEnvironment) process.env[name] = "publisher-secret-value";
+    try {
+      const published = publishEvalHistoryGeneration({
+        ...publisherInput(fixture.checkoutA, generation, inputRoot),
+        publisherToken: "publisher-secret-value"
+      });
+      expect(published.published).toBe(true);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+    expect(JSON.parse(fs.readFileSync(childEnvironment, "utf8"))).toEqual({});
+    expect(fs.existsSync(hookEnvironment)).toBe(false);
+  });
+
+  it("rejects origin mutation after CLI processing before any authorized push", () => {
+    const fixture = createRepositoryFixture();
+    const attacker = path.join(fixture.root, "attacker.git");
+    git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-origin", "observation-origin", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-origin.json", ["run-origin"], candidateCommit);
+    const childEnvironment = path.join(fixture.root, "origin-child-environment.json");
+    const previousOrigin = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_ORIGIN;
+    const previousCapture = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV;
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_ORIGIN = attacker;
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV = childEnvironment;
+    try {
+      expect(() =>
+        publishEvalHistoryGeneration({
+          ...publisherInput(fixture.checkoutA, generation, inputRoot),
+          publisherToken: "publisher-secret-value"
+        })
+      ).toThrow(/origin URL changed after trusted checkout/u);
+    } finally {
+      if (previousOrigin === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_ORIGIN;
+      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_ORIGIN = previousOrigin;
+      if (previousCapture === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV;
+      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV = previousCapture;
+    }
+    expect(JSON.parse(fs.readFileSync(childEnvironment, "utf8"))).toEqual({});
+    expect(gitStatus(attacker, ["show-ref", "--verify", TARGET_REF])).not.toBe(0);
+  });
+
+  it("requires publisher authority for a canonical GitHub publication", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-token", "observation-token", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-token.json", ["run-token"], candidateCommit);
+    git(fixture.checkoutA, ["remote", "set-url", "origin", "https://github.com/monad-developers/ultrafuzz.git"]);
+
+    expect(() =>
+      publishEvalHistoryGeneration({
+        generationPath: generation,
+        inputRoot,
+        repositoryRoot: fixture.checkoutA,
+        expectedGenerationSha256: sha256(fs.readFileSync(generation))
+      })
+    ).toThrow(/requires a publisher token/u);
+  });
+
+  it("ignores hostile inherited global Git transport configuration", () => {
+    const fixture = createRepositoryFixture();
+    const attacker = path.join(fixture.root, "global-attacker.git");
+    git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+    const hostileConfig = path.join(fixture.root, "hostile-global.gitconfig");
+    writeFile(hostileConfig, `[url ${JSON.stringify(attacker)}]\n\tinsteadOf = ${fixture.bare}\n`);
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-global", "observation-global", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-global.json", ["run-global"], candidateCommit);
+    const previous = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = hostileConfig;
+    try {
+      const published = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
+      expect(published.published).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previous;
+    }
+    expect(gitStatus(attacker, ["show-ref", "--verify", TARGET_REF])).not.toBe(0);
+  });
+
+  it("rejects hostile local HTTP and include transport configuration", () => {
+    for (const kind of ["http", "include"] as const) {
+      const fixture = createRepositoryFixture();
+      const inputRoot = path.join(fixture.root, "inputs");
+      const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+      writeEvalRun(inputRoot, `run-local-${kind}`, `observation-local-${kind}`, candidateCommit);
+      const generation = writeGeneration(
+        fixture.root,
+        `generation-local-${kind}.json`,
+        [`run-local-${kind}`],
+        candidateCommit
+      );
+      if (kind === "http") {
+        git(fixture.checkoutA, ["config", "http.curloptResolve", "+github.com:443:127.0.0.1"]);
+      } else {
+        const included = path.join(fixture.root, "included-transport.gitconfig");
+        writeFile(included, "[http]\n\tsslVerify = false\n");
+        git(fixture.checkoutA, ["config", "include.path", included]);
+      }
+
+      expect(() =>
+        publishEvalHistoryGeneration({
+          ...publisherInput(fixture.checkoutA, generation, inputRoot),
+          publisherToken: "publisher-secret-value"
+        })
+      ).toThrow(/unsafe transport configuration/u);
+    }
+  });
+
+  it("rejects hostile linked-worktree HTTP configuration created by the history CLI", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-worktree-http", "observation-worktree-http", candidateCommit);
+    const generation = writeGeneration(
+      fixture.root,
+      "generation-worktree-http.json",
+      ["run-worktree-http"],
+      candidateCommit
+    );
+    const previous = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP;
+    process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP = "1";
+    try {
+      expect(() =>
+        publishEvalHistoryGeneration({
+          ...publisherInput(fixture.checkoutA, generation, inputRoot),
+          publisherToken: "publisher-secret-value"
+        })
+      ).toThrow(/unsafe transport configuration: http.sslverify/u);
+    } finally {
+      if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP;
+      else process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP = previous;
+    }
+  });
+
   it("preserves unrelated main changes while committing only publication paths", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
@@ -181,7 +521,9 @@ describe("eval history Git CAS publisher", () => {
     const published = publishEvalHistoryGeneration({
       generationPath: generation,
       inputRoot,
-      repositoryRoot: fixture.checkoutB
+      repositoryRoot: fixture.checkoutB,
+      expectedGenerationSha256: sha256(fs.readFileSync(generation)),
+      testOnlyPublicationRemoteUrl: fixture.bare
     });
     expect(published).toMatchObject({ branch: "main", published: true, attempts: 1 });
     const publishedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
@@ -197,7 +539,22 @@ describe("eval history Git CAS publisher", () => {
       candidate_commit: "a".repeat(40),
       candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
       source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
-      runs: [{ eval_run_id: "run-a", benchmark: "evmbench", lane: "smoke", input_path: "runs/run-a" }]
+      runs: [
+        {
+          eval_run_id: "run-a",
+          benchmark: "evmbench",
+          lane: "smoke",
+          status: "succeeded",
+          input_path: "runs/run-a",
+          bundle_sha256: "b".repeat(64),
+          publication_tree_sha256: "c".repeat(64),
+          target_ids: ["target-a"],
+          observation_ids: ["run-a:target-a:variant:profile"],
+          executed_case_count: 1,
+          graded_case_count: 1,
+          publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+        }
+      ]
     };
     expect(() =>
       parseEvalHistoryPublicationGeneration({
@@ -226,7 +583,14 @@ describe("eval history Git CAS publisher", () => {
           lane: "smoke",
           status: "succeeded",
           input_path: "runs/run-a",
+          bundle_sha256: "b".repeat(64),
+          publication_tree_sha256: "c".repeat(64),
           target_ids: ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"],
+          observation_ids: [
+            "run-a:very-liquid-vaults-foundry:variant:profile",
+            "run-a:venus-isolated-pools-hardhat:variant:profile",
+            "run-a:stableswap-ng-vyper:variant:profile"
+          ],
           executed_case_count: 3,
           graded_case_count: 3,
           publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
@@ -236,6 +600,11 @@ describe("eval history Git CAS publisher", () => {
     expect(parseEvalHistoryPublicationGeneration(valid).runs[0]).toMatchObject({
       status: "succeeded",
       target_ids: ["very-liquid-vaults-foundry", "venus-isolated-pools-hardhat", "stableswap-ng-vyper"],
+      observation_ids: [
+        "run-a:very-liquid-vaults-foundry:variant:profile",
+        "run-a:venus-isolated-pools-hardhat:variant:profile",
+        "run-a:stableswap-ng-vyper:variant:profile"
+      ],
       executed_case_count: 3,
       graded_case_count: 3,
       publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
@@ -271,7 +640,9 @@ describe("eval history Git CAS publisher", () => {
       publishEvalHistoryGeneration({
         generationPath: generation,
         inputRoot,
-        repositoryRoot: fixture.checkoutA
+        repositoryRoot: fixture.checkoutA,
+        expectedGenerationSha256: sha256(fs.readFileSync(generation)),
+        testOnlyPublicationRemoteUrl: fixture.bare
       })
     ).toThrow(/candidate commit does not match publication generation/u);
   });
@@ -283,6 +654,23 @@ interface PublisherResult {
   attempts: number;
   published: boolean;
   eval_run_ids: string[];
+}
+
+function createHandoffFixture(): {
+  handoff: string;
+  generation: string;
+  inputRoot: string;
+  candidateCommit: string;
+} {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-history-handoff-test-"));
+  temporaryRoots.push(root);
+  const handoff = path.join(root, "handoff");
+  const inputRoot = path.join(handoff, "unpacked");
+  const candidateCommit = "a".repeat(40);
+  fs.mkdirSync(inputRoot, { recursive: true });
+  writeEvalRun(inputRoot, "run-handoff", "observation-handoff", candidateCommit);
+  const generation = writeGeneration(handoff, "generation.json", ["run-handoff"], candidateCommit, inputRoot);
+  return { handoff, generation, inputRoot, candidateCommit };
 }
 
 function createRepositoryFixture(): { root: string; bare: string; seed: string; checkoutA: string; checkoutB: string } {
@@ -318,6 +706,7 @@ function installFixtureCli(checkout: string): void {
     path.join(checkout, "packages", "cli", "dist", "index.js"),
     String.raw`import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 const charts = [
   "latest-summary.svg",
@@ -338,10 +727,51 @@ const project = path.resolve(args[projectIndex + 1]);
 const runId = args[2]?.startsWith("--") === false ? args[2] : undefined;
 const historyPath = path.join(project, "benchmarks", "history.json");
 const chartsRoot = path.join(project, "docs", "assets", "eval-history");
+const captureEnvironment = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_CAPTURE_CHILD_ENV;
+if (captureEnvironment !== undefined) {
+  const forbiddenTransportEnvironment = new Set([
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "CURL_SSL_BACKEND",
+    "OPENSSL_CONF",
+    "OPENSSL_CONF_INCLUDE",
+    "OPENSSL_ENGINES",
+    "OPENSSL_MODULES",
+    "QLOGDIR",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SSLKEYLOGFILE"
+  ]);
+  const authority = Object.fromEntries(
+    Object.entries(process.env).filter(([name, value]) =>
+      name === "PUBLISHER_TOKEN" ||
+      name === "GH_TOKEN" ||
+      name === "GITHUB_TOKEN" ||
+      name === "GIT_ASKPASS" ||
+      name === "GIT_SSH" ||
+      name === "GIT_SSH_COMMAND" ||
+      forbiddenTransportEnvironment.has(name) ||
+      value.includes("publisher-secret-value")
+    )
+  );
+  fs.writeFileSync(captureEnvironment, JSON.stringify(authority));
+}
+const mutatedOrigin = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_ORIGIN;
+if (mutatedOrigin !== undefined) execFileSync("git", ["config", "remote.origin.url", mutatedOrigin], { cwd: project });
+if (process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP === "1") {
+  execFileSync("git", ["config", "extensions.worktreeConfig", "true"], { cwd: project });
+  execFileSync("git", ["config", "--worktree", "http.sslVerify", "false"], { cwd: project });
+}
 
 function expectedCharts(history) {
   const ids = history.observations.map((entry) => entry.id).sort();
   return new Map(charts.map((file) => [file, file + ":" + ids.join(",") + "\n"]));
+}
+
+function selectedCharts(history) {
+  const expected = expectedCharts(history);
+  if (process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS === "1") expected.delete("cost.svg");
+  return expected;
 }
 
 if (runId !== undefined) {
@@ -363,46 +793,84 @@ if (runId !== undefined) {
     }
   }
   const history = JSON.parse(fs.readFileSync(historyPath, "utf8"));
-  if (!history.observations.some((entry) => entry.id === run.observation_id)) {
-    history.observations.push({ id: run.observation_id, source_eval_run_id: runId });
+  for (const observation of run.observations) {
+    if (!history.observations.some((entry) => entry.id === observation.id)) {
+      history.observations.push(observation);
+    }
   }
   history.observations.sort((left, right) => left.id.localeCompare(right.id));
   fs.writeFileSync(historyPath, JSON.stringify(history, null, 2) + "\n");
   fs.mkdirSync(chartsRoot, { recursive: true });
-  for (const [file, contents] of expectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
+  for (const [file, contents] of selectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
   process.exit(0);
 }
 
 const history = JSON.parse(fs.readFileSync(historyPath, "utf8"));
 if (args.includes("--check")) {
-  for (const [file, contents] of expectedCharts(history)) {
+  for (const [file, contents] of selectedCharts(history)) {
     if (fs.readFileSync(path.join(chartsRoot, file), "utf8") !== contents) throw new Error("stale fixture chart " + file);
   }
 } else {
   fs.mkdirSync(chartsRoot, { recursive: true });
-  for (const [file, contents] of expectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
+  for (const [file, contents] of selectedCharts(history)) fs.writeFileSync(path.join(chartsRoot, file), contents);
 }
 `
   );
 }
 
-function writeEvalRun(inputRoot: string, evalRunId: string, observationId: string, candidateCommit: string): void {
+function writeEvalRun(
+  inputRoot: string,
+  evalRunId: string,
+  observationIds: string | string[],
+  candidateCommit: string
+): void {
+  const ids = Array.isArray(observationIds) ? observationIds : [observationIds];
   writeFile(
-    path.join(inputRoot, evalRunId, "eval.json"),
+    path.join(inputRoot, evalRunId, "eval", "eval.json"),
     `${JSON.stringify(
       {
         eval_run_id: evalRunId,
-        observation_id: observationId,
-        provenance: { candidate: { commit: candidateCommit } }
+        provenance: { candidate: { commit: candidateCommit } },
+        observations: ids.map((id, index) => fixtureObservation(evalRunId, id, `target-${index + 1}`, candidateCommit))
       },
       null,
       2
     )}\n`
   );
+  writeFile(
+    path.join(inputRoot, evalRunId, "eval", "summary.json"),
+    `${JSON.stringify({ eval_run_id: evalRunId, score_revision: 1 }, null, 2)}\n`
+  );
 }
 
-function writeGeneration(root: string, file: string, evalRunIds: string[], candidateCommit: string): string {
+function writeGeneration(
+  root: string,
+  file: string,
+  evalRunIds: string[],
+  candidateCommit: string,
+  inputRoot = path.join(root, "inputs")
+): string {
   const generationPath = path.join(root, file);
+  const runs = evalRunIds.map((evalRunId) => {
+    const inputPath = path.join(inputRoot, evalRunId);
+    const evalManifest = JSON.parse(fs.readFileSync(path.join(inputPath, "eval", "eval.json"), "utf8")) as {
+      observations: Array<ReturnType<typeof fixtureObservation>>;
+    };
+    return {
+      eval_run_id: evalRunId,
+      benchmark: "evmbench",
+      lane: "smoke",
+      status: "succeeded",
+      input_path: evalRunId,
+      bundle_sha256: sha256(Buffer.from(`bundle:${evalRunId}`, "utf8")),
+      publication_tree_sha256: publicationTreeDigest(inputPath),
+      target_ids: evalManifest.observations.map((observation) => observation.target),
+      observation_ids: evalManifest.observations.map((observation) => observation.id),
+      executed_case_count: evalManifest.observations.length,
+      graded_case_count: evalManifest.observations.length,
+      publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+    };
+  });
   writeFile(
     generationPath,
     `${JSON.stringify(
@@ -411,18 +879,29 @@ function writeGeneration(root: string, file: string, evalRunIds: string[], candi
         candidate_commit: candidateCommit,
         candidate_repository_url: "https://github.com/monad-developers/ultrafuzz",
         source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
-        runs: evalRunIds.map((evalRunId) => ({
-          eval_run_id: evalRunId,
-          benchmark: "evmbench",
-          lane: "smoke",
-          input_path: evalRunId
-        }))
+        runs
       },
       null,
       2
     )}\n`
   );
   return generationPath;
+}
+
+function fixtureObservation(evalRunId: string, id: string, target: string, candidateCommit: string) {
+  return {
+    id,
+    source_eval_run_id: evalRunId,
+    source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
+    target,
+    candidate_commit: candidateCommit,
+    benchmark: "evmbench",
+    lane: "smoke",
+    status: "succeeded",
+    executed_case_count: 1,
+    graded_case_count: 1,
+    publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
+  };
 }
 
 function appendFixtureHistoryObservation(root: string, observationId: string, evalRunId: string): void {
@@ -441,21 +920,51 @@ function appendFixtureHistoryObservation(root: string, observationId: string, ev
   }
 }
 
+function appendFixtureHistoryValue(root: string, observation: ReturnType<typeof fixtureObservation>): void {
+  const historyPath = path.join(root, "benchmarks", "history.json");
+  const history = JSON.parse(fs.readFileSync(historyPath, "utf8")) as {
+    observations: Array<ReturnType<typeof fixtureObservation>>;
+  };
+  history.observations.push(observation);
+  history.observations.sort((left, right) => left.id.localeCompare(right.id));
+  fs.writeFileSync(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+  for (const chart of CHARTS) {
+    writeFile(
+      path.join(root, "docs", "assets", "eval-history", chart),
+      `${chart}:${history.observations.map((entry) => entry.id).join(",")}\n`
+    );
+  }
+}
+
+function publisherInput(repositoryRoot: string, generationPath: string, inputRoot: string) {
+  return {
+    generationPath,
+    inputRoot,
+    repositoryRoot,
+    expectedGenerationSha256: sha256(fs.readFileSync(generationPath)),
+    testOnlyPublicationRemoteUrl: git(repositoryRoot, ["remote", "get-url", "origin"]).trim()
+  };
+}
+
 async function invokePublisher(
   checkout: string,
   generationPath: string,
   inputRoot: string,
   barrier?: string
 ): Promise<PublisherResult> {
-  const child = Bun.spawn(["node", SCRIPT, generationPath, inputRoot], {
-    cwd: checkout,
-    env: {
-      ...process.env,
-      ...(barrier === undefined ? {} : { ULTRAFUZZ_HISTORY_CAS_TEST_BARRIER: barrier })
-    },
-    stdout: "pipe",
-    stderr: "pipe"
-  });
+  const child = Bun.spawn(
+    ["node", SCRIPT, generationPath, inputRoot, checkout, sha256(fs.readFileSync(generationPath))],
+    {
+      cwd: checkout,
+      env: {
+        ...process.env,
+        ULTRAFUZZ_HISTORY_CAS_TEST_LOCAL_REMOTE: git(checkout, ["remote", "get-url", "origin"]).trim(),
+        ...(barrier === undefined ? {} : { ULTRAFUZZ_HISTORY_CAS_TEST_BARRIER: barrier })
+      },
+      stdout: "pipe",
+      stderr: "pipe"
+    }
+  );
   const stdout = new Response(child.stdout).text();
   const stderr = new Response(child.stderr).text();
   const [exitCode, output, diagnostics] = await Promise.all([child.exited, stdout, stderr]);
@@ -475,4 +984,8 @@ function git(cwd: string, args: string[]): string {
 function gitStatus(cwd: string, args: string[]): number {
   const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "ignore", stderr: "ignore" });
   return result.exitCode;
+}
+
+function sha256(value: string | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
 }

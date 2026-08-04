@@ -13,6 +13,61 @@ afterEach(() => {
 });
 
 describe("Modal benchmark scope workflow binding", () => {
+  it("fail-closes every manual-dispatch checkout on one explicit exact candidate", () => {
+    const producer = parse(fs.readFileSync(path.resolve(".github/workflows/eval-benchmarks.yml"), "utf8")) as Workflow;
+    expect(producer.on?.workflow_dispatch?.inputs?.expected_candidate).toMatchObject({
+      required: true,
+      type: "string"
+    });
+
+    const bindings = Object.entries(producer.jobs).map(([jobName, job]) => {
+      const checkoutIndex = job.steps.findIndex((step) => step.with?.ref === "${{ env.BENCHMARK_CANDIDATE }}");
+      const bindingIndex = job.steps.findIndex(
+        (step) => step.name === "Bind the manual dispatch to the exact benchmark candidate"
+      );
+      if (bindingIndex < 0) return undefined;
+      expect(bindingIndex, `${jobName} binding order`).toBe(checkoutIndex + 1);
+      const binding = job.steps[bindingIndex]!;
+      expect(binding.if, `${jobName} push isolation`).toContain("github.event_name == 'workflow_dispatch'");
+      expect(binding.env).toEqual({
+        EXPECTED_CANDIDATE: "${{ inputs.expected_candidate }}",
+        EVENT_CANDIDATE: "${{ github.sha }}"
+      });
+      return binding.run;
+    });
+    expect(bindings.filter((run) => run !== undefined)).toHaveLength(3);
+    const scripts = new Set(bindings.filter((run): run is string => run !== undefined));
+    expect(scripts.size).toBe(1);
+    const bindingScript = [...scripts][0]!;
+
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: path.resolve("."), encoding: "utf8" });
+    expect(head.status).toBe(0);
+    const candidate = head.stdout.trim();
+    const differentCandidate = candidate === "a".repeat(40) ? "b".repeat(40) : "a".repeat(40);
+    const runBinding = (expectedCandidate: string, eventCandidate: string) =>
+      spawnSync("bash", ["-c", bindingScript], {
+        cwd: path.resolve("."),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          EXPECTED_CANDIDATE: expectedCandidate,
+          EVENT_CANDIDATE: eventCandidate
+        }
+      });
+
+    expect(runBinding(candidate, candidate).status).toBe(0);
+    for (const [expectedCandidate, eventCandidate] of [
+      [candidate.slice(0, -1), candidate],
+      ["A".repeat(40), candidate],
+      ["g".repeat(40), candidate],
+      [`${candidate} `, candidate],
+      [candidate, differentCandidate],
+      [differentCandidate, differentCandidate]
+    ]) {
+      expect(runBinding(expectedCandidate!, eventCandidate!).status).not.toBe(0);
+    }
+  });
+
   it("resolves only the exact DeepSeek Flash smoke marker for a manual smoke plan", () => {
     const valid = runRecoveryDiscovery({ event: "workflow_dispatch", mode: "smoke", markers: [deepseekMarker()] });
     expect(valid.status).toBe(0);
@@ -90,10 +145,118 @@ describe("Modal benchmark scope workflow binding", () => {
     expect(recoveryValidation).toContain('--expected-reasoning "$EXPECTED_REASONING"');
     expect(recoveryValidation).toContain('"${profile_args[@]}"');
   });
+
+  it("moves publisher authority onto a fresh runner after an exact sealed handoff", () => {
+    const publication = parse(
+      fs.readFileSync(path.resolve(".github/workflows/eval-history-publication.yml"), "utf8")
+    ) as Workflow;
+    const preparation = publication.jobs.publish_modal_benchmark!;
+    const publicationJob = publication.jobs.publish_validated_modal_benchmark!;
+    expect(publicationJob.needs).toEqual(["qualify_modal_benchmark", "publish_modal_benchmark"]);
+    expect(preparation.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(publicationJob.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(preparation.outputs).toMatchObject({
+      generation_sha256: "${{ steps.prepare_publication.outputs.generation_sha256 }}",
+      handoff_artifact_id: "${{ steps.upload_publication_handoff.outputs.artifact-id }}"
+    });
+
+    const prepareIndex = stepIndex(preparation, "Validate the atomic Modal benchmark generation");
+    const unpackIndex = stepIndex(preparation, "Unpack the digest-bound Modal benchmark generation");
+    const handoffLayoutIndex = stepIndex(preparation, "Validate the exact publication handoff layout");
+    const uploadIndex = stepIndex(preparation, "Upload the sealed publication handoff");
+    expect(unpackIndex).toBeGreaterThan(prepareIndex);
+    expect(handoffLayoutIndex).toBeGreaterThan(unpackIndex);
+    expect(uploadIndex).toBeGreaterThan(handoffLayoutIndex);
+    const preparationText = JSON.stringify(preparation);
+    expect(preparationText).not.toContain("create-github-app-token");
+    expect(preparationText).not.toContain("EVAL_HISTORY_APP_PRIVATE_KEY");
+    expect(preparationText).not.toContain("PUBLISHER_TOKEN");
+    expect(preparationText).not.toContain("permission-contents");
+
+    const prepare = preparation.steps[prepareIndex]?.run ?? "";
+    expect(prepare).toContain("prepare-eval-history-publication.mjs automatic");
+    expect(prepare).toContain("generation_sha256=");
+    expect(prepare).toContain('>> "$GITHUB_OUTPUT"');
+    expect(prepare).not.toContain("unpack-public");
+    expect(prepare).not.toContain("verify-unpacked");
+
+    const unpack = preparation.steps[unpackIndex]?.run ?? "";
+    expect(unpack).toContain("verify-bundle");
+    expect(unpack).toContain("unpack-public");
+    expect(unpack).toContain("verify-unpacked");
+    expect(unpack).not.toContain("GITHUB_OUTPUT");
+    const upload = preparation.steps[uploadIndex]!;
+    expect(upload.uses).toContain("actions/upload-artifact@");
+    expect(upload.with).toMatchObject({
+      name: "eval-history-publication-handoff-${{ github.run_id }}-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/eval-history-publication-handoff",
+      "if-no-files-found": "error",
+      "include-hidden-files": true,
+      overwrite: false,
+      "retention-days": 1
+    });
+
+    const freshCheckoutIndex = stepIndex(publicationJob, "Check out fresh trusted main publication tooling");
+    const freshBuildIndex = stepIndex(publicationJob, "Install and build fresh trusted main");
+    const downloadIndex = stepIndex(publicationJob, "Download the exact sealed publication handoff");
+    const validateIndex = stepIndex(publicationJob, "Validate the sealed publication handoff before token creation");
+    const driftIndex = stepIndex(publicationJob, "Verify fresh tooling, candidate policy, and main reachability");
+    const tokenIndex = stepIndex(publicationJob, "Create the narrowly scoped eval-history publisher token");
+    const publishIndex = stepIndex(
+      publicationJob,
+      "Publish the validated generation with remote-tip compare-and-swap retries"
+    );
+    expect(freshBuildIndex).toBeGreaterThan(freshCheckoutIndex);
+    expect(downloadIndex).toBeGreaterThan(freshBuildIndex);
+    expect(validateIndex).toBeGreaterThan(downloadIndex);
+    expect(driftIndex).toBeGreaterThan(validateIndex);
+    expect(tokenIndex).toBeGreaterThan(driftIndex);
+    expect(publishIndex).toBeGreaterThan(tokenIndex);
+    const download = publicationJob.steps[downloadIndex]!;
+    expect(download.with).toMatchObject({
+      "artifact-ids": "${{ needs.publish_modal_benchmark.outputs.handoff_artifact_id }}",
+      path: "${{ runner.temp }}/eval-history-publication-handoff"
+    });
+    const validate = publicationJob.steps[validateIndex]?.run ?? "";
+    expect(validate).toContain("publish-eval-history-cas.mjs validate-handoff");
+    expect(validate).toContain('"$EXPECTED_GENERATION_SHA256"');
+    expect(validate).toContain('"$CANDIDATE_COMMIT"');
+    expect(validate).toContain('"$EXPECTED_REPOSITORY_URL"');
+    const publish = publicationJob.steps[publishIndex]!;
+    expect(publish.env).toMatchObject({
+      PUBLISHER_TOKEN: "${{ steps.publisher-token.outputs.token }}",
+      EXPECTED_GENERATION_SHA256: "${{ needs.publish_modal_benchmark.outputs.generation_sha256 }}"
+    });
+    expect(publish.run).not.toContain("GIT_CONFIG_");
+    expect(publish.run).not.toContain("AUTHORIZATION:");
+    expect(publish.run).not.toContain("base64");
+    expect(JSON.stringify(publicationJob)).not.toContain("unpack-public");
+  });
 });
 
 interface Workflow {
-  jobs: Record<string, { steps: Array<{ name?: string; run?: string }> }>;
+  on?: {
+    workflow_dispatch?: {
+      inputs?: Record<string, { required?: boolean; type?: string }>;
+    };
+  };
+  jobs: Record<string, WorkflowJob>;
+}
+
+interface WorkflowJob {
+  needs?: string | string[];
+  permissions?: Record<string, string>;
+  outputs?: Record<string, string>;
+  steps: WorkflowStep[];
+}
+
+interface WorkflowStep {
+  name?: string;
+  if?: string;
+  run?: string;
+  uses?: string;
+  with?: Record<string, unknown>;
+  env?: Record<string, string>;
 }
 
 function deepseekMarker() {
@@ -106,6 +269,12 @@ function stepRun(workflow: Workflow, name: string): string {
     if (step?.run !== undefined) return step.run;
   }
   throw new Error(`missing workflow step ${name}`);
+}
+
+function stepIndex(job: WorkflowJob, name: string): number {
+  const index = job.steps.findIndex((step) => step.name === name);
+  if (index < 0) throw new Error(`missing workflow step ${name}`);
+  return index;
 }
 
 function runRecoveryDiscovery(input: {

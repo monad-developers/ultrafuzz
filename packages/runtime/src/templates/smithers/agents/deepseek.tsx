@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type DeepSeekAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
@@ -23,7 +24,7 @@ type DeepSeekSmithersUsage = {
   inputTokens: number;
   inputTokenDetails: { noCacheTokens: number; cacheReadTokens: number; cacheWriteTokens: 0 };
   outputTokens: number;
-  outputTokenDetails: { textTokens: undefined; reasoningTokens: undefined };
+  outputTokenDetails: { textTokens: undefined; reasoningTokens: 0 };
   totalTokens: number;
 };
 
@@ -32,6 +33,7 @@ type DeepSeekProviderIdentity = {
   invalid: boolean;
 };
 type DeepSeekUsageEvidence = { status: "complete"; usage: DeepSeekUsage } | { status: "incomplete" };
+type DeepSeekTokenCountEvidence = { status: "absent" } | { status: "complete"; value: number } | { status: "invalid" };
 type DeepSeekInvocationUsage =
   { status: "unseen" } | { status: "complete"; usage: DeepSeekUsage } | { status: "invalid" };
 type DeepSeekInvocationEvidence = {
@@ -61,6 +63,7 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
     ...(reasoningEffort === undefined ? {} : { extraArgs: ["--effort", reasoningEffort] }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),
     permissionMode: "bypassPermissions",
+    env: workflowControlChildEnvironment(),
     ...deepSeekAuthOptions()
   });
 }
@@ -359,25 +362,32 @@ function deepSeekUsageEvidenceFromResultLine(line: string): DeepSeekUsageEvidenc
   if (!isRecord(payload) || payload.type !== "result") return undefined;
   if (!isRecord(payload.usage)) return { status: "incomplete" };
   const usage = payload.usage;
-  const inputTokens = firstTokenCount(usage, ["prompt_cache_miss_tokens", "input_tokens", "inputTokens"]);
-  const outputTokens = firstTokenCount(usage, ["output_tokens", "outputTokens", "completion_tokens"]);
-  const cacheReadTokens = firstTokenCount(usage, [
+  const inputTokens = consistentTokenCount(usage, ["prompt_cache_miss_tokens", "input_tokens", "inputTokens"]);
+  const outputTokens = consistentTokenCount(usage, ["output_tokens", "outputTokens", "completion_tokens"]);
+  const cacheReadTokens = consistentTokenCount(usage, [
     "prompt_cache_hit_tokens",
     "cache_read_input_tokens",
     "cacheReadTokens",
     "cached_input_tokens"
   ]);
+  // Each alias is provider evidence in its own right. A malformed or
+  // contradictory alias cannot be ignored merely because another alias is
+  // well-formed: doing so would turn an ambiguous provider result into
+  // apparently authoritative accounting.
+  if (inputTokens.status === "invalid" || outputTokens.status === "invalid" || cacheReadTokens.status === "invalid") {
+    return { status: "incomplete" };
+  }
   // A cache hit count may be omitted when it is zero, but both uncached input
   // and output are required provider measurements. Never turn a partial result
   // into apparently complete zero-filled telemetry.
-  if (inputTokens === undefined || outputTokens === undefined) return { status: "incomplete" };
+  if (inputTokens.status !== "complete" || outputTokens.status !== "complete") return { status: "incomplete" };
   const normalized = {
-    inputTokens,
-    outputTokens,
+    inputTokens: inputTokens.value,
+    outputTokens: outputTokens.value,
     // DeepSeek enables its disk cache for every request and reports hit/miss
     // counts. Claude Code's aggregate result may omit an all-zero hit field;
     // zero is authoritative in that case rather than unknown telemetry.
-    cacheReadTokens: cacheReadTokens ?? 0,
+    cacheReadTokens: cacheReadTokens.status === "complete" ? cacheReadTokens.value : 0,
     cacheWriteTokens: 0 as const
   };
   const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
@@ -385,12 +395,18 @@ function deepSeekUsageEvidenceFromResultLine(line: string): DeepSeekUsageEvidenc
   return { status: "complete", usage: { ...normalized, totalTokens } };
 }
 
-function firstTokenCount(value: Record<string, unknown>, fields: readonly string[]): number | undefined {
+function consistentTokenCount(value: Record<string, unknown>, fields: readonly string[]): DeepSeekTokenCountEvidence {
+  let observed: number | undefined;
   for (const field of fields) {
+    if (!Object.hasOwn(value, field)) continue;
     const candidate = value[field];
-    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
+    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
+      return { status: "invalid" };
+    }
+    if (observed !== undefined && candidate !== observed) return { status: "invalid" };
+    observed = candidate;
   }
-  return undefined;
+  return observed === undefined ? { status: "absent" } : { status: "complete", value: observed };
 }
 
 function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
@@ -399,6 +415,7 @@ function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {
     output_tokens: usage.outputTokens,
     cache_read_input_tokens: usage.cacheReadTokens,
     cache_creation_input_tokens: usage.cacheWriteTokens,
+    reasoning_tokens: 0,
     total_tokens: usage.totalTokens
   };
 }
@@ -414,7 +431,7 @@ function deepSeekSmithersUsage(usage: DeepSeekUsage): DeepSeekSmithersUsage {
     outputTokens: usage.outputTokens,
     outputTokenDetails: {
       textTokens: undefined,
-      reasoningTokens: undefined
+      reasoningTokens: 0
     },
     totalTokens: usage.totalTokens
   };

@@ -1,18 +1,24 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+export const EVAL_HISTORY_PUBLICATION_GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v2";
 
 const TARGET_BRANCH = "main";
 const TARGET_REF = `refs/heads/${TARGET_BRANCH}`;
 const TARGET_REMOTE_REF = `refs/remotes/origin/${TARGET_BRANCH}`;
 const MAX_ATTEMPTS = 12;
 const MAX_GENERATION_BYTES = 1024 * 1024;
+const MAX_PUBLICATION_TREE_BYTES = 256 * 1024 * 1024;
+const HANDOFF_GENERATION_FILE = "generation.json";
+const HANDOFF_INPUT_DIRECTORY = "unpacked";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
+const SHA256 = /^[0-9a-f]{64}$/u;
+const SAFE_OBSERVATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u;
 const COMMIT_MESSAGE = "Update published eval history";
 const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
 const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
@@ -51,12 +57,20 @@ export function parseEvalHistoryPublicationGeneration(value) {
   const ids = new Set();
   const inputPaths = new Set();
   const runs = generation.runs.map((value, index) => {
-    const run = strictRecord(
-      value,
-      `publication run ${index}`,
-      ["eval_run_id", "benchmark", "lane", "input_path"],
-      ["status", "target_ids", "executed_case_count", "graded_case_count", "publication_url"]
-    );
+    const run = strictRecord(value, `publication run ${index}`, [
+      "eval_run_id",
+      "benchmark",
+      "lane",
+      "status",
+      "input_path",
+      "bundle_sha256",
+      "publication_tree_sha256",
+      "target_ids",
+      "observation_ids",
+      "executed_case_count",
+      "graded_case_count",
+      "publication_url"
+    ]);
     const evalRunId = safeId(run.eval_run_id, `publication run ${index} eval_run_id`);
     if (ids.has(evalRunId)) throw new Error(`publication generation repeats eval run ${evalRunId}`);
     ids.add(evalRunId);
@@ -67,25 +81,38 @@ export function parseEvalHistoryPublicationGeneration(value) {
       throw new Error(`publication run ${evalRunId} lane must be smoke or full`);
     }
     const inputPath = canonicalRelativePath(run.input_path, `publication run ${evalRunId} input_path`);
-    if (inputPaths.has(inputPath)) throw new Error(`publication generation repeats input path ${inputPath}`);
-    inputPaths.add(inputPath);
-    const targetIds = run.target_ids === undefined ? undefined : targetIdsForPublicationRun(run.target_ids, evalRunId);
-    const status = run.status === undefined ? undefined : publicationStatus(run.status, evalRunId);
-    const executedCaseCount =
-      run.executed_case_count === undefined
-        ? undefined
-        : positiveSafeInteger(run.executed_case_count, `publication run ${evalRunId} executed_case_count`);
-    const gradedCaseCount =
-      run.graded_case_count === undefined
-        ? undefined
-        : positiveSafeInteger(run.graded_case_count, `publication run ${evalRunId} graded_case_count`);
     if (
-      executedCaseCount !== undefined &&
-      gradedCaseCount !== undefined &&
-      (gradedCaseCount > executedCaseCount ||
-        (targetIds !== undefined && (targetIds.length > executedCaseCount || targetIds.length > gradedCaseCount)))
+      [...inputPaths].some(
+        (existing) =>
+          inputPath === existing || inputPath.startsWith(`${existing}/`) || existing.startsWith(`${inputPath}/`)
+      )
     ) {
-      throw new Error(`publication run ${evalRunId} case counts do not cover its target set`);
+      throw new Error(`publication generation repeats or overlaps input path ${inputPath}`);
+    }
+    inputPaths.add(inputPath);
+    const targetIds = targetIdsForPublicationRun(run.target_ids, evalRunId);
+    const observationIds = observationIdsForPublicationRun(run.observation_ids, evalRunId);
+    const status = publicationStatus(run.status, evalRunId);
+    const executedCaseCount = positiveSafeInteger(
+      run.executed_case_count,
+      `publication run ${evalRunId} executed_case_count`
+    );
+    const gradedCaseCount = positiveSafeInteger(
+      run.graded_case_count,
+      `publication run ${evalRunId} graded_case_count`
+    );
+    const bundleSha256 = sha256Value(run.bundle_sha256, `publication run ${evalRunId} bundle_sha256`);
+    const publicationTreeSha256 = sha256Value(
+      run.publication_tree_sha256,
+      `publication run ${evalRunId} publication_tree_sha256`
+    );
+    if (
+      gradedCaseCount > executedCaseCount ||
+      targetIds.length !== observationIds.length ||
+      targetIds.length > executedCaseCount ||
+      targetIds.length > gradedCaseCount
+    ) {
+      throw new Error(`publication run ${evalRunId} observation and case counts do not cover its target set`);
     }
     const publicationUrl =
       run.publication_url === undefined
@@ -96,10 +123,13 @@ export function parseEvalHistoryPublicationGeneration(value) {
       benchmark: run.benchmark,
       lane: run.lane,
       input_path: inputPath,
-      ...(status === undefined ? {} : { status }),
-      ...(targetIds === undefined ? {} : { target_ids: targetIds }),
-      ...(executedCaseCount === undefined ? {} : { executed_case_count: executedCaseCount }),
-      ...(gradedCaseCount === undefined ? {} : { graded_case_count: gradedCaseCount }),
+      status,
+      bundle_sha256: bundleSha256,
+      publication_tree_sha256: publicationTreeSha256,
+      target_ids: targetIds,
+      observation_ids: observationIds,
+      executed_case_count: executedCaseCount,
+      graded_case_count: gradedCaseCount,
       publication_url: publicationUrl
     };
   });
@@ -112,9 +142,42 @@ export function parseEvalHistoryPublicationGeneration(value) {
   };
 }
 
+export function validateEvalHistoryPublicationHandoff(input) {
+  const handoffRoot = regularDirectoryPath(input.handoffRoot, "publication handoff root");
+  assertExactDirectoryEntries(handoffRoot, [HANDOFF_GENERATION_FILE, HANDOFF_INPUT_DIRECTORY], "publication handoff");
+  const generationPath = regularFilePath(
+    path.join(handoffRoot, HANDOFF_GENERATION_FILE),
+    "publication handoff generation JSON"
+  );
+  const inputRoot = regularDirectoryPath(
+    path.join(handoffRoot, HANDOFF_INPUT_DIRECTORY),
+    "publication handoff input root"
+  );
+  const generation = readAndParseGeneration(generationPath, input.expectedGenerationSha256);
+  if (
+    input.expectedCandidateCommit !== undefined &&
+    generation.candidate_commit !== fullCommit(input.expectedCandidateCommit, "expected publication candidate commit")
+  ) {
+    throw new Error("publication handoff candidate commit does not match the trusted workflow output");
+  }
+  if (
+    input.expectedRepositoryUrl !== undefined &&
+    generation.candidate_repository_url !== canonicalGitHubRepositoryUrl(input.expectedRepositoryUrl)
+  ) {
+    throw new Error("publication handoff repository does not match the current workflow repository");
+  }
+  assertExactGenerationInputLayout(generation, inputRoot);
+  validateGenerationInputs(generation, inputRoot);
+  return {
+    schema_version: generation.schema_version,
+    candidate_commit: generation.candidate_commit,
+    eval_run_ids: generation.runs.map((run) => run.eval_run_id)
+  };
+}
+
 export function publishEvalHistoryGeneration(input) {
   const generationPath = regularFilePath(input.generationPath, "publication generation JSON");
-  const generation = parseEvalHistoryPublicationGeneration(readGeneration(generationPath));
+  const generation = readAndParseGeneration(generationPath, input.expectedGenerationSha256);
   const inputRoot = realDirectory(input.inputRoot, "publication input root");
   const repositoryRoot = gitRepositoryRoot(input.repositoryRoot ?? process.cwd());
   const benchmarkPolicyRoot = gitRepositoryRoot(input.benchmarkPolicyRoot ?? repositoryRoot);
@@ -131,7 +194,15 @@ export function publishEvalHistoryGeneration(input) {
     path.join(repositoryRoot, "packages", "cli", "dist", "index.js"),
     "built Ultrafuzz CLI"
   );
-  checked("git", ["remote", "get-url", "origin"], { cwd: repositoryRoot });
+  const publicationRemote = resolvePublicationRemote(
+    repositoryRoot,
+    generation.candidate_repository_url,
+    input.testOnlyPublicationRemoteUrl
+  );
+  if (!publicationRemote.testOnly && publisherTokenValue(input.publisherToken) === undefined) {
+    throw new Error("canonical GitHub publication requires a publisher token");
+  }
+  assertSafePublicationTransport(repositoryRoot, publicationRemote.originUrl);
 
   const temporaryParent = fs.realpathSync(os.tmpdir());
   const temporaryRoot = fs.mkdtempSync(path.join(temporaryParent, "ultrafuzz-eval-history-publish-"));
@@ -143,14 +214,20 @@ export function publishEvalHistoryGeneration(input) {
     const snapshots = snapshotGenerationInputs(generation, inputRoot, snapshotRoot);
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const base = refreshRemoteBase(repositoryRoot);
+      const base = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
       const worktree = path.join(temporaryRoot, `worktree-${attempt}`);
       checked("git", ["worktree", "add", "--detach", worktree, base.ref], { cwd: repositoryRoot });
       activeWorktree = worktree;
       try {
         installRunSnapshots(snapshots, worktree);
+        const historyBefore = readPublicationHistory(worktree);
         appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyRoot);
-        const stagedPaths = stageExactPublication(worktree);
+        const publicationKind = assertExactAutomaticPublicationDelta(
+          generation,
+          historyBefore,
+          readPublicationHistory(worktree)
+        );
+        const stagedPaths = stageExactPublication(worktree, publicationKind);
         let commit = base.oid;
         let createdCommit = false;
         if (stagedPaths.length > 0) {
@@ -160,7 +237,7 @@ export function publishEvalHistoryGeneration(input) {
         const needsPush = createdCommit;
 
         if (!needsPush) {
-          const latest = refreshRemoteBase(repositoryRoot);
+          const latest = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
           if (!sameRemoteState(base, latest)) {
             reportRetry(attempt, "a remote tip advanced during an idempotent rebuild");
             continue;
@@ -168,21 +245,27 @@ export function publishEvalHistoryGeneration(input) {
           return publicationResult(generation, latest.oid, attempt, false);
         }
 
-        const push = run("git", ["push", "origin", `HEAD:${TARGET_REF}`], { cwd: worktree });
+        assertSafePublicationTransport(repositoryRoot, publicationRemote.originUrl, worktree);
+        const pushArgs = ["push", "--no-verify", publicationRemote.pushUrl, `HEAD:${TARGET_REF}`];
+        const push = run("git", pushArgs, {
+          cwd: worktree,
+          env: publisherPushEnvironment(input.publisherToken, publicationRemote.testOnly),
+          redact: publisherAuthorityRedactions(input.publisherToken)
+        });
         if (push.status === 0) {
-          const published = refreshRemoteBase(repositoryRoot);
+          const published = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
           if (!isAncestor(repositoryRoot, commit, published.oid)) {
             throw new Error(`pushed commit ${commit} is not present on origin/${TARGET_BRANCH}`);
           }
           return publicationResult(generation, commit, attempt, true);
         }
 
-        const latest = refreshRemoteBase(repositoryRoot);
+        const latest = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
         if (!sameRemoteState(base, latest)) {
           reportRetry(attempt, "the publication push lost a remote-tip race");
           continue;
         }
-        throw processFailure("git", ["push", "origin", `HEAD:${TARGET_REF}`], push);
+        throw processFailure("git", pushArgs, push);
       } finally {
         removeWorktree(repositoryRoot, activeWorktree, temporaryRoot);
         activeWorktree = undefined;
@@ -197,14 +280,22 @@ export function publishEvalHistoryGeneration(input) {
 }
 
 function snapshotGenerationInputs(generation, inputRoot, snapshotRoot) {
-  return generation.runs.map((run) => {
-    const source = sourceDirectory(inputRoot, run.input_path, run.eval_run_id);
-    validateEvalRunIdentity(source, run.eval_run_id, generation.candidate_commit);
-    validateTree(source, `eval run ${run.eval_run_id}`);
+  return validateGenerationInputs(generation, inputRoot).map(({ run, source }) => {
     const snapshot = path.join(snapshotRoot, run.eval_run_id);
     copyTree(source, snapshot);
-    validateEvalRunIdentity(snapshot, run.eval_run_id, generation.candidate_commit);
+    assertPublicationTreeDigest(snapshot, run.publication_tree_sha256, run.eval_run_id);
+    validateEvalRunIdentity(path.join(snapshot, "eval"), run.eval_run_id, generation.candidate_commit);
     return { run, snapshot };
+  });
+}
+
+function validateGenerationInputs(generation, inputRoot) {
+  return generation.runs.map((run) => {
+    const source = sourceDirectory(inputRoot, run.input_path, run.eval_run_id);
+    validateTree(source, `publication tree for eval run ${run.eval_run_id}`);
+    assertPublicationTreeDigest(source, run.publication_tree_sha256, run.eval_run_id);
+    validateEvalRunIdentity(path.join(source, "eval"), run.eval_run_id, generation.candidate_commit);
+    return { run, source };
   });
 }
 
@@ -215,7 +306,7 @@ function installRunSnapshots(snapshots, worktree) {
     const destination = path.join(runsRoot, run.eval_run_id);
     if (fs.existsSync(destination))
       throw new Error(`temporary eval run destination already exists: ${run.eval_run_id}`);
-    copyTree(snapshot, destination);
+    copyTree(path.join(snapshot, "eval"), destination);
   }
 }
 
@@ -249,7 +340,7 @@ function appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyR
   checked("node", [cliPath, "eval", "history", "--project", worktree, "--check"], { cwd: worktree });
 }
 
-function stageExactPublication(worktree) {
+function stageExactPublication(worktree, publicationKind) {
   for (const relative of HISTORY_PATHS)
     regularFilePath(path.join(worktree, relative), `publication output ${relative}`);
   checked("git", ["add", "--", ...HISTORY_PATHS], { cwd: worktree });
@@ -260,7 +351,153 @@ function stageExactPublication(worktree) {
   if (unstagedTracked.length > 0) {
     throw new Error(`eval history CLI changed unexpected tracked paths: ${unstagedTracked.join(", ")}`);
   }
+  const expected = publicationKind === "first" ? HISTORY_PATHS : [];
+  if (!samePathSet(staged, expected)) {
+    throw new Error(
+      publicationKind === "first"
+        ? `first automatic publication must change history and all nine charts; changed: ${staged.join(", ")}`
+        : `automatic publication replay must be a true zero-change rebuild; changed: ${staged.join(", ")}`
+    );
+  }
   return staged;
+}
+
+function readPublicationHistory(worktree) {
+  const historyPath = regularFilePath(path.join(worktree, HISTORY_PATHS[0]), "publication history JSON");
+  let history;
+  try {
+    history = JSON.parse(fs.readFileSync(historyPath, "utf8"));
+  } catch (error) {
+    throw new Error("publication history is not valid JSON", { cause: error });
+  }
+  if (
+    typeof history !== "object" ||
+    history === null ||
+    Array.isArray(history) ||
+    !Array.isArray(history.observations)
+  ) {
+    throw new Error("publication history must contain an observations array");
+  }
+  return history.observations.map((value, index) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`publication history observation ${index} must be an object`);
+    }
+    return value;
+  });
+}
+
+function assertExactAutomaticPublicationDelta(generation, before, after) {
+  const expectedById = new Map();
+  const expectedRunIds = new Set(generation.runs.map((run) => run.eval_run_id));
+  for (const run of generation.runs) {
+    for (const [index, observationId] of run.observation_ids.entries()) {
+      if (expectedById.has(observationId)) {
+        throw new Error(`publication generation repeats observation ID ${observationId}`);
+      }
+      expectedById.set(observationId, { run, targetId: run.target_ids[index] });
+    }
+  }
+  const beforeById = observationsById(before, "base publication history");
+  const afterById = observationsById(after, "generated publication history");
+  const beforeExpected = [...expectedById.keys()].filter((id) => beforeById.has(id));
+  const relatedBefore = before.filter((observation) => expectedRunIds.has(observation.source_eval_run_id));
+  if (
+    relatedBefore.length !== beforeExpected.length ||
+    (beforeExpected.length !== 0 && beforeExpected.length !== expectedById.size)
+  ) {
+    throw new Error("automatic publication base contains a partial or foreign observation set for this generation");
+  }
+
+  for (const [id, canonicalBefore] of beforeById) {
+    const current = afterById.get(id);
+    if (current === undefined || stableJson(current) !== stableJson(canonicalBefore)) {
+      throw new Error(`automatic publication modified or removed existing observation ${id}`);
+    }
+  }
+
+  const relatedAfter = after.filter((observation) => expectedRunIds.has(observation.source_eval_run_id));
+  if (relatedAfter.length !== expectedById.size) {
+    throw new Error("automatic publication produced an incomplete or foreign observation set");
+  }
+  for (const [observationId, expected] of expectedById) {
+    const observation = afterById.get(observationId);
+    if (observation === undefined) {
+      throw new Error(`automatic publication did not produce expected observation ${observationId}`);
+    }
+    assertAutomaticObservationMetadata(observation, observationId, expected, generation);
+  }
+  assertAutomaticRunAggregates(generation, afterById);
+  const appended = [...afterById.keys()].filter((id) => !beforeById.has(id));
+  const expectedAppended = beforeExpected.length === 0 ? [...expectedById.keys()] : [];
+  if (!samePathSet(appended, expectedAppended)) {
+    throw new Error("automatic publication observation delta does not exactly match its generation");
+  }
+  return beforeExpected.length === 0 ? "first" : "replay";
+}
+
+function assertAutomaticObservationMetadata(observation, observationId, expected, generation) {
+  const { run, targetId } = expected;
+  if (
+    observation.source_eval_run_id !== run.eval_run_id ||
+    observation.target !== targetId ||
+    observation.candidate_commit !== generation.candidate_commit ||
+    observation.benchmark !== run.benchmark ||
+    observation.lane !== run.lane ||
+    observation.source_artifact !== generation.source_artifact ||
+    observation.publication_url !== run.publication_url ||
+    !Number.isSafeInteger(observation.executed_case_count) ||
+    observation.executed_case_count <= 0 ||
+    !Number.isSafeInteger(observation.graded_case_count) ||
+    observation.graded_case_count <= 0
+  ) {
+    throw new Error(`automatic publication observation ${observationId} does not match generation metadata`);
+  }
+}
+
+function assertAutomaticRunAggregates(generation, afterById) {
+  for (const run of generation.runs) {
+    const observations = run.observation_ids.map((id) => afterById.get(id));
+    if (observations.some((observation) => observation === undefined)) {
+      throw new Error(`automatic publication run ${run.eval_run_id} is missing expected observations`);
+    }
+    const executed = observations.reduce((sum, observation) => sum + observation.executed_case_count, 0);
+    const graded = observations.reduce((sum, observation) => sum + observation.graded_case_count, 0);
+    const status = observations.every((observation) => observation.status === "succeeded")
+      ? "succeeded"
+      : observations.some((observation) => observation.status === "failed")
+        ? "failed"
+        : "genuine-task-failures";
+    if (executed !== run.executed_case_count || graded !== run.graded_case_count || status !== run.status) {
+      throw new Error(`automatic publication run ${run.eval_run_id} does not match expected status or case counts`);
+    }
+  }
+}
+
+function observationsById(observations, label) {
+  const values = new Map();
+  for (const [index, observation] of observations.entries()) {
+    const id = requiredObservationId(observation.id, `${label} observation ${index} ID`);
+    if (values.has(id)) throw new Error(`${label} repeats observation ${id}`);
+    values.set(id, observation);
+  }
+  return values;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map((entry) => stableJson(entry)).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function samePathSet(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  const expectedSet = new Set(expected);
+  return actual.every((entry) => expectedSet.has(entry));
 }
 
 function createPublicationCommit(worktree, parent, generation) {
@@ -303,9 +540,96 @@ function assertAllowedPaths(paths, label) {
   }
 }
 
-function refreshRemoteBase(repositoryRoot) {
-  checked("git", ["fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"], {
-    cwd: repositoryRoot
+function resolvePublicationRemote(repositoryRoot, candidateRepositoryUrl, testOnlyPublicationRemoteUrl) {
+  const originUrl = gitOutput(repositoryRoot, ["remote", "get-url", "origin"]);
+  if (testOnlyPublicationRemoteUrl !== undefined) {
+    const testRemote = realDirectory(testOnlyPublicationRemoteUrl, "test-only publication remote");
+    if (path.resolve(originUrl) !== testRemote) throw new Error("test-only publication remote does not match origin");
+    return { originUrl, pushUrl: testRemote, testOnly: true };
+  }
+  const canonical = canonicalGitHubRepositoryUrl(candidateRepositoryUrl);
+  if (originUrl !== canonical && originUrl !== `${canonical}.git`) {
+    throw new Error("publication origin must be the canonical candidate GitHub HTTPS repository");
+  }
+  return { originUrl, pushUrl: `${canonical}.git`, testOnly: false };
+}
+
+function assertSafePublicationTransport(repositoryRoot, expectedOriginUrl, worktree) {
+  if (gitOutput(repositoryRoot, ["remote", "get-url", "origin"]) !== expectedOriginUrl) {
+    throw new Error("publication origin URL changed after trusted checkout");
+  }
+  const commonNames = nulPaths(
+    checked("git", ["config", "--local", "--name-only", "--null", "--list"], { cwd: repositoryRoot }).stdout
+  );
+  const originUrls = localConfigValues(repositoryRoot, "remote.origin.url");
+  if (originUrls.length !== 1 || originUrls[0] !== expectedOriginUrl) {
+    throw new Error("publication origin URL configuration changed after trusted checkout");
+  }
+  const originFetches = localConfigValues(repositoryRoot, "remote.origin.fetch");
+  if (
+    originFetches.length !== 1 ||
+    !["+refs/heads/*:refs/remotes/origin/*", "+refs/heads/main:refs/remotes/origin/main"].includes(originFetches[0])
+  ) {
+    throw new Error("publication origin fetch configuration changed after trusted checkout");
+  }
+  const worktreeNames = [];
+  if (worktree !== undefined) {
+    const worktreeConfigValue = gitOutput(worktree, ["rev-parse", "--git-path", "config.worktree"]);
+    const worktreeConfig = path.isAbsolute(worktreeConfigValue)
+      ? worktreeConfigValue
+      : path.resolve(worktree, worktreeConfigValue);
+    const stat = fs.lstatSync(worktreeConfig, { throwIfNoEntry: false });
+    if (stat !== undefined) {
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error("publication worktree configuration is not a regular file");
+      }
+      worktreeNames.push(
+        ...nulPaths(
+          checked("git", ["config", "--file", worktreeConfig, "--name-only", "--null", "--list"], {
+            cwd: worktree
+          }).stdout
+        )
+      );
+    }
+  }
+  const unsafe = commonNames.filter((name) => unsafePublicationTransportKey(name, true));
+  unsafe.push(...worktreeNames.filter((name) => unsafePublicationTransportKey(name, false)));
+  if (unsafe.length > 0) {
+    throw new Error(`publication repository contains unsafe transport configuration: ${unsafe.join(", ")}`);
+  }
+}
+
+function localConfigValues(repositoryRoot, key) {
+  const args = ["config", "--local", "--null", "--get-all", key];
+  const result = run("git", args, { cwd: repositoryRoot });
+  if (result.status === 1) return [];
+  if (result.status !== 0) throw processFailure("git", args, result);
+  return nulPaths(result.stdout);
+}
+
+function unsafePublicationTransportKey(name, allowCanonicalOrigin) {
+  const key = name.toLowerCase();
+  if (
+    key.startsWith("http.") ||
+    key.startsWith("credential.") ||
+    key.startsWith("url.") ||
+    key.startsWith("include.") ||
+    key.startsWith("includeif.") ||
+    key.startsWith("protocol.") ||
+    key.startsWith("ssh.") ||
+    key === "core.sshcommand" ||
+    key === "core.askpass"
+  ) {
+    return true;
+  }
+  if (!key.startsWith("remote.")) return false;
+  return !allowCanonicalOrigin || (key !== "remote.origin.url" && key !== "remote.origin.fetch");
+}
+
+function refreshRemoteBase(repositoryRoot, publicationRemoteUrl) {
+  checked("git", ["fetch", "--no-tags", publicationRemoteUrl, "+refs/heads/main:refs/remotes/origin/main"], {
+    cwd: repositoryRoot,
+    env: hardenedGitEnvironment(!publicationRemoteUrl.startsWith("https://"))
   });
   const oid = gitOutput(repositoryRoot, ["rev-parse", TARGET_REMOTE_REF]);
   return { ref: TARGET_REMOTE_REF, oid };
@@ -330,6 +654,50 @@ function publicationResult(generation, commit, attempts, published) {
     published,
     eval_run_ids: generation.runs.map((run) => run.eval_run_id)
   };
+}
+
+function assertExactGenerationInputLayout(generation, inputRoot) {
+  const tree = { children: new Map(), leaf: false };
+  for (const run of generation.runs) {
+    let node = tree;
+    for (const [index, segment] of run.input_path.split("/").entries()) {
+      let child = node.children.get(segment);
+      if (child === undefined) {
+        child = { children: new Map(), leaf: false };
+        node.children.set(segment, child);
+      }
+      node = child;
+      if (index === run.input_path.split("/").length - 1) node.leaf = true;
+    }
+  }
+
+  function walk(directory, node, relative) {
+    if (node.leaf) return;
+    const expected = [...node.children.keys()].sort(compareText);
+    assertExactDirectoryEntries(
+      directory,
+      expected,
+      `publication input layout${relative === "" ? "" : ` at ${relative}`}`
+    );
+    for (const name of expected) {
+      const childPath = path.join(directory, name);
+      const stat = fs.lstatSync(childPath);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new Error(`publication input layout contains a non-directory or symbolic link: ${relative}${name}`);
+      }
+      walk(childPath, node.children.get(name), `${relative}${name}/`);
+    }
+  }
+
+  walk(inputRoot, tree, "");
+}
+
+function assertExactDirectoryEntries(root, expected, label) {
+  const actual = fs.readdirSync(root).sort(compareText);
+  const canonicalExpected = [...expected].sort(compareText);
+  if (JSON.stringify(actual) !== JSON.stringify(canonicalExpected)) {
+    throw new Error(`${label} must contain exactly ${canonicalExpected.join(", ")}`);
+  }
 }
 
 function sourceDirectory(inputRoot, relative, evalRunId) {
@@ -371,6 +739,57 @@ function validateTree(root, label) {
     if (stat.isSymbolicLink()) throw new Error(`${label} contains a symbolic link: ${entry.name}`);
     if (stat.isDirectory()) validateTree(entryPath, label);
     else if (!stat.isFile()) throw new Error(`${label} contains a non-regular file: ${entry.name}`);
+  }
+}
+
+export function publicationTreeDigest(rootValue) {
+  const root = realDirectory(rootValue, "publication tree root");
+  const entries = [];
+  let totalBytes = 0;
+  function walk(directory, relativeDirectory) {
+    for (const entry of fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => compareText(left.name, right.name))) {
+      const entryPath = path.join(directory, entry.name);
+      const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) throw new Error(`publication tree contains a symbolic link: ${relativePath}`);
+      if (stat.isDirectory()) {
+        walk(entryPath, relativePath);
+        continue;
+      }
+      if (!stat.isFile()) throw new Error(`publication tree contains a non-regular entry: ${relativePath}`);
+      if (stat.size > MAX_PUBLICATION_TREE_BYTES) {
+        throw new Error(`publication tree file exceeds the size limit: ${relativePath}`);
+      }
+      const descriptor = fs.openSync(entryPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = fs.fstatSync(descriptor);
+        if (!opened.isFile() || opened.size !== stat.size) {
+          throw new Error(`publication tree file changed while hashing: ${relativePath}`);
+        }
+        const contents = fs.readFileSync(descriptor);
+        totalBytes += contents.byteLength;
+        if (totalBytes > MAX_PUBLICATION_TREE_BYTES) throw new Error("publication tree exceeds the size limit");
+        const completed = fs.fstatSync(descriptor);
+        if (!completed.isFile() || completed.size !== opened.size || completed.mtimeMs !== opened.mtimeMs) {
+          throw new Error(`publication tree file changed while hashing: ${relativePath}`);
+        }
+        entries.push({ path: relativePath, size_bytes: contents.byteLength, sha256: sha256(contents) });
+      } finally {
+        fs.closeSync(descriptor);
+      }
+    }
+  }
+  walk(root, "");
+  if (entries.length === 0) throw new Error("publication tree must contain at least one file");
+  return sha256(Buffer.from(JSON.stringify(entries), "utf8"));
+}
+
+function assertPublicationTreeDigest(root, expectedDigest, evalRunId) {
+  const actual = publicationTreeDigest(root);
+  if (actual !== expectedDigest) {
+    throw new Error(`publication tree digest does not match generation for ${evalRunId}`);
   }
 }
 
@@ -470,6 +889,39 @@ function targetIdsForPublicationRun(value, evalRunId) {
   });
 }
 
+function observationIdsForPublicationRun(value, evalRunId) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 2_048) {
+    throw new Error(`publication run ${evalRunId} observation_ids must be a non-empty array`);
+  }
+  const seen = new Set();
+  return value.map((entry, index) => {
+    const id = requiredObservationId(entry, `publication run ${evalRunId} observation_ids ${index}`);
+    if (seen.has(id)) throw new Error(`publication run ${evalRunId} repeats observation ${id}`);
+    seen.add(id);
+    return id;
+  });
+}
+
+function requiredObservationId(value, label) {
+  const id = requiredString(value, label);
+  if (!SAFE_OBSERVATION_ID.test(id)) throw new Error(`${label} is not a safe observation ID`);
+  return id;
+}
+
+function sha256Value(value, label) {
+  const digest = requiredString(value, label);
+  if (!SHA256.test(digest)) throw new Error(`${label} must be a lowercase SHA-256 digest`);
+  return digest;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function positiveSafeInteger(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive safe integer`);
@@ -515,13 +967,30 @@ function requiredString(value, label) {
   return value;
 }
 
-function readGeneration(filePath) {
-  const stat = fs.statSync(filePath);
-  if (stat.size > MAX_GENERATION_BYTES) throw new Error("publication generation JSON is too large");
+function readAndParseGeneration(generationPath, expectedGenerationSha256) {
+  return parseEvalHistoryPublicationGeneration(
+    readGeneration(generationPath, sha256Value(expectedGenerationSha256, "expected publication generation SHA-256"))
+  );
+}
+
+function readGeneration(filePath, expectedSha256) {
+  const descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (error) {
-    throw new Error(`failed to read publication generation JSON ${filePath}`, { cause: error });
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size < 1 || stat.size > MAX_GENERATION_BYTES) {
+      throw new Error("publication generation JSON is empty or too large");
+    }
+    const contents = fs.readFileSync(descriptor);
+    if (sha256(contents) !== expectedSha256) {
+      throw new Error("publication generation SHA-256 does not match the trusted workflow output");
+    }
+    try {
+      return JSON.parse(contents.toString("utf8"));
+    } catch (error) {
+      throw new Error(`failed to parse publication generation JSON ${filePath}`, { cause: error });
+    }
+  } finally {
+    fs.closeSync(descriptor);
   }
 }
 
@@ -534,6 +1003,15 @@ function realDirectory(value, label) {
   const resolved = fs.realpathSync(path.resolve(requiredString(value, label)));
   if (!fs.statSync(resolved).isDirectory()) throw new Error(`${label} must be a directory`);
   return resolved;
+}
+
+function regularDirectoryPath(value, label) {
+  const resolved = path.resolve(requiredString(value, label));
+  const stat = fs.lstatSync(resolved, { throwIfNoEntry: false });
+  if (stat === undefined || stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`${label} must be a regular directory`);
+  }
+  return fs.realpathSync(resolved);
 }
 
 function regularFilePath(value, label) {
@@ -565,13 +1043,105 @@ function checked(command, args, options) {
 function run(command, args, options) {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
-    env: process.env,
+    env: options.env ?? (command === "git" ? hardenedGitEnvironment(false) : publisherFreeEnvironment()),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 16 * 1024 * 1024
   });
   if (result.error !== undefined) throw result.error;
-  return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  return {
+    status: result.status ?? 1,
+    stdout: redactSensitiveText(result.stdout ?? "", options.redact),
+    stderr: redactSensitiveText(result.stderr ?? "", options.redact)
+  };
+}
+
+function publisherFreeEnvironment() {
+  const forbiddenTransportEnvironment = new Set([
+    "CURL_CA_BUNDLE",
+    "CURL_HOME",
+    "CURL_SSL_BACKEND",
+    "OPENSSL_CONF",
+    "OPENSSL_CONF_INCLUDE",
+    "OPENSSL_ENGINES",
+    "OPENSSL_MODULES",
+    "QLOGDIR",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SSLKEYLOGFILE"
+  ]);
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => {
+      const upper = name.toUpperCase();
+      return (
+        upper !== "PUBLISHER_TOKEN" &&
+        upper !== "GH_TOKEN" &&
+        upper !== "GITHUB_TOKEN" &&
+        !upper.startsWith("GIT_") &&
+        !upper.startsWith("GCM_") &&
+        !upper.startsWith("SSH_") &&
+        !/^(?:HTTP|HTTPS|ALL|NO)_PROXY$/u.test(upper) &&
+        !forbiddenTransportEnvironment.has(upper)
+      );
+    })
+  );
+}
+
+function publisherPushEnvironment(publisherToken, allowFileProtocol) {
+  const token = publisherTokenValue(publisherToken);
+  if (token === undefined && !allowFileProtocol) {
+    throw new Error("canonical GitHub publication requires a publisher token");
+  }
+  const authorization =
+    token === undefined
+      ? undefined
+      : `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")}`;
+  return hardenedGitEnvironment(allowFileProtocol, authorization);
+}
+
+function hardenedGitEnvironment(allowFileProtocol, authorization) {
+  const entries = [
+    ["credential.helper", ""],
+    ["core.hooksPath", "/dev/null"],
+    ["http.proxy", ""],
+    ["protocol.allow", "never"],
+    ["protocol.https.allow", "always"],
+    ["protocol.file.allow", allowFileProtocol ? "always" : "never"]
+  ];
+  if (authorization !== undefined) entries.unshift(["http.https://github.com/.extraheader", authorization]);
+  const environment = {
+    ...publisherFreeEnvironment(),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: String(entries.length)
+  };
+  for (const [index, [key, value]] of entries.entries()) {
+    environment[`GIT_CONFIG_KEY_${index}`] = key;
+    environment[`GIT_CONFIG_VALUE_${index}`] = value;
+  }
+  return environment;
+}
+
+function publisherAuthorityRedactions(publisherToken) {
+  const token = publisherTokenValue(publisherToken);
+  if (token === undefined) return [];
+  return [token, Buffer.from(`x-access-token:${token}`, "utf8").toString("base64")];
+}
+
+function publisherTokenValue(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length < 1 || value.length > 4096 || /[\r\n\0]/u.test(value)) {
+    throw new Error("publisher token is invalid");
+  }
+  return value;
+}
+
+function redactSensitiveText(value, sensitiveValues = []) {
+  let redacted = value;
+  for (const sensitive of sensitiveValues) redacted = redacted.split(sensitive).join("[REDACTED]");
+  return redacted;
 }
 
 function processFailure(command, args, result) {
@@ -613,17 +1183,78 @@ function reportRetry(attempt, reason) {
 }
 
 async function main() {
+  const publisherToken = takePublisherTokenFromEnvironment();
+  const testOnlyPublicationRemoteUrl = process.env.ULTRAFUZZ_HISTORY_CAS_TEST_LOCAL_REMOTE;
+  delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_LOCAL_REMOTE;
   const [command, ...args] = process.argv.slice(2);
-  const [generationPath, inputRoot, benchmarkPolicyRoot, ...extra] = [command, ...args];
-  if (generationPath === undefined || inputRoot === undefined || extra.length > 0) {
-    throw new Error("usage: publish-eval-history-cas.mjs <generation.json> <input-root> [benchmark-policy-root]");
+  if (command === "validate-handoff") {
+    if (publisherToken !== undefined) throw new Error("handoff validation must not receive publisher authority");
+    const [handoffRoot, expectedGenerationSha256, expectedCandidateCommit, expectedRepositoryUrl, ...extra] = args;
+    if (
+      handoffRoot === undefined ||
+      expectedGenerationSha256 === undefined ||
+      expectedCandidateCommit === undefined ||
+      expectedRepositoryUrl === undefined ||
+      extra.length > 0
+    ) {
+      throw new Error(
+        "usage: publish-eval-history-cas.mjs validate-handoff <handoff-root> <expected-generation-sha256> <expected-candidate-commit> <expected-repository-url>"
+      );
+    }
+    const result = validateEvalHistoryPublicationHandoff({
+      handoffRoot,
+      expectedGenerationSha256,
+      expectedCandidateCommit,
+      expectedRepositoryUrl
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  if (publisherToken === undefined && testOnlyPublicationRemoteUrl === undefined) {
+    throw new Error("canonical GitHub publication requires a publisher token");
+  }
+  const [inputRoot, benchmarkPolicyRoot, expectedGenerationSha256, ...extra] = args;
+  if (
+    command === undefined ||
+    inputRoot === undefined ||
+    benchmarkPolicyRoot === undefined ||
+    expectedGenerationSha256 === undefined ||
+    extra.length > 0
+  ) {
+    throw new Error(
+      "usage: publish-eval-history-cas.mjs <generation.json> <input-root> <benchmark-policy-root> <expected-generation-sha256>"
+    );
   }
   const result = publishEvalHistoryGeneration({
-    generationPath,
+    generationPath: command,
     inputRoot,
-    ...(benchmarkPolicyRoot === undefined ? {} : { benchmarkPolicyRoot })
+    benchmarkPolicyRoot,
+    expectedGenerationSha256,
+    publisherToken,
+    testOnlyPublicationRemoteUrl
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+function takePublisherTokenFromEnvironment() {
+  const token = publisherTokenValue(process.env.PUBLISHER_TOKEN);
+  for (const name of Object.keys(process.env)) {
+    const upper = name.toUpperCase();
+    if (
+      upper === "PUBLISHER_TOKEN" ||
+      upper === "GH_TOKEN" ||
+      upper === "GITHUB_TOKEN" ||
+      upper.startsWith("GIT_CONFIG_") ||
+      upper.startsWith("GCM_") ||
+      upper.startsWith("SSH_") ||
+      upper === "GIT_ASKPASS" ||
+      upper === "GIT_SSH" ||
+      upper === "GIT_SSH_COMMAND"
+    ) {
+      delete process.env[name];
+    }
+  }
+  return token;
 }
 
 const invokedPath = process.argv[1] === undefined ? undefined : pathToFileURL(path.resolve(process.argv[1])).href;

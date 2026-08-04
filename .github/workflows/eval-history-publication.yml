@@ -61,6 +61,12 @@ jobs:
     if: needs.qualify_modal_benchmark.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      generation_sha256: ${{ steps.prepare_publication.outputs.generation_sha256 }}
+      handoff_artifact_id: ${{ steps.upload_publication_handoff.outputs.artifact-id }}
     env:
       BENCHMARK_MODE: ${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}
       EXPECTED_PROVIDER: ${{ needs.qualify_modal_benchmark.outputs.expected_provider }}
@@ -166,14 +172,16 @@ jobs:
           fi
 
       - name: Validate the atomic Modal benchmark generation
+        id: prepare_publication
         env:
           BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-control
           BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-results
-          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
+          PUBLICATION_HANDOFF: ${{ runner.temp }}/eval-history-publication-handoff
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-publication-handoff/generation.json
           PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
           PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
-          PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
         run: |
+          mkdir -m 700 "$PUBLICATION_HANDOFF"
           profile_args=()
           if [ -n "$EXPECTED_PROVIDER" ]; then
             profile_args=(--expected-provider "$EXPECTED_PROVIDER")
@@ -198,8 +206,20 @@ jobs:
             "$PUBLICATION_GENERATION" \
             "$PUBLICATION_PLAN" \
             "${profile_args[@]}"
+          generation_sha256="$(sha256sum "$PUBLICATION_GENERATION" | awk '{print $1}')"
+          echo "generation_sha256=$generation_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Unpack the digest-bound Modal benchmark generation
+        env:
+          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-results
+          PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
+          PUBLICATION_UNPACKED: ${{ runner.temp }}/eval-history-publication-handoff/unpacked
+        run: |
           mkdir "$PUBLICATION_UNPACKED"
-          while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
+          while IFS=$'\t' read -r bundle_path bundle_sha256 unpack_path _publication_tree_sha256 eval_run_id benchmark lane model_slug; do
+            node scripts/ci/prepare-eval-history-publication.mjs verify-bundle \
+              "$BENCHMARK_RESULTS/$bundle_path" \
+              "$bundle_sha256"
             metadata="$(node packages/modal/dist/cli.js unpack-public \
               --bundle "$BENCHMARK_RESULTS/$bundle_path" \
               --output "$PUBLICATION_UNPACKED/$unpack_path")"
@@ -215,8 +235,134 @@ jobs:
                .model_slug == $model_slug and
                .candidate_commit == $candidate_commit' \
               <<< "$metadata" > /dev/null
-          done < <(jq -r '.pairs[] | [.bundle_path, .unpack_path, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
+          done < <(jq -r '.pairs[] | [.bundle_path, .bundle_sha256, .unpack_path, .publication_tree_sha256, .eval_run_id, .benchmark, .lane, .model_slug] | @tsv' \
             "$PUBLICATION_PLAN")
+          node scripts/ci/prepare-eval-history-publication.mjs verify-unpacked \
+            "$PUBLICATION_PLAN" \
+            "$PUBLICATION_UNPACKED"
+
+      - name: Validate the exact publication handoff layout
+        env:
+          PUBLICATION_HANDOFF: ${{ runner.temp }}/eval-history-publication-handoff
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-publication-handoff/generation.json
+          PUBLICATION_UNPACKED: ${{ runner.temp }}/eval-history-publication-handoff/unpacked
+        run: |
+          mapfile -d '' top_level < <(find "$PUBLICATION_HANDOFF" -mindepth 1 -maxdepth 1 -print0 | sort -z)
+          if [ "${#top_level[@]}" -ne 2 ] || \
+             [ "${top_level[0]}" != "$PUBLICATION_GENERATION" ] || \
+             [ "${top_level[1]}" != "$PUBLICATION_UNPACKED" ]; then
+            echo "Publication handoff must contain exactly generation.json and unpacked" >&2
+            exit 1
+          fi
+          if [ ! -f "$PUBLICATION_GENERATION" ] || [ -L "$PUBLICATION_GENERATION" ] || \
+             [ ! -d "$PUBLICATION_UNPACKED" ] || [ -L "$PUBLICATION_UNPACKED" ]; then
+            echo "Publication handoff contains an invalid generation or unpacked root" >&2
+            exit 1
+          fi
+          if find "$PUBLICATION_HANDOFF" -type l -print -quit | grep -q .; then
+            echo "Publication handoff must not contain symbolic links" >&2
+            exit 1
+          fi
+
+      - name: Upload the sealed publication handoff
+        id: upload_publication_handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eval-history-publication-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eval-history-publication-handoff
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: false
+          retention-days: 1
+          compression-level: 0
+
+  publish_validated_modal_benchmark:
+    needs:
+      - qualify_modal_benchmark
+      - publish_modal_benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    env:
+      CANDIDATE_COMMIT: ${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}
+
+    steps:
+      - name: Check out fresh trusted main publication tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          version: 11.1.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install and build fresh trusted main
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -w build
+
+      - name: Check out the exact fresh candidate benchmark policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.CANDIDATE_COMMIT }}
+          path: eval-history-benchmark-policy
+          persist-credentials: false
+
+      - name: Download the exact sealed publication handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.publish_modal_benchmark.outputs.handoff_artifact_id }}
+          path: ${{ runner.temp }}/eval-history-publication-handoff
+
+      - name: Validate the sealed publication handoff before token creation
+        env:
+          EXPECTED_GENERATION_SHA256: ${{ needs.publish_modal_benchmark.outputs.generation_sha256 }}
+          EXPECTED_REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          PUBLICATION_HANDOFF: ${{ runner.temp }}/eval-history-publication-handoff
+        run: |
+          node scripts/ci/publish-eval-history-cas.mjs validate-handoff \
+            "$PUBLICATION_HANDOFF" \
+            "$EXPECTED_GENERATION_SHA256" \
+            "$CANDIDATE_COMMIT" \
+            "$EXPECTED_REPOSITORY_URL"
+
+      - name: Verify fresh tooling, candidate policy, and main reachability
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
+        run: |
+          tooling_head="$(git rev-parse HEAD)"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if [ "$tooling_head" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+            echo "Trusted main publication tooling moved during handoff validation" >&2
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain=v1 --untracked-files=no)" ]; then
+            echo "Trusted main publication tooling has tracked modifications" >&2
+            exit 1
+          fi
+          if [ "$(git -C "$PUBLICATION_POLICY_ROOT" rev-parse HEAD)" != "$CANDIDATE_COMMIT" ] || \
+             [ -n "$(git -C "$PUBLICATION_POLICY_ROOT" status --porcelain=v1 --untracked-files=no)" ]; then
+            echo "Candidate benchmark policy checkout drifted" >&2
+            exit 1
+          fi
+          comparison_status="$(gh api \
+            "repos/$GITHUB_REPOSITORY/compare/$CANDIDATE_COMMIT...main" \
+            --jq '.status')"
+          if [ "$comparison_status" != ahead ] && [ "$comparison_status" != identical ]; then
+            echo "Benchmark candidate is no longer reachable from main" >&2
+            exit 1
+          fi
 
       - name: Create the narrowly scoped eval-history publisher token
         id: publisher-token
@@ -232,15 +378,13 @@ jobs:
       - name: Publish the validated generation with remote-tip compare-and-swap retries
         env:
           PUBLISHER_TOKEN: ${{ steps.publisher-token.outputs.token }}
-          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
+          EXPECTED_GENERATION_SHA256: ${{ needs.publish_modal_benchmark.outputs.generation_sha256 }}
+          PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-publication-handoff/generation.json
           PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
-          PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
+          PUBLICATION_UNPACKED: ${{ runner.temp }}/eval-history-publication-handoff/unpacked
         run: |
-          publisher_basic="$(printf 'x-access-token:%s' "$PUBLISHER_TOKEN" | base64 -w 0)"
-          GIT_CONFIG_COUNT=1 \
-          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
-          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $publisher_basic" \
-            node scripts/ci/publish-eval-history-cas.mjs \
-              "$PUBLICATION_GENERATION" \
-              "$PUBLICATION_UNPACKED" \
-              "$PUBLICATION_POLICY_ROOT"
+          node scripts/ci/publish-eval-history-cas.mjs \
+            "$PUBLICATION_GENERATION" \
+            "$PUBLICATION_UNPACKED" \
+            "$PUBLICATION_POLICY_ROOT" \
+            "$EXPECTED_GENERATION_SHA256"

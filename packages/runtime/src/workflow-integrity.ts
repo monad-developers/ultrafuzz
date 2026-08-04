@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   RUN_STATE_STATUSES,
+  assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
   safeResolveInside,
@@ -13,8 +14,13 @@ import {
 } from "@ultrafuzz/artifacts";
 import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
 
+import { bindSmithersExecutableCapability } from "./smithers-executable-capability.js";
+import { bindWorkflowExecutionSnapshotCapability } from "./workflow-execution-snapshot-capability.js";
+
 const WORKFLOW_CONTROL_INTEGRITY_SCHEMA_VERSION = "ultrafuzz.workflow-control-integrity.v2" as const;
 const WORKFLOW_CONTROL_INTEGRITY_FILE = "control-integrity.json";
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
+const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH = "dependencies/manifest.json";
 const MAX_WORKFLOW_CONTROL_FILE_BYTES = 64 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -109,6 +115,40 @@ export interface MaterializedWorkflowExecutionSnapshot {
   workflowPath: string;
   inputJson: string;
   env: Readonly<Record<string, string>>;
+  ownership: WorkflowExecutionSnapshotOwnership;
+}
+
+interface WorkflowExecutionSnapshotOwnership {
+  snapshotsRoot: string;
+  snapshotsRootDevice: number;
+  snapshotsRootInode: number;
+  snapshotDevice: number;
+  snapshotInode: number;
+}
+
+interface WorkflowExecutionDependencyTarget {
+  id: string;
+  name: string;
+  snapshot_path: string;
+}
+
+interface WorkflowExecutionDependencyPackage extends WorkflowExecutionDependencyTarget {
+  version: string;
+}
+
+interface WorkflowExecutionDependencyIssuer {
+  id: string;
+  snapshot_path: string;
+  dependencies: Readonly<Record<string, string>>;
+}
+
+interface WorkflowExecutionDependencyMap {
+  schema_version: typeof WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION;
+  modules: WorkflowExecutionDependencyTarget[];
+  packages: WorkflowExecutionDependencyPackage[];
+  issuers: WorkflowExecutionDependencyIssuer[];
+  executable_paths: string[];
+  smithers_bin: string | null;
 }
 
 export function workflowControlPaths(projectRoot: string, layout: RunLayout): WorkflowControlPaths {
@@ -295,36 +335,309 @@ export function materializeWorkflowExecutionSnapshot(input: {
   layout: RunLayout;
   snapshot: VerifiedWorkflowControlSnapshot;
 }): MaterializedWorkflowExecutionSnapshot {
-  const snapshotsRoot = safeResolveInside(
-    safeResolveInside(input.layout.root, "smithers", "workflow control directory"),
-    "execution-snapshots",
-    "workflow execution snapshots"
-  );
-  fs.mkdirSync(snapshotsRoot, { recursive: true, mode: 0o700 });
-  const snapshotRoot = fs.mkdtempSync(path.join(snapshotsRoot, `${input.snapshot.generation.slice(0, 24)}-`));
-  fs.chmodSync(snapshotRoot, 0o700);
+  const snapshotsDirectory = openWorkflowExecutionSnapshotsDirectory(input.layout);
+  let snapshotsDescriptorPath: string | undefined;
+  let snapshotRoot: string | undefined;
+  let snapshotDescriptor: number | undefined;
+  let snapshotDescriptorPath: string | undefined;
+  let ownership: WorkflowExecutionSnapshotOwnership | undefined;
   try {
-    for (const file of input.snapshot.executionFiles) {
-      writeSnapshotFile(snapshotRoot, file.snapshotPath, file.contents);
-    }
-    const workflowPath = path.join(
-      snapshotRoot,
-      ".smithers",
-      "workflows",
-      path.basename(input.snapshot.paths.workflowPath)
+    snapshotsDescriptorPath = requiredDirectoryDescriptorPath(
+      snapshotsDirectory.descriptor,
+      snapshotsDirectory.device,
+      snapshotsDirectory.inode,
+      "workflow execution snapshots"
     );
-    writeSnapshotFileAt(workflowPath, input.snapshot.contents.workflow);
-    wireWorkflowDependencies(input.projectRoot, snapshotRoot, input.snapshot.executionFiles);
-    sealSnapshotPermissions(snapshotRoot);
+    const creationRoot = snapshotsDescriptorPath;
+    const createdRoot = fs.mkdtempSync(path.join(creationRoot, `${input.snapshot.generation.slice(0, 24)}-`));
+    snapshotDescriptor = openDirectoryNoFollow(createdRoot);
+    const snapshotStat = fs.fstatSync(snapshotDescriptor);
+    if (!snapshotStat.isDirectory()) throw new Error("workflow execution snapshot root is not a physical directory");
+    snapshotDescriptorPath = requiredDirectoryDescriptorPath(
+      snapshotDescriptor,
+      snapshotStat.dev,
+      snapshotStat.ino,
+      "workflow execution snapshot root"
+    );
+    snapshotRoot = fs.realpathSync(snapshotDescriptorPath);
+    const ownedSnapshotsRoot = fs.realpathSync(snapshotsDescriptorPath);
+    assertDirectSnapshotChild(ownedSnapshotsRoot, snapshotRoot);
+    ownership = {
+      snapshotsRoot: ownedSnapshotsRoot,
+      snapshotsRootDevice: snapshotsDirectory.device,
+      snapshotsRootInode: snapshotsDirectory.inode,
+      snapshotDevice: snapshotStat.dev,
+      snapshotInode: snapshotStat.ino
+    };
+    assertCurrentDirectoryIdentity(
+      snapshotsDirectory.path,
+      snapshotsDirectory.device,
+      snapshotsDirectory.inode,
+      "workflow execution snapshots"
+    );
+    fs.fchmodSync(snapshotDescriptor, 0o700);
+    for (const file of input.snapshot.executionFiles) {
+      writeSnapshotFile(snapshotDescriptorPath, file.snapshotPath, file.contents);
+    }
+    const relativeWorkflowPath = path.join(".smithers", "workflows", path.basename(input.snapshot.paths.workflowPath));
+    writeSnapshotFileAt(path.join(snapshotDescriptorPath, relativeWorkflowPath), input.snapshot.contents.workflow);
+    const dependencies = wireWorkflowDependencies(snapshotDescriptorPath, input.snapshot.executionFiles);
+    sealSnapshotPermissions(snapshotDescriptorPath, new Set(dependencies.executable_paths));
+    const env = bindWorkflowExecutionSnapshotCapability(
+      {
+        ...workflowSnapshotModuleEnvironment(snapshotDescriptorPath, dependencies),
+        // Smithers loads and preflights through the descriptor-anchored command
+        // argument, while its durability layer must retain this canonical path
+        // for a supervisor or recovery process after the controller FD closes.
+        ULTRAFUZZ_WORKFLOW_PERSISTED_PATH: path.join(snapshotRoot, relativeWorkflowPath)
+      },
+      {
+        root: snapshotRoot,
+        snapshotsRoot: ownership.snapshotsRoot,
+        snapshotsRootDevice: ownership.snapshotsRootDevice,
+        snapshotsRootInode: ownership.snapshotsRootInode,
+        snapshotDevice: ownership.snapshotDevice,
+        snapshotInode: ownership.snapshotInode
+      }
+    );
+    assertCurrentDirectoryIdentity(
+      path.join(snapshotsDescriptorPath, path.basename(snapshotRoot)),
+      ownership.snapshotDevice,
+      ownership.snapshotInode,
+      "workflow execution snapshot"
+    );
+    assertCurrentDirectoryIdentity(
+      snapshotsDirectory.path,
+      snapshotsDirectory.device,
+      snapshotsDirectory.inode,
+      "workflow execution snapshots"
+    );
     return {
       root: snapshotRoot,
-      workflowPath,
+      workflowPath: path.join(snapshotRoot, relativeWorkflowPath),
       inputJson: input.snapshot.contents.input.toString("utf8"),
-      env: workflowSnapshotModuleEnvironment(snapshotRoot)
+      env,
+      ownership
     };
   } catch (error) {
-    fs.rmSync(snapshotRoot, { recursive: true, force: true });
+    if (snapshotRoot !== undefined && ownership !== undefined) {
+      try {
+        const cleanupRoot =
+          snapshotDescriptorPath === undefined ? snapshotRoot : fs.realpathSync(snapshotDescriptorPath);
+        const cleanupSnapshotsRoot =
+          snapshotsDescriptorPath === undefined ? ownership.snapshotsRoot : fs.realpathSync(snapshotsDescriptorPath);
+        disposeWorkflowExecutionSnapshotRoot(cleanupRoot, {
+          ...ownership,
+          snapshotsRoot: cleanupSnapshotsRoot
+        });
+      } catch {
+        // Preserve the materialization failure. A cleanup failure must never
+        // replace the error that prevented a usable execution snapshot.
+      }
+    }
     throw error;
+  } finally {
+    if (snapshotDescriptor !== undefined) fs.closeSync(snapshotDescriptor);
+    fs.closeSync(snapshotsDirectory.descriptor);
+  }
+}
+
+/**
+ * Removes one materialized snapshot without following a replaced parent/root
+ * symlink. Missing snapshots are already disposed, so repeated calls succeed.
+ */
+export function disposeWorkflowExecutionSnapshot(snapshot: MaterializedWorkflowExecutionSnapshot): void {
+  disposeWorkflowExecutionSnapshotRoot(snapshot.root, snapshot.ownership);
+}
+
+function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): {
+  path: string;
+  realPath: string;
+  descriptorPath?: string;
+  descriptor: number;
+  device: number;
+  inode: number;
+} {
+  const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
+  assertNoSymlinkComponents(layout.root, smithersRoot, "workflow control directory");
+  const snapshotsRoot = safeResolveInside(smithersRoot, "execution-snapshots", "workflow execution snapshots");
+  if (!pathExists(snapshotsRoot)) {
+    try {
+      fs.mkdirSync(snapshotsRoot, { mode: 0o700, recursive: false });
+    } catch (error) {
+      if (!isRecord(error) || error.code !== "EEXIST") throw error;
+    }
+  }
+  assertNoSymlinkComponents(layout.root, snapshotsRoot, "workflow execution snapshots");
+  const descriptor = openDirectoryNoFollow(snapshotsRoot);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    assertCurrentDirectoryIdentity(snapshotsRoot, stat.dev, stat.ino, "workflow execution snapshots");
+    const realPath = fs.realpathSync(snapshotsRoot);
+    const realRunRoot = fs.realpathSync(layout.root);
+    assertPathInside(realRunRoot, realPath, "workflow execution snapshots");
+    fs.fchmodSync(descriptor, 0o700);
+    return {
+      path: snapshotsRoot,
+      realPath,
+      descriptor,
+      device: stat.dev,
+      inode: stat.ino,
+      ...(directoryDescriptorPath(descriptor, stat.dev, stat.ino) === undefined
+        ? {}
+        : { descriptorPath: directoryDescriptorPath(descriptor, stat.dev, stat.ino) })
+    };
+  } catch (error) {
+    fs.closeSync(descriptor);
+    throw error;
+  }
+}
+
+function directoryDescriptorPath(descriptor: number, device: number, inode: number): string | undefined {
+  const candidates = process.platform === "win32" ? [] : [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isDirectory() && stat.dev === device && stat.ino === inode) return candidate;
+    } catch {
+      // Fall back to the verified physical path on platforms without fd paths.
+    }
+  }
+  return undefined;
+}
+
+function openDirectoryNoFollow(directory: string): number {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const directoryOnly = fs.constants.O_DIRECTORY ?? 0;
+  return fs.openSync(directory, fs.constants.O_RDONLY | noFollow | directoryOnly);
+}
+
+function assertCurrentDirectoryIdentity(directory: string, device: number, inode: number, label: string): void {
+  const stat = fs.lstatSync(directory);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
+    throw new Error(`${label} changed during snapshot ownership`);
+  }
+}
+
+function assertDirectSnapshotChild(snapshotsRoot: string, snapshotRoot: string): void {
+  assertPathInside(snapshotsRoot, snapshotRoot, "workflow execution snapshot root");
+  if (path.dirname(snapshotRoot) !== snapshotsRoot) {
+    throw new Error("workflow execution snapshot root is not a direct child of its owner directory");
+  }
+}
+
+function disposeWorkflowExecutionSnapshotRoot(root: string, ownership: WorkflowExecutionSnapshotOwnership): void {
+  if (!pathExists(ownership.snapshotsRoot)) {
+    throw new Error("workflow execution snapshots disappeared before cleanup could prove disposal");
+  }
+  assertCurrentDirectoryIdentity(
+    ownership.snapshotsRoot,
+    ownership.snapshotsRootDevice,
+    ownership.snapshotsRootInode,
+    "workflow execution snapshots"
+  );
+  const expectedRoot = path.resolve(ownership.snapshotsRoot, path.basename(root));
+  if (path.resolve(root) !== expectedRoot || path.dirname(expectedRoot) !== path.resolve(ownership.snapshotsRoot)) {
+    throw new Error("workflow execution snapshot root is not owned by its snapshots directory");
+  }
+
+  const snapshotsDescriptor = openDirectoryNoFollow(ownership.snapshotsRoot);
+  try {
+    const snapshotsStat = fs.fstatSync(snapshotsDescriptor);
+    if (
+      !snapshotsStat.isDirectory() ||
+      snapshotsStat.dev !== ownership.snapshotsRootDevice ||
+      snapshotsStat.ino !== ownership.snapshotsRootInode
+    ) {
+      throw new Error("workflow execution snapshots changed before cleanup");
+    }
+    const snapshotsDescriptorPath = requiredDirectoryDescriptorPath(
+      snapshotsDescriptor,
+      snapshotsStat.dev,
+      snapshotsStat.ino,
+      "workflow execution snapshots"
+    );
+    const ownedRoot = path.join(snapshotsDescriptorPath, path.basename(root));
+    if (!pathExists(ownedRoot)) return;
+    const rootStat = fs.lstatSync(ownedRoot);
+    if (
+      rootStat.isSymbolicLink() ||
+      !rootStat.isDirectory() ||
+      rootStat.dev !== ownership.snapshotDevice ||
+      rootStat.ino !== ownership.snapshotInode
+    ) {
+      throw new Error("workflow execution snapshot root changed before cleanup");
+    }
+
+    const rootDescriptor = openDirectoryNoFollow(ownedRoot);
+    try {
+      const openedRootStat = fs.fstatSync(rootDescriptor);
+      if (
+        !openedRootStat.isDirectory() ||
+        openedRootStat.dev !== ownership.snapshotDevice ||
+        openedRootStat.ino !== ownership.snapshotInode
+      ) {
+        throw new Error("workflow execution snapshot root changed before cleanup");
+      }
+      const rootDescriptorPath = requiredDirectoryDescriptorPath(
+        rootDescriptor,
+        openedRootStat.dev,
+        openedRootStat.ino,
+        "workflow execution snapshot root"
+      );
+      fs.fchmodSync(rootDescriptor, 0o700);
+      removeSnapshotDirectoryContents(rootDescriptorPath);
+      assertCurrentDirectoryIdentity(
+        ownedRoot,
+        ownership.snapshotDevice,
+        ownership.snapshotInode,
+        "workflow execution snapshot"
+      );
+      // The tree is already empty. A final rename/replacement race can at most
+      // make this non-recursive rmdir fail or remove an empty replacement that
+      // remains inside the held, verified parent descriptor; it cannot traverse
+      // a symlink or recursively delete an external tree.
+      fs.rmdirSync(ownedRoot);
+    } finally {
+      fs.closeSync(rootDescriptor);
+    }
+  } finally {
+    fs.closeSync(snapshotsDescriptor);
+  }
+}
+
+function requiredDirectoryDescriptorPath(descriptor: number, device: number, inode: number, label: string): string {
+  const descriptorPath = directoryDescriptorPath(descriptor, device, inode);
+  if (descriptorPath === undefined) {
+    throw new Error(`${label} cannot be cleaned safely without directory-descriptor paths`);
+  }
+  return descriptorPath;
+}
+
+function removeSnapshotDirectoryContents(directoryDescriptorPath: string): void {
+  for (const entry of fs.readdirSync(directoryDescriptorPath, { withFileTypes: true })) {
+    const candidate = path.join(directoryDescriptorPath, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      const descriptor = openDirectoryNoFollow(candidate);
+      try {
+        const stat = fs.fstatSync(descriptor);
+        if (!stat.isDirectory()) throw new Error("workflow execution snapshot directory changed during cleanup");
+        const childDescriptorPath = requiredDirectoryDescriptorPath(
+          descriptor,
+          stat.dev,
+          stat.ino,
+          "workflow execution snapshot directory"
+        );
+        fs.fchmodSync(descriptor, 0o700);
+        removeSnapshotDirectoryContents(childDescriptorPath);
+        assertCurrentDirectoryIdentity(candidate, stat.dev, stat.ino, "workflow execution snapshot directory");
+        fs.rmdirSync(candidate);
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      continue;
+    }
+    fs.unlinkSync(candidate);
   }
 }
 
@@ -356,65 +669,88 @@ function writeSnapshotFileAt(destination: string, contents: Buffer): void {
 }
 
 function wireWorkflowDependencies(
-  projectRoot: string,
   snapshotRoot: string,
   executionFiles: VerifiedWorkflowControlSnapshot["executionFiles"]
-): void {
-  const workflowNodeModules = path.join(snapshotRoot, "node_modules");
-  const smithersNodeModules = path.join(projectRoot, ".smithers", "node_modules");
-  fs.symlinkSync(smithersNodeModules, workflowNodeModules, process.platform === "win32" ? "junction" : "dir");
-
-  const packageManifests = executionFiles.filter((file) =>
-    /^modules\/@ultrafuzz\/[^/]+\/package\.json$/u.test(file.snapshotPath)
+): WorkflowExecutionDependencyMap {
+  const physicalSnapshotRoot = fs.realpathSync(snapshotRoot);
+  const manifestFile = executionFiles.find(
+    (file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH
   );
-  for (const file of packageManifests) {
-    const manifest = JSON.parse(file.contents.toString("utf8")) as { name?: unknown; dependencies?: unknown };
-    if (typeof manifest.name !== "string" || !/^@ultrafuzz\/[A-Za-z0-9._-]+$/u.test(manifest.name)) {
-      throw new Error(`invalid staged workflow package manifest: ${file.snapshotPath}`);
+  if (manifestFile === undefined) {
+    throw new Error("workflow execution snapshot is missing its sealed dependency map");
+  }
+  const dependencyMap = parseWorkflowExecutionDependencyMap(manifestFile.contents, executionFiles);
+  const targetPaths = new Map<string, string>();
+  for (const target of [...dependencyMap.modules, ...dependencyMap.packages]) {
+    const targetPath = resolveSnapshotPath(snapshotRoot, target.snapshot_path, `workflow dependency ${target.id}`);
+    if (!fs.statSync(targetPath).isDirectory()) {
+      throw new Error(`workflow dependency target is not a staged directory: ${target.id}`);
     }
-    const stagedPackageRoot = path.join(snapshotRoot, "modules", ...manifest.name.split("/"));
-    const sourcePackageRoot = path.dirname(file.sourcePath);
-    const stagedNodeModules = path.join(stagedPackageRoot, "node_modules");
-    fs.mkdirSync(stagedNodeModules, { recursive: true, mode: 0o700 });
-    if (!isRecord(manifest.dependencies)) continue;
-    for (const dependency of Object.keys(manifest.dependencies).sort()) {
-      const target = dependency.startsWith("@ultrafuzz/")
-        ? path.join(snapshotRoot, "modules", ...dependency.split("/"))
-        : path.join(sourcePackageRoot, "node_modules", ...dependency.split("/"));
-      if (!fs.existsSync(target)) {
-        throw new Error(`workflow package dependency is unavailable for snapshot: ${manifest.name} -> ${dependency}`);
-      }
-      const link = path.join(stagedNodeModules, ...dependency.split("/"));
+    targetPaths.set(target.id, targetPath);
+  }
+  for (const issuer of dependencyMap.issuers) {
+    const issuerPath =
+      issuer.id === "root"
+        ? snapshotRoot
+        : resolveSnapshotPath(snapshotRoot, issuer.snapshot_path, `workflow dependency issuer ${issuer.id}`);
+    const nodeModules = path.join(issuerPath, "node_modules");
+    fs.mkdirSync(nodeModules, { recursive: true, mode: 0o700 });
+    for (const [dependency, targetId] of Object.entries(issuer.dependencies)) {
+      const target = targetPaths.get(targetId);
+      if (target === undefined) throw new Error(`workflow dependency map has an unknown target: ${targetId}`);
+      const link = path.join(nodeModules, ...dependency.split("/"));
+      assertPathInside(snapshotRoot, link, `workflow dependency link ${issuer.id} -> ${dependency}`);
       fs.mkdirSync(path.dirname(link), { recursive: true, mode: 0o700 });
-      fs.symlinkSync(
-        fs.realpathSync(target),
-        link,
-        process.platform === "win32" ? "junction" : fs.statSync(target).isDirectory() ? "dir" : "file"
+      if (pathExists(link)) throw new Error(`workflow dependency link destination already exists: ${link}`);
+      const relativeTarget = path.relative(path.dirname(link), target);
+      if (relativeTarget.length === 0 || path.isAbsolute(relativeTarget)) {
+        throw new Error(`workflow dependency link target is invalid: ${issuer.id} -> ${dependency}`);
+      }
+      fs.symlinkSync(relativeTarget, link, "dir");
+      const resolvedTarget = fs.realpathSync(link);
+      assertPathInside(
+        physicalSnapshotRoot,
+        resolvedTarget,
+        `workflow dependency link target ${issuer.id} -> ${dependency}`
       );
+      if (resolvedTarget !== fs.realpathSync(target)) {
+        throw new Error(`workflow dependency link resolved to the wrong target: ${issuer.id} -> ${dependency}`);
+      }
     }
   }
+  verifySnapshotLinks(snapshotRoot);
+  return dependencyMap;
 }
 
-function workflowSnapshotModuleEnvironment(snapshotRoot: string): Readonly<Record<string, string>> {
+function workflowSnapshotModuleEnvironment(
+  snapshotRoot: string,
+  dependencies: WorkflowExecutionDependencyMap
+): Readonly<Record<string, string>> {
   const moduleUrl = (name: string): string => {
     const entry = path.join(snapshotRoot, "modules", "@ultrafuzz", name, "dist", "index.js");
-    return fs.existsSync(entry) ? pathToFileURL(entry).href : "";
+    return fs.existsSync(entry) ? pathToFileURL(fs.realpathSync(entry)).href : "";
   };
   const artifacts = moduleUrl("artifacts");
   const runtime = moduleUrl("runtime");
-  const config = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
-  if (artifacts.length === 0 || runtime.length === 0 || !fs.existsSync(config)) {
+  const configPath = path.join(snapshotRoot, "controls", "ultrafuzz.toml");
+  if (artifacts.length === 0 || runtime.length === 0 || !fs.existsSync(configPath)) {
     throw new Error("workflow execution snapshot is missing a required sealed module or config");
   }
-  return {
+  const config = fs.realpathSync(configPath);
+  const env: Record<string, string> = {
     ULTRAFUZZ_ARTIFACTS_MODULE: artifacts,
     ULTRAFUZZ_RUNTIME_MODULE: runtime,
     ...(moduleUrl("modal").length === 0 ? {} : { ULTRAFUZZ_MODAL_MODULE: moduleUrl("modal") }),
     ULTRAFUZZ_CONFIG_PATH: config
   };
+  if (dependencies.smithers_bin === null) return env;
+  return bindSmithersExecutableCapability(
+    env,
+    resolveSnapshotPath(snapshotRoot, dependencies.smithers_bin, "sealed workflow runner executable")
+  );
 }
 
-function sealSnapshotPermissions(root: string): void {
+function sealSnapshotPermissions(root: string, executablePaths: ReadonlySet<string>): void {
   const directories: string[] = [];
   const pending = [root];
   while (pending.length > 0) {
@@ -424,10 +760,295 @@ function sealSnapshotPermissions(root: string): void {
       const candidate = path.join(current, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) pending.push(candidate);
-      else if (entry.isFile()) fs.chmodSync(candidate, 0o400);
+      else if (entry.isFile()) {
+        const relative = path.relative(root, candidate).split(path.sep).join("/");
+        fs.chmodSync(candidate, executablePaths.has(relative) ? 0o500 : 0o400);
+      }
     }
   }
   for (const directory of directories.sort((left, right) => right.length - left.length)) fs.chmodSync(directory, 0o500);
+}
+
+function parseWorkflowExecutionDependencyMap(
+  contents: Buffer,
+  executionFiles: VerifiedWorkflowControlSnapshot["executionFiles"]
+): WorkflowExecutionDependencyMap {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("workflow execution dependency map is not valid JSON", { cause: error });
+  }
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["schema_version", "modules", "packages", "issuers", "executable_paths", "smithers_bin"]) ||
+    value.schema_version !== WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION ||
+    !Array.isArray(value.modules) ||
+    !Array.isArray(value.packages) ||
+    !Array.isArray(value.issuers) ||
+    !Array.isArray(value.executable_paths) ||
+    (value.smithers_bin !== null && typeof value.smithers_bin !== "string")
+  ) {
+    throw new Error("workflow execution dependency map is invalid");
+  }
+
+  const modules = value.modules.map((entry) => parseWorkflowDependencyModule(entry));
+  const packages = value.packages.map((entry, index) => parseWorkflowDependencyPackage(entry, index));
+  assertCanonicallyOrdered(
+    modules.map((entry) => entry.id),
+    "workflow dependency modules"
+  );
+  assertCanonicallyOrdered(
+    packages.map((entry) => entry.id),
+    "workflow dependency packages"
+  );
+  const targets = [...modules, ...packages];
+  const targetPaths = new Map<string, string>();
+  for (const target of targets) {
+    if (targetPaths.has(target.id)) throw new Error(`workflow dependency target is duplicated: ${target.id}`);
+    targetPaths.set(target.id, target.snapshot_path);
+  }
+
+  const issuers = value.issuers.map((entry) => parseWorkflowDependencyIssuer(entry, targetPaths));
+  assertCanonicallyOrdered(
+    issuers.map((entry) => entry.id),
+    "workflow dependency issuers"
+  );
+  const expectedIssuers = ["root", ...targetPaths.keys()].sort();
+  if (JSON.stringify(issuers.map((entry) => entry.id)) !== JSON.stringify(expectedIssuers)) {
+    throw new Error("workflow execution dependency map does not define every canonical issuer");
+  }
+  const issuerPaths = new Map<string, string>([["root", "."], ...targetPaths]);
+  for (const issuer of issuers) {
+    if (issuer.snapshot_path !== issuerPaths.get(issuer.id)) {
+      throw new Error(`workflow dependency issuer path does not match its target: ${issuer.id}`);
+    }
+  }
+
+  const executionByPath = new Map(executionFiles.map((file) => [file.snapshotPath, file]));
+  const executionPaths = new Set(executionByPath.keys());
+  const issuerManifests = new Map<string, Record<string, unknown>>();
+  const targetNames = new Map<string, string>();
+  const rootManifest = parseWorkflowDependencyPackageManifest(
+    executionByPath.get("dependencies/root-package.json")?.contents,
+    "workflow dependency root"
+  );
+  issuerManifests.set("root", rootManifest);
+  for (const module of modules) {
+    const manifest = parseWorkflowDependencyPackageManifest(
+      executionByPath.get(path.posix.join(module.snapshot_path, "package.json"))?.contents,
+      `workflow dependency module ${module.name}`
+    );
+    if (manifest.name !== module.name) {
+      throw new Error(`workflow dependency module metadata does not match the map: ${module.name}`);
+    }
+    issuerManifests.set(module.id, manifest);
+    targetNames.set(module.id, module.name);
+  }
+  for (const packageEntry of packages) {
+    const manifest = parseWorkflowDependencyPackageManifest(
+      executionByPath.get(path.posix.join(packageEntry.snapshot_path, "package.json"))?.contents,
+      `workflow dependency package ${packageEntry.name}`
+    );
+    if (manifest.name !== packageEntry.name || manifest.version !== packageEntry.version) {
+      throw new Error(`workflow dependency package metadata does not match the map: ${packageEntry.name}`);
+    }
+    issuerManifests.set(packageEntry.id, manifest);
+    targetNames.set(packageEntry.id, packageEntry.name);
+  }
+  for (const issuer of issuers) {
+    const manifest = issuerManifests.get(issuer.id);
+    if (manifest === undefined) throw new Error(`workflow dependency issuer metadata is missing: ${issuer.id}`);
+    for (const [dependency, target] of Object.entries(issuer.dependencies)) {
+      if (targetNames.get(target) !== dependency) {
+        throw new Error(`workflow dependency edge does not match target metadata: ${issuer.id} -> ${dependency}`);
+      }
+    }
+    const requiredDependencies = new Set<string>();
+    if (isRecord(manifest.dependencies)) {
+      for (const dependency of Object.keys(manifest.dependencies)) {
+        if (isRecord(manifest.optionalDependencies) && dependency in manifest.optionalDependencies) continue;
+        requiredDependencies.add(dependency);
+      }
+    }
+    if (isRecord(manifest.peerDependencies)) {
+      const peerDependenciesMeta = isRecord(manifest.peerDependenciesMeta) ? manifest.peerDependenciesMeta : {};
+      for (const dependency of Object.keys(manifest.peerDependencies)) {
+        const peerMeta = peerDependenciesMeta[dependency];
+        if (isRecord(peerMeta) && peerMeta.optional === true) continue;
+        requiredDependencies.add(dependency);
+      }
+    }
+    for (const dependency of requiredDependencies) {
+      if (issuer.dependencies[dependency] !== undefined) continue;
+      if (value.smithers_bin === null && !dependency.startsWith("@ultrafuzz/")) continue;
+      throw new Error(`workflow dependency map omits a required dependency: ${issuer.id} -> ${dependency}`);
+    }
+  }
+  for (const file of executionFiles) {
+    if (file.snapshotPath.split("/").includes("node_modules")) {
+      throw new Error(`workflow execution file collides with dependency links: ${file.snapshotPath}`);
+    }
+    if (file.snapshotPath.startsWith("dependencies/packages/")) {
+      const owner = packages.find(
+        (entry) => file.snapshotPath !== entry.snapshot_path && file.snapshotPath.startsWith(`${entry.snapshot_path}/`)
+      );
+      if (owner === undefined) {
+        throw new Error(`workflow execution file has no dependency package owner: ${file.snapshotPath}`);
+      }
+    }
+  }
+
+  const executablePaths = value.executable_paths.map((entry) => {
+    if (typeof entry !== "string") throw new Error("workflow dependency executable path is invalid");
+    const executablePath = validateSnapshotPath(entry);
+    if (!executionPaths.has(executablePath)) {
+      throw new Error(`workflow dependency executable is not a sealed file: ${executablePath}`);
+    }
+    return executablePath;
+  });
+  assertCanonicallyOrdered(executablePaths, "workflow dependency executable paths");
+  const smithersBin = value.smithers_bin === null ? null : validateSnapshotPath(value.smithers_bin as string);
+  if (smithersBin !== null) {
+    if (!executablePaths.includes(smithersBin)) {
+      throw new Error("sealed workflow runner is not a declared executable");
+    }
+    const rootIssuer = issuers.find((entry) => entry.id === "root")!;
+    const runnerTarget = rootIssuer.dependencies["smithers-orchestrator"];
+    const runner = packages.find((entry) => entry.id === runnerTarget && entry.name === "smithers-orchestrator");
+    if (runner === undefined || !smithersBin.startsWith(`${runner.snapshot_path}/`)) {
+      throw new Error("sealed workflow runner does not belong to the root runner dependency");
+    }
+  }
+
+  return {
+    schema_version: WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION,
+    modules,
+    packages,
+    issuers,
+    executable_paths: executablePaths,
+    smithers_bin: smithersBin
+  };
+}
+
+function parseWorkflowDependencyPackageManifest(contents: Buffer | undefined, label: string): Record<string, unknown> {
+  if (contents === undefined) throw new Error(`${label} is missing package metadata`);
+  return parseRecordJson(contents, `${label} package metadata`);
+}
+
+function parseWorkflowDependencyModule(value: unknown): WorkflowExecutionDependencyTarget {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["id", "name", "snapshot_path"]) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    !/^@ultrafuzz\/[A-Za-z0-9._-]+$/u.test(value.name) ||
+    value.id !== `module:${value.name}` ||
+    value.snapshot_path !== path.posix.join("modules", value.name)
+  ) {
+    throw new Error("workflow execution dependency map has an invalid module");
+  }
+  return { id: value.id, name: value.name, snapshot_path: validateSnapshotPath(value.snapshot_path) };
+}
+
+function parseWorkflowDependencyPackage(value: unknown, index: number): WorkflowExecutionDependencyPackage {
+  const sequence = String(index + 1).padStart(6, "0");
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["id", "name", "version", "snapshot_path"]) ||
+    value.id !== `package:${sequence}` ||
+    typeof value.name !== "string" ||
+    !isWorkflowDependencyPackageName(value.name) ||
+    typeof value.version !== "string" ||
+    value.version.length === 0 ||
+    value.version.length > 512 ||
+    value.snapshot_path !== `dependencies/packages/${sequence}`
+  ) {
+    throw new Error("workflow execution dependency map has an invalid package");
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    version: value.version,
+    snapshot_path: validateSnapshotPath(value.snapshot_path)
+  };
+}
+
+function parseWorkflowDependencyIssuer(
+  value: unknown,
+  targets: ReadonlyMap<string, string>
+): WorkflowExecutionDependencyIssuer {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["id", "snapshot_path", "dependencies"]) ||
+    typeof value.id !== "string" ||
+    typeof value.snapshot_path !== "string" ||
+    !isRecord(value.dependencies)
+  ) {
+    throw new Error("workflow execution dependency map has an invalid issuer");
+  }
+  const snapshotPath =
+    value.id === "root" && value.snapshot_path === "." ? "." : validateSnapshotPath(value.snapshot_path);
+  const dependencies: Record<string, string> = {};
+  const names = Object.keys(value.dependencies);
+  assertCanonicallyOrdered(names, `workflow dependencies for ${value.id}`);
+  for (const name of names) {
+    const target = value.dependencies[name];
+    if (!isWorkflowDependencyPackageName(name) || typeof target !== "string" || !targets.has(target)) {
+      throw new Error(`workflow execution dependency map has an invalid edge: ${value.id} -> ${name}`);
+    }
+    dependencies[name] = target;
+  }
+  return { id: value.id, snapshot_path: snapshotPath, dependencies };
+}
+
+function assertCanonicallyOrdered(values: readonly string[], label: string): void {
+  const sorted = [...new Set(values)].sort(compareCanonicalStrings);
+  if (JSON.stringify(values) !== JSON.stringify(sorted)) throw new Error(`${label} are not canonically ordered`);
+}
+
+function compareCanonicalStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function isWorkflowDependencyPackageName(value: string): boolean {
+  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/iu.test(value);
+}
+
+function resolveSnapshotPath(root: string, relativePath: string, label: string): string {
+  const validated = validateSnapshotPath(relativePath);
+  const resolved = path.resolve(root, ...validated.split("/"));
+  assertPathInside(root, resolved, label);
+  return resolved;
+}
+
+function pathExists(candidate: string): boolean {
+  try {
+    fs.lstatSync(candidate);
+    return true;
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function verifySnapshotLinks(snapshotRoot: string): void {
+  const physicalSnapshotRoot = fs.realpathSync(snapshotRoot);
+  const pending = [snapshotRoot];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) {
+        const target = fs.readlinkSync(candidate);
+        if (path.isAbsolute(target)) throw new Error(`workflow execution snapshot link is absolute: ${candidate}`);
+        const resolvedTarget = fs.realpathSync(candidate);
+        assertPathInside(physicalSnapshotRoot, resolvedTarget, `workflow execution snapshot link ${candidate}`);
+      } else if (entry.isDirectory()) {
+        pending.push(candidate);
+      }
+    }
+  }
 }
 
 function controlFileContents(
@@ -622,7 +1243,7 @@ function executionFileEntries(files: readonly WorkflowExecutionControlFile[]): W
       seenSnapshots.add(snapshotPath);
       return { sourcePath, snapshotPath };
     })
-    .sort((left, right) => left.snapshotPath.localeCompare(right.snapshotPath))
+    .sort((left, right) => compareCanonicalStrings(left.snapshotPath, right.snapshotPath))
     .map((file) => ({
       source_path: file.sourcePath,
       snapshot_path: file.snapshotPath,
@@ -639,13 +1260,15 @@ function readBoundedRegularFile(root: string, filePath: string, label: string): 
   return readOpenedRegularFile(exactPath, label);
 }
 
-function readOpenedRegularFile(exactPath: string, label: string): Buffer {
+function readOpenedRegularFile(exactPath: string, label: string, requireSingleLink = true): Buffer {
   const noFollow = fs.constants.O_NOFOLLOW ?? 0;
   const descriptor = fs.openSync(exactPath, fs.constants.O_RDONLY | noFollow);
   try {
     const opened = fs.fstatSync(descriptor, { bigint: true });
-    if (!opened.isFile() || opened.nlink !== 1n) {
-      throw new Error(`${label} must be a single-link regular file`);
+    if (!opened.isFile() || (requireSingleLink && opened.nlink !== 1n)) {
+      throw new Error(
+        requireSingleLink ? `${label} must be a single-link regular file` : `${label} must be a regular file`
+      );
     }
     if (opened.size < 0n || opened.size > BigInt(MAX_WORKFLOW_CONTROL_FILE_BYTES)) {
       throw new Error(`${label} exceeds the workflow control size limit`);
@@ -670,11 +1293,13 @@ function readOpenedRegularFile(exactPath: string, label: string): Buffer {
       opened.dev !== completed.dev ||
       opened.ino !== completed.ino ||
       opened.size !== completed.size ||
+      opened.nlink !== completed.nlink ||
       opened.ctimeNs !== completed.ctimeNs ||
       opened.mtimeNs !== completed.mtimeNs ||
       opened.dev !== current.dev ||
       opened.ino !== current.ino ||
       opened.size !== current.size ||
+      opened.nlink !== current.nlink ||
       opened.ctimeNs !== current.ctimeNs ||
       opened.mtimeNs !== current.mtimeNs
     ) {
@@ -691,7 +1316,7 @@ function readBoundedRegularFileExact(filePath: string, label: string): Buffer {
   if (!path.isAbsolute(filePath) || filePath.includes("\0")) {
     throw new Error(`${label} must use an absolute path`);
   }
-  return readOpenedRegularFile(exactPath, label);
+  return readOpenedRegularFile(exactPath, label, false);
 }
 
 function parseWorkflowControlIntegritySeal(contents: Buffer): WorkflowControlIntegritySeal {
@@ -767,7 +1392,7 @@ function parseWorkflowControlIntegritySeal(contents: Buffer): WorkflowControlInt
     });
   }
   const sortedExecutionFiles = [...executionFiles].sort((left, right) =>
-    left.snapshot_path.localeCompare(right.snapshot_path)
+    compareCanonicalStrings(left.snapshot_path, right.snapshot_path)
   );
   if (executionFiles.some((entry, index) => entry.snapshot_path !== sortedExecutionFiles[index]?.snapshot_path)) {
     throw new Error("workflow control seal execution files are not canonically ordered");

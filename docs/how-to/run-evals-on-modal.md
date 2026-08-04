@@ -139,10 +139,12 @@ graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
-A manual `workflow_dispatch` requires a `benchmark_scope`. The default `full`
-scope evaluates every checked-in EVMBench target with GPT-5.6 Luna at `high`,
-Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by
-default. Dispatch inputs `openai_model`, `openai_reasoning`,
+A manual `workflow_dispatch` requires both a `benchmark_scope` and an
+`expected_candidate`: a full lowercase commit SHA that must match the dispatch
+event and every candidate checkout before any build or Modal compute starts. The
+default `full` scope evaluates every checked-in EVMBench target with GPT-5.6
+Luna at `high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro
+at `max` by default. Dispatch inputs `openai_model`, `openai_reasoning`,
 `anthropic_model`, `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`,
 `deepseek_model`, and `deepseek_reasoning` provide explicit full-lane
 overrides. The full lane retains the production strategy set, including
@@ -170,10 +172,15 @@ history model label and observation timestamp must not be read as an attestation
 of immutable backend weights.
 
 ```bash
+candidate="$(gh api repos/monad-developers/ultrafuzz/commits/main --jq .sha)"
 gh workflow run eval-benchmarks.yml \
   --ref main \
+  -f expected_candidate="$candidate" \
   -f benchmark_scope=deepseek-v4-flash-smoke
 ```
+
+If `main` advances between resolving `candidate` and dispatching the workflow,
+the preflight fails closed; resolve the new tip and dispatch again.
 
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four

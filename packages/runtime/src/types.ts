@@ -720,6 +720,7 @@ export interface DoctorValue {
     compatibility_patches: {
       detached_admission: string;
       supervisor_descriptor: string;
+      workflow_path_persistence: string;
     };
   };
 }

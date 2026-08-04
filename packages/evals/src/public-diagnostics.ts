@@ -1,4 +1,5 @@
 import { z } from "zod/v4";
+import { AGENT_POSTFLIGHT_FAILURE_CODES } from "@ultrafuzz/runtime";
 
 import { boundedEvalId } from "./utils.js";
 
@@ -30,20 +31,7 @@ export const PUBLIC_EVAL_FAILURE_CATEGORIES = [
   "dependency-cascade",
   "provider-interruption"
 ] as const;
-export const PUBLIC_EVAL_FAILURE_CODES = [
-  "task-output-validation-failure",
-  "workspace-provenance-postflight",
-  "artifact-preparation-postflight",
-  "source-attestation-persistence-postflight",
-  "markdown-materialization-postflight",
-  "dedupe-materialization-postflight",
-  "final-report-materialization-postflight",
-  "findings-normalization-postflight",
-  "report-provenance-normalization-postflight",
-  "generated-test-manifest-normalization-postflight",
-  "generated-test-companion-materialization-postflight",
-  "artifact-validation-postflight"
-] as const;
+export const PUBLIC_EVAL_FAILURE_CODES = ["task-output-validation-failure", ...AGENT_POSTFLIGHT_FAILURE_CODES] as const;
 
 const MAX_ROWS = 2_048;
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
@@ -319,11 +307,7 @@ export function parsePublicEvalDiagnostics(value: unknown): PublicEvalDiagnostic
       throw new Error(`public eval diagnostics row failed nodes are not deterministic: ${row.row_id}`);
     }
     if (attested) {
-      assertPublicModelAndPricingEvidence(
-        row,
-        parsed.model,
-        parsed.schema_version === PUBLIC_EVAL_DIAGNOSTICS_V3_SCHEMA_VERSION
-      );
+      assertPublicModelAndPricingEvidence(row, parsed.model);
     }
     const expectedReasons = legacy
       ? legacyPublicEvalDiagnosticsReadinessReasonCodes(row)
@@ -496,11 +480,7 @@ function legacyPublicEvalDiagnosticsReadinessReasonCodes(
   return reasons;
 }
 
-function assertPublicModelAndPricingEvidence(
-  row: PublicEvalDiagnosticsRow,
-  expectedConfiguredModel: string,
-  preserveV3DeepSeekRateProfile: boolean
-): void {
+function assertPublicModelAndPricingEvidence(row: PublicEvalDiagnosticsRow, expectedConfiguredModel: string): void {
   const identity = row.model_identity;
   const pricing = row.pricing;
   if (identity !== undefined) {
@@ -537,7 +517,7 @@ function assertPublicModelAndPricingEvidence(
     }
     assertPublicPricingArithmetic(pricing, row.row_id);
     if (pricing.configured_model === DEEPSEEK_V4_FLASH_MODEL) {
-      assertDeepSeekV4FlashPricing(pricing, row.row_id, preserveV3DeepSeekRateProfile);
+      assertDeepSeekV4FlashPricing(pricing, row.row_id);
     }
   }
 }
@@ -582,16 +562,12 @@ function assertPublicPricingArithmetic(pricing: PublicPricingEvidence, rowId: st
   }
 }
 
-function assertDeepSeekV4FlashPricing(
-  pricing: PublicPricingEvidence,
-  rowId: string,
-  preserveV3RateProfile: boolean
-): void {
+function assertDeepSeekV4FlashPricing(pricing: PublicPricingEvidence, rowId: string): void {
   const expectedRates = DEEPSEEK_V4_FLASH_RATES_USD_PER_MILLION;
   if (
     pricing.provider_reported_model !== DEEPSEEK_V4_FLASH_MODEL ||
     pricing.catalog.source !== "models.dev" ||
-    (preserveV3RateProfile && JSON.stringify(pricing.rates_usd_per_million) !== JSON.stringify(expectedRates)) ||
+    JSON.stringify(pricing.rates_usd_per_million) !== JSON.stringify(expectedRates) ||
     pricing.usage.cache_write_tokens !== 0 ||
     pricing.usage.reasoning_tokens !== 0 ||
     pricing.component_costs_usd.cache_write !== 0 ||

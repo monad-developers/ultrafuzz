@@ -4,14 +4,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   cancelRun,
   diagnoseProject,
   diagnoseRun,
+  getRunHealth,
+  getRunStatus,
   getRunTimeline,
   getWorkflowNode,
   initProject,
+  listRuns,
   listRunSnapshots,
   queryWorkflowEvents,
   startRun,
@@ -19,7 +23,13 @@ import {
   watchWorkflowNode,
   type WorkflowLifecycleEvent
 } from "../src/index.js";
-import { SMITHERS_ORCHESTRATOR_BIN_PATH, SMITHERS_ORCHESTRATOR_VERSION } from "../src/smithers-package.js";
+import {
+  KIMI_CODE_VERSION,
+  SMITHERS_ORCHESTRATOR_BIN_PATH,
+  SMITHERS_ORCHESTRATOR_VERSION
+} from "../src/smithers-package.js";
+import { withLinkedWorkflowExecution } from "../src/workflow-sync.js";
+import { createSmithersTestEnvironment } from "./helpers/smithers-capability.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
 
@@ -78,8 +88,13 @@ interface FakeInspectionFixtures {
   snapshots?: unknown;
   node?: unknown;
   events?: string;
+  eventsExitCode?: number;
+  eventsStderr?: string;
+  eventsSignal?: "SIGKILL";
   cancelStatus?: string;
   cancelExitCode?: number;
+  cancelOutput?: string;
+  cancelStderr?: string;
 }
 
 /**
@@ -130,10 +145,19 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
       "    fi",
       "    ;;",
       "  events)",
-      `    cat ${shellQuote(files.events)}`,
+      ...(fixtures.eventsSignal === "SIGKILL"
+        ? ["    kill -9 $$"]
+        : [
+            ...(fixtures.eventsStderr === undefined
+              ? []
+              : [`    printf '%s\\n' ${shellQuote(fixtures.eventsStderr)} >&2`]),
+            `    cat ${shellQuote(files.events)}`,
+            ...(fixtures.eventsExitCode === undefined ? [] : [`    exit ${fixtures.eventsExitCode}`])
+          ]),
       "    ;;",
       "  cancel)",
-      `    printf '%s\\n' '{"data":{"status":"${fixtures.cancelStatus ?? "cancel-requested"}"}}'`,
+      ...(fixtures.cancelStderr === undefined ? [] : [`    printf '%s\\n' ${shellQuote(fixtures.cancelStderr)} >&2`]),
+      `    printf '%s\\n' ${shellQuote(fixtures.cancelOutput ?? JSON.stringify({ data: { status: fixtures.cancelStatus ?? "cancel-requested" } }))}`,
       `    exit ${fixtures.cancelExitCode ?? 2}`,
       "    ;;",
       "  *)",
@@ -145,12 +169,11 @@ function fakeInspectionEnv(project: string, fixtures: FakeInspectionFixtures): R
     "utf8"
   );
   fs.chmodSync(smithers, 0o755);
-  return {
+  return createSmithersTestEnvironment(smithers, {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    SMITHERS_BIN: smithers,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
     ...(fixtures.nodeWatchLines === undefined ? {} : { SMITHERS_FAKE_NODE_WATCH: nodeWatchPath })
-  };
+  });
 }
 
 async function launchedProject(
@@ -169,9 +192,277 @@ function smithersLog(project: string): string {
   return fs.readFileSync(path.join(project, "smithers-commands.log"), "utf8");
 }
 
+function installSealedInspectionRunner(project: string): {
+  env: Record<string, string | undefined>;
+  environmentLog: string;
+  liveBin: string;
+} {
+  const nodeModules = path.join(project, ".smithers", "node_modules");
+  const runnerRoot = path.join(nodeModules, "smithers-orchestrator");
+  const runner = path.join(runnerRoot, ...SMITHERS_ORCHESTRATOR_BIN_PATH.split("/"));
+  const liveBin = path.join(nodeModules, ".bin");
+  const liveRunner = path.join(liveBin, "smithers");
+  const environmentLog = path.join(project, "sealed-execution-environment.log");
+  const dependencies = [
+    ["@moonshot-ai/kimi-code", KIMI_CODE_VERSION],
+    ["@smithers-orchestrator/tool-context", SMITHERS_ORCHESTRATOR_VERSION],
+    ["react", "19.2.4"],
+    ["zod", "4.4.3"]
+  ] as const;
+  for (const [name, version] of dependencies) {
+    const packageRoot = path.join(nodeModules, ...name.split("/"));
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({ name, version })}\n`, "utf8");
+    fs.writeFileSync(path.join(packageRoot, "index.js"), "export {};\n", "utf8");
+  }
+  fs.mkdirSync(path.dirname(runner), { recursive: true });
+  fs.mkdirSync(liveBin, { recursive: true });
+  fs.writeFileSync(
+    path.join(runnerRoot, "package.json"),
+    `${JSON.stringify({
+      name: "smithers-orchestrator",
+      version: SMITHERS_ORCHESTRATOR_VERSION,
+      bin: { smithers: SMITHERS_ORCHESTRATOR_BIN_PATH }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    runner,
+    [
+      "#!/bin/sh",
+      'if [ -n "$SMITHERS_EXECUTION_ENV_LOG" ]; then',
+      '  printf \'%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' "$0" "$PATH" "$ULTRAFUZZ_RUNTIME_MODULE" "$ULTRAFUZZ_CONFIG_PATH" "$SMITHERS_BIN" "$*" >> "$SMITHERS_EXECUTION_ENV_LOG"',
+      "fi",
+      'case "$1" in',
+      "  status)",
+      '    printf \'%s\\n\' \'{"data":{"status":"running","verdict":"running-healthy","reason":"healthy","counts":{"finished":0,"inProgress":1,"pending":0,"failed":0,"waitingApproval":0,"waitingEvent":0,"waitingTimer":0,"skipped":0,"other":0,"total":1},"modelMix":[],"throughput":{"recentFinished":0,"windowMs":600000,"totalFinished":0,"lastFinishedAtMs":null},"bottleneck":[],"bottleneckOmitted":0,"quota":null,"generatedAtMs":2000}}\'',
+      "    ;;",
+      "  why)",
+      '    printf \'%s\\n\' \'{"data":{"status":"running","summary":"healthy","blockers":[],"information":[],"generatedAtMs":2000}}\'',
+      "    ;;",
+      "  timeline)",
+      '    printf \'%s\\n\' \'{"data":{"timeline":{"frames":[],"children":[]}}}\'',
+      "    ;;",
+      "  snapshots)",
+      "    printf '%s\\n' '{\"data\":{\"snapshots\":[]}}'",
+      "    ;;",
+      "  cancel)",
+      '    printf \'%s\\n\' \'{"data":{"status":"cancel-requested"}}\'',
+      "    exit 2",
+      "    ;;",
+      "  events)",
+      "    exit 0",
+      "    ;;",
+      "  *)",
+      "    printf '%s\\n' '{\"ok\":true}'",
+      "    ;;",
+      "esac",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.chmodSync(runner, 0o755);
+  fs.symlinkSync(path.relative(path.dirname(liveRunner), runner), liveRunner);
+  return {
+    env: {
+      PATH: "/usr/bin:/bin",
+      SMITHERS_EXECUTION_ENV_LOG: environmentLog
+    },
+    environmentLog,
+    liveBin
+  };
+}
+
+async function assertSingleSealedExecution(
+  input: {
+    project: string;
+    environmentLog: string;
+    liveBin: string;
+  },
+  operation: () => Promise<{ ok: boolean; diagnostics: unknown[] }>
+): Promise<void> {
+  fs.writeFileSync(input.environmentLog, "", "utf8");
+  const result = await operation();
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  const rows = fs
+    .readFileSync(input.environmentLog, "utf8")
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => line.split("\t"));
+  assert.ok(rows.length > 0);
+  const snapshotRoots = new Set<string>();
+  for (const [executable = "", commandPath = "", runtimeUrl = "", configPath = "", smithersBin = ""] of rows) {
+    const snapshotMarker = `${path.sep}dependencies${path.sep}`;
+    const markerIndex = smithersBin.indexOf(snapshotMarker);
+    assert.ok(markerIndex > 0, `expected a sealed runner path, received ${smithersBin}`);
+    const snapshotRoot = smithersBin.slice(0, markerIndex);
+    snapshotRoots.add(snapshotRoot);
+    assert.match(snapshotRoot, /^\/proc\/\d+\/fd\/\d+$/u);
+    assert.match(executable, /^\/proc\/\d+\/fd\/\d+$/u);
+    assert.equal(commandPath.split(path.delimiter).includes(input.liveBin), false);
+    assert.ok(fileURLToPath(runtimeUrl).startsWith(path.join(snapshotRoot, "modules", "@ultrafuzz", "runtime")));
+    assert.equal(configPath, path.join(snapshotRoot, "controls", "ultrafuzz.toml"));
+  }
+  assert.equal(snapshotRoots.size, 1, "one top-level operation must share one sealed execution snapshot");
+}
+
 function assertNoEngineBranding(value: unknown): void {
   assert.doesNotMatch(JSON.stringify(value), /smithers/iu);
 }
+
+function executionSnapshotRoot(env: Record<string, string | undefined>): string {
+  const configPath = env.ULTRAFUZZ_CONFIG_PATH;
+  assert.ok(configPath);
+  const marker = `${path.sep}controls${path.sep}`;
+  const markerIndex = configPath.indexOf(marker);
+  assert.ok(markerIndex > 0, `expected a sealed config path, received ${configPath}`);
+  return configPath.slice(0, markerIndex);
+}
+
+function makeTreeRemovable(root: string): void {
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    fs.chmodSync(current, 0o700);
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink()) pending.push(path.join(current, entry.name));
+    }
+  }
+}
+
+test("run operations share one sealed runner and control environment without the live package bin", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const sealed = installSealedInspectionRunner(project);
+  const run = await startRun({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const snapshotsRoot = path.join(run.value!.run_root, "smithers", "execution-snapshots");
+  const detachedStartSnapshots = fs.readdirSync(snapshotsRoot).sort();
+  assert.equal(detachedStartSnapshots.length, 1, "detached start must retain exactly one execution snapshot");
+
+  sealed.env.ULTRAFUZZ_RUNTIME_MODULE = "file:///live/runtime.js";
+  sealed.env.ULTRAFUZZ_CONFIG_PATH = path.join(project, "live-ultrafuzz.toml");
+  const operationInput = {
+    project,
+    environmentLog: sealed.environmentLog,
+    liveBin: sealed.liveBin
+  };
+
+  await assertSingleSealedExecution(operationInput, () =>
+    diagnoseRun({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env })
+  );
+  await assertSingleSealedExecution(operationInput, () =>
+    getRunStatus({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env })
+  );
+  await assertSingleSealedExecution(operationInput, () =>
+    getRunHealth({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env })
+  );
+  await assertSingleSealedExecution(operationInput, () =>
+    queryWorkflowEvents({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env })
+  );
+  await assertSingleSealedExecution(operationInput, () =>
+    cancelRun({ projectRoot: project, runId: "sealed-inspection-run", env: sealed.env })
+  );
+  assert.deepEqual(
+    fs.readdirSync(snapshotsRoot).sort(),
+    detachedStartSnapshots,
+    "transient inspection and cancellation snapshots must be disposed"
+  );
+});
+
+test("listRuns keeps ps --all at the project-global runner boundary", async () => {
+  const { project, env, runRoot } = await launchedProject({});
+  const snapshotsRoot = path.join(runRoot, "smithers", "execution-snapshots");
+  const snapshotsBefore = fs.readdirSync(snapshotsRoot).sort();
+
+  const listed = await listRuns({ projectRoot: project, env });
+
+  assert.equal(listed.ok, true, JSON.stringify(listed.diagnostics));
+  assert.deepEqual(fs.readdirSync(snapshotsRoot).sort(), snapshotsBefore);
+  assert.match(smithersLog(project), /ps --all --format json/u);
+});
+
+test("run inspection reports snapshot materialization failures as structured diagnostics", async () => {
+  const { project, env, runRoot } = await launchedProject({});
+  const snapshotsRoot = path.join(runRoot, "smithers", "execution-snapshots");
+  const displacedRoot = `${snapshotsRoot}.displaced`;
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-inspection-snapshot-outside-"));
+  fs.renameSync(snapshotsRoot, displacedRoot);
+  fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
+  let inspected;
+  try {
+    inspected = await getRunTimeline({ projectRoot: project, runId: "inspect-run", env });
+  } finally {
+    fs.unlinkSync(snapshotsRoot);
+    fs.renameSync(displacedRoot, snapshotsRoot);
+  }
+
+  assert.equal(inspected.ok, false);
+  assert.equal(inspected.diagnostics[0]?.code, "WORKFLOW_EXECUTION_SNAPSHOT_FAILED");
+  assert.equal(inspected.diagnostics[0]?.source, "workflow");
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
+
+test("successful linked operations surface snapshot cleanup failures as warnings", async () => {
+  const { project, env } = await launchedProject({});
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-linked-cleanup-outside-"));
+  const marker = path.join(outside, "keep.txt");
+  fs.writeFileSync(marker, "keep\n", "utf8");
+  let snapshotRoot = "";
+  let displacedRoot = "";
+
+  const result = await withLinkedWorkflowExecution(
+    { projectRoot: project, runId: "inspect-run", env },
+    async ({ env: executionEnv }) => {
+      snapshotRoot = executionSnapshotRoot(executionEnv);
+      displacedRoot = `${snapshotRoot}.displaced`;
+      fs.renameSync(snapshotRoot, displacedRoot);
+      fs.symlinkSync(outside, snapshotRoot, process.platform === "win32" ? "junction" : "dir");
+      return "completed";
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.value, "completed");
+  assert.equal(result.diagnostics.length, 1);
+  assert.equal(result.diagnostics[0]?.code, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED");
+  assert.equal(result.diagnostics[0]?.severity, "warning");
+  assert.equal(fs.readFileSync(marker, "utf8"), "keep\n");
+  fs.unlinkSync(snapshotRoot);
+  fs.renameSync(displacedRoot, snapshotRoot);
+  makeTreeRemovable(snapshotRoot);
+  fs.rmSync(snapshotRoot, { recursive: true });
+});
+
+test("linked operation failures remain primary when snapshot cleanup also fails", async () => {
+  const { project, env } = await launchedProject({});
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-linked-primary-error-outside-"));
+  const sentinel = new Error("operation sentinel");
+  let snapshotRoot = "";
+  let displacedRoot = "";
+
+  await assert.rejects(
+    () =>
+      withLinkedWorkflowExecution(
+        { projectRoot: project, runId: "inspect-run", env },
+        async ({ env: executionEnv }) => {
+          snapshotRoot = executionSnapshotRoot(executionEnv);
+          displacedRoot = `${snapshotRoot}.displaced`;
+          fs.renameSync(snapshotRoot, displacedRoot);
+          fs.symlinkSync(outside, snapshotRoot, process.platform === "win32" ? "junction" : "dir");
+          throw sentinel;
+        }
+      ),
+    (error) => error === sentinel
+  );
+
+  fs.unlinkSync(snapshotRoot);
+  fs.renameSync(displacedRoot, snapshotRoot);
+  makeTreeRemovable(snapshotRoot);
+  fs.rmSync(snapshotRoot, { recursive: true });
+  assert.deepEqual(fs.readdirSync(outside), []);
+});
 
 test("cancelRun keeps the run nonterminal for a durable cancel request", async () => {
   const { project, env, runRoot } = await launchedProject({ cancelStatus: "cancel-requested" });
@@ -536,9 +827,7 @@ test("watchWorkflowEvents stops streaming when the caller aborts", async () => {
 });
 
 test("event queries report a diagnostic when the engine command exits nonzero", async () => {
-  const { project, env } = await launchedProject({ events: "" });
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'run not found' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  const { project, env } = await launchedProject({ events: "", eventsExitCode: 4, eventsStderr: "run not found" });
 
   // A failed query must not look like a run with no events.
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
@@ -560,12 +849,9 @@ test("event queries report a diagnostic when the engine command exits nonzero", 
 });
 
 test("event queries report a diagnostic when the engine process is killed by a signal", async () => {
-  const { project, env } = await launchedProject({ events: "" });
+  const { project, env } = await launchedProject({ events: "", eventsSignal: "SIGKILL" });
   // An OOM-style external kill leaves no exit code, which must still be a
   // failure rather than an empty success.
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nkill -9 $$\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
-
   const queried = await queryWorkflowEvents({ projectRoot: project, runId: "inspect-run", env });
 
   assert.equal(queried.ok, false);
@@ -689,24 +975,12 @@ test("watchWorkflowNode keeps streaming past the engine's terminal clear-screen 
 });
 
 test("cancelRun converges when the engine reports the run is already terminal", async () => {
-  const { project, env, runRoot } = await launchedProject({});
+  const { project, env, runRoot } = await launchedProject({
+    cancelExitCode: 4,
+    cancelOutput: '{"ok":false,"error":{"code":"RUN_NOT_ACTIVE"}}'
+  });
   // The engine answers RUN_NOT_ACTIVE with exit 4 once a run is cancelled, so
   // rerunning cancel to confirm an in-flight request must not error.
-  fs.writeFileSync(
-    env.SMITHERS_BIN!,
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "cancel" ]; then',
-      '  printf \'%s\\n\' \'{"ok":false,"error":{"code":"RUN_NOT_ACTIVE"}}\'',
-      "  exit 4",
-      "fi",
-      "printf '%s\\n' '{\"ok\":true}'",
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
-
   const confirmed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 
   assert.equal(confirmed.ok, true, JSON.stringify(confirmed.diagnostics));
@@ -717,9 +991,11 @@ test("cancelRun converges when the engine reports the run is already terminal", 
 });
 
 test("cancelRun still fails on an unrelated engine error exit", async () => {
-  const { project, env } = await launchedProject({});
-  fs.writeFileSync(env.SMITHERS_BIN!, "#!/bin/sh\nprintf '%s\\n' 'database is locked' >&2\nexit 4\n", "utf8");
-  fs.chmodSync(env.SMITHERS_BIN!, 0o755);
+  const { project, env } = await launchedProject({
+    cancelExitCode: 4,
+    cancelOutput: "",
+    cancelStderr: "database is locked"
+  });
 
   const failed = await cancelRun({ projectRoot: project, runId: "inspect-run", env });
 

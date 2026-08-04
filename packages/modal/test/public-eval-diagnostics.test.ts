@@ -233,6 +233,20 @@ describe("public post-eval diagnostics", () => {
     };
     versionClaim.rows[0]!.model_identity.provider_version_status = "verified";
     expect(() => parsePublicEvalDiagnostics(versionClaim)).toThrow();
+
+    const substitutedRate = structuredClone(diagnostics) as unknown as {
+      rows: Array<{
+        pricing: {
+          rates_usd_per_million: { output: number };
+          component_costs_usd: { output: number };
+          cost_usd: number;
+        };
+      }>;
+    };
+    substitutedRate.rows[0]!.pricing.rates_usd_per_million.output = 0.3;
+    substitutedRate.rows[0]!.pricing.component_costs_usd.output = (20 * 0.3) / 1_000_000;
+    substitutedRate.rows[0]!.pricing.cost_usd = (1_000 * 0.14 + 100 * 0.0028 + 20 * 0.3) / 1_000_000;
+    expect(() => parsePublicEvalDiagnostics(substitutedRate)).toThrow(/invalid DeepSeek V4 Flash pricing/u);
   });
 
   it("accepts the runtime-prefixed workflow ID emitted for a maximum-length eval child run", () => {

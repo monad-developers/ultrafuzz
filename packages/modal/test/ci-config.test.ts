@@ -482,7 +482,7 @@ describe("public Modal benchmark configuration", () => {
       on: {
         push: { branches: string[] };
         workflow_dispatch: {
-          inputs: Record<string, { default: string; type: string }>;
+          inputs: Record<string, { default?: string; required: boolean; type: string }>;
         };
       };
       env: { BENCHMARK_SCOPE: string; BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
@@ -491,7 +491,13 @@ describe("public Modal benchmark configuration", () => {
         string,
         {
           if?: string;
-          steps: Array<{ name?: string; env?: Record<string, string>; run?: string; with?: Record<string, unknown> }>;
+          steps: Array<{
+            name?: string;
+            if?: string;
+            env?: Record<string, string>;
+            run?: string;
+            with?: Record<string, unknown>;
+          }>;
         }
       >;
     };
@@ -499,6 +505,7 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["**"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
+      expected_candidate: expect.objectContaining({ required: true, type: "string" }),
       benchmark_scope: expect.objectContaining({
         default: "full",
         type: "choice",
@@ -533,6 +540,28 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.jobs.launch?.steps[0]?.name).toContain("Benchmark scope");
     expect(workflow.jobs.launch?.steps[0]?.name).toContain("inputs.benchmark_scope");
     expect(fs.existsSync(path.join(workspace, ".github/workflows/target-e2e.yml"))).toBe(false);
+
+    for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
+      const steps = workflow.jobs[jobName]?.steps ?? [];
+      const checkoutIndex = steps.findIndex((step) => String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE"));
+      const bindingIndex = steps.findIndex(
+        (step) => step.name === "Bind the manual dispatch to the exact benchmark candidate"
+      );
+      expect(checkoutIndex, `${jobName} candidate checkout`).toBeGreaterThan(-1);
+      expect(bindingIndex, `${jobName} candidate binding`).toBe(checkoutIndex + 1);
+      const binding = steps[bindingIndex]!;
+      expect(binding.if, `${jobName} dispatch-only binding`).toContain("github.event_name == 'workflow_dispatch'");
+      expect(binding.env).toEqual({
+        EXPECTED_CANDIDATE: "${{ inputs.expected_candidate }}",
+        EVENT_CANDIDATE: "${{ github.sha }}"
+      });
+      expect(binding.run).toContain('[[ ! "$EXPECTED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]');
+      expect(binding.run).toContain('[ "$EXPECTED_CANDIDATE" != "$EVENT_CANDIDATE" ]');
+      expect(binding.run).toContain('checked_out_candidate="$(git rev-parse HEAD)"');
+      expect(binding.run).toContain('[ "$EXPECTED_CANDIDATE" != "$checked_out_candidate" ]');
+      const firstBuildIndex = steps.findIndex((step) => step.name?.startsWith("Install and build"));
+      expect(firstBuildIndex, `${jobName} candidate build`).toBeGreaterThan(bindingIndex);
+    }
 
     const prepare = workflow.jobs.launch?.steps.find(
       (step) => step.name === "Prepare the exact model by benchmark matrix"
@@ -929,7 +958,7 @@ describe("public Modal benchmark configuration", () => {
     expect(() => parse(producerText)).not.toThrow();
     expect(() => parse(publicationText)).not.toThrow();
     expect(producerText).not.toContain("publish-eval-history-cas.mjs");
-    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(1);
+    expect(publicationText.match(/publish-eval-history-cas\.mjs/gu)).toHaveLength(2);
     expect(publicationText).not.toContain("automation/eval-history");
     expect(publicationText).not.toContain("group: publish-eval-history");
     expect(publicationText).not.toContain("peter-evans/create-pull-request");
@@ -996,16 +1025,14 @@ describe("public Modal benchmark configuration", () => {
     expect(automatic.env?.EXPECTED_MODEL).toBe("${{ needs.qualify_modal_benchmark.outputs.expected_model }}");
     expect(automatic.env?.EXPECTED_REASONING).toBe("${{ needs.qualify_modal_benchmark.outputs.expected_reasoning }}");
     expect(automatic.env?.CANDIDATE_COMMIT).toBe("${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}");
-    const automaticToken = automatic.steps.find((step) => step.id === "publisher-token");
-    expect(automaticToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
-    expect(automaticToken?.with).toEqual({
-      "client-id": "${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}",
-      "private-key": "${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}",
-      owner: "${{ github.repository_owner }}",
-      repositories: "${{ github.event.repository.name }}",
-      "permission-contents": "write",
-      "skip-token-revoke": false
+    expect(automatic.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(automatic.outputs).toEqual({
+      generation_sha256: "${{ steps.prepare_publication.outputs.generation_sha256 }}",
+      handoff_artifact_id: "${{ steps.upload_publication_handoff.outputs.artifact-id }}"
     });
+    expect(JSON.stringify(automatic)).not.toContain("create-github-app-token");
+    expect(JSON.stringify(automatic)).not.toContain("PUBLISHER_TOKEN");
+    expect(JSON.stringify(automatic)).not.toContain("EVAL_HISTORY_APP_PRIVATE_KEY");
     const automaticCheckout = automatic.steps.find(
       (step) => step.name === "Check out trusted main publication tooling"
     );
@@ -1073,21 +1100,89 @@ describe("public Modal benchmark configuration", () => {
     expect(trustedValidationRun).toContain('"${profile_args[@]}"');
     expect(trustedValidationRun).not.toContain("publish-eval-history-cas.mjs");
     expect(trustedValidationRun).not.toContain("pnpm install");
-    const privilegedPublish = automatic.steps.find(
+    expect(trustedValidationRun).toContain('>> "$GITHUB_OUTPUT"');
+    const unpack = automatic.steps.find((step) => step.name === "Unpack the digest-bound Modal benchmark generation");
+    expect(unpack?.run).toContain("verify-bundle");
+    expect(unpack?.run).toContain("unpack-public");
+    expect(unpack?.run).toContain("verify-unpacked");
+    expect(unpack?.run).not.toContain("GITHUB_OUTPUT");
+    const handoffLayout = automatic.steps.find((step) => step.name === "Validate the exact publication handoff layout");
+    expect(handoffLayout?.run).toContain("exactly generation.json and unpacked");
+    expect(handoffLayout?.run).toContain('find "$PUBLICATION_HANDOFF" -type l');
+    const handoffUpload = automatic.steps.find((step) => step.id === "upload_publication_handoff");
+    expect(handoffUpload?.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
+    expect(handoffUpload?.with).toMatchObject({
+      name: "eval-history-publication-handoff-${{ github.run_id }}-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/eval-history-publication-handoff",
+      "if-no-files-found": "error",
+      "include-hidden-files": true,
+      overwrite: false,
+      "retention-days": 1
+    });
+    const buildIndex = automatic.steps.findIndex((step) => step.name === "Install and build trusted main");
+    const validationIndex = automatic.steps.indexOf(trustedValidation!);
+    const unpackIndex = automatic.steps.indexOf(unpack!);
+    const handoffLayoutIndex = automatic.steps.indexOf(handoffLayout!);
+    const handoffUploadIndex = automatic.steps.indexOf(handoffUpload!);
+    expect(validationIndex).toBeGreaterThan(terminalLayoutIndex);
+    expect(unpackIndex).toBeGreaterThan(validationIndex);
+    expect(handoffLayoutIndex).toBeGreaterThan(unpackIndex);
+    expect(handoffUploadIndex).toBeGreaterThan(handoffLayoutIndex);
+    expect(validationIndex).toBeGreaterThan(buildIndex);
+
+    const privileged = publication.jobs.publish_validated_modal_benchmark!;
+    expect(privileged.needs).toEqual(["qualify_modal_benchmark", "publish_modal_benchmark"]);
+    expect(privileged.permissions).toEqual({ actions: "read", contents: "read" });
+    const freshCheckout = privileged.steps.find(
+      (step) => step.name === "Check out fresh trusted main publication tooling"
+    );
+    expect(freshCheckout?.with?.ref).toBe("main");
+    expect(freshCheckout?.with?.["persist-credentials"]).toBe(false);
+    const handoffDownload = privileged.steps.find(
+      (step) => step.name === "Download the exact sealed publication handoff"
+    );
+    expect(handoffDownload?.with).toMatchObject({
+      "artifact-ids": "${{ needs.publish_modal_benchmark.outputs.handoff_artifact_id }}",
+      path: "${{ runner.temp }}/eval-history-publication-handoff"
+    });
+    expect(handoffDownload?.with).not.toHaveProperty("name");
+    const handoffValidation = privileged.steps.find(
+      (step) => step.name === "Validate the sealed publication handoff before token creation"
+    );
+    expect(handoffValidation?.env?.EXPECTED_GENERATION_SHA256).toBe(
+      "${{ needs.publish_modal_benchmark.outputs.generation_sha256 }}"
+    );
+    expect(handoffValidation?.env?.EXPECTED_REPOSITORY_URL).toBe("${{ github.server_url }}/${{ github.repository }}");
+    expect(handoffValidation?.run).toContain("publish-eval-history-cas.mjs validate-handoff");
+    expect(handoffValidation?.run).toContain('"$CANDIDATE_COMMIT"');
+    const automaticToken = privileged.steps.find((step) => step.id === "publisher-token");
+    expect(automaticToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
+    expect(automaticToken?.with).toEqual({
+      "client-id": "${{ vars.EVAL_HISTORY_APP_CLIENT_ID }}",
+      "private-key": "${{ secrets.EVAL_HISTORY_APP_PRIVATE_KEY }}",
+      owner: "${{ github.repository_owner }}",
+      repositories: "${{ github.event.repository.name }}",
+      "permission-contents": "write",
+      "skip-token-revoke": false
+    });
+    const privilegedPublish = privileged.steps.find(
       (step) => step.name === "Publish the validated generation with remote-tip compare-and-swap retries"
     );
     expect(privilegedPublish?.env?.PUBLISHER_TOKEN).toBe("${{ steps.publisher-token.outputs.token }}");
-    expect(privilegedPublish?.run).toContain('GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $publisher_basic"');
-    expect(privilegedPublish?.run).toContain("publish-eval-history-cas.mjs");
-    const buildIndex = automatic.steps.findIndex((step) => step.name === "Install and build trusted main");
-    const validationIndex = automatic.steps.findIndex(
-      (step) => step.name === "Validate the atomic Modal benchmark generation"
+    expect(privilegedPublish?.env?.EXPECTED_GENERATION_SHA256).toBe(
+      "${{ needs.publish_modal_benchmark.outputs.generation_sha256 }}"
     );
-    const tokenIndex = automatic.steps.findIndex((step) => step.id === "publisher-token");
-    const publishIndex = automatic.steps.indexOf(privilegedPublish!);
-    expect(tokenIndex).toBeGreaterThan(buildIndex);
-    expect(validationIndex).toBeGreaterThan(terminalLayoutIndex);
-    expect(tokenIndex).toBeGreaterThan(validationIndex);
+    expect(privilegedPublish?.run).toContain("publish-eval-history-cas.mjs");
+    expect(privilegedPublish?.run).not.toContain("GIT_CONFIG_");
+    expect(privilegedPublish?.run).not.toContain("AUTHORIZATION:");
+    const freshBuildIndex = privileged.steps.findIndex((step) => step.name === "Install and build fresh trusted main");
+    const handoffDownloadIndex = privileged.steps.indexOf(handoffDownload!);
+    const handoffValidationIndex = privileged.steps.indexOf(handoffValidation!);
+    const tokenIndex = privileged.steps.indexOf(automaticToken!);
+    const publishIndex = privileged.steps.indexOf(privilegedPublish!);
+    expect(handoffDownloadIndex).toBeGreaterThan(freshBuildIndex);
+    expect(handoffValidationIndex).toBeGreaterThan(handoffDownloadIndex);
+    expect(tokenIndex).toBeGreaterThan(handoffValidationIndex);
     expect(publishIndex).toBeGreaterThan(tokenIndex);
     expect(publication.jobs).not.toHaveProperty("publish_manual");
     expect(publication.jobs).not.toHaveProperty("open_publication_pr");

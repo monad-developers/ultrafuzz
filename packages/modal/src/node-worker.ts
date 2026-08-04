@@ -19,7 +19,9 @@ import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROJECT_ROOT = "/workspace/project";
 const AGENT_HOME = "/workspace/agent-home";
+const DEEPSEEK_AGENT_CONFIG_HOME = `${AGENT_HOME}/.deepseek-claude`;
 const KIMI_AGENT_AUTH_HOME = `${AGENT_HOME}/.kimi-code`;
+const KIMI_AGENT_SESSION_HOME = `${AGENT_HOME}/.kimi-code-sessions`;
 const KIMI_TRUSTED_SNAPSHOT_ROOT = "/run/ultrafuzz-kimi-auth-trusted";
 const CLOUD_RESULT_ROOT = "/run/ultrafuzz-node-results";
 const CLOUD_AGENT_LAUNCHER_ROOT = "/run/ultrafuzz-agent-launchers";
@@ -32,6 +34,7 @@ const CLOUD_AGENT_QUIESCENCE_TIMEOUT_MS = 5_000;
 const CLOUD_AGENT_TERM_GRACE_MS = 500;
 const CLOUD_AGENT_ZERO_SCANS = 3;
 const MAX_KIMI_CREDENTIAL_CANDIDATE_BYTES = 1024 * 1024;
+const KIMI_CREDENTIAL_RECOVERY_FILE = "kimi-credential-recovery.json";
 export const CLOUD_AGENT_UID = 65_532;
 export const CLOUD_AGENT_GID = 65_532;
 
@@ -39,6 +42,8 @@ export type CloudAgentCommandLabel = "codex" | "claude" | "kimi";
 export type CloudAgentCommandRole = "model" | "diagnostic";
 
 let workerCredentialValues: string[] = [];
+let workerSubscriptionRotationPossible = false;
+let workerSuccessorSecretsClassified = true;
 
 async function main(): Promise<void> {
   assertRootWorker();
@@ -50,6 +55,7 @@ async function main(): Promise<void> {
   fs.rmSync(PROJECT_ROOT, { recursive: true, force: true });
   fs.mkdirSync(PROJECT_ROOT, { recursive: true, mode: 0o700 });
   let input: ModalNodeSandboxInput | undefined;
+  let handoffError: unknown;
   try {
     secureTransportFile(requestPath);
     secureTransportFile(archivePath);
@@ -89,17 +95,22 @@ async function main(): Promise<void> {
     await extractSafeTarArchive(archivePath, PROJECT_ROOT, { gzip: true, label: "cloud handoff" });
     assertSafeTree(PROJECT_ROOT);
   } catch (error) {
-    fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true });
-    throw error;
-  } finally {
-    cleanupTransportFiles(
-      requestPath,
-      archivePath,
-      ...(kimiAuthArchivePath === undefined ? [] : [kimiAuthArchivePath])
-    );
+    handoffError = error;
   }
+  finalizeWorkerHandoffCleanup(
+    handoffError,
+    () =>
+      cleanupTransportFiles(
+        requestPath,
+        archivePath,
+        ...(kimiAuthArchivePath === undefined ? [] : [kimiAuthArchivePath])
+      ),
+    () => fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true })
+  );
   if (input === undefined) throw new Error("cloud worker request could not be loaded");
 
+  let candidateQuarantined = false;
+  let workflowError: unknown;
   try {
     await runChecked(
       "install-smithers",
@@ -151,23 +162,53 @@ async function main(): Promise<void> {
     );
     invocation.env[CLOUD_AGENT_WORKSPACE_ENV] = anchoredProjectPath(input.workspace_dir);
     invocation.env[CLOUD_AGENT_ARTIFACT_DIR_ENV] = anchoredProjectPath(input.artifact_dir);
+    if (input.agent_auth.auth.mode === "subscription") {
+      workerSubscriptionRotationPossible = true;
+      workerSuccessorSecretsClassified = false;
+    }
     await runAfterCloudAgentQuiescence(
       () =>
         runChecked("run-workflow", invocation.command, invocation.args, PROJECT_ROOT, {
+          credentialObserving: input!.agent_auth.auth.mode === "subscription",
           env: invocation.env,
           inheritEnvironment: false
         }),
-      async () => {
+      async (agentError) => {
         const candidate =
           input!.agent_auth.auth.mode === "subscription" ? await readKimiCredentialCandidate(input!) : undefined;
         if (candidate !== undefined) workerCredentialValues.push(...candidate.sensitiveValues);
-        await publishCanonicalResult(input!, dataRoot, workerCredentialValues, candidate?.credential);
+        if (agentError !== undefined) {
+          if (candidate === undefined) return;
+          await publishKimiCredentialRecovery(input!, dataRoot, workerCredentialValues, candidate.credential);
+          candidateQuarantined = true;
+          return;
+        }
+        try {
+          await publishCanonicalResult(input!, dataRoot, workerCredentialValues, candidate?.credential);
+          candidateQuarantined = candidate !== undefined;
+        } catch (publicationError) {
+          if (candidate === undefined) throw publicationError;
+          try {
+            await publishKimiCredentialRecovery(input!, dataRoot, workerCredentialValues, candidate.credential);
+            candidateQuarantined = true;
+          } catch (recoveryError) {
+            throw workerAggregateWithPrimary(publicationError, recoveryError);
+          }
+          throw publicationError;
+        }
       }
     );
-  } finally {
-    fs.rmSync(CLOUD_AGENT_LAUNCHER_ROOT, { recursive: true, force: true });
-    fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true });
+  } catch (error) {
+    workflowError = error;
   }
+  finalizeWorkerSecretCleanup(
+    workflowError,
+    () => fs.rmSync(CLOUD_AGENT_LAUNCHER_ROOT, { recursive: true, force: true }),
+    () => fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true }),
+    ...(input.agent_auth.auth.mode !== "subscription" || candidateQuarantined
+      ? [() => fs.rmSync(AGENT_HOME, { recursive: true, force: true })]
+      : [])
+  );
 }
 
 export interface CloudAgentInvocation {
@@ -220,6 +261,12 @@ export function cloudAgentInvocation(
       if (baseUrl !== undefined && baseUrl.trim() !== "") env.KIMI_BASE_URL = baseUrl;
     }
   }
+  if (descriptor.agent === "KimiAgent") {
+    // Keep every Kimi-created config, invocation, and session path under the
+    // pre-owned agent home. The root supervisor must never need to follow a
+    // runtime symlink into the trusted project tree to make Kimi state writable.
+    env.ULTRAFUZZ_KIMI_SESSION_HOME = KIMI_AGENT_SESSION_HOME;
+  }
   return {
     command,
     args: [...args],
@@ -270,11 +317,19 @@ export async function superviseCloudAgentCommand(
 ): Promise<number> {
   assertRootWorker();
   const role = cloudAgentCommandRole(label, args);
-  if (role === "model") openCloudAgentModelGate();
   const unregisterDiagnostic = role === "diagnostic" ? registerCloudAgentDiagnostic() : undefined;
   let modelGateClosed = false;
   try {
-    prepareCloudAgentCommandPaths(process.env);
+    if (role === "model") {
+      // Close registration before waiting so no new diagnostic can race the
+      // root-only ownership walk. Diagnostics never perform that walk.
+      closeCloudAgentModelGate();
+      modelGateClosed = true;
+      await waitForCloudAgentDiagnostics();
+      prepareCloudAgentCommandPaths(process.env);
+      openCloudAgentModelGate();
+      modelGateClosed = false;
+    }
     const invocation = cloudAgentSubprocessInvocation(command, args);
     let outcome: { code: number | null; signal: NodeJS.Signals | null } | undefined;
     const run = async (): Promise<void> => {
@@ -359,6 +414,14 @@ function cloudAgentDiagnosticsSettled(): boolean {
     .some((entry) => entry.startsWith(CLOUD_AGENT_DIAGNOSTIC_REGISTRATION_PREFIX));
 }
 
+async function waitForCloudAgentDiagnostics(): Promise<void> {
+  const deadline = Date.now() + CLOUD_AGENT_QUIESCENCE_TIMEOUT_MS;
+  while (!cloudAgentDiagnosticsSettled()) {
+    if (Date.now() >= deadline) throw new Error("cloud agent diagnostics did not settle before model preparation");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 function prepareCloudAgentLauncher(agent: ModalNodeSandboxInput["agent_auth"]["agent"], sourcePath: string): string {
   const command: CloudAgentCommandLabel = agent === "CodexAgent" ? "codex" : agent === "KimiAgent" ? "kimi" : "claude";
   const executable = resolveCloudAgentExecutable(command, unsupervisedAgentPath(sourcePath));
@@ -426,9 +489,9 @@ function prepareCloudAgentCommandPaths(env: NodeJS.ProcessEnv): void {
     "KIMI_SHARE_DIR"
   ]) {
     const configured = env[name];
-    if (configured !== undefined && configured.trim() !== "" && fs.existsSync(configured)) {
-      makeAgentRuntimeTreeWritable(configured, new Set<string>());
-    }
+    if (configured === undefined || configured.trim() === "") continue;
+    if (!fs.existsSync(configured)) throw new Error(`cloud agent runtime path is missing: ${name}`);
+    assertAgentRuntimeTree(configured, AGENT_HOME, new Set<string>());
   }
 }
 
@@ -445,37 +508,31 @@ function requiredAgentControlPath(value: string | undefined, label: string): str
   return resolved;
 }
 
-function makeAgentRuntimeTreeWritable(entryPath: string, visited: Set<string>): void {
+export function assertAgentRuntimeTree(entryPath: string, agentHome = AGENT_HOME, visited = new Set<string>()): void {
+  const home = path.resolve(agentHome);
   const lexical = path.resolve(entryPath);
+  assertContainedAgentRuntimePath(home, lexical);
   const stat = fs.lstatSync(lexical);
   if (stat.isSymbolicLink()) {
     const target = fs.realpathSync(lexical);
-    assertAllowedAgentRuntimePath(target);
-    if (!visited.has(target)) {
-      makeAgentRuntimeTreeWritable(target, visited);
-    }
+    assertContainedAgentRuntimePath(home, target);
     return;
   }
   const resolved = fs.realpathSync(lexical);
-  assertAllowedAgentRuntimePath(resolved);
+  if (resolved !== lexical) throw new Error("cloud agent runtime tree has a symlinked ancestor");
   if (visited.has(resolved)) return;
   visited.add(resolved);
   if (!stat.isDirectory() && !stat.isFile()) {
     throw new Error("cloud agent runtime tree contains a special file");
   }
-  fs.lchownSync(lexical, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
   if (!stat.isDirectory()) return;
   for (const entry of fs.readdirSync(lexical)) {
-    makeAgentRuntimeTreeWritable(path.join(lexical, entry), visited);
+    assertAgentRuntimeTree(path.join(lexical, entry), home, visited);
   }
 }
 
-function assertAllowedAgentRuntimePath(value: string): void {
-  const allowedProject = value === PROJECT_ROOT || value.startsWith(`${PROJECT_ROOT}${path.sep}`);
-  const allowedHome = value === AGENT_HOME || value.startsWith(`${AGENT_HOME}${path.sep}`);
-  const allowedKimiTemporary = path.dirname(value) === "/tmp" && path.basename(value).startsWith("ultrafuzz-kimi-");
-  const insideKimiTemporary = value.startsWith("/tmp/ultrafuzz-kimi-");
-  if (!allowedProject && !allowedHome && !allowedKimiTemporary && !insideKimiTemporary) {
+function assertContainedAgentRuntimePath(home: string, value: string): void {
+  if (value !== home && !value.startsWith(`${home}${path.sep}`)) {
     throw new Error("cloud agent runtime path escapes its writable boundaries");
   }
 }
@@ -603,6 +660,60 @@ function cleanupTransportFiles(...files: string[]): void {
   if (failures.length > 1) throw new AggregateError(failures, "cloud worker transport cleanup failed");
 }
 
+export function finalizeWorkerHandoffCleanup(
+  handoffError: unknown,
+  cleanupTransport: () => void,
+  cleanupTrustedSnapshot: () => void
+): void {
+  const transportCleanupFailures = collectWorkerCleanupFailures(cleanupTransport);
+  const snapshotCleanupFailures =
+    handoffError === undefined && transportCleanupFailures.length === 0
+      ? []
+      : collectWorkerCleanupFailures(cleanupTrustedSnapshot);
+  throwWorkerFailures(
+    handoffError,
+    [...transportCleanupFailures, ...snapshotCleanupFailures],
+    "cloud worker handoff cleanup failed"
+  );
+}
+
+export function finalizeWorkerSecretCleanup(primary: unknown, ...cleanups: Array<() => void>): void {
+  throwWorkerFailures(primary, collectWorkerCleanupFailures(...cleanups), "cloud worker secret cleanup failed");
+}
+
+function collectWorkerCleanupFailures(...cleanups: Array<() => void>): unknown[] {
+  const failures: unknown[] = [];
+  for (const cleanup of cleanups) {
+    try {
+      cleanup();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return failures;
+}
+
+function throwWorkerFailures(primary: unknown, cleanupFailures: readonly unknown[], message: string): void {
+  if (primary !== undefined) {
+    if (cleanupFailures.length === 0) throw primary;
+    throw workerAggregateWithPrimary(primary, new AggregateError(cleanupFailures, message));
+  }
+  if (cleanupFailures.length === 1) throw cleanupFailures[0];
+  if (cleanupFailures.length > 1) throw new AggregateError(cleanupFailures, message, { cause: cleanupFailures[0] });
+}
+
+function workerAggregateWithPrimary(primary: unknown, secondary: unknown): AggregateError {
+  const secondaryErrors = secondary instanceof AggregateError ? [...secondary.errors] : [secondary];
+  const aggregate = new AggregateError([primary, ...secondaryErrors], errorMessage(primary), { cause: primary });
+  Object.defineProperty(aggregate, "errors", {
+    configurable: true,
+    enumerable: true,
+    value: Object.freeze([...aggregate.errors]),
+    writable: false
+  });
+  return aggregate;
+}
+
 export function secureRootPrivateTree(root: string): void {
   const resolvedRoot = path.resolve(root);
   const visit = (entryPath: string): void => {
@@ -640,6 +751,8 @@ function prepareCloudAgentWorkspace(kimiSnapshotRoot?: string): void {
   fs.rmSync(AGENT_HOME, { force: true, recursive: true });
   for (const directory of [
     AGENT_HOME,
+    DEEPSEEK_AGENT_CONFIG_HOME,
+    KIMI_AGENT_SESSION_HOME,
     path.join(AGENT_HOME, "tmp"),
     path.join(AGENT_HOME, ".cache"),
     path.join(AGENT_HOME, ".config"),
@@ -698,6 +811,7 @@ export function rewriteCloudAgentAuthConfig(
   }
   if (descriptor.auth.mode === "api-key") {
     selected.api_key_env = canonicalAgentApiKeyEnvironment(descriptor.agent);
+    if (descriptor.agent === "DeepSeekAgent") selected.config_dir = DEEPSEEK_AGENT_CONFIG_HOME;
   } else {
     selected.config_dir = KIMI_AGENT_AUTH_HOME;
   }
@@ -755,7 +869,9 @@ async function publishCanonicalResult(
     });
     assertNoForwardedCredentialBytes(staging, credentialValues);
     const artifactArchive = path.join(publishing, "artifacts.tgz");
-    await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT);
+    await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT, {
+      credentialObserving: expectsKimiCredential
+    });
     const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
     const credentialCandidatePath = path.join(publishing, "kimi-credential-candidate.json");
     if (kimiCredentialCandidate !== undefined) {
@@ -778,7 +894,56 @@ async function publishCanonicalResult(
     fs.writeFileSync(path.join(publishing, "result.json"), result, { mode: 0o600 });
     fs.rmSync(dataRoot, { recursive: true, force: true });
     fs.renameSync(publishing, dataRoot);
-    await runChecked("sync-results", "sync", [], dataRoot);
+    await runChecked("sync-results", "sync", [], dataRoot, { credentialObserving: expectsKimiCredential });
+  } catch (error) {
+    fs.rmSync(publishing, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function publishKimiCredentialRecovery(
+  input: ModalNodeSandboxInput,
+  dataRoot: string,
+  credentialValues: readonly string[],
+  kimiCredentialCandidate: string | undefined
+): Promise<void> {
+  if (
+    input.agent_auth.auth.mode !== "subscription" ||
+    input.execution_identity === undefined ||
+    kimiCredentialCandidate === undefined
+  ) {
+    throw new Error("cloud Kimi subscription credential recovery is incomplete");
+  }
+  const publishing = `${dataRoot}.recovering`;
+  fs.rmSync(publishing, { recursive: true, force: true });
+  fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
+  fs.chownSync(publishing, 0, 0);
+  fs.chmodSync(publishing, 0o700);
+  try {
+    const credentialCandidatePath = path.join(publishing, "kimi-credential-candidate.json");
+    fs.writeFileSync(credentialCandidatePath, kimiCredentialCandidate, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600
+    });
+    fs.chownSync(credentialCandidatePath, 0, 0);
+    fs.chmodSync(credentialCandidatePath, 0o600);
+    const recovery = `${JSON.stringify({
+      schema_version: "ultrafuzz.modal.kimi-credential-recovery.v1",
+      status: "quarantined",
+      storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`,
+      execution_identity: input.execution_identity,
+      credential_candidate: path.posix.join(dataRoot, "kimi-credential-candidate.json")
+    })}\n`;
+    assertTextExcludesCredentials(recovery, credentialValues, "cloud Kimi credential recovery metadata");
+    fs.writeFileSync(path.join(publishing, KIMI_CREDENTIAL_RECOVERY_FILE), recovery, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600
+    });
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+    fs.renameSync(publishing, dataRoot);
+    await runChecked("sync-kimi-recovery", "sync", [], dataRoot, { credentialObserving: true });
   } catch (error) {
     fs.rmSync(publishing, { recursive: true, force: true });
     throw error;
@@ -818,12 +983,41 @@ async function readKimiCredentialCandidate(input: ModalNodeSandboxInput): Promis
   ) {
     throw new Error("cloud Kimi subscription credential candidate is unsafe");
   }
+  const classification = classifyKimiCredentialSecrets(credential);
+  if (!classification.classified) {
+    throw new Error("cloud Kimi subscription credential candidate secrets could not be classified");
+  }
+  // Record successor values immediately after the bounded, anchored read so a
+  // later lineage-validation failure cannot serialize them in an error stream.
+  workerCredentialValues.push(...classification.sensitiveValues);
+  workerSuccessorSecretsClassified = true;
   const sensitiveValues = await kimiSubscriptionAuthSecretValuesFromRoots(
     input.agent_model,
     KIMI_TRUSTED_SNAPSHOT_ROOT,
     KIMI_AGENT_AUTH_HOME
   );
-  return { credential, sensitiveValues };
+  return {
+    credential,
+    sensitiveValues: [...new Set([...classification.sensitiveValues, ...sensitiveValues])]
+  };
+}
+
+function classifyKimiCredentialSecrets(serialized: string): {
+  classified: boolean;
+  sensitiveValues: string[];
+} {
+  try {
+    const parsed = JSON.parse(serialized) as unknown;
+    if (!isRecord(parsed) || typeof parsed.access_token !== "string" || typeof parsed.refresh_token !== "string") {
+      return { classified: false, sensitiveValues: [] };
+    }
+    return {
+      classified: true,
+      sensitiveValues: [parsed.access_token, parsed.refresh_token].filter((value) => value !== "")
+    };
+  } catch {
+    return { classified: false, sensitiveValues: [] };
+  }
 }
 
 function assertAnchoredDirectory(root: string, directory: string): void {
@@ -862,7 +1056,7 @@ export interface CloudAgentQuiescenceHooks {
 
 export async function runAfterCloudAgentQuiescence<T>(
   runAgent: () => Promise<void>,
-  postflight: () => Promise<T>,
+  postflight: (agentError: unknown | undefined) => Promise<T>,
   hooks: CloudAgentQuiescenceHooks = {}
 ): Promise<T> {
   let agentError: unknown;
@@ -878,11 +1072,22 @@ export async function runAfterCloudAgentQuiescence<T>(
     quiescenceError = error;
   }
   if (agentError !== undefined && quiescenceError !== undefined) {
-    throw new AggregateError([agentError, quiescenceError], "cloud agent execution and quiescence failed");
+    throw workerAggregateWithPrimary(agentError, quiescenceError);
   }
   if (quiescenceError !== undefined) throw quiescenceError;
+  let postflightResult: T | undefined;
+  let postflightError: unknown;
+  try {
+    postflightResult = await postflight(agentError);
+  } catch (error) {
+    postflightError = error;
+  }
+  if (agentError !== undefined && postflightError !== undefined) {
+    throw workerAggregateWithPrimary(agentError, postflightError);
+  }
   if (agentError !== undefined) throw agentError;
-  return postflight();
+  if (postflightError !== undefined) throw postflightError;
+  return postflightResult!;
 }
 
 export async function quiesceCloudAgentUid(hooks: CloudAgentQuiescenceHooks = {}): Promise<void> {
@@ -951,12 +1156,16 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function runChecked(
   phase: string,
   command: string,
   args: string[],
   cwd: string,
-  options: { env?: Record<string, string>; inheritEnvironment?: boolean } = {}
+  options: { credentialObserving?: boolean; env?: Record<string, string>; inheritEnvironment?: boolean } = {}
 ): Promise<void> {
   const child = spawn(command, args, {
     cwd,
@@ -971,19 +1180,34 @@ async function runChecked(
   });
   const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
   if (exitCode !== 0) {
-    throw new CloudWorkerCommandError(phase, path.basename(command), exitCode, stdoutText, stderrText);
+    throw new CloudWorkerCommandError(
+      phase,
+      path.basename(command),
+      exitCode,
+      stdoutText,
+      stderrText,
+      options.credentialObserving === true || workerSubscriptionRotationPossible
+    );
   }
 }
 
-class CloudWorkerCommandError extends Error {
+export class CloudWorkerCommandError extends Error {
+  readonly stdout?: string;
+  readonly stderr?: string;
+
   constructor(
     readonly phase: string,
     readonly command: string,
     readonly exitCode: number,
-    readonly stdout: string,
-    readonly stderr: string
+    stdout: string,
+    stderr: string,
+    suppressStreams = false
   ) {
     super(`cloud worker phase ${phase} failed with code ${exitCode}`);
+    if (!suppressStreams) {
+      this.stdout = stdout;
+      this.stderr = stderr;
+    }
   }
 }
 
@@ -1004,26 +1228,53 @@ function readBoundedText(stream: Readable | null, limit = 4_096): Promise<string
   });
 }
 
-function workerErrorPayload(error: unknown, credentialValues: readonly string[]): Record<string, unknown> {
-  if (error instanceof CloudWorkerCommandError) {
+export function workerErrorPayload(
+  error: unknown,
+  credentialValues: readonly string[],
+  classification: { rotationPossible: boolean; successorSecretsClassified: boolean } = {
+    rotationPossible: workerSubscriptionRotationPossible,
+    successorSecretsClassified: workerSuccessorSecretsClassified
+  }
+): Record<string, unknown> {
+  const commandError = findCloudWorkerCommandError(error, new Set<unknown>());
+  if (commandError !== undefined) {
+    const suppressStreams = classification.rotationPossible;
     return {
       schema_version: "ultrafuzz.modal.node-worker-error.v1",
-      message: redactWorkerText(error.message, credentialValues),
-      phase: error.phase,
-      command: error.command,
-      exit_code: error.exitCode,
-      ...(error.stdout.trim() === ""
+      message: redactWorkerText(errorMessage(error), credentialValues),
+      phase: commandError.phase,
+      command: commandError.command,
+      exit_code: commandError.exitCode,
+      ...(suppressStreams ? { streams_suppressed: true } : {}),
+      ...(suppressStreams || commandError.stdout?.trim() === "" || commandError.stdout === undefined
         ? {}
-        : { stdout: redactWorkerText(error.stdout.trim(), credentialValues).slice(0, 2_000) }),
-      ...(error.stderr.trim() === ""
+        : { stdout: redactWorkerText(commandError.stdout.trim(), credentialValues).slice(0, 2_000) }),
+      ...(suppressStreams || commandError.stderr?.trim() === "" || commandError.stderr === undefined
         ? {}
-        : { stderr: redactWorkerText(error.stderr.trim(), credentialValues).slice(0, 2_000) })
+        : { stderr: redactWorkerText(commandError.stderr.trim(), credentialValues).slice(0, 2_000) })
     };
   }
   return {
     schema_version: "ultrafuzz.modal.node-worker-error.v1",
     message: redactWorkerText(error instanceof Error ? error.message : String(error), credentialValues)
   };
+}
+
+function findCloudWorkerCommandError(error: unknown, seen: Set<unknown>): CloudWorkerCommandError | undefined {
+  if (error instanceof CloudWorkerCommandError) return error;
+  if (typeof error !== "object" || error === null || seen.has(error)) return undefined;
+  seen.add(error);
+  if (error instanceof Error && error.cause !== undefined) {
+    const fromCause = findCloudWorkerCommandError(error.cause, seen);
+    if (fromCause !== undefined) return fromCause;
+  }
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const found = findCloudWorkerCommandError(nested, seen);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
 }
 
 function redactWorkerText(value: string, credentialValues: readonly string[]): string {
@@ -1033,7 +1284,9 @@ function redactWorkerText(value: string, credentialValues: readonly string[]): s
     .sort((left, right) => right.length - left.length)) {
     redacted = redacted.replaceAll(credential, "[credential]");
   }
-  return redacted;
+  return redacted
+    .replace(/((?:access_token|refresh_token)["']?\s*[:=]\s*["']?)[^"'\s,&}\]]+/giu, "$1[credential]")
+    .replace(/(\bBearer\s+)[A-Za-z0-9._~+/=-]+/giu, "$1[credential]");
 }
 
 function mergeWorkspaceArtifacts(workspaceDir: string, artifactDir: string, attemptId: string): void {

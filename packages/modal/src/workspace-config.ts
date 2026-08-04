@@ -28,6 +28,9 @@ export function modalTargetToml(
   const kimi = agentToml(model, "KimiAgent", "kimi");
   const modalApp = execution.app ?? DEFAULT_MODAL_APP;
   const modalImage = execution.image ?? DEFAULT_MODAL_IMAGE;
+  const serialKimiSubscription = model.provider === "kimi" && model.auth_mode === "subscription";
+  const maxParallelAgents = serialKimiSubscription ? 1 : DEFAULT_MODAL_MAX_PARALLEL_AGENTS;
+  const maxParallelNodes = serialKimiSubscription ? 1 : DEFAULT_MODAL_MAX_PARALLEL_NODES;
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
 
@@ -36,8 +39,8 @@ repo = "."
 
 [run]
 output_dir = ".ultrafuzz/runs"
-max_parallel_agents = ${DEFAULT_MODAL_MAX_PARALLEL_AGENTS}
-max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
+max_parallel_agents = ${maxParallelAgents}
+max_parallel_nodes = ${maxParallelNodes}
 keep_workspaces = true
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}

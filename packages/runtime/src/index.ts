@@ -18,7 +18,15 @@ export * from "./state-export.js";
 export * from "./types.js";
 export * from "./validate.js";
 export * from "./verifier-receipt.js";
-export * from "./workflow-sync.js";
+export {
+  ARTIFACT_RECONCILIATION_CLOCK_SKEW_MS,
+  ARTIFACT_RECONCILIATION_GRACE_MS,
+  ARTIFACT_RECONCILIATION_MAX_ATTEMPTS,
+  ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS,
+  syncRun,
+  synchronizeLinkedWorkflowRun,
+  type WorkflowSynchronizationControl
+} from "./workflow-sync.js";
 export * from "./workspace-provenance.js";
 export * from "./workflow-control.js";
 export * from "./workflow-integrity.js";

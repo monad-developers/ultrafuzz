@@ -71,6 +71,8 @@ describe("Modal target model profiles", () => {
 
     expect(config).toContain(`[models.default]\nagent = "KimiAgent"\nmodel = "kimi-k3"\nreasoning = "max"`);
     expect(config).toContain('[agents.KimiAgent]\nauth = "subscription"\nconfig_dir = "/run/ultrafuzz-auth/kimi"');
+    expect(config).toContain("max_parallel_agents = 1");
+    expect(config).toContain("max_parallel_nodes = 1");
     expect(config).not.toContain("final-message-only");
   });
 
@@ -88,6 +90,8 @@ describe("Modal target model profiles", () => {
     );
 
     expect(config).toContain('[agents.KimiAgent]\nauth = "api-key"\napi_key_env = "KIMI_API_KEY"');
+    expect(config).toContain("max_parallel_agents = 16");
+    expect(config).toContain("max_parallel_nodes = 32");
   });
 
   it("generates the dedicated DeepSeek V4 profile and API-key agent config", () => {

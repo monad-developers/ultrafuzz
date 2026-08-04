@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
+import { workflowControlChildEnvironment } from "./environment";
 import { readStringTable, stringField } from "./toml";
 
 type ClaudeAuthConfig = { auth?: string; api_key_env?: string; config_dir?: string };
-type ClaudeAuthOptions = { apiKey?: string; configDir?: string };
+type ClaudeAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
 export type ClaudeTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 
 export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClaudeCodeAgent {
+  const auth = claudeAuthOptions();
   return new SmithersClaudeCodeAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { extraArgs: ["--effort", options.reasoningEffort] }),
@@ -19,7 +21,8 @@ export function createClaudeAgent(options: ClaudeTaskOptions = {}): SmithersClau
     // deliberately not configurable per agent -- edit this generated file if a
     // project needs otherwise.
     permissionMode: "bypassPermissions",
-    ...claudeAuthOptions()
+    ...auth,
+    env: { ...workflowControlChildEnvironment(), ...auth.env }
   });
 }
 
