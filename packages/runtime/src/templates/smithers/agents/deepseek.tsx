@@ -17,12 +17,12 @@ type DeepSeekUsage = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
-  cacheWriteTokens: 0;
+  cacheWriteTokens: number;
   totalTokens: number;
 };
 type DeepSeekSmithersUsage = {
   inputTokens: number;
-  inputTokenDetails: { noCacheTokens: number; cacheReadTokens: number; cacheWriteTokens: 0 };
+  inputTokenDetails: { noCacheTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   outputTokens: number;
   outputTokenDetails: { textTokens: undefined; reasoningTokens: 0 };
   totalTokens: number;
@@ -32,10 +32,11 @@ type DeepSeekProviderIdentity = {
   observedModels: string[];
   invalid: boolean;
 };
-type DeepSeekUsageEvidence = { status: "complete"; usage: DeepSeekUsage } | { status: "incomplete" };
+type DeepSeekUsageEvidence =
+  { status: "complete"; providerModel: string; usage: DeepSeekUsage } | { status: "incomplete" };
 type DeepSeekTokenCountEvidence = { status: "absent" } | { status: "complete"; value: number } | { status: "invalid" };
 type DeepSeekInvocationUsage =
-  { status: "unseen" } | { status: "complete"; usage: DeepSeekUsage } | { status: "invalid" };
+  { status: "unseen" } | { status: "complete"; providerModel: string; usage: DeepSeekUsage } | { status: "invalid" };
 type DeepSeekInvocationEvidence = {
   providerIdentity: DeepSeekProviderIdentity;
   usage: DeepSeekInvocationUsage;
@@ -97,7 +98,7 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
       ...base,
       onStdoutLine: (line) => {
         collectDeepSeekProviderIdentity(line, evidence.providerIdentity);
-        const usageEvidence = deepSeekUsageEvidenceFromResultLine(line);
+        const usageEvidence = deepSeekUsageEvidenceFromResultLine(line, evidence.providerIdentity);
         if (usageEvidence !== undefined) recordDeepSeekTerminalUsage(evidence, usageEvidence);
         const events = base.onStdoutLine?.(line) ?? [];
         const forwarded = [];
@@ -282,17 +283,26 @@ function resolvedDeepSeekProviderModel(identity: DeepSeekProviderIdentity): stri
   return observed.length === 1 ? observed[0]! : PROVIDER_IDENTITY_MIXED;
 }
 
+function singleDeepSeekProviderModel(identity: DeepSeekProviderIdentity): string | undefined {
+  if (identity.invalid) return undefined;
+  const observed = [...new Set(identity.observedModels)];
+  return observed.length === 1 ? observed[0] : undefined;
+}
+
 function recordDeepSeekTerminalUsage(invocation: DeepSeekInvocationEvidence, evidence: DeepSeekUsageEvidence): void {
   invocation.terminalResults += 1;
   if (invocation.terminalResults !== 1 || invocation.usage.status !== "unseen" || evidence.status === "incomplete") {
     invocation.usage = { status: "invalid" };
     return;
   }
-  invocation.usage = { status: "complete", usage: evidence.usage };
+  invocation.usage = { status: "complete", providerModel: evidence.providerModel, usage: evidence.usage };
 }
 
 function resolvedDeepSeekUsage(invocation: DeepSeekInvocationEvidence): DeepSeekUsage | undefined {
-  return invocation.usage.status === "complete" ? invocation.usage.usage : undefined;
+  if (invocation.usage.status !== "complete") return undefined;
+  return singleDeepSeekProviderModel(invocation.providerIdentity) === invocation.usage.providerModel
+    ? invocation.usage.usage
+    : undefined;
 }
 
 function deepSeekSmithersUsageFromEvidence(invocation: DeepSeekInvocationEvidence): DeepSeekSmithersUsage | undefined {
@@ -348,11 +358,16 @@ function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEf
 }
 
 /**
- * DeepSeek bills cache misses and cache hits independently. Its completion
- * token count already includes thinking tokens, so exposing a separate
- * reasoning count would double-count both tokens and spend.
+ * Claude Code's result-level `usage` excludes subagent activity. Its
+ * per-model `modelUsage` is the whole-tree aggregate, so only that object can
+ * provide complete benchmark accounting. DeepSeek's completion token count
+ * already includes thinking tokens, so exposing a separate reasoning count
+ * would double-count both tokens and spend.
  */
-function deepSeekUsageEvidenceFromResultLine(line: string): DeepSeekUsageEvidence | undefined {
+function deepSeekUsageEvidenceFromResultLine(
+  line: string,
+  providerIdentity: DeepSeekProviderIdentity
+): DeepSeekUsageEvidence | undefined {
   let payload: unknown;
   try {
     payload = JSON.parse(line) as unknown;
@@ -360,53 +375,48 @@ function deepSeekUsageEvidenceFromResultLine(line: string): DeepSeekUsageEvidenc
     return undefined;
   }
   if (!isRecord(payload) || payload.type !== "result") return undefined;
-  if (!isRecord(payload.usage)) return { status: "incomplete" };
-  const usage = payload.usage;
-  const inputTokens = consistentTokenCount(usage, ["prompt_cache_miss_tokens", "input_tokens", "inputTokens"]);
-  const outputTokens = consistentTokenCount(usage, ["output_tokens", "outputTokens", "completion_tokens"]);
-  const cacheReadTokens = consistentTokenCount(usage, [
-    "prompt_cache_hit_tokens",
-    "cache_read_input_tokens",
-    "cacheReadTokens",
-    "cached_input_tokens"
-  ]);
-  // Each alias is provider evidence in its own right. A malformed or
-  // contradictory alias cannot be ignored merely because another alias is
-  // well-formed: doing so would turn an ambiguous provider result into
-  // apparently authoritative accounting.
-  if (inputTokens.status === "invalid" || outputTokens.status === "invalid" || cacheReadTokens.status === "invalid") {
+  if (!isRecord(payload.modelUsage)) return { status: "incomplete" };
+  const modelEntries = Object.entries(payload.modelUsage);
+  if (modelEntries.length !== 1) return { status: "incomplete" };
+  const [providerModel, modelUsage] = modelEntries[0]!;
+  const observedProviderModel = singleDeepSeekProviderModel(providerIdentity);
+  if (
+    !PROVIDER_MODEL_ID_PATTERN.test(providerModel) ||
+    providerModel !== observedProviderModel ||
+    !isRecord(modelUsage)
+  ) {
     return { status: "incomplete" };
   }
-  // A cache hit count may be omitted when it is zero, but both uncached input
-  // and output are required provider measurements. Never turn a partial result
-  // into apparently complete zero-filled telemetry.
-  if (inputTokens.status !== "complete" || outputTokens.status !== "complete") return { status: "incomplete" };
+  const inputTokens = exactTokenCount(modelUsage, "inputTokens");
+  const outputTokens = exactTokenCount(modelUsage, "outputTokens");
+  const cacheReadTokens = exactTokenCount(modelUsage, "cacheReadInputTokens");
+  const cacheWriteTokens = exactTokenCount(modelUsage, "cacheCreationInputTokens");
+  if (
+    inputTokens.status !== "complete" ||
+    outputTokens.status !== "complete" ||
+    cacheReadTokens.status !== "complete" ||
+    cacheWriteTokens.status !== "complete"
+  ) {
+    return { status: "incomplete" };
+  }
   const normalized = {
     inputTokens: inputTokens.value,
     outputTokens: outputTokens.value,
-    // DeepSeek enables its disk cache for every request and reports hit/miss
-    // counts. Claude Code's aggregate result may omit an all-zero hit field;
-    // zero is authoritative in that case rather than unknown telemetry.
-    cacheReadTokens: cacheReadTokens.status === "complete" ? cacheReadTokens.value : 0,
-    cacheWriteTokens: 0 as const
+    cacheReadTokens: cacheReadTokens.value,
+    cacheWriteTokens: cacheWriteTokens.value
   };
-  const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
+  const totalTokens =
+    normalized.inputTokens + normalized.cacheReadTokens + normalized.cacheWriteTokens + normalized.outputTokens;
   if (!Number.isSafeInteger(totalTokens)) return { status: "incomplete" };
-  return { status: "complete", usage: { ...normalized, totalTokens } };
+  return { status: "complete", providerModel, usage: { ...normalized, totalTokens } };
 }
 
-function consistentTokenCount(value: Record<string, unknown>, fields: readonly string[]): DeepSeekTokenCountEvidence {
-  let observed: number | undefined;
-  for (const field of fields) {
-    if (!Object.hasOwn(value, field)) continue;
-    const candidate = value[field];
-    if (typeof candidate !== "number" || !Number.isSafeInteger(candidate) || candidate < 0) {
-      return { status: "invalid" };
-    }
-    if (observed !== undefined && candidate !== observed) return { status: "invalid" };
-    observed = candidate;
-  }
-  return observed === undefined ? { status: "absent" } : { status: "complete", value: observed };
+function exactTokenCount(value: Record<string, unknown>, field: string): DeepSeekTokenCountEvidence {
+  if (!Object.hasOwn(value, field)) return { status: "absent" };
+  const candidate = value[field];
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    ? { status: "complete", value: candidate }
+    : { status: "invalid" };
 }
 
 function deepSeekCompletedUsage(usage: DeepSeekUsage): Record<string, number> {

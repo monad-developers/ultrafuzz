@@ -311,6 +311,23 @@ async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   };
 }
 
+function deepSeekModelUsage(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadInputTokens = 0,
+  cacheCreationInputTokens = 0
+): Record<string, Record<string, number>> {
+  return {
+    [model]: {
+      inputTokens,
+      outputTokens,
+      cacheReadInputTokens,
+      cacheCreationInputTokens
+    }
+  };
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -1914,11 +1931,20 @@ test(
       assert.equal(command.env?.[name], "", `${name} must not leak into DeepSeek Claude Code invocations`);
     }
 
+    const interpreter = agent.createOutputInterpreter();
+    interpreter.onStdoutLine?.(
+      JSON.stringify({
+        type: "assistant",
+        message: { model: "deepseek-v4-pro", content: [{ type: "text", text: "done" }] }
+      })
+    );
     const resultLine = JSON.stringify({
       type: "result",
       subtype: "success",
       is_error: false,
       result: "done",
+      modelUsage: deepSeekModelUsage("deepseek-v4-pro", 121, 31, 401, 2),
+      // This top-level aggregate excludes nested agents and must not win.
       usage: {
         input_tokens: 120,
         output_tokens: 30,
@@ -1927,7 +1953,6 @@ test(
         reasoning_tokens: 20
       }
     });
-    const interpreter = agent.createOutputInterpreter();
     const lineEvents = (interpreter.onStdoutLine?.(resultLine) ?? []) as Array<{
       type?: string;
       usage?: Record<string, number>;
@@ -1939,12 +1964,12 @@ test(
     const events = [...lineEvents, ...exitEvents];
     const completed = events.find((event) => event.type === "completed");
     assert.deepEqual(completed?.usage, {
-      input_tokens: 120,
-      output_tokens: 30,
-      cache_read_input_tokens: 400,
-      cache_creation_input_tokens: 0,
+      input_tokens: 121,
+      output_tokens: 31,
+      cache_read_input_tokens: 401,
+      cache_creation_input_tokens: 2,
       reasoning_tokens: 0,
-      total_tokens: 550
+      total_tokens: 555
     });
   }
 );
@@ -2028,6 +2053,7 @@ test(
             result: "done",
             model: "configured-echo-must-be-ignored",
             session_id: "deepseek-session",
+            modelUsage: deepSeekModelUsage("deepseek-v4-flash", 101, 23, 400),
             usage: providerUsage
           })}\n`
         )})`
@@ -2058,6 +2084,7 @@ test(
             is_error: true,
             error: "provider failed",
             model: "configured-echo-must-be-ignored",
+            modelUsage: deepSeekModelUsage("deepseek-v4-flash", 101, 23, 400),
             usage: providerUsage
           })}\n`
         )}); process.exit(17)`
@@ -2087,13 +2114,18 @@ test(
     const init = initProject({ projectRoot: project, force: true });
     assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
     const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-    const result = (model?: unknown, response?: unknown): Record<string, unknown> => ({
+    const result = (
+      model?: unknown,
+      response?: unknown,
+      usageModel = "deepseek-v4-flash"
+    ): Record<string, unknown> => ({
       type: "result",
       subtype: "success",
       is_error: false,
       result: "done",
       ...(model === undefined ? {} : { model }),
       ...(response === undefined ? {} : { response }),
+      modelUsage: deepSeekModelUsage(usageModel, 1, 1),
       usage: { input_tokens: 1, output_tokens: 1, prompt_cache_hit_tokens: 0 }
     });
     const cases: Array<{ name: string; lines: unknown[]; expected: string }> = [
@@ -2157,7 +2189,7 @@ test(
             type: "assistant",
             message: { model: "deepseek-v4-flash-20260801", content: [{ type: "text", text: "done" }] }
           },
-          result("deepseek-v4-flash")
+          result("deepseek-v4-flash", undefined, "deepseek-v4-flash-20260801")
         ],
         expected: "deepseek-v4-flash-20260801"
       },
@@ -2245,6 +2277,7 @@ test(
           is_error: false,
           result: "done",
           model: "configured-fallback",
+          modelUsage: deepSeekModelUsage("deepseek-v4-flash", 13, 8, 21),
           usage: providerUsage
         })
       );
@@ -2389,6 +2422,7 @@ test(
           subtype: "success",
           is_error: false,
           result: "done",
+          modelUsage: deepSeekModelUsage("deepseek-v4-flash", 2, 3),
           usage: { input_tokens: 2, output_tokens: 3 }
         })
       );
@@ -2529,6 +2563,7 @@ test("generated DeepSeek adapter isolates overlapping invocation evidence", { sk
         subtype: "success",
         is_error: false,
         result: "done",
+        modelUsage: deepSeekModelUsage(model, inputTokens, outputTokens),
         usage: { input_tokens: inputTokens, output_tokens: outputTokens }
       })
     );
@@ -2623,115 +2658,162 @@ test("generated DeepSeek adapter isolates overlapping invocation evidence", { sk
   }
 });
 
-test("generated DeepSeek adapter keeps malformed terminal usage fail-closed", { skip: !runningUnderBun }, async () => {
-  const project = tempProject();
-  const init = initProject({ projectRoot: project, force: true });
-  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
-  const parentPrototype = Object.getPrototypeOf(DeepSeekClaudeCodeAgent.prototype) as {
-    generate: (...args: unknown[]) => Promise<unknown>;
-  };
-  const originalGenerate = parentPrototype.generate;
-  const fabricatedUsage = Object.freeze({ inputTokens: 77, outputTokens: 88, totalTokens: 165 });
-  const completeUsage = { input_tokens: 5, output_tokens: 7 };
-  const cases: Array<{ name: string; results: Array<Record<string, unknown>> }> = [
-    { name: "missing input", results: [{ usage: { output_tokens: 7 } }] },
-    { name: "missing output", results: [{ usage: { input_tokens: 5 } }] },
-    { name: "absent usage", results: [{}] },
-    {
-      name: "malformed cache hit with otherwise complete usage",
-      results: [{ usage: { input_tokens: 5, output_tokens: 7, prompt_cache_hit_tokens: "0" } }]
-    },
-    {
-      name: "malformed cache miss with valid input fallback",
-      results: [{ usage: { prompt_cache_miss_tokens: "5", input_tokens: 5, output_tokens: 7 } }]
-    },
-    {
-      name: "malformed input alias with valid fallback",
-      results: [{ usage: { input_tokens: "5", inputTokens: 5, output_tokens: 7 } }]
-    },
-    {
-      name: "malformed output alias with valid fallback",
-      results: [{ usage: { input_tokens: 5, output_tokens: "7", completion_tokens: 7 } }]
-    },
-    {
-      name: "contradictory input aliases",
-      results: [{ usage: { prompt_cache_miss_tokens: 4, input_tokens: 5, output_tokens: 7 } }]
-    },
-    {
-      name: "contradictory output aliases",
-      results: [{ usage: { input_tokens: 5, output_tokens: 7, completion_tokens: 8 } }]
-    },
-    {
-      name: "contradictory cache hit aliases",
-      results: [{ usage: { input_tokens: 5, output_tokens: 7, prompt_cache_hit_tokens: 2, cacheReadTokens: 3 } }]
-    },
-    {
-      name: "partial then complete",
-      results: [{ usage: { input_tokens: 5 } }, { usage: completeUsage }]
-    },
-    {
-      name: "complete then partial",
-      results: [{ usage: completeUsage }, { usage: { output_tokens: 7 } }]
-    },
-    {
-      name: "duplicate complete results",
-      results: [{ usage: completeUsage }, { usage: completeUsage }]
-    }
-  ];
-  try {
-    for (const testCase of cases) {
-      const frozenResult = Object.freeze({
-        response: Object.freeze({ modelId: "configured-fallback" }),
-        totalUsage: fabricatedUsage,
-        usage: fabricatedUsage
-      });
-      let completedEvents: Array<{ type?: string; usage?: unknown }> = [];
-      parentPrototype.generate = async function (this: {
-        createOutputInterpreter(): {
-          onStdoutLine?: (line: string) => unknown;
-          onExit?: (result: unknown) => unknown;
+test(
+  "generated DeepSeek adapter keeps malformed whole-tree usage fail-closed",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project, force: true });
+    assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+    const { DeepSeekClaudeCodeAgent } = await loadGeneratedDeepSeekAgent(project);
+    const parentPrototype = Object.getPrototypeOf(DeepSeekClaudeCodeAgent.prototype) as {
+      generate: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalGenerate = parentPrototype.generate;
+    const fabricatedUsage = Object.freeze({ inputTokens: 77, outputTokens: 88, totalTokens: 165 });
+    const providerModel = "deepseek-v4-flash";
+    const completeUsage = {
+      inputTokens: 5,
+      outputTokens: 7,
+      cacheReadInputTokens: 2,
+      cacheCreationInputTokens: 0
+    };
+    const result = (modelUsage?: unknown): Record<string, unknown> => ({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "done",
+      ...(modelUsage === undefined ? {} : { modelUsage }),
+      // A valid top-level aggregate must never fill gaps in modelUsage.
+      usage: { input_tokens: 500, output_tokens: 700, cache_read_input_tokens: 200 }
+    });
+    const cases: Array<{
+      name: string;
+      lines: Array<Record<string, unknown>>;
+      expectedModelId?: string;
+    }> = [
+      { name: "absent model usage", lines: [result()] },
+      { name: "empty model usage", lines: [result({})] },
+      { name: "array model usage", lines: [result([])] },
+      {
+        name: "extra model entry",
+        lines: [
+          result({
+            ...deepSeekModelUsage(providerModel, 5, 7, 2),
+            ...deepSeekModelUsage("deepseek-v4-flash-shadow", 5, 7, 2)
+          })
+        ]
+      },
+      {
+        name: "unsafe model entry",
+        lines: [result({ "deep seek/v4": completeUsage })]
+      },
+      {
+        name: "mismatched model entry",
+        lines: [result(deepSeekModelUsage("deepseek-v4-flash-20260801", 5, 7, 2))]
+      },
+      {
+        name: "malformed model entry",
+        lines: [result({ [providerModel]: null })]
+      },
+      {
+        name: "missing input",
+        lines: [result({ [providerModel]: { ...completeUsage, inputTokens: undefined } })]
+      },
+      {
+        name: "missing output",
+        lines: [result({ [providerModel]: { ...completeUsage, outputTokens: undefined } })]
+      },
+      {
+        name: "missing cache read",
+        lines: [result({ [providerModel]: { ...completeUsage, cacheReadInputTokens: undefined } })]
+      },
+      {
+        name: "missing cache creation",
+        lines: [result({ [providerModel]: { ...completeUsage, cacheCreationInputTokens: undefined } })]
+      },
+      {
+        name: "malformed token count",
+        lines: [result({ [providerModel]: { ...completeUsage, inputTokens: "5" } })]
+      },
+      {
+        name: "negative token count",
+        lines: [result({ [providerModel]: { ...completeUsage, cacheReadInputTokens: -1 } })]
+      },
+      {
+        name: "non-integral token count",
+        lines: [result({ [providerModel]: { ...completeUsage, outputTokens: 7.5 } })]
+      },
+      {
+        name: "partial then complete",
+        lines: [
+          result({ [providerModel]: { ...completeUsage, inputTokens: undefined } }),
+          result({ [providerModel]: completeUsage })
+        ]
+      },
+      {
+        name: "complete then partial",
+        lines: [result({ [providerModel]: completeUsage }), result()]
+      },
+      {
+        name: "duplicate complete results",
+        lines: [result({ [providerModel]: completeUsage }), result({ [providerModel]: completeUsage })]
+      },
+      {
+        name: "provider identity changes after result",
+        lines: [
+          result({ [providerModel]: completeUsage }),
+          { type: "assistant", message: { model: "deepseek-v4-flash-shadow", content: [] } }
+        ],
+        expectedModelId: "ultrafuzz-provider-identity-mixed"
+      }
+    ];
+    try {
+      for (const testCase of cases) {
+        const frozenResult = Object.freeze({
+          response: Object.freeze({ modelId: "configured-fallback" }),
+          totalUsage: fabricatedUsage,
+          usage: fabricatedUsage
+        });
+        let completedEvents: Array<{ type?: string; usage?: unknown }> = [];
+        parentPrototype.generate = async function (this: {
+          createOutputInterpreter(): {
+            onStdoutLine?: (line: string) => unknown;
+            onExit?: (result: unknown) => unknown;
+          };
+        }) {
+          const interpreter = this.createOutputInterpreter();
+          completedEvents = [
+            ...completedEvents,
+            ...((interpreter.onStdoutLine?.(
+              JSON.stringify({ type: "assistant", message: { model: providerModel, content: [] } })
+            ) ?? []) as Array<{ type?: string; usage?: unknown }>),
+            ...testCase.lines.flatMap(
+              (line) =>
+                (interpreter.onStdoutLine?.(JSON.stringify(line)) ?? []) as Array<{ type?: string; usage?: unknown }>
+            ),
+            ...((interpreter.onExit?.({ exitCode: 0 }) ?? []) as Array<{ type?: string; usage?: unknown }>)
+          ];
+          return frozenResult;
         };
-      }) {
-        const interpreter = this.createOutputInterpreter();
-        completedEvents = [
-          ...completedEvents,
-          ...((interpreter.onStdoutLine?.(
-            JSON.stringify({ type: "assistant", message: { model: "deepseek-v4-flash", content: [] } })
-          ) ?? []) as Array<{ type?: string; usage?: unknown }>),
-          ...testCase.results.flatMap(
-            (result) =>
-              (interpreter.onStdoutLine?.(
-                JSON.stringify({
-                  type: "result",
-                  subtype: "success",
-                  is_error: false,
-                  result: "done",
-                  ...result
-                })
-              ) ?? []) as Array<{ type?: string; usage?: unknown }>
-          ),
-          ...((interpreter.onExit?.({ exitCode: 0 }) ?? []) as Array<{ type?: string; usage?: unknown }>)
-        ];
-        return frozenResult;
-      };
-      const agent = new DeepSeekClaudeCodeAgent({ model: "configured-fallback", ultrafuzzApiKey: "test-key" });
-      const generated = (await agent.generate({ prompt: testCase.name, rootDir: project })) as {
-        response?: { modelId?: string };
-        totalUsage?: unknown;
-        usage?: unknown;
-      };
-      assert.equal(generated.response?.modelId, "deepseek-v4-flash", testCase.name);
-      assert.equal(generated.usage, undefined, testCase.name);
-      assert.equal(generated.totalUsage, undefined, testCase.name);
-      const terminal = completedEvents.filter((event) => event.type === "completed");
-      assert.equal(terminal.length, 1, testCase.name);
-      assert.equal(terminal[0]?.usage, undefined, testCase.name);
+        const agent = new DeepSeekClaudeCodeAgent({ model: "configured-fallback", ultrafuzzApiKey: "test-key" });
+        const generated = (await agent.generate({ prompt: testCase.name, rootDir: project })) as {
+          response?: { modelId?: string };
+          totalUsage?: unknown;
+          usage?: unknown;
+        };
+        assert.equal(generated.response?.modelId, testCase.expectedModelId ?? providerModel, testCase.name);
+        assert.equal(generated.usage, undefined, testCase.name);
+        assert.equal(generated.totalUsage, undefined, testCase.name);
+        const terminal = completedEvents.filter((event) => event.type === "completed");
+        assert.equal(terminal.length, 1, testCase.name);
+        assert.equal(terminal[0]?.usage, undefined, testCase.name);
+      }
+    } finally {
+      parentPrototype.generate = originalGenerate;
     }
-  } finally {
-    parentPrototype.generate = originalGenerate;
   }
-});
+);
 
 test(
   "generated DeepSeek postflight failure preserves real engine usage through sync and ledger replay",
