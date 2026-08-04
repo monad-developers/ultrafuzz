@@ -22,10 +22,12 @@ import {
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
   modalEvalRunCommand,
+  NonResumableTerminalRunError,
   repairModalEvalRunRecord,
   type ModalResumeRunState,
   type ModalResumeWorkspace
 } from "./resume.js";
+import { inspectPinnedSource, materializePinnedSource } from "./pinned-source.js";
 import {
   canScoreBenchmarkRow,
   inspectTerminalDisposition,
@@ -64,6 +66,7 @@ const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
+const SOURCE_PROOF_PATH = path.join(DATA_ROOT, "source-proof.json");
 let modelWorkStarted = false;
 
 function privateConfig(): PrivateModalBenchmarkConfig {
@@ -89,7 +92,11 @@ async function main(): Promise<void> {
     snapshot: () => (target === undefined ? Promise.resolve(emptyWorkerCheckpoint()) : readWorkerCheckpoint(target)),
     flush: flushVolume,
     diagnosticCodeForError: (error) =>
-      error instanceof CheckpointIncompatibleError ? "checkpoint-incompatible" : undefined,
+      error instanceof CheckpointIncompatibleError
+        ? "checkpoint-incompatible"
+        : error instanceof NonResumableTerminalRunError
+          ? "terminal-run-non-resumable"
+          : undefined,
     run: async () => {
       assertWorkerInputLineage({
         config: CONFIG,
@@ -108,6 +115,7 @@ async function main(): Promise<void> {
           STATUS_PATH,
           RESULT_PATH,
           LOG_PATH,
+          SOURCE_PROOF_PATH,
           path.join(DATA_ROOT, "failure-details.json"),
           path.join(DATA_ROOT, "outcome")
         ]
@@ -300,7 +308,12 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await mkdir(stagingControl, { recursive: true, mode: 0o700 });
       await mkdir(stagingGroundTruth, { recursive: true, mode: 0o700 });
       const config = privateConfig();
-      await cloneAtRef(config.target.repo, config.target.ref, stagingTarget, "target");
+      await materializePinnedSource({
+        repository: config.target.repo,
+        revision: config.target.ref,
+        destination: stagingTarget,
+        proofPath: SOURCE_PROOF_PATH
+      });
       await cloneAtRef(config.ground_truth.repo, config.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
       await runChecked(["node", CLI, "init", "--project", stagingTarget, "--force", "--json"], {
         label: "target init"
@@ -319,12 +332,18 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await rm(stagingRoot, { recursive: true, force: true });
     }
   } else {
-    for (const required of [target, control, path.join(groundTruth, "findings.yml"), suitePath]) {
+    for (const required of [target, control, path.join(groundTruth, "findings.yml"), suitePath, SOURCE_PROOF_PATH]) {
       await access(required).catch(() => {
         throw new CheckpointIncompatibleError("persistent pre-model workspace is incomplete");
       });
     }
   }
+  await inspectPinnedSource(target, privateConfig().target.ref, undefined, {
+    allowDirty: true,
+    allowUltrafuzzWorktreeRefs: true
+  }).catch((error) => {
+    throw new CheckpointIncompatibleError("persistent benchmark source is not pinned", { cause: error });
+  });
   await runChecked(["node", CLI, "references", "sync", "--project", target, "--json"], {
     label: "references sync"
   });

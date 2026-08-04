@@ -588,6 +588,7 @@ function matchesWorkerAttempt(
 function workerResultCategory(contract: WorkerResultContract): ModalWorkerStatusCategory {
   if (contract.exit_category === "finished") return "succeeded";
   if (contract.exit_category === "genuine-evaluation-failure") return "genuine-task-outcome";
+  if (contract.diagnostic_code === "terminal-run-non-resumable") return "permanent-operational-failure";
   if (contract.diagnostic_code === "checkpoint-incompatible") return "incompatible-checkpoint";
   if (contract.diagnostic_code === "public-eval-diagnostics-invalid") return "permanent-operational-failure";
   if (contract.exit_category === "live") return contract.model_work_started ? "model-work" : "preparing";
