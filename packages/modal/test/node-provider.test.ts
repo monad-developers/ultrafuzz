@@ -17,7 +17,12 @@ import {
   modalNodeVolumeName,
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
-import { copySafeTree } from "../src/node-worker.js";
+import {
+  copySafeTree,
+  initializeDurableNodeWorkspace,
+  runDurableWorkflow,
+  workflowCommandArguments
+} from "../src/node-worker.js";
 import { extractSafeTarArchive } from "../src/safe-archive.js";
 
 const PROVIDER_ID_ENV = "ULTRAFUZZ_TEST_PROVIDER_ID";
@@ -138,6 +143,224 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("resumes a persisted inner workflow before attempting a new cloud-node run", () => {
+    const fixture = createProjectFixture();
+    try {
+      const resume = workflowCommandArguments(
+        "/volume/workflow.tsx",
+        "/volume/workspace",
+        "inner-run",
+        fixture.input,
+        true
+      );
+      const fresh = workflowCommandArguments(
+        "/volume/workflow.tsx",
+        "/volume/workspace",
+        "inner-run",
+        fixture.input,
+        false
+      );
+      expect(resume).toEqual(
+        expect.arrayContaining(["up", "/volume/workflow.tsx", "--resume", "--force", "--run-id", "inner-run"])
+      );
+      expect(fresh).toEqual(expect.arrayContaining(["up", "/volume/workflow.tsx", "--run-id", "inner-run"]));
+      expect(fresh).not.toContain("--resume");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("falls back to a fresh inner workflow only when no persisted run exists", async () => {
+    const fixture = createProjectFixture();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-test-"));
+    const logPath = path.join(root, "commands.jsonl");
+    const fakeSmithers = path.join(root, "smithers.mjs");
+    fs.writeFileSync(
+      fakeSmithers,
+      `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
+if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); process.exit(4); }
+`
+    );
+    fs.chmodSync(fakeSmithers, 0o700);
+    try {
+      await runDurableWorkflow(fakeSmithers, "/volume/workflow.tsx", fixture.root, "inner-run", fixture.input);
+      const commands = fs
+        .readFileSync(logPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]);
+      expect(commands).toHaveLength(2);
+      expect(commands[0]).toEqual(expect.arrayContaining(["--resume", "--force", "--run-id", "inner-run"]));
+      expect(commands[1]).toEqual(expect.arrayContaining(["--run-id", "inner-run"]));
+      expect(commands[1]).not.toContain("--resume");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps workspace mutations and failure checkpoints on durable storage for a replacement worker", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const replacementArchive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const replacementBytes = fs.readFileSync(replacementArchive.path);
+    replacementBytes[4] = replacementBytes[4]! ^ 1;
+    fs.writeFileSync(replacementArchive.path, replacementBytes);
+    replacementArchive.sha256 = crypto.createHash("sha256").update(replacementBytes).digest("hex");
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "attempt");
+    fixture.input.project_archive_sha256 = archive.sha256;
+    try {
+      const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      first.recordCheckpoint("prepared");
+      const generatedProperty = path.join(first.projectRoot, fixture.input.workspace_dir, "test", "Property.t.sol");
+      fs.mkdirSync(path.dirname(generatedProperty), { recursive: true });
+      fs.writeFileSync(generatedProperty, "contract Property {}\n");
+      first.recordCheckpoint("failed", new Error("campaign interrupted"));
+
+      const replacementInput = { ...fixture.input, project_archive_sha256: replacementArchive.sha256 };
+      const replacement = await initializeDurableNodeWorkspace(volumeRoot, replacementArchive.path, replacementInput);
+      expect(
+        fs.readFileSync(
+          path.join(replacement.projectRoot, fixture.input.workspace_dir, "test", "Property.t.sol"),
+          "utf8"
+        )
+      ).toBe("contract Property {}\n");
+      const index = JSON.parse(fs.readFileSync(replacement.checkpointIndex, "utf8")) as {
+        checkpoints: Array<{ checkpoint_id: string; stage: string; manifest: string }>;
+      };
+      expect(index.checkpoints).toEqual([
+        expect.objectContaining({ checkpoint_id: "0001-prepared", stage: "prepared" }),
+        expect.objectContaining({ checkpoint_id: "0002-failed", stage: "failed" })
+      ]);
+      const failureManifest = index.checkpoints[1]?.manifest;
+      expect(failureManifest).toBe(path.join(volumeRoot, "checkpoints", "0002-failed.json"));
+      expect(JSON.parse(fs.readFileSync(failureManifest!, "utf8"))).toMatchObject({
+        stage: "failed",
+        workspace_path: replacement.projectRoot,
+        error: "campaign interrupted"
+      });
+      expect(fs.readFileSync(path.join(volumeRoot, "input", "project.tgz"))).toHaveLength(
+        fs.readFileSync(archive.path).length
+      );
+      expect(replacement.input.project_archive_sha256).toBe(archive.sha256);
+      expect(replacementArchive.sha256).not.toBe(archive.sha256);
+    } finally {
+      archive.cleanup();
+      replacementArchive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("seeds a reset generation from the prior generation's durable outputs", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeParent = path.join(path.dirname(fixture.root), "modal-volume");
+    const priorRoot = path.join(volumeParent, "attempt-base");
+    const resetRoot = path.join(volumeParent, "attempt-reset");
+    const secondResetRoot = path.join(volumeParent, "attempt-reset-again");
+    const interruptedRoot = path.join(volumeParent, "attempt-interrupted");
+    try {
+      const prior = await initializeDurableNodeWorkspace(priorRoot, archive.path, fixture.input);
+      const generatedProperty = path.join(prior.projectRoot, fixture.input.workspace_dir, "test", "Property.t.sol");
+      fs.mkdirSync(path.dirname(generatedProperty), { recursive: true });
+      fs.writeFileSync(generatedProperty, "contract Property {}\n");
+      const finding = path.join(prior.projectRoot, fixture.input.artifact_dir, "finding.json");
+      fs.writeFileSync(finding, '{"id":"prior"}\n');
+      const priorLog = path.join(prior.projectRoot, fixture.input.run_root, "logs", "campaign.log");
+      fs.mkdirSync(path.dirname(priorLog), { recursive: true });
+      fs.writeFileSync(priorLog, "prior log\n");
+      prior.recordCheckpoint("failed", new Error("reset requested"));
+
+      fs.mkdirSync(path.join(interruptedRoot, "input"), { recursive: true });
+      fs.copyFileSync(archive.path, path.join(interruptedRoot, "input", "project.tgz"));
+      const interruptedInput = { ...fixture.input, execution_generation: "reset-interrupted" };
+      fs.writeFileSync(path.join(interruptedRoot, "input", "request.json"), `${JSON.stringify(interruptedInput)}\n`);
+      const interrupted = await initializeDurableNodeWorkspace(interruptedRoot, archive.path, interruptedInput);
+      expect(
+        fs.existsSync(
+          path.join(interrupted.projectRoot, ".ultrafuzz", "recovered", "attempt-base", "workspace", "test")
+        )
+      ).toBe(true);
+
+      const resetInput = { ...fixture.input, execution_generation: "reset-one" };
+      const reset = await initializeDurableNodeWorkspace(resetRoot, archive.path, resetInput);
+      expect(fs.existsSync(path.join(reset.projectRoot, resetInput.workspace_dir))).toBe(false);
+      expect(
+        fs.readFileSync(
+          path.join(
+            reset.projectRoot,
+            ".ultrafuzz",
+            "recovered",
+            "attempt-base",
+            "workspace",
+            "test",
+            "Property.t.sol"
+          ),
+          "utf8"
+        )
+      ).toBe("contract Property {}\n");
+      expect(fs.existsSync(path.join(reset.projectRoot, resetInput.artifact_dir, "finding.json"))).toBe(false);
+      expect(
+        fs.readFileSync(
+          path.join(reset.projectRoot, ".ultrafuzz", "recovered", "attempt-base", "artifacts", "finding.json"),
+          "utf8"
+        )
+      ).toBe('{"id":"prior"}\n');
+      expect(
+        fs.readFileSync(
+          path.join(reset.projectRoot, ".ultrafuzz", "recovered", "attempt-base", "logs", "campaign.log"),
+          "utf8"
+        )
+      ).toBe("prior log\n");
+      const prepared = reset.recordCheckpoint("prepared");
+      expect(prepared.restored_from).toBe(priorRoot);
+
+      const secondReset = await initializeDurableNodeWorkspace(secondResetRoot, archive.path, {
+        ...resetInput,
+        execution_generation: "reset-two"
+      });
+      expect(
+        fs.readFileSync(
+          path.join(
+            secondReset.projectRoot,
+            ".ultrafuzz",
+            "recovered",
+            "attempt-reset",
+            "previous-recovered",
+            "attempt-base",
+            "workspace",
+            "test",
+            "Property.t.sol"
+          ),
+          "utf8"
+        )
+      ).toBe("contract Property {}\n");
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("recognizes a completed checkpoint so publication retries skip the inner workflow", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "completed");
+    try {
+      const first = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      first.recordCheckpoint("completed");
+      const retry = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      expect(retry.hasCompletedCheckpoint).toBe(true);
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("reattaches to one live attempt and atomically publishes its durable result", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive();
@@ -194,6 +417,27 @@ describe("Modal node sandbox provider", () => {
       expect(client.sandboxes.create).toHaveBeenCalledOnce();
       expect(sandbox.exec).not.toHaveBeenCalled();
       expect(sandbox.filesystem.copyFromLocal).not.toHaveBeenCalled();
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeDurableCheckpoint: false });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/cloud node result is invalid/u);
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -549,7 +793,7 @@ function createProjectFixture() {
   };
 }
 
-function createResultArchive() {
+function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
@@ -560,14 +804,39 @@ function createResultArchive() {
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const tags = modalNodeTags("controller-run", "node:attempt");
+  const attemptRoot = `/data/ultrafuzz-nodes/${tags.run}/${tags.attempt}`;
+  const durableCheckpoint = `${attemptRoot}/checkpoints/0003-completed.json`;
+  const durableCheckpointIndex = `${attemptRoot}/checkpoints/index.json`;
   return {
     archive,
     result: JSON.stringify({
       schema_version: "ultrafuzz.modal.node-result.v1",
       status: "succeeded",
-      artifact_archive: `/data/ultrafuzz-nodes/${tags.run}/${tags.attempt}/artifacts.tgz`,
+      artifact_archive: `${attemptRoot}/artifacts.tgz`,
       artifact_sha256: digest,
-      storage_lineage: "run-one/attempt-one/base"
+      storage_lineage: "run-one/attempt-one/base",
+      ...(options.includeDurableCheckpoint === false
+        ? {}
+        : {
+            durable_checkpoint: durableCheckpoint,
+            durable_checkpoint_index: durableCheckpointIndex
+          })
+    }),
+    durableCheckpoint: JSON.stringify({
+      schema_version: "ultrafuzz.modal.node-checkpoint.v1",
+      stage: "completed",
+      storage_lineage: "run-one/attempt-one/base",
+      workspace_path: `${attemptRoot}/workspace`,
+      run_root: ".ultrafuzz/runs/run-one",
+      handoff_archive: `${attemptRoot}/input/project.tgz`
+    }),
+    durableCheckpointIndex: JSON.stringify({
+      schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
+      storage_lineage: "run-one/attempt-one/base",
+      workspace_path: `${attemptRoot}/workspace`,
+      run_root: ".ultrafuzz/runs/run-one",
+      handoff_archive: `${attemptRoot}/input/project.tgz`,
+      checkpoints: [{ manifest: durableCheckpoint, stage: "completed" }]
     }),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true })
   };
@@ -581,8 +850,10 @@ function fakeSandbox(result: ReturnType<typeof createResultArchive> | undefined)
     detach: vi.fn(),
     exec: vi.fn(),
     filesystem: {
-      readText: vi.fn(async () => {
+      readText: vi.fn(async (remote: string) => {
         if (result === undefined) throw new SandboxFilesystemNotFoundError("not found");
+        if (remote.endsWith("/0003-completed.json")) return result.durableCheckpoint;
+        if (remote.endsWith("/checkpoints/index.json")) return result.durableCheckpointIndex;
         return result.result;
       }),
       copyFromLocal: vi.fn(async () => undefined),
