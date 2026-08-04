@@ -24,6 +24,7 @@ import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/ref
 import {
   assertSmithersPackageManifest,
   KIMI_CODE_VERSION,
+  SMITHERS_EFFECT_VERSION,
   SMITHERS_ORCHESTRATOR_BIN_PATH,
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
@@ -1532,9 +1533,11 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz/prompts/setup/project-discovery.md")), true);
   const smithersPackage = JSON.parse(fs.readFileSync(path.join(project, ".smithers/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
+    overrides?: Record<string, string>;
   };
   assert.equal(smithersPackage.dependencies?.["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
   assert.equal(smithersPackage.dependencies?.["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
+  assert.equal(smithersPackage.overrides?.effect, SMITHERS_EFFECT_VERSION);
   const codexAgentText = fs.readFileSync(path.join(project, ".smithers/agents/codex.ts"), "utf8");
   assert.doesNotMatch(codexAgentText, /cwd:\s*process\.cwd/);
   assert.doesNotMatch(codexAgentText, /apiKey:\s*process\.env\.OPENAI_API_KEY/);
@@ -5518,6 +5521,9 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function resolveRegularArtifactFile/);
   assert.match(workflowSource, /throw new Error\(failureMessage\)/);
   assert.match(workflowSource, /<Worktree/);
+  assert.match(workflowSource, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/);
+  assert.match(workflowSource, /function preservePinnedSourceProof/);
+  assert.match(workflowSource, /"source-proofs"/);
   assert.doesNotMatch(workflowSource, /const layers =/);
   assert.doesNotMatch(workflowSource, /<Sequence\b/);
   assert.match(workflowSource, /<Parallel\b/);
@@ -6055,7 +6061,7 @@ test("startRun resolves the target-local Smithers binary when it is not on PATH"
   assert.match(fs.readFileSync(logPath, "utf8"), /up .*ultrafuzz-local-smithers-run\.tsx/);
 });
 
-test("startRun patches the pinned CLI cold detached lifecycle", async () => {
+test("startRun patches the pinned runner lifecycle and resume hydration", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
   writeSmallTopology(project);
@@ -6065,7 +6071,9 @@ test("startRun patches the pinned CLI cold detached lifecycle", async () => {
   const cliRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "cli");
   const admissionSource = path.join(cliRoot, "src", "detached-admission.js");
   const cliSource = path.join(cliRoot, "src", "index.js");
+  const schedulerRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "scheduler");
   const engineRoot = path.join(project, ".smithers", "node_modules", "@smithers-orchestrator", "engine");
+  const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
   const engineSource = path.join(engineRoot, "src", "engine.js");
   fs.mkdirSync(path.dirname(admissionSource), { recursive: true });
   fs.mkdirSync(path.dirname(engineSource), { recursive: true });
@@ -6100,15 +6108,42 @@ test("startRun patches the pinned CLI cold detached lifecycle", async () => {
     "utf8"
   );
   fs.writeFileSync(
-    engineSource,
-    "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;\n",
-    "utf8"
-  );
-  fs.writeFileSync(
     admissionSource,
     [
       'export const DETACHED_ADMISSION_NONCE_ENV = "SMITHERS_DETACHED_ADMISSION_NONCE";',
       "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  for (const dependencyRoot of [schedulerRoot, engineRoot]) {
+    fs.mkdirSync(path.join(dependencyRoot, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dependencyRoot, "package.json"),
+      `${JSON.stringify({ version: SMITHERS_ORCHESTRATOR_VERSION })}\n`,
+      "utf8"
+    );
+  }
+  fs.writeFileSync(
+    schedulerSource,
+    [
+      "export function makeWorkflowSession() {",
+      "  const state = { states: new Map() };",
+      "  return {",
+      "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),",
+      "  };",
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  fs.writeFileSync(
+    engineSource,
+    [
+      "async function run() {",
+      "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;",
+      "    const driverRenderer = {",
+      "}",
       ""
     ].join("\n"),
     "utf8"
@@ -6134,6 +6169,8 @@ test("startRun patches the pinned CLI cold detached lifecycle", async () => {
     fs.readFileSync(engineSource, "utf8"),
     /const resolvedWorkflowPath = opts\.workflowPath \? resolve\(opts\.workflowPath\) : null;/u
   );
+  assert.match(fs.readFileSync(schedulerSource, "utf8"), /restoreTerminalTaskStates/u);
+  assert.match(fs.readFileSync(engineSource, "utf8"), /restored durable terminal tasks into resumed workflow session/u);
 });
 
 test("startRun accepts the published Smithers bin target with its leading dot segment", async () => {
@@ -6245,6 +6282,32 @@ test("startRun migrates the known generated Smithers caret manifest without drop
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
   assert.equal(migrated.devDependencies["custom-build-package"], "2.3.4");
   assert.equal(migrated.scripts.custom, "node custom.js");
+  assert.equal((migrated as { overrides?: Record<string, string> }).overrides?.effect, SMITHERS_EFFECT_VERSION);
+});
+
+test("startRun adds the pinned Effect override to the previous generated manifest", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const packageJson = path.join(project, ".smithers", "package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    overrides?: Record<string, string>;
+  };
+  delete manifest.overrides;
+  fs.writeFileSync(packageJson, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  writeFakeInstalledSmithers(project);
+
+  const run = await startRun({
+    projectRoot: project,
+    runId: "migrated-effect-override-run",
+    env: { PATH: "", SMITHERS_FAKE_LOG: path.join(project, "local-smithers.log") }
+  });
+
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const migrated = JSON.parse(fs.readFileSync(packageJson, "utf8")) as {
+    overrides?: Record<string, string>;
+  };
+  assert.equal(migrated.overrides?.effect, SMITHERS_EFFECT_VERSION);
 });
 
 test("startRun migrates the previous exact Smithers manifest without dropping custom fields", async () => {
@@ -6279,6 +6342,7 @@ test("startRun migrates the previous exact Smithers manifest without dropping cu
   assert.equal(migrated.dependencies["smithers-orchestrator"], SMITHERS_ORCHESTRATOR_VERSION);
   assert.equal(migrated.dependencies["@moonshot-ai/kimi-code"], KIMI_CODE_VERSION);
   assert.equal(migrated.dependencies["custom-agent-package"], "1.2.3");
+  assert.equal((migrated as { overrides?: Record<string, string> }).overrides?.effect, SMITHERS_EFFECT_VERSION);
   assert.match(fs.readFileSync(installer.npmLogPath, "utf8"), /install/u);
 });
 
@@ -6343,6 +6407,17 @@ test("generated workflow dependencies require exact runner versions while allowi
       }),
     /must retain Ultrafuzz's exact runner versions/u
   );
+  assert.throws(
+    () =>
+      assertSmithersPackageManifest({
+        dependencies: {
+          "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
+          zod: "4.4.3"
+        },
+        devDependencies: { typescript: "6.0.3" }
+      }),
+    /must retain Ultrafuzz's exact runner versions/u
+  );
   assert.doesNotThrow(() =>
     assertSmithersPackageManifest({
       dependencies: {
@@ -6351,7 +6426,8 @@ test("generated workflow dependencies require exact runner versions while allowi
         zod: "4.4.3",
         "custom-agent-package": "1.2.3"
       },
-      devDependencies: { typescript: "6.0.3" }
+      devDependencies: { typescript: "6.0.3" },
+      overrides: { effect: SMITHERS_EFFECT_VERSION }
     })
   );
 });

@@ -17,15 +17,20 @@ import {
   resolvePersistentRemoteRoot
 } from "./layout.js";
 import {
+  assertModalPinnedTargetRevision,
+  assertModalPinnedWorkspace,
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
-  modalDurableRunNeedsResume,
   modalEvalRunCommand,
+  NonResumableTerminalRunError,
   repairModalEvalRunRecord,
+  runModalDurableResumeIfNeeded,
+  withModalPinnedWorkspace,
   type ModalResumeRunState,
   type ModalResumeWorkspace
 } from "./resume.js";
+import { materializePinnedSource } from "./pinned-source.js";
 import {
   canScoreBenchmarkRow,
   inspectTerminalDisposition,
@@ -64,6 +69,7 @@ const LOG_PATH = path.join(DATA_ROOT, "worker.log");
 const STATUS_PATH = path.join(DATA_ROOT, "status.json");
 const RESULT_PATH = path.join(DATA_ROOT, "result.json");
 const LINEAGE_PATH = path.join(DATA_ROOT, PERSISTED_LINEAGE_FILE);
+const SOURCE_PROOF_PATH = path.join(DATA_ROOT, "source-proof.json");
 let modelWorkStarted = false;
 
 function privateConfig(): PrivateModalBenchmarkConfig {
@@ -89,7 +95,11 @@ async function main(): Promise<void> {
     snapshot: () => (target === undefined ? Promise.resolve(emptyWorkerCheckpoint()) : readWorkerCheckpoint(target)),
     flush: flushVolume,
     diagnosticCodeForError: (error) =>
-      error instanceof CheckpointIncompatibleError ? "checkpoint-incompatible" : undefined,
+      error instanceof CheckpointIncompatibleError
+        ? "checkpoint-incompatible"
+        : error instanceof NonResumableTerminalRunError
+          ? "terminal-run-non-resumable"
+          : undefined,
     run: async () => {
       assertWorkerInputLineage({
         config: CONFIG,
@@ -108,6 +118,7 @@ async function main(): Promise<void> {
           STATUS_PATH,
           RESULT_PATH,
           LOG_PATH,
+          SOURCE_PROOF_PATH,
           path.join(DATA_ROOT, "failure-details.json"),
           path.join(DATA_ROOT, "outcome")
         ]
@@ -123,7 +134,12 @@ async function main(): Promise<void> {
       if (existing) {
         const workspace = await locateModalResumeWorkspace(WORK_ROOT);
         target = workspace.target;
-        const resumed = await resumeExistingEvaluation(workspace, writer);
+        const resumed = await withModalPinnedWorkspace({
+          target: workspace.target,
+          revision: privateConfig().target.ref,
+          proofPath: SOURCE_PROOF_PATH,
+          run: () => resumeExistingEvaluation(workspace, writer)
+        });
         ({ control, evalRunId, terminalDisposition } = resumed);
       } else {
         const prepared = await prepareWorkspace();
@@ -225,19 +241,31 @@ async function resumeExistingEvaluation(
   if (state === undefined) throw new CheckpointIncompatibleError("persistent workspace is missing durable run state");
   let disposition = await terminalDispositionForState(workspace, state);
   const checkpoint = await readWorkerCheckpoint(workspace.target);
-  if (modalDurableRunNeedsResume(state, checkpoint.counts)) {
-    const stateBeforeResume = state;
-    const resumeRunId = state.run_id;
-    await runBenchmarkExecutionOnce(
-      () =>
-        runChecked(modalDurableResumeCommand(CLI, resumeRunId, workspace.target), {
-          label: "resume durable run",
-          failureCategory: "unreachable"
-        }),
-      () => inspectTerminalDisposition(workspace.target)
-    );
-    state = await waitForTerminalRun(workspace, writer, stateBeforeResume);
-    disposition = await terminalDispositionForState(workspace, state);
+  const stateAtResumeDecision = state;
+  const resumed = await runModalDurableResumeIfNeeded({
+    state: stateAtResumeDecision,
+    counts: checkpoint.counts,
+    disposition,
+    resume: async () => {
+      const resumeRunId = stateAtResumeDecision.run_id;
+      await runBenchmarkExecutionOnce(
+        () =>
+          runChecked(modalDurableResumeCommand(CLI, resumeRunId, workspace.target), {
+            label: "resume durable run",
+            failureCategory: "unreachable"
+          }),
+        () => inspectTerminalDisposition(workspace.target)
+      );
+      const resumedState = await waitForTerminalRun(workspace, writer, stateAtResumeDecision);
+      return {
+        state: resumedState,
+        disposition: await terminalDispositionForState(workspace, resumedState)
+      };
+    }
+  });
+  if (resumed !== undefined) {
+    state = resumed.state;
+    disposition = resumed.disposition;
   }
   await repairModalEvalRunRecord(workspace, state, disposition);
   return {
@@ -300,7 +328,13 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await mkdir(stagingControl, { recursive: true, mode: 0o700 });
       await mkdir(stagingGroundTruth, { recursive: true, mode: 0o700 });
       const config = privateConfig();
-      await cloneAtRef(config.target.repo, config.target.ref, stagingTarget, "target");
+      const targetRevision = assertModalPinnedTargetRevision(config.target.ref);
+      await materializePinnedSource({
+        repository: config.target.repo,
+        revision: targetRevision,
+        destination: stagingTarget,
+        proofPath: SOURCE_PROOF_PATH
+      });
       await cloneAtRef(config.ground_truth.repo, config.ground_truth.ref, stagingGroundTruthRepo, "ground truth");
       await runChecked(["node", CLI, "init", "--project", stagingTarget, "--force", "--json"], {
         label: "target init"
@@ -319,12 +353,17 @@ async function prepareWorkspace(): Promise<{ target: string; control: string; su
       await rm(stagingRoot, { recursive: true, force: true });
     }
   } else {
-    for (const required of [target, control, path.join(groundTruth, "findings.yml"), suitePath]) {
+    for (const required of [target, control, path.join(groundTruth, "findings.yml"), suitePath, SOURCE_PROOF_PATH]) {
       await access(required).catch(() => {
         throw new CheckpointIncompatibleError("persistent pre-model workspace is incomplete");
       });
     }
   }
+  await assertModalPinnedWorkspace({
+    target,
+    revision: privateConfig().target.ref,
+    proofPath: SOURCE_PROOF_PATH
+  });
   await runChecked(["node", CLI, "references", "sync", "--project", target, "--json"], {
     label: "references sync"
   });

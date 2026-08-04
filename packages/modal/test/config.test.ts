@@ -11,7 +11,7 @@ function minimalConfig(): Record<string, unknown> {
   return {
     schema_version: MODAL_BENCHMARK_SCHEMA_VERSION,
     run_id: "example-run",
-    target: { repo: "https://example.invalid/target.git", ref: "0123456789abcdef" },
+    target: { repo: "https://example.invalid/target.git", ref: "0".repeat(40) },
     ground_truth: {
       repo: "https://example.invalid/ground-truth.git",
       ref: "fedcba9876543210",
@@ -53,6 +53,29 @@ describe("Modal benchmark config", () => {
         models: [DEFAULT_BENCHMARK_MODELS[0], DEFAULT_BENCHMARK_MODELS[0]]
       })
     ).toThrow(/duplicate model slug/u);
+  });
+
+  it("requires private targets pinned to exact lowercase commits while allowing ground-truth Git refs", () => {
+    const config = parseModalBenchmarkConfig({
+      ...minimalConfig(),
+      ground_truth: {
+        repo: "https://example.invalid/ground-truth.git",
+        ref: "main",
+        file: "findings.yml"
+      }
+    });
+
+    expect("target" in config && config.target.ref).toBe("0".repeat(40));
+    expect("ground_truth" in config && config.ground_truth.ref).toBe("main");
+
+    for (const ref of ["main", "a".repeat(39), "A".repeat(40), `${"a".repeat(40)} `]) {
+      expect(() =>
+        parseModalBenchmarkConfig({
+          ...minimalConfig(),
+          target: { repo: "https://example.invalid/target.git", ref }
+        })
+      ).toThrow(/exact 40-character lowercase hexadecimal commit SHA/u);
+    }
   });
 
   it("requires provider and agent pairs to match", () => {

@@ -102,7 +102,6 @@ import {
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "./layout.js";
-import { modalVolumeFromNameV2 } from "./modal-volume.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   parsePublicBenchmarkBundle,
@@ -145,6 +144,7 @@ import {
   type ModalRecoveryState,
   type ModalRecoveryWorker
 } from "./recovery.js";
+import { getOrCreateModalV2Volume } from "./volume.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
 const MODAL_RUNTIME_USER = "root";
@@ -641,7 +641,7 @@ async function reconcileKimiSubscriptionCredentialFromLaunchVolume(input: {
   const credentialFile = await kimiSubscriptionCredentialFileName(input.model.model, input.env);
   let volume: Volume;
   try {
-    volume = await input.modal.volumes.fromName(input.launch.volume_name, { createIfMissing: false });
+    volume = await getOrCreateModalV2Volume(input.modal, input.launch.volume_name, { createIfMissing: false });
   } catch (error) {
     if (error instanceof NotFoundError) return;
     throw error;
@@ -693,7 +693,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
 
   const volumeName = record?.volume_name ?? modalVolumeName(input.state.logical_run_id, input.model.slug);
   const remoteRoot = record?.remote_root ?? persistentDataRoot(input.state.logical_run_id, input.model.slug);
-  const volume = await modalVolumeFromNameV2(input.modal, volumeName, {
+  const volume = await getOrCreateModalV2Volume(input.modal, volumeName, {
     createIfMissing: record === undefined || input.state.generation_mode === "fresh"
   });
 
@@ -1329,7 +1329,7 @@ export async function modalBenchmarkStatus(input: {
     const rows: Array<Record<string, unknown>> = [];
     for (const launch of state.launches) {
       const probe = await probeModalSandbox(modal, launch.sandbox_id);
-      const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
+      const volume = await getOrCreateModalV2Volume(modal, launch.volume_name, { createIfMissing: false });
       const persisted = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
         "status.json",
         "result.json"
@@ -1461,7 +1461,7 @@ export async function overseeModalBenchmarkOnce(
           if (model === undefined || fingerprintModalModel(model) !== launch.model_fingerprint) {
             throw new Error(`incompatible Modal recovery model for ${launch.slug}`);
           }
-          const volume = await modalVolumeFromNameV2(modal, launch.volume_name, { createIfMissing: false });
+          const volume = await getOrCreateModalV2Volume(modal, launch.volume_name, { createIfMissing: false });
           let row = recoveryState.rows.find((candidate) => candidate.slug === launch.slug)!;
           let resolution = await resolveModalRecoveryOwner({
             modal,
@@ -2352,7 +2352,7 @@ export async function collectModalBenchmark(input: {
     await withModalLaunchStateLock(input.statePath, async () => {
       const { state, app, image } = await requiredLaunchStateForInspection(input.statePath, modal);
       for (const launch of state.launches) {
-        const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
+        const volume = await getOrCreateModalV2Volume(modal, launch.volume_name, { createIfMissing: false });
         const files = await readVolumeFiles(modal, app, image, volume, launch.remote_root, [
           ...MODAL_COLLECT_RESULT_FILES.filter((name) => name !== MODAL_RECOVERY_LIFECYCLE_FILE),
           ...(input.includePublicResults === true ? [MODAL_PUBLIC_RESULT_FILE] : [])

@@ -19,6 +19,7 @@ describe("Modal target model profiles", () => {
     expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("max_parallel_nodes = 32");
+    expect(config).toContain("keep_workspaces = false");
     expect(config).toContain(
       '[execution]\nmode = "cloud"\nprovider = "modal"\n\n[execution.resources]\ntimeout_seconds = 7200'
     );

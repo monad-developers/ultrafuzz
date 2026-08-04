@@ -16,7 +16,7 @@ import {
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
 const gitRef = z.string().min(1).max(256);
 const gitUrl = z.string().url().max(2048);
-const fullSha = z.string().regex(/^[0-9a-f]{40}$/u);
+const fullSha = z.string().regex(/^[0-9a-f]{40}$/u, "must be an exact 40-character lowercase hexadecimal commit SHA");
 const relativeFile = z
   .string()
   .min(1)
@@ -96,7 +96,7 @@ const commonBenchmarkConfig = {
 const privateBenchmarkConfigSchema = z
   .object({
     ...commonBenchmarkConfig,
-    target: z.object({ repo: gitUrl, ref: gitRef }).strict(),
+    target: z.object({ repo: gitUrl, ref: fullSha }).strict(),
     ground_truth: z
       .object({
         repo: gitUrl,

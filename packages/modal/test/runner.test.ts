@@ -208,7 +208,7 @@ describe("Modal benchmark termination", () => {
     const config = parseModalBenchmarkConfig({
       schema_version: "ultrafuzz.modal.benchmark.v1",
       run_id: "immutable-run",
-      target: { repo: "https://github.com/example/target", ref: "main" },
+      target: { repo: "https://github.com/example/target", ref: "a".repeat(40) },
       ground_truth: {
         repo: "https://github.com/example/ground-truth",
         ref: "main",

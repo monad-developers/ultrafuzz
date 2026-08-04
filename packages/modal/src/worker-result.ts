@@ -34,6 +34,7 @@ export const WORKER_DIAGNOSTIC_CODES = [
   "sandbox-exited",
   "dependency-unreachable",
   "genuine-evaluation-failure",
+  "terminal-run-non-resumable",
   "checkpoint-incompatible",
   "public-eval-diagnostics-invalid"
 ] as const;

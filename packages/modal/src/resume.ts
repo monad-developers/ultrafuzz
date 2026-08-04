@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { constants, type BigIntStats } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import { EVAL_WATCH_TIMEOUT_SECONDS } from "./defaults.js";
+import {
+  inspectPinnedSource,
+  PINNED_SOURCE_PROOF_SCHEMA_VERSION,
+  PINNED_SOURCE_REF,
+  type PinnedSourceProof
+} from "./pinned-source.js";
 import type { TerminalDisposition } from "./terminal-disposition.js";
+import { CheckpointIncompatibleError } from "./worker-lineage.js";
 
 export interface ModalResumeWorkspace {
   target: string;
@@ -28,13 +36,150 @@ export interface ModalResumeCheckpointCounts {
   remaining: number;
 }
 
+const fullPinnedRevision = /^[0-9a-f]{40}$/u;
+
+export class NonResumableTerminalRunError extends Error {
+  readonly code = "TERMINAL_RUN_NON_RESUMABLE";
+
+  constructor(status: string | undefined, disposition: TerminalDisposition | undefined) {
+    super(
+      `refusing to finalize non-resumable terminal run status ${status ?? "unknown"} with disposition ${
+        disposition?.kind ?? "unknown"
+      }`
+    );
+    this.name = "NonResumableTerminalRunError";
+  }
+}
+
 export function modalDurableResumeCommand(cliPath: string, runId: string, projectRoot: string): string[] {
   return ["node", cliPath, "resume", runId, "--project", projectRoot, "--force", "--retry-failed", "--json"];
 }
 
-export function modalDurableRunNeedsResume(state: ModalResumeRunState, counts: ModalResumeCheckpointCounts): boolean {
+export function modalDurableRunNeedsResume(
+  state: ModalResumeRunState,
+  counts: ModalResumeCheckpointCounts,
+  disposition?: TerminalDisposition
+): boolean {
+  if (isTerminalRunStatus(state.status) && disposition !== undefined) return false;
   if (!isTerminalRunStatus(state.status)) return true;
   return counts.failed > 0 || counts.remaining > 0;
+}
+
+export async function runModalDurableResumeIfNeeded<T>(input: {
+  state: ModalResumeRunState;
+  counts: ModalResumeCheckpointCounts;
+  disposition?: TerminalDisposition;
+  resume: () => Promise<T>;
+}): Promise<T | undefined> {
+  if (!modalDurableRunNeedsResume(input.state, input.counts, input.disposition)) return undefined;
+  return input.resume();
+}
+
+export function assertModalPinnedTargetRevision(revision: string): string {
+  if (!fullPinnedRevision.test(revision)) {
+    throw new CheckpointIncompatibleError("persistent benchmark target revision is not an exact commit");
+  }
+  return revision;
+}
+
+export async function assertModalPinnedWorkspace(input: {
+  target: string;
+  revision: string;
+  proofPath: string;
+}): Promise<void> {
+  const revision = assertModalPinnedTargetRevision(input.revision);
+  try {
+    const recorded = await readPinnedSourceProof(input.proofPath);
+    const inspected = await inspectPinnedSource(input.target, revision, undefined, {
+      allowDirty: true,
+      allowUltrafuzzWorktreeRefs: true
+    });
+    if (!matchesPinnedSourceProof(recorded, inspected, revision)) {
+      throw new Error("persistent benchmark source proof does not match the inspected source");
+    }
+  } catch (error) {
+    if (error instanceof CheckpointIncompatibleError) throw error;
+    throw new CheckpointIncompatibleError("persistent benchmark source is not pinned", { cause: error });
+  }
+}
+
+async function readPinnedSourceProof(filePath: string): Promise<unknown> {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size <= 0n || before.size > 64n * 1024n) {
+      throw new Error("persistent benchmark source proof is not a regular file");
+    }
+    const contents = Buffer.alloc(Number(before.size) + 1);
+    let offset = 0;
+    while (offset < contents.byteLength) {
+      const { bytesRead } = await handle.read(contents, offset, contents.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset !== Number(before.size)) throw new Error("persistent benchmark source proof changed while reading");
+    const after = await handle.stat({ bigint: true });
+    const current = await lstat(filePath, { bigint: true });
+    if (!samePinnedProofIdentity(before, after) || !samePinnedProofIdentity(before, current)) {
+      throw new Error("persistent benchmark source proof changed while reading");
+    }
+    return JSON.parse(contents.subarray(0, offset).toString("utf8")) as unknown;
+  } finally {
+    await handle.close();
+  }
+}
+
+function samePinnedProofIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return (
+    right.isFile() &&
+    right.nlink === 1n &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.ctimeNs === right.ctimeNs &&
+    left.mtimeNs === right.mtimeNs
+  );
+}
+
+function matchesPinnedSourceProof(
+  value: unknown,
+  inspected: PinnedSourceProof,
+  revision: string
+): value is PinnedSourceProof {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proof = value as Partial<PinnedSourceProof>;
+  return (
+    Object.keys(proof).sort().join("\0") ===
+      ["base_ref", "commit", "commit_object_count", "refs", "remotes", "revision_count", "schema_version", "tree"]
+        .sort()
+        .join("\0") &&
+    proof.schema_version === PINNED_SOURCE_PROOF_SCHEMA_VERSION &&
+    proof.commit === revision &&
+    proof.commit === inspected.commit &&
+    proof.tree === inspected.tree &&
+    proof.base_ref === PINNED_SOURCE_REF &&
+    proof.revision_count === 1 &&
+    proof.commit_object_count === 1 &&
+    Array.isArray(proof.remotes) &&
+    proof.remotes.length === 0 &&
+    Array.isArray(proof.refs) &&
+    proof.refs.length === 1 &&
+    proof.refs[0]?.name === PINNED_SOURCE_REF &&
+    proof.refs[0].object === revision &&
+    inspected.refs.some((ref) => ref.name === proof.refs![0]!.name && ref.object === proof.refs![0]!.object)
+  );
+}
+
+export async function withModalPinnedWorkspace<T>(input: {
+  target: string;
+  revision: string;
+  proofPath: string;
+  run: () => Promise<T>;
+}): Promise<T> {
+  await assertModalPinnedWorkspace(input);
+  return input.run();
 }
 
 export function modalDurableRunAdvanced(before: ModalResumeRunState, after: ModalResumeRunState): boolean {
@@ -115,7 +260,7 @@ export async function repairModalEvalRunRecord(
 ): Promise<void> {
   const genuineTaskOutcome = state.status === "failed" && disposition?.kind === "genuine-task-failures";
   if (state.status !== "succeeded" && !genuineTaskOutcome) {
-    throw new Error(`refusing to finalize evaluation row from run status ${state.status ?? "unknown"}`);
+    throw new NonResumableTerminalRunError(state.status, disposition);
   }
   if (state.run_id !== workspace.productRunId) {
     throw new Error(`refusing to finalize evaluation row from unrelated run ${state.run_id}`);

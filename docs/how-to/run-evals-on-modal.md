@@ -82,11 +82,11 @@ lanes.
   "run_id": "example-run",
   "target": {
     "repo": "https://example.invalid/subject.git",
-    "ref": "full-commit-sha"
+    "ref": "0123456789abcdef0123456789abcdef01234567"
   },
   "ground_truth": {
     "repo": "https://example.invalid/reference-findings.git",
-    "ref": "full-commit-sha",
+    "ref": "main",
     "file": "findings.yml"
   },
   "braintrust": {
@@ -95,6 +95,11 @@ lanes.
   }
 }
 ```
+
+`target.ref` must be the exact 40-character lowercase hexadecimal commit SHA;
+branch names, tags, abbreviated SHAs, and uppercase SHAs are rejected. The
+ground-truth repository is trusted separately, so `ground_truth.ref` may remain
+a branch, tag, or full commit ref.
 
 The ground-truth file must use the format accepted by `ultrafuzz eval score`.
 The config schema intentionally accepts credential environment-variable names,

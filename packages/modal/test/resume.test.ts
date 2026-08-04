@@ -1,16 +1,23 @@
+import { execFileSync } from "node:child_process";
 import fs, { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { materializePinnedSource } from "../src/pinned-source.js";
 import {
+  assertModalPinnedTargetRevision,
   locateModalResumeWorkspace,
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
-  repairModalEvalRunRecord
+  NonResumableTerminalRunError,
+  repairModalEvalRunRecord,
+  runModalDurableResumeIfNeeded,
+  withModalPinnedWorkspace
 } from "../src/resume.js";
+import { CheckpointIncompatibleError } from "../src/worker-lineage.js";
 
 const T0 = "2026-07-19T00:00:00.000Z";
 const T1 = "2026-07-19T00:01:00.000Z";
@@ -51,6 +58,79 @@ describe("Modal durable evaluation resume", () => {
       "--retry-failed",
       "--json"
     ]);
+  });
+
+  it("classifies legacy non-commit target refs as incompatible before materialization", () => {
+    expect(() => assertModalPinnedTargetRevision("main")).toThrow(CheckpointIncompatibleError);
+    expect(() => assertModalPinnedTargetRevision("0123456789abcdef")).toThrow(CheckpointIncompatibleError);
+    expect(() => assertModalPinnedTargetRevision("A".repeat(40))).toThrow(CheckpointIncompatibleError);
+    expect(assertModalPinnedTargetRevision("a".repeat(40))).toBe("a".repeat(40));
+  });
+
+  it("rejects a poisoned pinned workspace before dispatching any resume work", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-pinned-resume-"));
+    try {
+      const repository = path.join(root, "source");
+      const target = path.join(root, "target");
+      const proofPath = path.join(root, "source-proof.json");
+      fs.mkdirSync(repository);
+      git(repository, ["init", "--quiet", "--initial-branch=main"]);
+      git(repository, ["config", "user.name", "Ultrafuzz test"]);
+      git(repository, ["config", "user.email", "test@example.invalid"]);
+      fs.writeFileSync(path.join(repository, "source.txt"), "pinned\n");
+      git(repository, ["add", "source.txt"]);
+      git(repository, ["commit", "--quiet", "-m", "pinned"]);
+      const revision = git(repository, ["rev-parse", "HEAD"]);
+      await materializePinnedSource({ repository, revision, destination: target, proofPath });
+      const proof = fs.readFileSync(proofPath, "utf8");
+      git(target, ["branch", "ultrafuzz/run/attempt"]);
+
+      const resume = vi.fn(async () => "resumed");
+      await expect(withModalPinnedWorkspace({ target, revision, proofPath, run: resume })).resolves.toBe("resumed");
+      expect(resume).toHaveBeenCalledOnce();
+
+      const substitutedProof = JSON.parse(proof) as Record<string, unknown>;
+      substitutedProof.tree = "b".repeat(40);
+      fs.writeFileSync(proofPath, `${JSON.stringify(substitutedProof)}\n`);
+      resume.mockClear();
+      await expect(withModalPinnedWorkspace({ target, revision, proofPath, run: resume })).rejects.toBeInstanceOf(
+        CheckpointIncompatibleError
+      );
+      expect(resume).not.toHaveBeenCalled();
+
+      fs.writeFileSync(proofPath, proof);
+      git(target, ["remote", "add", "poisoned", repository]);
+      await expect(withModalPinnedWorkspace({ target, revision, proofPath, run: resume })).rejects.toBeInstanceOf(
+        CheckpointIncompatibleError
+      );
+      expect(resume).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not redispatch a terminal state with an authoritative disposition", async () => {
+    const resume = vi.fn(async () => "resumed");
+    const state = { run_id: "durable-run-one", status: "failed" };
+    const counts = { succeeded: 58, failed: 1, remaining: 0 };
+
+    await expect(
+      runModalDurableResumeIfNeeded({
+        state,
+        counts,
+        disposition: { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 },
+        resume
+      })
+    ).resolves.toBeUndefined();
+    await expect(
+      runModalDurableResumeIfNeeded({
+        state,
+        counts,
+        disposition: { kind: "genuine-task-failures", failedTasks: 1, operationalFailures: 0 },
+        resume
+      })
+    ).resolves.toBeUndefined();
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it("resumes terminal checkpoints that still have failed or unfinished logical rows", () => {
@@ -175,15 +255,23 @@ describe("Modal durable evaluation resume", () => {
   it("fails closed for operational terminal states and unrelated runs", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    await expect(
-      repairModalEvalRunRecord(
-        workspace,
-        { run_id: "durable-run-one", status: "failed" },
-        { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
-      )
-    ).rejects.toThrow("refusing to finalize");
+    const rejected = repairModalEvalRunRecord(
+      workspace,
+      { run_id: "durable-run-one", status: "failed" },
+      { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
+    );
+    await expect(rejected).rejects.toBeInstanceOf(NonResumableTerminalRunError);
+    await expect(rejected).rejects.toMatchObject({ code: "TERMINAL_RUN_NON_RESUMABLE" });
     await expect(
       repairModalEvalRunRecord(workspace, { run_id: "unrelated-run", status: "succeeded" }, undefined)
     ).rejects.toThrow("unrelated run");
   });
 });
+
+function git(cwd: string, args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  }).trim();
+}

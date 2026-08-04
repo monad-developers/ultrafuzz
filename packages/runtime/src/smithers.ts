@@ -106,6 +106,44 @@ const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = pro
   const resolvedWorkflowPath = opts.workflowPath
     ? resolve(persistedWorkflowPath || opts.workflowPath)
     : null;`;
+const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
+  "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),";
+const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
+      Effect.sync(() => {
+        for (const task of tasks) {
+          if (task.state !== "finished" && task.state !== "skipped") continue;
+          state.states.set(stateKeyFor(task), task.state);
+        }
+      }),
+    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),`;
+const SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE = "    const driverRenderer = {";
+const SMITHERS_ENGINE_RESUME_HYDRATION_PATCH = `    if (opts.resume) {
+      const durableOutputs = await loadOutputs(db, schema, runId);
+      const durableNodes = await Effect.runPromise(adapter.listNodes(runId));
+      const terminalTaskStates = durableNodes.flatMap((node) => {
+        if (node.state === "skipped") {
+          return [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "skipped" }];
+        }
+        if (node.state !== "finished" || typeof node.outputTable !== "string") return [];
+        const rows = durableOutputs[node.outputTable];
+        const hasOutput =
+          Array.isArray(rows) &&
+          rows.some((row) => {
+            const rowNodeId = row.nodeId ?? row.node_id;
+            return rowNodeId === node.nodeId && Number(row.iteration ?? 0) === Number(node.iteration ?? 0);
+          });
+        return hasOutput
+          ? [{ nodeId: node.nodeId, iteration: node.iteration ?? 0, state: "finished" }]
+          : [];
+      });
+      await Effect.runPromise(workflowSession.restoreTerminalTaskStates(terminalTaskStates));
+      logInfo(
+        "restored durable terminal tasks into resumed workflow session",
+        { runId, restoredTaskCount: terminalTaskStates.length },
+        "engine:run",
+      );
+    }
+    const driverRenderer = {`;
 const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "ALL_PROXY",
   "APPDATA",
@@ -2753,6 +2791,9 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     );
   }
   let cliContents = fs.readFileSync(cliSource, "utf8");
+  // Smithers 0.31 closes the detached-engine log descriptor before reusing it
+  // for the supervisor spawn. Open a dedicated descriptor so supervised public
+  // runs do not fail nondeterministically with posix_spawn EBADF.
   cliContents = applyRequiredSmithersPatch(
     cliContents,
     SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE,
@@ -2779,32 +2820,66 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
   );
   writeFileDurable(cliSource, cliContents);
 
-  const enginePackageRoots = [
+  const schedulerRoots = [
+    path.join(nodeModules, "@smithers-orchestrator", "scheduler"),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "scheduler")
+  ].filter((candidate) => fs.existsSync(candidate));
+  const engineRoots = [
     path.join(nodeModules, "@smithers-orchestrator", "engine"),
     path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "engine")
   ].filter((candidate) => fs.existsSync(candidate));
-  if (enginePackageRoots.length !== 1) {
-    throw new Error("pinned workflow runner did not resolve exactly one engine package root");
+  // Unit-test installers may provide only the public runner and CLI shims.
+  if (schedulerRoots.length === 0 && engineRoots.length === 0) return;
+  if (schedulerRoots.length !== 1 || engineRoots.length !== 1) {
+    throw new Error("pinned workflow runner resolved an incomplete resume implementation");
   }
-  const engineRoot = enginePackageRoots[0]!;
+
+  const schedulerRoot = schedulerRoots[0]!;
+  const engineRoot = engineRoots[0]!;
+  const schedulerPackageJson = path.join(schedulerRoot, "package.json");
   const enginePackageJson = path.join(engineRoot, "package.json");
+  const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
   const engineSource = path.join(engineRoot, "src", "engine.js");
-  assertRegularFileInside(nodeModules, enginePackageJson, "installed Smithers engine package metadata");
-  assertRegularFileInside(nodeModules, engineSource, "installed Smithers engine implementation");
-  const engineMetadata = JSON.parse(fs.readFileSync(enginePackageJson, "utf8")) as unknown;
-  if (!isObjectRecord(engineMetadata) || engineMetadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
-    throw new Error(`installed Smithers engine package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
+  for (const [label, dependencyPackageJson, dependencySource] of [
+    ["scheduler", schedulerPackageJson, schedulerSource],
+    ["engine", enginePackageJson, engineSource]
+  ] as const) {
+    assertRegularFileInside(nodeModules, dependencyPackageJson, `installed Smithers ${label} package metadata`);
+    assertRegularFileInside(nodeModules, dependencySource, `installed Smithers ${label} implementation`);
+    const dependencyMetadata = JSON.parse(fs.readFileSync(dependencyPackageJson, "utf8")) as unknown;
+    if (!isObjectRecord(dependencyMetadata) || dependencyMetadata.version !== SMITHERS_ORCHESTRATOR_VERSION) {
+      throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
+    }
   }
-  const engineContents = fs.readFileSync(engineSource, "utf8");
+
+  const schedulerContents = fs.readFileSync(schedulerSource, "utf8");
   writeFileDurable(
-    engineSource,
+    schedulerSource,
     applyRequiredSmithersPatch(
-      engineContents,
-      SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
-      SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
-      "durable workflow path"
+      schedulerContents,
+      SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE,
+      SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH,
+      "terminal-state restoration implementation"
     )
   );
+
+  let engineContents = fs.readFileSync(engineSource, "utf8");
+  engineContents = applyRequiredSmithersPatch(
+    engineContents,
+    SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+    "durable workflow path"
+  );
+  // The scheduler session is in-memory. Restore only durable skipped tasks and
+  // finished tasks whose output row still exists; genuinely pending work then
+  // becomes runnable immediately without replaying every checkpointed task.
+  engineContents = applyRequiredSmithersPatch(
+    engineContents,
+    SMITHERS_ENGINE_RESUME_HYDRATION_SOURCE,
+    SMITHERS_ENGINE_RESUME_HYDRATION_PATCH,
+    "resume hydration implementation"
+  );
+  writeFileDurable(engineSource, engineContents);
 }
 
 function applyRequiredSmithersPatch(contents: string, source: string, patch: string, label: string): string {

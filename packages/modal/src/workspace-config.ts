@@ -41,7 +41,7 @@ repo = "."
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = ${maxParallelAgents}
 max_parallel_nodes = ${maxParallelNodes}
-keep_workspaces = true
+keep_workspaces = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}
 
