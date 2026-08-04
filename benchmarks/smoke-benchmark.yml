@@ -28,6 +28,9 @@ groups:
       max_attempts: 2
       model_profiles:
         - benchmark
+  references:
+    label: References
+    color: "#4b5563"
   review:
     label: Bounded smoke review
     color: "#0f766e"
@@ -46,6 +49,18 @@ nodes:
     role: finish
     depends_on:
       - final-report
+  - id: reference-vulnerability-database
+    kind: reference
+    reference: vulnerability-database.web3
+    group: references
+    depends_on:
+      - __start__
+    outputs:
+      - path: vulnerability-db/catalog.json
+        contract: ultrafuzz/json-object@1
+        primary: true
+      - path: references/manifest.json
+        contract: ultrafuzz/json-object@1
   - id: smoke-context
     kind: agentic
     prompt: smoke/smoke-context.md
@@ -62,6 +77,7 @@ nodes:
     group: setup
     depends_on:
       - smoke-context
+      - reference-vulnerability-database
     outputs:
       - path: THREAT_MODEL.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -74,6 +90,7 @@ nodes:
     group: setup
     depends_on:
       - threat-model
+      - reference-vulnerability-database
     outputs:
       - path: goal-plan.json
         contract: ultrafuzz/goal-plan@1

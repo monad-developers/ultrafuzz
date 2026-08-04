@@ -40,6 +40,18 @@ nodes:
     role: finish
     depends_on:
       - final-report
+  - id: reference-vulnerability-database
+    kind: reference
+    reference: vulnerability-database.web3
+    group: references
+    depends_on:
+      - __start__
+    outputs:
+      - path: vulnerability-db/catalog.json
+        contract: ultrafuzz/json-object@1
+        primary: true
+      - path: references/manifest.json
+        contract: ultrafuzz/json-object@1
   - id: project-discovery
     kind: agentic
     prompt: setup/project-discovery.md
@@ -68,6 +80,7 @@ nodes:
     group: setup
     depends_on:
       - actors-flows
+      - reference-vulnerability-database
     loops: 1
     outputs:
       - path: THREAT_MODEL.md
@@ -81,6 +94,7 @@ nodes:
     group: setup
     depends_on:
       - threat-model
+      - reference-vulnerability-database
     loops: 1
     outputs:
       - path: goal-plan.json

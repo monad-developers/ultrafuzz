@@ -70,6 +70,7 @@ import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
 import {
   materializeVulnerabilityDatabasePlannerCatalog,
+  VULNERABILITY_DATABASE_REFERENCE_NODE_ID,
   type MaterializedVulnerabilityDatabaseCatalog
 } from "./vulnerability-database.js";
 
@@ -208,13 +209,34 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
   }
 
-  let vulnerabilityDatabase: MaterializedVulnerabilityDatabaseCatalog;
-  try {
-    vulnerabilityDatabase = materializeVulnerabilityDatabasePlannerCatalog(layout.root);
-  } catch (error) {
-    return runtimeFailure<PlanRunValue>([
-      diagnosticFromError(error, "vulnerability-database", "VULNERABILITY_DATABASE_MATERIALIZE_FAILED")
-    ]);
+  let vulnerabilityDatabase: MaterializedVulnerabilityDatabaseCatalog | undefined;
+  const requiresVulnerabilityDatabase = graph.nodes.some(
+    (node) => node.logical_id === "threat-model" || node.logical_id === "goal-plan"
+  );
+  if (requiresVulnerabilityDatabase) {
+    const referenceNode = graph.nodes.find(
+      (node) => node.logical_id === VULNERABILITY_DATABASE_REFERENCE_NODE_ID && node.kind === "reference"
+    );
+    if (referenceNode === undefined) {
+      return runtimeFailure<PlanRunValue>([
+        {
+          code: "VULNERABILITY_DATABASE_REFERENCE_REQUIRED",
+          message: `topology nodes threat-model/goal-plan require the ${VULNERABILITY_DATABASE_REFERENCE_NODE_ID} pinned reference node`,
+          severity: "error",
+          source: "vulnerability-database"
+        }
+      ]);
+    }
+    try {
+      vulnerabilityDatabase = materializeVulnerabilityDatabasePlannerCatalog(
+        layout.root,
+        getNodeArtifactDir(layout, referenceNode.id)
+      );
+    } catch (error) {
+      return runtimeFailure<PlanRunValue>([
+        diagnosticFromError(error, "vulnerability-database", "VULNERABILITY_DATABASE_MATERIALIZE_FAILED")
+      ]);
+    }
   }
 
   let renderedPrompts: RenderedPromptPlan[];
@@ -226,7 +248,7 @@ export async function planRun(input: PlanRunInput) {
       projectRoot,
       resolvedConfig: resolved.config,
       runId,
-      vulnerabilityDatabasePath: vulnerabilityDatabase.path
+      vulnerabilityDatabasePath: vulnerabilityDatabase?.path ?? "unavailable"
     });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
@@ -242,13 +264,21 @@ export async function planRun(input: PlanRunInput) {
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
     execution: resolved.config.execution,
-    vulnerability_database: {
-      catalog_path: vulnerabilityDatabase.relative_path,
-      catalog_sha256: vulnerabilityDatabase.sha256,
-      planner_catalog_schema_version: vulnerabilityDatabase.schema_version,
-      database_schema_version: vulnerabilityDatabase.database_schema_version,
-      aggregate_sha256: vulnerabilityDatabase.aggregate_sha256
-    },
+    ...(vulnerabilityDatabase === undefined
+      ? {}
+      : {
+          vulnerability_database: {
+            catalog_path: vulnerabilityDatabase.relative_path,
+            catalog_sha256: vulnerabilityDatabase.sha256,
+            planner_catalog_schema_version: vulnerabilityDatabase.schema_version,
+            database_schema_version: vulnerabilityDatabase.database_schema_version,
+            aggregate_sha256: vulnerabilityDatabase.aggregate_sha256,
+            repo: vulnerabilityDatabase.repo,
+            commit: vulnerabilityDatabase.commit,
+            resolved_at: vulnerabilityDatabase.resolved_at,
+            reference_artifact_dir: path.relative(layout.root, vulnerabilityDatabase.reference_artifact_dir)
+          }
+        }),
     topology: validation.value.topology,
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
