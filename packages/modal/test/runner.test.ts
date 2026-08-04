@@ -342,6 +342,8 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).not.toContain("crytic/echidna");
     expect(standaloneDockerfile).not.toContain("crytic/medusa");
     expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
+    expect(commands).toMatch(/apt-get install[^\n]*\bzstd\b/u);
+    expect(standaloneDockerfile).toMatch(/apt-get install[\s\S]*\bzstd\b/u);
   });
 
   it("archives tracked files only", () => {

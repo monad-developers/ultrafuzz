@@ -11,7 +11,7 @@ ENV DISABLE_AUTOUPDATER=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       bash build-essential ca-certificates curl git jq libssl3t64 \
-      python3 python3-pip python3-venv ripgrep tar unzip xz-utils \
+      python3 python3-pip python3-venv ripgrep tar unzip xz-utils zstd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
