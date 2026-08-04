@@ -102,7 +102,7 @@ describe("eval history Git CAS publisher", () => {
     }
   }, 30_000);
 
-  it("preserves independent history already committed to main", async () => {
+  it("accepts history-only advancement beyond the tooling checkout", async () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
@@ -561,15 +561,18 @@ process.exit(result.status ?? 1);
     }
   });
 
-  it("preserves unrelated main changes while committing only publication paths", () => {
+  it("rejects source or publication-tooling advancement beyond the tooling checkout", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutB, ["rev-parse", "HEAD"]).trim();
     writeEvalRun(inputRoot, "run-a", "observation-a", candidateCommit);
     const generation = writeGeneration(fixture.root, "generation.json", ["run-a"], candidateCommit);
 
-    writeFile(path.join(fixture.checkoutA, "independent-main-change.txt"), "must be preserved\n");
-    git(fixture.checkoutA, ["add", "independent-main-change.txt"]);
+    writeFile(
+      path.join(fixture.checkoutA, "scripts", "ci", "publish-eval-history-cas.mjs"),
+      "// Advanced publication tooling.\n"
+    );
+    git(fixture.checkoutA, ["add", "scripts/ci/publish-eval-history-cas.mjs"]);
     git(fixture.checkoutA, [
       "-c",
       "user.name=Fixture",
@@ -577,24 +580,24 @@ process.exit(result.status ?? 1);
       "user.email=fixture@example.com",
       "commit",
       "-m",
-      "Advance main independently"
+      "Advance publication tooling"
     ]);
     git(fixture.checkoutA, ["push", "origin", `HEAD:${TARGET_REF}`]);
-    const independentTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    const advancedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
 
-    const published = publishEvalHistoryGeneration({
-      generationPath: generation,
-      inputRoot,
-      repositoryRoot: fixture.checkoutB,
-      expectedGenerationSha256: sha256(fs.readFileSync(generation)),
-      testOnlyPublicationRemoteUrl: fixture.bare
-    });
-    expect(published).toMatchObject({ branch: "main", published: true, attempts: 1 });
-    const publishedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
-    expect(git(fixture.bare, ["show", `${TARGET_REF}:independent-main-change.txt`])).toBe("must be preserved\n");
-    expect(git(fixture.bare, ["diff", "--name-only", independentTarget, publishedTarget]).trim().split("\n")).toEqual(
-      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
+    expect(() =>
+      publishEvalHistoryGeneration({
+        generationPath: generation,
+        inputRoot,
+        repositoryRoot: fixture.checkoutB,
+        expectedGenerationSha256: sha256(fs.readFileSync(generation)),
+        testOnlyPublicationRemoteUrl: fixture.bare
+      })
+    ).toThrow(
+      /publication base advancement since the tooling checkout contains unexpected paths: "scripts\/ci\/publish-eval-history-cas\.mjs"/u
     );
+    expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(advancedTarget);
+    expect(git(fixture.bare, ["show", `${TARGET_REF}:benchmarks/history.json`])).not.toContain("observation-a");
   });
 
   it("rejects non-canonical generation paths and URLs", () => {

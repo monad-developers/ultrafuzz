@@ -89,12 +89,12 @@ point:
 
 ```bash
 ultrafuzz timeline <run-id> --project /path/to/target-protocol
-ultrafuzz fork <run-id> --project /path/to/target-protocol --label retry-triage
+ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12 --label retry-triage
 ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12
-ultrafuzz fork <run-id> --project /path/to/target-protocol --reset-node triage --max-concurrency 4
+ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12 --reset-node triage --max-concurrency 4
 ```
 
-`timeline` lists the checkpoint frame numbers replay and fork `--frame` accept, and
+Fork, like replay, requires an explicit checkpoint frame. `timeline` lists the checkpoint frame numbers replay and fork `--frame` accept, and
 `ultrafuzz snapshots <run-id>` lists the durability and workspace checkpoints
 behind recovery. Both are read-only.
 

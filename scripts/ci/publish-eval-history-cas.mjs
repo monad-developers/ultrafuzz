@@ -190,6 +190,7 @@ export function publishEvalHistoryGeneration(input) {
   if (gitOutput(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=no"]) !== "") {
     throw new Error("publication tooling checkout has tracked modifications");
   }
+  const toolingCommit = gitOutput(repositoryRoot, ["rev-parse", "HEAD"]);
   const cliPath = regularFilePath(
     path.join(repositoryRoot, "packages", "cli", "dist", "index.js"),
     "built Ultrafuzz CLI"
@@ -216,11 +217,12 @@ export function publishEvalHistoryGeneration(input) {
     const snapshots = snapshotGenerationInputs(generation, inputRoot, snapshotRoot);
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const base = refreshRemoteBase(
+      const base = refreshCompatibleRemoteBase(
         repositoryRoot,
         publicationRemote.pushUrl,
         publisherTransportEnvironment,
-        publisherTransportRedactions
+        publisherTransportRedactions,
+        toolingCommit
       );
       const worktree = path.join(temporaryRoot, `worktree-${attempt}`);
       checked("git", ["worktree", "add", "--detach", worktree, base.ref], { cwd: repositoryRoot });
@@ -244,11 +246,12 @@ export function publishEvalHistoryGeneration(input) {
         const needsPush = createdCommit;
 
         if (!needsPush) {
-          const latest = refreshRemoteBase(
+          const latest = refreshCompatibleRemoteBase(
             repositoryRoot,
             publicationRemote.pushUrl,
             publisherTransportEnvironment,
-            publisherTransportRedactions
+            publisherTransportRedactions,
+            toolingCommit
           );
           if (!sameRemoteState(base, latest)) {
             reportRetry(attempt, "a remote tip advanced during an idempotent rebuild");
@@ -265,11 +268,12 @@ export function publishEvalHistoryGeneration(input) {
           redact: publisherTransportRedactions
         });
         if (push.status === 0) {
-          const published = refreshRemoteBase(
+          const published = refreshCompatibleRemoteBase(
             repositoryRoot,
             publicationRemote.pushUrl,
             publisherTransportEnvironment,
-            publisherTransportRedactions
+            publisherTransportRedactions,
+            toolingCommit
           );
           if (!isAncestor(repositoryRoot, commit, published.oid)) {
             throw new Error(`pushed commit ${commit} is not present on origin/${TARGET_BRANCH}`);
@@ -277,11 +281,12 @@ export function publishEvalHistoryGeneration(input) {
           return publicationResult(generation, commit, attempt, true);
         }
 
-        const latest = refreshRemoteBase(
+        const latest = refreshCompatibleRemoteBase(
           repositoryRoot,
           publicationRemote.pushUrl,
           publisherTransportEnvironment,
-          publisherTransportRedactions
+          publisherTransportRedactions,
+          toolingCommit
         );
         if (!sameRemoteState(base, latest)) {
           reportRetry(attempt, "the publication push lost a remote-tip race");
@@ -656,6 +661,20 @@ function refreshRemoteBase(repositoryRoot, publicationRemoteUrl, environment, re
   });
   const oid = gitOutput(repositoryRoot, ["rev-parse", TARGET_REMOTE_REF]);
   return { ref: TARGET_REMOTE_REF, oid };
+}
+
+function refreshCompatibleRemoteBase(repositoryRoot, publicationRemoteUrl, environment, redactions, toolingCommit) {
+  const base = refreshRemoteBase(repositoryRoot, publicationRemoteUrl, environment, redactions);
+  if (!isAncestor(repositoryRoot, toolingCommit, base.oid)) {
+    throw new Error(`origin/${TARGET_BRANCH} is not descended from publication tooling commit ${toolingCommit}`);
+  }
+  const advancedPaths = nulPaths(
+    checked("git", ["diff", "--name-only", "--no-renames", "-z", `${toolingCommit}..${base.oid}`, "--"], {
+      cwd: repositoryRoot
+    }).stdout
+  );
+  assertAllowedPaths(advancedPaths, "publication base advancement since the tooling checkout");
+  return base;
 }
 
 function sameRemoteState(left, right) {

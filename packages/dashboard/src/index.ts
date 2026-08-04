@@ -1229,8 +1229,23 @@ class DashboardApp {
       case "run":
         return [...base, command, "--json"];
       case "replay":
-      case "fork":
         return [...base, command, runId ?? "<run-id>", "--frame", String(requiredLifecycleFrame(body)), "--json"];
+      case "fork": {
+        const resetNode = optionalStringField(body, "resetNode");
+        const label = optionalStringField(body, "label");
+        const maxConcurrency = optionalPositiveSafeIntegerField(body, "maxConcurrency");
+        return [
+          ...base,
+          command,
+          runId ?? "<run-id>",
+          "--frame",
+          String(requiredLifecycleFrame(body)),
+          ...(resetNode === undefined ? [] : ["--reset-node", resetNode]),
+          ...(label === undefined ? [] : ["--label", label]),
+          ...(maxConcurrency === undefined ? [] : ["--max-concurrency", String(maxConcurrency)]),
+          "--json"
+        ];
+      }
       default:
         return [...base, command, runId ?? "<run-id>", "--json"];
     }
@@ -1251,7 +1266,7 @@ class DashboardApp {
           prompt: optionalStringField(body, "prompt"),
           agent: optionalStringField(body, "agent"),
           model: optionalStringField(body, "model"),
-          maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+          maxConcurrency: optionalPositiveSafeIntegerField(body, "maxConcurrency"),
           workflowInput: body.workflowInput,
           env: this.env
         });
@@ -1269,7 +1284,7 @@ class DashboardApp {
         result = await resumeRun({
           projectRoot: this.projectRoot,
           runId: runId!,
-          maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+          maxConcurrency: optionalPositiveSafeIntegerField(body, "maxConcurrency"),
           env: this.env
         });
         break;
@@ -1288,7 +1303,7 @@ class DashboardApp {
           forkFrame: requiredLifecycleFrame(body),
           resetNode: optionalStringField(body, "resetNode"),
           label: optionalStringField(body, "label"),
-          maxConcurrency: optionalNumberField(body, "maxConcurrency"),
+          maxConcurrency: optionalPositiveSafeIntegerField(body, "maxConcurrency"),
           env: this.env
         });
         break;
@@ -2000,6 +2015,14 @@ function optionalNumberField(record: JsonObject, key: string): number | undefine
   }
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new HttpError(400, `${key} must be a number`);
+  }
+  return value;
+}
+
+function optionalPositiveSafeIntegerField(record: JsonObject, key: string): number | undefined {
+  const value = optionalNumberField(record, key);
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new HttpError(400, `${key} must be a positive safe integer`);
   }
   return value;
 }

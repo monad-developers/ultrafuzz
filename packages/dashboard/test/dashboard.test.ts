@@ -149,6 +149,42 @@ test("dashboard replay and fork require a checkpoint frame and expose it in argv
       assert.equal(job.command, command);
       assert.deepEqual(job.argv, ["ultrafuzz", command, "dashboard-frame-test", "--frame", "12", "--json"]);
     }
+
+    const populatedFork = await postLifecycle("fork", {
+      forkFrame: 13,
+      runId: "dashboard-frame-test",
+      resetNode: "triage",
+      label: "retry-triage",
+      maxConcurrency: 4
+    });
+    if (populatedFork.status !== 202) {
+      assert.fail(await populatedFork.text());
+    }
+    const populatedJob = (await populatedFork.json()) as { argv: string[]; command: string };
+    assert.deepEqual(populatedJob.argv, [
+      "ultrafuzz",
+      "fork",
+      "dashboard-frame-test",
+      "--frame",
+      "13",
+      "--reset-node",
+      "triage",
+      "--label",
+      "retry-triage",
+      "--max-concurrency",
+      "4",
+      "--json"
+    ]);
+
+    for (const maxConcurrency of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      const invalid = await postLifecycle("fork", {
+        forkFrame: 13,
+        runId: "dashboard-frame-test",
+        maxConcurrency
+      });
+      assert.equal(invalid.status, 400);
+      assert.match(await invalid.text(), /maxConcurrency must be a positive safe integer/u);
+    }
   } finally {
     await handle.close();
   }

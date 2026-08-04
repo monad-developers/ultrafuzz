@@ -173,9 +173,8 @@ ultrafuzz node <run-id> <node-id> \
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
   [--reset-node <workflow-node-id>] [--json]
 ultrafuzz replay <run-id> --frame <n> [--project <path>] [--json]
-ultrafuzz fork <run-id> \
+ultrafuzz fork <run-id> --frame <n> \
   [--project <path>] \
-  [--frame <n>] \
   [--reset-node <workflow-node-id>] \
   [--label <label>] \
   [--max-concurrency <n>] \
