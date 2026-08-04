@@ -113,6 +113,49 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   return { KimiCode029Agent: kimiModule.KimiCode029Agent };
 }
 
+async function loadGeneratedCodexAgent(project: string): Promise<{
+  CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      args: string[];
+      cleanup?: () => Promise<void>;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "codex-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const codexSource = fs
+    .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./toml"', 'from "./toml.mjs"');
+  fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
+    CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        args: string[];
+        cleanup?: () => Promise<void>;
+      }>;
+    };
+  };
+  return { CompatibleCodexAgent: codexModule.CompatibleCodexAgent };
+}
+
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   DeepSeekClaudeCodeAgent: new (options: Record<string, unknown>) => {
     generate(options: Record<string, unknown>): Promise<{ usage?: Record<string, unknown> }>;
@@ -895,6 +938,10 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
+  assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
+  assert.match(codexAgentText, /override async buildCommand/);
+  assert.match(codexAgentText, /directories\.flatMap\(\(directory\) => \["--add-dir", directory\]\)/);
+  assert.match(codexAgentText, /params\.options\?\.resumeSession/);
   assert.match(codexAgentText, /addDir:\s*options\.addDir/);
   assert.match(codexAgentText, /sandbox:\s*"workspace-write"/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
@@ -970,6 +1017,37 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_model, "gpt-5.5");
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
+
+test(
+  "generated Codex adapter repeats artifact directory flags and preserves resume argv",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project });
+    assert.equal(init.ok, true);
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+    const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
+
+    const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
+    const firstAddDir = fresh.args.indexOf("--add-dir");
+    assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
+      "--add-dir",
+      "/tmp/artifacts",
+      "--add-dir",
+      "/tmp/dependency artifacts"
+    ]);
+    assert.equal(fresh.args.at(-1), "-");
+    await fresh.cleanup?.();
+
+    const resumed = await agent.buildCommand({
+      prompt: "test",
+      cwd: project,
+      options: { resumeSession: "session-123" }
+    });
+    assert.equal(resumed.args.includes("--add-dir"), false);
+    await resumed.cleanup?.();
+  }
+);
 
 test(
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
