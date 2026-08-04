@@ -1018,32 +1018,36 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
-test("generated Codex adapter repeats artifact directory flags and preserves resume argv", async () => {
-  const project = tempProject();
-  const init = initProject({ projectRoot: project });
-  assert.equal(init.ok, true);
-  const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
-  const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
+test(
+  "generated Codex adapter repeats artifact directory flags and preserves resume argv",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project });
+    assert.equal(init.ok, true);
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+    const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
 
-  const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
-  const firstAddDir = fresh.args.indexOf("--add-dir");
-  assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
-    "--add-dir",
-    "/tmp/artifacts",
-    "--add-dir",
-    "/tmp/dependency artifacts"
-  ]);
-  assert.equal(fresh.args.at(-1), "-");
-  await fresh.cleanup?.();
+    const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
+    const firstAddDir = fresh.args.indexOf("--add-dir");
+    assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
+      "--add-dir",
+      "/tmp/artifacts",
+      "--add-dir",
+      "/tmp/dependency artifacts"
+    ]);
+    assert.equal(fresh.args.at(-1), "-");
+    await fresh.cleanup?.();
 
-  const resumed = await agent.buildCommand({
-    prompt: "test",
-    cwd: project,
-    options: { resumeSession: "session-123" }
-  });
-  assert.equal(resumed.args.includes("--add-dir"), false);
-  await resumed.cleanup?.();
-});
+    const resumed = await agent.buildCommand({
+      prompt: "test",
+      cwd: project,
+      options: { resumeSession: "session-123" }
+    });
+    assert.equal(resumed.args.includes("--add-dir"), false);
+    await resumed.cleanup?.();
+  }
+);
 
 test(
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
