@@ -26,6 +26,7 @@ describe("smoke benchmark topology", () => {
     expect(nodeIds).toEqual([
       "__start__",
       "__finish__",
+      "reference-vulnerability-database",
       "smoke-context",
       "threat-model",
       "goal-plan",
@@ -37,8 +38,14 @@ describe("smoke benchmark topology", () => {
     for (const strategyId of STRATEGY_IDS) {
       expect(topology.nodes.find((node) => node.id === strategyId)?.depends_on).toEqual(["smoke-context"]);
     }
-    expect(topology.nodes.find((node) => node.id === "threat-model")?.depends_on).toEqual(["smoke-context"]);
-    expect(topology.nodes.find((node) => node.id === "goal-plan")?.depends_on).toEqual(["threat-model"]);
+    expect(topology.nodes.find((node) => node.id === "threat-model")?.depends_on).toEqual([
+      "smoke-context",
+      "reference-vulnerability-database"
+    ]);
+    expect(topology.nodes.find((node) => node.id === "goal-plan")?.depends_on).toEqual([
+      "threat-model",
+      "reference-vulnerability-database"
+    ]);
     expect(topology.nodes.find((node) => node.id === "goal-roaming")?.depends_on).toEqual(["threat-model"]);
     expect(topology.nodes.find((node) => node.id === "threat-goals")?.depends_on).toEqual(["goal-plan"]);
     expect(topology.nodes.find((node) => node.id === "class-goals")?.depends_on).toEqual(["goal-plan"]);
@@ -71,7 +78,8 @@ describe("smoke benchmark topology", () => {
           reasoningEffort: "medium"
         }
       },
-      defaultModelProfileId: "benchmark"
+      defaultModelProfileId: "benchmark",
+      referenceCatalog: vulnerabilityDatabaseReferenceCatalog()
     });
     const declarations = graph.nodes.filter((node) => node.kind === "agentic");
     const executable = declarations.filter((node) => node.dynamic === undefined);
@@ -117,3 +125,18 @@ describe("smoke benchmark topology", () => {
     expect(production.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });
+
+function vulnerabilityDatabaseReferenceCatalog() {
+  return {
+    version: 1,
+    references: {
+      "vulnerability-database.web3": {
+        kind: "vulnerability-database" as const,
+        provider: "github" as const,
+        repo: "monad-developers/web3-vulnerability-database",
+        commit: "b".repeat(40),
+        paths: ["database.yml", "capabilities.yml", "catalog.json"]
+      }
+    }
+  };
+}

@@ -126,6 +126,7 @@ export interface PlannedGraphNode {
   prompt_path: string;
   reference?: string;
   reference_revision?: {
+    kind: "document" | "vulnerability-database";
     provider: "github";
     repo: string;
     commit: string;

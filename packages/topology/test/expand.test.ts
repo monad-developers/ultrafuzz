@@ -226,6 +226,7 @@ describe("expandTopology", () => {
       kind: "reference",
       reference: "properties.example",
       referenceRevision: {
+        kind: "document",
         provider: "github",
         repo: "example/repo",
         commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

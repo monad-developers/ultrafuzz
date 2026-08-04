@@ -804,6 +804,7 @@ function toPlannedGraphNode(
     ...(node.referenceRevision
       ? {
           reference_revision: {
+            kind: node.referenceRevision.kind,
             provider: node.referenceRevision.provider,
             repo: node.referenceRevision.repo,
             commit: node.referenceRevision.commit,

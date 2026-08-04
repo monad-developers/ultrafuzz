@@ -148,6 +148,7 @@ function referenceRevisionFor(
 
 function referenceRevision(entry: ReferenceEntry): ReferenceRevision {
   return {
+    kind: entry.kind ?? "document",
     provider: entry.provider,
     repo: entry.repo,
     commit: entry.commit,

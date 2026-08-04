@@ -65,9 +65,10 @@ export const expandedGraphJsonSchema = {
           reference: { type: "string", minLength: 1 },
           referenceRevision: {
             type: "object",
-            required: ["provider", "repo", "commit", "paths"],
+            required: ["kind", "provider", "repo", "commit", "paths"],
             additionalProperties: false,
             properties: {
+              kind: { enum: ["document", "vulnerability-database"] },
               provider: { const: "github" },
               repo: { type: "string", minLength: 1 },
               commit: { type: "string", pattern: "^[0-9a-fA-F]{40}$" },
@@ -286,6 +287,9 @@ function validateReferenceRevision(value: unknown, path: string, issues: Topolog
   if (!isRecord(value)) {
     issue(issues, path, "EXPANDED_NODE_REFERENCE_REVISION_INVALID", "referenceRevision must be an object");
     return;
+  }
+  if (value.kind !== "document" && value.kind !== "vulnerability-database") {
+    issue(issues, `${path}.kind`, "EXPANDED_NODE_REFERENCE_REVISION_INVALID", "reference kind is invalid");
   }
   if (value.provider !== "github") {
     issue(issues, `${path}.provider`, "EXPANDED_NODE_REFERENCE_PROVIDER_INVALID", "reference provider must be github");

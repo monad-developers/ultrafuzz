@@ -180,6 +180,7 @@ export interface ExpandedArtifactOutput extends NormalizedArtifactOutput {
 }
 
 export interface ReferenceRevision {
+  kind: "document" | "vulnerability-database";
   provider: "github";
   repo: string;
   commit: string;
@@ -216,7 +217,16 @@ export interface ExpandTopologyOptions extends TopologyValidationOptions {
   defaultModelProfileId?: string;
   referenceCatalog?: {
     version: number;
-    references: Record<string, { provider: "github"; repo: string; commit: string; paths: string[] }>;
+    references: Record<
+      string,
+      {
+        kind?: "document" | "vulnerability-database";
+        provider: "github";
+        repo: string;
+        commit: string;
+        paths: string[];
+      }
+    >;
   };
   configFingerprint?: unknown;
 }
