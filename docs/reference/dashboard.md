@@ -31,6 +31,12 @@ The default graph view should show logical topology nodes. Expanded loop
 attempts and model fan-out may be shown in details, timelines, or toggles, but
 editable graph changes must write back to the logical topology file.
 
+Runtime-generated nodes are first-class run evidence rather than editable
+topology declarations. Once expanded, graph and node-detail APIs must show each
+human generated ID, safe storage/attempt ID, template group, source lineage,
+and terminal state. IDs containing `:` must be URL-encoded as one route
+segment. The dynamic group remains visible as the aggregate downstream join.
+
 Editors for config, topology, prompts, and reference state must apply the same
 validation as the CLI. Invalid changes must be rejected without partial writes.
 

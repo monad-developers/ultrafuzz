@@ -91,7 +91,7 @@ A compatible config MUST support:
 - `dynamic_strategies_enumerator`
 - `[project] repo`
 - `[run] output_dir`, `max_parallel_agents`, `max_parallel_nodes`,
-  `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
+  `max_dynamic_nodes`, `keep_workspaces`, `workspace_mode`, `default_timeout_seconds`,
   `workflow_deadline_seconds`, and `controller_lease_seconds`
 - `[models] default` plus `[models.<id>] agent`, `model`, and
   `timeout_seconds`
@@ -205,6 +205,29 @@ topology version, groups, logical ID, concrete ID, label, kind, dependencies,
 artifact directory, loop metadata, contracted outputs, primary output marker,
 timeout, reference revision, and model fan-out provenance.
 
+An agentic topology node MAY define one-level runtime expansion through a
+static `dynamic` declaration containing `from.node`, restricted `from.path`, a
+stable scalar `key`, and a human `node_id` template. The source MUST be a direct
+upstream dependency whose selected JSON value is an array of objects. The
+template MUST determine execution policy; an agent MUST NOT provide executable
+topology. Dynamic templates MUST use one loop and generated children MUST NOT
+themselves expand dynamically.
+
+Each generated child MUST be an ordinary scheduled node with deterministic
+human identity, separate path-safe storage/attempt identity, retries, timeout,
+artifact validation, status, graph visibility, accounting, and provenance.
+Generated children MUST use existing global concurrency limits. The positive
+`run.max_dynamic_nodes` setting MUST limit aggregate run-wide expansion;
+exceeding it MUST fail explicitly and MUST NOT truncate work.
+
+The runtime MUST persist the first successful expansion as an immutable
+manifest containing canonical ordered items, generated IDs, source/template
+digests, and the applicable limit. Resume and controller takeover MUST reuse
+the manifest without duplicating attempts. Changed or tampered expansion inputs
+MUST fail as incompatible. An empty expansion MUST be a successful group join;
+otherwise downstream dependencies MUST observe the generated children's real
+terminal states.
+
 ## Prompts
 
 Prompts MUST live under `.ultrafuzz/prompts/**` and SHOULD be Markdown or MDX
@@ -256,6 +279,11 @@ The prompt variable set includes:
 - `artifact_path:<logical-node-id>`
 - `artifact_handoff:<logical-node-id>`
 - `ancestor_artifacts:<logical-node-id>[,<logical-node-id>...]`
+
+Runtime-generated prompts MAY additionally use scalar `item.*` variables and
+namespaced replacement keys supplied by the selected source item. Their values
+MAY recursively reference other item-scoped variables but MUST NOT override
+built-in runtime variables.
 
 Artifact handoff variables MUST resolve only to ancestor nodes. Handoff
 producers MUST declare a primary contracted output. Exact artifact paths MUST

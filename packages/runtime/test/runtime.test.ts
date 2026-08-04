@@ -3161,16 +3161,16 @@ test("compileSmithersWorkflow preserves Kimi cloud API-key binding for Modal fal
 });
 
 test("compileSmithersWorkflow escapes the evidence workflow import", async () => {
-  const project = tempProject();
+  const parent = tempProject();
+  const project = path.join(parent, 'checkout"quoted');
+  fs.mkdirSync(project);
   writeFanoutProject(project);
 
   const plan = await planRun({ projectRoot: project, runId: "escaped-import", env: {} });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const { compileSmithersWorkflow } = await import("../src/smithers.js");
-  const quotedProjectRoot = path.join(project, 'checkout"quoted');
-  fs.mkdirSync(quotedProjectRoot);
   const compiled = compileSmithersWorkflow({
-    projectRoot: quotedProjectRoot,
+    projectRoot: project,
     config: plan.value!.resolved_config,
     graph: plan.value!.expanded_graph,
     runLayout: plan.value!.layout,

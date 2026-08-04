@@ -62,6 +62,10 @@
         "pattern": "^[a-z0-9][a-z0-9:._-]{0,255}$"
       }
     },
+    "producer_node_id": {
+      "type": "string",
+      "minLength": 1
+    },
     "strategy": {
       "type": "string",
       "minLength": 1

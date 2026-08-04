@@ -754,6 +754,7 @@ function toPlannedGraphNode(
   catalog: PromptCatalog | undefined
 ): PlannedGraphNode {
   const promptEntry = node.promptPath ? promptEntryForNode(catalog, node) : undefined;
+  const dynamicDependencies = node.dependsOn.filter((dependency) => nodeById.get(dependency)?.dynamic !== undefined);
   return {
     id: node.id,
     logical_id: node.logicalId,
@@ -795,7 +796,22 @@ function toPlannedGraphNode(
       model_index: model.modelIndex,
       loop_index: model.loopIndex,
       attempt_index: model.attemptIndex
-    }))
+    })),
+    ...(node.dynamic === undefined
+      ? {}
+      : {
+          dynamic: {
+            from: { ...node.dynamic.from },
+            key: node.dynamic.key,
+            node_id: node.dynamic.nodeIdTemplate,
+            ...(node.dynamic.templateDigest === undefined ? {} : { template_digest: node.dynamic.templateDigest }),
+            status: "pending" as const,
+            generated_node_ids: []
+          }
+        }),
+    ...(dynamicDependencies.length === 0
+      ? {}
+      : { dynamic_dependencies: dynamicDependencies, declared_depends_on: [...node.dependsOn] })
   };
 }
 
@@ -814,9 +830,10 @@ function renderPromptsForPlan(input: {
     input.resolvedConfig.invariants.propertyPriorityThreshold
   );
   const rendered: RenderedPromptPlan[] = [];
+  const deferredNodeIds = nodesWithDynamicAncestors(input.graph);
 
   for (const node of input.graph.nodes) {
-    if (!node.prompt_path) {
+    if (!node.prompt_path || deferredNodeIds.has(node.id)) {
       continue;
     }
     const promptEntry = promptEntryForPath(input.catalog, projectPromptCatalogPath(node.prompt_path), node.logical_id);
@@ -886,6 +903,28 @@ function renderPromptsForPlan(input: {
   }
 
   return rendered;
+}
+
+function nodesWithDynamicAncestors(graph: PlannedGraph): Set<string> {
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const dynamicIds = new Set(graph.nodes.filter((node) => node.dynamic !== undefined).map((node) => node.id));
+  const memo = new Map<string, boolean>();
+  const visiting = new Set<string>();
+  const includesDynamic = (nodeId: string): boolean => {
+    const cached = memo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (dynamicIds.has(nodeId)) {
+      memo.set(nodeId, true);
+      return true;
+    }
+    if (visiting.has(nodeId)) return false;
+    visiting.add(nodeId);
+    const result = (nodeById.get(nodeId)?.depends_on ?? []).some(includesDynamic);
+    visiting.delete(nodeId);
+    memo.set(nodeId, result);
+    return result;
+  };
+  return new Set(graph.nodes.filter((node) => includesDynamic(node.id)).map((node) => node.id));
 }
 
 function applyWorkflowRunOverrides(config: PlanRunValue["resolved_config"], input: PlanRunInput): void {

@@ -108,7 +108,7 @@ function validatePromptVariable(
 
 function extractPromptVariablesForNode(node: NormalizedTopologyNode, promptText: string): PromptVariableReference[] {
   try {
-    return extractPromptVariables(promptText);
+    return extractPromptVariables(promptText, { allowDynamicItemVariables: node.dynamic !== undefined });
   } catch (error) {
     if (error instanceof PromptError) {
       throw topologyErrorForPromptError(node, error);

@@ -6,6 +6,39 @@ import { expandTopology, validateTopology } from "../src/index.js";
 import { validTopology } from "./helpers.js";
 
 describe("expandTopology", () => {
+  it("preserves the dynamic declaration and immutable prompt digest without pre-expanding items", () => {
+    const topology = validTopology({ defaults: { strategy_loops: 1 } });
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+    };
+    topology.nodes.splice(3, 0, {
+      id: "fanout",
+      prompt: "strategies/fanout.md",
+      depends_on: ["strategy"],
+      dynamic: {
+        from: { node: "strategy", path: "$.goals" },
+        key: "id",
+        node_id: "dynamic:item:{{ item.id }}"
+      },
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+    });
+    topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
+    const graph = expandTopology(topology, {
+      promptTexts: {
+        "strategies/fanout.md": "Investigate {{item.goal_prompt}} with {{context:detail}}."
+      }
+    });
+    const fanout = graph.nodes.find((node) => node.id === "fanout");
+    expect(fanout?.dynamic).toEqual({
+      from: { node: "strategy", path: "$.goals" },
+      key: "id",
+      nodeIdTemplate: "dynamic:item:{{ item.id }}",
+      templateDigest: expect.stringMatching(/^[0-9a-f]{64}$/u)
+    });
+    expect(graph.nodes.some((node) => node.id.startsWith("dynamic:"))).toBe(false);
+  });
+
   it("expands parallel loops with stable concrete IDs and lowered dependencies", () => {
     const graph = expandTopology(validTopology());
     expect(graph.nodes.map((node) => node.id)).toEqual([

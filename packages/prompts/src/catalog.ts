@@ -117,7 +117,10 @@ function parseCatalogEntry(
 ): PromptCatalogEntry {
   const document = parsePromptFrontmatter(markdown);
   if (options.validateVariables) {
-    validatePromptVariables(document.body);
+    // Catalog loading validates syntax without topology context. Whether item-
+    // scoped variables are legal is enforced later for the concrete topology
+    // node; static nodes still reject them before launch.
+    validatePromptVariables(document.body, { allowDynamicItemVariables: true });
   }
   const fallbackId = path.basename(options.relativePath).replace(/\.(md|mdx)$/i, "");
   const id = document.frontmatter.id ?? fallbackId;

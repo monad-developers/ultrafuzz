@@ -19,6 +19,13 @@ prompt.rendered.md
 
 Unknown template variables fail validation.
 
+Runtime-generated topology nodes additionally receive item-scoped variables.
+Scalar planner fields render as `{{item.<field>}}`; namespaced replacement keys
+such as `{{liquidation:overdue}}` come from the item's `replacements` object.
+Replacement values may reference other item-scoped variables recursively, with
+cycle and depth checks. They cannot override built-in variables. See
+[Runtime Dynamic Expansion](topology-yaml.md#runtime-dynamic-expansion).
+
 ## Frontmatter
 
 Prompt frontmatter may contain only:

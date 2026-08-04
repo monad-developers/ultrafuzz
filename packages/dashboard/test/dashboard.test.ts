@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { initProject } from "@ultrafuzz/runtime";
+import { updateNodeState } from "@ultrafuzz/artifacts";
+import { initProject, planRun } from "@ultrafuzz/runtime";
 
 import { serveDashboard } from "../src/index.js";
 
@@ -18,6 +19,9 @@ interface FlowResponse {
     id: string;
     data: {
       logicalNodeId: string;
+      producerNodeId?: string;
+      storageId?: string;
+      dynamic?: { source_node_id?: string; expansion_key?: string };
     };
   }>;
   capabilities: Record<string, boolean>;
@@ -46,6 +50,68 @@ test("serves logical topology flow with expanded attempt details", async () => {
     assert.equal(flow.capabilities.referencesStatus, true);
     assert.equal(flow.capabilities.doctor, false);
     assert.equal(flow.capabilities.merge, false);
+  } finally {
+    await handle.close();
+  }
+});
+
+test("persisted flow and node detail expose human dynamic IDs with safe storage state", async () => {
+  const projectRoot = makeProject();
+  const plan = await planRun({ projectRoot, runId: "dashboard-dynamic", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const graphPath = path.join(plan.value!.run_root, "graph.json");
+  const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {
+    nodes: Array<Record<string, unknown> & { id: string; logical_id: string; artifact_dir: string }>;
+  };
+  const template = graph.nodes.find((node) => node.logical_id === "boundary-tests") ?? graph.nodes[0]!;
+  const generatedId = "dynamic:threat:liquidation.overdue";
+  const storageId = "dynamic-boundary-tests-0123456789abcdef0123456789abcdef";
+  graph.nodes.push({
+    ...structuredClone(template),
+    id: generatedId,
+    display_name: "Overdue liquidation",
+    depends_on: [],
+    artifact_dir: `artifacts/${storageId}`,
+    artifact_dirs: [`artifacts/${storageId}`],
+    dynamic_generated: {
+      group_node_id: "boundary-tests",
+      source_node_id: "project-discovery",
+      source_attempt_id: "project-discovery",
+      expansion_key: "liquidation.overdue",
+      item_sha256: "a".repeat(64),
+      storage_id: storageId,
+      manifest_path: "dynamic-expansions/boundary-tests.json"
+    }
+  });
+  fs.writeFileSync(graphPath, `${JSON.stringify(graph, null, 2)}\n`, "utf8");
+  updateNodeState(plan.value!.layout, storageId, {
+    status: "running",
+    provenance: { producer_node_id: generatedId, storage_id: storageId }
+  });
+
+  const handle = await serveDashboard({ projectRoot, runId: "dashboard-dynamic", port: 0 });
+  try {
+    const flow = await getJson<FlowResponse>(apiUrl(handle.url, "/api/flow"));
+    const generated = flow.nodes.find((node) => node.id === generatedId);
+    assert.ok(generated);
+    assert.equal(generated.data.logicalNodeId, generatedId);
+    assert.equal(generated.data.producerNodeId, generatedId);
+    assert.equal(generated.data.storageId, storageId);
+    assert.equal(generated.data.dynamic?.source_node_id, "project-discovery");
+    assert.equal(generated.data.dynamic?.expansion_key, "liquidation.overdue");
+    const graphDetail = await getJson<{
+      generatedNodes: number;
+      runtimeGraph?: { nodes?: Array<{ id?: string; dynamic_generated?: { storage_id?: string } }> };
+    }>(apiUrl(handle.url, "/api/graph"));
+    assert.equal(graphDetail.generatedNodes, 1);
+    const runtimeGenerated = graphDetail.runtimeGraph?.nodes?.find((node) => node.id === generatedId);
+    assert.equal(runtimeGenerated?.dynamic_generated?.storage_id, storageId);
+    const detail = await getJson<{ node: { id: string; storage_id: string; status: string } }>(
+      apiUrl(handle.url, `/api/nodes/${encodeURIComponent(generatedId)}`)
+    );
+    assert.equal(detail.node.id, generatedId);
+    assert.equal(detail.node.storage_id, storageId);
+    assert.equal(detail.node.status, "running");
   } finally {
     await handle.close();
   }

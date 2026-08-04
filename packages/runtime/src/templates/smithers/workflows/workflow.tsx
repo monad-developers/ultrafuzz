@@ -48,8 +48,10 @@ const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   normalizeFinalReportSeverityRecord,
+  topologyRuntimeContextForTimeout,
   verifyThreatModelVulnerabilityDatabaseCapabilities
 } = await import(runtimeModule);
 
@@ -104,22 +106,33 @@ const agentRegistry = projectAgents as Record<string, AgentLike | AgentLike[]>;
 type AgentFactory = (options: { model?: string; reasoningEffort?: string; addDir?: string[] }) => AgentLike;
 const agentFactories =
   (projectAgents as unknown as { agentFactories?: Record<string, AgentFactory> }).agentFactories ?? {};
+const sourceProjectRoot = __ULTRAFUZZ_SOURCE_PROJECT_ROOT__;
+const dynamicRunRoot = path.resolve(process.cwd(), __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
+const dynamicGraphPath = path.join(dynamicRunRoot, "graph.json");
+const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
+const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
+const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
-const taskSpecs = serializedTaskSpecs.map((task) => ({
+let taskSpecs = serializedTaskSpecs.map((task) => ({
   ...task,
+  dynamicDependencies: [] as string[],
   promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
   workspaceRelativePath: task.workspacePath,
   workspacePath: path.resolve(process.cwd(), task.workspacePath),
   artifactRelativeDir: task.artifactDir,
   artifactDir: path.resolve(process.cwd(), task.artifactDir)
 }));
-const usesCloudExecution = taskSpecs.some((task) => task.execution.mode === "cloud");
+const usesCloudExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].some(
+  (task) => task.execution.mode === "cloud"
+);
 const isCloudWorkerProcess = process.env.ULTRAFUZZ_CLOUD_WORKER === "1";
 const modalModule =
   usesCloudExecution && !isCloudWorkerProcess
     ? await import(process.env.ULTRAFUZZ_MODAL_MODULE ?? __ULTRAFUZZ_MODAL_MODULE__)
     : undefined;
-const modalExecution = taskSpecs.find((task) => task.execution.mode === "cloud")?.execution.modal;
+const modalExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].find(
+  (task) => task.execution.mode === "cloud"
+)?.execution.modal;
 const cloudProvider =
   modalModule === undefined || modalExecution === undefined
     ? undefined
@@ -143,6 +156,102 @@ const authorizedDefensiveSecurityContext = [
   "Use security reasoning to help maintainers find, verify, and fix weaknesses; do not provide malware, credential theft, persistence, evasion, exfiltration, or deployment instructions."
 ].join("\n");
 
+function dynamicExecutionPath(task: (typeof compiledBaseTasks)[number], value: string, label: string): string {
+  const relative = path.relative(sourceProjectRoot, path.resolve(value));
+  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must be a project child path`);
+  }
+  return task.execution.mode === "cloud" ? relative.split(path.sep).join("/") : path.resolve(process.cwd(), relative);
+}
+
+function dynamicExecutionMetadata(task: (typeof compiledBaseTasks)[number]) {
+  return {
+    ...task.metadata,
+    workspace: {
+      ...task.metadata.workspace,
+      path: dynamicExecutionPath(task, task.metadata.workspace.path, "workspace metadata path")
+    },
+    artifacts: {
+      ...task.metadata.artifacts,
+      dir: dynamicExecutionPath(task, task.metadata.artifacts.dir, "artifact metadata directory"),
+      manifestPath: dynamicExecutionPath(task, task.metadata.artifacts.manifestPath, "artifact manifest path")
+    }
+  };
+}
+
+function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
+  return tasks.map((task) => ({
+    id: task.smithersNodeId,
+    preparationId: `prepare:${task.attemptId}`,
+    verifierId: task.verifierSmithersNodeId,
+    attemptId: task.attemptId,
+    dependsOn: task.dependencySmithersNodeIds,
+    dynamicDependencies: task.dynamicDependencies ?? [],
+    agentRef: task.agentRef,
+    modelName: task.modelName ?? null,
+    reasoningEffort: task.reasoningEffort ?? null,
+    prompt: "",
+    promptPath:
+      task.renderedPromptPath === undefined
+        ? undefined
+        : dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"),
+    workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
+    workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
+    artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),
+    artifactDir: path.resolve(process.cwd(), dynamicExecutionPath(task, task.artifactDir, "task artifact directory")),
+    dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
+      dynamicExecutionPath(task, directory, "dependency artifact directory")
+    ),
+    runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
+    workflowPath: dynamicExecutionPath(
+      task,
+      path.resolve(sourceProjectRoot, __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__),
+      "workflow path"
+    ),
+    sourceProjectRoot,
+    branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${task.attemptId}`,
+    timeoutMs: task.timeoutMs,
+    runtimeContext: topologyRuntimeContextForTimeout(task.timeoutMs),
+    heartbeatTimeoutMs: task.heartbeatTimeoutMs,
+    retries: task.retries,
+    retryPolicy: task.retryPolicy,
+    metadata: dynamicExecutionMetadata(task),
+    outputs: task.metadata.artifacts.outputs,
+    execution: task.execution
+  }));
+}
+
+function currentProjectPath(value: string, label: string): string {
+  const relative = path.relative(sourceProjectRoot, path.resolve(value));
+  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must be a project child path`);
+  }
+  return path.resolve(process.cwd(), relative);
+}
+
+function dynamicallyAvailableTaskSpecs(
+  specs: typeof taskSpecs,
+  expandedGroupIds: ReadonlySet<string>
+): typeof taskSpecs {
+  const blocked = new Set(
+    specs
+      .filter((task) => task.dynamicDependencies.some((groupId) => !expandedGroupIds.has(groupId)))
+      .map((task) => task.id)
+  );
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const blockedVerifiers = new Set(specs.filter((task) => blocked.has(task.id)).map((task) => task.verifierId));
+    for (const task of specs) {
+      if (!blocked.has(task.id) && task.dependsOn.some((dependency) => blockedVerifiers.has(dependency))) {
+        blocked.add(task.id);
+        changed = true;
+      }
+    }
+  }
+  return specs.filter((task) => !blocked.has(task.id));
+}
+
 function sourceUsesPinnedBranch(): boolean {
   try {
     execFileSync("git", ["rev-parse", "--verify", `${pinnedSourceRef}^{commit}`], {
@@ -155,9 +264,8 @@ function sourceUsesPinnedBranch(): boolean {
   }
 }
 function readCloudExecutionGeneration(): string {
-  const runRoot = taskSpecs.find((task) => task.execution.mode === "cloud")?.runRoot;
-  if (runRoot === undefined) return "base";
-  const generationPath = path.resolve(process.cwd(), runRoot, "smithers", "cloud-execution-generation.json");
+  if (!usesCloudExecution) return "base";
+  const generationPath = path.resolve(dynamicRunRoot, "smithers", "cloud-execution-generation.json");
   if (!existsSync(generationPath)) return "base";
   const parsed = JSON.parse(readFileSync(generationPath, "utf8")) as { generation?: unknown };
   if (typeof parsed.generation !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parsed.generation)) {
@@ -232,12 +340,9 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // a base-tree mismatch.
       prepareArtifactMirror(task, { replayWorkspacePatches: false });
       materializeMissingMarkdownArtifacts(task, result);
-      materializeCanonicalThreatModelArtifact(task);
-      materializeGoalPlanDatabaseArtifacts(task);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
       normalizeLegacyFindingFields(task);
-      normalizeFindingProvenance(task);
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
@@ -360,6 +465,10 @@ function resetTaskArtifactContents(
       continue;
     rmSync(candidate, { recursive: true, force: true });
   }
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -1645,55 +1754,6 @@ function materializeMissingMarkdownArtifacts(task: (typeof taskSpecs)[number], r
   }
 }
 
-function materializeCanonicalThreatModelArtifact(task: (typeof taskSpecs)[number]): void {
-  if (task.metadata.node.logicalNodeId !== "threat-model") {
-    return;
-  }
-  const artifactDir = realpathSync(task.metadata.artifacts.dir);
-  const runRoot = realpathSync(path.resolve(artifactDir, "..", ".."));
-  const workspaceRoot = realpathSync(task.workspacePath);
-  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
-    const jsonPath = path.resolve(artifactRoot, "threat-model.json");
-    if (!existsSync(jsonPath)) continue;
-    resolveRegularArtifactFile(
-      artifactRoot,
-      jsonPath,
-      "artifact-contract failure: threat-model.json is not a regular file"
-    );
-    const model = verifyThreatModelVulnerabilityDatabaseCapabilities(artifactRoot, runRoot);
-    verifyThreatModelEvidenceFiles(model, workspaceRoot);
-    materializeCanonicalThreatModelMarkdown(artifactRoot);
-  }
-}
-
-function materializeGoalPlanDatabaseArtifacts(task: (typeof taskSpecs)[number]): void {
-  if (task.metadata.node.logicalNodeId !== "goal-plan") {
-    return;
-  }
-  const dependencyAttemptIds = new Set(task.metadata.dependencies.attemptIds);
-  const threatModelArtifactDirs = taskSpecs
-    .filter(
-      (candidate) =>
-        dependencyAttemptIds.has(candidate.attemptId) && candidate.metadata.node.logicalNodeId === "threat-model"
-    )
-    .map((candidate) => candidate.metadata.artifacts.dir);
-  if (threatModelArtifactDirs.length === 0) {
-    throw new Error("artifact-contract failure: goal-plan has no direct threat-model dependency identity");
-  }
-  const artifactDir = realpathSync(task.metadata.artifacts.dir);
-  const runRoot = realpathSync(path.resolve(artifactDir, "..", ".."));
-  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
-    const goalPlanPath = path.resolve(artifactRoot, "goal-plan.json");
-    if (!existsSync(goalPlanPath)) continue;
-    resolveRegularArtifactFile(
-      artifactRoot,
-      goalPlanPath,
-      "artifact-contract failure: goal-plan.json is not a regular file"
-    );
-    materializeGoalPlanVulnerabilityDatabaseSnapshots(artifactRoot, { threatModelArtifactDirs, runRoot });
-  }
-}
-
 function agentResultSummary(result: unknown): string | undefined {
   if (typeof result !== "object" || result === null) {
     return typeof result === "string" && result.trim().length > 0 ? result.trim() : undefined;
@@ -1987,149 +2047,6 @@ function normalizeLegacyFindingFields(task: (typeof taskSpecs)[number]): void {
   }
 }
 
-function normalizeFindingProvenance(task: (typeof taskSpecs)[number]): void {
-  const artifactDir = realpathSync(task.metadata.artifacts.dir);
-  const preserveSourceNodes = isFindingTransformationNode(task.metadata.node.logicalNodeId);
-  const producerNodeId = task.metadata.node.producerNodeId ?? task.attemptId;
-  const sourceProvenance = preserveSourceNodes ? dependencyFindingProvenance(task, artifactDir) : undefined;
-
-  for (const output of task.outputs) {
-    if (output.contract !== "ultrafuzz/findings@1") {
-      continue;
-    }
-    for (const candidateRoot of taskArtifactRoots(task, artifactDir)) {
-      const candidatePath = path.resolve(candidateRoot, output.path);
-      if (!existsSync(candidatePath)) continue;
-      resolveRegularArtifactFile(
-        candidateRoot,
-        candidatePath,
-        `artifact-contract failure: output is not a regular file ${output.path}`
-      );
-      normalizeFindings({
-        artifactDir: candidateRoot,
-        relativePath: output.path,
-        nodeId: task.attemptId,
-        provenance: {
-          producerNodeId,
-          strategy: task.metadata.node.logicalNodeId,
-          attemptIndex: task.metadata.model?.attemptIndex ?? task.metadata.loop.attemptIndex,
-          modelId: task.metadata.model?.profileId,
-          model: task.metadata.model?.modelName,
-          modelIndex: task.metadata.model?.modelIndex,
-          loopIndex: task.metadata.loop.index
-        },
-        preserveSourceNodes,
-        requireSourceNodes: preserveSourceNodes,
-        allowedSourceNodes: sourceProvenance?.allowedSourceNodes,
-        sourceExpectations: sourceProvenance?.expectations,
-        requireSourceExpectation: preserveSourceNodes
-      });
-    }
-  }
-}
-
-function dependencyFindingProvenance(
-  task: (typeof taskSpecs)[number],
-  artifactDir: string
-): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
-  const upstream = dependencyFindingSources(task, artifactDir);
-  const requireLifecycleCoverage = task.metadata.node.logicalNodeId === "dedupe-findings";
-  const lifecycleLedger = requireLifecycleCoverage ? currentFindingLifecycleLedger(task, artifactDir) : undefined;
-  if (requireLifecycleCoverage && lifecycleLedger === undefined && upstream.length > 0) {
-    throw new Error("artifact-contract failure: dedupe provenance requires finding-lifecycle-ledger.json");
-  }
-  const expectations = buildFindingSourceExpectations({
-    upstream,
-    ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),
-    requireLifecycleCoverage
-  });
-  return {
-    allowedSourceNodes: uniqueStrings(expectations.flatMap((expectation) => expectation.source_nodes)),
-    expectations
-  };
-}
-
-function dependencyFindingSources(
-  task: (typeof taskSpecs)[number],
-  artifactDir: string
-): Array<{ node_id: string; artifact_path: string; finding: unknown }> {
-  const artifactsParent = realpathSync(path.dirname(artifactDir));
-  const findingFiles = [
-    "severity-classified-findings.json",
-    "triaged-findings.json",
-    "deduped-findings.json",
-    "findings.normalized.json",
-    "findings.json"
-  ];
-  const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
-  for (const attemptId of task.metadata.dependencies.attemptIds) {
-    const dependency = taskSpecs.find((candidate) => candidate.attemptId === attemptId);
-    if (dependency === undefined) continue;
-    const nodeId = dependency.metadata.node.producerNodeId ?? dependency.metadata.node.concreteNodeId ?? attemptId;
-    const roots = [path.resolve(artifactsParent, attemptId)];
-    let collected = false;
-    for (const rootPath of roots) {
-      if (!existsSync(rootPath)) continue;
-      const dependencyRoot = realpathSync(rootPath);
-      if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
-      for (const fileName of findingFiles) {
-        const findingPath = path.resolve(dependencyRoot, fileName);
-        if (!existsSync(findingPath)) continue;
-        const resolvedPath = resolveRegularArtifactFile(
-          dependencyRoot,
-          findingPath,
-          `artifact-contract failure: dependency findings are not a regular file ${fileName}`
-        );
-        const validation = validateArtifactContract(
-          "ultrafuzz/findings@1",
-          readFileSync(resolvedPath, "utf8"),
-          fileName
-        );
-        if (!validation.ok || !Array.isArray(validation.value)) continue;
-        upstream.push(
-          ...validation.value.map((finding) => ({ node_id: nodeId, artifact_path: resolvedPath, finding }))
-        );
-        collected = true;
-        break;
-      }
-      if (collected) break;
-    }
-  }
-  return upstream;
-}
-
-function currentFindingLifecycleLedger(task: (typeof taskSpecs)[number], artifactDir: string): unknown | undefined {
-  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
-    const ledgerPath = path.resolve(artifactRoot, "finding-lifecycle-ledger.json");
-    if (!existsSync(ledgerPath)) continue;
-    const resolvedPath = resolveRegularArtifactFile(
-      artifactRoot,
-      ledgerPath,
-      "artifact-contract failure: finding lifecycle ledger is not a regular file"
-    );
-    try {
-      return JSON.parse(readFileSync(resolvedPath, "utf8")) as unknown;
-    } catch {
-      throw new Error("artifact-contract failure: finding lifecycle ledger must contain valid JSON");
-    }
-  }
-  return undefined;
-}
-
-function uniqueStrings(values: readonly unknown[]): string[] {
-  const result: string[] = [];
-  for (const value of values) {
-    if (typeof value === "string" && value.trim() !== "" && !result.includes(value.trim())) {
-      result.push(value.trim());
-    }
-  }
-  return result;
-}
-
-function isFindingTransformationNode(logicalNodeId: string): boolean {
-  return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
-}
-
 function normalizeLegacyFindingArray(contents: string): string | undefined {
   let parsed: unknown;
   try {
@@ -2227,10 +2144,6 @@ function normalizeLegacyPathReference(value: string): { value: string; changed: 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
-  const sourceExpectations =
-    task.metadata.node.logicalNodeId === "final-report"
-      ? dependencyFindingProvenance(task, artifactDir).expectations
-      : undefined;
 
   for (const output of task.outputs) {
     if (output.contract !== "ultrafuzz/report@1") {
@@ -2249,7 +2162,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
       }
       const contents = readFileSync(resolvedPath, "utf8");
       const originalIsValid = validateArtifactContract(output.contract, contents, output.path).ok;
-      const normalized = normalizeLegacyReportProvenanceFields(contents, sourceExpectations);
+      const normalized = normalizeLegacyReportProvenanceFields(contents);
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
         break;
@@ -2261,10 +2174,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
   }
 }
 
-function normalizeLegacyReportProvenanceFields(
-  contents: string,
-  sourceExpectations?: ReadonlyArray<{ finding_keys: readonly string[]; source_nodes: readonly string[] }>
-): string | undefined {
+function normalizeLegacyReportProvenanceFields(contents: string): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -2274,26 +2184,17 @@ function normalizeLegacyReportProvenanceFields(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const report = parsed as { issues?: unknown; non_production_outcomes?: unknown; property_provenance?: unknown };
+  const report = parsed as { issues?: unknown; property_provenance?: unknown };
 
   let changed = false;
   const issues = Array.isArray(report.issues)
     ? report.issues.map((entry) => {
         const normalized = normalizeLegacyFindingRecord(entry);
         const severity = normalizeFinalReportSeverityRecord(normalized.value);
-        const provenance = normalizeReportFindingSourceNodes(severity.value, sourceExpectations);
-        changed ||= normalized.changed || severity.changed || provenance.changed;
-        return provenance.value;
+        changed ||= normalized.changed || severity.changed;
+        return severity.value;
       })
     : report.issues;
-  const nonProductionOutcomes = Array.isArray(report.non_production_outcomes)
-    ? report.non_production_outcomes.map((entry) => {
-        const normalized = normalizeLegacyFindingRecord(entry);
-        const provenance = normalizeReportFindingSourceNodes(normalized.value, sourceExpectations);
-        changed ||= normalized.changed || provenance.changed;
-        return provenance.value;
-      })
-    : report.non_production_outcomes;
   const propertyProvenance = Array.isArray(report.property_provenance)
     ? report.property_provenance.map((entry) => {
         if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -2321,42 +2222,12 @@ function normalizeLegacyReportProvenanceFields(
         {
           ...report,
           ...(issues === undefined ? {} : { issues }),
-          ...(nonProductionOutcomes === undefined ? {} : { non_production_outcomes: nonProductionOutcomes }),
           ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
         },
         null,
         2
       )}\n`
     : undefined;
-}
-
-function normalizeReportFindingSourceNodes(
-  value: unknown,
-  expectations: ReadonlyArray<{ finding_keys: readonly string[]; source_nodes: readonly string[] }> | undefined
-): { value: unknown; changed: boolean } {
-  if (!isPlainRecord(value) || expectations === undefined) return { value, changed: false };
-  const keys = new Set(findingIdentityKeys(value));
-  const matched = expectations.filter((expectation) => expectation.finding_keys.some((key) => keys.has(key)));
-  if (matched.length === 0) {
-    throw new Error("artifact-contract failure: report finding does not match dependency provenance");
-  }
-  const sourceNodes = uniqueStrings(matched.flatMap((expectation) => expectation.source_nodes));
-  if (sourceNodes.length === 0) {
-    throw new Error("artifact-contract failure: report finding has no dependency discovery provenance");
-  }
-  const current = Array.isArray(value.source_nodes)
-    ? value.source_nodes
-    : typeof value.source_node_id === "string"
-      ? [value.source_node_id]
-      : [];
-  const changed =
-    current.length !== sourceNodes.length ||
-    current.some((sourceNode, index) => sourceNode !== sourceNodes[index]) ||
-    value.source_node_id !== sourceNodes[0];
-  return {
-    value: { ...value, source_nodes: sourceNodes, source_node_id: sourceNodes[0] },
-    changed
-  };
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {
@@ -4121,11 +3992,6 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
         rememberVerifiedPublication(publications, companion.path, companion.contents);
       }
     }
-    if (output.contract === "ultrafuzz/goal-plan@1") {
-      for (const selected of verifyGoalPlanSelectedRecordSnapshots(artifactRoot, validation.value)) {
-        rememberVerifiedPublication(publications, selected.path, selected.contents);
-      }
-    }
     return {
       path: output.path,
       contract: output.contract,
@@ -4561,7 +4427,32 @@ export default smithers((ctx) => {
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   const cloudWorker = ctx.input.cloud_worker === true;
-  const selectedTaskSpecs = cloudWorker ? taskSpecs.filter((task) => task.id === ctx.input.task_id) : taskSpecs;
+  let availableTaskSpecs = taskSpecs;
+  if (dynamicGroupSpecs.length > 0) {
+    const readyGroupIds = dynamicGroupSpecs
+      .filter((group) => {
+        if (group.source.verifierSmithersNodeId === undefined) {
+          return existsSync(currentProjectPath(group.source.artifactPath, "dynamic source artifact"));
+        }
+        return ctx.outputMaybe(outputs.verification, { nodeId: group.source.verifierSmithersNodeId }) !== undefined;
+      })
+      .map((group) => group.groupNodeId);
+    const materialized = materializeDynamicRuntime({
+      runId: __ULTRAFUZZ_RUN_ID_LITERAL__,
+      projectRoot: process.cwd(),
+      runRoot: dynamicRunRoot,
+      graphPath: dynamicGraphPath,
+      tasksPath: dynamicTasksPath,
+      baseTasks: compiledBaseTasks,
+      groups: dynamicGroupSpecs,
+      readyGroupIds
+    });
+    taskSpecs = taskSpecsFromCompiled(materialized.tasks as typeof compiledBaseTasks);
+    availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
+  }
+  const selectedTaskSpecs = cloudWorker
+    ? availableTaskSpecs.filter((task) => task.id === ctx.input.task_id)
+    : availableTaskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
     throw new Error("cloud worker task selection must identify exactly one concrete attempt");
   }

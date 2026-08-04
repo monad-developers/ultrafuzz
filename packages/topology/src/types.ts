@@ -50,6 +50,19 @@ export interface TopologyNode {
   max_attempts?: number;
   outputs?: TopologyArtifactOutput[];
   model_profiles?: string[];
+  dynamic?: DynamicTopologyNode;
+}
+
+export interface DynamicTopologyNode {
+  from: {
+    node: string;
+    /** Restricted JSONPath rooted at `$`, for example `$.threat_goals`. */
+    path: string;
+  };
+  /** Stable, unique item field (dot-separated paths are supported). */
+  key: string;
+  /** Runtime node ID template, for example `dynamic:threat:{{ item.id }}`. */
+  node_id: string;
 }
 
 export interface TopologyArtifactOutput {
@@ -80,6 +93,7 @@ export interface NormalizedTopologyNode {
   max_attempts?: number;
   outputs: NormalizedArtifactOutput[];
   model_profiles: string[];
+  dynamic?: DynamicTopologyNode;
 }
 
 export interface NormalizedArtifactOutput {
@@ -148,6 +162,17 @@ export interface ExpandedNode {
   };
   outputs: ExpandedArtifactOutput[];
   modelFanout: ModelFanoutProvenance[];
+  dynamic?: ExpandedDynamicNode;
+}
+
+export interface ExpandedDynamicNode {
+  from: {
+    node: string;
+    path: string;
+  };
+  key: string;
+  nodeIdTemplate: string;
+  templateDigest?: string;
 }
 
 export interface ExpandedArtifactOutput extends NormalizedArtifactOutput {

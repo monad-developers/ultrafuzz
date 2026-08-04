@@ -254,6 +254,135 @@ test("controller recovery keeps the configured lease duration when timestamps ar
   assert.equal(before.state.controller_lease.expires_at, new Date(BASE_MS + 89_999).toISOString());
 });
 
+test("strict joins resolve a generated human ID through its safe storage state", () => {
+  const generatedId = "dynamic:threat:liquidation.overdue";
+  const storageId = "dynamic-threat-safe-storage";
+  const generated = {
+    ...node(generatedId),
+    dynamic_generated: {
+      group_node_id: "threat-hunters",
+      source_node_id: "planner",
+      source_attempt_id: "planner",
+      expansion_key: "liquidation.overdue",
+      item_sha256: "a".repeat(64),
+      storage_id: storageId,
+      manifest_path: "dynamic-expansions/threat-hunters.json"
+    }
+  };
+  const graph = syntheticGraph([generated, node("strict-join", [generatedId])]);
+  const state = createInitialRunState({
+    runId: "dynamic-join",
+    createdAt: new Date(BASE_MS).toISOString(),
+    requestedConcurrency: 1,
+    nodes: [{ id: storageId }, { id: "strict-join", waitReason: "dependency" }]
+  });
+  state.nodes[storageId]!.status = "succeeded";
+
+  const ready = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: [
+      { attemptId: storageId, concreteNodeId: generatedId },
+      { attemptId: "strict-join", concreteNodeId: "strict-join" }
+    ],
+    workflowStates: new Map(),
+    workflowState: "running",
+    nowMs: BASE_MS + 1_000
+  });
+  assert.equal(ready.state.nodes["strict-join"]?.wait_reason, "ready");
+
+  const failedState = structuredClone(state);
+  failedState.nodes[storageId]!.status = "failed";
+  const blocked = projectWorkflowControlState({
+    previousState: structuredClone(failedState),
+    state: failedState,
+    graph,
+    tasks: [
+      { attemptId: storageId, concreteNodeId: generatedId },
+      { attemptId: "strict-join", concreteNodeId: "strict-join" }
+    ],
+    workflowStates: new Map(),
+    workflowState: "running",
+    nowMs: BASE_MS + 1_000
+  });
+  assert.equal(blocked.state.nodes["strict-join"]?.wait_reason, "dependency");
+});
+
+test("a dynamic group join is never counted as dispatchable work", () => {
+  const planner = node("planner");
+  const group: PlannedGraphNode = {
+    ...node("threat-hunters", ["planner"]),
+    dynamic: {
+      from: { node: "planner", path: "$.threats" },
+      key: "id",
+      node_id: "dynamic:threat:{{ item.id }}",
+      status: "expanded",
+      generated_node_ids: ["dynamic:threat:liquidation.overdue"]
+    }
+  };
+  const graph = syntheticGraph([planner, group]);
+  const state = initialState(graph, 1);
+  state.nodes.planner!.status = "succeeded";
+
+  const projection = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: [{ attemptId: "planner", concreteNodeId: "planner" }],
+    workflowStates: new Map(),
+    workflowState: "running",
+    nowMs: BASE_MS + 1_000
+  });
+
+  assert.equal(projection.state.nodes["threat-hunters"]?.wait_reason, "dependency");
+  assert.equal(projection.state.concurrency.ready_queue_depth, 0);
+});
+
+test("a dynamic model-fanout aggregate is never counted as dispatchable work", () => {
+  const generatedId = "dynamic:threat:liquidation.overdue";
+  const storageId = "dynamic-threat-safe-storage";
+  const graph = syntheticGraph([
+    {
+      ...node(generatedId),
+      dynamic_generated: {
+        group_node_id: "threat-hunters",
+        source_node_id: "planner",
+        source_attempt_id: "planner",
+        expansion_key: "liquidation.overdue",
+        item_sha256: "a".repeat(64),
+        storage_id: storageId,
+        manifest_path: "dynamic-expansions/threat-hunters.json"
+      }
+    }
+  ]);
+  const state = createInitialRunState({
+    runId: "dynamic-model-aggregate",
+    createdAt: new Date(BASE_MS).toISOString(),
+    requestedConcurrency: 1,
+    nodes: [{ id: storageId }, { id: "model-a" }, { id: "model-b" }]
+  });
+  state.nodes["model-a"]!.status = "succeeded";
+
+  const projection = projectWorkflowControlState({
+    previousState: structuredClone(state),
+    state,
+    graph,
+    tasks: [
+      { attemptId: "model-a", concreteNodeId: generatedId },
+      { attemptId: "model-b", concreteNodeId: generatedId }
+    ],
+    workflowStates: new Map(),
+    workflowState: "running",
+    nowMs: BASE_MS + 1_000
+  });
+
+  assert.equal(projection.state.nodes[storageId]?.wait_reason, "dependency");
+  assert.equal(projection.state.nodes[storageId]?.next_eligible_action, "task-complete");
+  assert.equal(projection.state.concurrency.ready_queue_depth, 1);
+  assert.equal(projection.state.nodes["model-b"]?.wait_reason, "ready");
+});
+
 function initialState(
   graph: PlannedGraph,
   requestedConcurrency: number,

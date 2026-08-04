@@ -200,6 +200,7 @@ function normalizeRunConfig(run: Partial<RunConfig>, filePath: string): RunConfi
     outputDir: required(run.outputDir, "run.output_dir", filePath),
     maxParallelAgents: required(run.maxParallelAgents, "run.max_parallel_agents", filePath),
     maxParallelNodes: required(run.maxParallelNodes, "run.max_parallel_nodes", filePath),
+    maxDynamicNodes: required(run.maxDynamicNodes, "run.max_dynamic_nodes", filePath),
     keepWorkspaces: required(run.keepWorkspaces, "run.keep_workspaces", filePath),
     forgeGuardEnabled: required(run.forgeGuardEnabled, "run.forge_guard_enabled", filePath),
     forgeVmemLimitKb: required(run.forgeVmemLimitKb, "run.forge_vmem_limit_kb", filePath),
@@ -266,6 +267,7 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   for (const key of [
     "maxParallelAgents",
     "maxParallelNodes",
+    "maxDynamicNodes",
     "forgeVmemLimitKb",
     "forgeRayonThreads",
     "defaultTimeoutSeconds",

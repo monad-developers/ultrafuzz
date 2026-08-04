@@ -219,6 +219,26 @@ test("node attempt ledger is append-only, idempotent, independently queryable, a
   assert.equal(fs.readFileSync(layout.attemptLedgerPath, "utf8").trim().split("\n").length, 3);
 });
 
+test("node attempt ledger preserves human dynamic producer IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "dynamic-attempt-ledger" });
+  const result = appendNodeAttempt(layout, {
+    nodeId: "dynamic:threat:liquidation.overdue",
+    strategyAttemptId: "dynamic-threat-safe-attempt",
+    executorRetryId: "executor-retry-1",
+    checkpointGenerationId: "checkpoint-1",
+    workflowExecutionId: "execution-1",
+    controllerInvocationId: "controller-1",
+    startedAt: "2026-08-04T10:00:00.000Z",
+    finishedAt: "2026-08-04T10:01:00.000Z",
+    outcome: "failed",
+    inputManifestDigest: manifestDigest("dynamic input manifest"),
+    failureCategory: "executor-error"
+  });
+
+  assert.equal(result.entry.node_id, "dynamic:threat:liquidation.overdue");
+  assert.equal(queryNodeAttempts(layout)[0]?.node_id, "dynamic:threat:liquidation.overdue");
+});
+
 test("createRunLayout rejects symlinked run roots before creating outside writes", () => {
   const project = tempProject();
   const outside = tempProject();
@@ -428,6 +448,18 @@ test("artifact manifests record safe paths, sizes, digests, schema version, and 
   assert.equal(manifest.files[0]!.provenance.workflow_task_id, "node:node-a");
   assert.equal(manifest.output_contracts[0]!.contract, "ultrafuzz/nonempty-markdown@1");
   assert.deepEqual(manifest.prerequisite_manifests, []);
+});
+
+test("artifact provenance keeps uppercase-compatible historical static node IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-uppercase-producer" });
+  writeArtifact(layout, "StrategyA", "result.md", "historical static strategy\n");
+  const manifest = writeArtifactManifest({
+    layout,
+    nodeId: "StrategyA",
+    provenance: { producer_node_id: "StrategyA" }
+  });
+
+  assert.equal(manifest.files[0]!.provenance.producer_node_id, "StrategyA");
 });
 
 test("artifact manifests preserve causal prerequisite digests for safe reuse", () => {
@@ -707,6 +739,33 @@ test("findings normalize schema-versioned findings arrays", () => {
   assert.deepEqual(report.findings[0]!.evidence, [
     { kind: "test", path: ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol" }
   ]);
+});
+
+test("findings overwrite spoofed producer provenance with the runtime-owned human node reference", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-provenance" });
+  const nodeDir = getNodeArtifactDir(layout, "dynamic-safe-attempt", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Spoofed producer",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The runtime must own attribution.",
+        producer_node_id: "dynamic:spoofed"
+      }
+    ])
+  );
+
+  const report = normalizeFindings({
+    artifactDir: nodeDir,
+    nodeId: "dynamic-safe-attempt",
+    provenance: { producerNodeId: "dynamic:threat:liquidation.overdue" }
+  });
+
+  assert.equal(report.findings[0]!.source_node_id, "dynamic-safe-attempt");
+  assert.equal(report.findings[0]!.producer_node_id, "dynamic:threat:liquidation.overdue");
 });
 
 test("findings normalize bounded numeric confidence to its canonical string representation", () => {

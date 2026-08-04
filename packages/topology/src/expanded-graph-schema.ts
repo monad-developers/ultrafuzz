@@ -127,6 +127,25 @@ export const expandedGraphJsonSchema = {
                 attemptIndex: { type: "integer", minimum: 0 }
               }
             }
+          },
+          dynamic: {
+            type: "object",
+            required: ["from", "key", "nodeIdTemplate"],
+            additionalProperties: false,
+            properties: {
+              from: {
+                type: "object",
+                required: ["node", "path"],
+                additionalProperties: false,
+                properties: {
+                  node: { type: "string", minLength: 1 },
+                  path: { type: "string", minLength: 1 }
+                }
+              },
+              key: { type: "string", minLength: 1 },
+              nodeIdTemplate: { type: "string", minLength: 1 },
+              templateDigest: { type: "string", pattern: "^[0-9a-f]{64}$" }
+            }
           }
         }
       }
@@ -206,6 +225,31 @@ function validateExpandedNodeRecord(value: unknown, path: string, issues: Topolo
   validateRetryPolicy(value.retryPolicy, `${path}.retryPolicy`, issues);
   validateLoop(value.loop, `${path}.loop`, issues);
   validateModelFanoutArray(value.modelFanout, `${path}.modelFanout`, issues);
+  validateDynamicNode(value.dynamic, `${path}.dynamic`, issues);
+}
+
+function validateDynamicNode(value: unknown, path: string, issues: TopologySchemaValidationIssue[]): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    issue(issues, path, "EXPANDED_DYNAMIC_NODE_INVALID", "dynamic must be an object");
+    return;
+  }
+  if (!isRecord(value.from)) {
+    issue(issues, `${path}.from`, "EXPANDED_DYNAMIC_SOURCE_INVALID", "dynamic.from must be an object");
+  } else {
+    expectRequiredString(value.from, "node", `${path}.from`, issues);
+    expectRequiredString(value.from, "path", `${path}.from`, issues);
+  }
+  expectRequiredString(value, "key", path, issues);
+  expectRequiredString(value, "nodeIdTemplate", path, issues);
+  if (value.templateDigest !== undefined && !/^[0-9a-f]{64}$/u.test(String(value.templateDigest))) {
+    issue(
+      issues,
+      `${path}.templateDigest`,
+      "EXPANDED_DYNAMIC_TEMPLATE_DIGEST_INVALID",
+      "templateDigest must be SHA-256"
+    );
+  }
 }
 
 function validateOutputs(value: unknown, path: string, issues: TopologySchemaValidationIssue[]): void {

@@ -25,6 +25,7 @@ events.jsonl
 usage.jsonl
 attempts.jsonl
 plan.json
+dynamic-expansions/
 artifacts/
 review/
 events.index/
@@ -56,6 +57,16 @@ values are redacted before persistence, and restore metadata is written to
 concrete IDs, group, prompt path, dependencies, artifact directory, contracted
 outputs, primary output marker, loop metadata, reference revisions, and model
 fan-out provenance.
+
+For a dynamic topology, `graph.json` and the runtime task projection are
+atomically republished as groups expand. Generated graph entries retain the
+human `id`, their template group, source node/attempt and digest, expansion key
+and item digest, path-safe `storage_id`, and expansion-manifest path.
+
+`dynamic-expansions/<group-id>.json` is the immutable expansion decision. It
+records canonical ordered items, generated IDs, source and template digests,
+and the run-wide limit. Recovery validates and reuses it; incompatible or
+tampered manifests fail rather than causing replanning or duplicate attempts.
 
 `plan.json` records the run plan, graph/config fingerprints, topology summary,
 rendered prompt paths and digests, immutable prompt snapshot paths, and
@@ -105,6 +116,10 @@ into product artifacts.
 Node state can also record logical node ID, artifact directory, contracted
 outputs, attempt index, loop index, model profile ID, model name, model index,
 timestamps, last error, and provenance.
+
+For generated nodes, `producer_node_id` is the human runtime node ID while
+`storage_id` is the safe state/artifact identity. Reports and findings should
+display the producer ID; storage IDs are retained for exact operational lookup.
 
 ## Attempt Ledger
 

@@ -22,6 +22,7 @@ repo = "."
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = 4
 max_parallel_nodes = 8
+max_dynamic_nodes = 2048
 keep_workspaces = false
 forge_guard_enabled = true
 forge_vmem_limit_kb = 12582912
@@ -99,6 +100,7 @@ empty path components, and dot components fail validation.
 | `output_dir`                | string  | Project-local run output directory. Defaults to `.ultrafuzz/runs`.          |
 | `max_parallel_agents`       | integer | Positive workflow submission concurrency default.                           |
 | `max_parallel_nodes`        | integer | Positive graph planning parallelism limit.                                  |
+| `max_dynamic_nodes`         | integer | Positive run-wide safety limit for runtime-generated topology nodes.        |
 | `keep_workspaces`           | boolean | Retain successful-run node workspaces instead of reaping them.              |
 | `forge_guard_enabled`       | boolean | Prepend a run-scoped Forge resource-limit wrapper to worker `PATH`.         |
 | `forge_vmem_limit_kb`       | integer | Forge virtual-memory ceiling in KiB. Defaults to 12 GiB.                    |
@@ -109,6 +111,13 @@ empty path components, and dot components fail validation.
 | `controller_lease_seconds`  | integer | Lost-controller threshold used by the scoped renewable recovery supervisor. |
 
 Other workspace modes are outside the product contract.
+
+`max_dynamic_nodes` limits total generated nodes, not concurrently active
+nodes. Dynamic work still uses `max_parallel_agents`; exceeding the generation
+limit fails the run instead of silently dropping items. The selected value is
+part of the durable expansion contract, so changing it requires a new or
+explicitly incompatible run rather than changing an existing expansion on
+resume.
 Successful runs remove their generated workspaces by default. Setting
 `keep_workspaces = true` retains them; dirty or unpushed workspaces are always
 preserved by the workflow runner.

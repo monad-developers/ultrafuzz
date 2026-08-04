@@ -38,6 +38,7 @@ const RUN_KEYS = [
   "output_dir",
   "max_parallel_agents",
   "max_parallel_nodes",
+  "max_dynamic_nodes",
   "keep_workspaces",
   "forge_guard_enabled",
   "forge_vmem_limit_kb",
@@ -171,6 +172,13 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
         type: "integer",
         assign: (value) => {
           runConfig.maxParallelNodes = value;
+        }
+      },
+      {
+        key: "max_dynamic_nodes",
+        type: "integer",
+        assign: (value) => {
+          runConfig.maxDynamicNodes = value;
         }
       },
       {
