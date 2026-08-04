@@ -23,11 +23,13 @@ const MODEL_KEYS = ["model", "provider", "reasoning"];
 const PROVIDER_AGENT = {
   openai: "CodexAgent",
   anthropic: "ClaudeAgent",
+  deepseek: "DeepSeekAgent",
   kimi: "KimiAgent"
 };
 const AGENT_PROVIDER = {
   CodexAgent: "openai",
   ClaudeAgent: "anthropic",
+  DeepSeekAgent: "deepseek",
   KimiAgent: "kimi"
 };
 
@@ -181,8 +183,15 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   }
   if (!Array.isArray(requested)) throw new Error("BENCHMARK_MODELS_JSON must be an array");
 
-  const expectedProviders = benchmarkMode === "smoke" ? ["openai"] : ["openai", "anthropic", "kimi"];
   const validated = requested.map((entry, index) => validateModelEntry(entry, index));
+  const expectedProviders =
+    benchmarkMode === "smoke" && configured !== undefined && configured !== ""
+      ? validated.length === 1
+        ? [validated[0].provider]
+        : []
+      : benchmarkMode === "smoke"
+        ? ["openai"]
+        : ["openai", "anthropic", "kimi", "deepseek"];
   const providers = validated.map((entry) => entry.provider);
   if (
     providers.length !== expectedProviders.length ||
@@ -191,10 +200,6 @@ function benchmarkModels(benchmarkMode, checkedInProfiles) {
   ) {
     throw new Error(`${benchmarkMode} BENCHMARK_MODELS_JSON must contain exactly ${expectedProviders.join(" and ")}`);
   }
-  if (benchmarkMode === "smoke" && validated.some((entry) => entry.reasoning !== "high")) {
-    throw new Error("smoke BENCHMARK_MODELS_JSON reasoning must be high");
-  }
-
   const ordered = expectedProviders.map((provider) => validated.find((entry) => entry.provider === provider));
   const usedSlugs = new Set();
   return ordered.map((entry) => {
@@ -240,8 +245,9 @@ function validateModelEntry(entry, index) {
   if (typeof entry.reasoning !== "string" || !SAFE_REASONING.test(entry.reasoning)) {
     throw new Error(`BENCHMARK_MODELS_JSON[${index}].reasoning is unsafe`);
   }
-  if (entry.provider === "kimi" && !["low", "high", "max"].includes(entry.reasoning)) {
-    throw new Error(`BENCHMARK_MODELS_JSON[${index}].reasoning is unsupported for Kimi`);
+  if (["kimi", "deepseek"].includes(entry.provider) && !["low", "high", "max"].includes(entry.reasoning)) {
+    const providerName = entry.provider === "kimi" ? "Kimi" : "DeepSeek";
+    throw new Error(`BENCHMARK_MODELS_JSON[${index}].reasoning is unsupported for ${providerName}`);
   }
   return { provider: entry.provider, model: entry.model, reasoning: entry.reasoning };
 }

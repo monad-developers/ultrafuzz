@@ -356,8 +356,9 @@ export function benchmarkModelProfileOverrides(
     agent: runnerProfile.agent,
     ...(runnerProfile.model === undefined ? {} : { model: runnerProfile.model })
   };
-  const benchmarkReasoning = runnerProfile.agent === "KimiAgent" ? (runnerProfile.reasoning ?? "max") : "high";
-  const coordinationReasoning = runnerProfile.agent === "KimiAgent" ? (runnerProfile.reasoning ?? "max") : "medium";
+  const preservesRunnerReasoning = runnerProfile.agent === "KimiAgent" || runnerProfile.agent === "DeepSeekAgent";
+  const benchmarkReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "high";
+  const coordinationReasoning = preservesRunnerReasoning ? (runnerProfile.reasoning ?? "max") : "medium";
   return {
     runtimeOverrides: {
       models: {

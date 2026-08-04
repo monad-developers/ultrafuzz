@@ -12,6 +12,7 @@ export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: numbe
   const selectedProfile = modelProfileToml(model);
   const codex = agentToml(model, "CodexAgent", "openai");
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
+  const deepseek = agentToml(model, "DeepSeekAgent", "deepseek");
   const kimi = agentToml(model, "KimiAgent", "kimi");
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
@@ -39,6 +40,8 @@ ${selectedProfile}
 ${codex}
 
 ${claude}
+
+${deepseek}
 
 ${kimi}
 
@@ -80,7 +83,7 @@ reasoning = ${tomlString(model.reasoning)}`;
 
 function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"], provider: ModelProvider): string {
   const selected = selectedModel.agent === agent;
-  const auth = selected ? selectedModel.auth_mode : "subscription";
+  const auth = selected ? selectedModel.auth_mode : provider === "deepseek" ? "api-key" : "subscription";
   if (auth === "api-key") {
     return `[agents.${agent}]\nauth = "api-key"\napi_key_env = ${tomlString(apiKeyEnv(provider))}`;
   }
@@ -90,6 +93,7 @@ function agentToml(selectedModel: ModalModelSpec, agent: ModalModelSpec["agent"]
 function apiKeyEnv(provider: ModelProvider): string {
   if (provider === "openai") return "OPENAI_API_KEY";
   if (provider === "anthropic") return "ANTHROPIC_API_KEY";
+  if (provider === "deepseek") return "DEEPSEEK_API_KEY";
   return "KIMI_API_KEY";
 }
 

@@ -7,34 +7,41 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 
 ## Commands
 
-| Command                          | Purpose                                                                                                        |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `ultrafuzz init`                 | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
-| `ultrafuzz validate`             | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
-| `ultrafuzz run`                  | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
-| `ultrafuzz references status`    | Report whether pinned references are present in the local digest-checked cache.                                |
-| `ultrafuzz references sync`      | Explicitly fetch pinned references into the local cache.                                                       |
-| `ultrafuzz references update`    | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
-| `ultrafuzz ps`                   | List Ultrafuzz runs and linked workflow status.                                                                |
-| `ultrafuzz inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                   |
-| `ultrafuzz status <run-id>`      | Show a concise health verdict, progress counts, throughput, and gating nodes.                                  |
-| `ultrafuzz pause <run-id>`       | Gracefully pause an active run after its in-flight tasks finish.                                               |
-| `ultrafuzz resume <run-id>`      | Delegate resume for the linked workflow run after product checks.                                              |
-| `ultrafuzz replay <run-id>`      | Delegate replay for the linked workflow run after product checks.                                              |
-| `ultrafuzz fork <run-id>`        | Delegate fork for the linked workflow run after product checks.                                                |
-| `ultrafuzz report <run-id>`      | Locate the agent-written final report artifacts.                                                               |
-| `ultrafuzz materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
-| `ultrafuzz clean <run-id>`       | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
-| `ultrafuzz dashboard`            | Serve the local loopback dashboard and API for product state inspection and editing.                           |
-| `ultrafuzz eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                      |
-| `ultrafuzz eval run`             | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
-| `ultrafuzz eval status <id>`     | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                    |
-| `ultrafuzz eval score <id>`      | Score finished eval run reports against external ground truth.                                                 |
-| `ultrafuzz eval report <id>`     | Show the scored eval run variant ranking.                                                                      |
-| `ultrafuzz eval compare <id>`    | Compare scored eval variants against a baseline variant.                                                       |
-| `ultrafuzz eval analyze <type>`  | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
-| `ultrafuzz eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                        |
-| `ultrafuzz eval publish <id>`    | Replay a recorded eval run's node telemetry to the configured provider.                                        |
+| Command                             | Purpose                                                                                                        |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `ultrafuzz init`                    | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
+| `ultrafuzz validate`                | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
+| `ultrafuzz run`                     | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
+| `ultrafuzz references status`       | Report whether pinned references are present in the local digest-checked cache.                                |
+| `ultrafuzz references sync`         | Explicitly fetch pinned references into the local cache.                                                       |
+| `ultrafuzz references update`       | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
+| `ultrafuzz ps`                      | List Ultrafuzz runs and linked workflow status.                                                                |
+| `ultrafuzz inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                   |
+| `ultrafuzz status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
+| `ultrafuzz pause <run-id>`          | Gracefully pause an active run after its in-flight tasks finish.                                               |
+| `ultrafuzz why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
+| `ultrafuzz timeline <run-id>`       | Show checkpoint frames and fork lineage, including the frame numbers `fork --frame` accepts.                   |
+| `ultrafuzz events <run-id>`         | Show linked workflow lifecycle events, with optional streaming.                                                |
+| `ultrafuzz node <run-id> <node-id>` | Show one workflow node's status, attempts, retries, timing, and output metadata.                               |
+| `ultrafuzz snapshots <run-id>`      | List durability and workspace checkpoints for recovery and time-travel diagnosis.                              |
+| `ultrafuzz cancel <run-id>`         | Cancel an active run; cancellation is terminal, unlike pause.                                                  |
+| `ultrafuzz doctor`                  | Report validation, toolchain, and pinned workflow engine install posture without mutating anything.            |
+| `ultrafuzz resume <run-id>`         | Delegate resume for the linked workflow run after product checks.                                              |
+| `ultrafuzz replay <run-id>`         | Delegate replay for the linked workflow run after product checks.                                              |
+| `ultrafuzz fork <run-id>`           | Delegate fork for the linked workflow run after product checks.                                                |
+| `ultrafuzz report <run-id>`         | Locate the agent-written final report artifacts.                                                               |
+| `ultrafuzz materialize <run-id>`    | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
+| `ultrafuzz clean <run-id>`          | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
+| `ultrafuzz dashboard`               | Serve the local loopback dashboard and API for product state inspection and editing.                           |
+| `ultrafuzz eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                      |
+| `ultrafuzz eval run`                | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
+| `ultrafuzz eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                    |
+| `ultrafuzz eval score <id>`         | Score finished eval run reports against external ground truth.                                                 |
+| `ultrafuzz eval report <id>`        | Show the scored eval run variant ranking.                                                                      |
+| `ultrafuzz eval compare <id>`       | Compare scored eval variants against a baseline variant.                                                       |
+| `ultrafuzz eval analyze <type>`     | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
+| `ultrafuzz eval history [id]`       | Validate/render public eval history, or append one complete scored run.                                        |
+| `ultrafuzz eval publish <id>`       | Replay a recorded eval run's node telemetry to the configured provider.                                        |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -134,8 +141,35 @@ SHAs.
 ```bash
 ultrafuzz ps [--project <path>] [--json]
 ultrafuzz inspect <run-id> [--project <path>] [--json]
-ultrafuzz status <run-id> [--project <path>] [--window <minutes>] [--json]
+ultrafuzz status <run-id> \
+  [--project <path>] \
+  [--window <minutes>] \
+  [--watch] \
+  [--interval <seconds>] \
+  [--json]
 ultrafuzz pause <run-id> [--project <path>] [--json]
+ultrafuzz cancel <run-id> [--project <path>] [--json]
+ultrafuzz why <run-id> [--project <path>] [--json]
+ultrafuzz timeline <run-id> [--tree] [--project <path>] [--json]
+ultrafuzz snapshots <run-id> [--project <path>] [--json]
+ultrafuzz events <run-id> \
+  [--node <node-id>] \
+  [--type <category>] \
+  [--since <duration>] \
+  [--limit <n>] \
+  [--watch] \
+  [--interval <seconds>] \
+  [--history] \
+  [--project <path>] \
+  [--json]
+ultrafuzz node <run-id> <node-id> \
+  [--iteration <n>] \
+  [--attempts] \
+  [--tools] \
+  [--watch] \
+  [--interval <seconds>] \
+  [--project <path>] \
+  [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
   [--reset-node <workflow-node-id>] [--json]
 ultrafuzz replay <run-id> [--project <path>] [--json]
@@ -150,17 +184,156 @@ ultrafuzz fork <run-id> \
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the workflow run
 linked from Ultrafuzz run metadata. `status` reports a concise health verdict
-and maps workflow details into the stable Ultrafuzz JSON envelope. `pause`
-requests a graceful stop: no new tasks are scheduled, in-flight tasks finish,
-and the run settles in the resumable `paused` state. `resume` reports
-`submitted: false` instead of
-launching a duplicate continuation when the linked workflow is still in an
-active state (running, in-progress, started, queued, retrying, or waiting).
-`resume --reset-node` retries one failed workflow node and its dependents in
-the same linked run; the applied reset is recorded so retrying the command
-after a failed continuation resumes the already-reset run instead of repeating
-the reset. `fork` may start from a checkpoint frame and may reset one workflow
-node before starting the fork.
+and maps workflow details into the stable Ultrafuzz JSON envelope.
+
+`status` human output is watch-friendly:
+
+```text
+Run: <run-id>
+Status: running-healthy (running)
+Reason: 1 running, 2 finished in last 10m
+Progress: 99% (262 finished / 1 running / 1 pending / 0 failed / 264 total)
+ETA: 20 minutes
+Time on current step: 10 minutes on stateful-invariant-campaign
+Pace: 4 finished in the last 10m
+```
+
+`--watch` re-polls every `--interval` seconds (default 30) until the run
+reaches a terminal state (`succeeded`, `failed`, `timed-out`, or `canceled`)
+or the poll fails. With `--json --watch`, every poll writes one
+newline-delimited `ultrafuzz.cli.result.v1` envelope so the stream pipes into
+`jq` and other line-oriented tools; without `--watch`, `--json` keeps the
+existing pretty-printed single envelope.
+
+The JSON envelope carries stable machine-readable fields alongside the existing
+counts:
+
+- `progress`: `percent`, `finished`, `in_progress`, `pending`, `failed`,
+  `skipped`, `remaining`, and `total`. `remaining` is every node that is not
+  finished, failed, or skipped, and `percent` is the share of nodes that are
+  settled, so it agrees with `remaining` reaching zero even when nodes failed
+  or were skipped.
+- `eta`: `available`, `seconds`, `basis`, and `unavailable_reason`. `basis` is
+  `recent-throughput` when the recent activity window observed completions,
+  `run-throughput` when only whole-run throughput is available, and
+  `no-remaining-nodes` when nothing is left to run. `unavailable_reason` is
+  `no-node-counts` (a live run whose snapshot reports no nodes),
+  `no-finished-nodes`, `no-observed-elapsed-time`, `run-paused` (a paused run is
+  deliberately not progressing), or `run-terminal`.
+- `current_step`: `node_id`, `iteration`, `started_at`, `elapsed_seconds`, and
+  `running_count`. Elapsed time comes from Ultrafuzz's synchronized durable
+  `state.json` node timestamps, and the reported step is the longest-running
+  one. `elapsed_seconds` is `null` when no running node has a recorded start.
+  Nodes parked on an approval, event, timer, or controller handover are excluded
+  — they are not executing, and `ultrafuzz why` explains those waits.
+
+`progress` and `current_step` are denominated differently and can legitimately
+disagree. `progress` counts the linked workflow's own tasks, which include
+preparation and verification work that has no durable node, while
+`current_step` counts durable Ultrafuzz nodes. Treat `progress` as campaign-wide
+completion and `current_step` as what is executing right now.
+
+`--watch` re-synchronizes linked workflow evidence on every poll, exactly as a
+single `status` call does, so it is not a read-only command. It stops only at a
+terminal run status or a failed poll: `paused` is a deliberate steady state, so
+a watch on a paused run keeps polling until interrupted.
+
+`pause` requests a graceful stop: no new tasks are scheduled, in-flight tasks
+finish, and the run settles in the resumable `paused` state. `resume` reports
+`submitted: false` instead of launching a duplicate continuation when the linked
+workflow is still in an active state (running, in-progress, started, queued,
+retrying, or waiting). `resume --reset-node` retries one failed workflow node and
+its dependents in the same linked run; the applied reset is recorded so retrying
+the command after a failed continuation resumes the already-reset run instead of
+repeating the reset. `fork` may start from a checkpoint frame and may reset one
+workflow node before starting the fork.
+
+Every command in this section takes an Ultrafuzz run ID and resolves the linked
+workflow run from existing product evidence; none of them require the
+workflow-engine run ID.
+
+`cancel` is terminal, unlike `pause`. The engine accepts a durable cancellation
+request before the run actually stops, so `cancel` distinguishes the two: a
+submitted request reports `cancel-requested` and leaves the product run
+nonterminal, and a confirmed cancellation reports Ultrafuzz's canonical
+terminal spelling `canceled` with its terminal timestamp. Rerunning `cancel`
+after the run has already stopped converges on the confirmed result instead of
+failing. Both outcomes append
+distinct product events. Failures use the stable `WORKFLOW_CANCEL_FAILED`
+diagnostic.
+
+`why` returns a deterministic diagnosis: a summary, the current node, and typed
+blockers with `kind`, `node_id`, `iteration`, `reason`, `unblocker`,
+`waiting_since`, `attempt`, and `max_attempts`. Blocker kinds are
+`waiting-approval`, `waiting-event`, `waiting-timer`, `retry-backoff`,
+`retries-exhausted`, `dependency-failed`, `stale-heartbeat`, `engine-busy`,
+`binding`, `side-effect-boundary`, and `other`. It synchronizes linked workflow
+evidence first, matching single-run `status`, and `status` recommends it as the
+next step.
+
+`timeline` is read-only and returns `frames` with `frame`, `created_at`,
+`content_hash`, and fork points. Pass a listed frame number to
+`ultrafuzz fork <run-id> --frame <n>`. `--tree` adds forked runs recursively
+under `lineage`, each with its own depth and frames.
+
+`snapshots` is read-only and lists durability and workspace checkpoints with
+`sequence`, `node_id`, `iteration`, `attempt`, `tier` (an integer durability
+tier), `source`, `label`, and `created_at`. There is no `restore` or `rewind` command: those need separate
+product-state and side-effect-boundary design.
+
+`events` shows the **linked workflow** lifecycle log, which is distinct from
+Ultrafuzz's own product evidence in `.ultrafuzz/runs/<run-id>/events.jsonl`. It
+defaults to lifecycle events and never requests raw agent chunks. `--type` is
+restricted to lifecycle categories (`approval`, `frame`, `memory`, `node`,
+`revert`, `run`, `sandbox`, `scorer`, `snapshot`, `supervisor`, `timer`,
+`workflow`); a raw agent or tool category is rejected with
+`WORKFLOW_EVENTS_TYPE_UNSUPPORTED` rather than silently widening the view.
+Without `--watch` it returns a bounded typed array with `limit` and
+`truncated`;
+`--limit` defaults to 200 and is capped at 2000. `--watch` streams new events
+incrementally rather than buffering the run, printing one redacted event per
+line in human mode and one newline-delimited `ultrafuzz.cli.result.v1` envelope
+per event with `--json`. `--history` replays existing history before streaming.
+
+`node` takes a workflow node ID as already reported by `ultrafuzz inspect`. It
+returns node state, status, duration, attempt counts, agent/model identity, and
+output metadata. Attempt and retry history requires `--attempts`. Tool
+input/output payloads appear only with explicit `--tools` and pass through the
+shared secret redaction helpers; node output itself is reported as metadata
+only, never inlined. `--watch` follows the same bounded streaming and cleanup
+contract as `events --watch`.
+
+## Doctor
+
+```bash
+ultrafuzz doctor [--project <path>] [--json]
+```
+
+`doctor` is the operational superset of `validate`; `validate` keeps its
+non-launching configuration contract unchanged. Doctor reports:
+
+- config, topology, prompt, and reference validation posture;
+- required local toolchain and configured agent executable availability;
+- the bundled workflow engine version, the version the generated project
+  requires, and the installed project-local version and bin target;
+- npm's latest published stable engine version when the registry check is
+  available;
+- whether the installed dependency layout passes Ultrafuzz's exact
+  manifest and path validation;
+- whether required compatibility patches, or their upstream replacements, are
+  present. A source carrying neither the patch nor the shape Ultrafuzz patches
+  is reported as modified or incompatible, because the next run fails in that
+  state.
+
+Diagnostics are stable: `DOCTOR_TOOLCHAIN_MISSING`,
+`DOCTOR_WORKFLOW_ENGINE_MISSING`,
+`DOCTOR_WORKFLOW_ENGINE_VERSION_MISMATCH`,
+`DOCTOR_WORKFLOW_ENGINE_LAYOUT_INVALID`,
+`DOCTOR_WORKFLOW_ENGINE_PATCHES_PENDING`,
+`DOCTOR_WORKFLOW_ENGINE_PATCHES_INCOMPATIBLE`,
+`DOCTOR_WORKFLOW_ENGINE_OUTDATED`, and `DOCTOR_REGISTRY_UNAVAILABLE`. A registry or network failure produces a
+warning and an `unknown` latest version instead of failing an otherwise valid
+offline project. Doctor never mutates or upgrades dependencies.
 
 ## Report
 
@@ -235,7 +408,7 @@ writing, and guards mutating requests with a per-session token.
 ultrafuzz eval plan \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|langsmith|none] \
+  [--provider braintrust|none] \
   [--target-root <path>] \
   [--ground-truth-root <external-path>] \
   [--skip-target-validation] \
@@ -243,7 +416,7 @@ ultrafuzz eval plan \
 ultrafuzz eval run \
   [--project <path>] \
   [--suite <suite-yaml-path>] \
-  [--provider braintrust|langsmith|none] \
+  [--provider braintrust|none] \
   [--eval-run-id <id>] \
   [--row <row-id>]... \
   [--target-root <path>] \
@@ -272,7 +445,7 @@ ultrafuzz eval analyze all \
   [--json]
 ultrafuzz eval publish <eval-run-id> \
   [--project <path>] \
-  [--provider braintrust|langsmith] \
+  [--provider braintrust] \
   [--resume] \
   [--json]
 ultrafuzz eval history [eval-run-id] \

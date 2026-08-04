@@ -3,34 +3,41 @@
 Every command accepts `--project <path>`. Commands that support automation
 accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 
-| Command                | Purpose                                                                                                                   |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `init`                 | Create project config/topology, pinned references, `.ultrafuzz/**` run surfaces, editable prompts, and workflow plumbing. |
-| `validate`             | Validate config, topology, prompts, safe paths, trust posture, and agent references.                                      |
-| `run`                  | Plan, render prompts, launch a fuzzing workflow, and persist product evidence.                                            |
-| `references status`    | Show whether pinned references are present in the local digest-checked cache.                                             |
-| `references sync`      | Explicitly fetch pinned references into the local cache.                                                                  |
-| `references update`    | Rewrite the project reference catalog to current default-branch SHAs with `--latest`.                                     |
-| `ps`                   | List Ultrafuzz runs with linked workflow status.                                                                          |
-| `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                              |
-| `status <run-id>`      | Show a concise health verdict, progress, throughput, and gating nodes.                                                    |
-| `pause <run-id>`       | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
-| `resume <run-id>`      | Resume a linked run after product checks.                                                                                 |
-| `replay <run-id>`      | Replay a linked run after product checks.                                                                                 |
-| `fork <run-id>`        | Fork a linked run after product checks.                                                                                   |
-| `report <run-id>`      | Show the agent-written final report artifact.                                                                             |
-| `materialize <run-id>` | Copy selected outputs into the project after confirmation and path checks.                                                |
-| `clean <run-id>`       | Remove selected generated paths after confirmation and path checks.                                                       |
-| `dashboard`            | Serve the local loopback dashboard and API.                                                                               |
-| `eval plan`            | Dry-run an eval suite matrix without launching workflows.                                                                 |
-| `eval run`             | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
-| `eval status <id>`     | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                               |
-| `eval score <id>`      | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
-| `eval report <id>`     | Show the scored eval run variant ranking.                                                                                 |
-| `eval compare <id>`    | Compare scored eval variants against a `--baseline` variant.                                                              |
-| `eval analyze <type>`  | Generate private offline benchmark analysis from a finalized handoff ZIP.                                                 |
-| `eval history [id]`    | Validate/render public eval history, or append one complete scored run.                                                   |
-| `eval publish <id>`    | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
+| Command                   | Purpose                                                                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `init`                    | Create project config/topology, pinned references, `.ultrafuzz/**` run surfaces, editable prompts, and workflow plumbing. |
+| `validate`                | Validate config, topology, prompts, safe paths, trust posture, and agent references.                                      |
+| `run`                     | Plan, render prompts, launch a fuzzing workflow, and persist product evidence.                                            |
+| `references status`       | Show whether pinned references are present in the local digest-checked cache.                                             |
+| `references sync`         | Explicitly fetch pinned references into the local cache.                                                                  |
+| `references update`       | Rewrite the project reference catalog to current default-branch SHAs with `--latest`.                                     |
+| `ps`                      | List Ultrafuzz runs with linked workflow status.                                                                          |
+| `inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                              |
+| `status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                        |
+| `pause <run-id>`          | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
+| `why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                                      |
+| `timeline <run-id>`       | Show checkpoint frames and fork lineage, with the frame numbers `fork --frame` accepts.                                   |
+| `events <run-id>`         | Show linked workflow lifecycle events, optionally streaming with `--watch`.                                               |
+| `node <run-id> <node-id>` | Show one workflow node's status, attempts, retries, timing, and output metadata.                                          |
+| `snapshots <run-id>`      | List durability and workspace checkpoints for recovery and time-travel diagnosis.                                         |
+| `cancel <run-id>`         | Cancel an active run; cancellation is terminal, unlike pause.                                                             |
+| `doctor`                  | Report validation, toolchain, and pinned workflow engine install posture.                                                 |
+| `resume <run-id>`         | Resume a linked run after product checks.                                                                                 |
+| `replay <run-id>`         | Replay a linked run after product checks.                                                                                 |
+| `fork <run-id>`           | Fork a linked run after product checks.                                                                                   |
+| `report <run-id>`         | Show the agent-written final report artifact.                                                                             |
+| `materialize <run-id>`    | Copy selected outputs into the project after confirmation and path checks.                                                |
+| `clean <run-id>`          | Remove selected generated paths after confirmation and path checks.                                                       |
+| `dashboard`               | Serve the local loopback dashboard and API.                                                                               |
+| `eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                                 |
+| `eval run`                | Launch runs for an eval suite matrix and stream node telemetry to the configured provider.                                |
+| `eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                               |
+| `eval score <id>`         | Score finished eval run reports against external ground truth, optionally with `--llm-judge`.                             |
+| `eval report <id>`        | Show the scored eval run variant ranking.                                                                                 |
+| `eval compare <id>`       | Compare scored eval variants against a `--baseline` variant.                                                              |
+| `eval analyze <type>`     | Generate private offline benchmark analysis from a finalized handoff ZIP.                                                 |
+| `eval history [id]`       | Validate/render public eval history, or append one complete scored run.                                                   |
+| `eval publish <id>`       | Replay a recorded eval run's node telemetry to a provider post hoc.                                                       |
 
 The dashboard/API is a local operator surface over product state, not a
 workflow-engine API.
@@ -56,11 +63,36 @@ selects another agent, backend-specific reasoning is cleared, including when
 
 ## Run Lifecycle
 
-- `status <run-id> [--window <minutes>]` shows whether a run is healthy,
-  blocked, stalled, quota-parked, paused, or finished.
+- `status <run-id> [--window <minutes>] [--watch] [--interval <seconds>]`
+  shows whether a run is healthy, blocked, stalled, quota-parked, paused, or
+  finished, plus node progress, an ETA, and how long the current step has been
+  running. Progress counts every settled node, so failed and skipped nodes
+  advance the percentage instead of pinning it below 100%. Progress counts
+  linked workflow tasks while the current step counts durable Ultrafuzz nodes,
+  so the two can legitimately disagree. `--watch` refreshes
+  every `--interval` seconds (default 30) until the run is terminal; with
+  `--json` each poll is one newline-delimited `ultrafuzz.cli.result.v1`
+  envelope.
 - `pause <run-id>` stops new task scheduling and lets in-flight work settle
   before the run becomes `paused`.
 - `resume <run-id>` continues a paused run using the existing linked workflow.
+- `cancel <run-id>` halts a run for good. A submitted request reports
+  `cancel-requested`; a confirmed cancellation records the canonical terminal
+  `canceled` state.
+- `why <run-id>` explains what is blocking a run, with typed blockers and the
+  action that unblocks each one.
+- `timeline <run-id> [--tree]` lists checkpoint frames to pass to
+  `fork --frame <n>`, plus fork lineage.
+- `snapshots <run-id>` lists durability and workspace checkpoints.
+- `events <run-id> [--watch] [--interval <seconds>]` shows the **linked
+  workflow** lifecycle log, which is separate from Ultrafuzz's product
+  `events.jsonl`.
+- `node <run-id> <node-id> [--attempts] [--tools] [--watch]` shows one
+  workflow node's status, retries, timing, and output metadata. Tool payloads
+  require explicit `--tools`.
+- `doctor` reports validation, toolchain, and pinned workflow engine install
+  posture without changing anything. It is the operational superset of
+  `validate`.
 
 ## Reference Commands
 
@@ -95,7 +127,7 @@ explicit `--copy` selections for files you have reviewed.
 benchmark the pipeline against targets with known ground-truth bugs. The suite
 YAML (default from `[eval].eval_config`, overridable with `--suite`) defines
 the experiment; the `ultrafuzz.toml` `[eval]` section binds the reporting
-provider (`braintrust | langsmith | none`) and credential env-var names.
+provider (`braintrust | none`) and credential env-var names.
 Common flags:
 
 - `--suite <suite-yaml-path>` (plan, run)

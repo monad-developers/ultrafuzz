@@ -1,7 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
 import {
@@ -29,6 +30,7 @@ import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
+const STREAM_TERMINATION_GRACE_MS = 5_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const SMITHERS_CLI_DETACHED_ADMISSION_SOURCE = "export const DETACHED_ADMISSION_TIMEOUT_MS = 30_000;";
 const SMITHERS_CLI_DETACHED_ADMISSION_PATCH = "export const DETACHED_ADMISSION_TIMEOUT_MS = 300_000;";
@@ -318,6 +320,45 @@ export interface SmithersPauseResult {
   stderr: string;
 }
 
+export interface SmithersCancelResult {
+  status: "cancel-requested" | "cancelled";
+  reportedStatus?: string;
+  command: readonly string[];
+  stdout: string;
+  stderr: string;
+}
+
+export interface SmithersStreamResult {
+  command: string[];
+  lines: number;
+  truncated: boolean;
+  exitCode: number | null;
+  /** Set when the process died from a signal, e.g. an OOM kill. */
+  terminatedBySignal: string | null;
+  /**
+   * True only when Ultrafuzz itself stopped the process for truncation or
+   * abort. Callers must not infer that from a null exit code: an externally
+   * signalled death also has no exit code but is a real failure.
+   */
+  stoppedByCaller: boolean;
+  stderr: string;
+}
+
+export type SmithersPatchPosture = "applied" | "upstream" | "missing" | "incompatible" | "unknown";
+
+export interface SmithersInstallationPosture {
+  bundled_version: string;
+  required_version: string;
+  installed_version: string | null;
+  installed_bin_target: string | null;
+  bin_path: string | null;
+  layout_error: string | null;
+  compatibility_patches: {
+    detached_admission: SmithersPatchPosture;
+    supervisor_descriptor: SmithersPatchPosture;
+  };
+}
+
 export interface SmithersCommandSnapshot {
   command: string[];
   ok: boolean;
@@ -499,13 +540,261 @@ export async function requestSmithersCancel(input: {
   smithersRunId: string;
   projectRoot: string;
   env?: Record<string, string | undefined>;
-}): Promise<void> {
-  await execSmithersCli({
+}): Promise<SmithersCancelResult> {
+  // Exit 2 carries a durable cancel request. Exit 4 is the engine reporting the
+  // run is no longer active, which for cancellation is a completed outcome, not
+  // a failure: rerunning `cancel` to confirm an in-flight request must converge
+  // rather than error.
+  const result = await execSmithersCli({
     args: ["cancel", input.smithersRunId, "--format", "json"],
     projectRoot: input.projectRoot,
     env: input.env,
-    acceptedExitCodes: [2]
+    acceptedExitCodes: [2, 4]
   });
+  if (result.exitCode === 4 && !smithersStdoutHasErrorCode(result.stdout, "RUN_NOT_ACTIVE")) {
+    throw new Error(sanitizedDiagnosticText(result.stderr.trim() || "workflow runner cancel failed"));
+  }
+  if (result.exitCode === 4) {
+    return { ...result, status: "cancelled", reportedStatus: "already-terminal" };
+  }
+  const reportedStatus = firstStringField(commandPayload(jsonField(result.stdout).json), ["status"]);
+  // The engine reports `cancelled`; Ultrafuzz keeps `cancel-requested` until a
+  // confirmed terminal cancellation so a durable request never looks finished.
+  const status = isConfirmedCancelStatus(reportedStatus) ? "cancelled" : "cancel-requested";
+  return { ...result, status, ...(reportedStatus === undefined ? {} : { reportedStatus }) };
+}
+
+function smithersStdoutHasErrorCode(stdout: string, code: string): boolean {
+  return jsonHasErrorCode(jsonField(stdout).json, code) || stdout.includes(code);
+}
+
+function isConfirmedCancelStatus(value: string | undefined): boolean {
+  return value === "cancelled" || value === "canceled";
+}
+
+/**
+ * Streams a bounded number of stdout lines from an inspection command instead
+ * of buffering the whole run through `execFile`. Watch surfaces need
+ * incremental output and deterministic teardown; the bounded inspection helper
+ * stays strict for one-shot reads.
+ */
+export async function streamSmithersCommand(input: {
+  args: readonly string[];
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  maxLines: number;
+  onLine: (line: string) => void | Promise<void>;
+}): Promise<SmithersStreamResult> {
+  const command = [...input.args];
+  const displayCommand = smithersDisplayCommand(command);
+  // An already-aborted caller must not spawn a process at all: `abort` has
+  // already been dispatched, so an abort listener registered later never fires
+  // and the doomed child would run until it exited on its own.
+  if (isAbortedSignal(input.signal)) {
+    return {
+      command: displayCommand,
+      lines: 0,
+      truncated: false,
+      exitCode: null,
+      terminatedBySignal: null,
+      stoppedByCaller: true,
+      stderr: ""
+    };
+  }
+  await ensureSmithersDependencies(input.projectRoot, input.env, { signal: input.signal });
+  const child = spawn(smithersExecutable(input.projectRoot, input.env), command, {
+    cwd: input.projectRoot,
+    env: smithersCommandEnv(input.projectRoot, input.env),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
+  let lines = 0;
+  let truncated = false;
+  let stderr = "";
+  let stoppedByCaller = false;
+  let killTimer: NodeJS.Timeout | undefined;
+  const stopStreaming = (): void => {
+    stoppedByCaller = true;
+    reader.close();
+    child.stdout.destroy();
+    child.stderr.destroy();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      // A wedged engine can ignore SIGTERM, which would leave this awaiting
+      // `close` forever. Escalate once, and never hold the event loop open.
+      killTimer ??= setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, STREAM_TERMINATION_GRACE_MS).unref();
+    }
+  };
+  const onAbort = (): void => {
+    stopStreaming();
+  };
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  // Covers an abort that landed while dependencies were being verified above,
+  // after the pre-spawn check and before this listener existed.
+  if (isAbortedSignal(input.signal)) {
+    stopStreaming();
+  }
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr = truncateDiagnosticText(`${stderr}${chunk}`);
+  });
+  try {
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      let settled = false;
+      const settle = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        action();
+      };
+      child.once("error", (error) => {
+        settle(() => {
+          reject(error);
+        });
+      });
+      child.once("close", (code, signal) => {
+        settle(() => {
+          resolve({ code, signal });
+        });
+      });
+      reader.on("line", (line) => {
+        if (truncated || line.trim().length === 0) {
+          return;
+        }
+        lines += 1;
+        // Contain a throwing or rejecting consumer: an exception raised inside
+        // this readline handler would otherwise be uncaught and the awaited
+        // promise would never settle.
+        try {
+          const pending = input.onLine(line);
+          if (pending !== undefined) {
+            pending.catch((error: unknown) => {
+              settle(() => {
+                reject(error instanceof Error ? error : new Error(String(error)));
+              });
+            });
+          }
+        } catch (error) {
+          settle(() => {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          });
+          return;
+        }
+        if (lines >= input.maxLines) {
+          truncated = true;
+          stopStreaming();
+        }
+      });
+    });
+    return {
+      command: displayCommand,
+      lines,
+      truncated,
+      exitCode: exit.code,
+      terminatedBySignal: exit.signal,
+      stoppedByCaller,
+      stderr: redactedEvidenceText(stderr)
+    };
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+    stopStreaming();
+    if (killTimer !== undefined) {
+      clearTimeout(killTimer);
+    }
+  }
+}
+
+function isAbortedSignal(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
+/**
+ * Reports the local workflow-runner installation posture without mutating or
+ * upgrading anything, so `doctor` can explain a broken install offline.
+ */
+export function inspectSmithersInstallation(projectRoot: string): SmithersInstallationPosture {
+  const resolvedRoot = path.resolve(projectRoot);
+  const binPath = localSmithersExecutable(resolvedRoot);
+  let installedVersion: string | null = null;
+  let installedBinTarget: string | null = null;
+  try {
+    const packageJson = path.join(resolveInstalledSmithersPackageRoot(resolvedRoot), "package.json");
+    const metadata = JSON.parse(fs.readFileSync(packageJson, "utf8")) as unknown;
+    if (isObjectRecord(metadata)) {
+      installedVersion = typeof metadata.version === "string" ? metadata.version : null;
+      const bin = metadata.bin;
+      installedBinTarget = isObjectRecord(bin) && typeof bin.smithers === "string" ? bin.smithers : null;
+    }
+  } catch {
+    installedVersion = null;
+  }
+  return {
+    bundled_version: SMITHERS_ORCHESTRATOR_VERSION,
+    required_version: SMITHERS_ORCHESTRATOR_VERSION,
+    installed_version: installedVersion,
+    installed_bin_target: installedBinTarget,
+    bin_path: fs.existsSync(binPath) ? binPath : null,
+    layout_error: installedSmithersValidationError(resolvedRoot) ?? null,
+    compatibility_patches: inspectSmithersCompatibilityPatches(resolvedRoot)
+  };
+}
+
+function inspectSmithersCompatibilityPatches(
+  projectRoot: string
+): SmithersInstallationPosture["compatibility_patches"] {
+  const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
+  const packageRoots = [
+    path.join(nodeModules, "@smithers-orchestrator", "cli"),
+    path.join(nodeModules, "smithers-orchestrator", "node_modules", "@smithers-orchestrator", "cli")
+  ].filter((candidate) => fs.existsSync(candidate));
+  if (packageRoots.length !== 1) {
+    return { detached_admission: "unknown", supervisor_descriptor: "unknown" };
+  }
+  const packageRoot = packageRoots[0]!;
+  return {
+    detached_admission: patchPosture(
+      path.join(packageRoot, "src", "detached-admission.js"),
+      SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
+      SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
+    ),
+    supervisor_descriptor: patchPosture(
+      path.join(packageRoot, "src", "index.js"),
+      SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
+      SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
+    )
+  };
+}
+
+function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
+  if (!fs.existsSync(sourcePath)) {
+    return "unknown";
+  }
+  let contents: string;
+  try {
+    contents = fs.readFileSync(sourcePath, "utf8");
+  } catch {
+    // An unreadable source must degrade, not throw out of `doctor`.
+    return "unknown";
+  }
+  if (contents.includes(patched)) {
+    return "applied";
+  }
+  // The pinned release carries the exact shape Ultrafuzz patches, so a source
+  // with neither the patch nor the patchable shape has been modified or
+  // replaced. `applySmithers031CompatibilityPatches` throws in that state, so
+  // report it as incompatible rather than assuming an upstream fix.
+  return contents.includes(patchable) ? "missing" : "incompatible";
+}
+
+export function commandPayload(value: unknown): Record<string, unknown> | undefined {
+  if (!isObjectRecord(value)) {
+    return undefined;
+  }
+  return isObjectRecord(value.data) ? value.data : value;
 }
 
 export async function runSmithersLifecycleCommand(input: {
@@ -1774,7 +2063,7 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
-      prompt: task.renderedPromptPath === undefined ? "" : fs.readFileSync(task.renderedPromptPath, "utf8"),
+      prompt: "",
       promptPath:
         task.renderedPromptPath === undefined
           ? undefined

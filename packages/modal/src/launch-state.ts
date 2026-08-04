@@ -38,8 +38,8 @@ const modelSchema = z
   .object({
     slug: z.string().min(1),
     model: z.string().min(1),
-    provider: z.enum(["openai", "anthropic", "kimi"]),
-    agent: z.enum(["CodexAgent", "ClaudeAgent", "KimiAgent"]),
+    provider: z.enum(["openai", "anthropic", "deepseek", "kimi"]),
+    agent: z.enum(["CodexAgent", "ClaudeAgent", "DeepSeekAgent", "KimiAgent"]),
     reasoning: z.string().min(1),
     auth_mode: z.enum(["api-key", "subscription"])
   })

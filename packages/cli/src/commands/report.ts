@@ -2,16 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { Args, Command } from "@oclif/core";
-import {
-  assertNoSymlinkComponents,
-  assertPathInside,
-  assertRegularFileInside,
-  layoutForRunRoot,
-  validateSafeId
-} from "@ultrafuzz/artifacts";
+import { assertNoSymlinkComponents, assertPathInside, layoutForRunRoot, validateSafeId } from "@ultrafuzz/artifacts";
 import { runsRootForProject, type RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
 import { commandFailure, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
+import { reconcileReportArtifacts } from "../report-artifacts.js";
 
 type AccountingField = "tokens_used" | "estimated_spend";
 
@@ -35,7 +30,7 @@ export default class Report extends Command {
       const layout = layoutForRunRoot(path.join(runsRoot, runId), runId);
       assertPathInside(runsRoot, layout.root, "run root");
       assertNoSymlinkComponents(runsRoot, layout.root, "run root");
-      const written = findAgenticReport(layout.root);
+      const written = reconcileReportArtifacts(layout.root);
       const diagnostics = reportAccountingDiagnostics(layout.root, written);
       emitCommandResult(
         this,
@@ -58,40 +53,6 @@ export default class Report extends Command {
       );
     }
   }
-}
-
-function findAgenticReport(runRoot: string): {
-  markdown_path: string;
-  json_path: string;
-  source: "agentic-final-report";
-} {
-  for (const candidate of candidateReportDirs(runRoot)) {
-    const markdownPath = path.join(candidate, "report.md");
-    const jsonPath = path.join(candidate, "report.json");
-    if (fs.existsSync(markdownPath) && fs.existsSync(jsonPath)) {
-      assertRegularFileInside(runRoot, markdownPath, "report markdown path");
-      assertRegularFileInside(runRoot, jsonPath, "report JSON path");
-      return {
-        markdown_path: markdownPath,
-        json_path: jsonPath,
-        source: "agentic-final-report"
-      };
-    }
-  }
-  throw new Error("agent-written report artifacts are not available for this run");
-}
-
-function candidateReportDirs(runRoot: string): string[] {
-  const candidates = [path.join(runRoot, "artifacts", "final-report")];
-  const artifactsRoot = path.join(runRoot, "artifacts");
-  if (fs.existsSync(artifactsRoot)) {
-    for (const entry of fs.readdirSync(artifactsRoot, { withFileTypes: true })) {
-      if (entry.isDirectory() && entry.name.startsWith("final-report")) {
-        candidates.push(path.join(artifactsRoot, entry.name));
-      }
-    }
-  }
-  return Array.from(new Set(candidates));
 }
 
 function reportAccountingDiagnostics(

@@ -15,7 +15,7 @@ Two files split the configuration:
   provider, an endpoint, or an env var.
 - The `ultrafuzz.toml` `[eval]` section is per-environment: the default suite
   path, the machine-specific `ground_truth_root`, the active `provider`
-  (`braintrust | langsmith | none`), and `[eval.providers.<name>]` profiles
+  (`braintrust | none`), and `[eval.providers.<name>]` profiles
   holding credential env-var _names_.
 
 ```toml
@@ -109,7 +109,7 @@ credentials. Judge and reporter requests do not follow redirects.
 ## Publish Telemetry (Optional)
 
 ```bash
-ultrafuzz eval publish <eval-run-id> --provider langsmith
+ultrafuzz eval publish <eval-run-id> --provider braintrust
 ultrafuzz eval publish <eval-run-id> --resume
 ```
 
@@ -149,7 +149,8 @@ All three target rows run concurrently, while the four strategy nodes within
 each row use a smoke-only four-way workflow concurrency limit.
 
 The full lane uses every checked-in EVMBench target and runs GPT-5.6 Luna at
-`high`, Claude Sonnet 5 at `high`, and Kimi K3 at `max`. It also pins
+`high`, Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at
+`max`. It also pins
 `strategy_loops: 1`, while all three disable flags are `false`, so it retains
 the complete production topology with invariant tests, differential tests, and
 dynamic strategies. Both lanes default to one trial per variant and use the
@@ -158,7 +159,7 @@ into the normal `EvalSuiteSpec` and can project one runner for an isolated Modal
 pair while retaining the fixed judge.
 
 After a generation finishes and has been scored, append it and regenerate all
-six charts in one transaction:
+nine SVG charts in one transaction:
 
 ```bash
 ultrafuzz eval history <eval-run-id> \
@@ -214,7 +215,8 @@ and independent full dispatches can still overlap, so enforce provider and
 Modal budgets across all concurrent runs.
 
 A manual workflow dispatch launches the full EVMBench cohort instead, with
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max` by default. Its
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
+`max` by default. Its
 model and reasoning inputs can override all full-lane runners. Full runs only
 through that manual dispatch; pushes always select smoke. Both modes retain
 the standard Modal CPU and memory allocation. Smoke rows receive a
@@ -231,7 +233,7 @@ supplies the benchmark policy, and observations and regenerated charts stay
 keyed to that candidate commit. This compare-and-swap loop retains every
 complete generation without relying on a GitHub concurrency queue, which can
 discard a pending job. Its commit is restricted to `benchmarks/history.json`
-and the six `docs/assets/eval-history/*.svg` charts.
+and the nine `docs/assets/eval-history/*.svg` charts.
 
 Configure the App client ID as the `EVAL_HISTORY_APP_CLIENT_ID` Actions
 variable and its private key as the `EVAL_HISTORY_APP_PRIVATE_KEY` Actions

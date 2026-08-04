@@ -1,9 +1,11 @@
 export const SMITHERS_ORCHESTRATOR_VERSION = "0.31.0";
 export const SMITHERS_ORCHESTRATOR_BIN_PATH = "src/bin/smithers.js";
 export const SMITHERS_EFFECT_VERSION = "3.21.4";
+export const KIMI_CODE_VERSION = "0.29.1";
 
 const REQUIRED_SMITHERS_DEPENDENCIES = {
   dependencies: {
+    "@moonshot-ai/kimi-code": KIMI_CODE_VERSION,
     "smithers-orchestrator": SMITHERS_ORCHESTRATOR_VERSION,
     zod: "4.4.3"
   },

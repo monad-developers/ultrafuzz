@@ -11,9 +11,12 @@ import {
 import {
   EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION,
   EVAL_HISTORY_SCHEMA_VERSION,
+  aggregateEvalHistoryBenchmarkRuns,
+  aggregateEvalHistoryModelPerformanceCost,
   assertPublicBenchmarkGeneration,
   createEvalHistoryObservations,
   emptyEvalHistory,
+  formatEvalHistoryJson,
   mergeEvalHistory,
   parseEvalHistory,
   renderEvalHistoryCharts,
@@ -56,6 +59,7 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     recall: 0.5,
     f1: 0.6,
     cumulative_unique_true_positives: 2,
+    ground_truth_bug_count: 2,
     wall_clock_seconds: 120,
     wall_clock_completeness: { status: "complete", reasons: [] },
     cost_usd: 1.25,
@@ -83,6 +87,35 @@ function observation(overrides: Partial<EvalHistoryObservation> = {}): EvalHisto
     source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/1",
     ...overrides
   };
+}
+
+const TARGET_B_REVISION = "4444444444444444444444444444444444444444";
+const AGGREGATE_TARGET_REVISIONS = [
+  { target: "target-a", revision: TARGET_REVISION },
+  { target: "target-b", revision: TARGET_B_REVISION }
+];
+
+function cohortObservation(
+  target: "target-a" | "target-b",
+  overrides: Partial<EvalHistoryObservation> = {}
+): EvalHistoryObservation {
+  const base = observation();
+  const revision = target === "target-a" ? TARGET_REVISION : TARGET_B_REVISION;
+  return observation({
+    id: `run-1:${target}:baseline:benchmark-smoke`,
+    benchmark: "ultrafuzz-bench",
+    target,
+    target_revisions: AGGREGATE_TARGET_REVISIONS,
+    cumulative_unique_true_positives: target === "target-a" ? 1 : 2,
+    ground_truth_bug_count: target === "target-a" ? 2 : 4,
+    target_publication: {
+      ...base.target_publication!,
+      target,
+      revision,
+      repository: `https://example.com/${target}`
+    },
+    ...overrides
+  });
 }
 
 function rowScore(rowId: string, overrides: Partial<EvalRowScore> = {}): EvalRowScore {
@@ -197,20 +230,30 @@ function summary(rows: EvalRowScore[]): EvalScoreSummary {
   };
 }
 
-function publicDiagnostics(matrix: EvalMatrixRow[], genuineFailureRows: ReadonlySet<string> = new Set()) {
+function publicDiagnostics(
+  matrix: EvalMatrixRow[],
+  genuineFailureRows: ReadonlySet<string> = new Set(),
+  failedDatapointRows: ReadonlySet<string> = new Set()
+) {
   const first = matrix[0]!;
   const rows = matrix.map((row, index) => {
     const genuineFailure = genuineFailureRows.has(row.id);
+    const failedDatapoint = failedDatapointRows.has(row.id);
+    const failed = genuineFailure || failedDatapoint;
     return {
       row_id: row.id,
       target_id: row.target_id,
       variant_id: row.variant_id,
       trial_id: row.trial_id,
       run_status: "launched",
-      final_status: genuineFailure ? "failed" : "succeeded",
-      workflow_status: genuineFailure ? "failed" : "succeeded",
+      final_status: failed ? "failed" : "succeeded",
+      workflow_status: failed ? "failed" : "succeeded",
       workflow_terminal: true,
-      terminal_disposition: genuineFailure ? "genuine-task-failures" : "clean",
+      terminal_disposition: genuineFailure
+        ? "genuine-task-failures"
+        : failedDatapoint
+          ? "operational-failure"
+          : "clean",
       terminal_report_present: true,
       workflow_ids: [`workflow-${index + 1}`],
       diagnostic_codes: [],
@@ -265,6 +308,15 @@ describe("longitudinal eval history", () => {
     expect(() => mergeEvalHistory(once, [{ ...first, precision: 0.5 }])).toThrowError(
       expect.objectContaining({ code: "EVAL_HISTORY_CONFLICT" })
     );
+
+    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
+      schema_version: "ultrafuzz.eval.history.observation.v2"
+    });
+    const publishedHistory = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [publishedV2]
+    });
+    expect(mergeEvalHistory(publishedHistory, [publishedV2])).toEqual(publishedHistory);
   });
 
   it("preserves historical multi-trial observations without applying current lane defaults", () => {
@@ -293,6 +345,7 @@ describe("longitudinal eval history", () => {
       graded_case_count: _gradedCaseCount,
       publication_url: _publicationUrl,
       target_publication: _targetPublication,
+      ground_truth_bug_count: _groundTruthBugCount,
       ...legacy
     } = observation({ schema_version: "ultrafuzz.eval.history.observation.v1" });
     const parsed = parseEvalHistory({
@@ -300,6 +353,65 @@ describe("longitudinal eval history", () => {
       observations: [legacy]
     });
     expect(parsed.observations).toEqual([legacy]);
+  });
+
+  it("preserves published v2 observations without ground-truth counts", () => {
+    const { ground_truth_bug_count: _groundTruthBugCount, ...publishedV2 } = observation({
+      schema_version: "ultrafuzz.eval.history.observation.v2"
+    });
+    const parsed = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [publishedV2]
+    });
+    expect(parsed.observations).toEqual([publishedV2]);
+  });
+
+  it("requires ground-truth counts for current observations and bounds unique matches", () => {
+    const { ground_truth_bug_count: _groundTruthBugCount, ...missingGroundTruth } = observation();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [missingGroundTruth]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [observation({ cumulative_unique_true_positives: 3, ground_truth_bug_count: 2 })]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [observation({ cumulative_unique_true_positives: 0, ground_truth_bug_count: 0 })]
+      })
+    ).not.toThrow();
+  });
+
+  it("versions failed publication statuses without widening older observations", () => {
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).not.toThrow();
+    expect(() =>
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          observation({
+            schema_version: "ultrafuzz.eval.history.observation.v3",
+            status: "failed",
+            target_publication: { ...observation().target_publication!, status: "failed" }
+          })
+        ]
+      })
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_INVALID" }));
   });
 
   it("rejects malformed history and inconsistent completeness", () => {
@@ -402,6 +514,7 @@ describe("longitudinal eval history", () => {
       recall: 0.75,
       f1: 0.75,
       cumulative_unique_true_positives: 2,
+      ground_truth_bug_count: 2,
       wall_clock_seconds: 100,
       cost_usd: 0.75,
       executed_case_count: 2,
@@ -427,6 +540,37 @@ describe("longitudinal eval history", () => {
         }
       }
     });
+
+    const zeroGroundTruthRows = [first, second].map((row) =>
+      rowScore(row.id, {
+        trial_id: row.trial_id,
+        ground_truth_bug_count: 0,
+        finding_count: 0,
+        true_positives: 0,
+        missed: 0,
+        precision: 0,
+        recall: 0,
+        f1_score: 0,
+        full_match_rate: 0
+      })
+    );
+    expect(
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: summary(zeroGroundTruthRows),
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set<string>()],
+          [second.id, new Set<string>()]
+        ])
+      })
+    ).toMatchObject([{ ground_truth_bug_count: 0, cumulative_unique_true_positives: 0 }]);
 
     const recovered = summary([
       rowScore(first.id),
@@ -551,6 +695,25 @@ describe("longitudinal eval history", () => {
         publicEvalDiagnostics: genuineFailureDiagnostics
       })
     ).toMatchObject([{ status: "genuine-task-failures", target_publication: { status: "genuine-task-failures" } }]);
+    const failedDatapointDiagnostics = publicDiagnostics([first, second], new Set(), new Set([second.id]));
+    expect(
+      createEvalHistoryObservations({
+        benchmark: "evmbench",
+        lane: "smoke",
+        runTimestamp: "2026-07-19T00:00:00Z",
+        candidateRepositoryUrl: "https://github.com/monad-developers/ultrafuzz",
+        sourceArtifact: "artifact-1",
+        publicationUrl: PUBLICATION_URL,
+        suite,
+        matrix: [first, second],
+        summary: summary(rows),
+        matchedGroundTruthByRow: new Map([
+          [first.id, new Set(["bug-a"])],
+          [second.id, new Set<string>()]
+        ]),
+        publicEvalDiagnostics: failedDatapointDiagnostics
+      })
+    ).toMatchObject([{ status: "failed", target_publication: { status: "failed" } }]);
     expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",
@@ -636,6 +799,7 @@ describe("longitudinal eval history", () => {
       schema_version: EVAL_HISTORY_SCHEMA_VERSION,
       observations: [
         observation({
+          benchmark: "ultrafuzz-bench",
           wall_clock_seconds: null,
           wall_clock_completeness: { status: "unavailable", reasons: ["workflow-state-unavailable"] },
           cost_usd: null,
@@ -654,9 +818,259 @@ describe("longitudinal eval history", () => {
     expect(first.get("precision.svg")).toContain(">target-a</text>");
     expect(first.get("wall-clock-time.svg")).toContain('data-status="unavailable"');
     expect(first.get("wall-clock-time.svg")).toContain(`>n/a ${CANDIDATE.slice(0, 7)}<`);
+    expect(first.get("latest-summary.svg")).toContain("Score (macro-F1)");
+    expect(first.get("latest-summary.svg")).toContain(">n/a</text>");
+    expect(first.get("quality.svg")).toContain('data-metric="f1"');
   });
 
-  it("keeps changed cohorts and execution policies in separate chart series", () => {
+  it("aggregates only complete target cohorts with macro quality and parallel efficiency semantics", () => {
+    const targetA = cohortObservation("target-a", {
+      precision: 0.5,
+      recall: 0.5,
+      f1: 0.5,
+      wall_clock_seconds: 120,
+      cost_usd: 1.25
+    });
+    const targetB = cohortObservation("target-b", {
+      precision: 1,
+      recall: 0.25,
+      f1: 0.4,
+      wall_clock_seconds: 180,
+      cost_usd: 2
+    });
+
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA])).toEqual([]);
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA, { ...targetA, id: "duplicate-target-a" }])).toEqual([]);
+    expect(aggregateEvalHistoryBenchmarkRuns([targetA, targetB])).toMatchObject([
+      {
+        target_count: 2,
+        precision: 0.75,
+        recall: 0.375,
+        f1: 0.45,
+        cumulative_unique_true_positives: 3,
+        ground_truth_bug_count: 6,
+        wall_clock_seconds: 180,
+        cost_usd: 3.25
+      }
+    ]);
+  });
+
+  it("plots current-price model medians with Type-7 cost and F1 IQRs", () => {
+    const completeRun = (input: {
+      id: string;
+      timestamp: string;
+      commitCharacter: string;
+      model: string;
+      f1: number;
+      costUsd: number | null;
+    }): EvalHistoryObservation[] =>
+      (["target-a", "target-b"] as const).map((target) =>
+        cohortObservation(target, {
+          id: `${input.id}:${target}:benchmark-smoke`,
+          source_eval_run_id: input.id,
+          run_timestamp: input.timestamp,
+          candidate_commit: input.commitCharacter.repeat(40),
+          variant: `benchmark-smoke-${input.model}`,
+          model_profile: `benchmark-smoke-${input.model}`,
+          model: input.model,
+          f1: input.f1,
+          cost_usd: input.costUsd === null ? null : input.costUsd / 2,
+          cost_completeness:
+            input.costUsd === null
+              ? { status: "unavailable", reasons: ["accounting-unavailable"] }
+              : { status: "complete", reasons: [] }
+        })
+      );
+    const lunaRuns = [
+      ["old-luna", "2026-07-30T23:23:30.883Z", "1", 0.9, 100],
+      ["luna-1", "2026-07-31T14:52:13.635Z", "2", 0.1, 10],
+      ["luna-2", "2026-07-31T15:52:13.635Z", "3", 0.2, 12],
+      ["luna-3", "2026-07-31T16:52:13.635Z", "4", 0.3, 14],
+      ["luna-4", "2026-07-31T17:52:13.635Z", "5", 0.4, 16],
+      ["luna-5", "2026-07-31T18:52:13.635Z", "6", 0.5, 18],
+      ["luna-6", "2026-07-31T19:52:13.635Z", "7", 0.6, 20]
+    ] as const;
+    const observations = [
+      ...lunaRuns.flatMap(([id, timestamp, commitCharacter, f1, costUsd]) =>
+        completeRun({ id, timestamp, commitCharacter, model: "gpt-5.6-luna", f1, costUsd })
+      ),
+      ...completeRun({
+        id: "deepseek",
+        timestamp: "2026-08-01T00:00:00.000Z",
+        commitCharacter: "8",
+        model: "deepseek-v4-pro",
+        f1: 0.1,
+        costUsd: 1.25
+      }),
+      ...completeRun({
+        id: "kimi",
+        timestamp: "2026-08-02T00:00:00.000Z",
+        commitCharacter: "9",
+        model: "kimi-k3",
+        f1: 0.4,
+        costUsd: null
+      })
+    ];
+    const summaries = aggregateEvalHistoryModelPerformanceCost(aggregateEvalHistoryBenchmarkRuns(observations));
+
+    expect(summaries).toMatchObject([
+      {
+        model: "deepseek-v4-pro",
+        runCount: 1,
+        costUsd: { q1: 1.25, median: 1.25, q3: 1.25 },
+        f1: { q1: 0.1, median: 0.1, q3: 0.1 }
+      },
+      {
+        model: "gpt-5.6-luna",
+        runCount: 6,
+        firstRunTimestamp: "2026-07-31T14:52:13.635Z",
+        costUsd: { q1: 12.5, median: 15, q3: 17.5 },
+        f1: { q1: 0.225, median: 0.35, q3: 0.475 }
+      }
+    ]);
+
+    const svg = renderEvalHistoryCharts(
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+    ).get("performance-cost.svg")!;
+    expect(svg).toContain('data-model="gpt-5.6-luna" data-run-count="6"');
+    expect(svg).toContain('data-cost-q1="12.5" data-cost-median="15" data-cost-q3="17.5"');
+    expect(svg).toContain('data-f1-q1="0.225" data-f1-median="0.35" data-f1-q3="0.475"');
+    expect(svg).toContain("Not plotted · kimi-k3 · median 40.0% · n=1 · cost unavailable");
+    const deepseek = /<g data-model="deepseek-v4-pro"[\s\S]+?<\/g>/u.exec(svg)?.[0];
+    expect(deepseek).toBeDefined();
+    expect(deepseek).not.toContain('data-iqr="');
+
+    const currentUnpricedLuna = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [
+          ...completeRun({
+            id: "old-priced-luna",
+            timestamp: "2026-07-30T23:23:30.883Z",
+            commitCharacter: "a",
+            model: "gpt-5.6-luna",
+            f1: 0.9,
+            costUsd: 100
+          }),
+          ...completeRun({
+            id: "current-unpriced-luna",
+            timestamp: "2026-07-31T14:52:13.635Z",
+            commitCharacter: "b",
+            model: "gpt-5.6-luna",
+            f1: 0.2,
+            costUsd: null
+          })
+        ]
+      })
+    ).get("performance-cost.svg")!;
+    expect(currentUnpricedLuna).toContain("Not plotted · gpt-5.6-luna · median 20.0% · n=1 · cost unavailable");
+    expect(currentUnpricedLuna).not.toContain("median 55.0% · n=2");
+  });
+
+  it("renders one complete-run overview and breaks quality lines when lineage changes", () => {
+    const firstRun = (["target-a", "target-b"] as const).map((target) => cohortObservation(target));
+    const secondRun = (["target-a", "target-b"] as const).map((target) =>
+      cohortObservation(target, {
+        id: `run-2:${target}:baseline:benchmark-smoke`,
+        source_eval_run_id: "run-2",
+        source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/2",
+        candidate_commit: "3333333333333333333333333333333333333333",
+        run_timestamp: "2026-07-20T00:00:00.000Z"
+      })
+    );
+    const thirdRun = (["target-a", "target-b"] as const).map((target) =>
+      cohortObservation(target, {
+        id: `run-3:${target}:baseline:benchmark-smoke`,
+        source_eval_run_id: "run-3",
+        source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/3",
+        candidate_commit: "5555555555555555555555555555555555555555",
+        run_timestamp: "2026-07-21T00:00:00.000Z",
+        execution_policy_fingerprint: `sha256:${"e".repeat(64)}`
+      })
+    );
+    const thirdRunAlternateProfile = (["target-a", "target-b"] as const).map((target) =>
+      cohortObservation(target, {
+        id: `run-3:${target}:benchmark-full-kimi-k3-max`,
+        source_eval_run_id: "run-3",
+        source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/3",
+        candidate_commit: "5555555555555555555555555555555555555555",
+        run_timestamp: "2026-07-21T00:00:00.000Z",
+        execution_policy_fingerprint: `sha256:${"e".repeat(64)}`,
+        variant: "benchmark-full-kimi-k3-max",
+        model_profile: "benchmark-full-kimi-k3-max",
+        model: "kimi-k3",
+        reasoning_effort: "max"
+      })
+    );
+    const charts = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations: [...firstRun, ...secondRun, ...thirdRun, ...thirdRunAlternateProfile]
+      })
+    );
+    const quality = charts.get("quality.svg")!;
+    const summary = charts.get("latest-summary.svg")!;
+
+    expect(quality.match(/<polyline data-metric=/gu)).toHaveLength(1);
+    expect(quality).toContain('data-metric="f1"');
+    expect(quality).not.toContain('data-metric="precision"');
+    expect(quality).not.toContain('data-metric="recall"');
+    expect(quality).toContain('stroke-width="4"');
+    expect(quality).toContain("solid lines are comparable");
+    expect(quality).toContain('<circle data-metric="f1" data-profile="benchmark-smoke" fill="#2563eb"');
+    expect(quality).toContain('<rect data-metric="f1" data-profile="benchmark-full-kimi-k3-max" fill="#c2410c"');
+    expect(summary).toContain("2 model profiles");
+    expect(summary).not.toContain(">Precision</text>");
+    expect(summary).not.toContain(">Recall</text>");
+    expect(summary).toContain("gpt-5.6-luna · high");
+    expect(summary).toContain("kimi-k3 · max");
+    expect(summary.match(/3 \/ 6/gu)).toHaveLength(2);
+    expect(summary).toContain("$2.50");
+    expect(summary).toContain("2m 0s");
+  });
+
+  it("renders visual guides across per-candidate scoring identities and bounds recent runs", () => {
+    const commits = "0123456789abc".split("").map((character) => character.repeat(40));
+    const observations = commits.flatMap((candidateCommit, index) =>
+      (["target-a", "target-b"] as const).map((target) =>
+        cohortObservation(target, {
+          id: `run-${index}:${target}:baseline:benchmark-smoke`,
+          source_eval_run_id: `run-${index}`,
+          source_artifact: `https://github.com/monad-developers/ultrafuzz/actions/runs/${index}`,
+          candidate_commit: candidateCommit,
+          run_timestamp: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+          scoring_fingerprint: `sha256:${candidateCommit[0]!.repeat(64)}`
+        })
+      )
+    );
+    const quality = renderEvalHistoryCharts(
+      parseEvalHistory({ schema_version: EVAL_HISTORY_SCHEMA_VERSION, observations })
+    ).get("quality.svg")!;
+
+    expect(quality).toContain("latest 12 of 13 complete runs");
+    expect(quality).not.toContain(commits[0]!.slice(0, 7));
+    expect(quality).not.toContain("<polyline data-metric=");
+    expect(quality.match(/data-continuity="scoring-change"/gu)).toHaveLength(11);
+    expect(quality).toContain("Scoring identity changed (visual guide only)");
+  });
+
+  it("formats published history JSON compatibly with repository Prettier checks", () => {
+    const history = parseEvalHistory({
+      schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+      observations: [
+        observation({
+          cost_usd: null,
+          cost_completeness: { status: "unavailable", reasons: ["accounting-unavailable"] }
+        })
+      ]
+    });
+    const formatted = formatEvalHistoryJson(history);
+
+    expect(formatted).toContain('"reasons": ["accounting-unavailable"]');
+    expect(parseEvalHistory(JSON.parse(formatted))).toEqual(history);
+  });
+
+  it("renders changed cohorts and execution policies as lineage markers instead of chart series", () => {
     const svg = renderEvalHistoryCharts(
       parseEvalHistory({
         schema_version: EVAL_HISTORY_SCHEMA_VERSION,
@@ -672,8 +1086,11 @@ describe("longitudinal eval history", () => {
       })
     ).get("precision.svg")!;
 
-    expect(svg).toContain("cohort-aaaaaaaa policy-dddddddd");
-    expect(svg).toContain("cohort-cccccccc policy-eeeeeeee");
+    expect(svg.match(/<polyline /gu)).toHaveLength(1);
+    expect(svg).toContain('data-lineage-marker="cohort-aaaaaaaa"');
+    expect(svg).toContain('data-lineage-marker="cohort-cccccccc"');
+    expect(svg).not.toContain(">cohort-aaaaaaaa policy-dddddddd target-a</text>");
+    expect(svg).not.toContain(">cohort-cccccccc policy-eeeeeeee target-a</text>");
   });
 
   it("labels the globally earliest and latest dates across series", () => {
@@ -693,6 +1110,34 @@ describe("longitudinal eval history", () => {
     );
     const svg = charts.get("precision.svg")!;
     expect(svg.indexOf(">2026-07-17</text>")).toBeLessThan(svg.indexOf(">2026-07-19</text>"));
+  });
+
+  it("uses evenly spaced run columns and rotates date labels below the x axis", () => {
+    const observations = [0, 1, 2].map((index) =>
+      observation({
+        id: `run-${index}`,
+        candidate_commit: `${index + 1}`.repeat(40),
+        run_timestamp: ["2026-07-17T00:00:00.000Z", "2026-07-29T00:00:00.000Z", "2026-07-30T00:00:00.000Z"][index]!,
+        precision: 0.25 + index * 0.1
+      })
+    );
+    const svg = renderEvalHistoryCharts(
+      parseEvalHistory({
+        schema_version: EVAL_HISTORY_SCHEMA_VERSION,
+        observations
+      })
+    ).get("precision.svg")!;
+
+    const match = /<polyline[^>]+points="([^"]+)"/u.exec(svg);
+    expect(match).not.toBeNull();
+    const polylinePoints = match?.[1];
+    expect(polylinePoints).toBeDefined();
+    if (polylinePoints === undefined) throw new Error("missing polyline points");
+    const xCoordinates = polylinePoints.split(" ").map((point) => Number(point.split(",")[0]!));
+    expect(xCoordinates).toHaveLength(3);
+    expect(xCoordinates[1]! - xCoordinates[0]!).toBeCloseTo(xCoordinates[2]! - xCoordinates[1]!, 5);
+    expect(svg).toContain("rotate(-90)");
+    expect(svg).toContain(">2026-07-29</text>");
   });
 });
 

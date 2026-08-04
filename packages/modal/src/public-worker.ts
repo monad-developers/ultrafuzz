@@ -14,6 +14,7 @@ import {
   boundedEvalId,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
+  publicEvalDiagnosticsFailedTargetCount,
   resolveTerminalReportPath,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
@@ -213,7 +214,9 @@ export async function runPublicBenchmarkWorker(input: {
           cause: checkpoint.runError ?? new Error("public-eval-not-ready-for-scoring")
         });
       }
-      if (checkpoint.runError !== undefined) throw checkpoint.runError;
+      if (checkpoint.runError !== undefined && !publicEvalRunErrorCanBePublished(checkpoint.diagnostics)) {
+        throw checkpoint.runError;
+      }
       const judgeKeyEnv = input.config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY";
       await runCommand(
         ["node", CLI, "eval", "score", prepared.evalRunId, "--project", prepared.controlRoot, "--llm-judge", "--json"],
@@ -278,6 +281,10 @@ export function publicBenchmarkWorkRoot(dataRoot: string): string {
 
 export function publicEvalRunId(runId: string, modelSlug: string): string {
   return boundedEvalId([runId, modelSlug], PUBLIC_EVAL_RUN_ID_MAX_LENGTH);
+}
+
+export function publicEvalRunErrorCanBePublished(diagnostics: PublicEvalDiagnostics): boolean {
+  return diagnostics.summary.scoring_ready && publicEvalDiagnosticsFailedTargetCount(diagnostics.rows) === 1;
 }
 
 export function publicBenchmarkMaxParallelEvalRows(lane: "smoke" | "full"): number {
@@ -770,13 +777,15 @@ export function publicBundleSources(
   }
   for (const row of matrix as Array<{ id: string }>) {
     const record = finalRecordsByRow.get(row.id);
+    const terminalDisposition = record === undefined ? undefined : publicEvalRecordTerminalDisposition(record);
+    const failedDatapoint =
+      record?.final_status === "failed" &&
+      record.workflow?.status === "failed" &&
+      ["genuine-task-failures", "operational-failure"].includes(terminalDisposition ?? "");
     const scoreable =
       record !== undefined &&
       record.workflow?.terminal === true &&
-      ((record.final_status === "succeeded" && record.workflow.status === "succeeded") ||
-        (record.final_status === "failed" &&
-          record.workflow.status === "failed" &&
-          publicEvalRecordTerminalDisposition(record) === "genuine-task-failures"));
+      ((record.final_status === "succeeded" && record.workflow.status === "succeeded") || failedDatapoint);
     if (!scoreable) {
       throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
@@ -787,10 +796,17 @@ export function publicBundleSources(
     if (report === undefined || record.ultrafuzz_run_root === undefined) {
       throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
     }
+    const reportFindingsSource = path.join(path.dirname(report), "findings.normalized.json");
+    const smokeFindingsSource = path.join(
+      record.ultrafuzz_run_root,
+      "artifacts",
+      "dedupe-findings",
+      "deduped-findings.json"
+    );
     const normalizedFindingsSource =
-      lane === "smoke"
-        ? path.join(record.ultrafuzz_run_root, "artifacts", "dedupe-findings", "deduped-findings.json")
-        : path.join(path.dirname(report), "findings.normalized.json");
+      lane === "smoke" && (!failedDatapoint || fs.existsSync(smokeFindingsSource))
+        ? smokeFindingsSource
+        : reportFindingsSource;
     const candidates = [
       { name: "report.json", source: report },
       { name: "report.md", source: path.join(path.dirname(report), "report.md") },

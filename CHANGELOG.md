@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Adds first-class DeepSeek V4 Pro support through DeepSeek's official Claude
+  Code endpoint, including cache-aware token telemetry, first-party pricing,
+  Modal benchmark plumbing, and public benchmark coverage (#163).
+- Fixes Kimi token accounting so UltrafuzzBench publishes tokens and an API-comparison cost for Kimi runs, and pins Kimi model pricing to the Moonshot provider (#162).
+
 ## v0.0.4
 
 - Adds eval suites with a provider-agnostic `EvalReporter` and first-class node telemetry (#17).

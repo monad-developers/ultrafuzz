@@ -27,6 +27,9 @@ describe("runtime-only subscription auth", () => {
     );
     expect(localSubscriptionAuthPath("kimi", {}, "/home/example")).toBe(path.join("/home/example", ".kimi-code"));
     expect(localSubscriptionAuthPath("kimi", { KIMI_CODE_HOME: "/secure/kimi" }, "/unused")).toBe("/secure/kimi");
+    expect(() => localSubscriptionAuthPath("deepseek", {}, "/home/example")).toThrow(
+      /does not support subscription authentication/u
+    );
   });
 
   it("copies subscription credentials to ephemeral run paths only", () => {
@@ -70,11 +73,13 @@ describe("runtime-only subscription auth", () => {
 
   it("does not stage auth files for API-key models", () => {
     expect(subscriptionAuthCopy({ provider: "openai", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
+    expect(subscriptionAuthCopy({ provider: "deepseek", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
     expect(subscriptionAuthCopy({ provider: "kimi", auth_mode: "api-key" }, {}, "/home/example")).toBeUndefined();
   });
 
   it("accepts Kimi or Moonshot API keys for Kimi workers", () => {
     expect(runnerApiKeySourceEnv("openai")).toEqual(["OPENAI_API_KEY"]);
+    expect(runnerApiKeySourceEnv("deepseek")).toEqual(["DEEPSEEK_API_KEY"]);
     expect(runnerApiKeySourceEnv("kimi")).toEqual(["KIMI_API_KEY", "MOONSHOT_API_KEY"]);
   });
 
@@ -475,6 +480,7 @@ model = "unrelated"
     expect(snapshotConfig).toContain('default_model = "kimi-k3"');
     expect(snapshotConfig).toContain("[models.kimi-k3]");
     expect(snapshotConfig).toContain('model = "k3"');
+    expect(snapshotConfig).toMatch(/support_efforts\s*=\s*\[\s*"low",\s*"high",\s*"max"\s*\]/u);
     expect(snapshotConfig).not.toContain("kimi-code/k3");
     await prepared?.cleanup?.();
   });

@@ -249,6 +249,40 @@ describe("public benchmark manifests", () => {
         }
       }
     });
+
+    const smokeDeepSeekOverride = {
+      id: "workflow-smoke-deepseek-v4-pro-max",
+      agent: "DeepSeekAgent" as const,
+      model: "deepseek-v4-pro",
+      reasoning: "max"
+    };
+    const smokeDeepSeekSuite = adaptBenchmarkManifestToEvalSuite({
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      cohort: smokeCohort,
+      lanes,
+      runnerModelProfileOverride: smokeDeepSeekOverride
+    });
+    expect(smokeDeepSeekSuite.model_profiles[smokeDeepSeekOverride.id]).toEqual({
+      agent: "DeepSeekAgent",
+      model: "deepseek-v4-pro",
+      reasoning: "max"
+    });
+    expect(
+      benchmarkModelProfileOverrides(
+        { workflow_input: smokeDeepSeekSuite.variants[0]?.workflow_input },
+        smokeDeepSeekSuite.model_profiles[smokeDeepSeekOverride.id]
+      )
+    ).toEqual({
+      runtimeOverrides: {
+        models: {
+          profiles: {
+            benchmark: { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" },
+            "smoke-coordination": { agent: "DeepSeekAgent", model: "deepseek-v4-pro", reasoning: "max" }
+          }
+        }
+      }
+    });
   });
 
   it("uses every supported target and every pinned profile in the full lane", () => {
@@ -260,7 +294,8 @@ describe("public benchmark manifests", () => {
     expect(suite.variants.map((variant) => variant.runner_model_profile)).toEqual([
       "benchmark-full-gpt-5-6-luna-high",
       "benchmark-full-claude-sonnet-5-high",
-      "benchmark-full-kimi-k3-max"
+      "benchmark-full-kimi-k3-max",
+      "benchmark-full-deepseek-v4-pro-max"
     ]);
     expect(suite.variants.every((variant) => variant.judge_model_profile === lanes.full.judge_profile.id)).toBe(true);
     expect(suite.run.trials_per_variant).toBe(1);

@@ -1,7 +1,7 @@
 # Resume, Replay, Or Fork Runs
 
 Use `resume`, `replay`, and `fork` to operate on the linked workflow run after
-Ultrafuzz performs product checks.
+Ultrafuzz performs product checks. Use `cancel` when a run should stop for good.
 
 ## Find The Run
 
@@ -17,6 +17,22 @@ Run evidence lives under:
 ```
 
 `inspect` shows product evidence and the linked workflow identity.
+
+## Decide What To Do
+
+Before resuming, replaying, or forking, find out what actually stopped the run:
+
+```bash
+ultrafuzz status <run-id> --project /path/to/target-protocol
+ultrafuzz why <run-id> --project /path/to/target-protocol
+ultrafuzz events <run-id> --project /path/to/target-protocol --since 30m
+ultrafuzz node <run-id> <node-id> --project /path/to/target-protocol --attempts
+```
+
+`why` names the blockers and the action that clears each one. `events` shows the
+linked workflow lifecycle log, which is separate from Ultrafuzz's own product
+`events.jsonl`. `node` expands one node's attempts, retries, and timing; tool
+payloads require an explicit `--tools`.
 
 ## Resume A Linked Run
 
@@ -69,13 +85,32 @@ Use fork when you want a derived linked workflow from a checkpoint or reset
 point:
 
 ```bash
+ultrafuzz timeline <run-id> --project /path/to/target-protocol
 ultrafuzz fork <run-id> --project /path/to/target-protocol --label retry-triage
 ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12
 ultrafuzz fork <run-id> --project /path/to/target-protocol --reset-node triage --max-concurrency 4
 ```
 
+`timeline` lists the checkpoint frame numbers `--frame` accepts, and
+`ultrafuzz snapshots <run-id>` lists the durability and workspace checkpoints
+behind recovery. Both are read-only.
+
 Fork delegates to the workflow engine after product checks and persists the
 new linked workflow identity or lifecycle evidence.
+
+## Cancel A Linked Run
+
+Cancellation is terminal, unlike pause:
+
+```bash
+ultrafuzz cancel <run-id> --project /path/to/target-protocol
+```
+
+The engine accepts a durable cancellation request before the run stops, so the
+command distinguishes the two. A submitted request reports `cancel-requested`
+and leaves the product run nonterminal; a confirmed cancellation records the
+canonical terminal `canceled` state. Rerun `cancel` to confirm a request that
+was still in flight.
 
 ## When To Start Fresh
 

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { graphFromPlannedGraph } from "../src/reporter.js";
 import { BraintrustReporter } from "../src/reporters/braintrust.js";
 import { boundedResponseText } from "../src/reporters/http.js";
-import { LangSmithReporter, dottedOrderSegment } from "../src/reporters/langsmith.js";
 import {
   EVAL_PROVIDER_NONE,
   createEvalReporters,
@@ -56,28 +55,23 @@ const EVAL_CONFIG = {
   provider: "braintrust",
   evalConfig: ".ultrafuzz/evals/bug-finding.yml",
   providers: {
-    braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", project: "ultrafuzz-evals" },
-    langsmith: {
-      apiKeyEnv: "LANGSMITH_API_KEY",
-      workspaceIdEnv: "LANGSMITH_WORKSPACE_ID",
-      project: "ultrafuzz-evals"
-    }
+    braintrust: { apiKeyEnv: "BRAINTRUST_API_KEY", project: "ultrafuzz-evals" }
   }
 };
 
 describe("provider resolution", () => {
   it("applies CLI > env > toml precedence", () => {
     expect(resolveEvalProvider({ env: {}, evalConfig: EVAL_CONFIG }).provider).toBe("braintrust");
-    expect(
-      resolveEvalProvider({ env: { ULTRAFUZZ_EVAL_PROVIDER: "langsmith" }, evalConfig: EVAL_CONFIG }).provider
-    ).toBe("langsmith");
+    expect(resolveEvalProvider({ env: { ULTRAFUZZ_EVAL_PROVIDER: "none" }, evalConfig: EVAL_CONFIG }).provider).toBe(
+      EVAL_PROVIDER_NONE
+    );
     expect(
       resolveEvalProvider({
-        cliProvider: "none",
-        env: { ULTRAFUZZ_EVAL_PROVIDER: "langsmith" },
+        cliProvider: "braintrust",
+        env: { ULTRAFUZZ_EVAL_PROVIDER: "none" },
         evalConfig: EVAL_CONFIG
       }).provider
-    ).toBe(EVAL_PROVIDER_NONE);
+    ).toBe("braintrust");
   });
 
   it("fails on unknown providers and missing profiles at plan time", () => {
@@ -170,17 +164,6 @@ describe("provider resolution", () => {
       fetchImpl: fakeFetch().fetchImpl
     });
     expect(custom.map((reporter) => reporter.name)).toEqual(["braintrust"]);
-
-    expect(
-      () =>
-        new LangSmithReporter({
-          apiKey: "secret",
-          project: "ultrafuzz-evals",
-          evalRunId: "eval-1",
-          policy,
-          endpoint: "http://api.smith.langchain.com"
-        })
-    ).toThrowError(expect.objectContaining({ code: "EVAL_PROVIDER_ENDPOINT_INVALID" }));
   });
 });
 
@@ -430,157 +413,5 @@ describe("BraintrustReporter", () => {
       },
       output: { status: "succeeded", findings_count: 3 }
     });
-  });
-});
-
-describe("LangSmithReporter", () => {
-  it("creates live runs on node-started and patches them on node-finished", async () => {
-    const { requests, fetchImpl } = fakeFetch();
-    const suite = testSuite("/tmp/gt");
-    const row = testRow(suite);
-    const reporter = new LangSmithReporter({
-      apiKey: "secret",
-      project: "ultrafuzz-evals",
-      evalRunId: "eval-1",
-      policy: testReportingPolicy(),
-      fetchImpl
-    });
-    await reporter.onRowStart(row, {
-      rowId: row.id,
-      nodes: [{ id: "setup-1", logicalId: "setup-1", kind: "agentic", group: "setup", dependsOn: [] }]
-    });
-    await reporter.onNodeEvent({
-      eventId: "evt-1",
-      rowId: row.id,
-      nodeId: "setup-1",
-      event: { type: "node-started", at: "2026-07-09T00:00:00.000Z", attempt: 1 }
-    });
-    await reporter.onNodeEvent({
-      eventId: "evt-4",
-      rowId: row.id,
-      nodeId: "setup-1",
-      event: { type: "node-finished", at: "2026-07-09T00:05:00.000Z", status: "failed", attempt: 1, error: "boom" }
-    });
-
-    const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
-    // root run + group run + node run
-    expect(creates).toHaveLength(3);
-    const nodeCreate = creates[2]?.body as Record<string, unknown>;
-    expect(nodeCreate).toMatchObject({
-      name: "setup-1",
-      run_type: "chain",
-      session_name: "ultrafuzz-evals",
-      start_time: "2026-07-09T00:00:00.000Z"
-    });
-    expect(String(nodeCreate.dotted_order).split(".")).toHaveLength(3);
-
-    const patches = requests.filter((request) => request.method === "PATCH");
-    expect(patches).toHaveLength(1);
-    expect(patches[0]?.body).toMatchObject({
-      end_time: "2026-07-09T00:05:00.000Z",
-      outputs: { status: "failed" },
-      error: "boom"
-    });
-    expect(patches[0]?.url).toContain(String(nodeCreate.id));
-  });
-
-  it("routes artifact events to the latest attempt run, even beyond 16 retries", async () => {
-    const { requests, fetchImpl } = fakeFetch();
-    const suite = testSuite("/tmp/gt");
-    const row = testRow(suite);
-    const reporter = new LangSmithReporter({
-      apiKey: "secret",
-      project: "ultrafuzz-evals",
-      evalRunId: "eval-1",
-      policy: testReportingPolicy(),
-      fetchImpl
-    });
-    await reporter.onRowStart(row, {
-      rowId: row.id,
-      nodes: [{ id: "setup-1", logicalId: "setup-1", kind: "agentic", group: "setup", dependsOn: [] }]
-    });
-    await reporter.onNodeEvent({
-      eventId: "evt-1",
-      rowId: row.id,
-      nodeId: "setup-1",
-      event: { type: "node-started", at: "2026-07-09T00:00:00.000Z", attempt: 17 }
-    });
-    const creates = requests.filter((request) => request.method === "POST" && request.url.endsWith("/api/v1/runs"));
-    const nodeCreate = creates[creates.length - 1]?.body as Record<string, unknown>;
-    expect(nodeCreate).toMatchObject({ name: "setup-1 (attempt 17)" });
-
-    await reporter.onNodeEvent({
-      eventId: "evt-2",
-      rowId: row.id,
-      nodeId: "setup-1",
-      event: {
-        type: "node-artifacts",
-        at: "2026-07-09T00:05:00.000Z",
-        manifest: [{ path: "report.md", size_bytes: 8, sha256: "abc", provenance: { producer_node_id: "setup-1" } }]
-      }
-    });
-    const patches = requests.filter((request) => request.method === "PATCH");
-    expect(patches).toHaveLength(1);
-    expect(patches[0]?.url).toContain(String(nodeCreate.id));
-  });
-
-  it("patches root and group start_time from result.startedAt on row finish (post-hoc publish)", async () => {
-    const { requests, fetchImpl } = fakeFetch();
-    const suite = testSuite("/tmp/gt");
-    const row = testRow(suite);
-    const reporter = new LangSmithReporter({
-      apiKey: "secret",
-      project: "ultrafuzz-evals",
-      evalRunId: "eval-1",
-      policy: testReportingPolicy(),
-      fetchImpl
-    });
-    await reporter.onRowStart(row, {
-      rowId: row.id,
-      nodes: [{ id: "setup-1", logicalId: "setup-1", kind: "agentic", group: "setup", dependsOn: [] }]
-    });
-    await reporter.onRowFinish(row, {
-      status: "succeeded",
-      startedAt: "2026-07-01T00:00:00.000Z",
-      finishedAt: "2026-07-01T01:00:00.000Z",
-      recoveryEquivalence: cleanRecoveryEquivalence()
-    });
-
-    const patches = requests.filter((request) => request.method === "PATCH");
-    // group run + root run, both backdated to the actual run start
-    expect(patches).toHaveLength(2);
-    for (const patch of patches) {
-      expect(patch.body).toMatchObject({
-        start_time: "2026-07-01T00:00:00.000Z",
-        end_time: "2026-07-01T01:00:00.000Z"
-      });
-    }
-    expect(patches[patches.length - 1]?.body).toMatchObject({
-      outputs: { recovery_equivalence: { classification: "clean" } }
-    });
-  });
-
-  it("leaves start_time untouched on row finish when result.startedAt is absent", async () => {
-    const { requests, fetchImpl } = fakeFetch();
-    const suite = testSuite("/tmp/gt");
-    const row = testRow(suite);
-    const reporter = new LangSmithReporter({
-      apiKey: "secret",
-      project: "ultrafuzz-evals",
-      evalRunId: "eval-1",
-      policy: testReportingPolicy(),
-      fetchImpl
-    });
-    await reporter.onRowStart(row, { rowId: row.id, nodes: [] });
-    await reporter.onRowFinish(row, { status: "succeeded", finishedAt: "2026-07-01T01:00:00.000Z" });
-
-    const patches = requests.filter((request) => request.method === "PATCH");
-    expect(patches).toHaveLength(1);
-    expect(patches[0]?.body).not.toHaveProperty("start_time");
-  });
-
-  it("formats dotted-order segments the way LangSmith expects", () => {
-    const segment = dottedOrderSegment("2026-07-09T01:02:03.456Z", "abc");
-    expect(segment).toBe("20260709T010203456000Zabc");
   });
 });

@@ -252,7 +252,6 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
   for (const [name, profile] of Object.entries(clone.eval.providers)) {
     pushTable(lines, tableName(["eval", "providers", name]), {
       api_key_env: profile.apiKeyEnv,
-      workspace_id_env: profile.workspaceIdEnv,
       project: profile.project,
       endpoint: profile.endpoint
     });

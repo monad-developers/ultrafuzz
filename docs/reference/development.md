@@ -62,7 +62,7 @@ pnpm --filter @ultrafuzz/modal typecheck
 pnpm --filter @ultrafuzz/modal build
 ```
 
-These tests also validate the exact three-target automatic smoke and three-provider full
+These tests also validate the exact three-target automatic smoke and four-provider full
 EVMBench configuration, the fixed Sol judge, four-hour-ten-minute smoke and one-hour full row budgets,
 immutable image naming, hash-manifested public bundles, and the Modal-only benchmark
 workflow. They make no cloud or model calls.
@@ -73,6 +73,7 @@ script. It must be selected explicitly, once per provider:
 ```bash
 pnpm --filter @ultrafuzz/modal smoke -- --provider openai
 pnpm --filter @ultrafuzz/modal smoke -- --provider anthropic
+pnpm --filter @ultrafuzz/modal smoke -- --provider deepseek
 pnpm --filter @ultrafuzz/modal smoke -- --provider kimi
 ```
 

@@ -1,6 +1,8 @@
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
 const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
+const MOONSHOT_PROVIDER_ID = "moonshotai";
+const DEEPSEEK_PROVIDER_ID = "deepseek";
 
 export interface ModelPricing {
   inputUsdPerMillion: number;
@@ -143,13 +145,12 @@ function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelP
   }
   const providers = Object.entries(catalog).filter((entry): entry is [string, CatalogProvider] => isRecord(entry[1]));
   for (const model of models) {
-    const preferredProvider = providerForModel(model);
-    const orderedProviders = [...providers].sort(([left], [right]) => {
-      if (left === preferredProvider) return -1;
-      if (right === preferredProvider) return 1;
-      return left.localeCompare(right);
-    });
-    for (const [, provider] of orderedProviders) {
+    const pinnedProvider = pinnedProviderForModel(model);
+    const candidateProviders =
+      pinnedProvider === undefined
+        ? orderedProvidersForModel(providers, providerForModel(model))
+        : providers.filter(([id]) => id === pinnedProvider);
+    for (const [, provider] of candidateProviders) {
       if (!isRecord(provider.models)) {
         continue;
       }
@@ -304,6 +305,17 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
   };
 }
 
+function orderedProvidersForModel(
+  providers: Array<[string, CatalogProvider]>,
+  preferredProvider: string | undefined
+): Array<[string, CatalogProvider]> {
+  return [...providers].sort(([left], [right]) => {
+    if (left === preferredProvider) return -1;
+    if (right === preferredProvider) return 1;
+    return left.localeCompare(right);
+  });
+}
+
 function providerForModel(model: string): string | undefined {
   if (model.startsWith("claude-")) {
     return "anthropic";
@@ -311,7 +323,19 @@ function providerForModel(model: string): string | undefined {
   if (model.startsWith("gpt-") || /^o\d/u.test(model) || model.startsWith("chatgpt-")) {
     return "openai";
   }
-  return undefined;
+  return pinnedProviderForModel(model);
+}
+
+/**
+ * Kimi and DeepSeek aliases appear in many models.dev provider catalogs at
+ * different rates, including $0 subscription-only entries. Pinning each family
+ * to its first-party provider keeps the API-comparison estimate from depending
+ * on whichever third-party provider happens to sort first. A pin is exclusive:
+ * when the first-party catalog does not list an alias, it stays unresolved.
+ */
+function pinnedProviderForModel(model: string): string | undefined {
+  if (model.startsWith("deepseek")) return DEEPSEEK_PROVIDER_ID;
+  return model.startsWith("kimi") || model.startsWith("moonshot") ? MOONSHOT_PROVIDER_ID : undefined;
 }
 
 function uniqueNormalizedModels(models: Iterable<string>): string[] {

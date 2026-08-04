@@ -14,6 +14,9 @@ import {
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
 const TARGET_REF = "refs/heads/main";
 const CHARTS = [
+  "latest-summary.svg",
+  "quality.svg",
+  "performance-cost.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",
@@ -237,6 +240,12 @@ describe("eval history Git CAS publisher", () => {
       graded_case_count: 3,
       publication_url: "https://github.com/monad-developers/ultrafuzz/actions/runs/123/artifacts"
     });
+    expect(
+      parseEvalHistoryPublicationGeneration({
+        ...valid,
+        runs: [{ ...valid.runs[0], status: "failed" }]
+      }).runs[0]
+    ).toMatchObject({ status: "failed" });
     expect(() =>
       parseEvalHistoryPublicationGeneration({
         ...valid,
@@ -311,6 +320,9 @@ function installFixtureCli(checkout: string): void {
 import path from "node:path";
 
 const charts = [
+  "latest-summary.svg",
+  "quality.svg",
+  "performance-cost.svg",
   "precision.svg",
   "recall.svg",
   "f1.svg",

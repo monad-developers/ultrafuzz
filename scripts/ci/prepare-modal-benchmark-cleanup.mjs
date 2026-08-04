@@ -56,6 +56,7 @@ export function prepareModalBenchmarkCleanup(input) {
     trialsPerVariant: dimensions.trialsPerVariant,
     maxParallelEvalRows: dimensions.maxParallelEvalRows,
     maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
+    maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
     controlTimeoutSeconds: dimensions.controlTimeoutSeconds
   });
 
@@ -91,7 +92,8 @@ export function prepareModalBenchmarkCleanup(input) {
         generation: input.expectedGeneration,
         mode: input.expectedMode,
         benchmark: manifest.benchmark,
-        targets: manifest.targets
+        targets: manifest.targets,
+        maxRuntimeSeconds: dimensions.maxRuntimeSeconds
       },
       modelSlugs
     );

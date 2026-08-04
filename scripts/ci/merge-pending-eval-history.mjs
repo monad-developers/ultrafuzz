@@ -2,7 +2,12 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { mergeEvalHistory, parseEvalHistory, readEvalHistory } from "../../packages/evals/dist/index.js";
+import {
+  formatEvalHistoryJson,
+  mergeEvalHistory,
+  parseEvalHistory,
+  readEvalHistory
+} from "../../packages/evals/dist/index.js";
 
 const ref = process.argv[2];
 if (!ref) throw new Error("usage: merge-pending-eval-history.mjs <git-ref>");
@@ -18,5 +23,5 @@ const pendingText = execFileSync("git", ["show", `${ref}:benchmarks/history.json
 const current = readEvalHistory(historyPath);
 const pending = parseEvalHistory(JSON.parse(pendingText), `${ref}:benchmarks/history.json`);
 const merged = mergeEvalHistory(current, pending.observations);
-fs.writeFileSync(historyPath, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+fs.writeFileSync(historyPath, formatEvalHistoryJson(merged), "utf8");
 process.stdout.write(`Preserved ${merged.observations.length - current.observations.length} pending observations.\n`);

@@ -49,6 +49,13 @@ agent = "KimiAgent"
 model = "kimi-k3"
 reasoning = "max"
 
+# Opt-in DeepSeek V4 profile. DeepSeek's official coding-agent integration
+# runs Claude Code against its Anthropic-compatible API endpoint.
+[models.deepseek]
+agent = "DeepSeekAgent"
+model = "deepseek-v4-pro"
+reasoning = "max"
+
 [agents.CodexAgent]
 auth = "api-key"
 api_key_env = "OPENAI_API_KEY"
@@ -70,6 +77,12 @@ auth = "subscription"
 # API key instead (reads KIMI_API_KEY unless api_key_env names another variable,
 # such as MOONSHOT_API_KEY).
 auth = "subscription"
+
+[agents.DeepSeekAgent]
+# DeepSeek V4 is API-key only. The generated adapter reads DEEPSEEK_API_KEY and
+# routes Claude Code to DeepSeek's official Anthropic-compatible endpoint.
+auth = "api-key"
+api_key_env = "DEEPSEEK_API_KEY"
 
 [permissions]
 trust_model = "skip-permissions"
@@ -94,9 +107,3 @@ provider = "none"
 [eval.providers.braintrust]
 api_key_env = "BRAINTRUST_API_KEY"
 project = "ultrafuzz-evals"
-
-[eval.providers.langsmith]
-api_key_env = "LANGSMITH_API_KEY"
-workspace_id_env = "LANGSMITH_WORKSPACE_ID"
-project = "ultrafuzz-evals"
-# endpoint = "https://api.smith.langchain.com"

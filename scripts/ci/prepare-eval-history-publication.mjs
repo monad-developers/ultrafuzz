@@ -44,6 +44,7 @@ const CONCURRENCY_KEYS = [
 const PROVIDER_AGENT = {
   openai: "CodexAgent",
   anthropic: "ClaudeAgent",
+  deepseek: "DeepSeekAgent",
   kimi: "KimiAgent"
 };
 
@@ -345,7 +346,7 @@ function publicationExpectations(input) {
     "benchmark control timeout"
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
-  const providers = smoke ? ["openai"] : ["openai", "anthropic", "kimi"];
+  const providers = smoke ? ["openai"] : ["openai", "anthropic", "kimi", "deepseek"];
   return {
     candidateCommit,
     repository,
@@ -710,8 +711,8 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
   if (!SAFE_REASONING.test(model.reasoning)) {
     throw new Error(`benchmark config ${pair.config_path} has unsafe reasoning`);
   }
-  if (pair.provider === "kimi" && !["low", "high", "max"].includes(model.reasoning)) {
-    throw new Error(`benchmark config ${pair.config_path} has unsupported Kimi reasoning`);
+  if (["kimi", "deepseek"].includes(pair.provider) && !["low", "high", "max"].includes(model.reasoning)) {
+    throw new Error(`benchmark config ${pair.config_path} has unsupported ${pair.provider} reasoning`);
   }
   let expectedModelSlug = boundedSafeId(
     `benchmark-${context.mode}-${model.model}-${model.reasoning}`,
@@ -944,7 +945,9 @@ function assertBundleTargetsMatchExpected(bundleTargets, expectedTargetsValue, t
 }
 
 function safeBundleStatus(value, label) {
-  if (value !== "succeeded" && value !== "genuine-task-failures") throw new Error(`${label} is invalid`);
+  if (value !== "succeeded" && value !== "genuine-task-failures" && value !== "failed") {
+    throw new Error(`${label} is invalid`);
+  }
   return value;
 }
 

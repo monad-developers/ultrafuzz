@@ -52,8 +52,21 @@ describe("public Modal benchmark bundles", () => {
       files
     });
     const output = path.join(root, "output");
-    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v3");
+    expect(bundle.schema_version).toBe("ultrafuzz.modal.public-benchmark-bundle.v4");
     expect(bundle.schema_version).toBe(PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION);
+    expect(
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3"
+      })
+    ).toMatchObject({ schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3", status: "succeeded" });
+    expect(() =>
+      parsePublicBenchmarkBundle({
+        ...bundle,
+        schema_version: "ultrafuzz.modal.public-benchmark-bundle.v3",
+        status: "failed"
+      })
+    ).toThrow();
     expect(bundle).toMatchObject({
       status: "succeeded",
       executed_case_count: 2,
@@ -189,6 +202,66 @@ describe("public Modal benchmark bundles", () => {
     expect(() =>
       parsePublicBenchmarkBundle(replaceBundleContents(bundle, `reports/${rowId}/findings.normalized.json`, "[]\n"))
     ).toThrow(/must report at least one normalized finding/u);
+  });
+
+  it("allows empty smoke findings only for the single failed datapoint", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-failed-datapoint-"));
+    const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1", "target-c-runner-trial-1"];
+    const bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, rowIds)
+    });
+    const diagnosticsPath = "eval/public-eval-diagnostics.json";
+    const diagnostics = JSON.parse(bundleFileText(bundle, diagnosticsPath)) as {
+      summary: Record<string, unknown>;
+      rows: Array<Record<string, unknown>>;
+    };
+    const failedRow = diagnostics.rows[2]!;
+    Object.assign(failedRow, {
+      final_status: "failed",
+      workflow_status: "failed",
+      terminal_disposition: "operational-failure",
+      scoring_ready: true,
+      reason_codes: []
+    });
+    Object.assign(diagnostics.summary, {
+      workflow_succeeded: 2,
+      workflow_failed: 1,
+      scoring_ready: true
+    });
+    let failedBundle = replaceBundleContents(bundle, diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`);
+    failedBundle = replaceBundleContents(failedBundle, `reports/${rowIds[2]}/findings.normalized.json`, "[]\n");
+    failedBundle = {
+      ...failedBundle,
+      status: "failed",
+      targets: failedBundle.targets.map((target) =>
+        target.id === "target-3" ? { ...target, status: "failed" as const } : target
+      )
+    };
+
+    expect(parsePublicBenchmarkBundle(failedBundle)).toMatchObject({
+      status: "failed",
+      targets: [{ status: "succeeded" }, { status: "succeeded" }, { status: "failed" }]
+    });
+
+    Object.assign(diagnostics.rows[1]!, {
+      final_status: "failed",
+      workflow_status: "failed",
+      terminal_disposition: "operational-failure",
+      scoring_ready: true,
+      reason_codes: []
+    });
+    Object.assign(diagnostics.summary, {
+      workflow_succeeded: 1,
+      workflow_failed: 2,
+      scoring_ready: false
+    });
+    const twoFailures = replaceBundleContents(
+      failedBundle,
+      diagnosticsPath,
+      `${JSON.stringify(diagnostics, null, 2)}\n`
+    );
+    expect(() => parsePublicBenchmarkBundle(twoFailures)).toThrow(/not ready for scoring/u);
   });
 
   it("rejects malformed entries instead of counting them as smoke findings", () => {

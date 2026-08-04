@@ -1,9 +1,11 @@
 import { createClaudeAgent } from "./claude";
 import { createCodexAgent } from "./codex";
+import { createDeepSeekAgent } from "./deepseek";
 import { createKimiAgent } from "./kimi";
 
 export { createClaudeAgent } from "./claude";
 export { createCodexAgent } from "./codex";
+export { createDeepSeekAgent } from "./deepseek";
 export { createKimiAgent } from "./kimi";
 
 // Agents are constructed per task from the selected model profile, never at
@@ -12,5 +14,6 @@ export { createKimiAgent } from "./kimi";
 export const agentFactories = {
   ClaudeAgent: createClaudeAgent,
   CodexAgent: createCodexAgent,
+  DeepSeekAgent: createDeepSeekAgent,
   KimiAgent: createKimiAgent
 };

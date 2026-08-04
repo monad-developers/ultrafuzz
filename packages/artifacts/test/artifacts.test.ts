@@ -875,6 +875,36 @@ test("findings normalize source evidence line suffixes", () => {
   assert.throws(() => normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" }), /line conflicts/);
 });
 
+test("findings normalize scalar lists and affected-file line references", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
+  const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });
+  fs.writeFileSync(
+    path.join(nodeDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Line-referenced metadata",
+        status: "candidate",
+        severity_guess: "medium",
+        confidence: "medium",
+        summary: "Legacy metadata includes source locations in path-only fields.",
+        affected_files: "src/Oracle.sol:42:7",
+        affected_functions: "quote",
+        patch_refs: ["test/Oracle.t.sol#L10-L18", "src/Pool.sol:21-24"],
+        property_ids: "prop-1",
+        notes: "normalized"
+      }
+    ])
+  );
+
+  const report = normalizeFindings({ artifactDir: nodeDir, nodeId: "strategy-a" });
+
+  assert.deepEqual(report.findings[0]!.affected_files, ["src/Oracle.sol"]);
+  assert.deepEqual(report.findings[0]!.affected_functions, ["quote"]);
+  assert.deepEqual(report.findings[0]!.patch_refs, ["test/Oracle.t.sol", "src/Pool.sol"]);
+  assert.deepEqual(report.findings[0]!.property_ids, ["prop-1"]);
+  assert.deepEqual(report.findings[0]!.notes, ["normalized"]);
+});
+
 test("findings metadata paths allow dot-prefixed generated roots but reject traversal", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-1" });
   const nodeDir = getNodeArtifactDir(layout, "strategy-a", { create: true });

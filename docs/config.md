@@ -136,6 +136,61 @@ with `--prompt`. Kimi reasoning is limited to `low`, `high`, or `max`; the
 selected value is written to the executed model's `default_effort` and
 `[thinking].effort`, and any other value is rejected.
 
+Kimi Code prints no token usage on stdout, so each invocation's authoritative
+usage is read from the per-agent `wire.jsonl` records inside that invocation's
+isolated runtime home, covering the main agent and every sub-agent. Ultrafuzz
+takes a per-wire baseline right after session seeding, so a resumed session
+reports only the tokens it adds and never re-reports inherited history.
+Kimi's four components — uncached input, output, cache reads, and cache
+creation — are reported independently; Kimi already folds thinking tokens into
+output, so no separate reasoning total is published. Malformed or absent usage
+stays absent rather than becoming zeros, which keeps accounting honest about
+what it does not know. Kimi model pricing resolves against the Moonshot
+provider entry in the pricing catalog, so the configured alias must match a
+Moonshot catalog model id such as `kimi-k3`; anything else is reported as an
+unresolved model instead of being priced from a same-named third-party entry.
+Subscription runs are not billed per token, so the published cost is an
+API-comparison estimate at Moonshot list rates.
+
+## DeepSeek agent
+
+`ultrafuzz init` also generates a dedicated `DeepSeekAgent`. The default root
+config includes an opt-in DeepSeek V4 Pro profile:
+
+```toml
+[models.deepseek]
+agent = "DeepSeekAgent"
+model = "deepseek-v4-pro"
+reasoning = "max"
+
+[agents.DeepSeekAgent]
+auth = "api-key"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+DeepSeek V4 Pro is API-key only. The adapter runs the installed Claude Code CLI
+against DeepSeek's documented Anthropic-compatible endpoint,
+`https://api.deepseek.com/anthropic`, using `ANTHROPIC_AUTH_TOKEN`; it clears
+competing Claude credentials and provider selectors, and uses an isolated
+`CLAUDE_CONFIG_DIR` (default `.ultrafuzz/deepseek-claude`) so unrelated Anthropic
+credentials, routing, and session storage cannot take precedence. Project and
+managed Claude settings remain separate policy layers. Set `config_dir` under
+`[agents.DeepSeekAgent]` to choose another isolated directory.
+The supported reasoning efforts are `low`, `high`, and `max`, and any other
+value is rejected before execution. See DeepSeek's
+[Claude Code integration](https://api-docs.deepseek.com/quick_start/agent_integrations/claude_code)
+and [Anthropic API guide](https://api-docs.deepseek.com/guides/anthropic_api).
+
+DeepSeek's automatic disk cache reports cache misses and hits independently.
+Ultrafuzz records those as uncached input and cache-read tokens, records no
+cache-write charge, and treats the provider's output count as already including
+thinking tokens rather than publishing a second reasoning component. Pricing
+is pinned to the first-party `deepseek` catalog entry so a same-named hosted or
+subscription plan cannot supply a zero or unrelated rate. The current
+[DeepSeek price table](https://api-docs.deepseek.com/quick_start/pricing) lists
+DeepSeek V4 Pro at $0.435 per million cache-miss input tokens, $0.003625 per
+million cache-hit input tokens, and $0.87 per million output tokens.
+
 Default triage requires quorum `3` from a panel size of `4`:
 
 ```toml
@@ -235,7 +290,7 @@ before launch.
 The `[eval]` section binds eval suites to a reporting provider per
 environment. It holds the default suite path, the machine-specific
 `ground_truth_root` (which must resolve outside the repository), the active
-`provider` (`braintrust`, `langsmith`, or `none`), and per-provider
+`provider` (`braintrust` or `none`), and per-provider
 `[eval.providers.<name>]` connection profiles containing env-var _names_ only
 (matching the `[agents.CodexAgent] api_key_env` pattern). The committable
 experiment definition lives in the eval YAML referenced by `eval_config`. See

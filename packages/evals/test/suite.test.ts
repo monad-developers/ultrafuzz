@@ -87,7 +87,7 @@ describe("eval suite loading and planning", () => {
     expect(resolveJudgePanelConfig(suite.judge_panel)).toEqual({ total: 3, quorum: 2 });
     expect(DEFAULT_EVAL_JUDGE_PANEL).toEqual({ total: 3, quorum: 2 });
     // The YAML is provider-agnostic: no provider, endpoint, or env var names.
-    expect(JSON.stringify(suite)).not.toMatch(/braintrust|langsmith|api_key/iu);
+    expect(JSON.stringify(suite)).not.toMatch(/braintrust|api_key/iu);
   });
 
   it.each([

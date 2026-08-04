@@ -28,7 +28,9 @@ import { parseRecoveryEquivalence } from "./recovery-equivalence.js";
 import { EvalError, evalRunRoot, jsonFile, readJsonLines, safeEvalId } from "./utils.js";
 
 export const EVAL_HISTORY_SCHEMA_VERSION = "ultrafuzz.eval.history.v1" as const;
-export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
+export const EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v4" as const;
+const EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v3" as const;
+const EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v2" as const;
 const EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION = "ultrafuzz.eval.history.observation.v1" as const;
 const EVAL_HISTORY_PUBLIC_BUNDLE_FILE = "public-results.json";
 const EVAL_HISTORY_PUBLIC_REPORT_FILES = ["report.md", "report.json", "findings.normalized.json"] as const;
@@ -41,7 +43,7 @@ export interface EvalHistoryCompleteness {
   reasons: string[];
 }
 
-export type EvalHistoryObservationStatus = "succeeded" | "genuine-task-failures";
+export type EvalHistoryObservationStatus = "succeeded" | "genuine-task-failures" | "failed";
 
 export interface EvalHistoryTargetPublication {
   target: string;
@@ -59,7 +61,10 @@ export interface EvalHistoryTargetPublication {
 
 export interface EvalHistoryObservation {
   schema_version:
-    typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
+    | typeof EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION
+    | typeof EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION;
   id: string;
   benchmark: EvalHistoryBenchmark;
   lane: EvalHistoryLane;
@@ -81,6 +86,7 @@ export interface EvalHistoryObservation {
   recall: number;
   f1: number;
   cumulative_unique_true_positives: number;
+  ground_truth_bug_count?: number;
   wall_clock_seconds: number | null;
   wall_clock_completeness: EvalHistoryCompleteness;
   cost_usd: number | null;
@@ -121,8 +127,10 @@ const githubRepositoryUrl = z
   .string()
   .url()
   .regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/u);
-const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
+const publicationStatusSchema = z.enum(["succeeded", "genuine-task-failures", "failed"]);
+const legacyPublicationStatusSchema = z.enum(["succeeded", "genuine-task-failures"]);
 const positiveInteger = z.number().int().positive();
+const nonNegativeInteger = z.number().int().nonnegative();
 const relativePathSchema = z
   .string()
   .min(1)
@@ -141,18 +149,32 @@ const completenessSchema = z.strictObject({
   reasons: z.array(safeText)
 });
 
-const targetPublicationSchema = z.strictObject({
+const targetPublicationIdentityShape = {
   target: safeText,
   repository: z.string().url().max(2_048),
   revision: shaSchema,
-  framework: safeText.optional(),
-  status: publicationStatusSchema,
+  framework: safeText.optional()
+} as const;
+
+const targetPublicationResultShape = {
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
   publication_location: z.strictObject({
     bundle_path: relativePathSchema,
     report_paths: z.array(relativePathSchema).min(1)
   })
+} as const;
+
+const targetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: publicationStatusSchema,
+  ...targetPublicationResultShape
+});
+
+const legacyTargetPublicationSchema = z.strictObject({
+  ...targetPublicationIdentityShape,
+  status: legacyPublicationStatusSchema,
+  ...targetPublicationResultShape
 });
 
 const observationBaseShape = {
@@ -185,11 +207,9 @@ const observationBaseShape = {
 } as const;
 
 const currentObservationSchema = z.strictObject({
-  schema_version: z.union([
-    z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
-    z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
-  ]),
+  schema_version: z.literal(EVAL_HISTORY_OBSERVATION_SCHEMA_VERSION),
   ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
   status: publicationStatusSchema,
   executed_case_count: positiveInteger,
   graded_case_count: positiveInteger,
@@ -197,12 +217,41 @@ const currentObservationSchema = z.strictObject({
   target_publication: targetPublicationSchema
 });
 
+const previousObservationSchema = z.strictObject({
+  schema_version: z.literal(EVAL_HISTORY_PREVIOUS_OBSERVATION_SCHEMA_VERSION),
+  ...observationBaseShape,
+  ground_truth_bug_count: nonNegativeInteger,
+  status: legacyPublicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: legacyTargetPublicationSchema
+});
+
+const publishedObservationSchema = z.strictObject({
+  schema_version: z.union([
+    z.literal(EVAL_HISTORY_PUBLISHED_OBSERVATION_SCHEMA_VERSION),
+    z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION)
+  ]),
+  ...observationBaseShape,
+  status: legacyPublicationStatusSchema,
+  executed_case_count: positiveInteger,
+  graded_case_count: positiveInteger,
+  publication_url: publicationUrlSchema,
+  target_publication: legacyTargetPublicationSchema
+});
+
 const legacyObservationSchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_LEGACY_OBSERVATION_SCHEMA_VERSION),
   ...observationBaseShape
 });
 
-const observationSchema = z.union([currentObservationSchema, legacyObservationSchema]);
+const observationSchema = z.union([
+  currentObservationSchema,
+  previousObservationSchema,
+  publishedObservationSchema,
+  legacyObservationSchema
+]);
 
 const historySchema = z.strictObject({
   schema_version: z.literal(EVAL_HISTORY_SCHEMA_VERSION),
@@ -222,6 +271,16 @@ export const EVAL_HISTORY_CHARTS = [
   { file: "wall-clock-time.svg", metric: "wall_clock_seconds", title: "Wall-clock time (seconds)", ratio: false },
   { file: "cost.svg", metric: "cost_usd", title: "Cost (USD)", ratio: false }
 ] as const;
+
+export const EVAL_HISTORY_OVERVIEW_FILES = ["latest-summary.svg", "quality.svg", "performance-cost.svg"] as const;
+
+// Luna's repository history has a non-overlapping cost regime beginning with
+// this run: the 11 earlier complete runs cost $56.04-$82.40, while the six
+// runs at and after the cutoff cost $11.54-$15.05. Keep current-price model
+// comparisons from mixing those regimes as new results are published.
+export const EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS: Readonly<Record<string, string>> = {
+  "gpt-5.6-luna": "2026-07-31T14:52:13.635Z"
+};
 
 type ChartMetric = (typeof EVAL_HISTORY_CHARTS)[number]["metric"];
 
@@ -266,6 +325,15 @@ function assertHistoryIntegrity(history: EvalHistory): void {
     const targetKeys = observation.target_revisions.map((target) => target.target);
     if (new Set(targetKeys).size !== targetKeys.length) {
       throw new EvalError("EVAL_HISTORY_INVALID", `observation ${observation.id} repeats a target revision`);
+    }
+    if (
+      observation.ground_truth_bug_count !== undefined &&
+      observation.cumulative_unique_true_positives > observation.ground_truth_bug_count
+    ) {
+      throw new EvalError(
+        "EVAL_HISTORY_INVALID",
+        `observation ${observation.id} finds more unique true positives than its ground truth contains`
+      );
     }
     if (hasPublicationMetadata(observation)) {
       const targetRevision = observation.target_revisions.find((target) => target.target === observation.target);
@@ -359,7 +427,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       "eval generation does not have exactly one score per row"
     );
   }
-  const verifiedGenuineTaskFailures = verifiedGenuineTaskFailureRows(input, provenance.candidate.commit, summaryRows);
+  const verifiedFailureStatuses = verifiedPublishableFailureRows(input, provenance.candidate.commit, summaryRows);
   for (const row of input.matrix) {
     const score = summaryRows.get(row.id);
     if (score === undefined || !score.report_schema_valid) {
@@ -369,7 +437,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     const verifiedTaskFailure =
       score.lifecycle.workflow.terminal &&
       score.lifecycle.workflow.status === "failed" &&
-      verifiedGenuineTaskFailures.has(row.id);
+      verifiedFailureStatuses.has(row.id);
     if (!successful && !verifiedTaskFailure) {
       throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", `eval row ${row.id} did not finish successfully`);
     }
@@ -431,7 +499,9 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         (score) => score.lifecycle.workflow.terminal && score.lifecycle.workflow.status === "succeeded"
       )
         ? "succeeded"
-        : "genuine-task-failures";
+        : rows.some((row) => verifiedFailureStatuses.get(row.id) === "failed")
+          ? "failed"
+          : "genuine-task-failures";
       const targetPublication = targetPublicationForRows(rows, scores, status, publicationBundlePath);
       const model = requiredConsistent(
         rows.map((row) => row.runner_model),
@@ -452,6 +522,11 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
       for (const row of rows) {
         for (const bugId of input.matchedGroundTruthByRow.get(row.id) ?? []) uniqueMatches.add(bugId);
       }
+      const groundTruthBugCount = requiredConsistentNonNegativeInteger(
+        scores.map((score) => score.ground_truth_bug_count),
+        "ground-truth bug count",
+        first.id
+      );
       const wallClock = aggregateEfficiency(
         scores.map((score) => ({ value: score.efficiency.wall_time_seconds, completeness: score.efficiency.runtime }))
       );
@@ -481,6 +556,7 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
         recall: mean(scores.map((score) => score.recall)),
         f1: mean(scores.map((score) => score.f1_score)),
         cumulative_unique_true_positives: uniqueMatches.size,
+        ground_truth_bug_count: groundTruthBugCount,
         wall_clock_seconds: wallClock.value,
         wall_clock_completeness: wallClock.completeness,
         cost_usd: cost.value,
@@ -495,12 +571,12 @@ export function createEvalHistoryObservations(input: EvalHistoryGenerationInput)
     });
 }
 
-function verifiedGenuineTaskFailureRows(
+function verifiedPublishableFailureRows(
   input: EvalHistoryGenerationInput,
   candidateCommit: string,
   summaryRows: ReadonlyMap<string, EvalScoreSummary["rows"][number]>
-): Set<string> {
-  if (input.publicEvalDiagnostics === undefined) return new Set();
+): Map<string, Exclude<EvalHistoryObservationStatus, "succeeded">> {
+  if (input.publicEvalDiagnostics === undefined) return new Map();
   let diagnostics: ReturnType<typeof parsePublicEvalDiagnostics>;
   try {
     diagnostics = parsePublicEvalDiagnostics(input.publicEvalDiagnostics);
@@ -532,7 +608,7 @@ function verifiedGenuineTaskFailureRows(
   if (matrixRows.size !== input.matrix.length) {
     throw new EvalError("EVAL_HISTORY_GENERATION_INCOMPLETE", "eval matrix contains duplicate rows");
   }
-  const genuineTaskFailures = new Set<string>();
+  const failureStatuses = new Map<string, Exclude<EvalHistoryObservationStatus, "succeeded">>();
   for (const diagnostic of diagnostics.rows) {
     const row = matrixRows.get(diagnostic.row_id);
     const score = summaryRows.get(diagnostic.row_id);
@@ -579,15 +655,20 @@ function verifiedGenuineTaskFailureRows(
       diagnostic.final_status === "failed" &&
       diagnostic.workflow_status === "failed" &&
       diagnostic.terminal_disposition === "genuine-task-failures";
-    if (!succeeded && !genuineTaskFailure) {
+    const failedDatapoint =
+      diagnostic.final_status === "failed" &&
+      diagnostic.workflow_status === "failed" &&
+      diagnostic.terminal_disposition === "operational-failure";
+    if (!succeeded && !genuineTaskFailure && !failedDatapoint) {
       throw new EvalError(
         "EVAL_HISTORY_GENERATION_INCOMPLETE",
         `public eval diagnostics outcome is not publishable for row ${diagnostic.row_id}`
       );
     }
-    if (genuineTaskFailure) genuineTaskFailures.add(diagnostic.row_id);
+    if (genuineTaskFailure) failureStatuses.set(diagnostic.row_id, "genuine-task-failures");
+    if (failedDatapoint) failureStatuses.set(diagnostic.row_id, "failed");
   }
-  return genuineTaskFailures;
+  return failureStatuses;
 }
 
 function targetPublicationForRows(
@@ -721,6 +802,15 @@ function requiredConsistent(values: Array<string | undefined>, field: string, ro
     throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `${field} is missing or inconsistent for ${rowId}`);
   }
   return values[0];
+}
+
+function requiredConsistentNonNegativeInteger(values: number[], field: string, rowId: string): number {
+  const unique = new Set(values);
+  const value = values[0];
+  if (unique.size !== 1 || value === undefined || !Number.isInteger(value) || value < 0) {
+    throw new EvalError("EVAL_HISTORY_LINEAGE_INCOMPLETE", `${field} is missing or inconsistent for ${rowId}`);
+  }
+  return value;
 }
 
 function aggregateEfficiency(entries: Array<{ value: number | null; completeness: EvalEfficiencyCompleteness }>): {
@@ -1071,14 +1161,621 @@ function matchedGroundTruthByRow(
   return result;
 }
 
+export interface EvalHistoryBenchmarkAggregate {
+  key: string;
+  benchmark: EvalHistoryBenchmark;
+  lane: EvalHistoryLane;
+  variant: string;
+  model_profile: string;
+  model: string;
+  reasoning_effort: string;
+  run_timestamp: string;
+  candidate_commit: string;
+  candidate_repository_url: string;
+  cohort_fingerprint: string;
+  execution_policy_fingerprint: string;
+  scoring_fingerprint: string;
+  source_eval_run_id: string;
+  target_count: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  cumulative_unique_true_positives: number;
+  ground_truth_bug_count: number | null;
+  wall_clock_seconds: number | null;
+  cost_usd: number | null;
+}
+
+export interface EvalHistoryModelPerformanceCostAggregate {
+  model: string;
+  runCount: number;
+  firstRunTimestamp: string;
+  lastRunTimestamp: string;
+  pricingCutoff: string | null;
+  costUsd: EvalHistoryQuartiles;
+  f1: EvalHistoryQuartiles;
+}
+
+export interface EvalHistoryQuartiles {
+  q1: number;
+  median: number;
+  q3: number;
+}
+
+function canonicalTargetRevisions(observation: EvalHistoryObservation): string {
+  return observation.target_revisions
+    .map(({ target, revision }) => `${target}:${revision}`)
+    .sort(compareText)
+    .join("\u0001");
+}
+
+export function aggregateEvalHistoryBenchmarkRuns(
+  observations: EvalHistoryObservation[]
+): EvalHistoryBenchmarkAggregate[] {
+  const groups = new Map<string, EvalHistoryObservation[]>();
+  for (const observation of observations) {
+    const key = [
+      observation.benchmark,
+      observation.lane,
+      observation.variant,
+      observation.model_profile,
+      observation.model,
+      observation.reasoning_effort,
+      observation.cohort_fingerprint,
+      observation.execution_policy_fingerprint,
+      observation.scoring_fingerprint,
+      observation.run_timestamp,
+      observation.candidate_commit,
+      observation.source_eval_run_id
+    ].join("\u0000");
+    groups.set(key, [...(groups.get(key) ?? []), observation]);
+  }
+
+  const aggregates: EvalHistoryBenchmarkAggregate[] = [];
+  for (const [key, group] of groups) {
+    const first = group[0]!;
+    const targetRevisions = canonicalTargetRevisions(first);
+    const expectedTargets = new Set(first.target_revisions.map(({ target }) => target));
+    const observedTargets = new Set(group.map(({ target }) => target));
+    const complete =
+      expectedTargets.size > 0 &&
+      group.length === expectedTargets.size &&
+      observedTargets.size === expectedTargets.size &&
+      [...expectedTargets].every((target) => observedTargets.has(target)) &&
+      group.every(
+        (observation) =>
+          canonicalTargetRevisions(observation) === targetRevisions &&
+          observation.candidate_repository_url === first.candidate_repository_url
+      );
+    if (!complete) continue;
+
+    const groundTruthCounts = group.map((observation) => observation.ground_truth_bug_count);
+    const wallClockValues = group.map((observation) => observation.wall_clock_seconds);
+    const costValues = group.map((observation) => observation.cost_usd);
+    aggregates.push({
+      key,
+      benchmark: first.benchmark,
+      lane: first.lane,
+      variant: first.variant,
+      model_profile: first.model_profile,
+      model: first.model,
+      reasoning_effort: first.reasoning_effort,
+      run_timestamp: first.run_timestamp,
+      candidate_commit: first.candidate_commit,
+      candidate_repository_url: first.candidate_repository_url,
+      cohort_fingerprint: first.cohort_fingerprint,
+      execution_policy_fingerprint: first.execution_policy_fingerprint,
+      scoring_fingerprint: first.scoring_fingerprint,
+      source_eval_run_id: first.source_eval_run_id,
+      target_count: expectedTargets.size,
+      precision: mean(group.map((observation) => observation.precision)),
+      recall: mean(group.map((observation) => observation.recall)),
+      f1: mean(group.map((observation) => observation.f1)),
+      cumulative_unique_true_positives: group.reduce(
+        (sum, observation) => sum + observation.cumulative_unique_true_positives,
+        0
+      ),
+      ground_truth_bug_count: groundTruthCounts.some((value) => value === undefined)
+        ? null
+        : groundTruthCounts.reduce<number>((sum, value) => sum + (value ?? 0), 0),
+      wall_clock_seconds: wallClockValues.some((value) => value === null)
+        ? null
+        : round(Math.max(...wallClockValues.map((value) => value ?? 0))),
+      cost_usd: costValues.some((value) => value === null)
+        ? null
+        : round(costValues.reduce<number>((sum, value) => sum + (value ?? 0), 0))
+    });
+  }
+  return aggregates.sort(
+    (left, right) =>
+      compareText(left.run_timestamp, right.run_timestamp) ||
+      compareText(left.candidate_commit, right.candidate_commit) ||
+      compareText(left.key, right.key)
+  );
+}
+
+export function aggregateEvalHistoryModelPerformanceCost(
+  aggregates: EvalHistoryBenchmarkAggregate[]
+): EvalHistoryModelPerformanceCostAggregate[] {
+  const byModel = new Map<string, EvalHistoryBenchmarkAggregate[]>();
+  for (const aggregate of aggregates) {
+    if (!isCurrentPerformanceCostPricing(aggregate)) continue;
+    if (aggregate.cost_usd === null) continue;
+    byModel.set(aggregate.model, [...(byModel.get(aggregate.model) ?? []), aggregate]);
+  }
+
+  return [...byModel.entries()]
+    .map(([model, modelAggregates]) => {
+      const selected = modelAggregates.sort(
+        (left, right) =>
+          compareText(left.run_timestamp, right.run_timestamp) ||
+          compareText(left.candidate_commit, right.candidate_commit) ||
+          compareText(left.source_eval_run_id, right.source_eval_run_id)
+      );
+      return {
+        model,
+        runCount: selected.length,
+        firstRunTimestamp: selected[0]!.run_timestamp,
+        lastRunTimestamp: selected.at(-1)!.run_timestamp,
+        pricingCutoff: EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[model] ?? null,
+        costUsd: quartiles(selected.map((aggregate) => aggregate.cost_usd ?? 0)),
+        f1: quartiles(selected.map((aggregate) => aggregate.f1))
+      };
+    })
+    .sort((left, right) => compareText(left.model, right.model));
+}
+
+function isCurrentPerformanceCostPricing(aggregate: EvalHistoryBenchmarkAggregate): boolean {
+  const cutoff = EVAL_HISTORY_PERFORMANCE_COST_MODEL_CUTOFFS[aggregate.model];
+  return cutoff === undefined || compareText(aggregate.run_timestamp, cutoff) >= 0;
+}
+
+function aggregateProfileKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.variant,
+    aggregate.model_profile,
+    aggregate.model,
+    aggregate.reasoning_effort
+  ].join("\u0000");
+}
+
+function aggregateLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [aggregatePolicyLineageKey(aggregate), aggregate.scoring_fingerprint].join("\u0000");
+}
+
+function aggregatePolicyLineageKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint
+  ].join("\u0000");
+}
+
+function aggregateColumnKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [aggregate.run_timestamp, aggregate.candidate_commit, aggregate.source_eval_run_id].join("\u0000");
+}
+
+function aggregateRunKey(aggregate: EvalHistoryBenchmarkAggregate): string {
+  return [
+    aggregateColumnKey(aggregate),
+    aggregate.benchmark,
+    aggregate.lane,
+    aggregate.cohort_fingerprint,
+    aggregate.execution_policy_fingerprint,
+    aggregate.scoring_fingerprint
+  ].join("\u0000");
+}
+
+function renderLatestEvalSummary(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 40;
+  const latestAnchor = aggregates.at(-1);
+  const latestRun =
+    latestAnchor === undefined
+      ? []
+      : aggregates
+          .filter((aggregate) => aggregateRunKey(aggregate) === aggregateRunKey(latestAnchor))
+          .sort((leftAggregate, rightAggregate) =>
+            compareText(leftAggregate.model_profile, rightAggregate.model_profile)
+          );
+  const height = latestAnchor === undefined ? 190 : 136 + latestRun.length * 40;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">Latest UltrafuzzBench run</title>'
+  ];
+  if (latestAnchor === undefined) {
+    lines.push(
+      '<desc id="desc">No complete published benchmark run is available.</desc>',
+      `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
+      `<text x="${left}" y="54" font-family="system-ui, sans-serif" font-size="24" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
+      `<text x="${left}" y="112" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark run</text>`,
+      "</svg>"
+    );
+    return `${lines.join("\n")}\n`;
+  }
+
+  const commitUrl = `${latestAnchor.candidate_repository_url.replace(/\/$/u, "")}/commit/${latestAnchor.candidate_commit}`;
+  const profileDescriptions = latestRun.map((aggregate) => {
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives} bugs found`
+        : `${aggregate.cumulative_unique_true_positives} of ${aggregate.ground_truth_bug_count} bugs found`;
+    return `${aggregate.model} ${aggregate.reasoning_effort}: UltrafuzzBench Score ${formatOverviewPercent(aggregate.f1)}, ${bugs}`;
+  });
+  lines.push(
+    `<desc id="desc">Latest complete ${xml(latestAnchor.benchmark)} ${xml(latestAnchor.lane)} run with ${latestRun.length} model ${latestRun.length === 1 ? "profile" : "profiles"}. ${xml(profileDescriptions.join("; "))}.</desc>`,
+    `<rect width="${width}" height="${height}" rx="12" fill="#f9fafb"/>`,
+    `<text x="${left}" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>`,
+    `<text x="${left}" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml(`${latestAnchor.benchmark} · ${latestAnchor.lane} · ${latestRun.length} ${latestRun.length === 1 ? "profile" : "profiles"} · ${latestAnchor.target_count} targets each · ${latestAnchor.run_timestamp.slice(0, 10)}`)}</text>`,
+    `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><text x="${width - left}" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">${xml(latestAnchor.candidate_commit.slice(0, 7))}</text></a>`,
+    `<text x="${left}" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>`,
+    '<text x="400" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">UltrafuzzBench Score (macro-F1)</text>',
+    '<text x="600" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>',
+    '<text x="760" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Cost</text>',
+    '<text x="920" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Wall clock</text>',
+    `<line x1="${left}" y1="106" x2="${width - left}" y2="106" stroke="#d1d5db"/>`
+  );
+  latestRun.forEach((aggregate, index) => {
+    const rowTop = 112 + index * 40;
+    const rowY = rowTop + 23;
+    const bugs =
+      aggregate.ground_truth_bug_count === null
+        ? `${aggregate.cumulative_unique_true_positives}`
+        : `${aggregate.cumulative_unique_true_positives} / ${aggregate.ground_truth_bug_count}`;
+    lines.push(
+      `<rect x="${left}" y="${rowTop}" width="${width - left * 2}" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>`,
+      `<text x="${left + 12}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>${xml(`${aggregate.lane} · ${aggregate.model_profile}`)}</title>${xml(`${aggregate.model} · ${aggregate.reasoning_effort}`)}</text>`,
+      `<text x="400" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">${xml(formatOverviewPercent(aggregate.f1))}</text>`,
+      `<text x="600" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(bugs)}</text>`,
+      `<text x="760" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.cost_usd === null ? "n/a" : xml(`$${aggregate.cost_usd.toFixed(2)}`)}</text>`,
+      `<text x="920" y="${rowY}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${aggregate.wall_clock_seconds === null ? "n/a" : xml(formatElapsed(aggregate.wall_clock_seconds))}</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
+const OVERVIEW_METRICS = [
+  { key: "f1", label: "UltrafuzzBench Score (macro-F1)", color: "#0f766e", width: 4, dash: undefined }
+] as const;
+
+const OVERVIEW_SCORING_CHANGE_GUIDE = {
+  label: "Scoring identity changed (visual guide only)",
+  color: "#0f766e",
+  width: 2,
+  dash: "5 5"
+} as const;
+
+const OVERVIEW_PROFILE_COLORS = ["#2563eb", "#c2410c", "#7c3aed", "#be123c", "#0369a1", "#a16207"] as const;
+
+const EVAL_HISTORY_OVERVIEW_MAX_COLUMNS = 12;
+
+function renderProfileMarker(
+  profileIndex: number,
+  x: number,
+  y: number,
+  color: string,
+  radius: number,
+  attributes = ""
+): string {
+  const common = `${attributes} fill="${color}" stroke="#ffffff" stroke-width="1"`;
+  switch (profileIndex % 4) {
+    case 1:
+      return `<rect ${common} x="${format(x - radius)}" y="${format(y - radius)}" width="${format(radius * 2)}" height="${format(radius * 2)}"/>`;
+    case 2:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y)} ${format(x)},${format(y + radius + 1)} ${format(x - radius - 1)},${format(y)}"/>`;
+    case 3:
+      return `<polygon ${common} points="${format(x)},${format(y - radius - 1)} ${format(x + radius + 1)},${format(y + radius)} ${format(x - radius - 1)},${format(y + radius)}"/>`;
+    default:
+      return `<circle ${common} cx="${format(x)}" cy="${format(y)}" r="${format(radius)}"/>`;
+  }
+}
+
+function renderEvalQualityChart(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 70;
+  const right = 30;
+  const top = 110;
+  const plotWidth = width - left - right;
+  const plotHeight = 300;
+  const plotBottom = top + plotHeight;
+  const dateLabelBottom = plotBottom + 116;
+  const allColumns = [
+    ...new Map(aggregates.map((aggregate) => [aggregateColumnKey(aggregate), aggregate])).values()
+  ].sort(
+    (leftAggregate, rightAggregate) =>
+      compareText(leftAggregate.run_timestamp, rightAggregate.run_timestamp) ||
+      compareText(leftAggregate.candidate_commit, rightAggregate.candidate_commit) ||
+      compareText(leftAggregate.source_eval_run_id, rightAggregate.source_eval_run_id)
+  );
+  const columns = allColumns.slice(-EVAL_HISTORY_OVERVIEW_MAX_COLUMNS);
+  const visibleColumnKeys = new Set(columns.map(aggregateColumnKey));
+  const visibleAggregates = aggregates.filter((aggregate) => visibleColumnKeys.has(aggregateColumnKey(aggregate)));
+  const profiles = [
+    ...new Map(visibleAggregates.map((aggregate) => [aggregateProfileKey(aggregate), aggregate])).values()
+  ];
+  const legendTop = dateLabelBottom + 34;
+  const legendRowCount = OVERVIEW_METRICS.length + 1 + profiles.length;
+  const height = legendTop + Math.max(1, legendRowCount) * 22 + 18;
+  const columnIndex = new Map(columns.map((column, index) => [aggregateColumnKey(column), index]));
+  const columnX = (aggregate: EvalHistoryBenchmarkAggregate): number => {
+    if (columns.length <= 1) return left + plotWidth / 2;
+    const index = columnIndex.get(aggregateColumnKey(aggregate)) ?? 0;
+    const pad = 44;
+    return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
+  };
+  const pointX = (aggregate: EvalHistoryBenchmarkAggregate, profileIndex: number): number => {
+    if (profiles.length <= 1) return columnX(aggregate);
+    const offsetStep = Math.min(6, 16 / (profiles.length - 1));
+    return columnX(aggregate) + (profileIndex - (profiles.length - 1) / 2) * offsetStep;
+  };
+  const y = (value: number): number => top + plotHeight - value * plotHeight;
+  const constantContext = new Set(visibleAggregates.map((aggregate) => `${aggregate.benchmark} · ${aggregate.lane}`));
+  const context = constantContext.size === 1 ? [...constantContext][0]! : "Public benchmark history";
+  const subtitle =
+    allColumns.length > columns.length
+      ? `${context} · latest ${columns.length} of ${allColumns.length} complete runs`
+      : context;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">UltrafuzzBench quality</title>',
+    `<desc id="desc">UltrafuzzBench Score (macro-F1) over complete benchmark target cohorts for the latest ${columns.length} candidate runs. Solid lines connect identical scoring identities; dashed guides cross scoring changes. Lines break when the cohort or execution policy changes. Marker colors and shapes distinguish model profiles.</desc>`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">UltrafuzzBench quality</text>`,
+    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">${xml(subtitle)}</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Each point aggregates every required target; solid lines are comparable, while dashed links are visual guides only.</text>`,
+    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
+  ];
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const value = tick / 4;
+    const tickY = y(value);
+    lines.push(
+      `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
+      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#4b5563">${formatOverviewPercent(value)}</text>`
+    );
+  }
+  if (visibleAggregates.length === 0) {
+    lines.push(
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete published benchmark runs</text>`
+    );
+  } else {
+    const earliestByLineage = new Map<string, EvalHistoryBenchmarkAggregate>();
+    for (const aggregate of visibleAggregates) {
+      const lineage = aggregatePolicyLineageKey(aggregate);
+      if (!earliestByLineage.has(lineage)) earliestByLineage.set(lineage, aggregate);
+    }
+    for (const aggregate of earliestByLineage.values()) {
+      const markerX = columnX(aggregate);
+      const cohort = `cohort-${shortFingerprint(aggregate.cohort_fingerprint)}`;
+      const policy = `policy-${shortFingerprint(aggregate.execution_policy_fingerprint)}`;
+      lines.push(
+        `<g data-lineage-marker="${xml(cohort)}"><title>${xml(`${aggregate.benchmark} ${aggregate.lane} ${cohort} ${policy}`)}</title>`,
+        `<line x1="${format(markerX)}" y1="${top}" x2="${format(markerX)}" y2="${plotBottom}" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>`,
+        `<text transform="translate(${format(markerX + 7)},${format(top + 8)}) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">${xml(cohort)}</text></g>`
+      );
+    }
+
+    profiles.forEach((profile, profileIndex) => {
+      const profileColor = OVERVIEW_PROFILE_COLORS[profileIndex % OVERVIEW_PROFILE_COLORS.length]!;
+      const profilePoints = visibleAggregates.filter(
+        (aggregate) => aggregateProfileKey(aggregate) === aggregateProfileKey(profile)
+      );
+      OVERVIEW_METRICS.forEach((metric) => {
+        for (let index = 1; index < profilePoints.length; index += 1) {
+          const previous = profilePoints[index - 1]!;
+          const current = profilePoints[index]!;
+          if (
+            aggregatePolicyLineageKey(previous) !== aggregatePolicyLineageKey(current) ||
+            aggregateLineageKey(previous) === aggregateLineageKey(current)
+          ) {
+            continue;
+          }
+          lines.push(
+            `<line data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" data-continuity="scoring-change" x1="${format(pointX(previous, profileIndex))}" y1="${format(y(previous[metric.key]))}" x2="${format(pointX(current, profileIndex))}" y2="${format(y(current[metric.key]))}" stroke="${OVERVIEW_SCORING_CHANGE_GUIDE.color}" stroke-width="${OVERVIEW_SCORING_CHANGE_GUIDE.width}" stroke-dasharray="${OVERVIEW_SCORING_CHANGE_GUIDE.dash}"/>`
+          );
+        }
+        let segment: EvalHistoryBenchmarkAggregate[] = [];
+        let segmentLineage: string | undefined;
+        const flush = (): void => {
+          if (segment.length > 1) {
+            lines.push(
+              `<polyline data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}" fill="none" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`} points="${segment.map((aggregate) => `${format(pointX(aggregate, profileIndex))},${format(y(aggregate[metric.key]))}`).join(" ")}"/>`
+            );
+          }
+          segment = [];
+        };
+        for (const aggregate of profilePoints) {
+          const lineage = aggregateLineageKey(aggregate);
+          if (segmentLineage !== undefined && lineage !== segmentLineage) flush();
+          segmentLineage = lineage;
+          segment.push(aggregate);
+        }
+        flush();
+        for (const aggregate of profilePoints) {
+          const commitUrl = `${aggregate.candidate_repository_url.replace(/\/$/u, "")}/commit/${aggregate.candidate_commit}`;
+          const label = `${profile.lane} ${profile.model_profile} ${profile.model} ${profile.reasoning_effort} ${metric.label}`;
+          const attributes = `data-metric="${metric.key}" data-profile="${xml(profile.model_profile)}"`;
+          lines.push(
+            `<a href="${xml(commitUrl)}" xlink:href="${xml(commitUrl)}"><title>${xml(`${label} ${aggregate.candidate_commit.slice(0, 7)}: ${formatOverviewPercent(aggregate[metric.key])} · score-${shortFingerprint(aggregate.scoring_fingerprint)}`)}</title>`,
+            `${renderProfileMarker(profileIndex, pointX(aggregate, profileIndex), y(aggregate[metric.key]), profileColor, metric.key === "f1" ? 5 : 4, attributes)}</a>`
+          );
+        }
+      });
+    });
+    for (const column of columns) {
+      const labelX = columnX(column);
+      lines.push(
+        `<text x="${format(labelX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">${xml(column.candidate_commit.slice(0, 7))}</text>`,
+        `<text transform="translate(${format(labelX)},${dateLabelBottom}) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.run_timestamp.slice(0, 10))}</text>`
+      );
+    }
+  }
+  OVERVIEW_METRICS.forEach((metric, index) => {
+    const rowY = legendTop + index * 22;
+    lines.push(
+      `<line x1="${left}" y1="${rowY - 4}" x2="${left + 14}" y2="${rowY - 4}" stroke="${metric.color}" stroke-width="${metric.width}"${metric.dash === undefined ? "" : ` stroke-dasharray="${metric.dash}"`}/>`,
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14"${metric.key === "f1" ? ' font-weight="600"' : ""} fill="#374151">${xml(metric.label)}</text>`
+    );
+  });
+  const scoringGuideRowY = legendTop + OVERVIEW_METRICS.length * 22;
+  lines.push(
+    `<line x1="${left}" y1="${scoringGuideRowY - 4}" x2="${left + 14}" y2="${scoringGuideRowY - 4}" stroke="${OVERVIEW_SCORING_CHANGE_GUIDE.color}" stroke-width="${OVERVIEW_SCORING_CHANGE_GUIDE.width}" stroke-dasharray="${OVERVIEW_SCORING_CHANGE_GUIDE.dash}"/>`,
+    `<text x="${left + 20}" y="${scoringGuideRowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(OVERVIEW_SCORING_CHANGE_GUIDE.label)}</text>`
+  );
+  profiles.forEach((profile, profileIndex) => {
+    const rowY = legendTop + (OVERVIEW_METRICS.length + 1 + profileIndex) * 22;
+    const profileColor = OVERVIEW_PROFILE_COLORS[profileIndex % OVERVIEW_PROFILE_COLORS.length]!;
+    lines.push(
+      renderProfileMarker(profileIndex, left + 7, rowY - 4, profileColor, 4),
+      `<text x="${left + 20}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151">${xml(`${profile.lane} · ${profile.model_profile} · ${profile.model} · ${profile.reasoning_effort}`)}</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
+function renderEvalPerformanceCostChart(aggregates: EvalHistoryBenchmarkAggregate[]): string {
+  const width = 960;
+  const left = 90;
+  const right = 40;
+  const top = 120;
+  const plotWidth = width - left - right;
+  const plotHeight = 320;
+  const plotBottom = top + plotHeight;
+  const legendTop = plotBottom + 94;
+  const comparableAggregates = aggregates.filter(
+    (aggregate) => aggregate.lane === "smoke" && isCurrentPerformanceCostPricing(aggregate)
+  );
+  const summaries = aggregateEvalHistoryModelPerformanceCost(comparableAggregates);
+  const plottedModels = new Set(summaries.map((summary) => summary.model));
+  const unavailableModels = [...new Set(comparableAggregates.map((aggregate) => aggregate.model))]
+    .filter((model) => !plottedModels.has(model))
+    .sort(compareText)
+    .map((model) => {
+      const modelAggregates = comparableAggregates.filter((aggregate) => aggregate.model === model);
+      return {
+        model,
+        runCount: modelAggregates.length,
+        medianF1: quantile(
+          modelAggregates.map((aggregate) => aggregate.f1),
+          0.5
+        )
+      };
+    });
+  const legendRows = Math.max(1, summaries.length) + unavailableModels.length;
+  const height = legendTop + legendRows * 26 + 24;
+  const costMaximum = niceCostMaximum(summaries.map((summary) => summary.costUsd.q3));
+  const f1Maximum = niceF1Maximum(summaries.map((summary) => summary.f1.q3));
+  const x = (value: number): number => left + (value / costMaximum) * plotWidth;
+  const y = (value: number): number => top + plotHeight - (value / f1Maximum) * plotHeight;
+  const unavailableDescription =
+    unavailableModels.length === 0
+      ? ""
+      : ` Cost is unavailable for ${unavailableModels.map(({ model }) => model).join(", ")}.`;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">`,
+    '<title id="title">UltrafuzzBench performance versus cost</title>',
+    `<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges.${xml(unavailableDescription)}</desc>`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<text x="${left}" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">Performance × cost</text>`,
+    `<text x="${left}" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete runs in each model&apos;s current pricing regime</text>`,
+    `<text x="${left}" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Dots are medians; horizontal cost bands and vertical macro-F1 bands show the IQR.</text>`,
+    `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`,
+    `<text transform="translate(22,${top + plotHeight / 2}) rotate(-90)" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>`,
+    `<text x="${left + plotWidth / 2}" y="${plotBottom + 58}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">Cost per complete run (USD)</text>`
+  ];
+
+  for (let tick = 0; tick <= 4; tick += 1) {
+    const cost = (costMaximum * tick) / 4;
+    const tickX = x(cost);
+    lines.push(
+      `<line x1="${format(tickX)}" y1="${top}" x2="${format(tickX)}" y2="${plotBottom}" stroke="#e5e7eb"/>`,
+      `<text x="${format(tickX)}" y="${plotBottom + 24}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">${xml(formatCostTick(cost))}</text>`
+    );
+    const f1 = (f1Maximum * tick) / 4;
+    const tickY = y(f1);
+    lines.push(
+      `<line x1="${left}" y1="${format(tickY)}" x2="${left + plotWidth}" y2="${format(tickY)}" stroke="#e5e7eb"/>`,
+      `<text x="${left - 10}" y="${format(tickY + 5)}" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">${formatOverviewPercent(f1)}</text>`
+    );
+  }
+
+  if (summaries.length === 0) {
+    lines.push(
+      `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No complete priced benchmark runs</text>`
+    );
+  } else {
+    summaries.forEach((summary, index) => {
+      const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
+      const medianX = x(summary.costUsd.median);
+      const medianY = y(summary.f1.median);
+      const attributes = `data-model="${xml(summary.model)}" data-run-count="${summary.runCount}" data-cost-q1="${summary.costUsd.q1}" data-cost-median="${summary.costUsd.median}" data-cost-q3="${summary.costUsd.q3}" data-f1-q1="${summary.f1.q1}" data-f1-median="${summary.f1.median}" data-f1-q3="${summary.f1.q3}"`;
+      lines.push(
+        `<g ${attributes}><title>${xml(`${summary.model}: median ${formatOverviewPercent(summary.f1.median)} at ${formatCost(summary.costUsd.median)}; ${summary.runCount} ${summary.runCount === 1 ? "run" : "runs"} from ${summary.firstRunTimestamp.slice(0, 10)} to ${summary.lastRunTimestamp.slice(0, 10)}${summary.pricingCutoff === null ? "" : ` (current pricing since ${summary.pricingCutoff.slice(0, 10)})`}`)}</title>`
+      );
+      if (summary.costUsd.q1 < summary.costUsd.q3) {
+        lines.push(
+          `<line data-iqr="cost" x1="${format(x(summary.costUsd.q1))}" y1="${format(medianY)}" x2="${format(x(summary.costUsd.q3))}" y2="${format(medianY)}" stroke="${color}" stroke-width="10" stroke-linecap="round" opacity="0.22"/>`
+        );
+      }
+      if (summary.f1.q1 < summary.f1.q3) {
+        lines.push(
+          `<line data-iqr="f1" x1="${format(medianX)}" y1="${format(y(summary.f1.q1))}" x2="${format(medianX)}" y2="${format(y(summary.f1.q3))}" stroke="${color}" stroke-width="10" stroke-linecap="round" opacity="0.22"/>`
+        );
+      }
+      lines.push(renderProfileMarker(index, medianX, medianY, color, 8), "</g>");
+    });
+  }
+
+  summaries.forEach((summary, index) => {
+    const rowY = legendTop + index * 26;
+    const color = OVERVIEW_PROFILE_COLORS[index % OVERVIEW_PROFILE_COLORS.length]!;
+    lines.push(
+      renderProfileMarker(index, left + 8, rowY - 4, color, 6),
+      `<text x="${left + 24}" y="${rowY}" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">${xml(summary.model)}</tspan><tspan fill="#6b7280"> · median ${formatOverviewPercent(summary.f1.median)} · ${xml(formatCost(summary.costUsd.median))} · n=${summary.runCount}</tspan></text>`
+    );
+  });
+  unavailableModels.forEach((summary, index) => {
+    const rowY = legendTop + (Math.max(1, summaries.length) + index) * 26;
+    lines.push(
+      `<text x="${left}" y="${rowY}" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Not plotted · ${xml(summary.model)} · median ${formatOverviewPercent(summary.medianF1)} · n=${summary.runCount} · cost unavailable</text>`
+    );
+  });
+  lines.push("</svg>");
+  return `${lines.join("\n")}\n`;
+}
+
+function formatOverviewPercent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatElapsed(value: number): string {
+  const seconds = Math.round(value);
+  if (seconds >= 3_600) return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
 export function renderEvalHistoryCharts(history: EvalHistory): Map<string, string> {
   const validated = parseEvalHistory(history);
-  return new Map(
-    EVAL_HISTORY_CHARTS.map((chart) => [
-      chart.file,
-      renderChart(validated.observations, chart.metric, chart.title, chart.ratio)
-    ])
+  const aggregates = aggregateEvalHistoryBenchmarkRuns(validated.observations).filter(
+    (aggregate) => aggregate.benchmark === "ultrafuzz-bench"
   );
+  return new Map([
+    [EVAL_HISTORY_OVERVIEW_FILES[0], renderLatestEvalSummary(aggregates)],
+    [EVAL_HISTORY_OVERVIEW_FILES[1], renderEvalQualityChart(aggregates)],
+    [EVAL_HISTORY_OVERVIEW_FILES[2], renderEvalPerformanceCostChart(aggregates)],
+    ...EVAL_HISTORY_CHARTS.map(
+      (chart) => [chart.file, renderChart(validated.observations, chart.metric, chart.title, chart.ratio)] as const
+    )
+  ]);
 }
 
 export function writeEvalHistoryCharts(history: EvalHistory, chartsDirectory: string): string[] {
@@ -1103,12 +1800,21 @@ export function checkEvalHistoryCharts(history: EvalHistory, chartsDirectory: st
   return mismatches;
 }
 
-// Ordered series-identity fields. Every field except `target` is treated as
-// shared context: when it is constant across all plotted series it is rendered
-// once in the chart subtitle, and only the fields that actually vary end up in
-// each series legend label. `target` always labels the series so per-target
-// lines stay legible even when it is the only distinguishing field.
-const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning", "cohort", "policy"] as const;
+const SINGLE_ITEM_JSON_PRIMITIVE_ARRAY =
+  /\[\n\s+((?:"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?))\n\s+\]/giu;
+
+export function formatEvalHistoryJson(history: EvalHistory): string {
+  // Prettier keeps short single-item primitive arrays on one line. Match that
+  // behavior for deterministic publisher output without adding a formatter
+  // dependency to the runtime eval-history path.
+  return `${JSON.stringify(history, null, 2).replace(SINGLE_ITEM_JSON_PRIMITIVE_ARRAY, "[$1]")}\n`;
+}
+
+// Ordered series-identity fields. Benchmark lineage fields such as cohort and
+// execution policy are intentionally excluded from line identity: those changes
+// are rendered as vertical markers, while the metric lines keep tracking the
+// same benchmark target/model over time.
+const SERIES_CONTEXT_FIELDS = ["benchmark", "lane", "model", "reasoning"] as const;
 
 interface SeriesFields {
   benchmark: string;
@@ -1127,6 +1833,19 @@ interface ChartPoint {
   commit: string;
   repositoryUrl: string;
   value: number | null;
+}
+
+interface ChartColumn {
+  key: string;
+  timestamp: string;
+  commit: string;
+  repositoryUrl: string;
+}
+
+interface LineageMarker {
+  columnKey: string;
+  label: string;
+  title: string;
 }
 
 function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric): ChartPoint[] {
@@ -1174,6 +1893,44 @@ function chartPoints(observations: EvalHistoryObservation[], metric: ChartMetric
     );
 }
 
+function chartColumnKey(point: Pick<ChartPoint, "timestamp" | "commit">): string {
+  return [point.timestamp, point.commit].join("\u0000");
+}
+
+function chartColumns(points: ChartPoint[]): ChartColumn[] {
+  const byKey = new Map<string, ChartColumn>();
+  for (const point of points) {
+    const key = chartColumnKey(point);
+    if (byKey.has(key)) continue;
+    byKey.set(key, {
+      key,
+      timestamp: point.timestamp,
+      commit: point.commit,
+      repositoryUrl: point.repositoryUrl
+    });
+  }
+  return [...byKey.values()].sort(
+    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
+  );
+}
+
+function chartLineageMarkers(points: ChartPoint[]): LineageMarker[] {
+  const earliestByLineage = new Map<string, ChartPoint>();
+  for (const point of [...points].sort(
+    (left, right) => compareText(left.timestamp, right.timestamp) || compareText(left.commit, right.commit)
+  )) {
+    const lineageKey = [point.fields.benchmark, point.fields.lane, point.fields.cohort, point.fields.policy].join(
+      "\u0000"
+    );
+    if (!earliestByLineage.has(lineageKey)) earliestByLineage.set(lineageKey, point);
+  }
+  return [...earliestByLineage.values()].map((point) => ({
+    columnKey: chartColumnKey(point),
+    label: point.fields.cohort,
+    title: `${point.fields.benchmark} ${point.fields.lane} ${point.fields.cohort} ${point.fields.policy}`
+  }));
+}
+
 function shortFingerprint(value: string): string {
   return value.replace(/^sha256:/u, "").slice(0, 8);
 }
@@ -1212,14 +1969,16 @@ function renderChart(
   const plotWidth = width - left - right;
   const plotHeight = 300;
   const plotBottom = top + plotHeight;
-  const legendTop = plotBottom + 58;
+  const dateLabelBottom = plotBottom + 116;
+  const legendTop = dateLabelBottom + 34;
   const points = chartPoints(observations, metric);
+  const columns = chartColumns(points);
+  const columnIndex = new Map(columns.map((column, index) => [column.key, index]));
 
   const seriesKeys = [...new Set(points.map((point) => point.seriesKey))];
   const height = legendTop + seriesKeys.length * 22 + 12;
   const palette = ["#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c", "#4f46e5"];
   const color = new Map(seriesKeys.map((name, index) => [name, palette[index % palette.length]!]));
-  const seriesIndex = new Map(seriesKeys.map((name, index) => [name, index]));
   const seriesFieldsByKey = new Map(
     seriesKeys.map((key) => [key, points.find((point) => point.seriesKey === key)!.fields])
   );
@@ -1240,22 +1999,17 @@ function renderChart(
   const seriesLabel = (fields: SeriesFields): string =>
     [...varyingFields.map((field) => fields[field]), fields.target].join(" ");
 
-  const timestamps = points.map((point) => Date.parse(point.timestamp));
-  const minTime = timestamps.length === 0 ? 0 : Math.min(...timestamps);
-  const maxTime = timestamps.length === 0 ? 0 : Math.max(...timestamps);
-  // With a single benchmarked commit there is no time axis to spread points
-  // along, so lay the per-target series out side by side instead of stacking
-  // them on one x. Multiple commits use the real time axis.
-  const singleColumn = points.length > 0 && minTime === maxTime;
   const available = points.map((point) => point.value).filter((value): value is number => value !== null);
   const maxValue = ratioMetric ? 1 : Math.max(1, ...available);
-  const x = (point: ChartPoint): number => {
-    if (singleColumn) {
-      return left + (plotWidth * ((seriesIndex.get(point.seriesKey) ?? 0) + 1)) / (seriesKeys.length + 1);
-    }
-    if (minTime === maxTime) return left + plotWidth / 2;
+  const columnX = (column: ChartColumn): number => {
+    if (columns.length <= 1) return left + plotWidth / 2;
+    const index = columnIndex.get(column.key) ?? 0;
     const pad = 44;
-    return left + pad + ((Date.parse(point.timestamp) - minTime) / (maxTime - minTime)) * (plotWidth - 2 * pad);
+    return left + pad + (index / (columns.length - 1)) * (plotWidth - 2 * pad);
+  };
+  const x = (point: ChartPoint): number => {
+    const column = columns[columnIndex.get(chartColumnKey(point)) ?? 0];
+    return column === undefined ? left + plotWidth / 2 : columnX(column);
   };
   const y = (value: number): number => top + plotHeight - (value / maxValue) * plotHeight;
 
@@ -1273,7 +2027,7 @@ function renderChart(
     );
   }
   lines.push(
-    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across candidate commits.")}</text>`,
+    `<text x="${left}" y="86" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">${xml("Each line tracks one benchmark target across evenly spaced candidate-run columns.")}</text>`,
     `<line x1="${left}" y1="${top}" x2="${left}" y2="${plotBottom}" stroke="#6b7280"/>`,
     `<line x1="${left}" y1="${plotBottom}" x2="${left + plotWidth}" y2="${plotBottom}" stroke="#6b7280"/>`
   );
@@ -1290,6 +2044,16 @@ function renderChart(
       `<text x="${left + plotWidth / 2}" y="${top + plotHeight / 2}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="16" fill="#6b7280">No published observations</text>`
     );
   } else {
+    for (const marker of chartLineageMarkers(points)) {
+      const column = columns[columnIndex.get(marker.columnKey) ?? 0];
+      if (column === undefined) continue;
+      const markerX = columnX(column);
+      lines.push(
+        `<g data-lineage-marker="${xml(marker.label)}"><title>${xml(marker.title)}</title>`,
+        `<line x1="${format(markerX)}" y1="${top}" x2="${format(markerX)}" y2="${plotBottom}" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 4"/>`,
+        `<text transform="translate(${format(markerX + 7)},${format(top + 8)}) rotate(90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="11" fill="#6b7280">${xml(marker.label)}</text></g>`
+      );
+    }
     const bySeries = new Map<string, ChartPoint[]>();
     for (const point of points) bySeries.set(point.seriesKey, [...(bySeries.get(point.seriesKey) ?? []), point]);
     for (const [name, values] of bySeries) {
@@ -1324,21 +2088,11 @@ function renderChart(
         );
       }
     }
-    // Label each distinct commit column once beneath the axis; cap crowded
-    // histories to the earliest and latest commits.
-    const columnByTimestamp = new Map<string, ChartPoint>();
-    for (const point of points)
-      if (!columnByTimestamp.has(point.timestamp)) columnByTimestamp.set(point.timestamp, point);
-    let columns = [...columnByTimestamp.values()].sort(
-      (leftPoint, rightPoint) =>
-        compareText(leftPoint.timestamp, rightPoint.timestamp) || compareText(leftPoint.commit, rightPoint.commit)
-    );
-    if (columns.length > 8) columns = [columns[0]!, columns.at(-1)!];
     for (const column of columns) {
-      const columnX = singleColumn ? left + plotWidth / 2 : x(column);
+      const labelX = columnX(column);
       lines.push(
-        `<text x="${format(columnX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
-        `<text x="${format(columnX)}" y="${plotBottom + 34}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
+        `<text x="${format(labelX)}" y="${plotBottom + 18}" text-anchor="middle" font-family="ui-monospace, monospace" font-size="10" fill="#374151">${xml(column.commit.slice(0, 7))}</text>`,
+        `<text transform="translate(${format(labelX)},${dateLabelBottom}) rotate(-90)" text-anchor="start" font-family="system-ui, sans-serif" font-size="12" fill="#4b5563">${xml(column.timestamp.slice(0, 10))}</text>`
       );
     }
   }
@@ -1374,7 +2128,7 @@ function installHistoryPublication(
   let chartsInstalled = false;
   try {
     fs.mkdirSync(stagedCharts, { recursive: true });
-    fs.writeFileSync(stagedHistory, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+    fs.writeFileSync(stagedHistory, formatEvalHistoryJson(history), "utf8");
     for (const [file, contents] of charts) fs.writeFileSync(path.join(stagedCharts, file), contents, "utf8");
 
     if (fs.existsSync(historyPath)) {
@@ -1430,6 +2184,35 @@ function mean(values: number[]): number {
   return round(values.reduce((sum, value) => sum + value, 0) / values.length);
 }
 
+function quartiles(values: number[]): EvalHistoryQuartiles {
+  return {
+    q1: quantile(values, 0.25),
+    median: quantile(values, 0.5),
+    q3: quantile(values, 0.75)
+  };
+}
+
+function quantile(values: number[], probability: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = (sorted.length - 1) * probability;
+  const lowerIndex = Math.floor(index);
+  const lower = sorted[lowerIndex]!;
+  const upper = sorted[Math.min(lowerIndex + 1, sorted.length - 1)]!;
+  return round(lower + (upper - lower) * (index - lowerIndex));
+}
+
+function niceCostMaximum(values: number[]): number {
+  const padded = Math.max(1, ...values) * 1.15;
+  const magnitude = 10 ** Math.floor(Math.log10(padded));
+  const normalized = padded / magnitude;
+  const factor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return factor * magnitude;
+}
+
+function niceF1Maximum(values: number[]): number {
+  return Math.min(1, Math.max(0.4, Math.ceil(Math.max(0, ...values) * 11) / 10));
+}
+
 function round(value: number): number {
   return Number(value.toFixed(8));
 }
@@ -1459,6 +2242,14 @@ function compareText(left: string, right: string): number {
 function format(value: number): string {
   const rounded = Number(value.toFixed(2));
   return Object.is(rounded, -0) ? "0" : String(rounded);
+}
+
+function formatCost(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function formatCostTick(value: number): string {
+  return `$${Number(value.toFixed(2)).toLocaleString("en-US", { useGrouping: false })}`;
 }
 
 function formatMetric(value: number, ratioMetric: boolean): string {

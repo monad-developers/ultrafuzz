@@ -4,9 +4,8 @@ Ultrafuzz eval suites benchmark the fuzzing pipeline against targets with
 known ground-truth bugs, with a **provider-agnostic `EvalReporter`
 abstraction** and **first-class node telemetry**: every node of the
 `topology.yml` DAG (lifecycle, heartbeats, and intermediary artifacts —
-reports, markdown, JSON) is streamed to the configured eval cloud provider
-(Braintrust, LangSmith, …) as spans/child runs, live during a run and
-replayable after it.
+reports, markdown, JSON) is streamed to Braintrust as spans, live during a run
+and replayable after it.
 
 ## Configuration split
 
@@ -22,38 +21,29 @@ variables, never inline secret values.
 [eval]
 eval_config = ".ultrafuzz/evals/bug-finding.yml"   # suite used when --suite is omitted
 ground_truth_root = "/secure/eval-ground-truth"    # machine-specific, MUST resolve outside the repo
-provider = "braintrust"                            # active reporter: braintrust | langsmith | none
+provider = "braintrust"                            # active reporter: braintrust | none
 
 [eval.providers.braintrust]
 api_key_env = "BRAINTRUST_API_KEY"
 project = "ultrafuzz-evals"
-
-[eval.providers.langsmith]
-api_key_env = "LANGSMITH_API_KEY"
-workspace_id_env = "LANGSMITH_WORKSPACE_ID"
-project = "ultrafuzz-evals"
-# endpoint = "https://langsmith.internal.example" # requires the exact operator acknowledgement below
 ```
 
-- `provider` selects the active reporter; `[eval.providers.*]` entries are
-  connection profiles, so switching providers (or adding a new one) is a
-  one-line change with no YAML edits.
+- `provider` selects Braintrust reporting or disables cloud reporting with
+  `none`; `[eval.providers.*]` entries are connection profiles.
 - Precedence: CLI flag (`--provider`, `--suite`) > env
   (`ULTRAFUZZ_EVAL_PROVIDER`, `ULTRAFUZZ_EVAL_CONFIG`) > `ultrafuzz.toml`.
 - `ground_truth_root` is machine-specific and security-sensitive: ground truth
   must live **outside** the repository; suite targets reference files relative
   to this root. Absolute entries, traversal, symlinks, non-regular files, and
   files larger than 1 MiB are rejected.
-- Built-in reporters bind credentials to their canonical names
-  (`BRAINTRUST_API_KEY`, `LANGSMITH_API_KEY`, and, when configured,
-  `LANGSMITH_WORKSPACE_ID`) and canonical HTTPS origins. Requests reject
+- The built-in reporter binds credentials to the canonical
+  `BRAINTRUST_API_KEY` name and canonical HTTPS origin. Requests reject
   redirects, time out after 30 seconds, and accept at most 1 MiB of response
   data.
 - A self-hosted endpoint must be an HTTPS origin and requires an exact,
   operator-owned environment acknowledgement. Set
-  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` or
-  `ULTRAFUZZ_EVAL_LANGSMITH_TRUSTED_ENDPOINT` to the same origin as the
-  corresponding `endpoint`. Repository configuration alone cannot redirect a
+  `ULTRAFUZZ_EVAL_BRAINTRUST_TRUSTED_ENDPOINT` to the same origin as the
+  configured `endpoint`. Repository configuration alone cannot redirect a
   provider credential.
 - Validation: an unknown `provider` or a missing `[eval.providers.<name>]`
   profile is a config error at `eval plan` time; a missing env var named by
@@ -124,11 +114,8 @@ the workflow runner:
   degrade to warnings.
 - `packages/evals/src/reporters/braintrust.ts` maps rows to a three-level span
   tree (row root → topology group → node attempt) with backdated
-  `start`/`end` metrics; `reporters/langsmith.ts` maps the same stream to
-  root/child runs via `parent_run_id`/`dotted_order`, creating runs live on
-  `node-started` and patching them on `node-finished`. Both reporters speak
-  the providers' REST APIs directly over `fetch` — `packages/runtime` never
-  imports a provider SDK.
+  `start`/`end` metrics. The reporter speaks the provider's REST API directly
+  over `fetch` — `packages/runtime` never imports a provider SDK.
 - Heartbeat liveness is bounded by the sync poll cadence: state transitions
   and partial artifacts appear within one poll interval. That is the correct
   trade for a detached orchestrator.
@@ -193,7 +180,8 @@ strategies cover time, external dependencies, externalized accounting, and
 lifecycle views. Its
 lane definition still records `strategy_loops: 1` and the three disabled
 strategy families. The full lane selects every checked-in EVMBench target, pins
-GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, and Kimi K3 `max`, sets the same
+GPT-5.6 Luna `high`, Claude Sonnet 5 `high`, Kimi K3 `max`, and DeepSeek V4 Pro
+`max`, sets the same
 one strategy loop, and explicitly leaves all three disable flags off so the
 complete topology is included. Both default to one trial per variant and use
 GPT-5.6 Sol `xhigh` as an independent judge. Public Modal pairs contain one
@@ -203,10 +191,50 @@ runner. These overrides retain the lane's fixed provider count, target
 selection, and topology. Publication validates every pair as an exact projection
 of the candidate commit's trusted lane policy before merging its observations.
 Smoke publication additionally requires at least one normalized finding for
-every target row. The smoke workflow profile and selected strategy IDs are part
+every successful target row; the single report-backed failed target may publish
+an empty normalized finding list. The smoke workflow profile and selected strategy IDs are part
 of the execution-policy fingerprint, so its charts cannot mix with full or
 legacy smoke observations.
-`eval history` consumes only complete scored generations, stores aggregate
+
+### Published history
+
+The README overview emits one point only when a candidate run contains every
+target pinned by its cohort, exactly once, for the same benchmark, lane,
+variant, model profile, cohort, execution policy, and scoring lineage.
+Incomplete or duplicate target sets are retained in the append-only history but
+omitted from the overview. The **UltrafuzzBench Score** is macro-F1: the
+arithmetic mean of the per-target F1 values, so each target and framework has
+equal weight. Macro precision and recall use the same equal-target weighting.
+Precision and recall remain available in `benchmarks/history.json` but are omitted
+from the overview charts.
+
+The latest-result summary sums target cost and uses the slowest target as the
+parallel run's wall clock. If any target lacks complete cost or runtime
+evidence, that summary value is unavailable. When the latest run contains
+multiple model profiles, the summary shows every profile instead of choosing
+one by identifier order. The quality overview shows at most the 12 latest
+complete candidate runs, gives each model profile a distinct marker color and
+shape, and breaks lines when the cohort or execution policy changes. Solid line
+segments connect identical scoring identities. Because an exact scoring
+identity records the candidate commit itself, dashed segments provide a visual
+guide across scoring-identity changes without claiming strict comparability.
+Exact scoring identities remain available in point tooltips and continue to
+gate strict `eval compare` compatibility.
+
+The performance × cost overview uses the same complete-run aggregation for the
+smoke lane: its vertical value is target-macro F1 and its horizontal value is
+the sum of target costs. It groups runs by model, places the dot at the marginal
+median of each metric, and draws horizontal cost and vertical F1 bands from
+Type-7 first and third quartiles. These bands describe observed run dispersion,
+not confidence intervals. To avoid mixing Luna's old and current prices, its
+comparison starts at the first run in the non-overlapping current-price regime,
+`2026-07-31T14:52:13.635Z`; other models use all complete priced smoke runs. A
+run with any unavailable target cost is excluded from the bivariate summary
+rather than treated as zero. Models with no priced run retain their median F1
+and sample count in an explicit unplotted annotation; a one-run model has a dot
+and a collapsed IQR.
+
+`eval history` consumes complete scored generations, stores aggregate
 metrics plus immutable candidate, cohort, execution-policy, and scoring lineage
 in `benchmarks/history.json`, and renders the README SVGs without network or
 model calls. Efficiency values that are not complete remain `null` with typed
@@ -215,12 +243,13 @@ reasons and render as unavailable.
 EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the
 allowlisted report and normalized-finding files. It also carries the strict
-post-eval diagnostic that certifies each scoreable terminal outcome; history
-accepts a failed workflow only when that evidence identifies a report-backed
-genuine task failure. Bundle path, size, and SHA-256 checks are distinct from
+post-eval diagnostic that certifies each scoreable terminal outcome. A complete
+cohort may include one report-backed failed workflow, preserving that failure as
+a scored datapoint; two failed rows or missing terminal evidence still block
+publication. Bundle path, size, and SHA-256 checks are distinct from
 the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
-`eval publish --provider langsmith <eval-run-id>` replays the journal from
+`eval publish --provider braintrust <eval-run-id>` replays the journal from
 offset 0 and reconstructs the entire node trace on a provider after the fact
 (CI runs with reporting off, backfilling a newly added provider). Live and
 post-hoc publishing share one code path; `--resume` continues from the

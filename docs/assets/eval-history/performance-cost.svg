@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="636" viewBox="0 0 960 636" role="img" aria-labelledby="title desc">
+<title id="title">UltrafuzzBench performance versus cost</title>
+<desc id="desc">Each model with complete cost is represented by the median cost and UltrafuzzBench Score (macro-F1) of its complete smoke runs in the current pricing regime. Horizontal and vertical bands show Type-7 interquartile ranges.</desc>
+<rect width="960" height="636" fill="#ffffff"/>
+<text x="90" y="40" font-family="system-ui, sans-serif" font-size="26" font-weight="600" fill="#111827">Performance × cost</text>
+<text x="90" y="66" font-family="system-ui, sans-serif" font-size="14" fill="#6b7280">UltrafuzzBench smoke · complete runs in each model&apos;s current pricing regime</text>
+<text x="90" y="88" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">Dots are medians; horizontal cost bands and vertical macro-F1 bands show the IQR.</text>
+<line x1="90" y1="120" x2="90" y2="440" stroke="#6b7280"/>
+<line x1="90" y1="440" x2="920" y2="440" stroke="#6b7280"/>
+<text transform="translate(22,280) rotate(-90)" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">UltrafuzzBench Score (macro-F1)</text>
+<text x="505" y="498" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#374151">Cost per complete run (USD)</text>
+<line x1="90" y1="120" x2="90" y2="440" stroke="#e5e7eb"/>
+<text x="90" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$0</text>
+<line x1="90" y1="440" x2="920" y2="440" stroke="#e5e7eb"/>
+<text x="80" y="445" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">0.0%</text>
+<line x1="297.5" y1="120" x2="297.5" y2="440" stroke="#e5e7eb"/>
+<text x="297.5" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$5</text>
+<line x1="90" y1="360" x2="920" y2="360" stroke="#e5e7eb"/>
+<text x="80" y="365" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">10.0%</text>
+<line x1="505" y1="120" x2="505" y2="440" stroke="#e5e7eb"/>
+<text x="505" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$10</text>
+<line x1="90" y1="280" x2="920" y2="280" stroke="#e5e7eb"/>
+<text x="80" y="285" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">20.0%</text>
+<line x1="712.5" y1="120" x2="712.5" y2="440" stroke="#e5e7eb"/>
+<text x="712.5" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$15</text>
+<line x1="90" y1="200" x2="920" y2="200" stroke="#e5e7eb"/>
+<text x="80" y="205" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">30.0%</text>
+<line x1="920" y1="120" x2="920" y2="440" stroke="#e5e7eb"/>
+<text x="920" y="464" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">$20</text>
+<line x1="90" y1="120" x2="920" y2="120" stroke="#e5e7eb"/>
+<text x="80" y="125" text-anchor="end" font-family="system-ui, sans-serif" font-size="13" fill="#4b5563">40.0%</text>
+<g data-model="deepseek-v4-pro" data-run-count="1" data-cost-q1="1.26551998" data-cost-median="1.26551998" data-cost-q3="1.26551998" data-f1-q1="0.1" data-f1-median="0.1" data-f1-q3="0.1"><title>deepseek-v4-pro: median 10.0% at $1.27; 1 run from 2026-08-01 to 2026-08-01</title>
+<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="142.52" cy="360" r="8"/>
+</g>
+<g data-model="gpt-5.6-luna" data-run-count="8" data-cost-q1="12.67670025" data-cost-median="14.52592624" data-cost-q3="15.18550253" data-f1-q1="0.19911667" data-f1-median="0.2342" data-f1-q3="0.29056667"><title>gpt-5.6-luna: median 23.4% at $14.53; 8 runs from 2026-07-31 to 2026-08-03 (current pricing since 2026-07-31)</title>
+<line data-iqr="cost" x1="616.08" y1="252.64" x2="720.2" y2="252.64" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
+<line data-iqr="f1" x1="692.83" y1="280.71" x2="692.83" y2="207.55" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
+<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="684.83" y="244.64" width="16" height="16"/>
+</g>
+<g data-model="kimi-k3" data-run-count="1" data-cost-q1="16.6637064" data-cost-median="16.6637064" data-cost-q3="16.6637064" data-f1-q1="0.29373333" data-f1-median="0.29373333" data-f1-q3="0.29373333"><title>kimi-k3: median 29.4% at $16.66; 1 run from 2026-08-03 to 2026-08-03</title>
+<polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="781.54,196.01 790.54,205.01 781.54,214.01 772.54,205.01"/>
+</g>
+<circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="98" cy="530" r="6"/>
+<text x="114" y="534" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-pro</tspan><tspan fill="#6b7280"> · median 10.0% · $1.27 · n=1</tspan></text>
+<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="92" y="550" width="12" height="12"/>
+<text x="114" y="560" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">gpt-5.6-luna</tspan><tspan fill="#6b7280"> · median 23.4% · $14.53 · n=8</tspan></text>
+<polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="98,575 105,582 98,589 91,582"/>
+<text x="114" y="586" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">kimi-k3</tspan><tspan fill="#6b7280"> · median 29.4% · $16.66 · n=1</tspan></text>
+</svg>

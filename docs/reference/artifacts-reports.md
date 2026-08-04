@@ -142,15 +142,14 @@ generated-tests.json
 references/manifest.json
 ```
 
-The default `stateful-invariant-campaign` writes backend-neutral
-`campaign-plan.json`, `campaign-summary.json`, and `campaign-report.md`
-artifacts plus `echidna-results.json` and `medusa-results.json`. The plan records
-the resolved vCPU count, workers per backend, parallel or sequential execution
-mode, shared wall-clock budget, and finalization reserve. Each backend record
-keeps its command, version, timestamps, terminal status, distinct artifact
-paths, failures, reproducers, and available coverage metadata. The summary
-classifies the combined result as `complete`, `partial`, or `blocked` without
-discarding a usable backend's evidence.
+The default `stateful-invariant-campaign` runs one final recon-fuzzer backend
+and writes backend-neutral `campaign-plan.json`, `campaign-summary.json`, and
+`campaign-report.md` artifacts plus `recon-fuzzer-results.json`. The plan
+records the resolved vCPU count, worker count, wall-clock budget, deadline, and
+finalization reserve. The backend record keeps its command, version, timestamps,
+terminal status, distinct artifact paths, failures, reproducers, and available
+coverage metadata. The summary classifies the result as `complete`, `partial`,
+or `blocked` without discarding usable evidence.
 
 Required outputs are node-specific and declared with versioned contracts in
 `.ultrafuzz/topology.yml`. Output paths are relative to the node artifact
@@ -258,8 +257,9 @@ Property-derived `findings.json` entries carry the same optional
 not originate from a catalog property omit the field.
 
 Runtime artifact gates reject unknown canonical IDs and campaign references to
-properties that were not recorded with `implemented` status. They validate the
-Echidna and Medusa result records independently, reject raw campaign/finding
+properties that were not recorded with `implemented` status. They validate each
+campaign result record independently, judge unexplained findings against the
+union of every campaign record in the node, reject raw campaign/finding
 reference mismatches and dangling final-report IDs, and require final joins to
 match the validated sources, implementation/test paths, and complete set of
 originating fuzzer backends. Final `report.json` stores the joined chain in
@@ -307,7 +307,11 @@ missing component rate. Usage completeness is derived from reported component
 evidence regardless of whether catalog pricing is available. `partial_pricing`
 remains the backward-compatible inverse of pricing completeness. An event's
 reported total is tracked separately in `provided_cost_usd`; it does not fill
-missing component rates or make component pricing complete.
+missing component rates or make component pricing complete. Kimi-family models
+are priced from the pinned Moonshot provider entry, while DeepSeek-family
+models are priced from the pinned first-party DeepSeek entry. Either family
+stays listed in `pricing_catalog.unresolved_models` when its first-party entry
+is absent rather than borrowing a same-named rate from another provider.
 
 The final report is a review artifact. It is not an automatic vulnerability
 submission, repository mutation, or patch application.

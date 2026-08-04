@@ -18,9 +18,11 @@ import type {
   RunHealthVerdict,
   RunListEntry,
   RunListValue,
+  RunProgressSummary,
   RunStatusValue,
   WorkflowCommandSummary
 } from "./types.js";
+import { summarizeRunProgress } from "./run-progress.js";
 import { readJsonIfExists, runtimeFailure, runtimeResult } from "./utils.js";
 import { runSmithersInspectionCommand, type SmithersCommandSnapshot } from "./smithers.js";
 import { readLinkedWorkflowEvidence } from "./start-run.js";
@@ -191,12 +193,22 @@ export async function getRunHealth(input: {
       }
     ]);
   }
-  return runtimeResult(
+  const base = readRunListEntry(evidence.layout.root, evidence.layout.runId);
+  const state = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout) : undefined;
+  return runtimeResult<RunHealthValue>(
     true,
     {
-      ...readRunListEntry(evidence.layout.root, evidence.layout.runId),
+      ...base,
       workflow_run_id: evidence.smithersRunId,
-      ...health
+      ...health,
+      ...summarizeRunProgress({
+        runStatus: base.status,
+        counts: health.counts,
+        throughput: health.throughput,
+        state,
+        runStartedAt: base.started_at,
+        nowMs: Date.now()
+      })
     },
     syncDiagnostics
   );
@@ -352,7 +364,9 @@ function stringField(value: Record<string, unknown>, key: string): string | unde
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
 
-function parseRunHealth(value: unknown): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id"> | undefined {
+function parseRunHealth(
+  value: unknown
+): Omit<RunHealthValue, keyof RunListEntry | "workflow_run_id" | keyof RunProgressSummary> | undefined {
   const data = commandData(value);
   const counts = recordField(data, "counts");
   const throughput = recordField(data, "throughput");
@@ -483,7 +497,8 @@ function isRunHealthVerdict(value: string | undefined): value is RunHealthVerdic
 }
 
 function publicHealthReason(value: string): string {
-  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz inspect`").replace(/smithers/giu, "workflow runner");
+  // `ultrafuzz why` now wraps the engine diagnosis, so recommend it directly.
+  return value.replace(/`?smithers\s+why`?/giu, "`ultrafuzz why`").replace(/smithers/giu, "workflow runner");
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

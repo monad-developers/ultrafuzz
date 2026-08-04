@@ -56,7 +56,9 @@ Modal credential if it descends from the host token staged for that row.
 API-key auth is also supported per model; Kimi accepts either
 `KIMI_API_KEY` or `MOONSHOT_API_KEY` on the launcher host, exposes the value to
 the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
-`api_key` config field.
+`api_key` config field. DeepSeek V4 Pro requires `DEEPSEEK_API_KEY`; the worker
+forwards it only to the selected DeepSeek pair, whose generated adapter routes
+Claude Code to DeepSeek's Anthropic-compatible endpoint.
 
 For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
 auth or serial launches when comparing multiple Kimi profiles, so OAuth
@@ -64,9 +66,10 @@ refresh-token rotation remains single-writer.
 
 ## Create a private runtime config
 
-The seven-model matrix is built in, so `models` may be omitted. The default is
+The eight-model matrix is built in, so `models` may be omitted. The default is
 one run each for GPT-5.5, GPT-5.6 Sol/Terra/Luna, Claude Fable 5, Claude Opus
-4.8, and Kimi K3, with the default production strategy loop count `loops = 3`.
+4.8, Kimi K3, and DeepSeek V4 Pro, with the default production strategy loop
+count `loops = 3`.
 Public CI launch configs intentionally set `loops = 1` for their smoke and full
 lanes.
 
@@ -135,11 +138,13 @@ high/medium reasoning split, or target and topology limits.
 
 A manual `workflow_dispatch` runs the full lane instead. It evaluates every
 checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at
-`high`, and Kimi K3 at `max` by default. Dispatch inputs `openai_model`,
-`openai_reasoning`, `anthropic_model`, `anthropic_reasoning`, `kimi_model`, and
-`kimi_reasoning` provide explicit overrides. The full lane retains the production strategy set, including invariant,
-differential, and dynamic strategies, with all three disable flags set to
-`false`. Push events can never select this lane.
+`high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by default. Dispatch
+inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
+`anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
+`deepseek_reasoning` provide explicit overrides. The full lane retains the
+production strategy set, including invariant, differential, and dynamic
+strategies, with all three disable flags set to `false`. Push events can never
+select this lane.
 
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
@@ -158,7 +163,8 @@ cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
 Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
-either `KIMI_API_KEY` or `MOONSHOT_API_KEY`; automatic smoke runs do not.
+either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
+smoke runs do not.
 Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
 should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust
@@ -390,11 +396,14 @@ prerequisite for the other:
 ```bash
 pnpm --filter @ultrafuzz/modal smoke -- --provider openai
 pnpm --filter @ultrafuzz/modal smoke -- --provider anthropic
+pnpm --filter @ultrafuzz/modal smoke -- --provider deepseek
+pnpm --filter @ultrafuzz/modal smoke -- --provider kimi
 ```
 
 Each invocation uses the published production image and its installed compiled
 smoke entrypoint with a tiny generic state fixture. It checks the selected
-subscription-auth path without copying the other provider's credential, asserts
+subscription-auth path, or the isolated `DEEPSEEK_API_KEY` staging path for
+DeepSeek, without copying another provider's credential, asserts
 the worker is non-root, writes to a Modal Volume, terminates the first sandbox
 after one unit completes, resumes on that same volume, verifies the completed
 unit was not repeated, and races two continuation requests to prove that
@@ -413,6 +422,7 @@ runs because its skip-permissions mode cannot run with root privileges.
 
 ## Toolchain image
 
-The runner image includes Foundry (`forge`, `cast`, and `anvil`), Recon,
-`recon-generate`, Echidna, Medusa, Slither, and `covg-eval`. The equivalent
-standalone image definition is in `packages/modal/Dockerfile`.
+The runner image includes Foundry (`forge`, `cast`, and `anvil`), recon-fuzzer,
+`recon-generate`, Slither, and `covg-eval`. recon-fuzzer is the only fuzzing
+backend, so Echidna and Medusa are not installed. The equivalent standalone
+image definition is in `packages/modal/Dockerfile`.
