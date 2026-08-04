@@ -222,6 +222,11 @@ describe("Modal benchmark scope workflow binding", () => {
     expect(validate).toContain('"$EXPECTED_GENERATION_SHA256"');
     expect(validate).toContain('"$CANDIDATE_COMMIT"');
     expect(validate).toContain('"$EXPECTED_REPOSITORY_URL"');
+    const drift = publicationJob.steps[driftIndex]!;
+    expect(drift.env).toMatchObject({ GH_TOKEN: "${{ github.token }}" });
+    expect(drift.run).toContain('gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main"');
+    expect(drift.run).toContain('remote_main="');
+    expect(drift.run).not.toContain("git fetch");
     const publish = publicationJob.steps[publishIndex]!;
     expect(publish.env).toMatchObject({
       PUBLISHER_TOKEN: "${{ steps.publisher-token.outputs.token }}",

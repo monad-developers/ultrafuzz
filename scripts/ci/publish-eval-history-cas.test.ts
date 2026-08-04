@@ -372,6 +372,70 @@ describe("eval history Git CAS publisher", () => {
     expect(fs.existsSync(hookEnvironment)).toBe(false);
   });
 
+  it("authenticates every remote refresh with redacted publisher authority", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-fetch-authority", "observation-fetch-authority", candidateCommit);
+    const generation = writeGeneration(
+      fixture.root,
+      "generation-fetch-authority.json",
+      ["run-fetch-authority"],
+      candidateCommit
+    );
+    const capture = path.join(fixture.root, "fetch-environments.jsonl");
+    const wrapperDirectory = path.join(fixture.root, "git-wrapper");
+    const wrapper = path.join(wrapperDirectory, "git");
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    writeFile(
+      wrapper,
+      `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "fetch") {
+  const count = Number(process.env.GIT_CONFIG_COUNT ?? "0");
+  const config = [];
+  for (let index = 0; index < count; index += 1) {
+    config.push([process.env[\`GIT_CONFIG_KEY_\${index}\`], process.env[\`GIT_CONFIG_VALUE_\${index}\`]]);
+  }
+  fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ args, config }) + "\\n");
+}
+const result = spawnSync(${JSON.stringify(realGit)}, args, { env: process.env, stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`
+    );
+    fs.chmodSync(wrapper, 0o700);
+    const publisherToken = "publisher-secret-value";
+    const expectedAuthorization = `AUTHORIZATION: basic ${Buffer.from(
+      `x-access-token:${publisherToken}`,
+      "utf8"
+    ).toString("base64")}`;
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperDirectory}${path.delimiter}${previousPath ?? ""}`;
+    try {
+      const published = publishEvalHistoryGeneration({
+        ...publisherInput(fixture.checkoutA, generation, inputRoot),
+        publisherToken
+      });
+      expect(published.published).toBe(true);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+    const fetches = fs
+      .readFileSync(capture, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { args: string[]; config: Array<[string | undefined, string | undefined]> });
+    expect(fetches.length).toBeGreaterThanOrEqual(2);
+    for (const fetch of fetches) {
+      expect(fetch.args.join(" ")).not.toContain(publisherToken);
+      expect(fetch.config).toContainEqual(["http.https://github.com/.extraheader", expectedAuthorization]);
+    }
+  });
+
   it("rejects origin mutation after CLI processing before any authorized push", () => {
     const fixture = createRepositoryFixture();
     const attacker = path.join(fixture.root, "attacker.git");

@@ -10,6 +10,8 @@ import { createRunLayout, writeFileDurable, writeJsonDurable } from "@ultrafuzz/
 import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
 
 import { runSmithersInspectionCommand } from "../src/smithers.js";
+import { acquireSmithersExecutableAnchor } from "../src/smithers-executable-capability.js";
+import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import {
   disposeWorkflowExecutionSnapshot,
   materializeWorkflowExecutionSnapshot,
@@ -506,6 +508,171 @@ test("runner capability invokes the bound interpreter instead of a substituted P
     assert.equal(fs.existsSync(marker), false);
   } finally {
     disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test("snapshot capability falls back to exact lexical identities when descriptor paths are unavailable", () => {
+  const fixture = controlFixture();
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+  });
+  const anchor = acquireWorkflowExecutionSnapshotAnchor(
+    { ...materialized.env },
+    {
+      openDirectory: () => undefined,
+      directoryDescriptorPath: () => undefined,
+      controllerDirectoryDescriptorPath: () => undefined
+    }
+  );
+  assert.ok(anchor);
+  assert.equal(anchor.rewriteControllerValue(materialized.workflowPath), materialized.workflowPath);
+  assert.equal(
+    anchor.rewriteControllerValue(materialized.env.ULTRAFUZZ_RUNTIME_MODULE!),
+    materialized.env.ULTRAFUZZ_RUNTIME_MODULE
+  );
+  anchor.assertCurrent();
+
+  const displaced = `${materialized.root}.path-fallback-displaced`;
+  fs.renameSync(materialized.root, displaced);
+  fs.mkdirSync(materialized.root, { mode: 0o500 });
+  try {
+    assert.throws(
+      () => anchor.assertCurrent(),
+      /workflow execution snapshot changed at the controller command boundary/u
+    );
+  } finally {
+    anchor.close();
+    fs.rmSync(materialized.root, { recursive: true, force: true });
+    fs.renameSync(displaced, materialized.root);
+    disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test("snapshot materialization and disposal complete without directory handles or descriptor paths", () => {
+  const fixture = controlFixture();
+  const lexicalFileSystem = {
+    openDirectory: () => undefined,
+    directoryDescriptorPath: () => undefined
+  };
+  const snapshot = verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout);
+  const materialized = materializeWorkflowExecutionSnapshot(
+    {
+      projectRoot: fixture.projectRoot,
+      layout: fixture.layout,
+      snapshot
+    },
+    lexicalFileSystem
+  );
+
+  assert.equal(materialized.workflowPath.startsWith(materialized.root), true);
+  assert.equal(materialized.workflowPath.includes("/proc/"), false);
+  assert.equal(materialized.env.SMITHERS_BIN?.startsWith(materialized.root), true);
+  assert.equal(fs.readFileSync(materialized.workflowPath, "utf8"), snapshot.contents.workflow.toString("utf8"));
+  assert.equal(fs.readFileSync(materialized.env.ULTRAFUZZ_CONFIG_PATH!, "utf8"), '[project]\nname = "fixture"\n');
+
+  disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
+  assert.equal(fs.existsSync(materialized.root), false);
+  assert.doesNotThrow(() => disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem));
+});
+
+test(
+  "lexical snapshot cleanup rejects a root swapped during listing without traversing the replacement",
+  { concurrency: false },
+  () => {
+    const fixture = controlFixture();
+    const lexicalFileSystem = {
+      openDirectory: () => undefined,
+      directoryDescriptorPath: () => undefined
+    };
+    const materialized = materializeWorkflowExecutionSnapshot(
+      {
+        projectRoot: fixture.projectRoot,
+        layout: fixture.layout,
+        snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+      },
+      lexicalFileSystem
+    );
+    const displaced = `${materialized.root}.lexical-displaced`;
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-lexical-cleanup-outside-"));
+    const marker = path.join(outside, "keep.txt");
+    fs.writeFileSync(marker, "must survive lexical cleanup\n", "utf8");
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "readdirSync")!;
+    const originalReaddirSync = fs.readdirSync;
+    let swapped = false;
+    Object.defineProperty(fs, "readdirSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const result = Reflect.apply(originalReaddirSync, fs, args) as unknown;
+        if (!swapped && path.resolve(String(args[0])) === materialized.root) {
+          swapped = true;
+          fs.renameSync(materialized.root, displaced);
+          fs.symlinkSync(outside, materialized.root, process.platform === "win32" ? "junction" : "dir");
+        }
+        return result;
+      }
+    });
+    try {
+      assert.throws(
+        () => disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem),
+        /workflow execution snapshot directory changed during snapshot ownership/u
+      );
+      assert.equal(swapped, true);
+      assert.equal(fs.readFileSync(marker, "utf8"), "must survive lexical cleanup\n");
+    } finally {
+      Object.defineProperty(fs, "readdirSync", originalDescriptor);
+      if (fs.existsSync(materialized.root) && fs.lstatSync(materialized.root).isSymbolicLink()) {
+        fs.unlinkSync(materialized.root);
+      }
+      if (fs.existsSync(displaced)) fs.renameSync(displaced, materialized.root);
+      if (fs.existsSync(materialized.root)) disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
+    }
+  }
+);
+
+test("runner capability path fallback revalidates exact bytes on the held inode", () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runner-path-bytes-"));
+  const runner = path.join(projectRoot, "runner.js");
+  const original = "#!/usr/bin/env node\nconsole.log('trusted');\n";
+  const replacement = "#!/usr/bin/env node\nconsole.log('hostile');\n";
+  assert.equal(Buffer.byteLength(original), Buffer.byteLength(replacement));
+  fs.writeFileSync(runner, original, "utf8");
+  fs.chmodSync(runner, 0o700);
+  const anchor = acquireSmithersExecutableAnchor(createSmithersTestEnvironment(runner), {
+    executableDescriptorPath: () => undefined
+  });
+  assert.ok(anchor);
+  assert.equal(anchor.executable, fs.realpathSync(process.execPath));
+  assert.deepEqual(anchor.argumentPrefix, [fs.realpathSync(runner)]);
+  anchor.assertCurrent();
+
+  fs.writeFileSync(runner, replacement, "utf8");
+  try {
+    assert.throws(() => anchor.assertCurrent(), /workflow runner changed at the controller command boundary/u);
+  } finally {
+    anchor.close();
+  }
+});
+
+test("runner capability path fallback rejects an identical-byte pathname replacement", () => {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-runner-path-identity-"));
+  const runner = path.join(projectRoot, "runner.js");
+  const displaced = `${runner}.displaced`;
+  const contents = "#!/usr/bin/env node\nconsole.log('trusted');\n";
+  fs.writeFileSync(runner, contents, "utf8");
+  fs.chmodSync(runner, 0o700);
+  const anchor = acquireSmithersExecutableAnchor(createSmithersTestEnvironment(runner), {
+    executableDescriptorPath: () => undefined
+  });
+  assert.ok(anchor);
+  fs.renameSync(runner, displaced);
+  fs.writeFileSync(runner, contents, "utf8");
+  fs.chmodSync(runner, 0o700);
+  try {
+    assert.throws(() => anchor.assertCurrent(), /workflow runner changed at the controller command boundary/u);
+  } finally {
+    anchor.close();
   }
 });
 

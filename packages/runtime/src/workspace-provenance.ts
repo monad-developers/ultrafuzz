@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdtempSync,
   openSync,
+  opendirSync,
   readFileSync,
   readlinkSync,
   readSync,
@@ -40,23 +41,24 @@ const DEFAULT_WORKSPACE_VERIFICATION_LIMITS: WorkspaceProvenanceVerificationLimi
   maxTrackedBytes: 1024 * 1024 * 1024,
   maxTrackedEntries: 100_000
 };
-// These exact top-level directories are native package-manager, compiler, and
-// test-runner output. They may be large and are intentionally allowed between
-// retries, but repository-controlled ignore rules do not expand this list.
-const NATIVE_TOOL_OUTPUT_PREFIXES = [
-  ".build/",
-  ".cache/",
-  ".pytest_cache/",
-  ".venv/",
-  "__pycache__/",
-  "build/",
-  "cache/",
-  "dist/",
-  "node_modules/",
-  "out/"
+// These exact directory basenames are native package-manager, compiler, and
+// test-runner output. They may occur below package/test roots in monorepos and
+// Python projects. Repository-controlled ignore rules never expand this list.
+const NATIVE_TOOL_OUTPUT_DIRECTORY_NAMES = [
+  ".build",
+  ".cache",
+  ".pytest_cache",
+  ".venv",
+  "__pycache__",
+  "build",
+  "cache",
+  "dist",
+  "node_modules",
+  "out"
 ] as const;
+const NATIVE_TOOL_OUTPUT_DIRECTORY_NAME_SET = new Set<string>(NATIVE_TOOL_OUTPUT_DIRECTORY_NAMES);
 
-export const NATIVE_TOOL_OUTPUT_ROOTS = NATIVE_TOOL_OUTPUT_PREFIXES.map((prefix) => prefix.slice(0, -1));
+export const NATIVE_TOOL_OUTPUT_ROOTS = [...NATIVE_TOOL_OUTPUT_DIRECTORY_NAMES];
 
 function compareCanonicalAscii(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -186,6 +188,12 @@ type TrackedPathSnapshot =
       candidate: string;
       kind: "gitlink";
       repository: TrackedRepositorySnapshot;
+      stat: BigIntStats;
+      workspaceRoot: string;
+    }
+  | {
+      candidate: string;
+      kind: "unmaterialized-gitlink";
       stat: BigIntStats;
       workspaceRoot: string;
     };
@@ -337,9 +345,22 @@ export function cleanWorkspaceOutputRootsForRetry(
 export function cleanNativeWorkspaceOutputRoots(workspacePath: string): void {
   const workspaceRoot = realpathSync(path.resolve(workspacePath));
   const budget = createWorkspaceVerificationBudget({});
-  for (const relativeRoot of NATIVE_TOOL_OUTPUT_ROOTS) {
+  const expectedCommit = resolveCheckedOutCommitWithinBudget(workspaceRoot, budget);
+  cleanNativeWorkspaceOutputRootsWithinBudget(workspaceRoot, expectedCommit, budget, 0);
+}
+
+function cleanNativeWorkspaceOutputRootsWithinBudget(
+  workspaceRoot: string,
+  expectedCommit: string,
+  budget: WorkspaceVerificationBudget,
+  gitlinkDepth: number
+): void {
+  const headEntries = listCommitTrackedEntries(workspaceRoot, expectedCommit, budget);
+  const untracked = listUntrackedFiles(workspaceRoot, expectedCommit, budget);
+  const relativeRoots = nativeOutputRootsForEntries(untracked, true);
+  for (const relativeRoot of relativeRoots) {
     assertVerificationWithinElapsedLimit(budget);
-    const candidate = path.join(workspaceRoot, relativeRoot);
+    const candidate = path.join(workspaceRoot, ...relativeRoot.split("/"));
     assertOptionalAnchoredDirectory(workspaceRoot, candidate, "native tool output root");
     try {
       runGitWithinVerificationBudget(budget, (timeout) =>
@@ -356,6 +377,49 @@ export function cleanNativeWorkspaceOutputRoots(workspacePath: string): void {
     }
     assertOptionalAnchoredDirectory(workspaceRoot, candidate, "cleaned native tool output root");
   }
+  for (const entry of headEntries) {
+    if (entry.mode !== "160000") continue;
+    const nestedDepth = gitlinkDepth + 1;
+    consumeGitlink(budget, nestedDepth);
+    const candidate = path.resolve(workspaceRoot, entry.relativePath);
+    assertPathInside(workspaceRoot, candidate, "tracked gitlink cleanup");
+    assertNoSymlinkComponents(workspaceRoot, path.dirname(candidate), "tracked gitlink cleanup");
+    const before = lstatSync(candidate, { bigint: true });
+    assertTrackedDirectory(before);
+    if (trackedDirectoryIsEmpty(candidate, budget)) continue;
+    assertMaterializedGitlinkMetadata(candidate);
+    if (resolveCheckedOutCommitWithinBudget(candidate, budget) !== entry.objectId) {
+      throw new Error("workspace-provenance failure: tracked gitlink does not match HEAD during cleanup");
+    }
+    cleanNativeWorkspaceOutputRootsWithinBudget(candidate, entry.objectId, budget, nestedDepth);
+    const after = lstatSync(candidate, { bigint: true });
+    assertTrackedDirectory(after);
+    assertStableTrackedDirectoryIdentity(before, after, "tracked gitlink changed during cleanup");
+    if (resolveCheckedOutCommitWithinBudget(candidate, budget) !== entry.objectId) {
+      throw new Error("workspace-provenance failure: tracked gitlink changed during cleanup");
+    }
+  }
+}
+
+function nativeOutputRootsForEntries(entries: readonly string[], includeLeaf: boolean): string[] {
+  const roots = new Set<string>();
+  for (const entry of entries) {
+    const root = nativeOutputRootForEntry(entry, includeLeaf);
+    if (root !== undefined) roots.add(root);
+  }
+  return [...roots].sort(compareCanonicalAscii);
+}
+
+function nativeOutputRootForEntry(entry: string, includeLeaf: boolean): string | undefined {
+  const segments = entry.split("/");
+  const length = includeLeaf ? segments.length : Math.max(0, segments.length - 1);
+  for (let index = 0; index < length; index += 1) {
+    const segment = segments[index]!;
+    if (NATIVE_TOOL_OUTPUT_DIRECTORY_NAME_SET.has(segment)) {
+      return segments.slice(0, index + 1).join("/");
+    }
+  }
+  return undefined;
 }
 
 function assertOptionalAnchoredDirectory(workspaceRoot: string, candidate: string, label: string): void {
@@ -998,9 +1062,10 @@ function consumeDerivedTrackedPath(budget: WorkspaceVerificationBudget, candidat
   budget.derivedPathBytes = nextBytes;
 }
 
-function consumeGitListingBytes(budget: WorkspaceVerificationBudget, listed: string): void {
+function consumeGitListingBytes(budget: WorkspaceVerificationBudget, listed: string | Buffer): void {
   assertVerificationWithinElapsedLimit(budget);
-  const next = budget.gitListingBytes + Buffer.byteLength(listed, "utf8");
+  const next =
+    budget.gitListingBytes + (typeof listed === "string" ? Buffer.byteLength(listed, "utf8") : listed.length);
   if (!Number.isSafeInteger(next) || next > budget.limits.maxGitListingBytes) {
     throw gitListingLimitError(budget);
   }
@@ -1048,6 +1113,8 @@ function assertTrackedFilesMatchCommit(
       error instanceof Error &&
       (error.message.includes("unexpected untracked source") ||
         error.message.includes("untracked .gitignore") ||
+        error.message.includes("untracked task source path is not valid UTF-8") ||
+        error.message.includes("checked-out source tree path is not valid UTF-8") ||
         error.message.includes("allowed untracked root") ||
         error.message.includes("tracked symlink target exposes mutable gitlink source") ||
         error.message.includes("assume-unchanged or skip-worktree"))
@@ -1148,7 +1215,7 @@ function listCommitTrackedEntries(
   budget: WorkspaceVerificationBudget
 ): HeadTrackedEntry[] {
   const remainingListingBytes = budget.limits.maxGitListingBytes - budget.gitListingBytes;
-  let listed: string;
+  let listed: Buffer;
   try {
     listed = runGitWithinVerificationBudget(budget, (timeout) =>
       execFileSync(
@@ -1156,7 +1223,6 @@ function listCommitTrackedEntries(
         trustedGitArguments(["ls-tree", "-r", "-z", "--full-name", "--full-tree", "--abbrev=40", expectedCommit]),
         {
           cwd: workspaceRoot,
-          encoding: "utf8",
           env: gitWorkspaceEnvironment(workspaceRoot),
           // Permit one byte beyond the remaining cumulative allowance so a
           // successful command can be charged deterministically below. Larger
@@ -1174,36 +1240,33 @@ function listCommitTrackedEntries(
   }
   consumeGitListingBytes(budget, listed);
   const listedEntryCount = reserveListedTrackedEntries(budget, listed);
-  const entries = listed
-    .split("\0")
-    .filter((record) => record.length > 0)
-    .map((record): HeadTrackedEntry => {
-      const match = /^(100644|100755|120000|160000) (blob|commit) ([0-9a-f]{40})\t([\s\S]+)$/u.exec(record);
-      if (match === null || (match[1] === "160000") !== (match[2] === "commit")) {
-        throw new Error("workspace-provenance failure: checked-out source tree entry is invalid");
-      }
-      return {
-        mode: match[1] as HeadTrackedEntry["mode"],
-        type: match[2] as HeadTrackedEntry["type"],
-        objectId: match[3]!,
-        relativePath: match[4]!
-      };
-    });
+  const entries = decodeNulSeparatedGitRecords(listed, "checked-out source tree").map((record): HeadTrackedEntry => {
+    const match = /^(100644|100755|120000|160000) (blob|commit) ([0-9a-f]{40})\t([\s\S]+)$/u.exec(record);
+    if (match === null || (match[1] === "160000") !== (match[2] === "commit")) {
+      throw new Error("workspace-provenance failure: checked-out source tree entry is invalid");
+    }
+    return {
+      mode: match[1] as HeadTrackedEntry["mode"],
+      type: match[2] as HeadTrackedEntry["type"],
+      objectId: match[3]!,
+      relativePath: match[4]!
+    };
+  });
   if (entries.length !== listedEntryCount) {
     throw new Error("workspace-provenance failure: checked-out source tree listing is invalid");
   }
   return entries;
 }
 
-function reserveListedTrackedEntries(budget: WorkspaceVerificationBudget, listed: string): number {
-  if (listed.length > 0 && !listed.endsWith("\0")) {
+function reserveListedTrackedEntries(budget: WorkspaceVerificationBudget, listed: Buffer): number {
+  if (listed.length > 0 && listed[listed.length - 1] !== 0) {
     throw new Error("workspace-provenance failure: checked-out source tree listing is invalid");
   }
   const remaining = budget.limits.maxTrackedEntries - budget.trackedEntries;
   let count = 0;
   let offset = 0;
   for (;;) {
-    const delimiter = listed.indexOf("\0", offset);
+    const delimiter = listed.indexOf(0, offset);
     if (delimiter === -1) break;
     count += 1;
     if (count > remaining) {
@@ -1250,6 +1313,20 @@ function captureTrackedEntry(
     const before = lstatSync(candidate, { bigint: true });
     assertTrackedDirectory(before);
     assertStableTrackedFileStats(identity.stat, before);
+    const empty = trackedDirectoryIsEmpty(candidate, budget);
+    assertVerificationWithinElapsedLimit(budget);
+    const afterListing = lstatSync(candidate, { bigint: true });
+    assertTrackedDirectory(afterListing);
+    assertStableTrackedFileStats(before, afterListing);
+    if (empty) {
+      return {
+        candidate,
+        kind: "unmaterialized-gitlink",
+        stat: afterListing,
+        workspaceRoot
+      };
+    }
+    assertMaterializedGitlinkMetadata(candidate);
     if (resolveCheckedOutCommitWithinBudget(candidate, budget) !== entry.objectId) {
       throw new Error("workspace-provenance failure: tracked gitlink does not match HEAD");
     }
@@ -1287,7 +1364,7 @@ function assertTrackedPathSnapshotStable(snapshot: TrackedPathSnapshot, budget: 
     if (!snapshot.contents.equals(symlink.contents)) {
       throw new Error("workspace-provenance failure: tracked symlink changed during verification");
     }
-  } else {
+  } else if (snapshot.kind === "gitlink") {
     const before = lstatSync(snapshot.candidate, { bigint: true });
     assertTrackedDirectory(before);
     assertStableTrackedFileStats(snapshot.stat, before);
@@ -1295,6 +1372,18 @@ function assertTrackedPathSnapshotStable(snapshot: TrackedPathSnapshot, budget: 
     const after = lstatSync(snapshot.candidate, { bigint: true });
     assertTrackedDirectory(after);
     assertStableTrackedFileStats(snapshot.stat, after);
+  } else {
+    const before = lstatSync(snapshot.candidate, { bigint: true });
+    assertTrackedDirectory(before);
+    assertStableTrackedFileStats(snapshot.stat, before);
+    const empty = trackedDirectoryIsEmpty(snapshot.candidate, budget);
+    assertVerificationWithinElapsedLimit(budget);
+    const after = lstatSync(snapshot.candidate, { bigint: true });
+    assertTrackedDirectory(after);
+    assertStableTrackedFileStats(before, after);
+    if (!empty) {
+      throw new Error("workspace-provenance failure: unmaterialized tracked gitlink changed during verification");
+    }
   }
   assertNoSymlinkComponents(snapshot.workspaceRoot, path.dirname(snapshot.candidate), "tracked task source");
 }
@@ -1386,6 +1475,38 @@ function assertTrackedDirectory(stat: BigIntStats): void {
   }
 }
 
+function assertStableTrackedDirectoryIdentity(left: BigIntStats, right: BigIntStats, label: string): void {
+  if (left.dev !== right.dev || left.ino !== right.ino || left.mode !== right.mode) {
+    throw new Error(`workspace-provenance failure: ${label}`);
+  }
+}
+
+function trackedDirectoryIsEmpty(candidate: string, budget: WorkspaceVerificationBudget): boolean {
+  assertVerificationWithinElapsedLimit(budget);
+  const directory = opendirSync(candidate);
+  try {
+    const first = directory.readSync();
+    assertVerificationWithinElapsedLimit(budget);
+    return first === null;
+  } finally {
+    directory.closeSync();
+  }
+}
+
+function assertMaterializedGitlinkMetadata(candidate: string): void {
+  let stat: BigIntStats;
+  try {
+    stat = lstatSync(path.join(candidate, ".git"), { bigint: true });
+  } catch (error) {
+    throw new Error("workspace-provenance failure: populated tracked gitlink is not a repository", {
+      cause: error
+    });
+  }
+  if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
+    throw new Error("workspace-provenance failure: populated tracked gitlink has unsafe repository metadata");
+  }
+}
+
 function assertSingleLinkTrackedRegularFile(stat: BigIntStats): void {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n) {
     throw new Error("workspace-provenance failure: tracked task source is not a single-link regular file");
@@ -1440,7 +1561,10 @@ function assertTrackedSymlinkTargets(
   }
   const mutableRoots = [
     ...snapshot.allowedUntrackedRoots.map((root) => path.resolve(root)),
-    ...NATIVE_TOOL_OUTPUT_PREFIXES.map((prefix) => path.resolve(snapshot.workspaceRoot, prefix.slice(0, -1)))
+    ...nativeOutputRootsForEntries(
+      [...snapshot.headEntries.map((entry) => entry.relativePath), ...untracked],
+      false
+    ).map((root) => path.resolve(snapshot.workspaceRoot, ...root.split("/")))
   ];
 
   for (const entry of snapshot.entries) {
@@ -1613,8 +1737,7 @@ function assertNoUnexpectedUntrackedFiles(
 
 function untrackedPathAllowed(entry: string, allowedPrefixes: readonly string[]): boolean {
   return (
-    allowedPrefixes.some((prefix) => entry.startsWith(prefix)) ||
-    NATIVE_TOOL_OUTPUT_PREFIXES.some((prefix) => entry.startsWith(prefix))
+    allowedPrefixes.some((prefix) => entry.startsWith(prefix)) || nativeOutputRootForEntry(entry, false) !== undefined
   );
 }
 
@@ -1624,6 +1747,7 @@ function listUntrackedFiles(
   budget: WorkspaceVerificationBudget
 ): string[] {
   assertVerificationWithinElapsedLimit(budget);
+  const remainingListingBytes = budget.limits.maxGitListingBytes - budget.gitListingBytes;
   const temporaryRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-provenance-index-"));
   const indexPath = path.join(temporaryRoot, "index");
   try {
@@ -1642,20 +1766,46 @@ function listUntrackedFiles(
     const untracked = runGitWithinVerificationBudget(budget, (timeout) =>
       execFileSync("git", trustedGitArguments(["ls-files", "--others", "--full-name", "-z"]), {
         cwd: workspaceRoot,
-        encoding: "utf8",
         env: environment,
-        maxBuffer: MAX_GIT_LIST_BYTES,
+        maxBuffer: Math.min(MAX_GIT_LIST_BYTES, remainingListingBytes + 1),
         stdio: ["ignore", "pipe", "pipe"],
         timeout
       })
     );
-    return untracked.split("\0").filter((entry) => entry.length > 0);
+    consumeGitListingBytes(budget, untracked);
+    return decodeNulSeparatedGitRecords(untracked, "untracked task source");
   } catch (error) {
     if (error instanceof WorkspaceVerificationBudgetError) throw error;
+    if (isMaxBufferExceededError(error)) throw gitListingLimitError(budget);
+    if (error instanceof Error && error.message.startsWith("workspace-provenance failure: untracked task source")) {
+      throw error;
+    }
     throw new Error("workspace-provenance failure: could not inspect untracked task source", { cause: error });
   } finally {
     rmSync(temporaryRoot, { force: true, recursive: true });
   }
+}
+
+function decodeNulSeparatedGitRecords(listed: Buffer, label: string): string[] {
+  if (listed.length > 0 && listed[listed.length - 1] !== 0) {
+    throw new Error(`workspace-provenance failure: ${label} listing is invalid`);
+  }
+  const paths: string[] = [];
+  let offset = 0;
+  while (offset < listed.length) {
+    const delimiter = listed.indexOf(0, offset);
+    if (delimiter < offset) {
+      throw new Error(`workspace-provenance failure: ${label} listing is invalid`);
+    }
+    const raw = listed.subarray(offset, delimiter);
+    const decoded = raw.toString("utf8");
+    if (!Buffer.from(decoded, "utf8").equals(raw)) {
+      throw new Error(`workspace-provenance failure: ${label} path is not valid UTF-8`);
+    }
+    if (decoded.length > 0) paths.push(decoded);
+    offset = delimiter + 1;
+  }
+  return paths;
 }
 
 function canonicalArtifactRoot(artifactDir: string): string {

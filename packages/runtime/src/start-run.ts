@@ -1399,6 +1399,11 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           recovered.diagnostics
         );
       }
+      // A prepared fork/replay has not crossed the external invocation
+      // boundary. Reconciliation retires it as failed, so it must not remain
+      // bound to the new lifecycle request. In particular, a later idempotent
+      // resume must never reopen the retired non-idempotent journal entry.
+      journalEntry = undefined;
     }
     evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
     lifecycleWorkflowRunId = evidence.smithersRunId;

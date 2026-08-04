@@ -1649,6 +1649,103 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.equal(validate.value?.resolved_config?.default_reasoning, "xhigh");
 });
 
+test("init upgrades only byte-exact released agent scaffolds", () => {
+  const releasedCodex = [
+    'import { CodexAgent as SmithersCodexAgent } from "smithers-orchestrator";',
+    "",
+    "export const CodexAgent = new SmithersCodexAgent({",
+    '  model: "gpt-5.5",',
+    "  skipGitRepoCheck: true,",
+    "  apiKey: process.env.OPENAI_API_KEY,",
+    "});",
+    ""
+  ].join("\n");
+  const preDeepSeekRegistry = [
+    'import { createClaudeAgent } from "./claude";',
+    'import { createCodexAgent } from "./codex";',
+    'import { createKimiAgent } from "./kimi";',
+    "",
+    'export { createClaudeAgent } from "./claude";',
+    'export { createCodexAgent } from "./codex";',
+    'export { createKimiAgent } from "./kimi";',
+    "",
+    "// Agents are constructed per task from the selected model profile, never at",
+    "// import time: an agent's auth is only read when that agent is actually used,",
+    "// so a project running one backend does not need the other's credentials.",
+    "export const agentFactories = {",
+    "  ClaudeAgent: createClaudeAgent,",
+    "  CodexAgent: createCodexAgent,",
+    "  KimiAgent: createKimiAgent",
+    "};",
+    ""
+  ].join("\n");
+  assert.equal(
+    crypto.createHash("sha256").update(releasedCodex).digest("hex"),
+    "26dae14e43c09dbe7901aa731cd552b282d502d86cea8cc6726e4a8579cd3236"
+  );
+  assert.equal(
+    crypto.createHash("sha256").update(preDeepSeekRegistry).digest("hex"),
+    "58a1c796bef8466ec77c04a01fcb60bb1e91b55d437f0c69499f054db6305535"
+  );
+
+  const reference = tempProject();
+  assert.equal(initProject({ projectRoot: reference, force: true }).ok, true);
+  const currentCodex = fs.readFileSync(path.join(reference, ".smithers/agents/codex.ts"), "utf8");
+  const currentRegistry = fs.readFileSync(path.join(reference, ".smithers/agents/index.ts"), "utf8");
+
+  const releasedProject = tempProject();
+  fs.mkdirSync(path.join(releasedProject, ".smithers/agents"), { recursive: true });
+  fs.writeFileSync(path.join(releasedProject, ".smithers/agents/codex.ts"), releasedCodex, "utf8");
+  fs.writeFileSync(path.join(releasedProject, ".smithers/agents/index.ts"), preDeepSeekRegistry, "utf8");
+
+  const upgraded = initProject({ projectRoot: releasedProject });
+
+  assert.equal(upgraded.ok, true, JSON.stringify(upgraded.diagnostics));
+  assert.equal(fs.readFileSync(path.join(releasedProject, ".smithers/agents/codex.ts"), "utf8"), currentCodex);
+  assert.equal(fs.readFileSync(path.join(releasedProject, ".smithers/agents/index.ts"), "utf8"), currentRegistry);
+  assert.equal(
+    upgraded.diagnostics.filter((diagnostic) => diagnostic.code === "INIT_AGENT_REGISTRY_STALE").length,
+    0,
+    JSON.stringify(upgraded.diagnostics)
+  );
+
+  const customizedProject = tempProject();
+  fs.mkdirSync(path.join(customizedProject, ".smithers/agents"), { recursive: true });
+  const oneByteCodex = releasedCodex.replace('model: "gpt-5.5"', 'model: "gpt-5.4"');
+  const oneByteRegistry = preDeepSeekRegistry.replace("KimiAgent: createKimiAgent", "KimiAgent: createKimiAgenx");
+  const customDeepSeek = [
+    "// project-owned DeepSeek adapter",
+    'const configPath = path.join(process.cwd(), "ultrafuzz.toml");',
+    ""
+  ].join("\n");
+  assert.equal(Buffer.byteLength(oneByteCodex), Buffer.byteLength(releasedCodex));
+  assert.equal(Buffer.byteLength(oneByteRegistry), Buffer.byteLength(preDeepSeekRegistry));
+  fs.writeFileSync(path.join(customizedProject, ".smithers/agents/codex.ts"), oneByteCodex, "utf8");
+  fs.writeFileSync(path.join(customizedProject, ".smithers/agents/index.ts"), oneByteRegistry, "utf8");
+  fs.writeFileSync(path.join(customizedProject, ".smithers/agents/deepseek.ts"), customDeepSeek, "utf8");
+
+  const preserved = initProject({ projectRoot: customizedProject });
+
+  assert.equal(preserved.ok, true, JSON.stringify(preserved.diagnostics));
+  assert.equal(fs.readFileSync(path.join(customizedProject, ".smithers/agents/codex.ts"), "utf8"), oneByteCodex);
+  assert.equal(fs.readFileSync(path.join(customizedProject, ".smithers/agents/index.ts"), "utf8"), oneByteRegistry);
+  assert.equal(fs.readFileSync(path.join(customizedProject, ".smithers/agents/deepseek.ts"), "utf8"), customDeepSeek);
+  const staleConfigPath = preserved.diagnostics.filter(
+    (diagnostic) => diagnostic.code === "INIT_AGENT_CONFIG_PATH_STALE"
+  );
+  assert.deepEqual(
+    staleConfigPath.map((diagnostic) => diagnostic.path),
+    [".smithers/agents/deepseek.ts"]
+  );
+  assert.match(staleConfigPath[0]?.message ?? "", /ultrafuzz init --force/u);
+  assert.match(staleConfigPath[0]?.message ?? "", /process\.env\.ULTRAFUZZ_CONFIG_PATH/u);
+
+  const forced = initProject({ projectRoot: customizedProject, force: true });
+  assert.equal(forced.ok, true, JSON.stringify(forced.diagnostics));
+  assert.equal(fs.readFileSync(path.join(customizedProject, ".smithers/agents/codex.ts"), "utf8"), currentCodex);
+  assert.equal(fs.readFileSync(path.join(customizedProject, ".smithers/agents/index.ts"), "utf8"), currentRegistry);
+});
+
 test("generated agent child environments contain no execution-snapshot paths", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
@@ -14546,6 +14643,54 @@ test("initial workflow link reconciliation rejects conflicting partial bindings 
     assert.equal(fs.readFileSync(fixture.layout.statePath, "utf8"), stateBefore, testCase.name);
     assert.deepEqual(exactFileTree(fixture.layout.root), treeBefore, testCase.name);
   }
+});
+
+test("a prepared replay cut is retired before a later resume", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "journal-prepared-replay-resume";
+  const sourceWorkflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: sourceWorkflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const replayEntry = prepareWorkflowLifecycleAction(layout, {
+    action: "replay",
+    sourceWorkflowRunId,
+    sourceWorkflowLinkId: verifyCommittedWorkflowRunLink(layout).link_id,
+    controlGeneration: workflowControlGeneration(project, layout),
+    knownWorkflowRunIds: [sourceWorkflowRunId]
+  });
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const resumed = await resumeRun({ projectRoot: project, runId, env });
+
+  assert.equal(resumed.ok, true, JSON.stringify(resumed.diagnostics));
+  assert.equal(resumed.value?.workflow_run_id, sourceWorkflowRunId);
+  assert.equal(resumed.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`^inspect ${sourceWorkflowRunId} --format json$`, "mu"));
+  assert.doesNotMatch(commands, /^(?:fork|replay|up)\b/mu);
+  const journal = JSON.parse(fs.readFileSync(workflowLifecycleActionJournalPath(layout), "utf8")) as {
+    entries?: Array<{ action_id?: string; phase?: string }>;
+  };
+  assert.equal(journal.entries?.find((candidate) => candidate.action_id === replayEntry.action_id)?.phase, "failed");
+  assert.throws(
+    () =>
+      transitionWorkflowLifecycleAction(layout, replayEntry.action_id, "invoking", {
+        controller_invocation_id: "controller-after-terminal",
+        controller_invoked_at: new Date().toISOString()
+      }),
+    /cannot transition from failed to invoking/u
+  );
 });
 
 test("a torn workflow-link update is completed from its lifecycle journal without repeating replay", async () => {

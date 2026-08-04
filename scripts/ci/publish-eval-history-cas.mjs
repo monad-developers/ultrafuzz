@@ -203,6 +203,8 @@ export function publishEvalHistoryGeneration(input) {
     throw new Error("canonical GitHub publication requires a publisher token");
   }
   assertSafePublicationTransport(repositoryRoot, publicationRemote.originUrl);
+  const publisherTransportEnvironment = publisherGitEnvironment(input.publisherToken, publicationRemote.testOnly);
+  const publisherTransportRedactions = publisherAuthorityRedactions(input.publisherToken);
 
   const temporaryParent = fs.realpathSync(os.tmpdir());
   const temporaryRoot = fs.mkdtempSync(path.join(temporaryParent, "ultrafuzz-eval-history-publish-"));
@@ -214,7 +216,12 @@ export function publishEvalHistoryGeneration(input) {
     const snapshots = snapshotGenerationInputs(generation, inputRoot, snapshotRoot);
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const base = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
+      const base = refreshRemoteBase(
+        repositoryRoot,
+        publicationRemote.pushUrl,
+        publisherTransportEnvironment,
+        publisherTransportRedactions
+      );
       const worktree = path.join(temporaryRoot, `worktree-${attempt}`);
       checked("git", ["worktree", "add", "--detach", worktree, base.ref], { cwd: repositoryRoot });
       activeWorktree = worktree;
@@ -237,7 +244,12 @@ export function publishEvalHistoryGeneration(input) {
         const needsPush = createdCommit;
 
         if (!needsPush) {
-          const latest = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
+          const latest = refreshRemoteBase(
+            repositoryRoot,
+            publicationRemote.pushUrl,
+            publisherTransportEnvironment,
+            publisherTransportRedactions
+          );
           if (!sameRemoteState(base, latest)) {
             reportRetry(attempt, "a remote tip advanced during an idempotent rebuild");
             continue;
@@ -249,18 +261,28 @@ export function publishEvalHistoryGeneration(input) {
         const pushArgs = ["push", "--no-verify", publicationRemote.pushUrl, `HEAD:${TARGET_REF}`];
         const push = run("git", pushArgs, {
           cwd: worktree,
-          env: publisherPushEnvironment(input.publisherToken, publicationRemote.testOnly),
-          redact: publisherAuthorityRedactions(input.publisherToken)
+          env: publisherTransportEnvironment,
+          redact: publisherTransportRedactions
         });
         if (push.status === 0) {
-          const published = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
+          const published = refreshRemoteBase(
+            repositoryRoot,
+            publicationRemote.pushUrl,
+            publisherTransportEnvironment,
+            publisherTransportRedactions
+          );
           if (!isAncestor(repositoryRoot, commit, published.oid)) {
             throw new Error(`pushed commit ${commit} is not present on origin/${TARGET_BRANCH}`);
           }
           return publicationResult(generation, commit, attempt, true);
         }
 
-        const latest = refreshRemoteBase(repositoryRoot, publicationRemote.pushUrl);
+        const latest = refreshRemoteBase(
+          repositoryRoot,
+          publicationRemote.pushUrl,
+          publisherTransportEnvironment,
+          publisherTransportRedactions
+        );
         if (!sameRemoteState(base, latest)) {
           reportRetry(attempt, "the publication push lost a remote-tip race");
           continue;
@@ -626,10 +648,11 @@ function unsafePublicationTransportKey(name, allowCanonicalOrigin) {
   return !allowCanonicalOrigin || (key !== "remote.origin.url" && key !== "remote.origin.fetch");
 }
 
-function refreshRemoteBase(repositoryRoot, publicationRemoteUrl) {
+function refreshRemoteBase(repositoryRoot, publicationRemoteUrl, environment, redactions) {
   checked("git", ["fetch", "--no-tags", publicationRemoteUrl, "+refs/heads/main:refs/remotes/origin/main"], {
     cwd: repositoryRoot,
-    env: hardenedGitEnvironment(!publicationRemoteUrl.startsWith("https://"))
+    env: environment,
+    redact: redactions
   });
   const oid = gitOutput(repositoryRoot, ["rev-parse", TARGET_REMOTE_REF]);
   return { ref: TARGET_REMOTE_REF, oid };
@@ -1087,7 +1110,7 @@ function publisherFreeEnvironment() {
   );
 }
 
-function publisherPushEnvironment(publisherToken, allowFileProtocol) {
+function publisherGitEnvironment(publisherToken, allowFileProtocol) {
   const token = publisherTokenValue(publisherToken);
   if (token === undefined && !allowFileProtocol) {
     throw new Error("canonical GitHub publication requires a publisher token");

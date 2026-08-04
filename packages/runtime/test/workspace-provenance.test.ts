@@ -117,7 +117,10 @@ test("workspace provenance permits ignored tool output and exact task-owned root
     ".venv/installed-package",
     "build/contract.json",
     ".pytest_cache/state",
-    ".build/vyper.json"
+    ".build/vyper.json",
+    "packages/app/node_modules/dependency/index.js",
+    "packages/app/dist/bundle.js",
+    "tests/unit/__pycache__/module.pyc"
   ]) {
     const output = path.join(repository, relative);
     fs.mkdirSync(path.dirname(output), { recursive: true });
@@ -213,6 +216,12 @@ test("native output cleanup removes preseeded and prior-retry bytes while preser
     fs.mkdirSync(path.dirname(output), { recursive: true });
     fs.writeFileSync(output, "attacker-controlled prior output\n", "utf8");
   }
+  const nestedRoots = ["packages/app/node_modules", "packages/app/dist", "tests/unit/__pycache__"];
+  for (const root of nestedRoots) {
+    const output = path.join(repository, root, "preseeded", "state.bin");
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, "attacker-controlled prior output\n", "utf8");
+  }
 
   cleanNativeWorkspaceOutputRoots(repository);
 
@@ -220,6 +229,30 @@ test("native output cleanup removes preseeded and prior-retry bytes while preser
   for (const root of roots) {
     assert.equal(fs.existsSync(path.join(repository, root, "preseeded", "state.bin")), false, root);
   }
+  for (const root of nestedRoots) {
+    assert.equal(fs.existsSync(path.join(repository, root, "preseeded", "state.bin")), false, root);
+  }
+});
+
+test("native output cleanup recursively removes stale bytes from materialized gitlinks", () => {
+  const fixture = createGitlinkFixture();
+  const nestedRepository = path.join(fixture.repository, "vendor", "nested");
+  const stale = path.join(nestedRepository, "node_modules", "dependency", "state.bin");
+  fs.mkdirSync(path.dirname(stale), { recursive: true });
+  fs.writeFileSync(stale, "prior retry state\n", "utf8");
+
+  assert.equal(
+    assertAgentWorkspaceProvenance(fixture.repository, fixture.revision, fixture.repository).trackedClean,
+    true
+  );
+  cleanNativeWorkspaceOutputRoots(fixture.repository);
+
+  assert.equal(fs.existsSync(stale), false);
+  assert.equal(fs.readFileSync(path.join(nestedRepository, "source.sol"), "utf8"), "contract Nested {}\n");
+  assert.equal(
+    assertAgentWorkspaceProvenance(fixture.repository, fixture.revision, fixture.repository).trackedClean,
+    true
+  );
 });
 
 test("native output cleanup fails closed on a root link and never traverses a nested link", () => {
@@ -244,6 +277,33 @@ test("native output cleanup fails closed on a root link and never traverses a ne
   assert.equal(fs.existsSync(path.join(repository, ".cache", "nested")), false);
   assert.equal(fs.readFileSync(path.join(outside, "outside.txt"), "utf8"), "must remain\n");
 });
+
+test(
+  "native output cleanup and provenance reject non-UTF-8 paths without accepting lossy aliases",
+  { skip: process.platform === "win32" },
+  () => {
+    const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-native-clean-bytes-"));
+    git(repository, ["init"]);
+    git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+    git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+    fs.writeFileSync(path.join(repository, "target.sol"), "contract Target {}\n", "utf8");
+    git(repository, ["add", "target.sol"]);
+    git(repository, ["commit", "-m", "fixture"]);
+    const revision = git(repository, ["rev-parse", "HEAD"]);
+    const invalidRoot = Buffer.concat([
+      Buffer.from(`${repository}${path.sep}nested-`, "utf8"),
+      Buffer.from([0xff]),
+      Buffer.from(`${path.sep}node_modules${path.sep}pkg`, "utf8")
+    ]);
+    const poisonedState = Buffer.concat([invalidRoot, Buffer.from(`${path.sep}state.bin`, "utf8")]);
+    fs.mkdirSync(invalidRoot, { recursive: true });
+    fs.writeFileSync(poisonedState, "prior retry state\n", "utf8");
+
+    assert.throws(() => cleanNativeWorkspaceOutputRoots(repository), /path is not valid UTF-8/u);
+    assert.equal(fs.existsSync(poisonedState), true);
+    assert.throws(() => assertAgentWorkspaceProvenance(repository, revision, repository), /path is not valid UTF-8/u);
+  }
+);
 
 test(
   "retry cleanup bounds its Git subprocess with the shared monotonic deadline",
@@ -701,6 +761,96 @@ test("workspace provenance shares its tracked-entry budget across nested gitlink
     /tracked entries limit must be an integer from 0 through 100000/u
   );
 });
+
+test("workspace provenance accepts an empty worktree gitlink and verifies it after materialization", () => {
+  const child = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-worktree-submodule-child-"));
+  git(child, ["init"]);
+  git(child, ["config", "user.name", "Ultrafuzz Test"]);
+  git(child, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(child, "source.sol"), "contract Child {}\n", "utf8");
+  git(child, ["add", "source.sol"]);
+  git(child, ["commit", "-m", "child fixture"]);
+
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-worktree-submodule-parent-"));
+  git(parent, ["init"]);
+  git(parent, ["config", "user.name", "Ultrafuzz Test"]);
+  git(parent, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  git(parent, ["-c", "protocol.file.allow=always", "submodule", "add", child, "lib/child"]);
+  git(parent, ["commit", "-am", "parent fixture"]);
+  const revision = git(parent, ["rev-parse", "HEAD"]);
+  const checkoutParent = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-worktree-submodule-checkout-"));
+  const checkout = path.join(checkoutParent, "worktree");
+  git(parent, ["worktree", "add", "--detach", checkout, revision]);
+  const gitlink = path.join(checkout, "lib", "child");
+
+  assert.deepEqual(fs.readdirSync(gitlink), []);
+  assert.equal(assertAgentWorkspaceProvenance(checkout, revision, checkout).trackedClean, true);
+
+  fs.writeFileSync(path.join(gitlink, "untrusted.sol"), "contract Untrusted {}\n", "utf8");
+  assert.throws(() => cleanNativeWorkspaceOutputRoots(checkout), /populated tracked gitlink is not a repository/u);
+  assert.equal(fs.existsSync(path.join(gitlink, "untrusted.sol")), true);
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(checkout, revision, checkout),
+    /tracked changes before agent execution/u
+  );
+  fs.unlinkSync(path.join(gitlink, "untrusted.sol"));
+
+  git(checkout, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+  assert.equal(assertAgentWorkspaceProvenance(checkout, revision, checkout).trackedClean, true);
+  fs.writeFileSync(path.join(gitlink, "source.sol"), "contract MutatedChild {}\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(checkout, revision, checkout),
+    /tracked changes before agent execution/u
+  );
+});
+
+test(
+  "workspace provenance rejects a non-UTF-8 tracked path before it can alias a valid gitlink",
+  { skip: process.platform === "win32" },
+  () => {
+    const child = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-gitlink-bytes-child-"));
+    git(child, ["init"]);
+    git(child, ["config", "user.name", "Ultrafuzz Test"]);
+    git(child, ["config", "user.email", "ultrafuzz-test@example.com"]);
+    fs.writeFileSync(path.join(child, "source.sol"), "contract Child {}\n", "utf8");
+    git(child, ["add", "source.sol"]);
+    git(child, ["commit", "-m", "child fixture"]);
+    const childRevision = git(child, ["rev-parse", "HEAD"]);
+
+    const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-gitlink-bytes-parent-"));
+    git(repository, ["init"]);
+    git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+    git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+    const validRelative = "lib-\uFFFD";
+    const invalidRelative = Buffer.concat([Buffer.from("lib-", "utf8"), Buffer.from([0xff])]);
+    const indexRecords = Buffer.concat([
+      Buffer.from(`160000 commit ${childRevision}\t${validRelative}\0`, "utf8"),
+      Buffer.from(`160000 commit ${childRevision}\t`, "utf8"),
+      invalidRelative,
+      Buffer.from([0])
+    ]);
+    execFileSync("git", ["update-index", "-z", "--index-info"], {
+      cwd: repository,
+      input: indexRecords,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    git(repository, ["commit", "-m", "gitlink byte aliases"]);
+    const revision = git(repository, ["rev-parse", "HEAD"]);
+    fs.mkdirSync(path.join(repository, validRelative));
+    const invalidRoot = Buffer.concat([Buffer.from(`${repository}${path.sep}`, "utf8"), invalidRelative]);
+    fs.mkdirSync(invalidRoot);
+    fs.writeFileSync(
+      Buffer.concat([invalidRoot, Buffer.from(`${path.sep}source.sol`, "utf8")]),
+      "contract MutatedChild {}\n",
+      "utf8"
+    );
+
+    assert.throws(
+      () => assertAgentWorkspaceProvenance(repository, revision, repository),
+      /checked-out source tree path is not valid UTF-8/u
+    );
+  }
+);
 
 test("workspace provenance shares its Git tree-listing byte budget across nested gitlinks", () => {
   const fixture = createGitlinkFixture();

@@ -26,6 +26,25 @@ export interface WorkflowExecutionSnapshotAnchor {
 }
 
 /**
+ * Injectable descriptor access keeps the pathname fallback testable without
+ * impersonating another operating system. Production uses the defaults below;
+ * a platform that cannot open directories or expose another process's held
+ * descriptors simply returns `undefined` and relies on exact lexical identity
+ * checks at both controller-command boundaries.
+ */
+export interface WorkflowExecutionSnapshotAnchorDependencies {
+  openDirectory(directory: string): number | undefined;
+  directoryDescriptorPath(descriptor: number): string | undefined;
+  controllerDirectoryDescriptorPath(descriptor: number): string | undefined;
+}
+
+const DEFAULT_ANCHOR_DEPENDENCIES: WorkflowExecutionSnapshotAnchorDependencies = {
+  openDirectory: openDirectoryWhenSupported,
+  directoryDescriptorPath,
+  controllerDirectoryDescriptorPath
+};
+
+/**
  * Carries snapshot identity to the controller command boundary without putting
  * forgeable authority in process environment variables. The symbol is kept
  * private to this module and enumerable so the ordinary object spreads used to
@@ -55,56 +74,88 @@ export function hasWorkflowExecutionSnapshotCapability(env: Record<string, strin
  * pretending to create a security boundary against arbitrary same-UID code.
  */
 export function acquireWorkflowExecutionSnapshotAnchor(
-  env: Record<string, string | undefined> | undefined
+  env: Record<string, string | undefined> | undefined,
+  dependencyOverrides: Partial<WorkflowExecutionSnapshotAnchorDependencies> = {}
 ): WorkflowExecutionSnapshotAnchor | undefined {
   const identity = (env as CapableEnvironment | undefined)?.[WORKFLOW_EXECUTION_SNAPSHOT_CAPABILITY];
   if (identity === undefined) return undefined;
 
   assertCanonicalIdentity(identity);
-  const snapshotsDescriptor = openDirectoryNoFollow(identity.snapshotsRoot);
+  const dependencies = { ...DEFAULT_ANCHOR_DEPENDENCIES, ...dependencyOverrides };
+  assertLexicalDirectoryIdentity(
+    identity.snapshotsRoot,
+    identity.snapshotsRootDevice,
+    identity.snapshotsRootInode,
+    "workflow execution snapshots"
+  );
+  assertLexicalDirectoryIdentity(
+    identity.root,
+    identity.snapshotDevice,
+    identity.snapshotInode,
+    "workflow execution snapshot"
+  );
+  const snapshotsDescriptor = dependencies.openDirectory(identity.snapshotsRoot);
   let snapshotDescriptor: number | undefined;
   try {
-    assertDescriptorIdentity(
-      snapshotsDescriptor,
-      identity.snapshotsRootDevice,
-      identity.snapshotsRootInode,
-      "workflow execution snapshots"
-    );
-    const snapshotsDescriptorPath = requiredDirectoryDescriptorPath(
-      snapshotsDescriptor,
-      identity.snapshotsRootDevice,
-      identity.snapshotsRootInode,
-      "workflow execution snapshots"
-    );
-    snapshotDescriptor = openDirectoryNoFollow(path.join(snapshotsDescriptorPath, path.basename(identity.root)));
-    assertDescriptorIdentity(
-      snapshotDescriptor,
-      identity.snapshotDevice,
-      identity.snapshotInode,
-      "workflow execution snapshot"
-    );
-    const controllerSnapshotPath = requiredControllerDirectoryDescriptorPath(
-      snapshotDescriptor,
-      identity.snapshotDevice,
-      identity.snapshotInode,
-      "workflow execution snapshot"
-    );
-
-    let closed = false;
-    const assertCurrent = (): void => {
-      if (closed) throw new Error("workflow execution snapshot anchor is already closed");
+    if (snapshotsDescriptor !== undefined) {
       assertDescriptorIdentity(
         snapshotsDescriptor,
         identity.snapshotsRootDevice,
         identity.snapshotsRootInode,
         "workflow execution snapshots"
       );
+    }
+    const snapshotsDescriptorPath =
+      snapshotsDescriptor === undefined
+        ? undefined
+        : verifiedDirectoryDescriptorPath(
+            dependencies.directoryDescriptorPath(snapshotsDescriptor),
+            identity.snapshotsRootDevice,
+            identity.snapshotsRootInode,
+            "workflow execution snapshots"
+          );
+    const snapshotOpenPath =
+      snapshotsDescriptorPath === undefined
+        ? identity.root
+        : path.join(snapshotsDescriptorPath, path.basename(identity.root));
+    snapshotDescriptor = dependencies.openDirectory(snapshotOpenPath);
+    if (snapshotDescriptor !== undefined) {
       assertDescriptorIdentity(
-        snapshotDescriptor!,
+        snapshotDescriptor,
         identity.snapshotDevice,
         identity.snapshotInode,
         "workflow execution snapshot"
       );
+    }
+    const controllerSnapshotPath =
+      snapshotDescriptor === undefined
+        ? undefined
+        : verifiedDirectoryDescriptorPath(
+            dependencies.controllerDirectoryDescriptorPath(snapshotDescriptor),
+            identity.snapshotDevice,
+            identity.snapshotInode,
+            "workflow execution snapshot"
+          );
+
+    let closed = false;
+    const assertCurrent = (): void => {
+      if (closed) throw new Error("workflow execution snapshot anchor is already closed");
+      if (snapshotsDescriptor !== undefined) {
+        assertDescriptorIdentity(
+          snapshotsDescriptor,
+          identity.snapshotsRootDevice,
+          identity.snapshotsRootInode,
+          "workflow execution snapshots"
+        );
+      }
+      if (snapshotDescriptor !== undefined) {
+        assertDescriptorIdentity(
+          snapshotDescriptor,
+          identity.snapshotDevice,
+          identity.snapshotInode,
+          "workflow execution snapshot"
+        );
+      }
       assertLexicalDirectoryIdentity(
         identity.snapshotsRoot,
         identity.snapshotsRootDevice,
@@ -121,16 +172,23 @@ export function acquireWorkflowExecutionSnapshotAnchor(
     assertCurrent();
     return {
       assertCurrent,
-      rewriteControllerValue: (value) => rewriteControllerValue(value, identity.root, controllerSnapshotPath),
+      rewriteControllerValue: (value) =>
+        rewriteControllerValue(value, identity.root, controllerSnapshotPath ?? identity.root),
       close: () => {
         if (closed) return;
         closed = true;
-        closeFileDescriptors([snapshotDescriptor!, snapshotsDescriptor]);
+        closeFileDescriptors([
+          ...(snapshotDescriptor === undefined ? [] : [snapshotDescriptor]),
+          ...(snapshotsDescriptor === undefined ? [] : [snapshotsDescriptor])
+        ]);
       }
     };
   } catch (error) {
     try {
-      closeFileDescriptors([...(snapshotDescriptor === undefined ? [] : [snapshotDescriptor]), snapshotsDescriptor]);
+      closeFileDescriptors([
+        ...(snapshotDescriptor === undefined ? [] : [snapshotDescriptor]),
+        ...(snapshotsDescriptor === undefined ? [] : [snapshotsDescriptor])
+      ]);
     } catch {
       // Preserve the identity/setup failure after attempting every close.
     }
@@ -189,6 +247,13 @@ function openDirectoryNoFollow(directory: string): number {
   return fs.openSync(directory, fs.constants.O_RDONLY | noFollow | directoryOnly);
 }
 
+function openDirectoryWhenSupported(directory: string): number | undefined {
+  // Node cannot open directory handles with `fs.openSync` on Windows. The
+  // lexical fallback below still checks the exact parent/root identities before
+  // and after every controller command.
+  return process.platform === "win32" ? undefined : openDirectoryNoFollow(directory);
+}
+
 function assertDescriptorIdentity(descriptor: number, device: number, inode: number, label: string): void {
   const stat = fs.fstatSync(descriptor);
   if (!stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
@@ -203,33 +268,38 @@ function assertLexicalDirectoryIdentity(directory: string, device: number, inode
   }
 }
 
-function requiredDirectoryDescriptorPath(descriptor: number, device: number, inode: number, label: string): string {
-  const candidates = process.platform === "win32" ? [] : [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`];
+function directoryDescriptorPath(descriptor: number): string | undefined {
+  const candidates = [`/proc/self/fd/${descriptor}`, `/dev/fd/${descriptor}`];
   for (const candidate of candidates) {
     try {
-      const stat = fs.statSync(candidate);
-      if (stat.isDirectory() && stat.dev === device && stat.ino === inode) return candidate;
+      if (fs.statSync(candidate).isDirectory()) return candidate;
     } catch {
       // Continue to the next platform descriptor path.
     }
   }
-  throw new Error(`${label} cannot be anchored without directory-descriptor paths`);
+  return undefined;
 }
 
-function requiredControllerDirectoryDescriptorPath(
-  descriptor: number,
+function controllerDirectoryDescriptorPath(descriptor: number): string | undefined {
+  const candidate = `/proc/${process.pid}/fd/${descriptor}`;
+  try {
+    if (fs.statSync(candidate).isDirectory()) return candidate;
+  } catch {
+    // Platforms without cross-process descriptor paths use lexical identity.
+  }
+  return undefined;
+}
+
+function verifiedDirectoryDescriptorPath(
+  candidate: string | undefined,
   device: number,
   inode: number,
   label: string
-): string {
-  if (process.platform !== "win32") {
-    const candidate = `/proc/${process.pid}/fd/${descriptor}`;
-    try {
-      const stat = fs.statSync(candidate);
-      if (stat.isDirectory() && stat.dev === device && stat.ino === inode) return candidate;
-    } catch {
-      // Fall through to the explicit unsupported-platform error.
-    }
+): string | undefined {
+  if (candidate === undefined) return undefined;
+  const stat = fs.statSync(candidate);
+  if (!stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
+    throw new Error(`${label} descriptor path changed at the controller command boundary`);
   }
-  throw new Error(`${label} cannot be passed safely without controller directory-descriptor paths`);
+  return candidate;
 }

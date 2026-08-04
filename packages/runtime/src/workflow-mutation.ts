@@ -114,6 +114,19 @@ interface WorkflowRunLinkJournal {
 }
 
 const TERMINAL_LIFECYCLE_ACTION_PHASES = new Set<WorkflowLifecycleActionPhase>(["reconciled", "cancelled", "failed"]);
+const WORKFLOW_LIFECYCLE_ACTION_TRANSITIONS: Readonly<
+  Record<WorkflowLifecycleActionPhase, ReadonlySet<WorkflowLifecycleActionPhase>>
+> = {
+  prepared: new Set(["invoking", "failed"]),
+  invoking: new Set(["external-result", "reconciliation-pending", "cancelled", "failed"]),
+  "external-result": new Set(["linked", "reconciliation-pending", "cancelled"]),
+  linked: new Set(["submitted", "cancelled"]),
+  submitted: new Set(["reconciled", "cancelled"]),
+  "reconciliation-pending": new Set(["external-result", "linked", "reconciliation-pending", "cancelled"]),
+  reconciled: new Set(),
+  cancelled: new Set(),
+  failed: new Set()
+};
 
 export interface WorkflowLifecycleGeneration {
   eventId?: string;
@@ -210,6 +223,9 @@ export function transitionWorkflowLifecycleAction(
   const entry = journal.entries.find((candidate) => candidate.action_id === actionId);
   if (entry === undefined) {
     throw new Error(`workflow lifecycle action journal entry not found: ${actionId}`);
+  }
+  if (!WORKFLOW_LIFECYCLE_ACTION_TRANSITIONS[entry.phase].has(phase)) {
+    throw new Error(`workflow lifecycle action cannot transition from ${entry.phase} to ${phase}`);
   }
   Object.assign(entry, patch, { phase, updated_at: now });
   validateWorkflowLifecycleActionJournalEntry(entry);

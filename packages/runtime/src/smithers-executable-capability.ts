@@ -29,6 +29,19 @@ export interface SmithersExecutableAnchor {
 }
 
 /**
+ * Descriptor-path discovery is injectable so the lexical fallback can be
+ * exercised on every development platform. Returned paths are never trusted:
+ * acquisition verifies that they still name the held descriptor identity.
+ */
+export interface SmithersExecutableAnchorDependencies {
+  executableDescriptorPath(descriptor: number): string | undefined;
+}
+
+const DEFAULT_ANCHOR_DEPENDENCIES: SmithersExecutableAnchorDependencies = {
+  executableDescriptorPath
+};
+
+/**
  * Binds both the runner bytes and the interpreter selected by its shebang to
  * an in-memory environment object. The private symbol prevents workflow or
  * process environment variables from manufacturing this authority.
@@ -38,7 +51,7 @@ export function bindSmithersExecutableCapability<T extends Record<string, string
   executable: string
 ): T {
   const runner = verifiedRegularFile(executable, true, "workflow runner");
-  const interpreter = verifiedInterpreter(runner.path);
+  const interpreter = verifiedInterpreter(runner);
   (env as Record<string, string | undefined>).SMITHERS_BIN = runner.path;
   Object.defineProperty(env, SMITHERS_EXECUTABLE_CAPABILITY, {
     configurable: false,
@@ -62,38 +75,50 @@ export function smithersExecutableCapability(
  * a later PATH substitution irrelevant.
  */
 export function acquireSmithersExecutableAnchor(
-  env: Record<string, string | undefined> | undefined
+  env: Record<string, string | undefined> | undefined,
+  dependencyOverrides: Partial<SmithersExecutableAnchorDependencies> = {}
 ): SmithersExecutableAnchor | undefined {
   const capability = smithersExecutableCapability(env);
   if (capability === undefined) return undefined;
-  if (process.platform === "win32") {
-    throw new Error("workflow runner capability requires executable descriptor paths on this platform");
-  }
+  const dependencies = { ...DEFAULT_ANCHOR_DEPENDENCIES, ...dependencyOverrides };
   const requested = env?.SMITHERS_BIN?.trim() || capability.runner.path;
   const runnerDescriptor = openRegularFileNoFollow(requested);
   let interpreterDescriptor: number | undefined;
   try {
     assertDescriptorIdentity(runnerDescriptor, capability.runner, "workflow runner");
+    assertPathIdentity(requested, capability.runner, "workflow runner");
+    assertPathIdentity(capability.runner.path, capability.runner, "workflow runner");
     interpreterDescriptor = openRegularFileNoFollow(capability.interpreter.path);
     assertDescriptorIdentity(interpreterDescriptor, capability.interpreter, "workflow runner interpreter");
-    const runnerPath = requiredExecutableDescriptorPath(runnerDescriptor, capability.runner, "workflow runner");
-    const interpreterPath = requiredExecutableDescriptorPath(
-      interpreterDescriptor,
+    assertPathIdentity(capability.interpreter.path, capability.interpreter, "workflow runner interpreter");
+    const runnerDescriptorPath = verifiedExecutableDescriptorPath(
+      dependencies.executableDescriptorPath(runnerDescriptor),
+      capability.runner,
+      "workflow runner"
+    );
+    const interpreterDescriptorPath = verifiedExecutableDescriptorPath(
+      dependencies.executableDescriptorPath(interpreterDescriptor),
       capability.interpreter,
       "workflow runner interpreter"
     );
+    // Use descriptor execution only when both files can remain anchored. A
+    // platform without cross-process descriptor paths invokes the canonical
+    // attested paths and rechecks path, inode, size, and bytes after the child
+    // closes, rejecting any replacement observed during the command.
+    const useDescriptorPaths = runnerDescriptorPath !== undefined && interpreterDescriptorPath !== undefined;
     let closed = false;
     const assertCurrent = (): void => {
       if (closed) throw new Error("workflow runner executable anchor is already closed");
       assertDescriptorIdentity(runnerDescriptor, capability.runner, "workflow runner");
       assertDescriptorIdentity(interpreterDescriptor!, capability.interpreter, "workflow runner interpreter");
       assertPathIdentity(requested, capability.runner, "workflow runner");
+      assertPathIdentity(capability.runner.path, capability.runner, "workflow runner");
       assertPathIdentity(capability.interpreter.path, capability.interpreter, "workflow runner interpreter");
     };
     assertCurrent();
     return {
-      executable: interpreterPath,
-      argumentPrefix: [runnerPath],
+      executable: useDescriptorPaths ? interpreterDescriptorPath : capability.interpreter.path,
+      argumentPrefix: [useDescriptorPaths ? runnerDescriptorPath : capability.runner.path],
       assertCurrent,
       close: () => {
         if (closed) return;
@@ -147,8 +172,8 @@ function verifiedRegularFile(executable: string, requireExecutable: boolean, lab
   }
 }
 
-function verifiedInterpreter(runner: string): FileIdentity {
-  const firstLine = fs.readFileSync(runner, "utf8").split(/\r?\n/u, 1)[0] ?? "";
+function verifiedInterpreter(runner: FileIdentity): FileIdentity {
+  const firstLine = readVerifiedFile(runner, "workflow runner").split(/\r?\n/u, 1)[0] ?? "";
   if (!firstLine.startsWith("#!")) throw new Error("workflow runner executable is missing an interpreter shebang");
   const words = firstLine.slice(2).trim().split(/\s+/u).filter(Boolean);
   if (words.length === 0) throw new Error("workflow runner executable has an invalid interpreter shebang");
@@ -217,6 +242,19 @@ function assertDescriptorIdentity(descriptor: number, identity: FileIdentity, la
 }
 
 function assertPathIdentity(filePath: string, identity: FileIdentity, label: string): void {
+  let canonical: string;
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`${label} path is no longer a regular file`);
+    }
+    canonical = fs.realpathSync(filePath);
+  } catch (error) {
+    throw new Error(`${label} changed at the controller command boundary`, { cause: error });
+  }
+  if (canonical !== identity.path) {
+    throw new Error(`${label} changed at the controller command boundary`);
+  }
   const descriptor = openRegularFileNoFollow(filePath);
   try {
     assertDescriptorIdentity(descriptor, identity, label);
@@ -225,13 +263,37 @@ function assertPathIdentity(filePath: string, identity: FileIdentity, label: str
   }
 }
 
-function requiredExecutableDescriptorPath(descriptor: number, identity: FileIdentity, label: string): string {
+function readVerifiedFile(identity: FileIdentity, label: string): string {
+  const descriptor = openRegularFileNoFollow(identity.path);
+  try {
+    assertDescriptorIdentity(descriptor, identity, label);
+    const contents = fs.readFileSync(descriptor, "utf8");
+    assertDescriptorIdentity(descriptor, identity, label);
+    return contents;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function executableDescriptorPath(descriptor: number): string | undefined {
   const candidate = `/proc/${process.pid}/fd/${descriptor}`;
   try {
-    const stat = fs.statSync(candidate);
-    if (stat.isFile() && stat.dev === identity.device && stat.ino === identity.inode) return candidate;
+    if (fs.statSync(candidate).isFile()) return candidate;
   } catch {
-    // Fall through to the fail-closed unsupported-platform error.
+    // Platforms without cross-process descriptor paths use lexical identity.
   }
-  throw new Error(`${label} cannot be executed safely without file-descriptor paths`);
+  return undefined;
+}
+
+function verifiedExecutableDescriptorPath(
+  candidate: string | undefined,
+  identity: FileIdentity,
+  label: string
+): string | undefined {
+  if (candidate === undefined) return undefined;
+  const stat = fs.statSync(candidate);
+  if (!stat.isFile() || stat.dev !== identity.device || stat.ino !== identity.inode || stat.size !== identity.size) {
+    throw new Error(`${label} descriptor path changed at the controller command boundary`);
+  }
+  return candidate;
 }

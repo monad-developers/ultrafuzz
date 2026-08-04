@@ -118,6 +118,25 @@ export interface MaterializedWorkflowExecutionSnapshot {
   ownership: WorkflowExecutionSnapshotOwnership;
 }
 
+/**
+ * Directory-handle access is injectable so platforms without openable
+ * directory descriptors (notably Windows) and the lexical fallback can share
+ * one implementation. A returned descriptor path is verified against the
+ * opened inode before it is used. The lexical mode detects ownership changes
+ * around every filesystem boundary and avoids recursive pathname deletion; it
+ * does not claim to isolate against arbitrary concurrently executing same-UID
+ * code in the interval between two native filesystem calls.
+ */
+export interface WorkflowExecutionSnapshotFileSystemDependencies {
+  openDirectory(directory: string): number | undefined;
+  directoryDescriptorPath(descriptor: number, device: number, inode: number): string | undefined;
+}
+
+const DEFAULT_WORKFLOW_EXECUTION_SNAPSHOT_FILE_SYSTEM: WorkflowExecutionSnapshotFileSystemDependencies = {
+  openDirectory: openDirectoryWhenSupported,
+  directoryDescriptorPath
+};
+
 interface WorkflowExecutionSnapshotOwnership {
   snapshotsRoot: string;
   snapshotsRootDevice: number;
@@ -330,38 +349,60 @@ export function verifyOfflineWorkflowControlBytes(input: OfflineWorkflowControlB
   };
 }
 
-export function materializeWorkflowExecutionSnapshot(input: {
-  projectRoot: string;
-  layout: RunLayout;
-  snapshot: VerifiedWorkflowControlSnapshot;
-}): MaterializedWorkflowExecutionSnapshot {
-  const snapshotsDirectory = openWorkflowExecutionSnapshotsDirectory(input.layout);
+export function materializeWorkflowExecutionSnapshot(
+  input: {
+    projectRoot: string;
+    layout: RunLayout;
+    snapshot: VerifiedWorkflowControlSnapshot;
+  },
+  dependencyOverrides: Partial<WorkflowExecutionSnapshotFileSystemDependencies> = {}
+): MaterializedWorkflowExecutionSnapshot {
+  const dependencies = { ...DEFAULT_WORKFLOW_EXECUTION_SNAPSHOT_FILE_SYSTEM, ...dependencyOverrides };
+  const snapshotsDirectory = openWorkflowExecutionSnapshotsDirectory(input.layout, dependencies);
   let snapshotsDescriptorPath: string | undefined;
   let snapshotRoot: string | undefined;
   let snapshotDescriptor: number | undefined;
   let snapshotDescriptorPath: string | undefined;
   let ownership: WorkflowExecutionSnapshotOwnership | undefined;
+  let boundary: SnapshotMutationBoundary | undefined;
   try {
-    snapshotsDescriptorPath = requiredDirectoryDescriptorPath(
-      snapshotsDirectory.descriptor,
-      snapshotsDirectory.device,
-      snapshotsDirectory.inode,
-      "workflow execution snapshots"
-    );
-    const creationRoot = snapshotsDescriptorPath;
+    assertOpenedDirectoryIdentity(snapshotsDirectory, "workflow execution snapshots");
+    snapshotsDescriptorPath = snapshotsDirectory.descriptorPath;
+    const creationRoot = snapshotsDescriptorPath ?? snapshotsDirectory.realPath;
+    assertOpenedDirectoryIdentity(snapshotsDirectory, "workflow execution snapshots");
     const createdRoot = fs.mkdtempSync(path.join(creationRoot, `${input.snapshot.generation.slice(0, 24)}-`));
-    snapshotDescriptor = openDirectoryNoFollow(createdRoot);
-    const snapshotStat = fs.fstatSync(snapshotDescriptor);
-    if (!snapshotStat.isDirectory()) throw new Error("workflow execution snapshot root is not a physical directory");
-    snapshotDescriptorPath = requiredDirectoryDescriptorPath(
-      snapshotDescriptor,
-      snapshotStat.dev,
-      snapshotStat.ino,
-      "workflow execution snapshot root"
-    );
-    snapshotRoot = fs.realpathSync(snapshotDescriptorPath);
-    const ownedSnapshotsRoot = fs.realpathSync(snapshotsDescriptorPath);
+    // A descriptor-root creation remains confined to the opened directory even
+    // if its lexical name moved during mkdtemp. Capture enough identity to
+    // clean that physical child before reporting the lexical swap. A lexical
+    // creation has no such anchor and must fail immediately instead.
+    if (snapshotsDescriptorPath === undefined) {
+      assertOpenedDirectoryIdentity(snapshotsDirectory, "workflow execution snapshots");
+    }
+    const createdStat = fs.lstatSync(createdRoot);
+    if (createdStat.isSymbolicLink() || !createdStat.isDirectory()) {
+      throw new Error("workflow execution snapshot root is not a physical directory");
+    }
+    snapshotRoot = fs.realpathSync(createdRoot);
+    const ownedSnapshotsRoot =
+      snapshotsDescriptorPath === undefined ? snapshotsDirectory.realPath : fs.realpathSync(snapshotsDescriptorPath);
     assertDirectSnapshotChild(ownedSnapshotsRoot, snapshotRoot);
+    assertCurrentDirectoryIdentity(snapshotRoot, createdStat.dev, createdStat.ino, "workflow execution snapshot root");
+    snapshotDescriptor = dependencies.openDirectory(snapshotRoot);
+    const snapshotStat =
+      snapshotDescriptor === undefined ? fs.lstatSync(snapshotRoot) : fs.fstatSync(snapshotDescriptor);
+    if (!snapshotStat.isDirectory()) throw new Error("workflow execution snapshot root is not a physical directory");
+    if (snapshotStat.dev !== createdStat.dev || snapshotStat.ino !== createdStat.ino) {
+      throw new Error("workflow execution snapshot root changed while it was opened");
+    }
+    snapshotDescriptorPath =
+      snapshotDescriptor === undefined
+        ? undefined
+        : verifiedDirectoryDescriptorPath(
+            dependencies.directoryDescriptorPath(snapshotDescriptor, snapshotStat.dev, snapshotStat.ino),
+            snapshotStat.dev,
+            snapshotStat.ino,
+            "workflow execution snapshot root"
+          );
     ownership = {
       snapshotsRoot: ownedSnapshotsRoot,
       snapshotsRootDevice: snapshotsDirectory.device,
@@ -369,23 +410,28 @@ export function materializeWorkflowExecutionSnapshot(input: {
       snapshotDevice: snapshotStat.dev,
       snapshotInode: snapshotStat.ino
     };
-    assertCurrentDirectoryIdentity(
-      snapshotsDirectory.path,
-      snapshotsDirectory.device,
-      snapshotsDirectory.inode,
-      "workflow execution snapshots"
-    );
-    fs.fchmodSync(snapshotDescriptor, 0o700);
+    const accessRoot = snapshotDescriptorPath ?? snapshotRoot;
+    boundary = {
+      accessRoot,
+      lexicalRoot: snapshotRoot,
+      snapshotsDirectory,
+      snapshotDescriptor,
+      ownership,
+      lexicalFallback: snapshotDescriptorPath === undefined
+    };
+    assertSnapshotMutationBoundary(boundary, "workflow execution snapshot creation");
+    if (snapshotDescriptor !== undefined) fs.fchmodSync(snapshotDescriptor, 0o700);
+    assertSnapshotMutationBoundary(boundary, "workflow execution snapshot permission setup");
     for (const file of input.snapshot.executionFiles) {
-      writeSnapshotFile(snapshotDescriptorPath, file.snapshotPath, file.contents);
+      writeSnapshotFile(accessRoot, file.snapshotPath, file.contents, boundary);
     }
     const relativeWorkflowPath = path.join(".smithers", "workflows", path.basename(input.snapshot.paths.workflowPath));
-    writeSnapshotFileAt(path.join(snapshotDescriptorPath, relativeWorkflowPath), input.snapshot.contents.workflow);
-    const dependencies = wireWorkflowDependencies(snapshotDescriptorPath, input.snapshot.executionFiles);
-    sealSnapshotPermissions(snapshotDescriptorPath, new Set(dependencies.executable_paths));
+    writeSnapshotFileAt(path.join(accessRoot, relativeWorkflowPath), input.snapshot.contents.workflow, boundary);
+    const dependencyMap = wireWorkflowDependencies(accessRoot, input.snapshot.executionFiles, boundary);
+    sealSnapshotPermissions(accessRoot, new Set(dependencyMap.executable_paths), boundary);
     const env = bindWorkflowExecutionSnapshotCapability(
       {
-        ...workflowSnapshotModuleEnvironment(snapshotDescriptorPath, dependencies),
+        ...workflowSnapshotModuleEnvironment(accessRoot, dependencyMap),
         // Smithers loads and preflights through the descriptor-anchored command
         // argument, while its durability layer must retain this canonical path
         // for a supervisor or recovery process after the controller FD closes.
@@ -400,18 +446,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
         snapshotInode: ownership.snapshotInode
       }
     );
-    assertCurrentDirectoryIdentity(
-      path.join(snapshotsDescriptorPath, path.basename(snapshotRoot)),
-      ownership.snapshotDevice,
-      ownership.snapshotInode,
-      "workflow execution snapshot"
-    );
-    assertCurrentDirectoryIdentity(
-      snapshotsDirectory.path,
-      snapshotsDirectory.device,
-      snapshotsDirectory.inode,
-      "workflow execution snapshots"
-    );
+    assertSnapshotMutationBoundary(boundary, "workflow execution snapshot completion");
     return {
       root: snapshotRoot,
       workflowPath: path.join(snapshotRoot, relativeWorkflowPath),
@@ -426,10 +461,14 @@ export function materializeWorkflowExecutionSnapshot(input: {
           snapshotDescriptorPath === undefined ? snapshotRoot : fs.realpathSync(snapshotDescriptorPath);
         const cleanupSnapshotsRoot =
           snapshotsDescriptorPath === undefined ? ownership.snapshotsRoot : fs.realpathSync(snapshotsDescriptorPath);
-        disposeWorkflowExecutionSnapshotRoot(cleanupRoot, {
-          ...ownership,
-          snapshotsRoot: cleanupSnapshotsRoot
-        });
+        disposeWorkflowExecutionSnapshotRoot(
+          cleanupRoot,
+          {
+            ...ownership,
+            snapshotsRoot: cleanupSnapshotsRoot
+          },
+          dependencies
+        );
       } catch {
         // Preserve the materialization failure. A cleanup failure must never
         // replace the error that prevented a usable execution snapshot.
@@ -438,7 +477,7 @@ export function materializeWorkflowExecutionSnapshot(input: {
     throw error;
   } finally {
     if (snapshotDescriptor !== undefined) fs.closeSync(snapshotDescriptor);
-    fs.closeSync(snapshotsDirectory.descriptor);
+    if (snapshotsDirectory.descriptor !== undefined) fs.closeSync(snapshotsDirectory.descriptor);
   }
 }
 
@@ -446,18 +485,38 @@ export function materializeWorkflowExecutionSnapshot(input: {
  * Removes one materialized snapshot without following a replaced parent/root
  * symlink. Missing snapshots are already disposed, so repeated calls succeed.
  */
-export function disposeWorkflowExecutionSnapshot(snapshot: MaterializedWorkflowExecutionSnapshot): void {
-  disposeWorkflowExecutionSnapshotRoot(snapshot.root, snapshot.ownership);
+export function disposeWorkflowExecutionSnapshot(
+  snapshot: MaterializedWorkflowExecutionSnapshot,
+  dependencyOverrides: Partial<WorkflowExecutionSnapshotFileSystemDependencies> = {}
+): void {
+  disposeWorkflowExecutionSnapshotRoot(snapshot.root, snapshot.ownership, {
+    ...DEFAULT_WORKFLOW_EXECUTION_SNAPSHOT_FILE_SYSTEM,
+    ...dependencyOverrides
+  });
 }
 
-function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): {
+interface OpenedWorkflowExecutionSnapshotsDirectory {
   path: string;
   realPath: string;
   descriptorPath?: string;
-  descriptor: number;
+  descriptor?: number;
   device: number;
   inode: number;
-} {
+}
+
+interface SnapshotMutationBoundary {
+  accessRoot: string;
+  lexicalRoot: string;
+  snapshotsDirectory: OpenedWorkflowExecutionSnapshotsDirectory;
+  snapshotDescriptor?: number;
+  ownership: WorkflowExecutionSnapshotOwnership;
+  lexicalFallback: boolean;
+}
+
+function openWorkflowExecutionSnapshotsDirectory(
+  layout: RunLayout,
+  dependencies: WorkflowExecutionSnapshotFileSystemDependencies
+): OpenedWorkflowExecutionSnapshotsDirectory {
   const smithersRoot = safeResolveInside(layout.root, "smithers", "workflow control directory");
   assertNoSymlinkComponents(layout.root, smithersRoot, "workflow control directory");
   const snapshotsRoot = safeResolveInside(smithersRoot, "execution-snapshots", "workflow execution snapshots");
@@ -469,26 +528,41 @@ function openWorkflowExecutionSnapshotsDirectory(layout: RunLayout): {
     }
   }
   assertNoSymlinkComponents(layout.root, snapshotsRoot, "workflow execution snapshots");
-  const descriptor = openDirectoryNoFollow(snapshotsRoot);
+  const lexicalStat = fs.lstatSync(snapshotsRoot);
+  if (lexicalStat.isSymbolicLink() || !lexicalStat.isDirectory()) {
+    throw new Error("workflow execution snapshots must be a physical directory");
+  }
+  const descriptor = dependencies.openDirectory(snapshotsRoot);
   try {
-    const stat = fs.fstatSync(descriptor);
+    const stat = descriptor === undefined ? lexicalStat : fs.fstatSync(descriptor);
+    if (!stat.isDirectory() || stat.dev !== lexicalStat.dev || stat.ino !== lexicalStat.ino) {
+      throw new Error("workflow execution snapshots changed while they were opened");
+    }
     assertCurrentDirectoryIdentity(snapshotsRoot, stat.dev, stat.ino, "workflow execution snapshots");
     const realPath = fs.realpathSync(snapshotsRoot);
     const realRunRoot = fs.realpathSync(layout.root);
     assertPathInside(realRunRoot, realPath, "workflow execution snapshots");
-    fs.fchmodSync(descriptor, 0o700);
+    if (descriptor !== undefined) fs.fchmodSync(descriptor, 0o700);
+    assertCurrentDirectoryIdentity(snapshotsRoot, stat.dev, stat.ino, "workflow execution snapshots");
+    const descriptorPath =
+      descriptor === undefined
+        ? undefined
+        : verifiedDirectoryDescriptorPath(
+            dependencies.directoryDescriptorPath(descriptor, stat.dev, stat.ino),
+            stat.dev,
+            stat.ino,
+            "workflow execution snapshots"
+          );
     return {
       path: snapshotsRoot,
       realPath,
-      descriptor,
       device: stat.dev,
       inode: stat.ino,
-      ...(directoryDescriptorPath(descriptor, stat.dev, stat.ino) === undefined
-        ? {}
-        : { descriptorPath: directoryDescriptorPath(descriptor, stat.dev, stat.ino) })
+      ...(descriptor === undefined ? {} : { descriptor }),
+      ...(descriptorPath === undefined ? {} : { descriptorPath })
     };
   } catch (error) {
-    fs.closeSync(descriptor);
+    if (descriptor !== undefined) fs.closeSync(descriptor);
     throw error;
   }
 }
@@ -512,6 +586,67 @@ function openDirectoryNoFollow(directory: string): number {
   return fs.openSync(directory, fs.constants.O_RDONLY | noFollow | directoryOnly);
 }
 
+function openDirectoryWhenSupported(directory: string): number | undefined {
+  // Node's ordinary file-descriptor API cannot open directories on Windows.
+  // Lexical identity checks below retain fail-closed ownership semantics there.
+  return process.platform === "win32" ? undefined : openDirectoryNoFollow(directory);
+}
+
+function verifiedDirectoryDescriptorPath(
+  candidate: string | undefined,
+  device: number,
+  inode: number,
+  label: string
+): string | undefined {
+  if (candidate === undefined) return undefined;
+  const stat = fs.statSync(candidate);
+  if (!stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
+    throw new Error(`${label} descriptor path changed during snapshot ownership`);
+  }
+  return candidate;
+}
+
+function assertOpenedDirectoryIdentity(directory: OpenedWorkflowExecutionSnapshotsDirectory, label: string): void {
+  assertCurrentDirectoryIdentity(directory.path, directory.device, directory.inode, label);
+  if (directory.descriptor === undefined) return;
+  const stat = fs.fstatSync(directory.descriptor);
+  if (!stat.isDirectory() || stat.dev !== directory.device || stat.ino !== directory.inode) {
+    throw new Error(`${label} changed during snapshot ownership`);
+  }
+}
+
+function assertSnapshotMutationBoundary(boundary: SnapshotMutationBoundary, label: string): void {
+  assertOpenedDirectoryIdentity(boundary.snapshotsDirectory, "workflow execution snapshots");
+  assertCurrentDirectoryIdentity(
+    boundary.lexicalRoot,
+    boundary.ownership.snapshotDevice,
+    boundary.ownership.snapshotInode,
+    label
+  );
+  if (boundary.snapshotDescriptor !== undefined) {
+    const stat = fs.fstatSync(boundary.snapshotDescriptor);
+    if (
+      !stat.isDirectory() ||
+      stat.dev !== boundary.ownership.snapshotDevice ||
+      stat.ino !== boundary.ownership.snapshotInode
+    ) {
+      throw new Error(`${label} changed during snapshot ownership`);
+    }
+  }
+}
+
+function assertSnapshotMutationPath(boundary: SnapshotMutationBoundary, candidate: string, label: string): void {
+  assertSnapshotMutationBoundary(boundary, label);
+  const relative = path.relative(boundary.accessRoot, path.resolve(candidate));
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} escapes the workflow execution snapshot`);
+  }
+  if (boundary.lexicalFallback) {
+    const lexicalCandidate = path.resolve(boundary.lexicalRoot, relative);
+    assertNoSymlinkComponents(boundary.lexicalRoot, lexicalCandidate, label);
+  }
+}
+
 function assertCurrentDirectoryIdentity(directory: string, device: number, inode: number, label: string): void {
   const stat = fs.lstatSync(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
@@ -526,7 +661,11 @@ function assertDirectSnapshotChild(snapshotsRoot: string, snapshotRoot: string):
   }
 }
 
-function disposeWorkflowExecutionSnapshotRoot(root: string, ownership: WorkflowExecutionSnapshotOwnership): void {
+function disposeWorkflowExecutionSnapshotRoot(
+  root: string,
+  ownership: WorkflowExecutionSnapshotOwnership,
+  dependencies: WorkflowExecutionSnapshotFileSystemDependencies
+): void {
   if (!pathExists(ownership.snapshotsRoot)) {
     throw new Error("workflow execution snapshots disappeared before cleanup could prove disposal");
   }
@@ -541,23 +680,28 @@ function disposeWorkflowExecutionSnapshotRoot(root: string, ownership: WorkflowE
     throw new Error("workflow execution snapshot root is not owned by its snapshots directory");
   }
 
-  const snapshotsDescriptor = openDirectoryNoFollow(ownership.snapshotsRoot);
+  const snapshotsDescriptor = dependencies.openDirectory(ownership.snapshotsRoot);
   try {
-    const snapshotsStat = fs.fstatSync(snapshotsDescriptor);
+    const snapshotsStat =
+      snapshotsDescriptor === undefined ? fs.lstatSync(ownership.snapshotsRoot) : fs.fstatSync(snapshotsDescriptor);
     if (
       !snapshotsStat.isDirectory() ||
+      snapshotsStat.isSymbolicLink() ||
       snapshotsStat.dev !== ownership.snapshotsRootDevice ||
       snapshotsStat.ino !== ownership.snapshotsRootInode
     ) {
       throw new Error("workflow execution snapshots changed before cleanup");
     }
-    const snapshotsDescriptorPath = requiredDirectoryDescriptorPath(
-      snapshotsDescriptor,
-      snapshotsStat.dev,
-      snapshotsStat.ino,
-      "workflow execution snapshots"
-    );
-    const ownedRoot = path.join(snapshotsDescriptorPath, path.basename(root));
+    const snapshotsDescriptorPath =
+      snapshotsDescriptor === undefined
+        ? undefined
+        : verifiedDirectoryDescriptorPath(
+            dependencies.directoryDescriptorPath(snapshotsDescriptor, snapshotsStat.dev, snapshotsStat.ino),
+            snapshotsStat.dev,
+            snapshotsStat.ino,
+            "workflow execution snapshots"
+          );
+    const ownedRoot = path.join(snapshotsDescriptorPath ?? ownership.snapshotsRoot, path.basename(root));
     if (!pathExists(ownedRoot)) return;
     const rootStat = fs.lstatSync(ownedRoot);
     if (
@@ -569,9 +713,9 @@ function disposeWorkflowExecutionSnapshotRoot(root: string, ownership: WorkflowE
       throw new Error("workflow execution snapshot root changed before cleanup");
     }
 
-    const rootDescriptor = openDirectoryNoFollow(ownedRoot);
+    const rootDescriptor = dependencies.openDirectory(ownedRoot);
     try {
-      const openedRootStat = fs.fstatSync(rootDescriptor);
+      const openedRootStat = rootDescriptor === undefined ? rootStat : fs.fstatSync(rootDescriptor);
       if (
         !openedRootStat.isDirectory() ||
         openedRootStat.dev !== ownership.snapshotDevice ||
@@ -579,57 +723,118 @@ function disposeWorkflowExecutionSnapshotRoot(root: string, ownership: WorkflowE
       ) {
         throw new Error("workflow execution snapshot root changed before cleanup");
       }
-      const rootDescriptorPath = requiredDirectoryDescriptorPath(
-        rootDescriptor,
-        openedRootStat.dev,
-        openedRootStat.ino,
-        "workflow execution snapshot root"
-      );
-      fs.fchmodSync(rootDescriptor, 0o700);
-      removeSnapshotDirectoryContents(rootDescriptorPath);
+      const rootDescriptorPath =
+        rootDescriptor === undefined
+          ? undefined
+          : verifiedDirectoryDescriptorPath(
+              dependencies.directoryDescriptorPath(rootDescriptor, openedRootStat.dev, openedRootStat.ino),
+              openedRootStat.dev,
+              openedRootStat.ino,
+              "workflow execution snapshot root"
+            );
+      if (rootDescriptor !== undefined) fs.fchmodSync(rootDescriptor, 0o700);
+      else chmodLexicalDirectory(ownedRoot, openedRootStat.dev, openedRootStat.ino);
+      if (rootDescriptorPath !== undefined) {
+        removeSnapshotDirectoryContentsByDescriptor(rootDescriptorPath, dependencies);
+      } else {
+        removeSnapshotDirectoryContentsLexically(ownedRoot, openedRootStat.dev, openedRootStat.ino, () => {
+          assertCurrentDirectoryIdentity(
+            ownership.snapshotsRoot,
+            ownership.snapshotsRootDevice,
+            ownership.snapshotsRootInode,
+            "workflow execution snapshots"
+          );
+          if (snapshotsDescriptor !== undefined) {
+            assertDescriptorDirectoryIdentity(
+              snapshotsDescriptor,
+              ownership.snapshotsRootDevice,
+              ownership.snapshotsRootInode,
+              "workflow execution snapshots"
+            );
+          }
+          if (rootDescriptor !== undefined) {
+            assertDescriptorDirectoryIdentity(
+              rootDescriptor,
+              ownership.snapshotDevice,
+              ownership.snapshotInode,
+              "workflow execution snapshot"
+            );
+          }
+        });
+      }
       assertCurrentDirectoryIdentity(
         ownedRoot,
         ownership.snapshotDevice,
         ownership.snapshotInode,
         "workflow execution snapshot"
       );
-      // The tree is already empty. A final rename/replacement race can at most
-      // make this non-recursive rmdir fail or remove an empty replacement that
-      // remains inside the held, verified parent descriptor; it cannot traverse
-      // a symlink or recursively delete an external tree.
+      if (snapshotsDescriptorPath === undefined) {
+        assertCurrentDirectoryIdentity(
+          ownership.snapshotsRoot,
+          ownership.snapshotsRootDevice,
+          ownership.snapshotsRootInode,
+          "workflow execution snapshots"
+        );
+      }
+      // The tree is already empty. Descriptor mode deletes through the held
+      // verified parent; lexical mode revalidates that parent immediately
+      // before and after this non-recursive operation. Neither mode recursively
+      // follows a replacement link.
       fs.rmdirSync(ownedRoot);
+      if (snapshotsDescriptorPath === undefined) {
+        assertCurrentDirectoryIdentity(
+          ownership.snapshotsRoot,
+          ownership.snapshotsRootDevice,
+          ownership.snapshotsRootInode,
+          "workflow execution snapshots"
+        );
+      }
     } finally {
-      fs.closeSync(rootDescriptor);
+      if (rootDescriptor !== undefined) fs.closeSync(rootDescriptor);
     }
   } finally {
-    fs.closeSync(snapshotsDescriptor);
+    if (snapshotsDescriptor !== undefined) fs.closeSync(snapshotsDescriptor);
   }
 }
 
-function requiredDirectoryDescriptorPath(descriptor: number, device: number, inode: number, label: string): string {
-  const descriptorPath = directoryDescriptorPath(descriptor, device, inode);
-  if (descriptorPath === undefined) {
-    throw new Error(`${label} cannot be cleaned safely without directory-descriptor paths`);
+function assertDescriptorDirectoryIdentity(descriptor: number, device: number, inode: number, label: string): void {
+  const stat = fs.fstatSync(descriptor);
+  if (!stat.isDirectory() || stat.dev !== device || stat.ino !== inode) {
+    throw new Error(`${label} changed during snapshot cleanup`);
   }
-  return descriptorPath;
 }
 
-function removeSnapshotDirectoryContents(directoryDescriptorPath: string): void {
+function chmodLexicalDirectory(directory: string, device: number, inode: number): void {
+  assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+  fs.chmodSync(directory, 0o700);
+  assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+}
+
+function removeSnapshotDirectoryContentsByDescriptor(
+  directoryDescriptorPath: string,
+  dependencies: WorkflowExecutionSnapshotFileSystemDependencies
+): void {
   for (const entry of fs.readdirSync(directoryDescriptorPath, { withFileTypes: true })) {
     const candidate = path.join(directoryDescriptorPath, entry.name);
     if (entry.isDirectory() && !entry.isSymbolicLink()) {
-      const descriptor = openDirectoryNoFollow(candidate);
+      const descriptor = dependencies.openDirectory(candidate);
+      if (descriptor === undefined) {
+        throw new Error("workflow execution snapshot lost directory-handle support during cleanup");
+      }
       try {
         const stat = fs.fstatSync(descriptor);
         if (!stat.isDirectory()) throw new Error("workflow execution snapshot directory changed during cleanup");
-        const childDescriptorPath = requiredDirectoryDescriptorPath(
-          descriptor,
+        const childDescriptorPath = verifiedDirectoryDescriptorPath(
+          dependencies.directoryDescriptorPath(descriptor, stat.dev, stat.ino),
           stat.dev,
           stat.ino,
           "workflow execution snapshot directory"
         );
+        if (childDescriptorPath === undefined) {
+          throw new Error("workflow execution snapshot lost descriptor paths during cleanup");
+        }
         fs.fchmodSync(descriptor, 0o700);
-        removeSnapshotDirectoryContents(childDescriptorPath);
+        removeSnapshotDirectoryContentsByDescriptor(childDescriptorPath, dependencies);
         assertCurrentDirectoryIdentity(candidate, stat.dev, stat.ino, "workflow execution snapshot directory");
         fs.rmdirSync(candidate);
       } finally {
@@ -641,18 +846,88 @@ function removeSnapshotDirectoryContents(directoryDescriptorPath: string): void 
   }
 }
 
-function writeSnapshotFile(root: string, relativePath: string, contents: Buffer): void {
+function removeSnapshotDirectoryContentsLexically(
+  directory: string,
+  device: number,
+  inode: number,
+  assertOwnerCurrent: () => void
+): void {
+  assertOwnerCurrent();
+  assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  // Never act on a listing obtained through a path that was replaced while it
+  // was being read. In particular, a directory-to-symlink swap cannot turn the
+  // following loop into recursive traversal of the link target.
+  assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+  assertOwnerCurrent();
+  for (const entry of entries) {
+    assertOwnerCurrent();
+    assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+    const candidate = path.join(directory, entry.name);
+    const stat = fs.lstatSync(candidate);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      chmodLexicalDirectory(candidate, stat.dev, stat.ino);
+      removeSnapshotDirectoryContentsLexically(candidate, stat.dev, stat.ino, assertOwnerCurrent);
+      assertOwnerCurrent();
+      assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+      assertCurrentDirectoryIdentity(candidate, stat.dev, stat.ino, "workflow execution snapshot directory");
+      fs.rmdirSync(candidate);
+      assertOwnerCurrent();
+      assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+      continue;
+    }
+    if (stat.isFile() && !stat.isSymbolicLink()) {
+      prepareLexicalFileForUnlink(candidate, stat.dev, stat.ino);
+    }
+    fs.unlinkSync(candidate);
+    assertOwnerCurrent();
+    assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+  }
+  assertCurrentDirectoryIdentity(directory, device, inode, "workflow execution snapshot directory");
+  assertOwnerCurrent();
+}
+
+function prepareLexicalFileForUnlink(candidate: string, device: number, inode: number): void {
+  const descriptor = fs.openSync(candidate, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== device || opened.ino !== inode) {
+      throw new Error("workflow execution snapshot file changed during cleanup");
+    }
+    // Windows maps the sealed read-only mode to its read-only file attribute,
+    // which must be cleared before unlink. Operating on the already verified
+    // file handle avoids chmod following a replacement pathname.
+    fs.fchmodSync(descriptor, 0o600);
+    const current = fs.lstatSync(candidate);
+    if (current.isSymbolicLink() || !current.isFile() || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw new Error("workflow execution snapshot file changed during cleanup");
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function writeSnapshotFile(
+  root: string,
+  relativePath: string,
+  contents: Buffer,
+  boundary: SnapshotMutationBoundary
+): void {
   const validated = validateSnapshotPath(relativePath);
   const destination = path.resolve(root, ...validated.split("/"));
   assertPathInside(root, destination, `workflow execution snapshot file ${validated}`);
-  writeSnapshotFileAt(destination, contents);
+  writeSnapshotFileAt(destination, contents, boundary);
 }
 
-function writeSnapshotFileAt(destination: string, contents: Buffer): void {
+function writeSnapshotFileAt(destination: string, contents: Buffer, boundary: SnapshotMutationBoundary): void {
+  const label = `workflow execution snapshot file ${path.basename(destination)}`;
+  assertSnapshotMutationPath(boundary, path.dirname(destination), label);
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  assertSnapshotMutationPath(boundary, path.dirname(destination), label);
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
   const descriptor = fs.openSync(
     destination,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL,
+    fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
     0o400
   );
   try {
@@ -660,18 +935,38 @@ function writeSnapshotFileAt(destination: string, contents: Buffer): void {
     while (offset < contents.byteLength)
       offset += fs.writeSync(descriptor, contents, offset, contents.byteLength - offset);
     fs.fsyncSync(descriptor);
+    const observed = Buffer.alloc(contents.byteLength);
+    let readOffset = 0;
+    while (readOffset < observed.byteLength) {
+      const bytesRead = fs.readSync(descriptor, observed, readOffset, observed.byteLength - readOffset, readOffset);
+      if (bytesRead === 0) throw new Error(`workflow execution snapshot write changed size: ${destination}`);
+      readOffset += bytesRead;
+    }
+    const opened = fs.fstatSync(descriptor);
+    const current = fs.lstatSync(destination);
+    if (
+      !opened.isFile() ||
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      opened.dev !== current.dev ||
+      opened.ino !== current.ino ||
+      opened.size !== current.size ||
+      !observed.equals(contents)
+    ) {
+      throw new Error(`workflow execution snapshot write was not stable: ${destination}`);
+    }
   } finally {
     fs.closeSync(descriptor);
   }
-  if (!fs.readFileSync(destination).equals(contents)) {
-    throw new Error(`workflow execution snapshot write was not stable: ${destination}`);
-  }
+  assertSnapshotMutationPath(boundary, destination, label);
 }
 
 function wireWorkflowDependencies(
   snapshotRoot: string,
-  executionFiles: VerifiedWorkflowControlSnapshot["executionFiles"]
+  executionFiles: VerifiedWorkflowControlSnapshot["executionFiles"],
+  boundary: SnapshotMutationBoundary
 ): WorkflowExecutionDependencyMap {
+  assertSnapshotMutationBoundary(boundary, "workflow execution dependency wiring");
   const physicalSnapshotRoot = fs.realpathSync(snapshotRoot);
   const manifestFile = executionFiles.find(
     (file) => file.snapshotPath === WORKFLOW_EXECUTION_DEPENDENCY_MAP_SNAPSHOT_PATH
@@ -694,19 +989,36 @@ function wireWorkflowDependencies(
         ? snapshotRoot
         : resolveSnapshotPath(snapshotRoot, issuer.snapshot_path, `workflow dependency issuer ${issuer.id}`);
     const nodeModules = path.join(issuerPath, "node_modules");
+    assertSnapshotMutationPath(boundary, issuerPath, `workflow dependency issuer ${issuer.id}`);
     fs.mkdirSync(nodeModules, { recursive: true, mode: 0o700 });
+    assertSnapshotMutationPath(boundary, nodeModules, `workflow dependency issuer ${issuer.id}`);
     for (const [dependency, targetId] of Object.entries(issuer.dependencies)) {
       const target = targetPaths.get(targetId);
       if (target === undefined) throw new Error(`workflow dependency map has an unknown target: ${targetId}`);
       const link = path.join(nodeModules, ...dependency.split("/"));
       assertPathInside(snapshotRoot, link, `workflow dependency link ${issuer.id} -> ${dependency}`);
+      assertSnapshotMutationPath(
+        boundary,
+        path.dirname(link),
+        `workflow dependency link ${issuer.id} -> ${dependency}`
+      );
       fs.mkdirSync(path.dirname(link), { recursive: true, mode: 0o700 });
+      assertSnapshotMutationPath(
+        boundary,
+        path.dirname(link),
+        `workflow dependency link ${issuer.id} -> ${dependency}`
+      );
       if (pathExists(link)) throw new Error(`workflow dependency link destination already exists: ${link}`);
       const relativeTarget = path.relative(path.dirname(link), target);
       if (relativeTarget.length === 0 || path.isAbsolute(relativeTarget)) {
         throw new Error(`workflow dependency link target is invalid: ${issuer.id} -> ${dependency}`);
       }
       fs.symlinkSync(relativeTarget, link, "dir");
+      assertSnapshotMutationPath(
+        boundary,
+        path.dirname(link),
+        `workflow dependency link ${issuer.id} -> ${dependency}`
+      );
       const resolvedTarget = fs.realpathSync(link);
       assertPathInside(
         physicalSnapshotRoot,
@@ -718,7 +1030,8 @@ function wireWorkflowDependencies(
       }
     }
   }
-  verifySnapshotLinks(snapshotRoot);
+  verifySnapshotLinks(snapshotRoot, boundary);
+  assertSnapshotMutationBoundary(boundary, "workflow execution dependency wiring");
   return dependencyMap;
 }
 
@@ -750,11 +1063,16 @@ function workflowSnapshotModuleEnvironment(
   );
 }
 
-function sealSnapshotPermissions(root: string, executablePaths: ReadonlySet<string>): void {
+function sealSnapshotPermissions(
+  root: string,
+  executablePaths: ReadonlySet<string>,
+  boundary: SnapshotMutationBoundary
+): void {
   const directories: string[] = [];
   const pending = [root];
   while (pending.length > 0) {
     const current = pending.pop()!;
+    assertSnapshotMutationPath(boundary, current, "workflow execution snapshot permission seal");
     directories.push(current);
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const candidate = path.join(current, entry.name);
@@ -762,11 +1080,18 @@ function sealSnapshotPermissions(root: string, executablePaths: ReadonlySet<stri
       if (entry.isDirectory()) pending.push(candidate);
       else if (entry.isFile()) {
         const relative = path.relative(root, candidate).split(path.sep).join("/");
+        assertSnapshotMutationPath(boundary, candidate, "workflow execution snapshot permission seal");
         fs.chmodSync(candidate, executablePaths.has(relative) ? 0o500 : 0o400);
+        assertSnapshotMutationPath(boundary, candidate, "workflow execution snapshot permission seal");
       }
     }
+    assertSnapshotMutationPath(boundary, current, "workflow execution snapshot permission seal");
   }
-  for (const directory of directories.sort((left, right) => right.length - left.length)) fs.chmodSync(directory, 0o500);
+  for (const directory of directories.sort((left, right) => right.length - left.length)) {
+    assertSnapshotMutationPath(boundary, directory, "workflow execution snapshot permission seal");
+    fs.chmodSync(directory, 0o500);
+    assertSnapshotMutationPath(boundary, directory, "workflow execution snapshot permission seal");
+  }
 }
 
 function parseWorkflowExecutionDependencyMap(
@@ -1032,12 +1357,15 @@ function pathExists(candidate: string): boolean {
   }
 }
 
-function verifySnapshotLinks(snapshotRoot: string): void {
+function verifySnapshotLinks(snapshotRoot: string, boundary: SnapshotMutationBoundary): void {
   const physicalSnapshotRoot = fs.realpathSync(snapshotRoot);
   const pending = [snapshotRoot];
   while (pending.length > 0) {
     const current = pending.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+    assertSnapshotMutationPath(boundary, current, "workflow execution snapshot link verification");
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    assertSnapshotMutationPath(boundary, current, "workflow execution snapshot link verification");
+    for (const entry of entries) {
       const candidate = path.join(current, entry.name);
       if (entry.isSymbolicLink()) {
         const target = fs.readlinkSync(candidate);
@@ -1048,6 +1376,7 @@ function verifySnapshotLinks(snapshotRoot: string): void {
         pending.push(candidate);
       }
     }
+    assertSnapshotMutationPath(boundary, current, "workflow execution snapshot link verification");
   }
 }
 

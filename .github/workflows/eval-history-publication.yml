@@ -342,8 +342,12 @@ jobs:
           PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
         run: |
           tooling_head="$(git rev-parse HEAD)"
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          if [ "$tooling_head" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+          remote_main="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ ! "$remote_main" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Remote main did not resolve to a full commit SHA" >&2
+            exit 1
+          fi
+          if [ "$tooling_head" != "$remote_main" ]; then
             echo "Trusted main publication tooling moved during handoff validation" >&2
             exit 1
           fi
