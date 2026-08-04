@@ -19,6 +19,7 @@ import {
   type reconcileKimiSubscriptionAuthCredential
 } from "./auth.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
+import { getOrCreateModalV2Volume, type ModalV2VolumeClient } from "./volume.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
 const REMOTE_TRANSPORT_ROOT = "/root/.ultrafuzz-node-transport";
@@ -26,8 +27,12 @@ const REMOTE_PROJECT_ARCHIVE = `${REMOTE_TRANSPORT_ROOT}/project.tgz`;
 const REMOTE_REQUEST = `${REMOTE_TRANSPORT_ROOT}/request.json`;
 const REMOTE_KIMI_AUTH_ARCHIVE = `${REMOTE_TRANSPORT_ROOT}/kimi-auth.tgz`;
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
-const REMOTE_DATA_ROOT = "/run/ultrafuzz-node-results";
-const MODAL_NODE_ISOLATION_PROTOCOL = "rootless-ephemeral-v2";
+const REMOTE_RESULT_ROOT = "/run/ultrafuzz-node-results";
+const REMOTE_DURABLE_VOLUME_MOUNT = "/data";
+const REMOTE_DURABLE_ROOT = `${REMOTE_DURABLE_VOLUME_MOUNT}/ultrafuzz-nodes`;
+// Changing the remote storage contract must fence reattachment to sandboxes
+// launched before durable workspaces and split result publication existed.
+const MODAL_NODE_ISOLATION_PROTOCOL = "rootless-durable-v3";
 const KIMI_CREDENTIAL_LEASE_TAG = "credential_lease";
 const KIMI_CREDENTIAL_LEASE_OWNER_TAG = "credential_lease_owner";
 const KIMI_REMOTE_QUIESCENCE_SETTLEMENT_MS = 5_000;
@@ -142,12 +147,15 @@ export interface ModalNodeSandboxInput {
   operator_prompt?: string;
 }
 
-interface ModalNodeClient {
+interface ModalNodeClient extends ModalV2VolumeClient {
   apps: {
     fromName(name: string, params: { createIfMissing: boolean }): Promise<App>;
   };
   images: {
     fromName(name: string): Promise<Image>;
+  };
+  volumes: ModalV2VolumeClient["volumes"] & {
+    delete(name: string): Promise<void>;
   };
   secrets: {
     fromObject(values: Record<string, string>): Promise<Secret>;
@@ -280,6 +288,9 @@ async function runModalNodeSandbox(
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     app ??= await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
+    const volume = await getOrCreateModalV2Volume(client, modalNodeVolumeName(request.runId), {
+      createIfMissing: true
+    });
     const tags = {
       ...modalNodeTags(request.runId, request.sandboxId, input.execution_generation, workerInput.execution_identity),
       ...(kimiExecutionLease === undefined ? {} : kimiCredentialLeaseTags(kimiExecutionLease))
@@ -318,6 +329,7 @@ async function runModalNodeSandbox(
         workdir: "/opt/ultrafuzz",
         ...(options.region === undefined ? {} : { regions: [options.region] }),
         ...(secret === undefined ? {} : { secrets: [secret] }),
+        volumes: { [REMOTE_DURABLE_VOLUME_MOUNT]: volume },
         tags
       });
       request.heartbeat({
@@ -351,6 +363,8 @@ async function runModalNodeSandbox(
           REMOTE_PROJECT_ARCHIVE,
           ...(preparedAuth.kimi === undefined ? [] : ["--kimi-auth-archive", REMOTE_KIMI_AUTH_ARCHIVE]),
           "--data-root",
+          remoteDurableAttemptRoot(request.runId, request.sandboxId, input.execution_generation),
+          "--result-root",
           remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation)
         ]);
         const stdout = processHandle.stdout.readText().catch(() => "");
@@ -725,7 +739,7 @@ export async function cleanupModalNodeRun(
   options: ModalNodeSandboxProviderOptions,
   controllerRunId: string,
   cleanupOptions: { force?: boolean } = {}
-): Promise<{ terminated: number }> {
+): Promise<{ terminated: number; volumeDeleted: boolean }> {
   validateProviderOptions(options);
   const env = options.env ?? process.env;
   const [tokenIdName, tokenSecretName] = options.credentialEnv;
@@ -741,6 +755,7 @@ export async function cleanupModalNodeRun(
     for await (const sandbox of client.sandboxes.list({ appId: app.appId, tags })) {
       candidates.push(sandbox);
     }
+    let terminated = 0;
     if (cleanupOptions.force !== true) {
       let hasActiveOrUnproven = false;
       for (const sandbox of candidates) {
@@ -755,10 +770,20 @@ export async function cleanupModalNodeRun(
         candidates.forEach((sandbox) => sandbox.detach());
         throw new ModalNodeCleanupRefusedError();
       }
-      return { terminated: 0 };
+    } else {
+      // Volume deletion is permitted only after every listed sandbox is proven
+      // stopped. terminateEverySandbox fails closed on an unprovable state.
+      terminated = await terminateEverySandbox(candidates, "forced cloud node sandbox cleanup failed");
     }
-    const terminated = await terminateEverySandbox(candidates, "forced cloud node sandbox cleanup failed");
-    return { terminated };
+    try {
+      await client.volumes.delete(modalNodeVolumeName(controllerRunId));
+      return { terminated, volumeDeleted: true };
+    } catch (error) {
+      if (error instanceof Error && error.name === "NotFoundError") {
+        return { terminated, volumeDeleted: false };
+      }
+      throw error;
+    }
   } finally {
     client.close();
   }
@@ -786,6 +811,7 @@ const RESERVED_CLOUD_AUTH_ENVIRONMENT_VARIABLES = new Set([
   "TMP",
   "TMPDIR",
   "ULTRAFUZZ_CLOUD_AGENT_ARTIFACT_DIR",
+  "ULTRAFUZZ_CLOUD_AGENT_PROJECT_ROOT",
   "ULTRAFUZZ_CLOUD_AGENT_WORKSPACE",
   "ULTRAFUZZ_ARTIFACTS_MODULE",
   "ULTRAFUZZ_CLOUD_WORKER",
@@ -1022,6 +1048,10 @@ function kimiCredentialLeaseTags(
   };
 }
 
+export function modalNodeVolumeName(runId: string): string {
+  return `ultrafuzz-node-${boundedIdentity(runId)}`;
+}
+
 export function modalNodeRequestFingerprint(input: ModalNodeSandboxInput): string {
   const { request_fingerprint: _requestFingerprint, execution_identity: _executionIdentity, ...payload } = input;
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
@@ -1097,6 +1127,17 @@ export async function createModalNodeHandoffArchive(
     for (const metadata of ["hooks", "logs", "branches", "description", "COMMIT_EDITMSG", "FETCH_HEAD", "ORIG_HEAD"]) {
       fs.rmSync(path.join(staging, ".git", metadata), { recursive: true, force: true });
     }
+    // A checkout index caches host ctime/mtime/inode values. Rebuild it against
+    // the pinned tree through a fresh index path so identical logical handoffs
+    // retain one archive digest (and therefore one execution identity) across
+    // controller retries.
+    const gitIndex = path.join(staging, ".git", "index");
+    const deterministicGitIndex = path.join(staging, ".git", "index.deterministic");
+    execFileSync("git", ["read-tree", sourceCommit], {
+      cwd: staging,
+      env: { ...process.env, GIT_INDEX_FILE: deterministicGitIndex }
+    });
+    fs.renameSync(deterministicGitIndex, gitIndex);
     assertSafeTree(staging);
 
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
@@ -1123,7 +1164,22 @@ export async function createModalNodeHandoffArchive(
       }
     }
     assertSafeTree(staging);
-    execFileSync("tar", ["-czf", archive, "-C", staging, "."]);
+    // GNU tar streams gzip without a source filename/timestamp. Normalize all
+    // archive headers as well so source mtimes and controller uid/gid cannot
+    // perturb the transport digest.
+    execFileSync("tar", [
+      "--sort=name",
+      "--mtime=@0",
+      "--owner=0",
+      "--group=0",
+      "--numeric-owner",
+      "--format=gnu",
+      "-czf",
+      archive,
+      "-C",
+      staging,
+      "."
+    ]);
     fs.chmodSync(archive, 0o600);
     return {
       path: archive,
@@ -1144,6 +1200,8 @@ interface ModalNodeResult {
   storage_lineage: string;
   execution_identity: string;
   credential_candidate?: string;
+  durable_checkpoint: string;
+  durable_checkpoint_index: string;
 }
 
 interface ModalNodeKimiCredentialRecovery {
@@ -1196,30 +1254,60 @@ async function readModalNodeResult(
   input: ModalNodeSandboxInput,
   forwardedCredentialValues: readonly string[]
 ): Promise<ModalNodeResult | undefined> {
-  const attemptRoot = remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
-  const resultPath = path.posix.join(attemptRoot, "result.json");
-  let parsed: unknown;
+  const resultRoot = remoteAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
+  const durableRoot = remoteDurableAttemptRoot(request.runId, request.sandboxId, input.execution_generation);
+  const resultPath = path.posix.join(resultRoot, "result.json");
+  let serialized: string;
   try {
-    const serialized = await sandbox.filesystem.readText(resultPath);
-    assertNoCredentialText(serialized, forwardedCredentialValues, "cloud node result metadata");
-    parsed = JSON.parse(serialized) as unknown;
+    serialized = await sandbox.filesystem.readText(resultPath);
   } catch (error) {
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
-    throw error;
+    // SDK errors are not trusted to omit remote file contents.
+    // eslint-disable-next-line preserve-caught-error -- a remote read cause can contain untrusted metadata bytes
+    throw new Error("cloud node result metadata is unavailable");
   }
+  assertNoCredentialText(serialized, forwardedCredentialValues, "cloud node result metadata");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    // JSON.parse diagnostics may quote attacker-controlled remote bytes.
+    throw new Error("cloud node result is invalid");
+  }
+  const resultKeys = [
+    "schema_version",
+    "status",
+    "artifact_archive",
+    "artifact_sha256",
+    "storage_lineage",
+    "execution_identity",
+    "durable_checkpoint",
+    "durable_checkpoint_index",
+    ...(input.agent_auth.auth.mode === "subscription" ? ["credential_candidate"] : [])
+  ];
   if (
     isRecord(parsed) &&
+    hasExactKeys(parsed, resultKeys) &&
     parsed.schema_version === "ultrafuzz.modal.node-result.v1" &&
     parsed.status === "succeeded" &&
-    parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
+    parsed.artifact_archive === path.posix.join(resultRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
     parsed.execution_identity === input.execution_identity &&
     (input.agent_auth.auth.mode === "subscription"
-      ? parsed.credential_candidate === path.posix.join(attemptRoot, "kimi-credential-candidate.json")
-      : parsed.credential_candidate === undefined)
+      ? parsed.credential_candidate === path.posix.join(resultRoot, "kimi-credential-candidate.json")
+      : parsed.credential_candidate === undefined) &&
+    isDurableCheckpointPath(parsed.durable_checkpoint, durableRoot) &&
+    parsed.durable_checkpoint_index === path.posix.join(durableRoot, "checkpoints", "index.json")
   ) {
+    await validateDurableCheckpoint(
+      sandbox,
+      parsed as unknown as ModalNodeResult,
+      durableRoot,
+      input,
+      forwardedCredentialValues
+    );
     return parsed as unknown as ModalNodeResult;
   }
   throw new Error("cloud node result is invalid");
@@ -1236,11 +1324,12 @@ async function readModalNodeKimiCredentialRecovery(
   let serialized: string;
   try {
     serialized = await sandbox.filesystem.readText(recoveryPath);
-    assertNoCredentialText(serialized, forwardedCredentialValues, "cloud Kimi credential recovery metadata");
   } catch (error) {
     if (error instanceof SandboxFilesystemNotFoundError) return undefined;
-    throw error;
+    // eslint-disable-next-line preserve-caught-error -- credential-observing remote metadata must remain opaque
+    throw new Error("cloud Kimi credential recovery manifest is unavailable");
   }
+  assertNoCredentialText(serialized, forwardedCredentialValues, "cloud Kimi credential recovery metadata");
   let parsed: unknown;
   try {
     parsed = JSON.parse(serialized) as unknown;
@@ -1252,6 +1341,13 @@ async function readModalNodeKimiCredentialRecovery(
   }
   if (
     isRecord(parsed) &&
+    hasExactKeys(parsed, [
+      "schema_version",
+      "status",
+      "storage_lineage",
+      "execution_identity",
+      "credential_candidate"
+    ]) &&
     parsed.schema_version === "ultrafuzz.modal.kimi-credential-recovery.v1" &&
     parsed.status === "quarantined" &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
@@ -1296,6 +1392,192 @@ async function stageKimiCredentialCandidate(
 interface StagedModalNodePublication {
   cleanup: () => void;
   commit: () => void;
+}
+
+function isDurableCheckpointPath(value: unknown, durableRoot: string): value is string {
+  const checkpointDirectory = path.posix.join(durableRoot, "checkpoints");
+  return (
+    typeof value === "string" &&
+    path.posix.dirname(value) === checkpointDirectory &&
+    /^[0-9]{4,}-completed\.json$/u.test(path.posix.basename(value))
+  );
+}
+
+async function validateDurableCheckpoint(
+  sandbox: Sandbox,
+  result: ModalNodeResult,
+  durableRoot: string,
+  input: ModalNodeSandboxInput,
+  forwardedCredentialValues: readonly string[]
+): Promise<void> {
+  if (
+    input.project_archive_sha256 === undefined ||
+    input.request_fingerprint === undefined ||
+    input.execution_identity === undefined
+  ) {
+    throw new Error("cloud node durable checkpoint identity is incomplete");
+  }
+  const [checkpoint, index] = await Promise.all([
+    readRemoteJsonMetadata(
+      sandbox,
+      result.durable_checkpoint,
+      forwardedCredentialValues,
+      "cloud node durable checkpoint"
+    ),
+    readRemoteJsonMetadata(
+      sandbox,
+      result.durable_checkpoint_index,
+      forwardedCredentialValues,
+      "cloud node durable checkpoint index"
+    )
+  ]);
+  const checkpointDirectory = path.posix.join(durableRoot, "checkpoints");
+  const workspacePath = path.posix.join(durableRoot, "workspace");
+  const handoffArchive = path.posix.join(durableRoot, "input", "project.tgz");
+  const lineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  const checkpointKeys = [
+    "schema_version",
+    "checkpoint_id",
+    "sequence",
+    "stage",
+    "created_at",
+    "storage_lineage",
+    "workspace_path",
+    "run_root",
+    "handoff_archive",
+    "project_archive_sha256",
+    "execution_identity",
+    "request_fingerprint",
+    "base_commit",
+    ...(isRecord(checkpoint) && checkpoint.restored_from !== undefined ? ["restored_from"] : []),
+    ...(isRecord(checkpoint) && checkpoint.error !== undefined ? ["error"] : [])
+  ];
+  if (
+    !isRecord(checkpoint) ||
+    !hasExactKeys(checkpoint, checkpointKeys) ||
+    checkpoint.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
+    !isPositiveInteger(checkpoint.sequence) ||
+    checkpoint.checkpoint_id !== `${String(checkpoint.sequence).padStart(4, "0")}-completed` ||
+    checkpoint.stage !== "completed" ||
+    !isIsoTimestamp(checkpoint.created_at) ||
+    checkpoint.storage_lineage !== lineage ||
+    checkpoint.workspace_path !== workspacePath ||
+    checkpoint.run_root !== input.run_root ||
+    checkpoint.handoff_archive !== handoffArchive ||
+    checkpoint.project_archive_sha256 !== input.project_archive_sha256 ||
+    checkpoint.execution_identity !== input.execution_identity ||
+    checkpoint.request_fingerprint !== input.request_fingerprint ||
+    checkpoint.base_commit !== input.base_commit ||
+    result.durable_checkpoint !== path.posix.join(checkpointDirectory, `${checkpoint.checkpoint_id}.json`) ||
+    !isValidRestoredFrom(checkpoint.restored_from, durableRoot) ||
+    (checkpoint.error !== undefined && (typeof checkpoint.error !== "string" || checkpoint.error.length > 2_000))
+  ) {
+    throw new Error("cloud node durable checkpoint is invalid");
+  }
+  const indexKeys = [
+    "schema_version",
+    "storage_lineage",
+    "workspace_path",
+    "run_root",
+    "handoff_archive",
+    "project_archive_sha256",
+    "execution_identity",
+    "request_fingerprint",
+    "base_commit",
+    "checkpoints"
+  ];
+  if (
+    !isRecord(index) ||
+    !hasExactKeys(index, indexKeys) ||
+    index.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
+    index.storage_lineage !== lineage ||
+    index.workspace_path !== workspacePath ||
+    index.run_root !== input.run_root ||
+    index.handoff_archive !== handoffArchive ||
+    index.project_archive_sha256 !== input.project_archive_sha256 ||
+    index.execution_identity !== input.execution_identity ||
+    index.request_fingerprint !== input.request_fingerprint ||
+    index.base_commit !== input.base_commit ||
+    !Array.isArray(index.checkpoints) ||
+    !index.checkpoints.every((entry, entryIndex) =>
+      isValidDurableCheckpointIndexEntry(entry, entryIndex + 1, checkpointDirectory)
+    ) ||
+    !index.checkpoints.some((entry) => durableCheckpointEntryMatches(entry, checkpoint, result.durable_checkpoint))
+  ) {
+    throw new Error("cloud node durable checkpoint index is invalid");
+  }
+}
+
+async function readRemoteJsonMetadata(
+  sandbox: Sandbox,
+  remotePath: string,
+  forwardedCredentialValues: readonly string[],
+  label: string
+): Promise<unknown> {
+  let serialized: string;
+  try {
+    serialized = await sandbox.filesystem.readText(remotePath);
+  } catch {
+    throw new Error(`${label} is unavailable`);
+  }
+  assertNoCredentialText(serialized, forwardedCredentialValues, label);
+  try {
+    return JSON.parse(serialized) as unknown;
+  } catch {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function isValidRestoredFrom(value: unknown, durableRoot: string): boolean {
+  return (
+    value === undefined ||
+    (typeof value === "string" &&
+      value !== durableRoot &&
+      path.posix.dirname(value) === path.posix.dirname(durableRoot) &&
+      /^[A-Za-z0-9_-]+$/u.test(path.posix.basename(value)))
+  );
+}
+
+function isValidDurableCheckpointIndexEntry(
+  value: unknown,
+  expectedSequence: number,
+  checkpointDirectory: string
+): boolean {
+  if (!isRecord(value) || !hasExactKeys(value, ["checkpoint_id", "sequence", "stage", "created_at", "manifest"])) {
+    return false;
+  }
+  if (
+    value.stage !== "prepared" &&
+    value.stage !== "running" &&
+    value.stage !== "completed" &&
+    value.stage !== "failed"
+  ) {
+    return false;
+  }
+  const checkpointId = `${String(expectedSequence).padStart(4, "0")}-${value.stage}`;
+  return (
+    value.sequence === expectedSequence &&
+    value.checkpoint_id === checkpointId &&
+    isIsoTimestamp(value.created_at) &&
+    value.manifest === path.posix.join(checkpointDirectory, `${checkpointId}.json`)
+  );
+}
+
+function durableCheckpointEntryMatches(entry: unknown, checkpoint: Record<string, unknown>, manifest: string): boolean {
+  return (
+    isRecord(entry) &&
+    entry.checkpoint_id === checkpoint.checkpoint_id &&
+    entry.sequence === checkpoint.sequence &&
+    entry.stage === checkpoint.stage &&
+    entry.created_at === checkpoint.created_at &&
+    entry.manifest === manifest
+  );
 }
 
 async function stageModalNodeResult(
@@ -1547,7 +1829,15 @@ async function terminateEverySandbox(
 
 function remoteAttemptRoot(runId: string, sandboxId: string, executionGeneration: string): string {
   return path.posix.join(
-    REMOTE_DATA_ROOT,
+    REMOTE_RESULT_ROOT,
+    boundedIdentity(runId),
+    boundedIdentity(`${sandboxId}:${executionGeneration}`)
+  );
+}
+
+function remoteDurableAttemptRoot(runId: string, sandboxId: string, executionGeneration: string): string {
+  return path.posix.join(
+    REMOTE_DURABLE_ROOT,
     boundedIdentity(runId),
     boundedIdentity(`${sandboxId}:${executionGeneration}`)
   );

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,7 +17,7 @@ import {
 import { kimiSubscriptionAuthSecretValuesFromRoots, kimiSubscriptionCredentialFileName } from "./auth.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
-const PROJECT_ROOT = "/workspace/project";
+const DEFAULT_PROJECT_ROOT = "/workspace/project";
 const AGENT_HOME = "/workspace/agent-home";
 const DEEPSEEK_AGENT_CONFIG_HOME = `${AGENT_HOME}/.deepseek-claude`;
 const KIMI_AGENT_AUTH_HOME = `${AGENT_HOME}/.kimi-code`;
@@ -27,6 +27,7 @@ const CLOUD_RESULT_ROOT = "/run/ultrafuzz-node-results";
 const CLOUD_AGENT_LAUNCHER_ROOT = "/run/ultrafuzz-agent-launchers";
 const CLOUD_AGENT_WORKSPACE_ENV = "ULTRAFUZZ_CLOUD_AGENT_WORKSPACE";
 const CLOUD_AGENT_ARTIFACT_DIR_ENV = "ULTRAFUZZ_CLOUD_AGENT_ARTIFACT_DIR";
+const CLOUD_AGENT_PROJECT_ROOT_ENV = "ULTRAFUZZ_CLOUD_AGENT_PROJECT_ROOT";
 const CLOUD_AGENT_MODEL_CLOSED = `${CLOUD_AGENT_LAUNCHER_ROOT}/model-closed`;
 const CLOUD_AGENT_DIAGNOSTIC_REGISTRATION_PREFIX = "diagnostic-";
 const SETPRIV = "/usr/bin/setpriv";
@@ -45,34 +46,82 @@ let workerCredentialValues: string[] = [];
 let workerSubscriptionRotationPossible = false;
 let workerSuccessorSecretsClassified = true;
 
+const DURABLE_WORKSPACE_DIRECTORY = "workspace";
+const DURABLE_INPUT_DIRECTORY = "input";
+const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
+const DURABLE_CHECKPOINT_INDEX = "index.json";
+const DURABLE_RESTORE_MARKER = "restore.json";
+
+type DurableCheckpointStage = "prepared" | "running" | "failed" | "completed";
+type IdentifiedModalNodeSandboxInput = ModalNodeSandboxInput & {
+  execution_identity: string;
+  project_archive_sha256: string;
+  request_fingerprint: string;
+};
+
+export interface DurableCheckpointRecord {
+  schema_version: "ultrafuzz.modal.node-checkpoint.v1";
+  checkpoint_id: string;
+  sequence: number;
+  stage: DurableCheckpointStage;
+  created_at: string;
+  storage_lineage: string;
+  workspace_path: string;
+  run_root: string;
+  handoff_archive: string;
+  project_archive_sha256: string;
+  execution_identity: string;
+  request_fingerprint: string;
+  base_commit: string;
+  restored_from?: string;
+  error?: string;
+}
+
+interface DurableCheckpointIndex {
+  schema_version: "ultrafuzz.modal.node-checkpoint-index.v1";
+  storage_lineage: string;
+  workspace_path: string;
+  run_root: string;
+  handoff_archive: string;
+  project_archive_sha256: string;
+  execution_identity: string;
+  request_fingerprint: string;
+  base_commit: string;
+  checkpoints: Array<
+    Pick<DurableCheckpointRecord, "checkpoint_id" | "sequence" | "stage" | "created_at"> & { manifest: string }
+  >;
+}
+
+export interface DurableNodeWorkspace {
+  projectRoot: string;
+  checkpointIndex: string;
+  input: ModalNodeSandboxInput;
+  completedCheckpoint?: DurableCheckpointRecord;
+  hasCompletedCheckpoint: boolean;
+  recordCheckpoint(stage: DurableCheckpointStage, error?: unknown): DurableCheckpointRecord;
+}
+
 async function main(): Promise<void> {
   assertRootWorker();
   const requestPath = requiredOption("--request");
   const archivePath = requiredOption("--project-archive");
   const kimiAuthArchivePath = optionalOption("--kimi-auth-archive");
-  const dataRoot = requiredOption("--data-root");
-  const publicationBoundary = cloudPublicationBoundary(dataRoot);
-  fs.rmSync(PROJECT_ROOT, { recursive: true, force: true });
-  fs.mkdirSync(PROJECT_ROOT, { recursive: true, mode: 0o700 });
+  const durableDataRoot = requiredOption("--data-root");
+  const resultRoot = requiredOption("--result-root");
+  const publicationBoundary = cloudPublicationBoundary(resultRoot);
+  let durableWorkspace: DurableNodeWorkspace | undefined;
   let input: ModalNodeSandboxInput | undefined;
   let handoffError: unknown;
   try {
     secureTransportFile(requestPath);
     secureTransportFile(archivePath);
     if (kimiAuthArchivePath !== undefined) secureTransportFile(kimiAuthArchivePath);
-    input = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
-    if (
-      input.request_fingerprint === undefined ||
-      input.request_fingerprint !== modalNodeRequestFingerprint(input) ||
-      input.execution_identity === undefined ||
-      input.execution_identity !== modalNodeExecutionIdentity(input)
-    ) {
-      throw new Error("cloud handoff request identity mismatch");
-    }
-    if ((input.agent_auth.auth.mode === "subscription") !== (kimiAuthArchivePath !== undefined)) {
+    const requestedInput = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+    assertCloudHandoffIdentity(requestedInput);
+    if ((requestedInput.agent_auth.auth.mode === "subscription") !== (kimiAuthArchivePath !== undefined)) {
       throw new Error("cloud Kimi subscription transport is incomplete");
     }
-    if (input.agent_auth.auth.mode === "subscription") {
+    if (requestedInput.agent_auth.auth.mode === "subscription") {
       fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true });
       fs.mkdirSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, mode: 0o700 });
       await extractSafeTarArchive(kimiAuthArchivePath!, KIMI_TRUSTED_SNAPSHOT_ROOT, {
@@ -82,18 +131,15 @@ async function main(): Promise<void> {
       assertSafeTree(KIMI_TRUSTED_SNAPSHOT_ROOT);
       secureRootPrivateTree(KIMI_TRUSTED_SNAPSHOT_ROOT);
       workerCredentialValues = await kimiSubscriptionAuthSecretValuesFromRoots(
-        input.agent_model!,
+        requestedInput.agent_model!,
         KIMI_TRUSTED_SNAPSHOT_ROOT,
         KIMI_TRUSTED_SNAPSHOT_ROOT
       );
     } else {
-      workerCredentialValues = forwardedAgentCredentialValues(input.agent_auth, process.env);
+      workerCredentialValues = forwardedAgentCredentialValues(requestedInput.agent_auth, process.env);
     }
-    if (input.project_archive_sha256 === undefined || sha256File(archivePath) !== input.project_archive_sha256) {
-      throw new Error("cloud handoff archive digest mismatch");
-    }
-    await extractSafeTarArchive(archivePath, PROJECT_ROOT, { gzip: true, label: "cloud handoff" });
-    assertSafeTree(PROJECT_ROOT);
+    durableWorkspace = await initializeDurableNodeWorkspace(durableDataRoot, archivePath, requestedInput);
+    input = durableWorkspace.input;
   } catch (error) {
     handoffError = error;
   }
@@ -107,89 +153,89 @@ async function main(): Promise<void> {
       ),
     () => fs.rmSync(KIMI_TRUSTED_SNAPSHOT_ROOT, { recursive: true, force: true })
   );
-  if (input === undefined) throw new Error("cloud worker request could not be loaded");
+  if (input === undefined || durableWorkspace === undefined) {
+    throw new Error("cloud worker request could not be loaded");
+  }
 
+  const projectRoot = durableWorkspace.projectRoot;
   let candidateQuarantined = false;
   let workflowError: unknown;
   try {
-    await runChecked(
-      "install-smithers",
-      "npm",
-      [
-        "install",
-        "--prefix",
-        path.join(PROJECT_ROOT, ".smithers"),
-        "--ignore-scripts",
-        "--package-lock=false",
-        "--no-audit",
-        "--no-fund",
-        "--loglevel=error"
-      ],
-      PROJECT_ROOT
-    );
-    const workflowPath = anchoredProjectPath(input.workflow_path);
+    if (durableWorkspace.completedCheckpoint === undefined) {
+      durableWorkspace.recordCheckpoint("prepared");
+      syncDurableData(projectRoot);
+      await runChecked(
+        "install-smithers",
+        "npm",
+        [
+          "install",
+          "--prefix",
+          path.join(projectRoot, ".smithers"),
+          "--ignore-scripts",
+          "--package-lock=false",
+          "--no-audit",
+          "--no-fund",
+          "--loglevel=error"
+        ],
+        projectRoot
+      );
+    }
+    const workflowPath = anchoredProjectPath(projectRoot, input.workflow_path);
     const localRunId = `${input.run_id}-${crypto.createHash("sha256").update(input.task_id).digest("hex").slice(0, 12)}`;
-    const smithers = path.join(PROJECT_ROOT, ".smithers", "node_modules", ".bin", "smithers");
-    prepareCloudAgentWorkspace(input.agent_auth.auth.mode === "subscription" ? KIMI_TRUSTED_SNAPSHOT_ROOT : undefined);
-    rewriteCloudAgentAuthConfig(input.agent_auth);
+    const smithers = path.join(projectRoot, ".smithers", "node_modules", ".bin", "smithers");
+    prepareCloudAgentWorkspace(
+      projectRoot,
+      input.agent_auth.auth.mode === "subscription" ? KIMI_TRUSTED_SNAPSHOT_ROOT : undefined
+    );
+    rewriteCloudAgentAuthConfig(input.agent_auth, projectRoot);
     const supervisedPath = prepareCloudAgentLauncher(
       input.agent_auth.agent,
       process.env.PATH ?? "/usr/local/bin:/opt/security-venv/bin:/usr/bin:/bin"
     );
     secureCloudPublicationBoundary(publicationBoundary);
-    const invocation = cloudAgentInvocation(
-      smithers,
-      [
-        "up",
-        workflowPath,
-        "--run-id",
-        localRunId,
-        "--max-concurrency",
-        "1",
-        "--root",
-        PROJECT_ROOT,
-        "--input",
-        JSON.stringify({
-          cloud_worker: true,
-          task_id: input.task_id,
-          ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
-        }),
-        "--format",
-        "json"
-      ],
-      input.agent_auth,
-      { ...process.env, PATH: supervisedPath }
-    );
-    invocation.env[CLOUD_AGENT_WORKSPACE_ENV] = anchoredProjectPath(input.workspace_dir);
-    invocation.env[CLOUD_AGENT_ARTIFACT_DIR_ENV] = anchoredProjectPath(input.artifact_dir);
     if (input.agent_auth.auth.mode === "subscription") {
       workerSubscriptionRotationPossible = true;
       workerSuccessorSecretsClassified = false;
     }
+    let completedCheckpoint = durableWorkspace.completedCheckpoint;
     await runAfterCloudAgentQuiescence(
-      () =>
-        runChecked("run-workflow", invocation.command, invocation.args, PROJECT_ROOT, {
+      async () => {
+        if (completedCheckpoint !== undefined) return;
+        durableWorkspace!.recordCheckpoint("running");
+        syncDurableData(projectRoot);
+        await runDurableWorkflow(smithers, workflowPath, projectRoot, localRunId, input!, {
+          agentAuth: input!.agent_auth,
           credentialObserving: input!.agent_auth.auth.mode === "subscription",
-          env: invocation.env,
-          inheritEnvironment: false
-        }),
+          sourceEnvironment: { ...process.env, PATH: supervisedPath }
+        });
+      },
       async (agentError) => {
         const candidate =
           input!.agent_auth.auth.mode === "subscription" ? await readKimiCredentialCandidate(input!) : undefined;
         if (candidate !== undefined) workerCredentialValues.push(...candidate.sensitiveValues);
         if (agentError !== undefined) {
           if (candidate === undefined) return;
-          await publishKimiCredentialRecovery(input!, dataRoot, workerCredentialValues, candidate.credential);
+          await publishKimiCredentialRecovery(input!, resultRoot, workerCredentialValues, candidate.credential);
           candidateQuarantined = true;
           return;
         }
         try {
-          await publishCanonicalResult(input!, dataRoot, workerCredentialValues, candidate?.credential);
+          completedCheckpoint ??= durableWorkspace!.recordCheckpoint("completed");
+          syncDurableData(projectRoot);
+          await publishCanonicalResult(
+            input!,
+            projectRoot,
+            resultRoot,
+            durableWorkspace!.checkpointIndex,
+            completedCheckpoint,
+            workerCredentialValues,
+            candidate?.credential
+          );
           candidateQuarantined = candidate !== undefined;
         } catch (publicationError) {
           if (candidate === undefined) throw publicationError;
           try {
-            await publishKimiCredentialRecovery(input!, dataRoot, workerCredentialValues, candidate.credential);
+            await publishKimiCredentialRecovery(input!, resultRoot, workerCredentialValues, candidate.credential);
             candidateQuarantined = true;
           } catch (recoveryError) {
             throw workerAggregateWithPrimary(publicationError, recoveryError);
@@ -200,6 +246,12 @@ async function main(): Promise<void> {
     );
   } catch (error) {
     workflowError = error;
+    try {
+      durableWorkspace.recordCheckpoint("failed", error);
+      syncDurableData(projectRoot);
+    } catch {
+      // Preserve the original worker failure; the durable workspace remains mounted for a replacement worker.
+    }
   }
   finalizeWorkerSecretCleanup(
     workflowError,
@@ -221,7 +273,8 @@ export function cloudAgentInvocation(
   command: string,
   args: readonly string[],
   agentAuth: ModalNodeSandboxInput["agent_auth"],
-  sourceEnvironment: Record<string, string | undefined>
+  sourceEnvironment: Record<string, string | undefined>,
+  projectRoot = DEFAULT_PROJECT_ROOT
 ): CloudAgentInvocation {
   const descriptor = parseCloudAgentAuthDescriptor(agentAuth);
   const env: Record<string, string> = {
@@ -230,7 +283,7 @@ export function cloudAgentInvocation(
     LOGNAME: "ultrafuzz-agent",
     SHELL: "/bin/bash",
     PATH: sourceEnvironment.PATH ?? "/usr/local/bin:/opt/security-venv/bin:/usr/bin:/bin",
-    PWD: PROJECT_ROOT,
+    PWD: projectRoot,
     TMPDIR: path.join(AGENT_HOME, "tmp"),
     XDG_CACHE_HOME: path.join(AGENT_HOME, ".cache"),
     XDG_CONFIG_HOME: path.join(AGENT_HOME, ".config"),
@@ -474,8 +527,9 @@ function unsupervisedAgentPath(value: string | undefined): string {
 }
 
 function prepareCloudAgentCommandPaths(env: NodeJS.ProcessEnv): void {
-  const workspace = requiredAgentControlPath(env[CLOUD_AGENT_WORKSPACE_ENV], "workspace");
-  const artifactDir = requiredAgentControlPath(env[CLOUD_AGENT_ARTIFACT_DIR_ENV], "artifact directory");
+  const projectRoot = requiredAgentProjectRoot(env[CLOUD_AGENT_PROJECT_ROOT_ENV]);
+  const workspace = requiredAgentControlPath(env[CLOUD_AGENT_WORKSPACE_ENV], "workspace", projectRoot);
+  const artifactDir = requiredAgentControlPath(env[CLOUD_AGENT_ARTIFACT_DIR_ENV], "artifact directory", projectRoot);
   const cwd = fs.realpathSync(process.cwd());
   if (cwd !== workspace) throw new Error("cloud agent process did not start in its exact workspace");
   lchownTree(workspace, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
@@ -495,10 +549,20 @@ function prepareCloudAgentCommandPaths(env: NodeJS.ProcessEnv): void {
   }
 }
 
-function requiredAgentControlPath(value: string | undefined, label: string): string {
+function requiredAgentProjectRoot(value: string | undefined): string {
+  if (value === undefined || value.trim() === "") throw new Error("cloud agent project boundary is missing");
+  const resolved = path.resolve(value);
+  const stat = fs.lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(resolved) !== resolved) {
+    throw new Error("cloud agent project boundary is unsafe");
+  }
+  return resolved;
+}
+
+function requiredAgentControlPath(value: string | undefined, label: string, projectRoot: string): string {
   if (value === undefined || value.trim() === "") throw new Error(`cloud agent ${label} boundary is missing`);
   const resolved = path.resolve(value);
-  if (resolved === PROJECT_ROOT || !resolved.startsWith(`${PROJECT_ROOT}${path.sep}`)) {
+  if (resolved === projectRoot || !resolved.startsWith(`${projectRoot}${path.sep}`)) {
     throw new Error(`cloud agent ${label} boundary escapes the project`);
   }
   const stat = fs.lstatSync(resolved);
@@ -541,6 +605,7 @@ function cloudAgentChildEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = { ...env, PATH: unsupervisedAgentPath(env.PATH) };
   delete child[CLOUD_AGENT_WORKSPACE_ENV];
   delete child[CLOUD_AGENT_ARTIFACT_DIR_ENV];
+  delete child[CLOUD_AGENT_PROJECT_ROOT_ENV];
   return child;
 }
 
@@ -747,7 +812,7 @@ export function secureRootPrivateTree(root: string): void {
   visit(resolvedRoot);
 }
 
-function prepareCloudAgentWorkspace(kimiSnapshotRoot?: string): void {
+function prepareCloudAgentWorkspace(projectRoot: string, kimiSnapshotRoot?: string): void {
   fs.rmSync(AGENT_HOME, { force: true, recursive: true });
   for (const directory of [
     AGENT_HOME,
@@ -763,7 +828,7 @@ function prepareCloudAgentWorkspace(kimiSnapshotRoot?: string): void {
   if (kimiSnapshotRoot !== undefined) {
     copySafeTree(kimiSnapshotRoot, KIMI_AGENT_AUTH_HOME);
   }
-  exposeTrustedProjectTree(PROJECT_ROOT);
+  exposeTrustedProjectTree(projectRoot);
   lchownTree(AGENT_HOME, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
 }
 
@@ -787,7 +852,7 @@ function exposeTrustedProjectTree(root: string): void {
 
 export function rewriteCloudAgentAuthConfig(
   agentAuth: ModalNodeSandboxInput["agent_auth"],
-  projectRoot = PROJECT_ROOT
+  projectRoot = DEFAULT_PROJECT_ROOT
 ): void {
   const descriptor = parseCloudAgentAuthDescriptor(agentAuth);
   const resolvedRoot = fs.realpathSync(path.resolve(projectRoot));
@@ -842,7 +907,10 @@ function lchownTree(root: string, uid: number, gid: number): void {
 
 async function publishCanonicalResult(
   input: ModalNodeSandboxInput,
-  dataRoot: string,
+  projectRoot: string,
+  resultRoot: string,
+  checkpointIndex: string,
+  completedCheckpoint: DurableCheckpointRecord,
   credentialValues: readonly string[],
   kimiCredentialCandidate?: string
 ): Promise<void> {
@@ -850,10 +918,17 @@ async function publishCanonicalResult(
   if (expectsKimiCredential !== (kimiCredentialCandidate !== undefined)) {
     throw new Error("cloud Kimi subscription credential candidate publication is incomplete");
   }
-  if (input.execution_identity === undefined) {
-    throw new Error("cloud worker execution identity is missing");
+  if (
+    input.execution_identity === undefined ||
+    input.request_fingerprint === undefined ||
+    completedCheckpoint.stage !== "completed" ||
+    completedCheckpoint.execution_identity !== input.execution_identity ||
+    completedCheckpoint.request_fingerprint !== input.request_fingerprint ||
+    completedCheckpoint.base_commit !== input.base_commit
+  ) {
+    throw new Error("cloud worker completed checkpoint identity is invalid");
   }
-  const publishing = `${dataRoot}.publishing`;
+  const publishing = `${resultRoot}.publishing`;
   fs.rmSync(publishing, { recursive: true, force: true });
   fs.mkdirSync(publishing, { recursive: true, mode: 0o700 });
   fs.chownSync(publishing, 0, 0);
@@ -862,14 +937,14 @@ async function publishCanonicalResult(
     const staging = path.join(publishing, "bundle");
     fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     stageCanonicalNodeResultBundle({
-      artifactDir: anchoredProjectPath(input.artifact_dir),
-      workspaceDir: anchoredProjectPath(input.workspace_dir),
+      artifactDir: anchoredProjectPath(projectRoot, input.artifact_dir),
+      workspaceDir: anchoredProjectPath(projectRoot, input.workspace_dir),
       attemptId: input.attempt_id,
       stagingDir: staging
     });
     assertNoForwardedCredentialBytes(staging, credentialValues);
     const artifactArchive = path.join(publishing, "artifacts.tgz");
-    await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], PROJECT_ROOT, {
+    await runChecked("archive-results", "tar", ["-czf", artifactArchive, "-C", staging, "."], projectRoot, {
       credentialObserving: expectsKimiCredential
     });
     const digest = crypto.createHash("sha256").update(fs.readFileSync(artifactArchive)).digest("hex");
@@ -879,22 +954,28 @@ async function publishCanonicalResult(
       fs.chownSync(credentialCandidatePath, 0, 0);
       fs.chmodSync(credentialCandidatePath, 0o600);
     }
+    const durableCheckpoint = path.posix.join(
+      path.posix.dirname(checkpointIndex),
+      `${completedCheckpoint.checkpoint_id}.json`
+    );
     const result = `${JSON.stringify({
       schema_version: "ultrafuzz.modal.node-result.v1",
       status: "succeeded",
-      artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
+      artifact_archive: path.posix.join(resultRoot, "artifacts.tgz"),
       artifact_sha256: digest,
       storage_lineage: `${input.run_id}/${input.attempt_id}/${input.execution_generation}`,
       execution_identity: input.execution_identity,
       ...(kimiCredentialCandidate === undefined
         ? {}
-        : { credential_candidate: path.posix.join(dataRoot, "kimi-credential-candidate.json") })
+        : { credential_candidate: path.posix.join(resultRoot, "kimi-credential-candidate.json") }),
+      durable_checkpoint: durableCheckpoint,
+      durable_checkpoint_index: checkpointIndex
     })}\n`;
     assertTextExcludesCredentials(result, credentialValues, "cloud worker result metadata");
     fs.writeFileSync(path.join(publishing, "result.json"), result, { mode: 0o600 });
-    fs.rmSync(dataRoot, { recursive: true, force: true });
-    fs.renameSync(publishing, dataRoot);
-    await runChecked("sync-results", "sync", [], dataRoot, { credentialObserving: expectsKimiCredential });
+    fs.rmSync(resultRoot, { recursive: true, force: true });
+    fs.renameSync(publishing, resultRoot);
+    await runChecked("sync-results", "sync", [], resultRoot, { credentialObserving: expectsKimiCredential });
   } catch (error) {
     fs.rmSync(publishing, { recursive: true, force: true });
     throw error;
@@ -1160,6 +1241,631 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function assertCloudHandoffIdentity(input: ModalNodeSandboxInput): asserts input is IdentifiedModalNodeSandboxInput {
+  if (
+    input.project_archive_sha256 === undefined ||
+    input.request_fingerprint === undefined ||
+    input.request_fingerprint !== modalNodeRequestFingerprint(input) ||
+    input.execution_identity === undefined ||
+    input.execution_identity !== modalNodeExecutionIdentity(input)
+  ) {
+    throw new Error("cloud handoff request identity mismatch");
+  }
+}
+
+export async function initializeDurableNodeWorkspace(
+  dataRoot: string,
+  archivePath: string,
+  requestedInput: ModalNodeSandboxInput
+): Promise<DurableNodeWorkspace> {
+  assertCloudHandoffIdentity(requestedInput);
+  const root = resolveDurableDataRoot(dataRoot);
+  const projectRoot = path.join(root, DURABLE_WORKSPACE_DIRECTORY);
+  const handoffDirectory = path.join(root, DURABLE_INPUT_DIRECTORY);
+  const handoffArchive = path.join(handoffDirectory, "project.tgz");
+  const durableRequest = path.join(handoffDirectory, "request.json");
+  const checkpointsDirectory = path.join(root, DURABLE_CHECKPOINT_DIRECTORY);
+  const checkpointIndex = path.join(checkpointsDirectory, DURABLE_CHECKPOINT_INDEX);
+
+  const lineageDirectory = path.dirname(root);
+  fs.mkdirSync(lineageDirectory, { recursive: true, mode: 0o711 });
+  fs.mkdirSync(root, { recursive: true, mode: 0o711 });
+  fs.mkdirSync(handoffDirectory, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(checkpointsDirectory, { recursive: true, mode: 0o700 });
+  secureDurableTraversalDirectory(lineageDirectory, "durable run lineage");
+  secureDurableTraversalDirectory(root, "durable attempt root");
+  secureDurableDirectory(handoffDirectory, "durable input directory");
+  secureDurableDirectory(checkpointsDirectory, "durable checkpoint directory");
+  const hasDurableHandoff = fs.existsSync(handoffArchive);
+  const input = hasDurableHandoff
+    ? readDurableInput(durableRequest, requestedInput)
+    : validateFreshHandoff(archivePath, requestedInput);
+  const projectArchiveSha256 = input.project_archive_sha256;
+  const storageLineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  if (hasDurableHandoff) {
+    if (sha256File(handoffArchive) !== projectArchiveSha256) {
+      throw new Error("durable cloud handoff archive digest mismatch");
+    }
+  } else {
+    const handoffPublishing = path.join(handoffDirectory, ".project.tgz.publishing");
+    writeJsonAtomic(durableRequest, input);
+    if (fs.existsSync(handoffPublishing)) {
+      if (sha256File(handoffPublishing) === projectArchiveSha256) {
+        fs.renameSync(handoffPublishing, handoffArchive);
+      } else {
+        fs.rmSync(handoffPublishing, { force: true });
+      }
+    }
+    if (!fs.existsSync(handoffArchive)) {
+      fs.copyFileSync(archivePath, handoffPublishing, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(handoffPublishing, 0o600);
+      fs.renameSync(handoffPublishing, handoffArchive);
+    }
+  }
+
+  const hadDurableWorkspace = fs.existsSync(projectRoot);
+  if (hadDurableWorkspace) {
+    assertDurableDirectory(projectRoot, "durable workspace");
+  } else {
+    const staging = path.join(root, `.workspace-publishing-${crypto.randomUUID()}`);
+    fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
+    try {
+      await extractSafeTarArchive(handoffArchive, staging, { gzip: true, label: "cloud handoff" });
+      assertSafeTree(staging);
+      fs.renameSync(staging, projectRoot);
+    } catch (error) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  const index = loadDurableCheckpointIndex(
+    checkpointIndex,
+    storageLineage,
+    projectRoot,
+    input.run_root,
+    handoffArchive,
+    projectArchiveSha256,
+    input.execution_identity,
+    input.request_fingerprint,
+    input.base_commit
+  );
+  const restoreMarker = path.join(handoffDirectory, DURABLE_RESTORE_MARKER);
+  let restoredFrom = readRestoreMarker(restoreMarker, path.dirname(root));
+  if (restoredFrom === undefined) {
+    restoredFrom = restorePriorAttemptOutputs(root, projectRoot, input);
+    if (restoredFrom !== undefined) {
+      writeJsonAtomic(restoreMarker, { schema_version: "ultrafuzz.modal.node-restore.v1", source_root: restoredFrom });
+    }
+  }
+  let completedCheckpoint = readLastCompletedCheckpoint(index, checkpointsDirectory);
+  return {
+    projectRoot,
+    checkpointIndex,
+    input,
+    get completedCheckpoint() {
+      return completedCheckpoint;
+    },
+    get hasCompletedCheckpoint() {
+      return completedCheckpoint !== undefined;
+    },
+    recordCheckpoint(stage, error) {
+      const sequence = index.checkpoints.length + 1;
+      const checkpointId = `${String(sequence).padStart(4, "0")}-${stage}`;
+      const createdAt = new Date().toISOString();
+      const manifestPath = path.join(checkpointsDirectory, `${checkpointId}.json`);
+      const checkpoint: DurableCheckpointRecord = {
+        schema_version: "ultrafuzz.modal.node-checkpoint.v1",
+        checkpoint_id: checkpointId,
+        sequence,
+        stage,
+        created_at: createdAt,
+        storage_lineage: storageLineage,
+        workspace_path: projectRoot,
+        run_root: input.run_root,
+        handoff_archive: handoffArchive,
+        project_archive_sha256: projectArchiveSha256,
+        execution_identity: input.execution_identity,
+        request_fingerprint: input.request_fingerprint,
+        base_commit: input.base_commit,
+        ...(restoredFrom === undefined ? {} : { restored_from: restoredFrom }),
+        ...(error === undefined ? {} : { error: describeCheckpointError(error) })
+      };
+      writeJsonAtomic(manifestPath, checkpoint);
+      index.checkpoints.push({
+        checkpoint_id: checkpointId,
+        sequence,
+        stage,
+        created_at: createdAt,
+        manifest: manifestPath
+      });
+      writeJsonAtomic(checkpointIndex, index);
+      if (stage === "completed") completedCheckpoint = checkpoint;
+      return checkpoint;
+    }
+  };
+}
+
+function validateFreshHandoff(archivePath: string, input: ModalNodeSandboxInput): IdentifiedModalNodeSandboxInput {
+  assertCloudHandoffIdentity(input);
+  if (sha256File(archivePath) !== input.project_archive_sha256) {
+    throw new Error("cloud handoff archive digest mismatch");
+  }
+  return input;
+}
+
+function readDurableInput(
+  durableRequest: string,
+  requestedInput: IdentifiedModalNodeSandboxInput
+): IdentifiedModalNodeSandboxInput {
+  let persistedInput: ModalNodeSandboxInput;
+  try {
+    persistedInput = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
+  } catch (error) {
+    throw new Error("durable cloud handoff request is unavailable", { cause: error });
+  }
+  try {
+    assertCloudHandoffIdentity(persistedInput);
+  } catch {
+    throw new Error("durable cloud handoff request identity is invalid");
+  }
+  if (!sameResumableNodeInput(persistedInput, requestedInput)) {
+    throw new Error("durable workspace request does not match this cloud node attempt");
+  }
+  return persistedInput;
+}
+
+function sameResumableNodeInput(
+  left: ModalNodeSandboxInput,
+  right: ModalNodeSandboxInput,
+  ignoreExecutionGeneration = false
+): boolean {
+  return (
+    left.schema_version === right.schema_version &&
+    left.run_id === right.run_id &&
+    left.task_id === right.task_id &&
+    left.attempt_id === right.attempt_id &&
+    (ignoreExecutionGeneration || left.execution_generation === right.execution_generation) &&
+    left.workflow_execution_id === right.workflow_execution_id &&
+    left.controller_invocation_id === right.controller_invocation_id &&
+    left.base_commit === right.base_commit &&
+    left.workflow_path === right.workflow_path &&
+    left.prompt_path === right.prompt_path &&
+    left.run_root === right.run_root &&
+    left.artifact_dir === right.artifact_dir &&
+    left.workspace_dir === right.workspace_dir &&
+    sameStrings(left.dependency_artifact_dirs, right.dependency_artifact_dirs) &&
+    left.resources.cpu === right.resources.cpu &&
+    left.resources.memory_mib === right.resources.memory_mib &&
+    left.resources.timeout_seconds === right.resources.timeout_seconds &&
+    sameCloudAgentAuth(left.agent_auth, right.agent_auth) &&
+    left.agent_model === right.agent_model &&
+    left.project_archive_sha256 === right.project_archive_sha256 &&
+    (ignoreExecutionGeneration || left.request_fingerprint === right.request_fingerprint) &&
+    (ignoreExecutionGeneration || left.execution_identity === right.execution_identity) &&
+    left.operator_prompt === right.operator_prompt
+  );
+}
+
+function sameCloudAgentAuth(
+  left: ModalNodeSandboxInput["agent_auth"],
+  right: ModalNodeSandboxInput["agent_auth"]
+): boolean {
+  if (left.agent !== right.agent || left.provider !== right.provider || left.auth.mode !== right.auth.mode)
+    return false;
+  if (left.auth.mode === "subscription" || right.auth.mode === "subscription") {
+    return (
+      left.auth.mode === "subscription" &&
+      right.auth.mode === "subscription" &&
+      left.auth.config_dir === right.auth.config_dir
+    );
+  }
+  return (
+    left.auth.source_env === right.auth.source_env &&
+    ("fallback_source_env" in left.auth ? left.auth.fallback_source_env : undefined) ===
+      ("fallback_source_env" in right.auth ? right.auth.fallback_source_env : undefined) &&
+    ("base_url_source_env" in left.auth ? left.auth.base_url_source_env : undefined) ===
+      ("base_url_source_env" in right.auth ? right.auth.base_url_source_env : undefined)
+  );
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function readRestoreMarker(markerPath: string, allowedParent: string): string | undefined {
+  if (!fs.existsSync(markerPath)) return undefined;
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8")) as unknown;
+    if (
+      isRecord(marker) &&
+      marker.schema_version === "ultrafuzz.modal.node-restore.v1" &&
+      typeof marker.source_root === "string" &&
+      path.isAbsolute(marker.source_root) &&
+      marker.source_root.startsWith(`${allowedParent}${path.sep}`)
+    ) {
+      return marker.source_root;
+    }
+  } catch {
+    // Re-run restoration when an interrupted marker cannot be parsed.
+  }
+  return undefined;
+}
+
+function restorePriorAttemptOutputs(
+  currentRoot: string,
+  projectRoot: string,
+  input: IdentifiedModalNodeSandboxInput
+): string | undefined {
+  const parent = path.dirname(currentRoot);
+  const candidates: Array<{ root: string; mtimeMs: number; input: IdentifiedModalNodeSandboxInput }> = [];
+  for (const entry of fs.readdirSync(parent, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const candidateRoot = path.join(parent, entry.name);
+    if (candidateRoot === currentRoot) continue;
+    const requestPath = path.join(candidateRoot, DURABLE_INPUT_DIRECTORY, "request.json");
+    try {
+      const persisted = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(requestPath, "utf8")) as unknown);
+      assertCloudHandoffIdentity(persisted);
+      if (
+        persisted.execution_generation !== input.execution_generation &&
+        sameResumableNodeInput(persisted, input, true) &&
+        fs.existsSync(path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY, DURABLE_CHECKPOINT_INDEX)) &&
+        priorAttemptHasEvidence(candidateRoot, persisted)
+      ) {
+        candidates.push({
+          root: candidateRoot,
+          mtimeMs: fs.statSync(path.join(candidateRoot, DURABLE_CHECKPOINT_DIRECTORY)).mtimeMs,
+          input: persisted
+        });
+      }
+    } catch {
+      // Ignore unrelated or incomplete generation directories; the current generation remains recoverable.
+    }
+  }
+  const prior = candidates.sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
+  if (prior === undefined) return undefined;
+
+  const priorProjectRoot = path.join(prior.root, DURABLE_WORKSPACE_DIRECTORY);
+  const recoveryBase = anchoredProjectPath(
+    projectRoot,
+    path.join(".ultrafuzz", "recovered", path.basename(prior.root))
+  );
+  const sourceWorkspace = anchoredProjectPath(priorProjectRoot, input.workspace_dir);
+  if (fs.existsSync(sourceWorkspace)) {
+    copySafeTree(sourceWorkspace, path.join(recoveryBase, "workspace"));
+  }
+  for (const [label, relative] of [
+    ["artifacts", input.artifact_dir],
+    ["logs", path.join(input.run_root, "logs")]
+  ] as const) {
+    const source = anchoredProjectPath(priorProjectRoot, relative);
+    if (fs.existsSync(source)) copySafeTree(source, path.join(recoveryBase, label));
+  }
+  const priorRecovered = anchoredProjectPath(priorProjectRoot, path.join(".ultrafuzz", "recovered"));
+  if (fs.existsSync(priorRecovered)) copySafeTree(priorRecovered, path.join(recoveryBase, "previous-recovered"));
+  return prior.root;
+}
+
+function priorAttemptHasEvidence(candidateRoot: string, input: ModalNodeSandboxInput): boolean {
+  const projectRoot = path.join(candidateRoot, DURABLE_WORKSPACE_DIRECTORY);
+  const candidates: string[] = [];
+  for (const relative of [
+    input.workspace_dir,
+    input.artifact_dir,
+    path.join(input.run_root, "logs"),
+    path.join(".ultrafuzz", "recovered")
+  ]) {
+    try {
+      candidates.push(anchoredProjectPath(projectRoot, relative));
+    } catch {
+      return false;
+    }
+  }
+  return candidates.some((candidate) => {
+    try {
+      return fs.statSync(candidate).isDirectory() && fs.readdirSync(candidate).length > 0;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function resolveDurableDataRoot(dataRoot: string): string {
+  const root = path.resolve(dataRoot);
+  if (
+    root === path.parse(root).root ||
+    root === CLOUD_RESULT_ROOT ||
+    root.startsWith(`${CLOUD_RESULT_ROOT}${path.sep}`)
+  ) {
+    throw new Error("cloud durable data root is unsafe");
+  }
+  return root;
+}
+
+function assertDurableDirectory(directory: string, label: string): void {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory) {
+    throw new Error(`${label} is unsafe`);
+  }
+}
+
+function secureDurableDirectory(directory: string, label: string): void {
+  assertDurableDirectory(directory, label);
+  const uid = process.geteuid?.() ?? process.getuid?.();
+  const gid = process.getegid?.() ?? process.getgid?.();
+  if (uid !== undefined && gid !== undefined) fs.chownSync(directory, uid, gid);
+  fs.chmodSync(directory, 0o700);
+  const stat = fs.lstatSync(directory);
+  if (
+    (uid !== undefined && stat.uid !== uid) ||
+    (gid !== undefined && stat.gid !== gid) ||
+    (stat.mode & 0o777) !== 0o700
+  ) {
+    throw new Error(`${label} is not private`);
+  }
+}
+
+function secureDurableTraversalDirectory(directory: string, label: string): void {
+  assertDurableDirectory(directory, label);
+  const uid = process.geteuid?.() ?? process.getuid?.();
+  const gid = process.getegid?.() ?? process.getgid?.();
+  if (uid !== undefined && gid !== undefined) fs.chownSync(directory, uid, gid);
+  fs.chmodSync(directory, 0o711);
+  const stat = fs.lstatSync(directory);
+  if (
+    (uid !== undefined && stat.uid !== uid) ||
+    (gid !== undefined && stat.gid !== gid) ||
+    (stat.mode & 0o777) !== 0o711
+  ) {
+    throw new Error(`${label} is not root-owned and traverse-only`);
+  }
+}
+
+function loadDurableCheckpointIndex(
+  checkpointIndex: string,
+  storageLineage: string,
+  projectRoot: string,
+  runRoot: string,
+  handoffArchive: string,
+  archiveSha256: string,
+  executionIdentity: string,
+  requestFingerprint: string,
+  baseCommit: string
+): DurableCheckpointIndex {
+  if (!fs.existsSync(checkpointIndex)) {
+    return {
+      schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
+      storage_lineage: storageLineage,
+      workspace_path: projectRoot,
+      run_root: runRoot,
+      handoff_archive: handoffArchive,
+      project_archive_sha256: archiveSha256,
+      execution_identity: executionIdentity,
+      request_fingerprint: requestFingerprint,
+      base_commit: baseCommit,
+      checkpoints: []
+    };
+  }
+  const parsed = readDurableJson(checkpointIndex, "durable checkpoint index");
+  if (
+    !isRecord(parsed) ||
+    parsed.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
+    parsed.storage_lineage !== storageLineage ||
+    parsed.workspace_path !== projectRoot ||
+    parsed.run_root !== runRoot ||
+    parsed.handoff_archive !== handoffArchive ||
+    parsed.project_archive_sha256 !== archiveSha256 ||
+    parsed.execution_identity !== executionIdentity ||
+    parsed.request_fingerprint !== requestFingerprint ||
+    parsed.base_commit !== baseCommit ||
+    !Array.isArray(parsed.checkpoints) ||
+    !parsed.checkpoints.every((entry, index) =>
+      isDurableCheckpointIndexEntry(entry, index + 1, path.dirname(checkpointIndex))
+    )
+  ) {
+    throw new Error("durable checkpoint index is invalid");
+  }
+  return parsed as unknown as DurableCheckpointIndex;
+}
+
+function isDurableCheckpointIndexEntry(value: unknown, sequence: number, directory: string): boolean {
+  if (!isRecord(value) || !isDurableCheckpointStage(value.stage)) return false;
+  const checkpointId = `${String(sequence).padStart(4, "0")}-${value.stage}`;
+  return (
+    value.checkpoint_id === checkpointId &&
+    value.sequence === sequence &&
+    isCanonicalIsoTimestamp(value.created_at) &&
+    value.manifest === path.join(directory, `${checkpointId}.json`)
+  );
+}
+
+function readLastCompletedCheckpoint(
+  index: DurableCheckpointIndex,
+  checkpointsDirectory: string
+): DurableCheckpointRecord | undefined {
+  let completed: DurableCheckpointRecord | undefined;
+  for (const entry of index.checkpoints) {
+    const manifestPath = path.join(checkpointsDirectory, `${entry.checkpoint_id}.json`);
+    const parsed = readDurableJson(manifestPath, "durable checkpoint manifest");
+    if (
+      !isRecord(parsed) ||
+      parsed.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
+      parsed.checkpoint_id !== entry.checkpoint_id ||
+      parsed.sequence !== entry.sequence ||
+      parsed.stage !== entry.stage ||
+      parsed.created_at !== entry.created_at ||
+      parsed.storage_lineage !== index.storage_lineage ||
+      parsed.workspace_path !== index.workspace_path ||
+      parsed.run_root !== index.run_root ||
+      parsed.handoff_archive !== index.handoff_archive ||
+      parsed.project_archive_sha256 !== index.project_archive_sha256 ||
+      parsed.execution_identity !== index.execution_identity ||
+      parsed.request_fingerprint !== index.request_fingerprint ||
+      parsed.base_commit !== index.base_commit ||
+      (parsed.restored_from !== undefined &&
+        (typeof parsed.restored_from !== "string" || !path.isAbsolute(parsed.restored_from))) ||
+      (parsed.error !== undefined && (typeof parsed.error !== "string" || parsed.error.length > 2_000))
+    ) {
+      throw new Error("durable checkpoint manifest is invalid");
+    }
+    if (entry.stage === "completed") completed = parsed as unknown as DurableCheckpointRecord;
+  }
+  return completed;
+}
+
+function readDurableJson(file: string, label: string): unknown {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.nlink !== 1 ||
+      stat.size <= 0 ||
+      stat.size > 1024 * 1024 ||
+      fs.realpathSync(file) !== path.resolve(file)
+    ) {
+      throw new Error("unsafe");
+    }
+    return JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+  } catch {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
+function isDurableCheckpointStage(value: unknown): value is DurableCheckpointStage {
+  return value === "prepared" || value === "running" || value === "failed" || value === "completed";
+}
+
+function isCanonicalIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
+function writeJsonAtomic(destination: string, value: unknown): void {
+  const parent = path.dirname(destination);
+  assertDurableDirectory(parent, "durable checkpoint parent");
+  const publishing = path.join(parent, `.${path.basename(destination)}.${crypto.randomUUID()}.publishing`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(publishing, "wx", 0o600);
+    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(publishing, destination);
+    syncDirectory(parent);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(publishing, { force: true });
+  }
+}
+
+function syncDirectory(directory: string): void {
+  const descriptor = fs.openSync(directory, "r");
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function syncDurableData(cwd: string): void {
+  try {
+    execFileSync("sync", [], { cwd, stdio: "ignore" });
+  } catch (error) {
+    throw new Error("unable to flush cloud durable data", { cause: error });
+  }
+}
+
+function describeCheckpointError(error: unknown): string {
+  if (workerSubscriptionRotationPossible) {
+    return "cloud workflow failed after credential-observing execution";
+  }
+  return redactWorkerText(errorMessage(error), workerCredentialValues).slice(0, 2_000);
+}
+
+interface DurableWorkflowOptions {
+  agentAuth?: ModalNodeSandboxInput["agent_auth"];
+  credentialObserving?: boolean;
+  sourceEnvironment?: Record<string, string | undefined>;
+}
+
+export async function runDurableWorkflow(
+  smithers: string,
+  workflowPath: string,
+  projectRoot: string,
+  localRunId: string,
+  input: ModalNodeSandboxInput,
+  options: DurableWorkflowOptions = {}
+): Promise<void> {
+  const run = async (resume: boolean): Promise<void> => {
+    const args = workflowCommandArguments(workflowPath, projectRoot, localRunId, input, resume);
+    if (options.agentAuth === undefined) {
+      await runChecked(resume ? "resume-workflow" : "run-workflow", smithers, args, projectRoot);
+      return;
+    }
+    const invocation = cloudAgentInvocation(
+      smithers,
+      args,
+      options.agentAuth,
+      options.sourceEnvironment ?? process.env,
+      projectRoot
+    );
+    invocation.env[CLOUD_AGENT_PROJECT_ROOT_ENV] = projectRoot;
+    invocation.env[CLOUD_AGENT_WORKSPACE_ENV] = anchoredProjectPath(projectRoot, input.workspace_dir);
+    invocation.env[CLOUD_AGENT_ARTIFACT_DIR_ENV] = anchoredProjectPath(projectRoot, input.artifact_dir);
+    await runChecked(resume ? "resume-workflow" : "run-workflow", invocation.command, invocation.args, projectRoot, {
+      credentialObserving: options.credentialObserving,
+      env: invocation.env,
+      inheritEnvironment: false
+    });
+  };
+  try {
+    await run(true);
+  } catch (error) {
+    if (!isMissingWorkflowRun(error)) throw error;
+    await run(false);
+  }
+}
+
+export function workflowCommandArguments(
+  workflowPath: string,
+  projectRoot: string,
+  localRunId: string,
+  input: ModalNodeSandboxInput,
+  resume: boolean
+): string[] {
+  return [
+    "up",
+    workflowPath,
+    ...(resume ? ["--resume", "--force"] : []),
+    "--run-id",
+    localRunId,
+    "--max-concurrency",
+    "1",
+    "--root",
+    projectRoot,
+    "--input",
+    JSON.stringify({
+      cloud_worker: true,
+      task_id: input.task_id,
+      ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
+    }),
+    "--format",
+    "json"
+  ];
+}
+
+function isMissingWorkflowRun(error: unknown): boolean {
+  return error instanceof CloudWorkerCommandError && error.runNotFound;
+}
+
 async function runChecked(
   phase: string,
   command: string,
@@ -1186,7 +1892,8 @@ async function runChecked(
       exitCode,
       stdoutText,
       stderrText,
-      options.credentialObserving === true || workerSubscriptionRotationPossible
+      options.credentialObserving === true || workerSubscriptionRotationPossible,
+      /\bRUN_NOT_FOUND\b|\bRun not found\b/u.test(`${stdoutText}\n${stderrText}`)
     );
   }
 }
@@ -1201,7 +1908,8 @@ export class CloudWorkerCommandError extends Error {
     readonly exitCode: number,
     stdout: string,
     stderr: string,
-    suppressStreams = false
+    suppressStreams = false,
+    readonly runNotFound = false
   ) {
     super(`cloud worker phase ${phase} failed with code ${exitCode}`);
     if (!suppressStreams) {
@@ -1368,9 +2076,10 @@ function assertSafeTree(root: string): void {
   }
 }
 
-function anchoredProjectPath(value: string): string {
-  const resolved = path.resolve(PROJECT_ROOT, value);
-  if (resolved === PROJECT_ROOT || !resolved.startsWith(`${PROJECT_ROOT}${path.sep}`)) {
+function anchoredProjectPath(projectRoot: string, value: string): string {
+  const root = path.resolve(projectRoot);
+  const resolved = path.resolve(root, value);
+  if (resolved === root || !resolved.startsWith(`${root}${path.sep}`)) {
     throw new Error("cloud worker path escapes the project");
   }
   return resolved;
