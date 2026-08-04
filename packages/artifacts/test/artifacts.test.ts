@@ -15,6 +15,7 @@ import {
   normalizeFindings,
   normalizeSafeRelativePath,
   manifestDigest,
+  publishFileDurableExclusive,
   queryNodeAttempts,
   queryEvents,
   readEventQueryFacade,
@@ -236,6 +237,162 @@ test("safe path helpers reject traversal, absolutes, unsafe IDs, and symlink esc
   const outside = tempProject();
   fs.symlinkSync(outside, path.join(root, "link"));
   assert.throws(() => safeResolveInside(root, "link/file.txt"), /symlink/);
+});
+
+test("validated artifact publication is atomic, exclusive, durable, and idempotent", () => {
+  const root = tempProject();
+  const expected = "verified artifact\n";
+
+  const first = publishFileDurableExclusive(root, "nested/result.md", expected);
+  const replay = publishFileDurableExclusive(root, "nested/result.md", expected);
+
+  assert.equal(first.created, true);
+  assert.equal(replay.created, false);
+  assert.equal(replay.sha256, first.sha256);
+  assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+  assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+  assert.deepEqual(
+    fs.readdirSync(path.dirname(first.path)).filter((entry) => entry.includes(".publish-")),
+    []
+  );
+  assert.throws(
+    () => publishFileDurableExclusive(root, "nested/result.md", "different artifact\n"),
+    /different contents/u
+  );
+  assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+});
+
+test("validated artifact publication rejects symlinked canonical parents", () => {
+  const root = tempProject();
+  const outside = tempProject();
+  fs.symlinkSync(outside, path.join(root, "linked"), "dir");
+
+  assert.throws(() => publishFileDurableExclusive(root, "linked/result.md", "verified\n"), /symlink/u);
+  assert.equal(fs.existsSync(path.join(outside, "result.md")), false);
+});
+
+test("validated artifact publication falls back to an exclusive durable write when hard links are unsupported", () => {
+  const root = tempProject();
+  const expected = "verified artifact on a no-link volume\n";
+  const originalLinkSync = fs.linkSync;
+  fs.linkSync = (() => {
+    throw Object.assign(new Error("hard links are unsupported"), { code: "EPERM" });
+  }) as typeof fs.linkSync;
+  try {
+    const first = publishFileDurableExclusive(root, "nested/result.md", expected);
+    const replay = publishFileDurableExclusive(root, "nested/result.md", expected);
+    assert.equal(first.created, true);
+    assert.equal(replay.created, false);
+    assert.equal(fs.readFileSync(first.path, "utf8"), expected);
+    assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(first.path)).filter((entry) => entry.includes(".publish-")),
+      []
+    );
+    assert.throws(
+      () => publishFileDurableExclusive(root, "nested/result.md", "different artifact\n"),
+      /different contents/u
+    );
+  } finally {
+    fs.linkSync = originalLinkSync;
+  }
+});
+
+test("validated artifact publication preserves a temporary-file close error without retrying the descriptor", () => {
+  const root = tempProject();
+  const originalCloseSync = fs.closeSync;
+  let injected = false;
+  fs.closeSync = ((fd) => {
+    if (!injected) {
+      injected = true;
+      originalCloseSync(fd);
+      throw Object.assign(new Error("injected close failure"), { code: "EIO" });
+    }
+    originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+
+  try {
+    assert.throws(
+      () => publishFileDurableExclusive(root, "nested/result.md", "verified artifact\n"),
+      (error: unknown) => error instanceof Error && (error as NodeJS.ErrnoException).code === "EIO"
+    );
+  } finally {
+    fs.closeSync = originalCloseSync;
+  }
+});
+
+test("no-link artifact publication preserves a destination close error without retrying the descriptor", () => {
+  const root = tempProject();
+  const destination = path.join(root, "nested", "result.md");
+  const originalCloseSync = fs.closeSync;
+  const originalLinkSync = fs.linkSync;
+  let closeCalls = 0;
+  fs.linkSync = (() => {
+    throw Object.assign(new Error("hard links are unsupported"), { code: "EPERM" });
+  }) as typeof fs.linkSync;
+  fs.closeSync = ((fd) => {
+    closeCalls += 1;
+    if (closeCalls === 2) {
+      originalCloseSync(fd);
+      throw Object.assign(new Error("injected close failure"), { code: "EIO" });
+    }
+    originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+
+  try {
+    assert.throws(
+      () => publishFileDurableExclusive(root, "nested/result.md", "verified artifact\n"),
+      (error: unknown) => error instanceof Error && (error as NodeJS.ErrnoException).code === "EIO"
+    );
+    assert.equal(fs.existsSync(destination), false);
+  } finally {
+    fs.closeSync = originalCloseSync;
+    fs.linkSync = originalLinkSync;
+  }
+});
+
+test("failed publication cleanup detects a canonical-path replacement before accepting the unlink", () => {
+  const root = tempProject();
+  const destination = path.join(root, "nested", "result.md");
+  const displaced = path.join(root, "nested", "displaced-result.md");
+  const replacement = "concurrent publisher artifact\n";
+  const originalFsyncSync = fs.fsyncSync;
+  const originalLinkSync = fs.linkSync;
+  const originalUnlinkSync = fs.unlinkSync;
+  let fsyncCalls = 0;
+
+  fs.linkSync = (() => {
+    throw Object.assign(new Error("hard links are unsupported"), { code: "EPERM" });
+  }) as typeof fs.linkSync;
+  fs.fsyncSync = ((fd) => {
+    fsyncCalls += 1;
+    if (fsyncCalls === 2) {
+      throw Object.assign(new Error("injected fsync failure"), { code: "EIO" });
+    }
+    originalFsyncSync(fd);
+  }) as typeof fs.fsyncSync;
+  fs.unlinkSync = ((filePath) => {
+    if (filePath === destination) {
+      fs.renameSync(destination, displaced);
+      fs.writeFileSync(destination, replacement);
+      originalUnlinkSync(destination);
+      fs.writeFileSync(destination, replacement);
+      return;
+    }
+    originalUnlinkSync(filePath);
+  }) as typeof fs.unlinkSync;
+
+  try {
+    assert.throws(
+      () => publishFileDurableExclusive(root, "nested/result.md", "verified artifact\n"),
+      /failed to remove an incomplete published artifact/u
+    );
+    assert.equal(fs.readFileSync(destination, "utf8"), replacement);
+  } finally {
+    fs.fsyncSync = originalFsyncSync;
+    fs.linkSync = originalLinkSync;
+    fs.unlinkSync = originalUnlinkSync;
+  }
 });
 
 test("artifact manifests record safe paths, sizes, digests, schema version, and provenance", () => {

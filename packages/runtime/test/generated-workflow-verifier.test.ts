@@ -21,10 +21,8 @@ test("generated Smithers verifier rejects zero-byte generated-test companions", 
   assert.ok(workflowStart > verifierStart, source);
 
   const helper = source.slice(helperStart, verifierStart);
-  assert.match(
-    source,
-    /const \{ artifactContractDefinition, assertRegularFileInside, validateArtifactContract, writeFileDurable \} =\s*await import/u
-  );
+  assert.match(source, /artifactContractDefinition,[\s\S]*assertRegularFileInside,[\s\S]*validateArtifactContract/u);
+  assert.match(source, /validateArtifactContract,[\s\S]*writeFileDurable[\s\S]*= await import/u);
   assert.match(source, /assertRegularFileInside\(artifactDir, artifactPath, failureMessage\)/u);
   assert.match(helper, /resolveRegularArtifactFile\(artifactDir, artifactPath, missingFailureMessage\)/u);
   assert.match(helper, /statSync\(resolvedPath\)\.size === 0/u);
@@ -54,6 +52,30 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
+});
+
+test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const proofStart = source.indexOf("function preservePinnedSourceProof");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(proofStart > preparationStart, source);
+  assert.ok(workflowStart > proofStart, source);
+  assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
+  assert.match(source, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/u);
+  assert.match(source, /if \(!usesPinnedSource\) return/u);
+  assert.match(source, /preservePinnedSourceProof\(task\)/u);
+  assert.match(source, /git\(\["rev-parse", "HEAD"\]\)/u);
+  assert.match(source, /git\(\["rev-parse", pinnedSourceRef\]\)/u);
+  assert.match(source, /git\(\["rev-list", "--all"\]\)/u);
+  assert.match(source, /git\(\["cat-file", "--batch-all-objects", "--batch-check=%\(objecttype\)"\]\)/u);
+  assert.match(source, /git\(\["remote"\]\)/u);
+  assert.match(source, /source-isolation failure/u);
+  assert.match(source, /"source-proofs"/u);
+  assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
+  assert.doesNotMatch(source.slice(proofStart, workflowStart), /task\.runRoot/u);
+  assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
 });
 
 test("generated Smithers retries reset exact task-owned artifact contents after the first attempt", () => {
@@ -321,6 +343,30 @@ test("generated Smithers verifier rejects in-root leaf and parent symlinks", () 
   const parentSymlink = path.join(root, "linked-parent");
   fs.symlinkSync(realDirectory, parentSymlink, "dir");
   assert.throws(() => assertRegularFileInside(root, path.join(parentSymlink, "Test.t.sol")), /symlink/u);
+});
+
+test("generated Smithers verifier publishes the complete validated set before task success", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(verifierStart >= 0, source);
+  assert.ok(workflowStart > verifierStart, source);
+  assert.match(source, /publishFileDurableExclusive/u);
+
+  const verifier = source.slice(verifierStart, workflowStart);
+  assert.match(verifier, /const publications = new Map<string, Buffer>\(\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, output\.path, bytes\)/u);
+  assert.match(verifier, /verifyGeneratedTestFiles\(artifactRoot, validation\.value\)/u);
+  assert.match(verifier, /rememberVerifiedPublication\(publications, companion\.path, companion\.contents\)/u);
+  assert.match(verifier, /publishFileDurableExclusive\(artifactDir, relativePath, contents\)/u);
+  assert.ok(
+    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") > verifier.indexOf("primary === undefined")
+  );
+  assert.ok(
+    verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)") <
+      verifier.indexOf("return { artifacts, primary_artifact: primary.path }")
+  );
 });
 
 function findRuntimePackageRoot(start: string): string {

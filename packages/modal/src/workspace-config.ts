@@ -24,7 +24,7 @@ repo = "."
 output_dir = ".ultrafuzz/runs"
 max_parallel_agents = ${DEFAULT_MODAL_MAX_PARALLEL_AGENTS}
 max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
-keep_workspaces = true
+keep_workspaces = false
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}
 

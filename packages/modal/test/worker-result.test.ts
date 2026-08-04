@@ -55,6 +55,29 @@ describe("sanitized worker result contracts", () => {
     expect(result).not.toContain(failure.message);
   });
 
+  it("persists the sanitized non-resumable terminal diagnostic without private failure text", async () => {
+    const harness = await terminalHarness();
+    const failure = new Error("private terminal artifact detail");
+
+    await expect(
+      runWithTerminalPersistence({
+        ...harness.input,
+        diagnosticCodeForError: () => "terminal-run-non-resumable",
+        run: async () => {
+          throw failure;
+        }
+      })
+    ).rejects.toBe(failure);
+
+    const result = fs.readFileSync(harness.resultPath, "utf8");
+    expect(JSON.parse(result)).toMatchObject({
+      result_type: "terminal",
+      exit_category: "sandbox-exited",
+      diagnostic_code: "terminal-run-non-resumable"
+    });
+    expect(result).not.toContain(failure.message);
+  });
+
   it("publishes the complete stable operational taxonomy", () => {
     expect(OPERATIONAL_DISPOSITION_CATEGORIES).toEqual([
       "live",

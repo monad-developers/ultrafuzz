@@ -9,6 +9,7 @@ import {
   modalDurableResumeCommand,
   modalDurableRunAdvanced,
   modalDurableRunNeedsResume,
+  NonResumableTerminalRunError,
   repairModalEvalRunRecord
 } from "../src/resume.js";
 
@@ -175,13 +176,13 @@ describe("Modal durable evaluation resume", () => {
   it("fails closed for operational terminal states and unrelated runs", async () => {
     const value = fixture();
     const workspace = await locateModalResumeWorkspace(value.workRoot);
-    await expect(
-      repairModalEvalRunRecord(
-        workspace,
-        { run_id: "durable-run-one", status: "failed" },
-        { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
-      )
-    ).rejects.toThrow("refusing to finalize");
+    const rejected = repairModalEvalRunRecord(
+      workspace,
+      { run_id: "durable-run-one", status: "failed" },
+      { kind: "operational-failure", failedTasks: 0, operationalFailures: 1 }
+    );
+    await expect(rejected).rejects.toBeInstanceOf(NonResumableTerminalRunError);
+    await expect(rejected).rejects.toMatchObject({ code: "TERMINAL_RUN_NON_RESUMABLE" });
     await expect(
       repairModalEvalRunRecord(workspace, { run_id: "unrelated-run", status: "succeeded" }, undefined)
     ).rejects.toThrow("unrelated run");
