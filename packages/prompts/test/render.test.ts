@@ -118,6 +118,18 @@ describe("prompt rendering", () => {
     expect(result.variablesUsed).toEqual(["item.goal_prompt", "liquidation:overdue"]);
   });
 
+  it("preserves escaped replacement placeholders as literals for downstream MDX prompts", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Emit \\{{class:liquidation:fixed-term-before-overdue}} exactly.";
+
+    expect(() => validatePromptVariables(input.prompt)).not.toThrow();
+    const result = renderPrompt(input);
+    expect(result.renderedMarkdown).toContain("Emit {{class:liquidation:fixed-term-before-overdue}} exactly.");
+    expect(result.variablesUsed).toEqual([]);
+  });
+
   it("accepts dotted vulnerability IDs in namespaced dynamic variables", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

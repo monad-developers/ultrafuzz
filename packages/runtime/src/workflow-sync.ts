@@ -9,7 +9,10 @@ import {
   appendEvent,
   assertNoSymlinkComponents,
   assertPathInside,
+  buildFindingSourceExpectations,
+  validateArtifactContract,
   FindingsValidationError,
+  materializeCanonicalThreatModelMarkdown,
   createNodeState,
   createNodeAttemptLedgerEntry,
   getNodeArtifactDir,
@@ -2122,6 +2125,16 @@ async function finalizeTerminalTask(input: {
           payload: { materialized: reconciledArtifacts }
         });
       }
+      if (reconciliationError === undefined && input.node.logical_id === "threat-model") {
+        const threatModelJson = safeResolveInside(artifactDir, "threat-model.json", "threat model JSON");
+        if (fs.existsSync(threatModelJson)) {
+          assertSynchronizationBudget(input.control);
+          const canonical = materializeCanonicalThreatModelMarkdown(artifactDir);
+          reconciledArtifacts = Array.from(
+            new Set([...reconciledArtifacts, path.relative(artifactDir, canonical.markdownPath).split(path.sep).join("/")])
+          ).sort();
+        }
+      }
     } catch (error) {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) {
         throw error;
@@ -2217,28 +2230,33 @@ async function finalizeTerminalTask(input: {
 
   let findingsCount: number | undefined;
   let findingsValidationFailed = false;
-  const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
-  if (fs.existsSync(findingsPath)) {
+  const findingsOutputs = input.node.outputs.filter((output) => output.contract === "ultrafuzz/findings@1");
+  for (const output of findingsOutputs) {
+    const findingsPath = safeResolveInside(artifactDir, output.path, "findings path");
+    if (!fs.existsSync(findingsPath)) continue;
     try {
       assertSynchronizationBudget(input.control);
+      const preserveSourceNodes = isFindingTransformationNode(input.task.logicalNodeId);
+      const sourceProvenance = preserveSourceNodes ? dependencyFindingProvenanceForTask(input) : undefined;
       const report = normalizeFindings({
         artifactDir,
+        relativePath: output.path,
         nodeId: input.task.attemptId,
-        provenance: findingsProvenance(input.node, input.task)
+        provenance: findingsProvenance(input.node, input.task),
+        preserveSourceNodes,
+        requireSourceNodes: preserveSourceNodes,
+        allowedSourceNodes: sourceProvenance?.allowedSourceNodes,
+        sourceExpectations: sourceProvenance?.expectations,
+        requireSourceExpectation: preserveSourceNodes
       });
-      findingsCount = report.count;
+      findingsCount = (findingsCount ?? 0) + report.count;
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
-        payload: {
-          count: report.count,
-          path: path.relative(input.layout.root, report.normalized_path).split(path.sep).join("/")
-        }
+        payload: { count: report.count, path: path.relative(input.layout.root, report.normalized_path).split(path.sep).join("/") }
       });
     } catch (error) {
-      if (synchronizationInterruptionDiagnostic(error) !== undefined) {
-        throw error;
-      }
+      if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
       findingsValidationFailed = error instanceof FindingsValidationError;
       diagnostics.push(diagnosticFromError(error, "findings", "FINDINGS_NORMALIZE_FAILED"));
     }
@@ -3380,6 +3398,45 @@ function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
     modelIndex: model?.modelIndex ?? node.model_fanout[0]?.model_index,
     loopIndex: task.metadata?.loop?.index ?? node.loop.index
   };
+}
+
+function isFindingTransformationNode(logicalNodeId: string): boolean {
+  return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
+}
+
+function dependencyFindingProvenanceForTask(input: {
+  layout: RunLayout;
+  node: PlannedGraphNode;
+  task: StoredWorkflowTask;
+}): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
+  const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
+  const artifactsParent = path.dirname(getNodeArtifactDir(input.layout, input.task.attemptId, { create: true }));
+  const findingFiles = ["severity-classified-findings.json", "triaged-findings.json", "deduped-findings.json", "findings.normalized.json", "findings.json"];
+  for (const dependencyId of input.task.dependencies) {
+    const dependencyRoot = getNodeArtifactDir(input.layout, dependencyId, { create: true });
+    if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
+    for (const fileName of findingFiles) {
+      const findingPath = path.resolve(dependencyRoot, fileName);
+      if (!fs.existsSync(findingPath)) continue;
+      const resolvedPath = safeResolveInside(dependencyRoot, fileName, "dependency findings path");
+      const validation = validateArtifactContract("ultrafuzz/findings@1", fs.readFileSync(resolvedPath, "utf8"), fileName);
+      if (!validation.ok || !Array.isArray(validation.value)) continue;
+      upstream.push(...validation.value.map((finding) => ({ node_id: dependencyId, artifact_path: resolvedPath, finding })));
+      break;
+    }
+  }
+  const expectations = buildFindingSourceExpectations({
+    upstream,
+    requireLifecycleCoverage: input.task.logicalNodeId === "dedupe-findings"
+  });
+  return {
+    allowedSourceNodes: [...new Set(expectations.flatMap((expectation) => expectation.source_nodes))],
+    expectations
+  };
+}
+
+function isStrictlyInsideDirectory(root: string, candidate: string): boolean {
+  return candidate !== root && candidate.startsWith(`${root}${path.sep}`);
 }
 
 function ensureWorkflowTaskStateRecords(
