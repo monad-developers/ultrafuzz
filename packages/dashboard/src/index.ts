@@ -1963,7 +1963,7 @@ function groupExpandedNodes(nodes: ExpandedNode[]): Map<string, ExpandedNode[]> 
 
 function plannedDynamicAttempts(node: PlannedGraphNode): ExpandedNode[] {
   const artifactDirs = node.artifact_dirs ?? [node.artifact_dir];
-  return artifactDirs.map((artifactDir, index) => ({
+  return artifactDirs.map((artifactDir, _index) => ({
     id: path.posix.basename(artifactDir),
     logicalId: node.logical_id,
     label: node.display_name,

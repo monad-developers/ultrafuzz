@@ -527,7 +527,7 @@ describe("prompt semantic anchors", () => {
         expect.objectContaining({ path: "threat-model.json", contract: "ultrafuzz/threat-model@1" })
       ])
     );
-    expect(byId.get("goal-plan")?.depends_on).toEqual(["threat-model"]);
+    expect(byId.get("goal-plan")?.depends_on).toEqual(["threat-model", "reference-vulnerability-database"]);
     expect(byId.get("goal-roaming")?.depends_on).toEqual(["threat-model"]);
     expect(byId.get("threat-goals")?.dynamic).toEqual({
       from: { node: "goal-plan", path: "$.threat_goals" },

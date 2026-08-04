@@ -432,7 +432,7 @@ test("100 generated attempts remain queued under the ordinary concurrency projec
   assert.equal(Object.values(projection.state.nodes).filter((node) => node.wait_reason === "capacity").length, 96);
 });
 
-function plannedGraph(runId: string): PlannedGraph {
+function plannedGraph(_runId: string): PlannedGraph {
   const base = {
     display_name: "Node",
     kind: "agentic",
