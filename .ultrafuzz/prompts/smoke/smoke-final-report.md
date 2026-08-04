@@ -11,6 +11,9 @@ This is one final evidence review, not another repository-wide audit.
 Required inputs:
 
 - Context: `{{artifact_path:smoke-context}}/smoke-context.md`
+- Threat model: `{{artifact_path:threat-model}}/THREAT_MODEL.md` and
+  `{{artifact_path:threat-model}}/threat-model.json`
+- Goal plan: `{{artifact_path:goal-plan}}/goal-plan.json`
 - Findings: `{{artifact_path:dedupe-findings}}/deduped-findings.json`
 - Strategy hits: `{{artifact_path:dedupe-findings}}/strategy-detections.json`
 - Lifecycle: `{{artifact_path:dedupe-findings}}/finding-lifecycle-ledger.json`
@@ -37,7 +40,9 @@ include at least:
 - `severity`, `impact`, `likelihood`, `description`, and a reproducible
   `proof_of_concept` or precise execution trace; and
 - structured `strategy_provenance` and its matching lifecycle record when
-available.
+  available; and
+- the complete non-empty `source_nodes` discovery union with compatibility
+  `source_node_id` equal to its first entry.
 
 Write every issue's `confidence` as one of the strings `high`, `medium`, or
 `low`; never use a numeric confidence in the normalized report.
@@ -55,7 +60,9 @@ artifact and must never contain synthetic findings.
 
 Write `{{artifact_path}}/report.md` beginning with `# Ultrafuzz report`. Include
 a concise run summary, an issue index, and for each production issue its
-severity reasoning, evidence/PoC, affected code, and strategy detections. Add a
-short non-production outcomes table when needed. State `No issues reported.`
+severity reasoning, evidence/PoC, affected code, strategy detections, and source
+nodes. Add a concise Audit context section linking the dedicated threat-model
+and goal-plan artifacts without copying their content. Add a short
+non-production outcomes table when needed. State `No issues reported.`
 only when the evidence supports no production issue. Validate all three
 required files against their output contracts, then stop.

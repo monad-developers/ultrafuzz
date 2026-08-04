@@ -166,6 +166,11 @@ the upstream evidence already supports a more specific status.
 In particular, preserve `property_ids` unchanged for every property-derived
 finding.
 
+Preserve each finding's complete `source_nodes` array unchanged, together with
+the compatibility `source_node_id` equal to its first entry. These are the
+discovery nodes corroborating the root cause. Do not replace them with
+`triage`, discard dynamic threat/class IDs, or reduce the union to one source.
+
 For stateful invariant records, preserve any upstream
 `stateful_failure_classification=<classification>` note exactly. Coverage-only
 success is not evidence that the record should be removed. Treat

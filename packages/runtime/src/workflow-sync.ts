@@ -15,6 +15,7 @@ import {
   layoutForRunRoot,
   normalizeFindings,
   manifestDigest,
+  materializeCanonicalThreatModelMarkdown,
   queryNodeAttempts,
   replayEvents,
   readRunState,
@@ -91,6 +92,7 @@ interface StoredWorkflowTask {
     node?: {
       concreteNodeId?: string;
       logicalNodeId?: string;
+      producerNodeId?: string;
     };
     loop?: {
       attemptIndex?: number;
@@ -2054,6 +2056,28 @@ async function finalizeTerminalTask(input: {
       }
     }
   }
+  if (reconciliationError === undefined && input.node.logical_id === "threat-model") {
+    const threatModelJson = safeResolveInside(artifactDir, "threat-model.json", "threat model JSON");
+    if (fs.existsSync(threatModelJson)) {
+      try {
+        assertSynchronizationBudget(input.control);
+        const canonical = materializeCanonicalThreatModelMarkdown(artifactDir);
+        reconciledArtifacts = Array.from(
+          new Set([
+            ...reconciledArtifacts,
+            path.relative(artifactDir, canonical.markdownPath).split(path.sep).join("/")
+          ])
+        ).sort();
+      } catch (error) {
+        reconciliationError = diagnosticFromError(
+          error,
+          "artifact-reconciliation",
+          "THREAT_MODEL_CANONICAL_RENDER_FAILED"
+        );
+        diagnostics.push(reconciliationError);
+      }
+    }
+  }
   assertSynchronizationBudget(input.control);
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
   const grace = nextArtifactReconciliationGrace({
@@ -2128,16 +2152,21 @@ async function finalizeTerminalTask(input: {
 
   let findingsCount: number | undefined;
   let findingsValidationFailed = false;
-  const findingsPath = safeResolveInside(artifactDir, "findings.json", "findings path");
-  if (fs.existsSync(findingsPath)) {
+  const findingsOutputs = input.node.outputs.filter((output) => output.contract === "ultrafuzz/findings@1");
+  for (const output of findingsOutputs) {
+    const findingsPath = safeResolveInside(artifactDir, output.path, "findings path");
+    if (!fs.existsSync(findingsPath)) continue;
     try {
       assertSynchronizationBudget(input.control);
       const report = normalizeFindings({
         artifactDir,
+        relativePath: output.path,
         nodeId: input.task.attemptId,
-        provenance: findingsProvenance(input.node, input.task)
+        provenance: findingsProvenance(input.node, input.task),
+        preserveSourceNodes: isFindingTransformationNode(input.task.logicalNodeId),
+        requireSourceNodes: isFindingTransformationNode(input.task.logicalNodeId)
       });
-      findingsCount = report.count;
+      findingsCount = (findingsCount ?? 0) + report.count;
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
@@ -3244,7 +3273,7 @@ function artifactProvenance(
 ): Partial<ArtifactProvenance> {
   const model = task.metadata?.model;
   return {
-    producer_node_id: task.attemptId,
+    producer_node_id: task.metadata?.node?.producerNodeId ?? task.attemptId,
     logical_node_id: task.logicalNodeId,
     attempt_index: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
     loop_index: task.metadata?.loop?.index ?? node.loop.index,
@@ -3265,6 +3294,7 @@ function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
   const model = task.metadata?.model;
   return {
     nodeId: task.attemptId,
+    producerNodeId: task.metadata?.node?.producerNodeId ?? task.attemptId,
     strategy: task.logicalNodeId,
     attemptIndex: model?.attemptIndex ?? task.metadata?.loop?.attemptIndex ?? node.loop.attempt_index,
     modelId: model?.profileId ?? node.model_fanout[0]?.model_profile_id,
@@ -3272,6 +3302,10 @@ function findingsProvenance(node: PlannedGraphNode, task: StoredWorkflowTask) {
     modelIndex: model?.modelIndex ?? node.model_fanout[0]?.model_index,
     loopIndex: task.metadata?.loop?.index ?? node.loop.index
   };
+}
+
+function isFindingTransformationNode(logicalNodeId: string): boolean {
+  return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
 }
 
 function workflowSnapshotDiagnostic(snapshot: SmithersCommandSnapshot, code: string): RuntimeDiagnostic {

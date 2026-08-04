@@ -2809,14 +2809,26 @@ test("plan applies smoke eval model profiles to a normally initialized target", 
   });
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
-  const executable = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
-  assert.equal(executable.length, 7);
+  const declarations = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
+  const executable = declarations.filter((node) => node.dynamic === undefined);
+  assert.equal(declarations.length, 12);
+  assert.equal(executable.length, 10);
   const strategies = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "benchmark");
   const coordination = executable.filter((node) => node.model_fanout[0]?.model_profile_id === "smoke-coordination");
-  assert.equal(strategies.length, 4);
+  assert.equal(strategies.length, 5);
   assert.ok(strategies.every((node) => node.model_fanout[0]?.reasoning_effort === "high"));
-  assert.equal(coordination.length, 3);
+  assert.equal(coordination.length, 5);
   assert.ok(coordination.every((node) => node.model_fanout[0]?.reasoning_effort === "medium"));
+  const catalogPath = path.join(plan.value!.run_root, "vulnerability-db", "catalog.json");
+  assert.equal(fs.existsSync(catalogPath), true);
+  const goalPlanPrompt = plan.value!.rendered_prompts.find((prompt) => prompt.logical_node_id === "goal-plan");
+  assert.ok(goalPlanPrompt);
+  assert.match(fs.readFileSync(goalPlanPrompt.rendered_prompt_path, "utf8"), /vulnerability-db\/catalog\.json/u);
+  const persistedPlan = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "plan.json"), "utf8")) as {
+    vulnerability_database?: { catalog_path?: string; catalog_sha256?: string };
+  };
+  assert.equal(persistedPlan.vulnerability_database?.catalog_path, "vulnerability-db/catalog.json");
+  assert.match(persistedPlan.vulnerability_database?.catalog_sha256 ?? "", /^[a-f0-9]{64}$/u);
 });
 
 test("plan materializes pinned reference nodes before rendering dependent prompts", async () => {

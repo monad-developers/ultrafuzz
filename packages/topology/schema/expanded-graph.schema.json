@@ -158,6 +158,7 @@
                   "enum": [
                     "ultrafuzz/findings@1",
                     "ultrafuzz/generated-tests@1",
+                    "ultrafuzz/goal-plan@1",
                     "ultrafuzz/implemented-properties@1",
                     "ultrafuzz/implemented-properties@2",
                     "ultrafuzz/invariant-ledger@1",
@@ -170,6 +171,7 @@
                     "ultrafuzz/property-campaign@1",
                     "ultrafuzz/report@1",
                     "ultrafuzz/text@1",
+                    "ultrafuzz/threat-model@1",
                     "ultrafuzz/workspace-patch@1"
                   ]
                 },

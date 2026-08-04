@@ -30,16 +30,28 @@ const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIM
 const {
   artifactContractDefinition,
   assertRegularFileInside,
+  buildFindingSourceExpectations,
+  findingIdentityKeys,
+  materializeCanonicalThreatModelMarkdown,
   materializePromptSchemas,
+  normalizeFindings,
   publishFileDurableExclusive,
   validateArtifactContract,
   validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
+  verifyGoalPlanSelectedRecordSnapshots,
+  verifyThreatModelEvidenceFiles,
   writeFileDurable
 } = await import(artifactsModule);
-const { applyWorkspacePatch, captureWorkspacePatch, captureWorkspaceTree, normalizeFinalReportSeverityRecord } =
-  await import(runtimeModule);
+const {
+  applyWorkspacePatch,
+  captureWorkspacePatch,
+  captureWorkspaceTree,
+  materializeGoalPlanVulnerabilityDatabaseSnapshots,
+  normalizeFinalReportSeverityRecord,
+  verifyThreatModelVulnerabilityDatabaseCapabilities
+} = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -220,9 +232,12 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       // a base-tree mismatch.
       prepareArtifactMirror(task, { replayWorkspacePatches: false });
       materializeMissingMarkdownArtifacts(task, result);
+      materializeCanonicalThreatModelArtifact(task);
+      materializeGoalPlanDatabaseArtifacts(task);
       materializeMissingDedupeArtifact(task);
       materializeMissingFinalReportArtifacts(task);
       normalizeLegacyFindingFields(task);
+      normalizeFindingProvenance(task);
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
@@ -1630,6 +1645,55 @@ function materializeMissingMarkdownArtifacts(task: (typeof taskSpecs)[number], r
   }
 }
 
+function materializeCanonicalThreatModelArtifact(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "threat-model") {
+    return;
+  }
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const runRoot = realpathSync(path.resolve(artifactDir, "..", ".."));
+  const workspaceRoot = realpathSync(task.workspacePath);
+  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
+    const jsonPath = path.resolve(artifactRoot, "threat-model.json");
+    if (!existsSync(jsonPath)) continue;
+    resolveRegularArtifactFile(
+      artifactRoot,
+      jsonPath,
+      "artifact-contract failure: threat-model.json is not a regular file"
+    );
+    const model = verifyThreatModelVulnerabilityDatabaseCapabilities(artifactRoot, runRoot);
+    verifyThreatModelEvidenceFiles(model, workspaceRoot);
+    materializeCanonicalThreatModelMarkdown(artifactRoot);
+  }
+}
+
+function materializeGoalPlanDatabaseArtifacts(task: (typeof taskSpecs)[number]): void {
+  if (task.metadata.node.logicalNodeId !== "goal-plan") {
+    return;
+  }
+  const dependencyAttemptIds = new Set(task.metadata.dependencies.attemptIds);
+  const threatModelArtifactDirs = taskSpecs
+    .filter(
+      (candidate) =>
+        dependencyAttemptIds.has(candidate.attemptId) && candidate.metadata.node.logicalNodeId === "threat-model"
+    )
+    .map((candidate) => candidate.metadata.artifacts.dir);
+  if (threatModelArtifactDirs.length === 0) {
+    throw new Error("artifact-contract failure: goal-plan has no direct threat-model dependency identity");
+  }
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const runRoot = realpathSync(path.resolve(artifactDir, "..", ".."));
+  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
+    const goalPlanPath = path.resolve(artifactRoot, "goal-plan.json");
+    if (!existsSync(goalPlanPath)) continue;
+    resolveRegularArtifactFile(
+      artifactRoot,
+      goalPlanPath,
+      "artifact-contract failure: goal-plan.json is not a regular file"
+    );
+    materializeGoalPlanVulnerabilityDatabaseSnapshots(artifactRoot, { threatModelArtifactDirs, runRoot });
+  }
+}
+
 function agentResultSummary(result: unknown): string | undefined {
   if (typeof result !== "object" || result === null) {
     return typeof result === "string" && result.trim().length > 0 ? result.trim() : undefined;
@@ -1923,6 +1987,149 @@ function normalizeLegacyFindingFields(task: (typeof taskSpecs)[number]): void {
   }
 }
 
+function normalizeFindingProvenance(task: (typeof taskSpecs)[number]): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const preserveSourceNodes = isFindingTransformationNode(task.metadata.node.logicalNodeId);
+  const producerNodeId = task.metadata.node.producerNodeId ?? task.attemptId;
+  const sourceProvenance = preserveSourceNodes ? dependencyFindingProvenance(task, artifactDir) : undefined;
+
+  for (const output of task.outputs) {
+    if (output.contract !== "ultrafuzz/findings@1") {
+      continue;
+    }
+    for (const candidateRoot of taskArtifactRoots(task, artifactDir)) {
+      const candidatePath = path.resolve(candidateRoot, output.path);
+      if (!existsSync(candidatePath)) continue;
+      resolveRegularArtifactFile(
+        candidateRoot,
+        candidatePath,
+        `artifact-contract failure: output is not a regular file ${output.path}`
+      );
+      normalizeFindings({
+        artifactDir: candidateRoot,
+        relativePath: output.path,
+        nodeId: task.attemptId,
+        provenance: {
+          producerNodeId,
+          strategy: task.metadata.node.logicalNodeId,
+          attemptIndex: task.metadata.model?.attemptIndex ?? task.metadata.loop.attemptIndex,
+          modelId: task.metadata.model?.profileId,
+          model: task.metadata.model?.modelName,
+          modelIndex: task.metadata.model?.modelIndex,
+          loopIndex: task.metadata.loop.index
+        },
+        preserveSourceNodes,
+        requireSourceNodes: preserveSourceNodes,
+        allowedSourceNodes: sourceProvenance?.allowedSourceNodes,
+        sourceExpectations: sourceProvenance?.expectations,
+        requireSourceExpectation: preserveSourceNodes
+      });
+    }
+  }
+}
+
+function dependencyFindingProvenance(
+  task: (typeof taskSpecs)[number],
+  artifactDir: string
+): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
+  const upstream = dependencyFindingSources(task, artifactDir);
+  const requireLifecycleCoverage = task.metadata.node.logicalNodeId === "dedupe-findings";
+  const lifecycleLedger = requireLifecycleCoverage ? currentFindingLifecycleLedger(task, artifactDir) : undefined;
+  if (requireLifecycleCoverage && lifecycleLedger === undefined && upstream.length > 0) {
+    throw new Error("artifact-contract failure: dedupe provenance requires finding-lifecycle-ledger.json");
+  }
+  const expectations = buildFindingSourceExpectations({
+    upstream,
+    ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),
+    requireLifecycleCoverage
+  });
+  return {
+    allowedSourceNodes: uniqueStrings(expectations.flatMap((expectation) => expectation.source_nodes)),
+    expectations
+  };
+}
+
+function dependencyFindingSources(
+  task: (typeof taskSpecs)[number],
+  artifactDir: string
+): Array<{ node_id: string; artifact_path: string; finding: unknown }> {
+  const artifactsParent = realpathSync(path.dirname(artifactDir));
+  const findingFiles = [
+    "severity-classified-findings.json",
+    "triaged-findings.json",
+    "deduped-findings.json",
+    "findings.normalized.json",
+    "findings.json"
+  ];
+  const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
+  for (const attemptId of task.metadata.dependencies.attemptIds) {
+    const dependency = taskSpecs.find((candidate) => candidate.attemptId === attemptId);
+    if (dependency === undefined) continue;
+    const nodeId = dependency.metadata.node.producerNodeId ?? dependency.metadata.node.concreteNodeId ?? attemptId;
+    const roots = [path.resolve(artifactsParent, attemptId)];
+    let collected = false;
+    for (const rootPath of roots) {
+      if (!existsSync(rootPath)) continue;
+      const dependencyRoot = realpathSync(rootPath);
+      if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
+      for (const fileName of findingFiles) {
+        const findingPath = path.resolve(dependencyRoot, fileName);
+        if (!existsSync(findingPath)) continue;
+        const resolvedPath = resolveRegularArtifactFile(
+          dependencyRoot,
+          findingPath,
+          `artifact-contract failure: dependency findings are not a regular file ${fileName}`
+        );
+        const validation = validateArtifactContract(
+          "ultrafuzz/findings@1",
+          readFileSync(resolvedPath, "utf8"),
+          fileName
+        );
+        if (!validation.ok || !Array.isArray(validation.value)) continue;
+        upstream.push(
+          ...validation.value.map((finding) => ({ node_id: nodeId, artifact_path: resolvedPath, finding }))
+        );
+        collected = true;
+        break;
+      }
+      if (collected) break;
+    }
+  }
+  return upstream;
+}
+
+function currentFindingLifecycleLedger(task: (typeof taskSpecs)[number], artifactDir: string): unknown | undefined {
+  for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
+    const ledgerPath = path.resolve(artifactRoot, "finding-lifecycle-ledger.json");
+    if (!existsSync(ledgerPath)) continue;
+    const resolvedPath = resolveRegularArtifactFile(
+      artifactRoot,
+      ledgerPath,
+      "artifact-contract failure: finding lifecycle ledger is not a regular file"
+    );
+    try {
+      return JSON.parse(readFileSync(resolvedPath, "utf8")) as unknown;
+    } catch {
+      throw new Error("artifact-contract failure: finding lifecycle ledger must contain valid JSON");
+    }
+  }
+  return undefined;
+}
+
+function uniqueStrings(values: readonly unknown[]): string[] {
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "" && !result.includes(value.trim())) {
+      result.push(value.trim());
+    }
+  }
+  return result;
+}
+
+function isFindingTransformationNode(logicalNodeId: string): boolean {
+  return ["dedupe-findings", "triage", "severity-classification", "final-report"].includes(logicalNodeId);
+}
+
 function normalizeLegacyFindingArray(contents: string): string | undefined {
   let parsed: unknown;
   try {
@@ -2020,6 +2227,10 @@ function normalizeLegacyPathReference(value: string): { value: string; changed: 
 function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
+  const sourceExpectations =
+    task.metadata.node.logicalNodeId === "final-report"
+      ? dependencyFindingProvenance(task, artifactDir).expectations
+      : undefined;
 
   for (const output of task.outputs) {
     if (output.contract !== "ultrafuzz/report@1") {
@@ -2038,7 +2249,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
       }
       const contents = readFileSync(resolvedPath, "utf8");
       const originalIsValid = validateArtifactContract(output.contract, contents, output.path).ok;
-      const normalized = normalizeLegacyReportProvenanceFields(contents);
+      const normalized = normalizeLegacyReportProvenanceFields(contents, sourceExpectations);
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
         break;
@@ -2050,7 +2261,10 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
   }
 }
 
-function normalizeLegacyReportProvenanceFields(contents: string): string | undefined {
+function normalizeLegacyReportProvenanceFields(
+  contents: string,
+  sourceExpectations?: ReadonlyArray<{ finding_keys: readonly string[]; source_nodes: readonly string[] }>
+): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -2060,17 +2274,26 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const report = parsed as { issues?: unknown; property_provenance?: unknown };
+  const report = parsed as { issues?: unknown; non_production_outcomes?: unknown; property_provenance?: unknown };
 
   let changed = false;
   const issues = Array.isArray(report.issues)
     ? report.issues.map((entry) => {
         const normalized = normalizeLegacyFindingRecord(entry);
         const severity = normalizeFinalReportSeverityRecord(normalized.value);
-        changed ||= normalized.changed || severity.changed;
-        return severity.value;
+        const provenance = normalizeReportFindingSourceNodes(severity.value, sourceExpectations);
+        changed ||= normalized.changed || severity.changed || provenance.changed;
+        return provenance.value;
       })
     : report.issues;
+  const nonProductionOutcomes = Array.isArray(report.non_production_outcomes)
+    ? report.non_production_outcomes.map((entry) => {
+        const normalized = normalizeLegacyFindingRecord(entry);
+        const provenance = normalizeReportFindingSourceNodes(normalized.value, sourceExpectations);
+        changed ||= normalized.changed || provenance.changed;
+        return provenance.value;
+      })
+    : report.non_production_outcomes;
   const propertyProvenance = Array.isArray(report.property_provenance)
     ? report.property_provenance.map((entry) => {
         if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -2098,12 +2321,42 @@ function normalizeLegacyReportProvenanceFields(contents: string): string | undef
         {
           ...report,
           ...(issues === undefined ? {} : { issues }),
+          ...(nonProductionOutcomes === undefined ? {} : { non_production_outcomes: nonProductionOutcomes }),
           ...(propertyProvenance === undefined ? {} : { property_provenance: propertyProvenance })
         },
         null,
         2
       )}\n`
     : undefined;
+}
+
+function normalizeReportFindingSourceNodes(
+  value: unknown,
+  expectations: ReadonlyArray<{ finding_keys: readonly string[]; source_nodes: readonly string[] }> | undefined
+): { value: unknown; changed: boolean } {
+  if (!isPlainRecord(value) || expectations === undefined) return { value, changed: false };
+  const keys = new Set(findingIdentityKeys(value));
+  const matched = expectations.filter((expectation) => expectation.finding_keys.some((key) => keys.has(key)));
+  if (matched.length === 0) {
+    throw new Error("artifact-contract failure: report finding does not match dependency provenance");
+  }
+  const sourceNodes = uniqueStrings(matched.flatMap((expectation) => expectation.source_nodes));
+  if (sourceNodes.length === 0) {
+    throw new Error("artifact-contract failure: report finding has no dependency discovery provenance");
+  }
+  const current = Array.isArray(value.source_nodes)
+    ? value.source_nodes
+    : typeof value.source_node_id === "string"
+      ? [value.source_node_id]
+      : [];
+  const changed =
+    current.length !== sourceNodes.length ||
+    current.some((sourceNode, index) => sourceNode !== sourceNodes[index]) ||
+    value.source_node_id !== sourceNodes[0];
+  return {
+    value: { ...value, source_nodes: sourceNodes, source_node_id: sourceNodes[0] },
+    changed
+  };
 }
 
 function normalizeLegacyGeneratedTestManifests(task: (typeof taskSpecs)[number]): void {
@@ -3866,6 +4119,11 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     if (output.contract === "ultrafuzz/generated-tests@1") {
       for (const companion of verifyGeneratedTestFiles(artifactRoot, validation.value)) {
         rememberVerifiedPublication(publications, companion.path, companion.contents);
+      }
+    }
+    if (output.contract === "ultrafuzz/goal-plan@1") {
+      for (const selected of verifyGoalPlanSelectedRecordSnapshots(artifactRoot, validation.value)) {
+        rememberVerifiedPublication(publications, selected.path, selected.contents);
       }
     }
     return {

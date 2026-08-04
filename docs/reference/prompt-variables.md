@@ -56,6 +56,7 @@ timeouts, backend settings, or artifact requirements.
 | `strategy_loop_index`       | Zero-based loop index for this logical node.                           |
 | `strategy_loop_count`       | Total loop count for this logical node.                                |
 | `strategy_attempt_test_dir` | Absolute workspace path for generated Foundry tests from this attempt. |
+| `vulnerability_database_path` | Absolute path to the immutable current-run vulnerability planner catalog. |
 
 ## Triage And Invariant Variables
 
@@ -98,6 +99,13 @@ Use deterministic split-work assignment for looped strategies:
 ```text
 n % {{strategy_loop_count}} == {{strategy_loop_index}}
 ```
+
+Dynamic topology items additionally expose scalar `item.*` values and a
+bounded, item-scoped `replacements` map. Namespaced keys such as
+`{{class:liquidation:fixed-term-before-overdue}}` and
+`{{liquidation:overdue}}` resolve only from that item. A value such as
+`{{item.goal_prompt}}` may retain those placeholders for the bounded nested
+replacement pass; unresolved, cyclic, non-scalar, or non-item references fail.
 
 ## Output Contract
 

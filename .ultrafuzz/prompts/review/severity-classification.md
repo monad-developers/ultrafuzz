@@ -33,6 +33,9 @@ Write reportable severity records to
 must preserve upstream provenance fields and assign a stable `id`. Use
 `schema_version: "1.0"` on every emitted finding object.
 Preserve each property-derived finding's `property_ids` unchanged.
+Preserve the complete upstream `source_nodes` discovery union and keep
+`source_node_id` equal to its first entry. Do not substitute this review node
+for a threat, vulnerability-class, roaming, or existing-strategy source.
 
 For every production report candidate, include these machine-readable fields:
 

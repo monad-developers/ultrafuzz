@@ -52,6 +52,13 @@ The default scaffold mixes broad discovery with targeted test-generation lanes:
 - Dynamic strategy generation reviews accumulated artifacts, enumerates
   target-specific candidates, and feeds selected generated tests and findings
   into review.
+- Threat modeling produces canonical structured and Markdown views of assets,
+  actors, trust boundaries, capabilities, invariants, attack surfaces, and
+  evidence-backed threats. The planner then runs one focused dynamic `/goal`
+  node for every threat and every applicable vulnerability class, plus one
+  fixed roaming goal that challenges both the model and taxonomy. Applicability
+  excludes only evidence-backed incompatibilities; unknown does not mean
+  absent.
 
 ## Why The Graph Is Persisted
 

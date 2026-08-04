@@ -697,6 +697,9 @@ test("findings normalize schema-versioned findings arrays", () => {
   assert.equal(report.findings[0]!.schema_version, "1.0");
   assert.equal(report.findings[0]!.id, "strategy-a-0");
   assert.equal(report.findings[0]!.strategy, "strategy-a");
+  assert.equal(report.findings[0]!.source_node_id, "strategy-a");
+  assert.equal(report.findings[0]!.producer_node_id, "strategy-a");
+  assert.deepEqual(report.findings[0]!.source_nodes, ["strategy-a"]);
   assert.equal(report.findings[0]!.model_index, 1);
   assert.deepEqual(report.findings[0]!.affected_files, [
     ".ultrafuzz/runs/run-1/artifacts/strategy-a/generated-tests/Invariant.t.sol"

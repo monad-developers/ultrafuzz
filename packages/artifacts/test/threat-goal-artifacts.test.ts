@@ -1,0 +1,941 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  GOAL_PLAN_POLICY,
+  GOAL_PLAN_SCHEMA_VERSION,
+  THREAT_MODEL_SCHEMA_VERSION,
+  buildFindingSourceExpectations,
+  materializeCanonicalThreatModelMarkdown,
+  renderThreatModelMarkdown,
+  normalizeFindings,
+  validateArtifactContract,
+  validateGoalPlan,
+  validateThreatModel,
+  verifyThreatModelEvidenceFiles,
+  verifyGoalPlanSelectedRecordSnapshotBytes,
+  verifyGoalPlanSelectedRecordSnapshots,
+  verifyGoalPlanThreatModelBytes
+} from "../src/index.js";
+
+const digest = "a".repeat(64);
+
+function threatModelFixture(): Record<string, unknown> {
+  const evidence = [{ path: "src/Pool.sol", line: 10, symbol: "liquidate" }];
+  return {
+    schema_version: THREAT_MODEL_SCHEMA_VERSION,
+    title: "Protocol threat model",
+    scope: {
+      summary: "The protocol-owned contracts and their documented integrations are in scope.",
+      repository_evidence: evidence,
+      exclusions: []
+    },
+    protocol: {
+      summary: "A collateralized lending protocol with permissionless liquidation.",
+      archetypes: ["collateralized lending"]
+    },
+    capabilities: [
+      {
+        id: "lending.liquidation",
+        status: "present",
+        rationale: "The pool exposes a liquidation entry point.",
+        evidence
+      },
+      {
+        id: "cross-chain.messaging",
+        status: "unknown",
+        rationale: "No cross-chain integration was established from the inspected scope.",
+        evidence: []
+      }
+    ],
+    assets: [
+      {
+        id: "asset:collateral",
+        name: "Borrower collateral",
+        description: "Collateral held by the pool.",
+        value_at_risk: "All deposited collateral.",
+        evidence
+      }
+    ],
+    actors: [
+      {
+        id: "actor:liquidator",
+        name: "Liquidator",
+        role: "Repays unhealthy debt in exchange for collateral.",
+        trust: "untrusted",
+        privileges: [],
+        evidence
+      }
+    ],
+    trust_boundaries: [
+      {
+        id: "boundary:external-call",
+        name: "External caller boundary",
+        description: "Untrusted callers enter protocol accounting.",
+        actor_ids: ["actor:liquidator"],
+        evidence
+      }
+    ],
+    attack_surfaces: [
+      {
+        id: "surface:liquidation",
+        name: "Liquidation",
+        description: "Liquidation mutates borrower debt and collateral.",
+        entry_points: ["Pool.liquidate"],
+        asset_ids: ["asset:collateral"],
+        actor_ids: ["actor:liquidator"],
+        capability_ids: ["lending.liquidation"],
+        trust_boundary_ids: ["boundary:external-call"],
+        evidence
+      }
+    ],
+    value_flows: [
+      {
+        id: "flow:liquidation",
+        name: "Liquidation value flow",
+        description: "Debt is repaid and collateral leaves the pool.",
+        steps: ["Repay debt.", "Transfer collateral."],
+        asset_ids: ["asset:collateral"],
+        actor_ids: ["actor:liquidator"],
+        evidence
+      }
+    ],
+    lifecycle_transitions: [
+      {
+        id: "lifecycle:overdue-liquidation",
+        name: "Overdue liquidation",
+        from: "healthy",
+        to: "liquidatable",
+        trigger: "Debt becomes overdue.",
+        guards: ["Position is unhealthy."],
+        effects: ["Debt and collateral accounting change."],
+        evidence
+      }
+    ],
+    invariants: [
+      {
+        id: "invariant:solvency",
+        name: "Solvency",
+        kind: "economic",
+        statement: "Recorded debt and collateral remain solvent across liquidation.",
+        asset_ids: ["asset:collateral"],
+        capability_ids: ["lending.liquidation"],
+        evidence
+      }
+    ],
+    threats: [
+      {
+        id: "liquidation:overdue",
+        title: "Overdue liquidation can be bypassed",
+        description: "A state transition can liquidate at the wrong lifecycle boundary.",
+        preconditions: ["A fixed-term position exists."],
+        impact: "Bad debt or premature collateral seizure.",
+        asset_ids: ["asset:collateral"],
+        actor_ids: ["actor:liquidator"],
+        attack_surface_ids: ["surface:liquidation"],
+        capability_ids: ["lending.liquidation"],
+        trust_boundary_ids: ["boundary:external-call"],
+        invariant_ids: ["invariant:solvency"],
+        assumption_ids: [],
+        unknown_ids: [],
+        evidence
+      }
+    ],
+    assumptions: [],
+    unknowns: [],
+    coverage_gaps: []
+  };
+}
+
+function goalPlanFixture(threatCount = 1): Record<string, unknown> {
+  const ids = Array.from({ length: threatCount }, (_, index) =>
+    index === 0 ? "liquidation:overdue" : "surface:threat-" + String(index).padStart(3, "0")
+  );
+  const threatGoals = ids.map((id) => ({
+    kind: "threat",
+    id,
+    node_id: "dynamic:threat:" + id,
+    title: "Investigate " + id,
+    threat_ids: [id],
+    class_ids: [],
+    attack_surface_ids: ["surface:liquidation"],
+    goal_prompt:
+      "Your /goal is to find any vulnerability affecting this surface using threat model threat {{" + id + "}}.",
+    replacements: {
+      [id]: "Threat " + id + " with its full assets, preconditions, evidence, and invariant context."
+    },
+    selection_rationale: "The additive policy runs every modeled threat."
+  }));
+  return {
+    schema_version: GOAL_PLAN_SCHEMA_VERSION,
+    policy: GOAL_PLAN_POLICY,
+    threat_model_sha256: digest,
+    vulnerability_database: {
+      planner_catalog_schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
+      snapshot_manifest_schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
+      database_schema_version: 1,
+      aggregate_sha256: digest,
+      catalog_sha256: digest
+    },
+    catalog_class_ids: [],
+    modeled_threat_ids: ids,
+    threat_goals: threatGoals,
+    class_goals: [],
+    applicability_decisions: [],
+    selected_class_records: [],
+    roaming_goal: {
+      node_id: "goal-roaming",
+      prompt_path: "strategies/roaming-goal.md",
+      purpose: "Challenge taxonomy and threat-model completeness."
+    },
+    counts: {
+      threats: threatCount,
+      applicable_classes: 0,
+      inapplicable_classes: 0,
+      dynamic_goals: threatCount,
+      total_goals: threatCount + 1
+    }
+  };
+}
+
+test("threat model validates evidence-backed capability states and renders canonical Markdown", () => {
+  const result = validateThreatModel(threatModelFixture());
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.ok(result.value);
+
+  const markdown = renderThreatModelMarkdown(result.value!);
+  assert.match(markdown, /^# Protocol threat model$/mu);
+  assert.match(markdown, /^## Capabilities$/mu);
+  assert.match(markdown, /^## Threats$/mu);
+  assert.match(markdown, /liquidation:overdue/u);
+  assert.match(markdown, /^## Unknowns$/mu);
+  assert.doesNotMatch(markdown, /remediation backlog|LINDDUN|ARI/u);
+  assert.equal(validateArtifactContract("ultrafuzz/threat-model@1", JSON.stringify(threatModelFixture())).ok, true);
+});
+
+test("runtime materialization replaces agent Markdown with the exact canonical threat-model rendering", () => {
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-model-"));
+  fs.writeFileSync(path.join(artifactDir, "threat-model.json"), JSON.stringify(threatModelFixture()));
+  fs.writeFileSync(path.join(artifactDir, "THREAT_MODEL.md"), "# Agent rendering that may drift\n");
+
+  const materialized = materializeCanonicalThreatModelMarkdown(artifactDir);
+  const expected = renderThreatModelMarkdown(validateThreatModel(threatModelFixture()).value!);
+
+  assert.equal(materialized.markdown, expected);
+  assert.equal(fs.readFileSync(materialized.markdownPath, "utf8"), expected);
+  assert.doesNotMatch(expected, /Agent rendering that may drift/u);
+});
+
+test("threat model rejects unevidenced present or absent capabilities and broken references", () => {
+  const unevidenced = threatModelFixture();
+  const capabilities = unevidenced.capabilities as Array<Record<string, unknown>>;
+  capabilities[0] = { ...capabilities[0], status: "absent", evidence: [] };
+  assert.equal(validateThreatModel(unevidenced).ok, false);
+
+  const broken = threatModelFixture();
+  const threats = broken.threats as Array<Record<string, unknown>>;
+  threats[0] = { ...threats[0], asset_ids: ["asset:missing"] };
+  const result = validateThreatModel(broken);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some((issue) => /Unknown reference asset:missing/u.test(issue.message)));
+});
+
+test("threat model evidence paths are bounded canonical repository-relative POSIX paths", () => {
+  const invalidPaths = [
+    "",
+    ".",
+    "..",
+    "../Pool.sol",
+    "/etc/passwd",
+    "C:/Windows/System32/config",
+    "C:\\Windows\\System32\\config",
+    "https://example.com/Pool.sol",
+    "file:src/Pool.sol",
+    "src\\Pool.sol",
+    "src//Pool.sol",
+    "src/",
+    "src/./Pool.sol",
+    "src/lib/../Pool.sol",
+    "src/Pool\u0001.sol",
+    "a".repeat(513)
+  ];
+  for (const invalidPath of invalidPaths) {
+    const model = threatModelFixture();
+    (model.scope as { repository_evidence: Array<{ path: string }> }).repository_evidence[0]!.path = invalidPath;
+    const result = validateThreatModel(model);
+    assert.equal(result.ok, false, `expected evidence path to fail: ${JSON.stringify(invalidPath)}`);
+    assert.ok(
+      result.issues.some((issue) => /canonical relative POSIX repository path|Too (?:big|small)/u.test(issue.message)),
+      JSON.stringify(result.issues)
+    );
+  }
+});
+
+test("goal-plan applicability evidence uses the strict repository-path contract", () => {
+  const plan = goalPlanFixture();
+  plan.catalog_class_ids = ["liquidation:class-a"];
+  plan.applicability_decisions = [
+    {
+      class_id: "liquidation:class-a",
+      decision: "inapplicable",
+      checks: [
+        {
+          capability_id: "lending.liquidation",
+          requirement: "required",
+          observed_status: "absent",
+          evidence: [{ path: "src/Pool.sol", line: 10 }],
+          rationale: "Repository evidence establishes that the required capability is absent."
+        }
+      ],
+      rationale: "The required capability is evidence-backed absent."
+    }
+  ];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 0,
+    inapplicable_classes: 1,
+    dynamic_goals: 1,
+    total_goals: 2
+  };
+  assert.equal(validateGoalPlan(plan).ok, true);
+
+  for (const invalidPath of [
+    "../Pool.sol",
+    "/etc/passwd",
+    "C:/Windows/System32/config",
+    "src\\Pool.sol",
+    "https://example.com/Pool.sol",
+    "file:src/Pool.sol",
+    "src/./Pool.sol",
+    "src/Pool\u0001.sol"
+  ]) {
+    const invalid = structuredClone(plan);
+    const decisions = invalid.applicability_decisions as Array<{
+      checks: Array<{ evidence: Array<{ path: string }> }>;
+    }>;
+    decisions[0]!.checks[0]!.evidence[0]!.path = invalidPath;
+    assert.equal(validateGoalPlan(invalid).ok, false, `expected evidence path to fail: ${JSON.stringify(invalidPath)}`);
+  }
+});
+
+test("threat model evidence publication requires regular files inside the exact workspace", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-evidence-workspace-"));
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src", "Pool.sol"), "contract Pool {}\n", "utf8");
+  const model = validateThreatModel(threatModelFixture()).value!;
+  assert.deepEqual(verifyThreatModelEvidenceFiles(model, workspace), ["src/Pool.sol"]);
+
+  fs.unlinkSync(path.join(workspace, "src", "Pool.sol"));
+  assert.throws(() => verifyThreatModelEvidenceFiles(model, workspace), /does not exist/u);
+
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-threat-evidence-outside-"));
+  fs.writeFileSync(path.join(outside, "Pool.sol"), "contract Outside {}\n", "utf8");
+  fs.symlinkSync(path.join(outside, "Pool.sol"), path.join(workspace, "src", "Pool.sol"));
+  assert.throws(() => verifyThreatModelEvidenceFiles(model, workspace), /cannot be a symlink/u);
+});
+
+test("additive goal plans preserve all 100 threats plus the fixed roaming goal", () => {
+  const plan = goalPlanFixture(100);
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.value?.threat_goals.length, 100);
+  assert.equal(result.value?.counts.dynamic_goals, 100);
+  assert.equal(result.value?.counts.total_goals, 101);
+  assert.equal(validateArtifactContract("ultrafuzz/goal-plan@1", JSON.stringify(plan)).ok, true);
+});
+
+test("goal plans bind to the exact upstream threat-model JSON bytes", () => {
+  const threatModelBytes = Buffer.from(`${JSON.stringify(threatModelFixture(), null, 2)}\n`, "utf8");
+  const plan = goalPlanFixture();
+  plan.threat_model_sha256 = crypto.createHash("sha256").update(threatModelBytes).digest("hex");
+
+  assert.equal(verifyGoalPlanThreatModelBytes(plan, threatModelBytes).threat_model_sha256, plan.threat_model_sha256);
+  assert.throws(
+    () => verifyGoalPlanThreatModelBytes(plan, Buffer.concat([threatModelBytes, Buffer.from("\n")])),
+    /does not match the upstream threat-model\.json bytes/u
+  );
+});
+
+test("goal plans decide every planner-catalog class exactly once", () => {
+  const plan = goalPlanFixture();
+  plan.catalog_class_ids = ["liquidation:class-a", "liquidation:class-b"];
+  plan.applicability_decisions = ["liquidation:class-a", "liquidation:class-b"].map((classId) => ({
+    class_id: classId,
+    decision: "inapplicable",
+    checks: [
+      {
+        capability_id: "lending.liquidation",
+        requirement: "required",
+        observed_status: "absent",
+        evidence: [{ path: "src/Pool.sol", line: 10, note: "No liquidation entry point is present." }],
+        rationale: "Repository evidence proves that the required capability is absent."
+      }
+    ],
+    rationale: "The required capability is evidence-backed absent."
+  }));
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 0,
+    inapplicable_classes: 2,
+    dynamic_goals: 1,
+    total_goals: 2
+  };
+  assert.equal(validateGoalPlan(plan).ok, true);
+
+  const missing = structuredClone(plan);
+  (missing.applicability_decisions as unknown[]).pop();
+  assert.equal(validateGoalPlan(missing).ok, false);
+
+  const unknown = structuredClone(plan);
+  (unknown.applicability_decisions as unknown[]).push({
+    ...(unknown.applicability_decisions as Array<Record<string, unknown>>)[0],
+    class_id: "liquidation:not-in-catalog"
+  });
+  assert.equal(validateGoalPlan(unknown).ok, false);
+});
+
+test("goal plans retain exact item-scoped MDX replacements for threat and class goals", () => {
+  const plan = goalPlanFixture();
+  const classId = "liquidation:fixed-term-before-overdue";
+  const record = {
+    id: classId,
+    path: "vulnerability-db/selected/liquidation/fixed-term-before-overdue.md",
+    sha256: digest,
+    size_bytes: 1024
+  };
+  plan.catalog_class_ids = [classId];
+  (plan.class_goals as unknown[]) = [
+    {
+      kind: "class",
+      id: classId,
+      node_id: "dynamic:class:" + classId,
+      class_id: classId,
+      class_replacement_key: "class:liquidation:fixed-term-before-overdue",
+      title: "Fixed-term liquidation before overdue",
+      threat_ids: ["liquidation:overdue"],
+      threat_replacement_keys: ["liquidation:overdue"],
+      attack_surface_ids: ["surface:liquidation"],
+      coverage_gap: false,
+      selected_record: record,
+      goal_prompt:
+        "Your /goal is to find a vulnerability of type {{class:liquidation:fixed-term-before-overdue}} using threat model {{liquidation:overdue}}.",
+      replacements: {
+        "class:liquidation:fixed-term-before-overdue": "Full vulnerability-class instructions and examples.",
+        "liquidation:overdue": "Full threat-model context for overdue liquidation."
+      },
+      selection_rationale: "Liquidation is evidence-backed present."
+    }
+  ];
+  (plan.applicability_decisions as unknown[]) = [
+    {
+      class_id: classId,
+      decision: "applicable",
+      checks: [
+        {
+          capability_id: "lending.liquidation",
+          requirement: "required",
+          observed_status: "unknown",
+          evidence: [],
+          rationale: "Unknown does not become a hard exclusion."
+        }
+      ],
+      rationale: "The unknown capability state keeps this class eligible for review."
+    }
+  ];
+  plan.selected_class_records = [record];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 1,
+    inapplicable_classes: 0,
+    dynamic_goals: 2,
+    total_goals: 3
+  };
+
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.match(result.value?.class_goals[0]?.goal_prompt ?? "", /\{\{liquidation:overdue\}\}/u);
+  assert.equal(
+    result.value?.class_goals[0]?.replacements["liquidation:overdue"],
+    "Full threat-model context for overdue liquidation."
+  );
+
+  const invalid = structuredClone(plan);
+  (invalid.applicability_decisions as Array<Record<string, unknown>>)[0]!.decision = "inapplicable";
+  assert.equal(validateGoalPlan(invalid).ok, false, "unknown must not silently become an evidence-backed exclusion");
+
+  const unrelatedReplacement = structuredClone(plan);
+  const unrelatedGoal = (unrelatedReplacement.class_goals as Array<Record<string, unknown>>)[0]!;
+  unrelatedGoal.threat_replacement_keys = ["liquidation:overdue", "liquidation:unrelated"];
+  unrelatedGoal.goal_prompt = String(unrelatedGoal.goal_prompt) + " Also inspect {{liquidation:unrelated}}.";
+  unrelatedGoal.replacements = {
+    ...(unrelatedGoal.replacements as Record<string, unknown>),
+    "liquidation:unrelated": "Unrelated context must not expand this class goal."
+  };
+  assert.equal(validateGoalPlan(unrelatedReplacement).ok, false);
+});
+
+test("goal-plan dynamic provenance IDs retain valid dotted threat and class segments", () => {
+  const plan = goalPlanFixture();
+  const threatId = "oracle:price.v2";
+  const classId = "oracle.v2:stale-price";
+  const threatGoal = (plan.threat_goals as Array<Record<string, unknown>>)[0]!;
+  plan.modeled_threat_ids = [threatId];
+  threatGoal.id = threatId;
+  threatGoal.node_id = `dynamic:threat:${threatId}`;
+  threatGoal.threat_ids = [threatId];
+  threatGoal.class_ids = [classId];
+  threatGoal.goal_prompt = `Your /goal is to inspect the modeled oracle threat {{${threatId}}}.`;
+  threatGoal.replacements = { [threatId]: "Full dotted threat-model context." };
+  const selectedRecord = {
+    id: classId,
+    path: "vulnerability-db/selected/oracle/stale-price.md",
+    sha256: digest,
+    size_bytes: 256
+  };
+  plan.catalog_class_ids = [classId];
+  plan.class_goals = [
+    {
+      kind: "class",
+      id: classId,
+      node_id: `dynamic:class:${classId}`,
+      class_id: classId,
+      class_replacement_key: `class:${classId}`,
+      threat_ids: [threatId],
+      threat_replacement_keys: [threatId],
+      attack_surface_ids: ["surface:oracle"],
+      coverage_gap: false,
+      title: "Stale price",
+      selected_record: selectedRecord,
+      goal_prompt: `Your /goal is to find {{class:${classId}}} using threat model {{${threatId}}}.`,
+      replacements: {
+        [`class:${classId}`]: "Full dotted vulnerability-class instructions.",
+        [threatId]: "Full dotted threat-model context."
+      },
+      selection_rationale: "The class is applicable to the modeled oracle threat."
+    }
+  ];
+  plan.applicability_decisions = [
+    {
+      class_id: classId,
+      decision: "applicable",
+      checks: [],
+      rationale: "No evidence-backed hard incompatibility applies."
+    }
+  ];
+  plan.selected_class_records = [selectedRecord];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 1,
+    inapplicable_classes: 0,
+    dynamic_goals: 2,
+    total_goals: 3
+  };
+
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.value?.threat_goals[0]?.node_id, "dynamic:threat:oracle:price.v2");
+  assert.equal(result.value?.class_goals[0]?.node_id, "dynamic:class:oracle.v2:stale-price");
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/findings@1",
+      JSON.stringify([
+        {
+          schema_version: "1.0",
+          id: "oracle-v2-finding",
+          title: "Stale oracle price",
+          status: "candidate",
+          severity_guess: "high",
+          confidence: "high",
+          summary: "The v2 oracle can retain a stale observation.",
+          producer_node_id: "dynamic:threat:oracle:price.v2",
+          source_node_id: "dynamic:threat:oracle:price.v2",
+          source_nodes: ["dynamic:threat:oracle:price.v2"]
+        }
+      ])
+    ).ok,
+    true
+  );
+});
+
+test("an applicable class remains planned when no explicit threat maps to it", () => {
+  const plan = goalPlanFixture();
+  const classId = "accounting:share-inflation";
+  const record = {
+    id: classId,
+    path: "vulnerability-db/selected/accounting/share-inflation.md",
+    sha256: digest,
+    size_bytes: 512
+  };
+  plan.catalog_class_ids = [classId];
+  plan.class_goals = [
+    {
+      kind: "class",
+      id: classId,
+      node_id: "dynamic:class:" + classId,
+      class_id: classId,
+      class_replacement_key: "class:accounting:share-inflation",
+      threat_ids: [],
+      threat_replacement_keys: ["threat-model:coverage-gap"],
+      attack_surface_ids: ["surface:liquidation"],
+      coverage_gap: true,
+      title: "Share inflation",
+      selected_record: record,
+      goal_prompt:
+        "Your /goal is to find a vulnerability of type {{class:accounting:share-inflation}} using threat model {{threat-model:coverage-gap}}.",
+      replacements: {
+        "class:accounting:share-inflation": "Full vulnerability-class context.",
+        "threat-model:coverage-gap": "No explicit threat mapped; inspect the full threat model and this gap."
+      },
+      selection_rationale: "The class is applicable and exposes a threat-model coverage gap."
+    }
+  ];
+  plan.applicability_decisions = [
+    {
+      class_id: classId,
+      decision: "applicable",
+      checks: [],
+      rationale: "The class has no hard incompatibility."
+    }
+  ];
+  plan.selected_class_records = [record];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 1,
+    inapplicable_classes: 0,
+    dynamic_goals: 2,
+    total_goals: 3
+  };
+
+  const result = validateGoalPlan(plan);
+  assert.equal(result.ok, true, JSON.stringify(result.issues));
+  assert.equal(result.value?.class_goals[0]?.threat_ids.length, 0);
+  assert.equal(result.value?.class_goals[0]?.coverage_gap, true);
+});
+
+test("initial finding normalization ignores agent provenance and seeds the runtime-controlled producer", () => {
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-"));
+  fs.writeFileSync(
+    path.join(artifactDir, "findings.json"),
+    JSON.stringify([
+      {
+        title: "Overdue liquidation bypass",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The position can be liquidated before its required overdue boundary.",
+        source_node_id: "legacy-node",
+        source_nodes: ["dynamic:class:liquidation:fixed-term-before-overdue", "legacy-node"]
+      }
+    ])
+  );
+
+  const result = normalizeFindings({
+    artifactDir,
+    nodeId: "filesystem-safe-attempt",
+    provenance: { producerNodeId: "dynamic:threat:liquidation:overdue" }
+  });
+
+  assert.equal(result.findings[0]?.source_node_id, "dynamic:threat:liquidation:overdue");
+  assert.equal(result.findings[0]?.producer_node_id, "dynamic:threat:liquidation:overdue");
+  assert.deepEqual(result.findings[0]?.source_nodes, ["dynamic:threat:liquidation:overdue"]);
+});
+
+test("downstream normalization preserves discovery sources without treating the transformer as a discoverer", () => {
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-transform-"));
+  fs.writeFileSync(
+    path.join(artifactDir, "deduped-findings.json"),
+    JSON.stringify([
+      {
+        title: "Overdue liquidation bypass",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "Two focused hunters corroborated the same root cause.",
+        source_nodes: ["dynamic:threat:liquidation:overdue", "dynamic:class:liquidation:fixed-term-before-overdue"]
+      }
+    ])
+  );
+
+  const result = normalizeFindings({
+    artifactDir,
+    relativePath: "deduped-findings.json",
+    provenance: { producerNodeId: "dedupe-findings" },
+    preserveSourceNodes: true,
+    requireSourceNodes: true,
+    allowedSourceNodes: ["dynamic:threat:liquidation:overdue", "dynamic:class:liquidation:fixed-term-before-overdue"]
+  });
+  assert.equal(result.findings[0]?.producer_node_id, "dedupe-findings");
+  assert.equal(result.findings[0]?.source_node_id, "dynamic:threat:liquidation:overdue");
+  assert.deepEqual(result.findings[0]?.source_nodes, [
+    "dynamic:threat:liquidation:overdue",
+    "dynamic:class:liquidation:fixed-term-before-overdue"
+  ]);
+
+  const tamperedDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-tamper-"));
+  fs.writeFileSync(
+    path.join(tamperedDir, "deduped-findings.json"),
+    JSON.stringify([
+      {
+        title: "Invented source",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "The review node tried to invent discovery provenance.",
+        source_nodes: ["dynamic:threat:liquidation:invented"]
+      }
+    ])
+  );
+  assert.throws(
+    () =>
+      normalizeFindings({
+        artifactDir: tamperedDir,
+        relativePath: "deduped-findings.json",
+        provenance: { producerNodeId: "dedupe-findings" },
+        preserveSourceNodes: true,
+        requireSourceNodes: true,
+        allowedSourceNodes: ["dynamic:threat:liquidation:overdue"]
+      }),
+    /not present in dependency findings/u
+  );
+});
+
+test("dedupe provenance rejects dropped corroborating sources and incomplete lifecycle coverage", () => {
+  const upstream = [
+    {
+      node_id: "dynamic:threat:liquidation:overdue",
+      artifact_path: "artifacts/threat/findings.json",
+      finding: {
+        id: "threat-finding",
+        dedupe_key: "raw:threat",
+        producer_node_id: "dynamic:threat:liquidation:overdue",
+        source_nodes: ["dynamic:threat:liquidation:overdue"]
+      }
+    },
+    {
+      node_id: "dynamic:class:liquidation:fixed-term-before-overdue",
+      artifact_path: "artifacts/class/findings.json",
+      finding: {
+        id: "class-finding",
+        dedupe_key: "raw:class",
+        producer_node_id: "dynamic:class:liquidation:fixed-term-before-overdue",
+        source_nodes: ["dynamic:class:liquidation:fixed-term-before-overdue"]
+      }
+    }
+  ];
+  const lifecycleLedger = {
+    schema_version: "1.0",
+    records: [
+      {
+        dedupe_key: "root:fixed-term-overdue",
+        source_artifacts: [
+          {
+            node_id: "dynamic:threat:liquidation:overdue",
+            finding_id: "threat-finding"
+          },
+          {
+            node_id: "dynamic:class:liquidation:fixed-term-before-overdue",
+            finding_id: "class-finding"
+          }
+        ]
+      }
+    ]
+  };
+  const expectations = buildFindingSourceExpectations({
+    upstream,
+    lifecycleLedger,
+    requireLifecycleCoverage: true
+  });
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-goal-provenance-drop-"));
+  fs.writeFileSync(
+    path.join(artifactDir, "deduped-findings.json"),
+    JSON.stringify([
+      {
+        id: "kept-finding",
+        dedupe_key: "root:fixed-term-overdue",
+        title: "Fixed-term liquidation before overdue",
+        status: "candidate",
+        severity_guess: "high",
+        confidence: "high",
+        summary: "Two focused hunters found the same lifecycle boundary bug.",
+        source_nodes: ["dynamic:threat:liquidation:overdue"]
+      }
+    ])
+  );
+  assert.throws(
+    () =>
+      normalizeFindings({
+        artifactDir,
+        relativePath: "deduped-findings.json",
+        provenance: { producerNodeId: "dedupe-findings" },
+        preserveSourceNodes: true,
+        requireSourceNodes: true,
+        allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+        sourceExpectations: expectations,
+        requireSourceExpectation: true
+      }),
+    /does not preserve the exact dependency discovery-source union/u
+  );
+
+  const complete = JSON.parse(fs.readFileSync(path.join(artifactDir, "deduped-findings.json"), "utf8")) as Array<
+    Record<string, unknown>
+  >;
+  complete[0]!.source_nodes = [
+    "dynamic:class:liquidation:fixed-term-before-overdue",
+    "dynamic:threat:liquidation:overdue"
+  ];
+  fs.writeFileSync(path.join(artifactDir, "deduped-findings.json"), JSON.stringify(complete));
+  const normalized = normalizeFindings({
+    artifactDir,
+    relativePath: "deduped-findings.json",
+    provenance: { producerNodeId: "dedupe-findings" },
+    preserveSourceNodes: true,
+    requireSourceNodes: true,
+    allowedSourceNodes: upstream.flatMap((entry) => entry.finding.source_nodes),
+    sourceExpectations: expectations,
+    requireSourceExpectation: true
+  });
+  assert.deepEqual(normalized.findings[0]?.source_nodes, [
+    "dynamic:threat:liquidation:overdue",
+    "dynamic:class:liquidation:fixed-term-before-overdue"
+  ]);
+
+  const incompleteLedger = structuredClone(lifecycleLedger);
+  incompleteLedger.records[0]!.source_artifacts.pop();
+  assert.throws(
+    () =>
+      buildFindingSourceExpectations({
+        upstream,
+        lifecycleLedger: incompleteLedger,
+        requireLifecycleCoverage: true
+      }),
+    /omitted dependency findings/u
+  );
+});
+
+test("selected vulnerability-class snapshots are manifest-backed exact artifacts", () => {
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-selected-classes-"));
+  const contents = Buffer.from("# Share inflation\n\nFocused hunter instructions.\n");
+  const selectedPath = "vulnerability-db/selected/accounting/share-inflation.md";
+  const classId = "accounting:share-inflation";
+  const classDigest = crypto.createHash("sha256").update(contents).digest("hex");
+  fs.mkdirSync(path.join(artifactDir, "vulnerability-db", "selected", "accounting"), { recursive: true });
+  fs.writeFileSync(path.join(artifactDir, selectedPath), contents);
+  const manifest = {
+    schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
+    database_schema_version: 1,
+    aggregate_sha256: digest,
+    files: {},
+    records: [
+      {
+        id: classId,
+        path: "classes/accounting/share-inflation.md",
+        sha256: classDigest,
+        size_bytes: contents.length
+      }
+    ],
+    selected_records: [
+      {
+        id: classId,
+        path: "classes/accounting/share-inflation.md",
+        artifact_path: selectedPath,
+        sha256: classDigest,
+        size_bytes: contents.length
+      }
+    ]
+  };
+  fs.writeFileSync(path.join(artifactDir, "vulnerability-db-manifest.json"), JSON.stringify(manifest));
+
+  const plan = goalPlanFixture();
+  const selectedRecord = {
+    id: classId,
+    path: selectedPath,
+    sha256: classDigest,
+    size_bytes: contents.length
+  };
+  plan.catalog_class_ids = [classId];
+  plan.class_goals = [
+    {
+      kind: "class",
+      id: classId,
+      node_id: "dynamic:class:" + classId,
+      class_id: classId,
+      class_replacement_key: "class:" + classId,
+      threat_ids: [],
+      threat_replacement_keys: ["threat-model:coverage-gap"],
+      attack_surface_ids: [],
+      coverage_gap: true,
+      title: "Share inflation",
+      selected_record: selectedRecord,
+      goal_prompt:
+        "Your /goal is to find a vulnerability of type {{class:accounting:share-inflation}} using threat model {{threat-model:coverage-gap}}.",
+      replacements: {
+        "class:accounting:share-inflation": "Focused hunter instructions.",
+        "threat-model:coverage-gap": "Inspect the full threat model because the explicit mapping is missing."
+      },
+      selection_rationale: "Applicable class exposes a coverage gap."
+    }
+  ];
+  plan.applicability_decisions = [
+    {
+      class_id: classId,
+      decision: "applicable",
+      checks: [],
+      rationale: "No hard incompatibility exists."
+    }
+  ];
+  plan.selected_class_records = [selectedRecord];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 1,
+    inapplicable_classes: 0,
+    dynamic_goals: 2,
+    total_goals: 3
+  };
+
+  const snapshots = verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan);
+  assert.deepEqual(
+    snapshots.map((snapshot) => snapshot.path),
+    [selectedPath]
+  );
+  assert.equal(snapshots[0]?.contents.equals(contents), true);
+
+  const inMemory = verifyGoalPlanSelectedRecordSnapshotBytes(plan, manifest, new Map([[selectedPath, contents]]));
+  assert.deepEqual(
+    inMemory.map((snapshot) => snapshot.path),
+    [selectedPath]
+  );
+  assert.throws(
+    () =>
+      verifyGoalPlanSelectedRecordSnapshotBytes(
+        plan,
+        manifest,
+        new Map([
+          [selectedPath, contents],
+          ["vulnerability-db/selected/accounting/unplanned.md", Buffer.from("unplanned")]
+        ])
+      ),
+    /byte map does not exactly match/u
+  );
+  const extraManifestSelection = structuredClone(manifest);
+  extraManifestSelection.selected_records.push({
+    ...extraManifestSelection.selected_records[0]!,
+    id: "accounting:unplanned",
+    artifact_path: "vulnerability-db/selected/accounting/unplanned.md"
+  });
+  assert.throws(
+    () => verifyGoalPlanSelectedRecordSnapshotBytes(plan, extraManifestSelection, new Map([[selectedPath, contents]])),
+    /selected set does not match/u
+  );
+
+  const unplannedPath = path.join(artifactDir, "vulnerability-db", "selected", "accounting", "unplanned.md");
+  fs.writeFileSync(unplannedPath, "# Unplanned\n");
+  assert.throws(() => verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan), /byte map does not exactly match/u);
+  fs.unlinkSync(unplannedPath);
+
+  fs.appendFileSync(path.join(artifactDir, selectedPath), "tampered");
+  assert.throws(() => verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan), /bytes do not match/u);
+});

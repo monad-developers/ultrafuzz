@@ -99,6 +99,11 @@ Dynamic findings:
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
+Also consume every generated child from the `threat-goals` and `class-goals`
+dynamic groups plus the fixed `goal-roaming` lane. Dynamic children are
+ordinary finding producers even when a group contains dozens or hundreds of
+nodes; never inspect only a fixed prefix of the group.
+
 Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
 
 Admin/config generated-test manifest: {{artifact_path:admin-config-boundaries}}/generated-tests.json
@@ -147,6 +152,15 @@ Preserve `property_ids` on every property-derived finding. When deduplicating
 several records into one root or family, use the stable union of their canonical
 property IDs on the kept record and relevant family variants; do not discard a
 property reference during deduplication.
+
+Treat each input finding's runtime-normalized `producer_node_id`,
+`source_nodes`, and compatibility `source_node_id` as provenance, not agent
+commentary. For every retained root, form a stable first-seen union of every
+contributing finding's `source_nodes` (or legacy `source_node_id`). Include all
+corroborating threat, class, roaming, and existing-strategy node IDs. Write the
+union to `source_nodes` and its first entry to `source_node_id`; never replace
+the discovery sources with `dedupe-findings` or a dynamic group ID. Preserve
+the relevant source union on family variants and in duplicate audit records.
 
 For every deduped finding, preserve the strategy and loop-attempt provenance of
 the kept finding plus every matching duplicate or family variant for the same

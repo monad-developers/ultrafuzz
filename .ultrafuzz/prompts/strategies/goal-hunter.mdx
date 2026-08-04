@@ -1,0 +1,42 @@
+---
+id: goal-hunter
+display_name: Dynamic goal hunter
+---
+
+# Focused vulnerability goal
+
+{{item.goal_prompt}}
+
+The first sentence above is the authoritative focused goal. Its namespaced MDX
+placeholders were resolved from this dynamic item's bounded `replacements`
+map. Do not broaden the assigned bug class or threat into unrelated generic
+review.
+
+Canonical threat model:
+{{artifact_path:threat-model}}/threat-model.json
+
+Goal plan and node mapping:
+{{artifact_path:goal-plan}}/goal-plan.json
+
+Selected vulnerability-class records:
+{{artifact_path:goal-plan}}/vulnerability-db/selected
+
+Inspect the assigned threat or class context, then trace concrete repository
+paths that could violate its invariants or preconditions. Confirm reachability,
+scope, and impact from repository evidence. Use focused native compilation or
+tests when they materially strengthen a candidate and can complete before the
+runtime finalization reserve.
+
+Do not inspect sibling runs, historical reports, benchmark ground truth,
+host-global files, package internals, or network resources. Do not invent a
+finding to satisfy the goal.
+
+Write normalized findings to `{{output_findings_path}}`. Use `[]` when no
+supported vulnerability is found. The runtime records this generated node as
+the producer; do not replace `source_node_id` or `source_nodes` with a parent
+group ID.
+
+If you create focused tests, place them below
+`{{strategy_attempt_test_dir}}` and write their ordinary manifest to
+`{{artifact_path}}/generated-tests.json`. Otherwise write the canonical empty
+generated-test manifest required by the output contract.

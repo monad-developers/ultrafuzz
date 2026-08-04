@@ -510,6 +510,56 @@ describe("prompt semantic anchors", () => {
     expect(markdown).toContain("structured `strategy_provenance` object");
   });
 
+  it("keeps threat-model-driven additive goals and provenance in the default prompts and topology", () => {
+    const topologyPath = fileURLToPath(new URL("../../../.ultrafuzz/topology.yml", import.meta.url));
+    const topology = YAML.parse(readFileSync(topologyPath, "utf8")) as {
+      nodes: Array<{
+        id: string;
+        depends_on?: string[];
+        dynamic?: { from: { node: string; path: string }; key: string; node_id: string };
+        outputs?: Array<{ path: string; contract: string }>;
+      }>;
+    };
+    const byId = new Map(topology.nodes.map((node) => [node.id, node]));
+    expect(byId.get("threat-model")?.outputs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "THREAT_MODEL.md" }),
+        expect.objectContaining({ path: "threat-model.json", contract: "ultrafuzz/threat-model@1" })
+      ])
+    );
+    expect(byId.get("goal-plan")?.depends_on).toEqual(["threat-model"]);
+    expect(byId.get("goal-roaming")?.depends_on).toEqual(["threat-model"]);
+    expect(byId.get("threat-goals")?.dynamic).toEqual({
+      from: { node: "goal-plan", path: "$.threat_goals" },
+      key: "id",
+      node_id: "dynamic:threat:{{ item.id }}"
+    });
+    expect(byId.get("class-goals")?.dynamic).toEqual({
+      from: { node: "goal-plan", path: "$.class_goals" },
+      key: "id",
+      node_id: "dynamic:class:{{ item.id }}"
+    });
+    expect(byId.get("dedupe-findings")?.depends_on).toEqual(
+      expect.arrayContaining(["goal-roaming", "threat-goals", "class-goals"])
+    );
+
+    const planner = prompt("setup/goal-plan.md");
+    const threatModel = prompt("setup/threat-model.md");
+    const smokeThreatModel = prompt("smoke/smoke-threat-model.md");
+    const hunter = prompt("strategies/goal-hunter.mdx");
+    const dedupe = prompt("review/dedupe-findings.md");
+    const report = prompt("review/final-report.md");
+    expect(planner).toContain("{{class:liquidation:fixed-term-before-overdue}}");
+    expect(planner).toContain("{{liquidation:overdue}}");
+    expect(threatModel).toContain("canonical repository-relative POSIX path");
+    expect(threatModel).toContain("existing regular file in the current task workspace");
+    expect(smokeThreatModel).toMatch(/canonical\s+repository-relative POSIX path/u);
+    expect(hunter).toContain("{{item.goal_prompt}}");
+    expect(dedupe).toContain("stable first-seen union");
+    expect(report).toContain("`source_nodes`");
+    expect(report).toContain("`THREAT_MODEL.md`");
+  });
+
   it("keeps the empty findings array contract in prompt-owned templates", () => {
     const templatePath = fileURLToPath(
       new URL("../../../.ultrafuzz/prompts/_templates/output-contract/findings.mdx", import.meta.url)

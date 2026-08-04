@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { builtInPromptRoot } from "./assets.js";
 import { parsePromptFrontmatter, PromptError, type ParsedPromptDocument, titleFromId } from "./frontmatter.js";
 import { validatePromptVariables } from "./render.js";
 
@@ -98,10 +98,6 @@ export function getPrompt(catalog: PromptCatalog, id: string): PromptCatalogEntr
 
 export function builtInPromptRelativePaths(): string[] {
   return discoverBuiltInPromptRelativePaths(builtInPromptRoot());
-}
-
-function builtInPromptRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/", import.meta.url));
 }
 
 function discoverBuiltInPromptRelativePaths(root: string): string[] {

@@ -68,6 +68,10 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import {
+  materializeVulnerabilityDatabasePlannerCatalog,
+  type MaterializedVulnerabilityDatabaseCatalog
+} from "./vulnerability-database.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
 const PROMPT_REPAIR_LOCK = ".prompt-repair";
@@ -204,6 +208,15 @@ export async function planRun(input: PlanRunInput) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
   }
 
+  let vulnerabilityDatabase: MaterializedVulnerabilityDatabaseCatalog;
+  try {
+    vulnerabilityDatabase = materializeVulnerabilityDatabasePlannerCatalog(layout.root);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([
+      diagnosticFromError(error, "vulnerability-database", "VULNERABILITY_DATABASE_MATERIALIZE_FAILED")
+    ]);
+  }
+
   let renderedPrompts: RenderedPromptPlan[];
   try {
     renderedPrompts = renderPromptsForPlan({
@@ -212,7 +225,8 @@ export async function planRun(input: PlanRunInput) {
       layout,
       projectRoot,
       resolvedConfig: resolved.config,
-      runId
+      runId,
+      vulnerabilityDatabasePath: vulnerabilityDatabase.path
     });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_RENDER_FAILED")]);
@@ -228,6 +242,13 @@ export async function planRun(input: PlanRunInput) {
     config_fingerprint: configFingerprint,
     redacted_config_fingerprint: redactedConfigFingerprint,
     execution: resolved.config.execution,
+    vulnerability_database: {
+      catalog_path: vulnerabilityDatabase.relative_path,
+      catalog_sha256: vulnerabilityDatabase.sha256,
+      planner_catalog_schema_version: vulnerabilityDatabase.schema_version,
+      database_schema_version: vulnerabilityDatabase.database_schema_version,
+      aggregate_sha256: vulnerabilityDatabase.aggregate_sha256
+    },
     topology: validation.value.topology,
     rendered_prompts: persistedRenderedPrompts,
     policy_posture: Object.fromEntries(
@@ -785,6 +806,7 @@ function renderPromptsForPlan(input: {
   projectRoot: string;
   resolvedConfig: PlanRunValue["resolved_config"];
   runId: string;
+  vulnerabilityDatabasePath: string;
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
@@ -844,7 +866,8 @@ function renderPromptsForPlan(input: {
           invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
           invariantPropertyPriorities: invariantPrioritySelection.priorities,
           invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
-          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
+          invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds,
+          vulnerabilityDatabasePath: input.vulnerabilityDatabasePath
         }
       });
       writeRenderedPrompt(result);

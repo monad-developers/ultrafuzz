@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { builtInPromptRoot } from "./assets.js";
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
 
 export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
@@ -27,7 +27,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priorities",
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
-  "strategy_attempt_test_dir"
+  "strategy_attempt_test_dir",
+  "vulnerability_database_path"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -122,6 +123,7 @@ export interface PromptRenderInput {
     invariantPropertyPriorities?: string[];
     invariantTestingSmokeTimeout?: string | number;
     invariantTestingFuzzerTimeout?: string | number;
+    vulnerabilityDatabasePath?: string;
   };
 }
 
@@ -241,7 +243,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
   let consumed = 0;
 
   for (const occurrence of findTemplateOccurrences(body)) {
-    rendered += body.slice(consumed, occurrence.start);
+    rendered += unescapePromptTemplateLiterals(body.slice(consumed, occurrence.start));
     variablesUsed.push(occurrence.name);
 
     const producer = parseArtifactProducer(occurrence.name);
@@ -272,7 +274,7 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
     rendered += value;
     consumed = occurrence.end;
   }
-  rendered += body.slice(consumed);
+  rendered += unescapePromptTemplateLiterals(body.slice(consumed));
   rendered = appendOutputContract(rendered, input, graph.current);
 
   return {
@@ -350,7 +352,7 @@ function loadOutputContractTemplate(relativePath: string): string {
 }
 
 function outputContractTemplateRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/_templates/output-contract/", import.meta.url));
+  return path.join(builtInPromptRoot(), "_templates", "output-contract");
 }
 
 export function writeRenderedPrompt(result: PromptRenderResult): string {
@@ -421,6 +423,10 @@ function findTemplateOccurrences(template: string): TemplateOccurrence[] {
     if (start === -1) {
       return occurrences;
     }
+    if (template[start - 1] === "\\") {
+      offset = start + 2;
+      continue;
+    }
     const end = template.indexOf("}}", start + 2);
     if (end === -1) {
       throw new PromptError("unclosed-template-variable", "template variable is missing a closing delimiter");
@@ -438,6 +444,10 @@ function findTemplateOccurrences(template: string): TemplateOccurrence[] {
     });
     offset = end + 2;
   }
+}
+
+function unescapePromptTemplateLiterals(template: string): string {
+  return template.replaceAll("\\{{", "{{");
 }
 
 function parseArtifactProducer(name: string): ArtifactProducer | undefined {
@@ -761,6 +771,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
+    vulnerability_database_path: input.resolvedConfig?.vulnerabilityDatabasePath ?? "unavailable",
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))
   };
 }

@@ -449,6 +449,16 @@ Render the human-readable Strategy section as a Markdown table with columns
 without percentages. Keep loop-attempt provenance in `report.json`, not in the
 human-readable Strategy section. Do not call this metric Temperature.
 
+For every production issue, render one concise `Source nodes` bullet from the
+stable `source_nodes` union in the severity-classified finding. Preserve that
+same array in the `report.json` issue and keep compatibility `source_node_id`
+equal to its first entry. Do not replace discovery sources with `final-report`.
+
+Add a concise `## Audit context` section after Run summary with links to
+`THREAT_MODEL.md`, `threat-model.json`, and `goal-plan.json`. Keep detailed
+threat content in those dedicated artifacts; do not duplicate it in
+`report.md`.
+
 ## Additional Sections
 
 Add `## Property implementation coverage` after the production issue entries
@@ -557,7 +567,8 @@ with the final rendered issue. Also include the report-specific fields
 available. Keep the canonical `strategy` field a non-empty originating strategy
 name when one is available. Store multiple strategy names, detection rates, and
 loop-attempt provenance in a structured `strategy_provenance` object for
-downstream analysis. The production issue
+downstream analysis. Preserve non-empty, unique `source_nodes` and the
+first-entry compatibility alias `source_node_id`. The production issue
 `severity_guess`, `severity`, `impact`, and `likelihood` values must use the same
 High, Medium, or Low report vocabulary rendered in Markdown. Do not add
 alternate severity fields that preserve nonstandard upstream severity labels;
@@ -590,6 +601,7 @@ Before finishing, verify that:
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
 - Production issues include a `### Strategy` detection-rate table.
+- Production issues render their complete discovery `Source nodes` union.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,
   Medium, or Low followed by a colon.
@@ -605,6 +617,8 @@ Before finishing, verify that:
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
+- `report.md` contains concise links to the dedicated threat-model and goal-plan
+  artifacts without copying their detailed analysis.
 - `report.md` contains `## Property implementation coverage` with counts that
   match the implementation handoff, or the literal `unavailable` for
   historical artifacts.

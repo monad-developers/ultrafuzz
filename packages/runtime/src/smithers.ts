@@ -330,6 +330,8 @@ export interface SmithersTaskMetadata {
     role?: string;
     promptPath?: string;
     group?: string;
+    /** Human node identity for serialized provenance; storage remains keyed by attemptId. */
+    producerNodeId?: string;
   };
   dependencies: {
     concreteNodeIds: readonly string[];

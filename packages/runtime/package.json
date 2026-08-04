@@ -27,6 +27,7 @@
     "@ultrafuzz/references": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "@ultrafuzz/topology": "workspace:*",
+    "@ultrafuzz/vulnerability-db": "workspace:*",
     "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
