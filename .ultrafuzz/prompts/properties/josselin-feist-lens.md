@@ -26,7 +26,13 @@ Base test setup:
 
 When producing structured candidates, use `josselin-feist` as the `lens_id` and `source_lens_id` for compatibility with the first implementation. The assigned source material is the Montyly rounding reference.
 
-You should create a table containing: property id (with {{strategy}}- prefix), property description, category, priority.
+You must produce a typed JSON catalog and a matching Markdown companion. Use
+`packages/artifacts/schema/property-lens.schema.json` as the JSON Schema for
+the catalog, and set every property priority to `high`, `medium`, or `low`.
+The JSON catalog is the machine-readable source of truth.
+
+Keep the Markdown table readable and identical in ids, descriptions,
+categories, and priorities. Do not put findings in either property artifact.
 
 Findings discipline: property candidates are planning material, not campaign
 findings. Do not copy the property table into `findings.json`; write `[]`
@@ -40,4 +46,6 @@ findings with `cat`, `grep`, `tr`, `wc`, pipes, redirection, or command chains.
 If you inspect the artifact after writing it, use the Read tool or one simple
 allowlisted command, then finish.
 
-Save your output into {{artifact_path}}/properties/josselin-feist.md
+Write the JSON catalog first to {{artifact_path}}/properties/josselin-feist.json,
+then write its matching Markdown companion to
+{{artifact_path}}/properties/josselin-feist.md.

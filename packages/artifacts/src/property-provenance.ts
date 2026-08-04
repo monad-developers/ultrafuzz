@@ -8,12 +8,16 @@ import {
 } from "./schema-validation.js";
 
 export const PROPERTIES_SCHEMA_VERSION = "ultrafuzz.properties.v1" as const;
+export const PROPERTY_LENS_SCHEMA_VERSION = "ultrafuzz.property-lens.v1" as const;
 export const IMPLEMENTED_PROPERTIES_SCHEMA_VERSION = "ultrafuzz.implemented-properties.v1" as const;
 export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v1" as const;
 export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties" as const;
 
 const nonEmptyString = z.string().min(1);
 const nonEmptyStringArray = z.array(nonEmptyString);
+export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
+export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
+export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
 const propertyIdsSchema = z
   .array(nonEmptyString)
   .min(1)
@@ -36,11 +40,23 @@ export interface PropertySource {
   source_property_id: string;
 }
 
+export interface LensProperty extends Record<string, unknown> {
+  id: string;
+  description: string;
+  category: string;
+  priority: PropertyPriority;
+}
+
+export interface LensPropertiesArtifact {
+  schema_version: typeof PROPERTY_LENS_SCHEMA_VERSION;
+  properties: LensProperty[];
+}
+
 export interface CanonicalProperty extends Record<string, unknown> {
   id: string;
   description: string;
   category: string;
-  priority: string;
+  priority: PropertyPriority;
   sources: PropertySource[];
 }
 
@@ -85,11 +101,37 @@ const propertySourceSchema = z.strictObject({
   source_property_id: nonEmptyString
 });
 
+const lensPropertySchema = z.strictObject({
+  id: nonEmptyString,
+  description: nonEmptyString,
+  category: nonEmptyString,
+  priority: propertyPrioritySchema
+});
+
+export const lensPropertiesSchema = z
+  .strictObject({
+    schema_version: z.literal(PROPERTY_LENS_SCHEMA_VERSION),
+    properties: z.array(lensPropertySchema).min(1)
+  })
+  .superRefine((artifact, context) => {
+    const propertyIds = new Set<string>();
+    for (const [propertyIndex, property] of artifact.properties.entries()) {
+      if (propertyIds.has(property.id)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate property ID ${JSON.stringify(property.id)}`,
+          path: ["properties", propertyIndex, "id"]
+        });
+      }
+      propertyIds.add(property.id);
+    }
+  });
+
 const canonicalPropertySchema = z.looseObject({
   id: nonEmptyString,
   description: nonEmptyString,
   category: nonEmptyString,
-  priority: nonEmptyString,
+  priority: propertyPrioritySchema,
   sources: z.array(propertySourceSchema).min(1)
 });
 
@@ -196,7 +238,7 @@ export const propertiesJsonSchema = {
           id: { type: "string", minLength: 1 },
           description: { type: "string", minLength: 1 },
           category: { type: "string", minLength: 1 },
-          priority: { type: "string", minLength: 1 },
+          priority: { enum: [...PROPERTY_PRIORITIES] },
           sources: {
             type: "array",
             minItems: 1,
@@ -216,6 +258,43 @@ export const propertiesJsonSchema = {
     }
   }
 } as const;
+
+export const lensPropertiesJsonSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: `${PROPERTIES_JSON_SCHEMA_ID}/lens`,
+  title: "Ultrafuzz property lens catalog",
+  type: "object",
+  required: ["schema_version", "properties"],
+  additionalProperties: false,
+  properties: {
+    schema_version: { const: PROPERTY_LENS_SCHEMA_VERSION },
+    properties: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        required: ["id", "description", "category", "priority"],
+        additionalProperties: false,
+        properties: {
+          id: { type: "string", minLength: 1 },
+          description: { type: "string", minLength: 1 },
+          category: { type: "string", minLength: 1 },
+          priority: { enum: [...PROPERTY_PRIORITIES] }
+        }
+      }
+    }
+  }
+} as const;
+
+export function validateLensPropertiesSchema(
+  value: unknown,
+  path = "$"
+): SchemaValidationResult<LensPropertiesArtifact> {
+  return validateWithZod(lensPropertiesSchema as z.ZodType<LensPropertiesArtifact>, value, {
+    path,
+    code: "PROPERTY_LENS_SCHEMA_INVALID"
+  });
+}
 
 export function validatePropertiesSchema(value: unknown, path = "$"): SchemaValidationResult<PropertiesArtifact> {
   return validateWithZod(propertiesSchema as z.ZodType<PropertiesArtifact>, value, {

@@ -201,6 +201,8 @@ nodes:
       - path: properties/certora.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/certora.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-crytic
@@ -214,6 +216,8 @@ nodes:
       - path: properties/crytic.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/crytic.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-runtime-verification
@@ -227,6 +231,8 @@ nodes:
       - path: properties/runtime-verification.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/runtime-verification.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-a16z
@@ -240,6 +246,8 @@ nodes:
       - path: properties/a16z.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/a16z.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-recon
@@ -253,6 +261,8 @@ nodes:
       - path: properties/recon.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/recon.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-aviggiano
@@ -266,6 +276,8 @@ nodes:
       - path: properties/aviggiano.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/aviggiano.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-0kn0t
@@ -279,6 +291,8 @@ nodes:
       - path: properties/0kn0t.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/0kn0t.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-josselin-feist
@@ -292,6 +306,8 @@ nodes:
       - path: properties/josselin-feist.md
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
+      - path: properties/josselin-feist.json
+        contract: ultrafuzz/property-lens@1
       - path: findings.json
         contract: ultrafuzz/findings@1
   - id: property-specification-fanin

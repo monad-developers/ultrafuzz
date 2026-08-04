@@ -162,6 +162,7 @@
                     "ultrafuzz/json-array@1",
                     "ultrafuzz/json-object@1",
                     "ultrafuzz/nonempty-markdown@1",
+                    "ultrafuzz/property-lens@1",
                     "ultrafuzz/properties@1",
                     "ultrafuzz/property-campaign@1",
                     "ultrafuzz/report@1",
