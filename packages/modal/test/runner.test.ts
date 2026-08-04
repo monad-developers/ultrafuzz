@@ -344,6 +344,8 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
     expect(commands).toMatch(/apt-get install[^\n]*\bzstd\b/u);
     expect(standaloneDockerfile).toMatch(/apt-get install[\s\S]*\bzstd\b/u);
+    expect(commands).toContain("RUN command -v zstd && zstd --version");
+    expect(standaloneDockerfile).toContain("RUN command -v zstd");
   });
 
   it("archives tracked files only", () => {

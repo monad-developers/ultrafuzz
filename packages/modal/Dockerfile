@@ -14,6 +14,9 @@ RUN apt-get update \
       python3 python3-pip python3-venv ripgrep tar unzip xz-utils zstd \
     && rm -rf /var/lib/apt/lists/*
 
+RUN command -v zstd \
+    && zstd --version
+
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
     && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
     && rm /tmp/node.tar.xz \
