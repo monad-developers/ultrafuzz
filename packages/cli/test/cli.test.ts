@@ -244,12 +244,34 @@ function writeJsonRecord(filePath: string, value: Record<string, unknown>): void
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function appendFixtureVulnerabilityDatabaseReference(project: string): void {
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "references.yml"),
+    [
+      "",
+      "  vulnerability-database.web3:",
+      "    kind: vulnerability-database",
+      "    provider: github",
+      "    repo: monad-developers/web3-vulnerability-database",
+      `    commit: ${"b".repeat(40)}`,
+      "    paths:",
+      "      - database.yml",
+      "      - capabilities.yml",
+      "      - catalog.json",
+      '    resolved_at: "2026-08-04T00:00:00Z"',
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
 test("init and validate emit schema-versioned launch JSON", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# owned\n", "utf8");
 
   const init = await cli(project, ["init", "--json"]);
   assert.equal(init.code, 0, init.stderr);
+  appendFixtureVulnerabilityDatabaseReference(project);
   const initBody = parseJson(init);
   assertNoSmithersSurface(initBody);
   assert.equal((initBody.data as { preserved: string[] }).preserved.includes("ultrafuzz.toml"), true);
