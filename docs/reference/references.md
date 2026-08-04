@@ -117,8 +117,8 @@ Markdown headed with the reference ID, repo, commit, and resolved timestamp.
 Non-Markdown source files are included as fenced code blocks.
 
 A `kind: vulnerability-database` reference instead materializes the validated
-checkout byte-for-byte below `vulnerability-db/` in its node artifact directory.
-Its primary output is `vulnerability-db/catalog.json`. Validation independently
+database files below `vulnerability-db/` in its node artifact directory. Its
+primary output is `vulnerability-db/catalog.json`. Validation independently
 checks the top-level schema, capability registry, strict record frontmatter and
 required sections, catalog normalization, related-class and capability
 references, every source digest and byte size, and the aggregate digest. The
