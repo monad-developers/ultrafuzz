@@ -731,7 +731,7 @@ function isDirectiveConformingMarkdown(
     containsPrivatePath(markdown) ||
     /<[A-Za-z][^>]*>/u.test(prose) ||
     /!\[[^\]]*\]\(/u.test(prose) ||
-    /(?<!\\)\]\((?!#[a-z0-9-]+\))/iu.test(prose)
+    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+))\)/iu.test(prose)
   ) {
     return false;
   }
