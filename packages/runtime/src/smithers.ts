@@ -100,6 +100,37 @@ const SMITHERS_CLI_POST_FAILURE_PATH_PATCH = `        launchPostFailureAutopsy({
           workflowPath: persistedWorkflowPath,
           enabled: options.postFailure !== false,
         });`;
+const SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE = `      restoreVcs: z.boolean().default(false).describe("Restore jj filesystem state to the source frame's revision"),
+      force: z.boolean().default(false).describe("Cross unresolved effects; mark parent needs-attention"),
+    }),`;
+const SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH = `      restoreVcs: z.boolean().default(false).describe("Restore jj filesystem state to the source frame's revision"),
+      force: z.boolean().default(false).describe("Cross unresolved effects; mark parent needs-attention"),
+      ultrafuzzPrepareOnly: z
+        .boolean()
+        .default(false)
+        .describe("Private Ultrafuzz mode: prepare the replay child without executing it"),
+    }),`;
+const SMITHERS_CLI_REPLAY_PREPARE_SOURCE = `          reportReplayResult({
+            result,
+            parentRunId: c.options.runId,
+            parentFrame: c.options.frame,
+          });
+          // Now resume the forked run`;
+const SMITHERS_CLI_REPLAY_PREPARE_PATCH = `          reportReplayResult({
+            result,
+            parentRunId: c.options.runId,
+            parentFrame: c.options.frame,
+          });
+          if (c.options.ultrafuzzPrepareOnly) {
+            return c.ok({
+              forkedRunId: result.runId,
+              parentRunId: c.options.runId,
+              parentFrame: c.options.frame,
+              vcsRestored: result.vcsRestored,
+              effectBoundary: result.effectBoundary,
+            });
+          }
+          // Now resume the forked run`;
 const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
   "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
 const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
@@ -525,6 +556,7 @@ export interface SmithersInstallationPosture {
   layout_error: string | null;
   compatibility_patches: {
     detached_admission: SmithersPatchPosture;
+    replay_prepare_only: SmithersPatchPosture;
     supervisor_descriptor: SmithersPatchPosture;
     workflow_path_persistence: SmithersPatchPosture;
   };
@@ -1618,6 +1650,7 @@ function inspectSmithersCompatibilityPatches(
   if (packageRoots.length !== 1) {
     return {
       detached_admission: "unknown",
+      replay_prepare_only: "unknown",
       supervisor_descriptor: "unknown",
       workflow_path_persistence: "unknown"
     };
@@ -1632,6 +1665,11 @@ function inspectSmithersCompatibilityPatches(
       path.join(packageRoot, "src", "detached-admission.js"),
       SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
       SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
+    ),
+    replay_prepare_only: patchPosture(
+      path.join(packageRoot, "src", "index.js"),
+      SMITHERS_CLI_REPLAY_PREPARE_PATCH,
+      SMITHERS_CLI_REPLAY_PREPARE_SOURCE
     ),
     supervisor_descriptor: patchPosture(
       path.join(packageRoot, "src", "index.js"),
@@ -2023,6 +2061,63 @@ export async function runSmithersLifecycleCommand(input: {
     };
   }
 
+  if (input.action === "replay") {
+    const replayCommand = [
+      "replay",
+      input.workflowPath,
+      "--run-id",
+      input.smithersRunId,
+      "--frame",
+      String(input.forkFrame!),
+      "--label",
+      input.correlationLabel!,
+      ...(input.force === true ? ["--force"] : []),
+      "--ultrafuzz-prepare-only",
+      "--format",
+      "json"
+    ];
+    const replayResult = await execSmithersCli({
+      args: replayCommand,
+      projectRoot: input.projectRoot,
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames,
+      keepWorkspaces: input.keepWorkspaces,
+      onSpawn: input.onExternalInvocationSpawned
+    });
+    const replayedRunId = parseForkedRunId(replayResult.stdout);
+    if (replayedRunId === undefined) {
+      throw new Error("workflow replay did not return a replayed workflow run ID");
+    }
+    const resumeCommand = [
+      "up",
+      input.workflowPath,
+      "--resume",
+      replayedRunId,
+      "--run-id",
+      replayedRunId,
+      "--force",
+      "--detach",
+      ...(input.maxConcurrency === undefined ? [] : ["--max-concurrency", String(input.maxConcurrency)]),
+      "--format",
+      "json",
+      ...supervisorCommandArgs(input.controllerLeaseSeconds)
+    ];
+    input.onDetachedInvocation?.();
+    const resumeResult = await execSmithersCli({
+      args: resumeCommand,
+      projectRoot: input.projectRoot,
+      env: input.env,
+      environmentVariableNames: input.environmentVariableNames,
+      keepWorkspaces: input.keepWorkspaces
+    });
+    return {
+      stdout: resumeResult.stdout,
+      stderr: [replayResult.stderr, resumeResult.stderr].filter((value) => value.length > 0).join("\n"),
+      command: resumeResult.command,
+      workflowRunId: replayedRunId
+    };
+  }
+
   const command =
     input.action === "resume"
       ? [
@@ -2039,43 +2134,30 @@ export async function runSmithersLifecycleCommand(input: {
           "json",
           ...supervisorCommandArgs(input.controllerLeaseSeconds)
         ]
-      : input.action === "fork"
-        ? [
-            input.action,
-            input.workflowPath,
-            "--run-id",
-            input.smithersRunId,
-            "--run",
-            "--label",
-            input.correlationLabel!,
-            "--format",
-            "json"
-          ]
-        : [
-            input.action,
-            input.workflowPath,
-            "--run-id",
-            input.smithersRunId,
-            "--frame",
-            String(input.forkFrame),
-            "--label",
-            input.correlationLabel!,
-            "--format",
-            "json"
-          ];
-  if (input.action === "resume" || input.action === "fork") input.onDetachedInvocation?.();
+      : [
+          input.action,
+          input.workflowPath,
+          "--run-id",
+          input.smithersRunId,
+          "--run",
+          "--label",
+          input.correlationLabel!,
+          "--format",
+          "json"
+        ];
+  input.onDetachedInvocation?.();
   const result = await execSmithersCli({
     args: command,
     projectRoot: input.projectRoot,
     env: input.env,
     environmentVariableNames: input.environmentVariableNames,
     keepWorkspaces: input.keepWorkspaces,
-    ...(["fork", "replay"].includes(input.action) ? { onSpawn: input.onExternalInvocationSpawned } : {})
+    ...(input.action === "fork" ? { onSpawn: input.onExternalInvocationSpawned } : {})
   });
   return {
     ...result,
     stderr: [preResumeStderr, result.stderr].filter((value) => value.length > 0).join("\n"),
-    ...(["fork", "replay"].includes(input.action) ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
+    ...(input.action === "fork" ? { workflowRunId: parseForkedRunId(result.stdout) } : {})
   };
 }
 
@@ -2836,6 +2918,18 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     SMITHERS_CLI_POST_FAILURE_PATH_SOURCE,
     SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
     "post-failure workflow path"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE,
+    SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH,
+    "replay prepare-only option"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_REPLAY_PREPARE_SOURCE,
+    SMITHERS_CLI_REPLAY_PREPARE_PATCH,
+    "replay prepare-only implementation"
   );
   writeFileDurable(cliSource, cliContents);
 

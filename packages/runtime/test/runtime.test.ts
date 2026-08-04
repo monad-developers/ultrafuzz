@@ -524,6 +524,7 @@ function fakeSmithersEnv(
       '    previous=""',
       '    for argument in "$@"; do [ "$previous" != "--frame" ] || replay_frame="$argument"; previous="$argument"; done',
       '    case "$replay_frame" in ""|*[!0-9]*) printf \'replay requires integer --frame\\n\' >&2; exit 64 ;; esac',
+      '    case " $* " in *" --ultrafuzz-prepare-only "*) ;; *) printf \'replay requires prepare-only mode\\n\' >&2; exit 65 ;; esac',
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-replayed\"}'",
       "    ;;",
       "  timeline)",
@@ -1001,6 +1002,7 @@ process.stdout.write(JSON.stringify({
       '    previous=""',
       '    for argument in "$@"; do [ "$previous" != "--frame" ] || replay_frame="$argument"; previous="$argument"; done',
       '    case "$replay_frame" in ""|*[!0-9]*) printf \'replay requires integer --frame\\n\' >&2; exit 64 ;; esac',
+      '    case " $* " in *" --ultrafuzz-prepare-only "*) ;; *) printf \'replay requires prepare-only mode\\n\' >&2; exit 65 ;; esac',
       input.replayRunId === undefined
         ? "    printf '%s\\n' '{\"ok\":true}'"
         : `    printf '%s\\n' ${shellQuote(JSON.stringify({ forkedRunId: input.replayRunId }))}`,
@@ -6238,6 +6240,18 @@ test("startRun patches the pinned runner lifecycle and resume hydration", async 
       "          workflowPath: resolvedWorkflowPath,",
       "          enabled: options.postFailure !== false,",
       "        });",
+      '      restoreVcs: z.boolean().default(false).describe("Restore jj filesystem state to the source frame\'s revision"),',
+      '      force: z.boolean().default(false).describe("Cross unresolved effects; mark parent needs-attention"),',
+      "    }),",
+      "          reportReplayResult({",
+      "            result,",
+      "            parentRunId: c.options.runId,",
+      "            parentFrame: c.options.frame,",
+      "          });",
+      "          // Now resume the forked run",
+      "          const runResult = await Effect.runPromise(",
+      "            engine.runWorkflow(workflow, {}),",
+      "          );",
       '        const supervisor = spawn("bun", supervisorArgs, {',
       "          detached: true,",
       '          stdio: ["ignore", fd, fd],',
@@ -6309,6 +6323,12 @@ test("startRun patches the pinned runner lifecycle and resume hydration", async 
   assert.match(fs.readFileSync(cliSource, "utf8"), /persistedWorkflowPathValue/u);
   assert.match(fs.readFileSync(cliSource, "utf8"), /realpathSync\(resolvedWorkflowPath\)/u);
   assert.match(fs.readFileSync(cliSource, "utf8"), /workflowPath: persistedWorkflowPath/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /ultrafuzzPrepareOnly/u);
+  assert.match(fs.readFileSync(cliSource, "utf8"), /if \(c\.options\.ultrafuzzPrepareOnly\)/u);
+  assert.ok(
+    fs.readFileSync(cliSource, "utf8").indexOf("if (c.options.ultrafuzzPrepareOnly)") <
+      fs.readFileSync(cliSource, "utf8").indexOf("engine.runWorkflow")
+  );
   assert.match(fs.readFileSync(engineSource, "utf8"), /ULTRAFUZZ_WORKFLOW_PERSISTED_PATH/u);
   assert.doesNotMatch(
     fs.readFileSync(engineSource, "utf8"),
@@ -13253,16 +13273,22 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(missingReplayFrame.diagnostics[0]?.code, "WORKFLOW_REPLAY_FRAME_REQUIRED");
   assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 2);
 
-  const replayed = await replayRun({ projectRoot: project, runId: run.value!.run_id, forkFrame: 33, env });
+  const replayed = await replayRun({
+    projectRoot: project,
+    runId: run.value!.run_id,
+    forkFrame: 33,
+    maxConcurrency: 6,
+    env
+  });
   assert.equal(replayed.ok, true, JSON.stringify(replayed.diagnostics));
   assert.equal(replayed.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
   assert.equal(replayed.value?.submitted, true);
-  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 2);
+  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 3);
 
   const missingFrame = await forkRun({ projectRoot: project, runId: run.value!.run_id, env });
   assert.equal(missingFrame.ok, false);
   assert.equal(missingFrame.diagnostics[0]?.code, "WORKFLOW_FORK_FRAME_REQUIRED");
-  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 2);
+  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 3);
 
   const forked = await forkRun({
     projectRoot: project,
@@ -13276,7 +13302,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(forked.ok, true, JSON.stringify(forked.diagnostics));
   assert.equal(forked.value?.workflow_run_id, "ultrafuzz-lifecycle-run-forked");
   assert.equal(forked.value?.submitted, true);
-  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 3);
+  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots + 4);
   const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
     workflow?: { run_id?: string };
     workflow_ids?: string[];
@@ -13301,7 +13327,11 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --frame 33 --label ultrafuzz-lifecycle-[0-9a-f]{64} --format json/
+    /replay .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run --frame 33 --label ultrafuzz-lifecycle-[0-9a-f]{64} --ultrafuzz-prepare-only --format json/
+  );
+  assert.match(
+    commands,
+    /up .*ultrafuzz-lifecycle-run\.tsx --resume ultrafuzz-lifecycle-run-replayed --run-id ultrafuzz-lifecycle-run-replayed --force --detach --max-concurrency 6 --format json --supervise --supervise-interval 10s --supervise-stale-threshold 30s --supervise-max-concurrent 1/
   );
   assert.match(
     commands,
@@ -13323,6 +13353,10 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.ok(commands.includes(`--label ${workflowLifecycleCorrelationLabel(replayAction!.action_id!)}`));
   assert.ok(commands.includes(`--label ${workflowLifecycleCorrelationLabel(forkAction!.action_id!)}`));
   assert.equal(commands.includes("--label after-edit"), false);
+  assert.ok(
+    commands.indexOf("replay ") < commands.indexOf("up ", commands.indexOf("replay ")),
+    "replay preparation must precede its detached resume"
+  );
 });
 
 test("fork and replay reject invalid checkpoint frames before journaling or invocation", async () => {
