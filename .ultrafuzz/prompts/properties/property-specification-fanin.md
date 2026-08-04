@@ -11,7 +11,13 @@ Your job is to consolidate this project's properties and invariants into a singl
 
 ## 1. Consolidate
 
-Consolidate properties from these topology-required lens artifacts into a single table:
+Consolidate properties from these topology-required lens artifacts into a single table.
+Each lens now emits `properties/<lens>.json` alongside its Markdown table. Read
+and validate every lens JSON artifact first; it is the machine-readable source
+of truth. Use the Markdown only as a human-readable companion and parity check.
+Use `{{schema_path}}/property-lens.schema.json` to validate each
+source catalog and assign every retained priority as `high`, `medium`, or
+`low`.
 
 {{ancestor_artifacts}}
 
@@ -41,28 +47,9 @@ only.
 
 ## 2. Artifacts
 
-Write `{{artifact_path}}/properties.json` first with exactly this top-level
-shape:
-
-```json
-{
-  "schema_version": "ultrafuzz.properties.v1",
-  "properties": [
-    {
-      "id": "property-1",
-      "description": "Expected property",
-      "category": "accounting",
-      "priority": "high",
-      "sources": [
-        {
-          "source_node_id": "property-specification-certora",
-          "source_property_id": "certora-1"
-        }
-      ]
-    }
-  ]
-}
-```
+Write `{{artifact_path}}/properties.json` first and validate it against
+`{{schema_path}}/properties.schema.json`. Use the schema as the
+source of truth for the required fields, types, and source records.
 
 Every property must have at least one source. Keep source pairs unique and
 canonical property IDs unique. The runtime validates this artifact before any

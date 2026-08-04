@@ -30,6 +30,7 @@ import { REMOTE_CONFIG_PATH, REMOTE_LAUNCH_READY_PATH, REMOTE_LINEAGE_PATH, remo
 import { MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES, PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION } from "../src/public-bundle.js";
 import { createModalRecoveryLifecycleDocument } from "../src/recovery-lifecycle.js";
 import {
+  CODEX_CLI_VERSION,
   KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT,
   MODAL_COLLECT_RESULT_FILES,
   ModalTerminationError,
@@ -331,6 +332,17 @@ describe("Modal benchmark termination", () => {
 });
 
 describe("Modal image source staging", () => {
+  it("pins a Codex CLI release compatible with Smithers stdin prompts", () => {
+    const commands = modalSecurityToolchainCommands().join("\n");
+    const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
+    const expected = `@openai/codex@${CODEX_CLI_VERSION}`;
+
+    expect(commands).toContain(expected);
+    expect(standaloneDockerfile).toContain(expected);
+    expect(commands).not.toContain("@openai/codex@0.144.3");
+    expect(standaloneDockerfile).not.toContain("@openai/codex@0.144.3");
+  });
+
   it("installs recon-fuzzer as the only fuzzing backend", () => {
     const commands = modalSecurityToolchainCommands().join("\n");
     const standaloneDockerfile = fs.readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");

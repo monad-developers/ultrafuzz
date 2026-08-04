@@ -254,6 +254,55 @@ async function loadGeneratedKimiAgent(project: string): Promise<{
   return { KimiCode029Agent: kimiModule.KimiCode029Agent };
 }
 
+async function loadGeneratedCodexAgent(project: string): Promise<{
+  CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+    buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+      args: string[];
+      cleanup?: () => Promise<void>;
+    }>;
+  };
+}> {
+  const fixture = path.join(project, "codex-agent-executable-test");
+  fs.mkdirSync(fixture, { recursive: true });
+  const agentsDir = path.join(project, ".smithers", "agents");
+  const smithersUrl = pathToFileURL(
+    fs.realpathSync(path.join(process.cwd(), "node_modules", "smithers-orchestrator", "src", "index.js"))
+  ).href;
+  const transpile = (source: string): string =>
+    ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true
+      }
+    }).outputText;
+  const codexSource = fs
+    .readFileSync(path.join(agentsDir, "codex.ts"), "utf8")
+    .replace('from "smithers-orchestrator"', `from ${JSON.stringify(smithersUrl)}`)
+    .replace('from "./environment"', 'from "./environment.mjs"')
+    .replace('from "./toml"', 'from "./toml.mjs"');
+  fs.writeFileSync(path.join(fixture, "codex.mjs"), transpile(codexSource), "utf8");
+  fs.writeFileSync(
+    path.join(fixture, "environment.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "environment.ts"), "utf8")),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(fixture, "toml.mjs"),
+    transpile(fs.readFileSync(path.join(agentsDir, "toml.ts"), "utf8")),
+    "utf8"
+  );
+  const codexModule = (await import(pathToFileURL(path.join(fixture, "codex.mjs")).href)) as {
+    CompatibleCodexAgent: new (options?: Record<string, unknown>) => {
+      buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
+        args: string[];
+        cleanup?: () => Promise<void>;
+      }>;
+    };
+  };
+  return { CompatibleCodexAgent: codexModule.CompatibleCodexAgent };
+}
+
 async function loadGeneratedDeepSeekAgent(project: string): Promise<{
   createDeepSeekAgent: (options?: Record<string, unknown>) => {
     buildCommand(params: { prompt: string; cwd: string; options: Record<string, unknown> }): Promise<{
@@ -1768,6 +1817,10 @@ test("init preserves existing project-owned files and validate exposes launch po
   assert.match(codexAgentText, /env: { OPENAI_API_KEY: "", CODEX_API_KEY: "" }/);
   assert.match(codexAgentText, /createCodexAgent/);
   assert.match(codexAgentText, /model_reasoning_effort:\s*options\.reasoningEffort/);
+  assert.match(codexAgentText, /class CompatibleCodexAgent extends SmithersCodexAgent/);
+  assert.match(codexAgentText, /override async buildCommand/);
+  assert.match(codexAgentText, /directories\.flatMap\(\(directory\) => \["--add-dir", directory\]\)/);
+  assert.match(codexAgentText, /params\.options\?\.resumeSession/);
   assert.match(codexAgentText, /addDir:\s*options\.addDir/);
   assert.match(codexAgentText, /sandbox:\s*"workspace-write"/);
   assert.doesNotMatch(codexAgentText, /model:\s*"gpt-5\.5"/);
@@ -2067,6 +2120,37 @@ test("agent postflight preserves provider identity and classifies canonical find
     "deepseek-v4-flash"
   );
 });
+
+test(
+  "generated Codex adapter repeats artifact directory flags and preserves resume argv",
+  { skip: !runningUnderBun },
+  async () => {
+    const project = tempProject();
+    const init = initProject({ projectRoot: project });
+    assert.equal(init.ok, true);
+    const { CompatibleCodexAgent } = await loadGeneratedCodexAgent(project);
+    const agent = new CompatibleCodexAgent({ addDir: ["/tmp/artifacts", "/tmp/dependency artifacts"] });
+
+    const fresh = await agent.buildCommand({ prompt: "test", cwd: project, options: {} });
+    const firstAddDir = fresh.args.indexOf("--add-dir");
+    assert.deepEqual(fresh.args.slice(firstAddDir, firstAddDir + 4), [
+      "--add-dir",
+      "/tmp/artifacts",
+      "--add-dir",
+      "/tmp/dependency artifacts"
+    ]);
+    assert.equal(fresh.args.at(-1), "-");
+    await fresh.cleanup?.();
+
+    const resumed = await agent.buildCommand({
+      prompt: "test",
+      cwd: project,
+      options: { resumeSession: "session-123" }
+    });
+    assert.equal(resumed.args.includes("--add-dir"), false);
+    await resumed.cleanup?.();
+  }
+);
 
 test(
   "generated DeepSeek adapter uses the official endpoint and preserves independent usage components",
@@ -5770,7 +5854,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
-  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir\]/);
+  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
+  assert.match(workflowSource, /materializePromptSchemas\(path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)\)/);
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
@@ -5806,6 +5891,8 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.equal(workflowSource.includes(`"baseCommit": ${JSON.stringify(expectedBaseCommit)}`), true);
   assert.match(workflowSource, /\{\(\) => prepareTask\(task\)\}/);
   assert.match(workflowSource, /runMetadata\.target_revision = targetRevision/);
+  assert.match(workflowSource, /function assertTaskInputs/);
+  assert.match(workflowSource, /artifact handoff directory is unavailable/);
   assert.match(workflowSource, /function canonicalEmptyArtifact/);
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);

@@ -8,9 +8,41 @@ type CodexAuthConfig = { auth?: string; api_key_env?: string; config_dir?: strin
 type CodexAuthOptions = { apiKey?: string; configDir?: string; env?: Record<string, string> };
 export type CodexTaskOptions = { model?: string; reasoningEffort?: string; addDir?: string[] };
 
+type CodexCommandParams = Parameters<SmithersCodexAgent["buildCommand"]>[0];
+type CodexCommand = Awaited<ReturnType<SmithersCodexAgent["buildCommand"]>>;
+
+/**
+ * Smithers 0.31.0 passes an `addDir` array as one flag followed by all
+ * directories. Codex accepts one directory per flag and otherwise treats the
+ * second path as the prompt, making the trailing stdin `-` fail. Rewrite only
+ * fresh commands; Smithers intentionally omits `addDir` for `exec resume`.
+ */
+export class CompatibleCodexAgent extends SmithersCodexAgent {
+  override async buildCommand(params: CodexCommandParams): Promise<CodexCommand> {
+    const command = await super.buildCommand(params);
+    const directories = this.opts.addDir ?? [];
+    if (typeof params.options?.resumeSession === "string" || directories.length <= 1) {
+      return command;
+    }
+    const addDirIndex = command.args.indexOf("--add-dir");
+    if (addDirIndex < 0) {
+      return command;
+    }
+    const replacement = directories.flatMap((directory) => ["--add-dir", directory]);
+    return {
+      ...command,
+      args: [
+        ...command.args.slice(0, addDirIndex),
+        ...replacement,
+        ...command.args.slice(addDirIndex + 1 + directories.length)
+      ]
+    };
+  }
+}
+
 export function createCodexAgent(options: CodexTaskOptions = {}): SmithersCodexAgent {
   const auth = codexAuthOptions();
-  return new SmithersCodexAgent({
+  return new CompatibleCodexAgent({
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoningEffort === undefined ? {} : { config: { model_reasoning_effort: options.reasoningEffort } }),
     ...(options.addDir === undefined ? {} : { addDir: options.addDir }),

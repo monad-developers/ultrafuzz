@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && cp ../../.ultrafuzz/topology.yml dist/topology.yml && rm -rf dist/templates && cp -R src/templates dist/templates",
-    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated (Kimi|DeepSeek)'",
+    "test": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && node scripts/run-tests.mjs && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated (Codex|Kimi|DeepSeek)'",
     "test:kimi-contract": "pnpm --filter @ultrafuzz/runtime... build && rm -rf dist-test && tsc -p tsconfig.test.json && bun test dist-test/test/runtime.test.js --test-name-pattern 'generated Kimi'",
     "typecheck": "pnpm --filter @ultrafuzz/runtime^... build && tsc -p tsconfig.json --noEmit --pretty false"
   },
