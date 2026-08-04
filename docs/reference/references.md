@@ -64,6 +64,10 @@ Synced content is stored outside the project repository:
 ${XDG_CACHE_HOME:-$HOME/.cache}/ultrafuzz/references/github/<owner>/<repo>/<commit>/
 ```
 
+Vulnerability-database references use
+`<repo>/vulnerability-database/<commit>/`, a sibling namespace that cannot
+collide with document references pinned to the same repository and commit.
+
 Each cache entry contains the requested source files plus:
 
 ```text

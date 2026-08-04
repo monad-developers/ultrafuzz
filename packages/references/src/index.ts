@@ -22,6 +22,7 @@ import {
   VULNERABILITY_DATABASE_REFERENCE_KIND,
   VULNERABILITY_DATABASE_REQUIRED_PATHS,
   parseVulnerabilityDatabaseCatalog,
+  parseVulnerabilityDatabaseGitTree,
   validateVulnerabilityDatabaseDirectory,
   validateVulnerabilityDatabaseGitTree,
   vulnerabilityDatabaseReferencePaths,
@@ -586,7 +587,11 @@ function validateReferencePath(id: string, referencePath: string): void {
 function cacheDirForRoot(reference: ReferenceEntry, root: string): string {
   const { owner, repo } = githubRepoParts(reference, "cache-path");
   const githubRoot = path.resolve(root, "github");
-  const cacheDir = path.resolve(githubRoot, owner, repo, reference.commit);
+  const commitDir = path.resolve(githubRoot, owner, repo, reference.commit);
+  const cacheDir =
+    referenceKind(reference) === "document"
+      ? commitDir
+      : path.resolve(githubRoot, owner, repo, VULNERABILITY_DATABASE_REFERENCE_KIND, reference.commit);
   assertPathInside(githubRoot, cacheDir, "reference cache path");
   return cacheDir;
 }
@@ -829,20 +834,18 @@ function effectiveCachedReferencePaths(reference: ReferenceEntry, cacheDir: stri
 }
 
 function gitTreeEntries(cwd: string, commit: string): VulnerabilityDatabaseGitTreeEntry[] {
-  const output = gitOutput(cwd, ["ls-tree", "-r", commit]);
-  return output
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => {
-      const separator = line.indexOf("\t");
-      const metadata = line.slice(0, separator).split(" ");
-      const entryPath = line.slice(separator + 1);
-      const [mode, type] = metadata;
-      if (separator < 0 || mode === undefined || type === undefined || entryPath === "") {
-        throw referenceError("INVALID_GIT_TREE", `git tree for ${commit} contains an invalid entry`);
-      }
-      return { mode, type, path: entryPath };
+  let output: Buffer;
+  try {
+    output = execFileSync("git", ["ls-tree", "-r", "-z", commit], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
     });
+  } catch (error) {
+    throw referenceError("GIT_FAILED", `git command failed: git ls-tree -r -z ${commit}: ${stderrFor(error)}`, {
+      command: ["git", "ls-tree", "-r", "-z", commit]
+    });
+  }
+  return parseVulnerabilityDatabaseGitTree(output);
 }
 
 function referenceKind(reference: ReferenceEntry): ReferenceKind {
