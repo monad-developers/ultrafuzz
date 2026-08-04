@@ -47,6 +47,7 @@ import {
   validateProject,
   loadResolvedProject,
   modelProfilesForTopology,
+  WORKFLOW_CHECKPOINT_FRAME_MAX,
   type RuntimeResult
 } from "@ultrafuzz/runtime";
 import {
@@ -2029,8 +2030,8 @@ function optionalPositiveSafeIntegerField(record: JsonObject, key: string): numb
 
 function requiredLifecycleFrame(record: JsonObject): number {
   const frame = optionalNumberField(record, "forkFrame");
-  if (frame === undefined || !Number.isSafeInteger(frame) || frame < 0) {
-    throw new HttpError(400, "forkFrame must be a non-negative safe integer");
+  if (frame === undefined || !Number.isSafeInteger(frame) || frame < 0 || frame > WORKFLOW_CHECKPOINT_FRAME_MAX) {
+    throw new HttpError(400, "forkFrame must be a non-negative 32-bit integer");
   }
   return frame;
 }

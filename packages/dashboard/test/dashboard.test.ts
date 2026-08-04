@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { initProject } from "@ultrafuzz/runtime";
+import { initProject, WORKFLOW_CHECKPOINT_FRAME_MAX } from "@ultrafuzz/runtime";
 
 import { serveDashboard } from "../src/index.js";
 
@@ -132,13 +132,30 @@ test("dashboard replay and fork require a checkpoint frame and expose it in argv
   try {
     const missing = await postLifecycle("replay", { runId: "dashboard-frame-test" });
     assert.equal(missing.status, 400);
-    assert.match(await missing.text(), /forkFrame must be a non-negative safe integer/u);
+    assert.match(await missing.text(), /forkFrame must be a non-negative 32-bit integer/u);
 
-    for (const forkFrame of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const forkFrame of [-1, 1.5, WORKFLOW_CHECKPOINT_FRAME_MAX + 1, Number.MAX_SAFE_INTEGER + 1]) {
       const invalid = await postLifecycle("replay", { forkFrame, runId: "dashboard-frame-test" });
       assert.equal(invalid.status, 400);
-      assert.match(await invalid.text(), /forkFrame must be a non-negative safe integer/u);
+      assert.match(await invalid.text(), /forkFrame must be a non-negative 32-bit integer/u);
     }
+
+    const maximum = await postLifecycle("replay", {
+      forkFrame: WORKFLOW_CHECKPOINT_FRAME_MAX,
+      runId: "dashboard-frame-test"
+    });
+    if (maximum.status !== 202) {
+      assert.fail(await maximum.text());
+    }
+    const maximumJob = (await maximum.json()) as { argv: string[]; command: string };
+    assert.deepEqual(maximumJob.argv, [
+      "ultrafuzz",
+      "replay",
+      "dashboard-frame-test",
+      "--frame",
+      String(WORKFLOW_CHECKPOINT_FRAME_MAX),
+      "--json"
+    ]);
 
     for (const command of ["replay", "fork"] as const) {
       const accepted = await postLifecycle(command, { forkFrame: 12, runId: "dashboard-frame-test" });

@@ -486,6 +486,10 @@ test("doctor reports install posture in human and JSON output", async () => {
   assert.match(human.stdout + human.stderr, /- bundled: \d+\.\d+\.\d+/u);
   assert.match(human.stdout + human.stderr, /- latest published stable: /u);
   assert.match(human.stdout + human.stderr, /- compatibility patches: detached admission /u);
+  assert.match(
+    human.stdout + human.stderr,
+    /, fork\/replay preparation (?:applied|upstream|missing|incompatible|unknown),/u
+  );
   assert.doesNotMatch(human.stdout + human.stderr, /smithers-orchestrator/u);
 
   const json = await cli(project, ["doctor", "--json"], env);

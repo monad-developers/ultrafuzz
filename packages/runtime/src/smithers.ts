@@ -131,12 +131,192 @@ const SMITHERS_CLI_REPLAY_PREPARE_PATCH = `          reportReplayResult({
             });
           }
           // Now resume the forked run`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE =
+  "          const resolvedReplayWorkflowPath = resolve(c.args.workflow);";
+const SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH = `          const resolvedReplayWorkflowPath = resolve(c.args.workflow);
+          const persistedReplayWorkflowPathValue =
+            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+          const persistedReplayWorkflowPath = persistedReplayWorkflowPathValue
+            ? resolve(persistedReplayWorkflowPathValue)
+            : resolvedReplayWorkflowPath;
+          if (realpathSync(resolvedReplayWorkflowPath) !== realpathSync(persistedReplayWorkflowPath)) {
+            return fail({
+              code: "INVALID_WORKFLOW_PATH",
+              message: "Controller replay workflow path does not match its persisted workflow path",
+              exitCode: 4,
+            });
+          }`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE = `            workflowPath: resolvedReplayWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(resolvedReplayWorkflowPath),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),`;
+const SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH = `            workflowPath: persistedReplayWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(
+              resolvedReplayWorkflowPath,
+              persistedReplayWorkflowPath,
+            ),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedReplayWorkflowPath),`;
+const SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE = "          const resolvedForkWorkflowPath = resolve(c.args.workflow);";
+const SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH = `          const resolvedForkWorkflowPath = resolve(c.args.workflow);
+          const persistedForkWorkflowPathValue =
+            process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+          const persistedForkWorkflowPath = persistedForkWorkflowPathValue
+            ? resolve(persistedForkWorkflowPathValue)
+            : resolvedForkWorkflowPath;
+          if (realpathSync(resolvedForkWorkflowPath) !== realpathSync(persistedForkWorkflowPath)) {
+            return fail({
+              code: "INVALID_WORKFLOW_PATH",
+              message: "Controller fork workflow path does not match its persisted workflow path",
+              exitCode: 4,
+            });
+          }`;
+const SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE = `            workflowPath: resolvedForkWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(resolvedForkWorkflowPath),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+const SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH = `            workflowPath: persistedForkWorkflowPath,
+            workflowHash: await readWorkflowGraphHash(
+              resolvedForkWorkflowPath,
+              persistedForkWorkflowPath,
+            ),
+            entryWorkflowHash: await readWorkflowEntryHash(resolvedForkWorkflowPath),`;
+const SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE = `      run: z.boolean().default(false).describe("Immediately start the forked run"),
+      force: z.boolean().default(false).describe("Allow --run to cross unresolved external effects"),`;
+const SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH = `      run: z.boolean().default(false).describe("Immediately start the forked run"),
+      ultrafuzzPrepareOnly: z
+        .boolean()
+        .default(false)
+        .describe("Private Ultrafuzz mode: prepare the fork child without executing it"),
+      force: z.boolean().default(false).describe("Allow --run to cross unresolved external effects"),`;
+const SMITHERS_CLI_FORK_PREPARE_SOURCE = "            autoRun: c.options.run,";
+const SMITHERS_CLI_FORK_PREPARE_PATCH = "            autoRun: c.options.run || c.options.ultrafuzzPrepareOnly,";
+const SMITHERS_CLI_FORK_FOREGROUND_SOURCE = "          if (c.options.run) {";
+const SMITHERS_CLI_FORK_FOREGROUND_PATCH = "          if (c.options.run && !c.options.ultrafuzzPrepareOnly) {";
 const SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE =
   "  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;";
-const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+const SMITHERS_ENGINE_UNSAFE_WORKFLOW_PATH_PATCH = `  const persistedWorkflowPath = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
   const resolvedWorkflowPath = opts.workflowPath
     ? resolve(persistedWorkflowPath || opts.workflowPath)
     : null;`;
+const SMITHERS_ENGINE_WORKFLOW_PATH_PATCH = `  const resolvedWorkflowPath = opts.workflowPath ? resolve(opts.workflowPath) : null;
+  const persistedWorkflowPathValue = process.env.ULTRAFUZZ_WORKFLOW_PERSISTED_PATH?.trim();
+  const persistedWorkflowPath = opts.workflowPath
+    ? resolve(persistedWorkflowPathValue || opts.workflowPath)
+    : null;
+  if (
+    resolvedWorkflowPath &&
+    persistedWorkflowPath &&
+    realpathSync(resolvedWorkflowPath) !== realpathSync(persistedWorkflowPath)
+  ) {
+    throw new SmithersError(
+      "INVALID_WORKFLOW_PATH",
+      "Controller workflow path does not match its persisted workflow path",
+    );
+  }`;
+const SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE = `/**
+ * @param {string | null} workflowPath
+ * @param {string} rootDir
+ * @returns {Promise<RunDurabilityMetadata>}
+ */
+async function getRunDurabilityMetadata(workflowPath, rootDir) {
+  const entryWorkflowHash = await readWorkflowEntryHash(workflowPath);
+  const workflowHash = await readWorkflowGraphHash(workflowPath);`;
+const SMITHERS_ENGINE_DURABILITY_METADATA_PATCH = `/**
+ * @param {string | null} workflowPath
+ * @param {string} rootDir
+ * @param {string | null} [identityWorkflowPath]
+ * @returns {Promise<RunDurabilityMetadata>}
+ */
+async function getRunDurabilityMetadata(workflowPath, rootDir, identityWorkflowPath = workflowPath) {
+  const entryWorkflowHash = await readWorkflowEntryHash(workflowPath);
+  const workflowHash = await readWorkflowGraphHash(workflowPath, identityWorkflowPath);`;
+const SMITHERS_ENGINE_RUN_METADATA_SOURCE =
+  "  const runMetadata = await getRunDurabilityMetadata(resolvedWorkflowPath, rootDir);";
+const SMITHERS_ENGINE_RUN_METADATA_PATCH = `  const runMetadata = await getRunDurabilityMetadata(
+    resolvedWorkflowPath,
+    rootDir,
+    persistedWorkflowPath,
+  );`;
+const SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE = `          runMetadata,
+          resolvedWorkflowPath,
+          {
+            acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_RESUME_IDENTITY_PATCH = `          runMetadata,
+          persistedWorkflowPath,
+          {
+            acceptWorkflowChange: "acceptWorkflowChange" in opts && opts.acceptWorkflowChange === true,`;
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE = `          workflowName: "workflow",
+          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? null,
+          workflowHash: runMetadata.workflowHash,`;
+const SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH = `          workflowName: "workflow",
+          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? null,
+          workflowHash: runMetadata.workflowHash,`;
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE = `        runConfigJson,
+        runMetadata,
+        resolvedWorkflowPath,
+      );`;
+const SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH = `        runConfigJson,
+        runMetadata,
+        persistedWorkflowPath,
+      );`;
+const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE =
+  "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
+const SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH =
+  "          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? existingRun.workflowPath ?? null,";
+const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE =
+  "          workflowPath: resolvedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
+const SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH =
+  "          workflowPath: persistedWorkflowPath ?? opts.workflowPath ?? latestRun?.workflowPath ?? null,";
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE = 'import { dirname, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH = 'import { dirname, relative, resolve } from "node:path";';
+const SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE = `/**
+ * @param {string} workflowPath
+ * @returns {Promise<string[]>}
+ */
+async function collectWorkflowModuleHashEntries(workflowPath, visited = new Set()) {
+  const resolvedPath = resolve(workflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH = `/**
+ * @param {string} workflowPath
+ * @param {string} [identityWorkflowPath]
+ * @param {Set<string>} [visited]
+ * @returns {Promise<string[]>}
+ */
+async function collectWorkflowModuleHashEntries(
+  workflowPath,
+  identityWorkflowPath = workflowPath,
+  visited = new Set(),
+) {
+  const resolvedPath = resolve(workflowPath);
+  const resolvedIdentityPath = resolve(identityWorkflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE = "  const entries = [`${resolvedPath}:${sha256Hex(source)}`];";
+const SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH = "  const entries = [`${resolvedIdentityPath}:${sha256Hex(source)}`];";
+const SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE =
+  "    entries.push(...(await collectWorkflowModuleHashEntries(importedPath, visited)));";
+const SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH = `    const importedIdentityPath = resolve(
+      dirname(resolvedIdentityPath),
+      relative(dirname(resolvedPath), importedPath),
+    );
+    entries.push(
+      ...(await collectWorkflowModuleHashEntries(importedPath, importedIdentityPath, visited)),
+    );`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE = `/**
+ * @param {string | null} workflowPath
+ * @returns {Promise<string | null>}
+ */
+export async function readWorkflowGraphHash(workflowPath) {
+  if (!workflowPath) return null;
+  try {
+    const entries = await collectWorkflowModuleHashEntries(workflowPath);`;
+const SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH = `/**
+ * @param {string | null} workflowPath
+ * @param {string | null} [identityWorkflowPath]
+ * @returns {Promise<string | null>}
+ */
+export async function readWorkflowGraphHash(workflowPath, identityWorkflowPath = workflowPath) {
+  if (!workflowPath) return null;
+  try {
+    const entries = await collectWorkflowModuleHashEntries(
+      workflowPath,
+      identityWorkflowPath || workflowPath,
+    );`;
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_SOURCE =
   "    getTaskStates: () => Effect.sync(() => cloneTaskStateMap(state.states)),";
 const SMITHERS_SCHEDULER_TERMINAL_RESTORE_PATCH = `    restoreTerminalTaskStates: (tasks) =>
@@ -1453,7 +1633,12 @@ export async function streamSmithersCommand(input: {
 }): Promise<SmithersStreamResult> {
   return withWorkflowExecutionSnapshotAnchor(input.env, (anchor) => {
     const anchored = anchoredSmithersControllerInput(input.args, input.env, anchor);
-    return streamSmithersCommandUnanchored({ ...input, ...anchored, displayArgs: input.args });
+    return streamSmithersCommandUnanchored({
+      ...input,
+      ...anchored,
+      displayArgs: input.args,
+      snapshotAnchor: anchor
+    });
   });
 }
 
@@ -1465,6 +1650,7 @@ async function streamSmithersCommandUnanchored(input: {
   maxLines: number;
   onLine: (line: string) => void | Promise<void>;
   displayArgs?: readonly string[];
+  snapshotAnchor?: WorkflowExecutionSnapshotAnchor;
 }): Promise<SmithersStreamResult> {
   const command = [...input.args];
   const displayCommand = smithersDisplayCommand(input.displayArgs ?? command);
@@ -1486,12 +1672,14 @@ async function streamSmithersCommandUnanchored(input: {
   const executableAnchor = acquireSmithersExecutableAnchor(input.env);
   let child;
   try {
+    const commandEnvironment = smithersCommandEnv(input.projectRoot, input.env);
+    input.snapshotAnchor?.assertCurrent();
     child = spawn(
       executableAnchor?.executable ?? smithersExecutable(input.projectRoot, input.env),
       [...(executableAnchor?.argumentPrefix ?? []), ...command],
       {
         cwd: input.projectRoot,
-        env: smithersCommandEnv(input.projectRoot, input.env),
+        env: commandEnvironment,
         stdio: ["ignore", "pipe", "pipe"]
       }
     );
@@ -1500,6 +1688,7 @@ async function streamSmithersCommandUnanchored(input: {
     throw error;
   }
   const reader = createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY });
+  const readerClosed = new Promise<void>((resolve) => reader.once("close", resolve));
   let lines = 0;
   let truncated = false;
   let stderr = "";
@@ -1535,22 +1724,15 @@ async function streamSmithersCommandUnanchored(input: {
     stderr = truncateDiagnosticText(`${stderr}${chunk}`);
   });
   try {
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
-      let settled = false;
-      const settle = (action: () => void): void => {
-        if (settled) return;
-        settled = true;
-        action();
-      };
+    let streamError: Error | undefined;
+    const pendingLineCallbacks: Promise<void>[] = [];
+    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       child.once("error", (error) => {
-        settle(() => {
-          reject(error);
-        });
+        streamError ??= error;
+        stopStreaming();
       });
       child.once("close", (code, signal) => {
-        settle(() => {
-          resolve({ code, signal });
-        });
+        resolve({ code, signal });
       });
       reader.on("line", (line) => {
         if (truncated || line.trim().length === 0) {
@@ -1563,16 +1745,16 @@ async function streamSmithersCommandUnanchored(input: {
         try {
           const pending = input.onLine(line);
           if (pending !== undefined) {
-            pending.catch((error: unknown) => {
-              settle(() => {
-                reject(error instanceof Error ? error : new Error(String(error)));
-              });
-            });
+            pendingLineCallbacks.push(
+              pending.catch((error: unknown) => {
+                streamError ??= error instanceof Error ? error : new Error(String(error));
+                stopStreaming();
+              })
+            );
           }
         } catch (error) {
-          settle(() => {
-            reject(error instanceof Error ? error : new Error(String(error)));
-          });
+          streamError ??= error instanceof Error ? error : new Error(String(error));
+          stopStreaming();
           return;
         }
         if (lines >= input.maxLines) {
@@ -1581,6 +1763,12 @@ async function streamSmithersCommandUnanchored(input: {
         }
       });
     });
+    // Child `close` can win the race with a consumer promise that rejects on a
+    // later turn. Wait until readline can emit no more lines, then settle every
+    // bounded callback before deciding whether streaming succeeded.
+    await readerClosed;
+    await Promise.all(pendingLineCallbacks);
+    if (streamError !== undefined) throw streamError;
     return {
       command: displayCommand,
       lines,
@@ -1666,25 +1854,153 @@ function inspectSmithersCompatibilityPatches(
       SMITHERS_CLI_DETACHED_ADMISSION_PATCH,
       SMITHERS_CLI_DETACHED_ADMISSION_SOURCE
     ),
-    replay_prepare_only: patchPosture(
-      path.join(packageRoot, "src", "index.js"),
-      SMITHERS_CLI_REPLAY_PREPARE_PATCH,
-      SMITHERS_CLI_REPLAY_PREPARE_SOURCE
+    replay_prepare_only: combinedPatchPosture(
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_REPLAY_PREPARE_OPTION_PATCH,
+        SMITHERS_CLI_REPLAY_PREPARE_OPTION_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_REPLAY_PREPARE_PATCH,
+        SMITHERS_CLI_REPLAY_PREPARE_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH,
+        SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_FORK_PREPARE_PATCH,
+        SMITHERS_CLI_FORK_PREPARE_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_FORK_FOREGROUND_PATCH,
+        SMITHERS_CLI_FORK_FOREGROUND_SOURCE
+      )
     ),
     supervisor_descriptor: patchPosture(
       path.join(packageRoot, "src", "index.js"),
       SMITHERS_CLI_SUPERVISOR_SPAWN_PATCH,
       SMITHERS_CLI_SUPERVISOR_SPAWN_SOURCE
     ),
-    workflow_path_persistence:
+    workflow_path_persistence: combinedPatchPosture(
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_WORKFLOW_PATH_IMPORT_PATCH,
+        SMITHERS_CLI_WORKFLOW_PATH_IMPORT_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_WORKFLOW_PATH_PATCH,
+        SMITHERS_CLI_WORKFLOW_PATH_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_POST_FAILURE_PATH_PATCH,
+        SMITHERS_CLI_POST_FAILURE_PATH_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
+        SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+        SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
+        SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE
+      ),
+      patchPosture(
+        path.join(packageRoot, "src", "index.js"),
+        SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
+        SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE
+      ),
       engineRoots.length !== 1
         ? "unknown"
-        : patchPosture(
-            path.join(engineRoots[0]!, "src", "engine.js"),
-            SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
-            SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE
+        : combinedPatchPosture(
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
+              SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_RUN_METADATA_PATCH,
+              SMITHERS_ENGINE_RUN_METADATA_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_RESUME_IDENTITY_PATCH,
+              SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH,
+              SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+              SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH,
+              SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "engine.js"),
+              SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
+              SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
+              SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
+              SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
+              SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
+              SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE
+            ),
+            patchPosture(
+              path.join(engineRoots[0]!, "src", "workflow-hash.js"),
+              SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
+              SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE
+            )
           )
+    )
   };
+}
+
+function combinedPatchPosture(...postures: SmithersPatchPosture[]): SmithersPatchPosture {
+  if (postures.includes("unknown")) return "unknown";
+  if (postures.includes("incompatible")) return "incompatible";
+  if (postures.includes("missing")) return "missing";
+  if (postures.every((posture) => posture === "applied")) return "applied";
+  return "upstream";
 }
 
 function patchPosture(sourcePath: string, patched: string, patchable: string): SmithersPatchPosture {
@@ -2023,6 +2339,8 @@ export async function runSmithersLifecycleCommand(input: {
       ...(input.resetNode === undefined ? [] : ["--reset-node", input.resetNode]),
       "--label",
       input.correlationLabel!,
+      ...(input.force === true ? ["--force"] : []),
+      "--ultrafuzz-prepare-only",
       "--format",
       "json"
     ];
@@ -2452,7 +2770,12 @@ async function execSmithersCli(input: {
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   return withWorkflowExecutionSnapshotAnchor(input.env, (anchor) => {
     const anchored = anchoredSmithersControllerInput(input.args, input.env, anchor);
-    return execSmithersCliUnanchored({ ...input, ...anchored, displayArgs: input.args });
+    return execSmithersCliUnanchored({
+      ...input,
+      ...anchored,
+      displayArgs: input.args,
+      snapshotAnchor: anchor
+    });
   });
 }
 
@@ -2467,6 +2790,7 @@ async function execSmithersCliUnanchored(input: {
   timeoutMs?: number;
   displayArgs?: readonly string[];
   onSpawn?: () => void;
+  snapshotAnchor?: WorkflowExecutionSnapshotAnchor;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
@@ -2478,11 +2802,18 @@ async function execSmithersCliUnanchored(input: {
     executionDeadline === undefined ? undefined : Math.max(1, Math.ceil(executionDeadline - Date.now()));
   const executableAnchor = acquireSmithersExecutableAnchor(input.env);
   try {
+    const commandEnvironment = smithersCommandEnv(
+      input.projectRoot,
+      input.env,
+      input.environmentVariableNames,
+      input.keepWorkspaces
+    );
+    input.snapshotAnchor?.assertCurrent();
     const result = await executeBoundedSmithersCommand({
       executable: executableAnchor?.executable ?? smithersExecutable(input.projectRoot, input.env),
       args: [...(executableAnchor?.argumentPrefix ?? []), ...command],
       cwd: input.projectRoot,
-      env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
+      env: commandEnvironment,
       signal: input.signal,
       timeoutMs: commandTimeoutMs,
       onSpawn: input.onSpawn
@@ -2863,7 +3194,7 @@ async function ensureSmithersDependencies(
   applySmithers031CompatibilityPatches(projectRoot);
 }
 
-function applySmithers031CompatibilityPatches(projectRoot: string): void {
+export function applySmithers031CompatibilityPatches(projectRoot: string): void {
   const nodeModules = path.join(projectRoot, ".smithers", "node_modules");
   const candidatePackageRoots = [
     path.join(nodeModules, "@smithers-orchestrator", "cli"),
@@ -2940,6 +3271,48 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     SMITHERS_CLI_REPLAY_PREPARE_PATCH,
     "replay prepare-only implementation"
   );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_REPLAY_WORKFLOW_PATH_SOURCE,
+    SMITHERS_CLI_REPLAY_WORKFLOW_PATH_PATCH,
+    "replay workflow path persistence"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_SOURCE,
+    SMITHERS_CLI_REPLAY_WORKFLOW_METADATA_PATCH,
+    "replay workflow metadata persistence"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_FORK_WORKFLOW_PATH_SOURCE,
+    SMITHERS_CLI_FORK_WORKFLOW_PATH_PATCH,
+    "fork workflow path persistence"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_FORK_WORKFLOW_METADATA_SOURCE,
+    SMITHERS_CLI_FORK_WORKFLOW_METADATA_PATCH,
+    "fork workflow metadata persistence"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_FORK_PREPARE_OPTION_SOURCE,
+    SMITHERS_CLI_FORK_PREPARE_OPTION_PATCH,
+    "fork prepare-only option"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_FORK_PREPARE_SOURCE,
+    SMITHERS_CLI_FORK_PREPARE_PATCH,
+    "fork prepare-only implementation"
+  );
+  cliContents = applyRequiredSmithersPatch(
+    cliContents,
+    SMITHERS_CLI_FORK_FOREGROUND_SOURCE,
+    SMITHERS_CLI_FORK_FOREGROUND_PATCH,
+    "fork prepare-only foreground guard"
+  );
   writeFileDurable(cliSource, cliContents);
 
   const schedulerRoots = [
@@ -2962,6 +3335,7 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
   const enginePackageJson = path.join(engineRoot, "package.json");
   const schedulerSource = path.join(schedulerRoot, "src", "makeWorkflowSession.js");
   const engineSource = path.join(engineRoot, "src", "engine.js");
+  const engineWorkflowHashSource = path.join(engineRoot, "src", "workflow-hash.js");
   for (const [label, dependencyPackageJson, dependencySource] of [
     ["scheduler", schedulerPackageJson, schedulerSource],
     ["engine", enginePackageJson, engineSource]
@@ -2973,6 +3347,7 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
       throw new Error(`installed Smithers ${label} package version must be ${SMITHERS_ORCHESTRATOR_VERSION}`);
     }
   }
+  assertRegularFileInside(nodeModules, engineWorkflowHashSource, "installed Smithers workflow hash implementation");
 
   const schedulerContents = fs.readFileSync(schedulerSource, "utf8");
   writeFileDurable(
@@ -2985,13 +3360,77 @@ function applySmithers031CompatibilityPatches(projectRoot: string): void {
     )
   );
 
-  let engineContents = fs.readFileSync(engineSource, "utf8");
-  engineContents = applyRequiredSmithersPatch(
-    engineContents,
-    SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE,
-    SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
-    "durable workflow path"
+  let engineWorkflowHashContents = fs.readFileSync(engineWorkflowHashSource, "utf8");
+  engineWorkflowHashContents = applyRequiredSmithersPatch(
+    engineWorkflowHashContents,
+    SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_HASH_IMPORT_PATCH,
+    "workflow hash path import"
   );
+  engineWorkflowHashContents = applyRequiredSmithersPatch(
+    engineWorkflowHashContents,
+    SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_HASH_COLLECT_PATCH,
+    "workflow hash read and identity paths"
+  );
+  engineWorkflowHashContents = applyRequiredSmithersPatch(
+    engineWorkflowHashContents,
+    SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_HASH_ENTRY_PATCH,
+    "workflow hash identity label"
+  );
+  engineWorkflowHashContents = applyRequiredSmithersPatch(
+    engineWorkflowHashContents,
+    SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_HASH_RECURSION_PATCH,
+    "workflow hash recursive identity"
+  );
+  engineWorkflowHashContents = applyRequiredSmithersPatch(
+    engineWorkflowHashContents,
+    SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_SOURCE,
+    SMITHERS_ENGINE_WORKFLOW_HASH_PUBLIC_PATCH,
+    "workflow hash public identity"
+  );
+  writeFileDurable(engineWorkflowHashSource, engineWorkflowHashContents);
+
+  let engineContents = fs.readFileSync(engineSource, "utf8");
+  engineContents = applyRequiredSmithersPatchFromSources(
+    engineContents,
+    [SMITHERS_ENGINE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_UNSAFE_WORKFLOW_PATH_PATCH],
+    SMITHERS_ENGINE_WORKFLOW_PATH_PATCH,
+    "anchored and durable workflow paths"
+  );
+  for (const [source, patch, label] of [
+    [
+      SMITHERS_ENGINE_DURABILITY_METADATA_SOURCE,
+      SMITHERS_ENGINE_DURABILITY_METADATA_PATCH,
+      "workflow durability hash identity"
+    ],
+    [SMITHERS_ENGINE_RUN_METADATA_SOURCE, SMITHERS_ENGINE_RUN_METADATA_PATCH, "workflow durability metadata"],
+    [SMITHERS_ENGINE_RESUME_IDENTITY_SOURCE, SMITHERS_ENGINE_RESUME_IDENTITY_PATCH, "resume workflow identity"],
+    [SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_INSERT_WORKFLOW_PATH_PATCH, "inserted workflow path"],
+    [
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_ACTIVATE_WORKFLOW_PATH_PATCH,
+      "resumed workflow path"
+    ],
+    [SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_SOURCE, SMITHERS_ENGINE_UPDATE_WORKFLOW_PATH_PATCH, "updated workflow path"],
+    [
+      SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_SOURCE,
+      SMITHERS_ENGINE_CONTINUATION_WORKFLOW_PATH_PATCH,
+      "continued workflow path"
+    ]
+  ] as const) {
+    engineContents = applyRequiredSmithersPatch(engineContents, source, patch, label);
+  }
+  // The execution path stays descriptor-anchored. Only the five durable path
+  // fields above receive the lexical identity that survives controller exit.
+  if (!engineContents.includes("workflowPath: resolvedWorkflowPath ?? opts.workflowPath,")) {
+    throw new Error("pinned workflow runner descriptor execution paths are incompatible");
+  }
+  if (!engineContents.includes("workflowPath: resolvedWorkflowPath,")) {
+    throw new Error("pinned workflow runner descriptor driver path is incompatible");
+  }
   // The scheduler session is in-memory. Restore only durable skipped tasks and
   // finished tasks whose output row still exists; genuinely pending work then
   // becomes runnable immediately without replaying every checkpointed task.
@@ -3010,6 +3449,20 @@ function applyRequiredSmithersPatch(contents: string, source: string, patch: str
     throw new Error(`pinned workflow runner ${label} is incompatible`);
   }
   return contents.replace(source, patch);
+}
+
+function applyRequiredSmithersPatchFromSources(
+  contents: string,
+  sources: readonly string[],
+  patch: string,
+  label: string
+): string {
+  if (contents.includes(patch)) return contents;
+  const matchingSources = sources.filter((source) => contents.split(source).length === 2);
+  if (matchingSources.length !== 1) {
+    throw new Error(`pinned workflow runner ${label} is incompatible`);
+  }
+  return contents.replace(matchingSources[0]!, patch);
 }
 
 function installedSmithersValidationError(projectRoot: string): string | undefined {

@@ -22,11 +22,13 @@ const SAFE_OBSERVATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/u;
 const COMMIT_MESSAGE = "Update published eval history";
 const COMMIT_AUTHOR_NAME = "ultrafuzz-eval-history-publisher[bot]";
 const COMMIT_AUTHOR_EMAIL = "308007741+ultrafuzz-eval-history-publisher[bot]@users.noreply.github.com";
-const HISTORY_PATHS = [
-  "benchmarks/history.json",
+const HISTORY_JSON_PATH = "benchmarks/history.json";
+const HISTORY_OVERVIEW_PATHS = [
   "docs/assets/eval-history/latest-summary.svg",
   "docs/assets/eval-history/quality.svg",
-  "docs/assets/eval-history/performance-cost.svg",
+  "docs/assets/eval-history/performance-cost.svg"
+];
+const HISTORY_METRIC_PATHS = [
   "docs/assets/eval-history/precision.svg",
   "docs/assets/eval-history/recall.svg",
   "docs/assets/eval-history/f1.svg",
@@ -34,6 +36,7 @@ const HISTORY_PATHS = [
   "docs/assets/eval-history/wall-clock-time.svg",
   "docs/assets/eval-history/cost.svg"
 ];
+const HISTORY_PATHS = [HISTORY_JSON_PATH, ...HISTORY_OVERVIEW_PATHS, ...HISTORY_METRIC_PATHS];
 
 export function parseEvalHistoryPublicationGeneration(value) {
   const generation = strictRecord(value, "publication generation", [
@@ -236,7 +239,7 @@ export function publishEvalHistoryGeneration(input) {
           historyBefore,
           readPublicationHistory(worktree)
         );
-        const stagedPaths = stageExactPublication(worktree, publicationKind);
+        const stagedPaths = stageExactPublication(generation, worktree, publicationKind);
         let commit = base.oid;
         let createdCommit = false;
         if (stagedPaths.length > 0) {
@@ -268,12 +271,11 @@ export function publishEvalHistoryGeneration(input) {
           redact: publisherTransportRedactions
         });
         if (push.status === 0) {
-          const published = refreshCompatibleRemoteBase(
+          const published = refreshRemoteBase(
             repositoryRoot,
             publicationRemote.pushUrl,
             publisherTransportEnvironment,
-            publisherTransportRedactions,
-            toolingCommit
+            publisherTransportRedactions
           );
           if (!isAncestor(repositoryRoot, commit, published.oid)) {
             throw new Error(`pushed commit ${commit} is not present on origin/${TARGET_BRANCH}`);
@@ -367,7 +369,7 @@ function appendGenerationWithCli(generation, worktree, cliPath, benchmarkPolicyR
   checked("node", [cliPath, "eval", "history", "--project", worktree, "--check"], { cwd: worktree });
 }
 
-function stageExactPublication(worktree, publicationKind) {
+function stageExactPublication(generation, worktree, publicationKind) {
   for (const relative of HISTORY_PATHS)
     regularFilePath(path.join(worktree, relative), `publication output ${relative}`);
   checked("git", ["add", "--", ...HISTORY_PATHS], { cwd: worktree });
@@ -378,11 +380,15 @@ function stageExactPublication(worktree, publicationKind) {
   if (unstagedTracked.length > 0) {
     throw new Error(`eval history CLI changed unexpected tracked paths: ${unstagedTracked.join(", ")}`);
   }
-  const expected = publicationKind === "first" ? HISTORY_PATHS : [];
+  const changesOverview = generation.runs.some((run) => run.benchmark === "ultrafuzz-bench");
+  const expected =
+    publicationKind === "first"
+      ? [HISTORY_JSON_PATH, ...(changesOverview ? HISTORY_OVERVIEW_PATHS : []), ...HISTORY_METRIC_PATHS]
+      : [];
   if (!samePathSet(staged, expected)) {
     throw new Error(
       publicationKind === "first"
-        ? `first automatic publication must change history and all nine charts; changed: ${staged.join(", ")}`
+        ? `first automatic publication must change history and all ${changesOverview ? "nine" : "six metric"} charts; changed: ${staged.join(", ")}`
         : `automatic publication replay must be a true zero-change rebuild; changed: ${staged.join(", ")}`
     );
   }

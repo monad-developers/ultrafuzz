@@ -40,10 +40,19 @@ import type {
   WorkflowNodeValue,
   WorkflowRunQueryInput
 } from "./types.js";
-import { runtimeFailure, runtimeResult } from "./utils.js";
+import { diagnosticFromError, runtimeFailure, runtimeResult } from "./utils.js";
 import { withLinkedWorkflowExecution } from "./workflow-sync.js";
-import { disposeWorkflowExecutionSnapshot, materializeWorkflowExecutionSnapshot } from "./workflow-integrity.js";
-import { acquireWorkflowLifecycleActionLock, acquireWorkflowMutationLock } from "./workflow-mutation.js";
+import {
+  disposeWorkflowExecutionSnapshot,
+  materializeWorkflowExecutionSnapshot,
+  sweepWorkflowExecutionSnapshotAllocations
+} from "./workflow-integrity.js";
+import {
+  acquireWorkflowLifecycleActionLock,
+  acquireWorkflowMutationLock,
+  pendingWorkflowLifecycleAction,
+  workflowLifecyclePublicBranchLabels
+} from "./workflow-mutation.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 2_000;
@@ -58,13 +67,25 @@ export async function cancelRun(input: CancelRunInput) {
   }
   let evidence = initialEvidence;
   let controllerInvocation: ReturnType<typeof appendEvent> | undefined;
+  let executionSnapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot> | undefined;
+  const cleanupDiagnostics: RuntimeDiagnostic[] = [];
   let releaseLifecycleActionLock: (() => Promise<void>) | undefined;
   try {
     releaseLifecycleActionLock = await acquireWorkflowLifecycleActionLock(evidence.layout);
     evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+    const sweep = await sweepWorkflowExecutionSnapshotAllocations({ layout: evidence.layout });
+    if (sweep.errors.length !== 0) {
+      throw new AggregateError(sweep.errors, "workflow execution snapshot cleanup could not be completed safely");
+    }
     const releaseInvocationLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+      const pending = pendingWorkflowLifecycleAction(evidence.layout);
+      if (pending !== undefined) {
+        throw new Error(
+          `cannot cancel while ${pending.action} action ${pending.action_id} requires lifecycle reconciliation`
+        );
+      }
       controllerInvocation = appendEvent(evidence.layout, {
         eventType: "workflow-lifecycle-invoking",
         status: fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending",
@@ -78,29 +99,16 @@ export async function cancelRun(input: CancelRunInput) {
     } finally {
       await releaseInvocationLock();
     }
-    const executionSnapshot = materializeWorkflowExecutionSnapshot({
+    executionSnapshot = materializeWorkflowExecutionSnapshot({
       projectRoot,
       layout: evidence.layout,
       snapshot: evidence.verifiedControl
     });
-    const cleanupDiagnostics: RuntimeDiagnostic[] = [];
-    let result;
-    try {
-      result = await requestSmithersCancel({
-        smithersRunId: evidence.smithersRunId,
-        projectRoot,
-        env: { ...input.env, ...executionSnapshot.env }
-      });
-    } finally {
-      try {
-        disposeWorkflowExecutionSnapshot(executionSnapshot);
-      } catch (error) {
-        cleanupDiagnostics.push({
-          ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),
-          severity: "warning"
-        });
-      }
-    }
+    const result = await requestSmithersCancel({
+      smithersRunId: evidence.smithersRunId,
+      projectRoot,
+      env: { ...input.env, ...executionSnapshot.env }
+    });
     const confirmed = result.status === "cancelled";
     let persistedStatus: ReturnType<typeof readRunState>["status"] | "pending" = "pending";
     let state: ReturnType<typeof updateRunStatus> | undefined;
@@ -130,6 +138,15 @@ export async function cancelRun(input: CancelRunInput) {
     } finally {
       await releaseCompletionLock();
     }
+    try {
+      await disposeWorkflowExecutionSnapshot(executionSnapshot);
+      executionSnapshot = undefined;
+    } catch (error) {
+      cleanupDiagnostics.push({
+        ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),
+        severity: "warning"
+      });
+    }
     return runtimeResult<CancelRunValue>(
       true,
       {
@@ -145,8 +162,17 @@ export async function cancelRun(input: CancelRunInput) {
     );
   } catch (error) {
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED");
+    let failureDurablyClosed = controllerInvocation === undefined;
     if (controllerInvocation !== undefined) {
-      await appendCancelFailureBestEffort(evidence, controllerInvocation, diagnostic);
+      failureDurablyClosed = await appendCancelFailureBestEffort(evidence, controllerInvocation, diagnostic);
+    }
+    if (executionSnapshot !== undefined && failureDurablyClosed) {
+      try {
+        await disposeWorkflowExecutionSnapshot(executionSnapshot);
+        executionSnapshot = undefined;
+      } catch {
+        // Preserve the cancellation failure after its durable lifecycle closure.
+      }
     }
     return runtimeFailure<CancelRunValue>([diagnostic]);
   } finally {
@@ -162,7 +188,7 @@ async function appendCancelFailureBestEffort(
   evidence: LinkedWorkflowEvidence,
   controllerInvocation: { event_id: string; timestamp: string },
   diagnostic: RuntimeDiagnostic
-): Promise<void> {
+): Promise<boolean> {
   try {
     const releaseLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
@@ -186,8 +212,10 @@ async function appendCancelFailureBestEffort(
     } finally {
       await releaseLock();
     }
+    return true;
   } catch {
     // Preserve the cancel error when its durable failure event cannot be appended.
+    return false;
   }
 }
 
@@ -252,14 +280,22 @@ export async function getRunTimeline(input: WorkflowRunQueryInput & { tree?: boo
     if (timeline === undefined) {
       return runtimeFailure<RunTimelineValue>([invalidPayloadDiagnostic("WORKFLOW_TIMELINE_INVALID")]);
     }
-    const frames = recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? []);
+    let publicBranchLabels: ReadonlyMap<string, string | null>;
+    try {
+      publicBranchLabels = workflowLifecyclePublicBranchLabels(evidence.layout);
+    } catch (error) {
+      return runtimeFailure<RunTimelineValue>([
+        diagnosticFromError(error, "runtime", "WORKFLOW_TIMELINE_LABELS_INVALID")
+      ]);
+    }
+    const frames = recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row, publicBranchLabels) ?? []);
     const lineage: RunTimelineBranch[] = [];
-    collectTimelineLineage(timeline, 0, lineage);
+    collectTimelineLineage(timeline, 0, lineage, publicBranchLabels);
     return runtimeResult<RunTimelineValue>(true, {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
       tree: input.tree === true,
-      branch: nullableString(timeline.branch),
+      branch: publicTimelineBranchLabel(timeline.branch, publicBranchLabels),
       frames,
       latest_frame: frames.length === 0 ? null : Math.max(...frames.map((frame) => frame.frame)),
       lineage
@@ -565,7 +601,10 @@ function blockerKind(value: string | null): RunBlockerKind {
   }
 }
 
-function adaptTimelineFrame(row: Record<string, unknown>): RunTimelineFrame | undefined {
+function adaptTimelineFrame(
+  row: Record<string, unknown>,
+  publicBranchLabels: ReadonlyMap<string, string | null>
+): RunTimelineFrame | undefined {
   const frame = nullableNumber(row.frameNo);
   if (frame === null) {
     // Never invent a frame number: it would be offered to `fork --frame`.
@@ -577,22 +616,35 @@ function adaptTimelineFrame(row: Record<string, unknown>): RunTimelineFrame | un
     content_hash: nullableString(row.contentHash),
     forks: recordArray(row.forks).map((fork) => ({
       run_id: stringOr(fork.runId, "unknown"),
-      branch_label: nullableString(fork.branchLabel),
+      branch_label: publicTimelineBranchLabel(fork.branchLabel, publicBranchLabels),
       description: mapNullable(nullableString(fork.forkDescription), publicWorkflowText)
     }))
   };
 }
 
-function collectTimelineLineage(timeline: Record<string, unknown>, depth: number, into: RunTimelineBranch[]): void {
+function collectTimelineLineage(
+  timeline: Record<string, unknown>,
+  depth: number,
+  into: RunTimelineBranch[],
+  publicBranchLabels: ReadonlyMap<string, string | null>
+): void {
   into.push({
     workflow_run_id: stringOr(timeline.runId, "unknown"),
-    branch: nullableString(timeline.branch),
+    branch: publicTimelineBranchLabel(timeline.branch, publicBranchLabels),
     depth,
-    frames: recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row) ?? [])
+    frames: recordArray(timeline.frames).flatMap((row) => adaptTimelineFrame(row, publicBranchLabels) ?? [])
   });
   for (const child of recordArray(timeline.children)) {
-    collectTimelineLineage(child, depth + 1, into);
+    collectTimelineLineage(child, depth + 1, into, publicBranchLabels);
   }
+}
+
+function publicTimelineBranchLabel(
+  value: unknown,
+  publicBranchLabels: ReadonlyMap<string, string | null>
+): string | null {
+  const label = nullableString(value);
+  return label !== null && publicBranchLabels.has(label) ? (publicBranchLabels.get(label) ?? null) : label;
 }
 
 function adaptSnapshot(row: Record<string, unknown>): RunSnapshot {

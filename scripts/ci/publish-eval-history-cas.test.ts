@@ -16,10 +16,8 @@ import {
 
 const SCRIPT = fileURLToPath(new URL("./publish-eval-history-cas.mjs", import.meta.url));
 const TARGET_REF = "refs/heads/main";
-const CHARTS = [
-  "latest-summary.svg",
-  "quality.svg",
-  "performance-cost.svg",
+const OVERVIEW_CHARTS = ["latest-summary.svg", "quality.svg", "performance-cost.svg"];
+const METRIC_CHARTS = [
   "precision.svg",
   "recall.svg",
   "f1.svg",
@@ -27,6 +25,7 @@ const CHARTS = [
   "wall-clock-time.svg",
   "cost.svg"
 ];
+const CHARTS = [...OVERVIEW_CHARTS, ...METRIC_CHARTS];
 const temporaryRoots: string[] = [];
 
 afterEach(() => {
@@ -93,12 +92,15 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(beforeRetry);
     expect(Number(git(fixture.bare, ["rev-list", "--count", `${candidateCommit}..${TARGET_REF}`]))).toBe(2);
     expect(git(fixture.bare, ["diff", "--name-only", candidateCommit, TARGET_REF]).trim().split("\n")).toEqual(
-      ["benchmarks/history.json", ...CHARTS.map((chart) => `docs/assets/eval-history/${chart}`).sort()].sort()
+      ["benchmarks/history.json", ...METRIC_CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
     );
-    for (const chart of CHARTS) {
+    for (const chart of METRIC_CHARTS) {
       expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(
         `${chart}:observation-a,observation-a-2,observation-b\n`
       );
+    }
+    for (const chart of OVERVIEW_CHARTS) {
+      expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(`${chart}:\n`);
     }
   }, 30_000);
 
@@ -133,10 +135,13 @@ describe("eval history Git CAS publisher", () => {
       "observation-b",
       "observation-main"
     ]);
-    for (const chart of CHARTS) {
+    for (const chart of METRIC_CHARTS) {
       expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(
         `${chart}:observation-a,observation-b,observation-main\n`
       );
+    }
+    for (const chart of OVERVIEW_CHARTS) {
+      expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(`${chart}:\n`);
     }
 
     const retried = await invokePublisher(fixture.checkoutA, generationB, inputRoot);
@@ -160,11 +165,56 @@ describe("eval history Git CAS publisher", () => {
     expect(git(fixture.bare, ["rev-parse", TARGET_REF]).trim()).toBe(publishedTarget);
   }, 30_000);
 
-  it("atomically publishes exactly three observations and all nine charts", () => {
+  it("accepts a descendant main advancement after its publication push succeeds", () => {
     const fixture = createRepositoryFixture();
     const inputRoot = path.join(fixture.root, "inputs");
     const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
-    writeEvalRun(inputRoot, "run-three", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    writeEvalRun(inputRoot, "run-post-push", "observation-post-push", candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-post-push.json", ["run-post-push"], candidateCommit);
+    installPostPushMainAdvancementHook(fixture.bare);
+
+    const published = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
+
+    expect(published).toMatchObject({ branch: "main", published: true, attempts: 1 });
+    const advancedTarget = git(fixture.bare, ["rev-parse", TARGET_REF]).trim();
+    expect(advancedTarget).not.toBe(published.commit);
+    expect(git(fixture.bare, ["rev-parse", `${TARGET_REF}^`]).trim()).toBe(published.commit);
+    expect(gitStatus(fixture.bare, ["merge-base", "--is-ancestor", published.commit, advancedTarget])).toBe(0);
+    expect(git(fixture.bare, ["show", `${TARGET_REF}:post-push-advancement.txt`])).toBe(
+      "advanced after successful publication push\n"
+    );
+  });
+
+  it("atomically publishes EVMBench history and only the six benchmark-wide charts", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(inputRoot, "run-evmbench", ["observation-a", "observation-b", "observation-c"], candidateCommit);
+    const generation = writeGeneration(fixture.root, "generation-evmbench.json", ["run-evmbench"], candidateCommit);
+
+    const published = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
+
+    expect(published).toMatchObject({ published: true, attempts: 1 });
+    const parent = git(fixture.bare, ["rev-parse", `${TARGET_REF}^`]).trim();
+    expect(git(fixture.bare, ["diff", "--name-only", parent, TARGET_REF]).trim().split("\n").sort()).toEqual(
+      ["benchmarks/history.json", ...METRIC_CHARTS.map((chart) => `docs/assets/eval-history/${chart}`)].sort()
+    );
+    for (const chart of OVERVIEW_CHARTS) {
+      expect(git(fixture.bare, ["show", `${TARGET_REF}:docs/assets/eval-history/${chart}`])).toBe(`${chart}:\n`);
+    }
+  });
+
+  it("atomically publishes exactly three UltrafuzzBench observations and all nine charts", () => {
+    const fixture = createRepositoryFixture();
+    const inputRoot = path.join(fixture.root, "inputs");
+    const candidateCommit = git(fixture.checkoutA, ["rev-parse", "HEAD"]).trim();
+    writeEvalRun(
+      inputRoot,
+      "run-three",
+      ["observation-a", "observation-b", "observation-c"],
+      candidateCommit,
+      "ultrafuzz-bench"
+    );
     const generation = writeGeneration(fixture.root, "generation-three.json", ["run-three"], candidateCommit);
 
     const published = publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot));
@@ -213,7 +263,7 @@ describe("eval history Git CAS publisher", () => {
     process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS = "1";
     try {
       expect(() => publishEvalHistoryGeneration(publisherInput(fixture.checkoutA, generation, inputRoot))).toThrow(
-        /must change history and all nine charts/u
+        /must change history and all six metric charts/u
       );
     } finally {
       if (previous === undefined) delete process.env.ULTRAFUZZ_HISTORY_CAS_TEST_SUBSET_CHARTS;
@@ -768,6 +818,39 @@ function createRepositoryFixture(): { root: string; bare: string; seed: string; 
   return { root, bare, seed, checkoutA, checkoutB };
 }
 
+function installPostPushMainAdvancementHook(bare: string): void {
+  const hook = path.join(bare, "hooks", "post-receive");
+  writeFile(
+    hook,
+    String.raw`#!/bin/sh
+set -eu
+
+marker="$(git rev-parse --git-dir)/hooks/post-receive-advanced"
+while read -r _old_rev new_rev ref_name; do
+  if [ "$ref_name" != "refs/heads/main" ] || [ -e "$marker" ]; then
+    continue
+  fi
+  index_file="$(mktemp)"
+  rm -f "$index_file"
+  trap 'rm -f "$index_file"' EXIT HUP INT TERM
+  GIT_INDEX_FILE="$index_file" git read-tree "$new_rev"
+  blob_oid="$(printf '%s\n' 'advanced after successful publication push' | git hash-object -w --stdin)"
+  GIT_INDEX_FILE="$index_file" git update-index --add --cacheinfo 100644 "$blob_oid" post-push-advancement.txt
+  tree_oid="$(GIT_INDEX_FILE="$index_file" git write-tree)"
+  commit_oid="$(printf '%s\n' 'Advance main after publication push' | env \
+    GIT_AUTHOR_NAME=Fixture \
+    GIT_AUTHOR_EMAIL=fixture@example.com \
+    GIT_COMMITTER_NAME=Fixture \
+    GIT_COMMITTER_EMAIL=fixture@example.com \
+    git commit-tree "$tree_oid" -p "$new_rev")"
+  git update-ref "$ref_name" "$commit_oid" "$new_rev"
+  : > "$marker"
+done
+`
+  );
+  fs.chmodSync(hook, 0o700);
+}
+
 function installFixtureCli(checkout: string): void {
   writeFile(
     path.join(checkout, "packages", "cli", "dist", "index.js"),
@@ -775,10 +858,12 @@ function installFixtureCli(checkout: string): void {
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-const charts = [
+const overviewCharts = [
   "latest-summary.svg",
   "quality.svg",
-  "performance-cost.svg",
+  "performance-cost.svg"
+];
+const metricCharts = [
   "precision.svg",
   "recall.svg",
   "f1.svg",
@@ -832,7 +917,14 @@ if (process.env.ULTRAFUZZ_HISTORY_CAS_TEST_MUTATE_WORKTREE_HTTP === "1") {
 
 function expectedCharts(history) {
   const ids = history.observations.map((entry) => entry.id).sort();
-  return new Map(charts.map((file) => [file, file + ":" + ids.join(",") + "\n"]));
+  const overviewIds = history.observations
+    .filter((entry) => entry.benchmark === "ultrafuzz-bench")
+    .map((entry) => entry.id)
+    .sort();
+  return new Map([
+    ...overviewCharts.map((file) => [file, file + ":" + overviewIds.join(",") + "\n"]),
+    ...metricCharts.map((file) => [file, file + ":" + ids.join(",") + "\n"])
+  ]);
 }
 
 function selectedCharts(history) {
@@ -889,7 +981,8 @@ function writeEvalRun(
   inputRoot: string,
   evalRunId: string,
   observationIds: string | string[],
-  candidateCommit: string
+  candidateCommit: string,
+  benchmark: "evmbench" | "ultrafuzz-bench" = "evmbench"
 ): void {
   const ids = Array.isArray(observationIds) ? observationIds : [observationIds];
   writeFile(
@@ -898,7 +991,9 @@ function writeEvalRun(
       {
         eval_run_id: evalRunId,
         provenance: { candidate: { commit: candidateCommit } },
-        observations: ids.map((id, index) => fixtureObservation(evalRunId, id, `target-${index + 1}`, candidateCommit))
+        observations: ids.map((id, index) =>
+          fixtureObservation(evalRunId, id, `target-${index + 1}`, candidateCommit, benchmark)
+        )
       },
       null,
       2
@@ -925,7 +1020,7 @@ function writeGeneration(
     };
     return {
       eval_run_id: evalRunId,
-      benchmark: "evmbench",
+      benchmark: evalManifest.observations[0]!.benchmark,
       lane: "smoke",
       status: "succeeded",
       input_path: evalRunId,
@@ -955,14 +1050,20 @@ function writeGeneration(
   return generationPath;
 }
 
-function fixtureObservation(evalRunId: string, id: string, target: string, candidateCommit: string) {
+function fixtureObservation(
+  evalRunId: string,
+  id: string,
+  target: string,
+  candidateCommit: string,
+  benchmark: "evmbench" | "ultrafuzz-bench"
+) {
   return {
     id,
     source_eval_run_id: evalRunId,
     source_artifact: "https://github.com/monad-developers/ultrafuzz/actions/runs/123",
     target,
     candidate_commit: candidateCommit,
-    benchmark: "evmbench",
+    benchmark,
     lane: "smoke",
     status: "succeeded",
     executed_case_count: 1,
@@ -974,17 +1075,12 @@ function fixtureObservation(evalRunId: string, id: string, target: string, candi
 function appendFixtureHistoryObservation(root: string, observationId: string, evalRunId: string): void {
   const historyPath = path.join(root, "benchmarks", "history.json");
   const history = JSON.parse(fs.readFileSync(historyPath, "utf8")) as {
-    observations: Array<{ id: string; source_eval_run_id: string }>;
+    observations: Array<{ id: string; source_eval_run_id: string; benchmark: "evmbench" }>;
   };
-  history.observations.push({ id: observationId, source_eval_run_id: evalRunId });
+  history.observations.push({ id: observationId, source_eval_run_id: evalRunId, benchmark: "evmbench" });
   history.observations.sort((left, right) => left.id.localeCompare(right.id));
   fs.writeFileSync(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
-  for (const chart of CHARTS) {
-    writeFile(
-      path.join(root, "docs", "assets", "eval-history", chart),
-      `${chart}:${history.observations.map((entry) => entry.id).join(",")}\n`
-    );
-  }
+  writeFixtureCharts(root, history.observations);
 }
 
 function appendFixtureHistoryValue(root: string, observation: ReturnType<typeof fixtureObservation>): void {
@@ -995,11 +1091,23 @@ function appendFixtureHistoryValue(root: string, observation: ReturnType<typeof 
   history.observations.push(observation);
   history.observations.sort((left, right) => left.id.localeCompare(right.id));
   fs.writeFileSync(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
-  for (const chart of CHARTS) {
-    writeFile(
-      path.join(root, "docs", "assets", "eval-history", chart),
-      `${chart}:${history.observations.map((entry) => entry.id).join(",")}\n`
-    );
+  writeFixtureCharts(root, history.observations);
+}
+
+function writeFixtureCharts(
+  root: string,
+  observations: Array<{ id: string; benchmark?: "evmbench" | "ultrafuzz-bench" }>
+): void {
+  const ids = observations.map((entry) => entry.id).sort();
+  const overviewIds = observations
+    .filter((entry) => entry.benchmark === "ultrafuzz-bench")
+    .map((entry) => entry.id)
+    .sort();
+  for (const chart of OVERVIEW_CHARTS) {
+    writeFile(path.join(root, "docs", "assets", "eval-history", chart), `${chart}:${overviewIds.join(",")}\n`);
+  }
+  for (const chart of METRIC_CHARTS) {
+    writeFile(path.join(root, "docs", "assets", "eval-history", chart), `${chart}:${ids.join(",")}\n`);
   }
 }
 

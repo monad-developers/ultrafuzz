@@ -83,7 +83,9 @@ import type {
 import {
   disposeWorkflowExecutionSnapshot,
   materializeWorkflowExecutionSnapshot,
+  recoverWorkflowExecutionSnapshot,
   sealWorkflowControlFiles,
+  sweepWorkflowExecutionSnapshotAllocations,
   verifyWorkflowControlSnapshot,
   workflowControlPaths,
   type WorkflowExecutionControlFile,
@@ -435,6 +437,7 @@ async function reconcileInitialStartSubmission(input: {
   persistForgeGuardMetadata(input.plan.layout, input.plan.resolved_config, forgeGuard.active);
 
   let submission: StartSubmissionDocument;
+  await sweepWorkflowExecutionSnapshotsOrThrow(input.plan.layout);
   let release = await acquireWorkflowMutationLock(input.plan.layout);
   try {
     submission = ensureStartSubmissionIntent(input.plan.layout, identity);
@@ -472,11 +475,11 @@ async function reconcileInitialStartSubmission(input: {
           })
         });
       } catch (error) {
-        disposeStartReconciliationSnapshot(reconciliationSnapshot);
+        await disposeStartReconciliationSnapshot(reconciliationSnapshot);
         throw error;
       }
       if (existence.status === "present") {
-        cleanupDiagnostics.push(...disposeTransientWorkflowExecutionSnapshot(reconciliationSnapshot));
+        cleanupDiagnostics.push(...(await disposeTransientWorkflowExecutionSnapshot(reconciliationSnapshot)));
         const evidence = persistRecoveredStartSubmissionEvidence(input.plan.layout, submission, existence);
         submission = await recordStartSubmissionExternalEvidence(input.plan.layout, submission, evidence);
       } else if (existence.status === "absent") {
@@ -487,7 +490,7 @@ async function reconcileInitialStartSubmission(input: {
           executionSnapshot: reconciliationSnapshot
         });
       } else {
-        disposeStartReconciliationSnapshot(reconciliationSnapshot);
+        await disposeStartReconciliationSnapshot(reconciliationSnapshot);
         throw new StartSubmissionReconciliationError(
           `detached workflow submission cannot be reconciled safely: ${existence.reason}`
         );
@@ -632,7 +635,7 @@ async function invokeInitialStartSubmission(input: {
       await release();
     }
   } catch (error) {
-    disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
+    await disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
     throw error;
   }
 
@@ -666,15 +669,17 @@ async function invokeInitialStartSubmission(input: {
   return recordStartSubmissionExternalEvidence(input.plan.layout, submission, evidence);
 }
 
-function disposeStartReconciliationSnapshot(snapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot>): void {
-  disposeWorkflowExecutionSnapshotBestEffort(snapshot);
+async function disposeStartReconciliationSnapshot(
+  snapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot>
+): Promise<void> {
+  await disposeWorkflowExecutionSnapshotBestEffort(snapshot);
 }
 
-function disposeTransientWorkflowExecutionSnapshot(
+async function disposeTransientWorkflowExecutionSnapshot(
   snapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot>
-): RuntimeDiagnostic[] {
+): Promise<RuntimeDiagnostic[]> {
   try {
-    disposeWorkflowExecutionSnapshot(snapshot);
+    await disposeWorkflowExecutionSnapshot(snapshot);
     return [];
   } catch (error) {
     return [
@@ -686,12 +691,19 @@ function disposeTransientWorkflowExecutionSnapshot(
   }
 }
 
-function disposeWorkflowExecutionSnapshotBestEffort(
+async function disposeWorkflowExecutionSnapshotBestEffort(
   snapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot>
-): void {
+): Promise<void> {
   // Snapshot cleanup must never replace the command or reconciliation outcome
   // that determines whether a detached workflow may still be running.
-  disposeTransientWorkflowExecutionSnapshot(snapshot);
+  await disposeTransientWorkflowExecutionSnapshot(snapshot);
+}
+
+async function sweepWorkflowExecutionSnapshotsOrThrow(layout: RunLayout): Promise<void> {
+  const sweep = await sweepWorkflowExecutionSnapshotAllocations({ layout });
+  if (sweep.errors.length !== 0) {
+    throw new AggregateError(sweep.errors, "workflow execution snapshot cleanup could not be completed safely");
+  }
 }
 
 interface StartSubmissionExternalEvidence {
@@ -1243,9 +1255,16 @@ export async function pauseRun(input: PauseRunInput) {
   try {
     releaseLifecycleActionLock = await acquireWorkflowLifecycleActionLock(evidence.layout);
     evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+    await sweepWorkflowExecutionSnapshotsOrThrow(evidence.layout);
     const releaseInvocationLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+      const pending = pendingWorkflowLifecycleAction(evidence.layout);
+      if (pending !== undefined) {
+        throw new Error(
+          `cannot pause while ${pending.action} action ${pending.action_id} requires lifecycle reconciliation`
+        );
+      }
       controllerInvocation = appendEvent(evidence.layout, {
         eventType: "workflow-lifecycle-invoking",
         status: readRunState(evidence.layout).status,
@@ -1264,17 +1283,11 @@ export async function pauseRun(input: PauseRunInput) {
       layout: evidence.layout,
       snapshot: evidence.verifiedControl
     });
-    let result;
-    try {
-      result = await requestSmithersPause({
-        smithersRunId: evidence.smithersRunId,
-        projectRoot,
-        env: { ...input.env, ...executionSnapshot.env }
-      });
-    } finally {
-      cleanupDiagnostics.push(...disposeTransientWorkflowExecutionSnapshot(executionSnapshot));
-      executionSnapshot = undefined;
-    }
+    const result = await requestSmithersPause({
+      smithersRunId: evidence.smithersRunId,
+      projectRoot,
+      env: { ...input.env, ...executionSnapshot.env }
+    });
     const releaseCompletionLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
@@ -1296,6 +1309,8 @@ export async function pauseRun(input: PauseRunInput) {
     } finally {
       await releaseCompletionLock();
     }
+    cleanupDiagnostics.push(...(await disposeTransientWorkflowExecutionSnapshot(executionSnapshot)));
+    executionSnapshot = undefined;
     return runtimeResult(
       true,
       {
@@ -1308,12 +1323,18 @@ export async function pauseRun(input: PauseRunInput) {
       cleanupDiagnostics
     );
   } catch (error) {
-    if (executionSnapshot !== undefined) {
-      disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
-    }
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_PAUSE_FAILED");
+    let failureDurablyClosed = controllerInvocation === undefined;
     if (controllerInvocation !== undefined) {
-      await appendLifecycleFailureBestEffort(evidence, "pause", controllerInvocation, diagnostic);
+      failureDurablyClosed = await appendLifecycleFailureBestEffort(
+        evidence,
+        "pause",
+        controllerInvocation,
+        diagnostic
+      );
+    }
+    if (executionSnapshot !== undefined && failureDurablyClosed) {
+      await disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
     }
     return runtimeFailure<PauseRunValue>([diagnostic]);
   } finally {
@@ -1384,6 +1405,8 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
   let releaseLifecycleActionLock: (() => Promise<void>) | undefined;
   try {
     releaseLifecycleActionLock = await acquireWorkflowLifecycleActionLock(evidence.layout);
+    evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+    await sweepWorkflowExecutionSnapshotsOrThrow(evidence.layout);
     evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
     const pending = pendingWorkflowLifecycleAction(evidence.layout);
     if (pending !== undefined) {
@@ -1478,6 +1501,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           workflow_run_id: evidence.smithersRunId,
           control_generation: evidence.controlGeneration,
           workflow_link_id: evidence.workflowLinkId,
+          execution_snapshot_root: executionSnapshot.root,
           ...(journalEntry === undefined ? {} : { lifecycle_action_id: journalEntry.action_id })
         }
       });
@@ -1538,6 +1562,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       // executable lookup, and spawn failures remain safe to retry in-process.
       onExternalInvocationSpawned: () => {
         externalNonIdempotentInvocationStarted = true;
+        retainExecutionSnapshot = true;
       },
       ...(journalEntry === undefined
         ? {}
@@ -1568,10 +1593,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       assertExactLifecycleChild(journalEntry, lifecycleResult.workflowRunId, returnedChildTimeline);
     }
     if (lifecycleResult.alreadyRunning === true) retainExecutionSnapshot = false;
-    if (!retainExecutionSnapshot) {
-      cleanupDiagnostics.push(...disposeTransientWorkflowExecutionSnapshot(executionSnapshot));
-      executionSnapshot = undefined;
-    }
     lifecycleWorkflowRunId = lifecycleResult.workflowRunId ?? evidence.smithersRunId;
     if (journalEntry !== undefined) {
       if (
@@ -1680,6 +1701,10 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     } finally {
       await releaseCompletionLock();
     }
+    if (!retainExecutionSnapshot && executionSnapshot !== undefined) {
+      cleanupDiagnostics.push(...(await disposeTransientWorkflowExecutionSnapshot(executionSnapshot)));
+      executionSnapshot = undefined;
+    }
     return runtimeResult(
       true,
       {
@@ -1691,11 +1716,9 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       cleanupDiagnostics
     );
   } catch (error) {
-    if (executionSnapshot !== undefined && !retainExecutionSnapshot) {
-      disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
-    }
     const diagnostic = smithersDiagnostic(error, "WORKFLOW_LIFECYCLE_FAILED");
     const uncertainNonIdempotentAction = externalNonIdempotentInvocationStarted;
+    let failureDurablyClosed = controllerInvocation === undefined;
     if (externalNonIdempotentInvocationStarted && journalEntry !== undefined) {
       if (journalEntry.phase === "reconciled" && journalEntry.external_workflow_run_id !== undefined) {
         return runtimeResult(true, {
@@ -1725,29 +1748,18 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       }
     }
     if (controllerInvocation !== undefined && !uncertainNonIdempotentAction) {
-      await appendLifecycleFailureBestEffort(
+      failureDurablyClosed = await appendLifecycleFailureBestEffort(
         evidence,
         action,
         controllerInvocation,
         diagnostic,
-        lifecycleWorkflowRunId
+        lifecycleWorkflowRunId,
+        journalEntry?.action_id
       );
-      if (journalEntry !== undefined) {
-        try {
-          const releaseJournalFailureLock = await acquireWorkflowMutationLock(evidence.layout);
-          try {
-            if (pendingWorkflowLifecycleAction(evidence.layout)?.action_id === journalEntry.action_id) {
-              transitionWorkflowLifecycleAction(evidence.layout, journalEntry.action_id, "failed", {
-                reconciliation_reason: diagnostic.message
-              });
-            }
-          } finally {
-            await releaseJournalFailureLock();
-          }
-        } catch {
-          // Preserve the lifecycle command failure when journal finalization fails.
-        }
-      }
+    }
+    if (executionSnapshot !== undefined && !retainExecutionSnapshot && failureDurablyClosed) {
+      await disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
+      executionSnapshot = undefined;
     }
     return runtimeFailure<WorkflowLifecycleValue>([diagnostic]);
   } finally {
@@ -1774,12 +1786,15 @@ async function closeOrphanedWorkflowLifecycleInvocation(
       throw new Error("uncertain fork/replay invocation has no lifecycle journal and cannot be repeated safely");
     }
     const persistedStatus = readRunState(layout).status;
+    const workflowLink = verifyCommittedWorkflowRunLink(layout);
     appendEvent(layout, {
       eventType: "workflow-lifecycle-failed",
       status: persistedStatus,
       payload: {
         action: generation.action ?? fallbackAction,
         workflow_run_id: generation.workflowRunId ?? fallbackWorkflowRunId,
+        control_generation: workflowLink.control_generation,
+        workflow_link_id: generation.workflowLinkId ?? workflowLink.link_id,
         controller_invocation_id: generation.eventId,
         ...(generation.eventTimestamp === undefined ? {} : { controller_invoked_at: generation.eventTimestamp }),
         run_status: persistedStatus,
@@ -1789,6 +1804,124 @@ async function closeOrphanedWorkflowLifecycleInvocation(
   } finally {
     await releaseMutationLock();
   }
+}
+
+interface WorkflowLifecycleInvocationEvidence {
+  eventId: string;
+  timestamp: string;
+  executionSnapshotRoot?: string;
+}
+
+function workflowLifecycleInvocationEvidence(
+  layout: RunLayout,
+  entry: WorkflowLifecycleActionJournalEntry
+): WorkflowLifecycleInvocationEvidence | undefined {
+  const matches = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => {
+    const payload = objectRecord(event.payload);
+    return event.event_type === "workflow-lifecycle-invoking" && payload.lifecycle_action_id === entry.action_id;
+  });
+  if (matches.length > 1) {
+    throw new Error("pending lifecycle action has duplicate controller invocation events");
+  }
+  const event = matches[0];
+  if (event === undefined) return undefined;
+  const payload = objectRecord(event.payload);
+  if (
+    payload.action !== entry.action ||
+    payload.workflow_run_id !== entry.source_workflow_run_id ||
+    payload.control_generation !== entry.control_generation ||
+    payload.workflow_link_id !== entry.source_workflow_link_id ||
+    payload.lifecycle_action_id !== entry.action_id ||
+    (entry.controller_invocation_id !== undefined && entry.controller_invocation_id !== event.event_id) ||
+    (entry.controller_invoked_at !== undefined && entry.controller_invoked_at !== event.timestamp)
+  ) {
+    throw new Error("pending lifecycle action controller invocation event conflicts with its journal fence");
+  }
+  const snapshotRoot = payload.execution_snapshot_root;
+  if (
+    snapshotRoot !== undefined &&
+    (typeof snapshotRoot !== "string" || !path.isAbsolute(snapshotRoot) || path.resolve(snapshotRoot) !== snapshotRoot)
+  ) {
+    throw new Error("pending lifecycle action has an invalid retained execution snapshot root");
+  }
+  return {
+    eventId: event.event_id,
+    timestamp: event.timestamp,
+    ...(typeof snapshotRoot === "string" ? { executionSnapshotRoot: snapshotRoot } : {})
+  };
+}
+
+function workflowLifecycleInvocationSnapshotRoot(
+  layout: RunLayout,
+  entry: WorkflowLifecycleActionJournalEntry
+): string | undefined {
+  const invocation = workflowLifecycleInvocationEvidence(layout, entry);
+  if (invocation === undefined) {
+    throw new Error("pending lifecycle action is missing its durable controller invocation event");
+  }
+  return invocation.executionSnapshotRoot;
+}
+
+function retirePreparedWorkflowLifecycleAction(
+  layout: RunLayout,
+  entry: WorkflowLifecycleActionJournalEntry
+): string | undefined {
+  const invocation = workflowLifecycleInvocationEvidence(layout, entry);
+  if (invocation !== undefined) {
+    const generation = workflowLifecycleGeneration(layout);
+    if (generation.invoking) {
+      if (
+        generation.eventId !== invocation.eventId ||
+        generation.eventTimestamp !== invocation.timestamp ||
+        generation.action !== entry.action ||
+        generation.workflowRunId !== entry.source_workflow_run_id ||
+        generation.workflowLinkId !== entry.source_workflow_link_id
+      ) {
+        throw new Error("prepared lifecycle action does not own the latest invoking event");
+      }
+      const persistedStatus = readRunState(layout).status;
+      appendEvent(layout, {
+        eventType: "workflow-lifecycle-failed",
+        status: persistedStatus,
+        payload: {
+          action: entry.action,
+          workflow_run_id: entry.source_workflow_run_id,
+          control_generation: entry.control_generation,
+          workflow_link_id: entry.source_workflow_link_id,
+          lifecycle_action_id: entry.action_id,
+          controller_invocation_id: invocation.eventId,
+          controller_invoked_at: invocation.timestamp,
+          run_status: persistedStatus,
+          failure_reason: "prepared-lifecycle-action-never-invoked"
+        }
+      });
+    } else {
+      const latest = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.find(
+        (event) => event.event_id === generation.eventId
+      );
+      const payload = objectRecord(latest?.payload);
+      if (
+        latest?.event_type !== "workflow-lifecycle-failed" ||
+        payload.action !== entry.action ||
+        payload.workflow_run_id !== entry.source_workflow_run_id ||
+        payload.control_generation !== entry.control_generation ||
+        payload.workflow_link_id !== entry.source_workflow_link_id ||
+        payload.lifecycle_action_id !== entry.action_id ||
+        payload.controller_invocation_id !== invocation.eventId ||
+        payload.controller_invoked_at !== invocation.timestamp ||
+        payload.failure_reason !== "prepared-lifecycle-action-never-invoked"
+      ) {
+        throw new Error("prepared lifecycle action has a conflicting durable invocation closure");
+      }
+    }
+  }
+  transitionWorkflowLifecycleAction(layout, entry.action_id, "failed", {
+    reconciliation_reason:
+      invocation === undefined
+        ? "prepared action never reached controller invocation recording"
+        : "prepared controller invocation record never reached the external process boundary"
+  });
+  return invocation?.executionSnapshotRoot;
 }
 
 async function reconcilePendingWorkflowLifecycleAction(input: {
@@ -1801,17 +1934,6 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
   lifecycleInput: WorkflowLifecycleInput;
 }): Promise<{ workflowRunId: string; submitted: boolean; diagnostics: RuntimeDiagnostic[] } | undefined> {
   let entry = input.entry;
-  if (entry.phase === "prepared") {
-    const releaseLock = await acquireWorkflowMutationLock(input.evidence.layout);
-    try {
-      transitionWorkflowLifecycleAction(input.evidence.layout, entry.action_id, "failed", {
-        reconciliation_reason: "prepared action never reached external invocation"
-      });
-    } finally {
-      await releaseLock();
-    }
-    return undefined;
-  }
   if (entry.control_generation !== input.evidence.controlGeneration) {
     throw new Error("pending lifecycle action was prepared against a different workflow control generation");
   }
@@ -1828,25 +1950,64 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
   ) {
     throw new Error("pending lifecycle action does not match its source workflow run link");
   }
+  if (entry.phase === "prepared") {
+    let preparedSnapshotRoot: string | undefined;
+    const releaseLock = await acquireWorkflowMutationLock(input.evidence.layout);
+    try {
+      preparedSnapshotRoot = retirePreparedWorkflowLifecycleAction(input.evidence.layout, entry);
+    } finally {
+      await releaseLock();
+    }
+    if (preparedSnapshotRoot !== undefined) {
+      try {
+        await disposeWorkflowExecutionSnapshotBestEffort(
+          recoverWorkflowExecutionSnapshot({
+            layout: input.evidence.layout,
+            snapshot: input.evidence.verifiedControl,
+            root: preparedSnapshotRoot
+          })
+        );
+      } catch {
+        // The journal and correlated failure event are already terminal. Only
+        // dispose a pre-spawn snapshot after proving its exact retained tree;
+        // an absent or altered tree is left untouched for forensic recovery.
+      }
+    }
+    return undefined;
+  }
   if (entry.controller_invocation_id === undefined || entry.controller_invoked_at === undefined) {
     throw new Error("pending lifecycle action is missing its controller invocation fence");
   }
 
   let executionSnapshot: ReturnType<typeof materializeWorkflowExecutionSnapshot> | undefined;
+  let retainedExecutionSnapshot = false;
   let detachedInvocationStarted = false;
   const cleanupDiagnostics: RuntimeDiagnostic[] = [];
-  const disposeReconciliationSnapshot = (): void => {
+  const disposeReconciliationSnapshot = async (): Promise<void> => {
     if (executionSnapshot === undefined) return;
-    cleanupDiagnostics.push(...disposeTransientWorkflowExecutionSnapshot(executionSnapshot));
+    if (retainedExecutionSnapshot) {
+      executionSnapshot = undefined;
+      return;
+    }
+    cleanupDiagnostics.push(...(await disposeTransientWorkflowExecutionSnapshot(executionSnapshot)));
     executionSnapshot = undefined;
   };
   try {
     let childWorkflowRunId = entry.external_workflow_run_id;
-    executionSnapshot = materializeWorkflowExecutionSnapshot({
-      projectRoot: input.projectRoot,
-      layout: input.evidence.layout,
-      snapshot: input.evidence.verifiedControl
-    });
+    const retainedSnapshotRoot = workflowLifecycleInvocationSnapshotRoot(input.evidence.layout, entry);
+    executionSnapshot =
+      retainedSnapshotRoot === undefined
+        ? materializeWorkflowExecutionSnapshot({
+            projectRoot: input.projectRoot,
+            layout: input.evidence.layout,
+            snapshot: input.evidence.verifiedControl
+          })
+        : recoverWorkflowExecutionSnapshot({
+            layout: input.evidence.layout,
+            snapshot: input.evidence.verifiedControl,
+            root: retainedSnapshotRoot
+          });
+    retainedExecutionSnapshot = retainedSnapshotRoot !== undefined;
     const timeline = await inspectWorkflowTimeline(input.projectRoot, entry.source_workflow_run_id, {
       ...input.lifecycleInput.env,
       ...executionSnapshot.env
@@ -1968,7 +2129,7 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
       } finally {
         await releaseLock();
       }
-      disposeReconciliationSnapshot();
+      await disposeReconciliationSnapshot();
       return {
         workflowRunId: childWorkflowRunId,
         submitted: generation.eventType === "workflow-lifecycle-submitted",
@@ -1985,7 +2146,7 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
       } finally {
         await releaseLock();
       }
-      disposeReconciliationSnapshot();
+      await disposeReconciliationSnapshot();
       return { workflowRunId: childWorkflowRunId, submitted: true, diagnostics: cleanupDiagnostics };
     }
 
@@ -2038,7 +2199,6 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
     });
     if (lifecycleResult.alreadyRunning === true) {
       detachedInvocationStarted = false;
-      disposeReconciliationSnapshot();
     }
     if (lifecycleResult.workflowRunId !== undefined && lifecycleResult.workflowRunId !== childWorkflowRunId) {
       throw new Error("idempotent lifecycle reconciliation returned an unexpected workflow run ID");
@@ -2080,14 +2240,17 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
     } finally {
       await releaseCompletionLock();
     }
+    if (lifecycleResult.alreadyRunning === true) {
+      await disposeReconciliationSnapshot();
+    }
     return {
       workflowRunId: childWorkflowRunId,
       submitted: lifecycleResult.alreadyRunning !== true,
       diagnostics: cleanupDiagnostics
     };
   } catch (error) {
-    if (!detachedInvocationStarted && executionSnapshot !== undefined) {
-      disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
+    if (!detachedInvocationStarted && !retainedExecutionSnapshot && executionSnapshot !== undefined) {
+      await disposeWorkflowExecutionSnapshotBestEffort(executionSnapshot);
       executionSnapshot = undefined;
     }
     throw error;
@@ -2233,8 +2396,9 @@ async function appendLifecycleFailureBestEffort(
   action: string,
   controllerInvocation: { event_id: string; timestamp: string },
   diagnostic: RuntimeDiagnostic,
-  workflowRunId = evidence.smithersRunId
-): Promise<void> {
+  workflowRunId = evidence.smithersRunId,
+  lifecycleActionId?: string
+): Promise<boolean> {
   try {
     const releaseFailureLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
@@ -2247,17 +2411,30 @@ async function appendLifecycleFailureBestEffort(
           workflow_run_id: workflowRunId,
           control_generation: evidence.controlGeneration,
           workflow_link_id: evidence.workflowLinkId,
+          ...(lifecycleActionId === undefined ? {} : { lifecycle_action_id: lifecycleActionId }),
           controller_invocation_id: controllerInvocation.event_id,
           controller_invoked_at: controllerInvocation.timestamp,
           run_status: persistedStatus,
           diagnostic
         }
       });
+      if (lifecycleActionId !== undefined) {
+        const pending = pendingWorkflowLifecycleAction(evidence.layout);
+        if (pending?.action_id === lifecycleActionId) {
+          transitionWorkflowLifecycleAction(evidence.layout, lifecycleActionId, "failed", {
+            reconciliation_reason: diagnostic.message
+          });
+        } else if (workflowLifecycleAction(evidence.layout, lifecycleActionId)?.phase !== "failed") {
+          throw new Error("workflow lifecycle failure could not terminalize its action journal");
+        }
+      }
     } finally {
       await releaseFailureLock();
     }
+    return true;
   } catch {
     // Preserve the lifecycle command failure when its failure event cannot be persisted.
+    return false;
   }
 }
 

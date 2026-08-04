@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,22 +10,27 @@ import { fileURLToPath } from "node:url";
 import { createRunLayout, writeFileDurable, writeJsonDurable } from "@ultrafuzz/artifacts";
 import { fingerprintGraph, type ExpandedGraph } from "@ultrafuzz/topology";
 
-import { runSmithersInspectionCommand } from "../src/smithers.js";
+import { runSmithersInspectionCommand, streamSmithersCommand } from "../src/smithers.js";
 import { acquireSmithersExecutableAnchor } from "../src/smithers-executable-capability.js";
 import { acquireWorkflowExecutionSnapshotAnchor } from "../src/workflow-execution-snapshot-capability.js";
 import {
   disposeWorkflowExecutionSnapshot,
   materializeWorkflowExecutionSnapshot,
+  recoverWorkflowExecutionSnapshot,
   sealWorkflowControlFiles,
+  sweepWorkflowExecutionSnapshotAllocations,
   verifyOfflineWorkflowControlBytes,
   verifyWorkflowControlFiles,
   verifyWorkflowControlSnapshot,
   workflowControlGeneration,
   workflowControlPaths
 } from "../src/workflow-integrity.js";
+import { acquireWorkflowMutationLock } from "../src/workflow-mutation.js";
 import { createSmithersTestEnvironment } from "./helpers/smithers-capability.js";
 
-function controlFixture(input: { runnerSource?: string } = {}) {
+function controlFixture(
+  input: { runnerSource?: string; extraExecutionFileCount?: number; deepExecutionFileDepth?: number } = {}
+) {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workflow-integrity-"));
   const outputRoot = path.join(projectRoot, ".ultrafuzz", "runs");
   const expandedGraph = {
@@ -166,13 +172,26 @@ function controlFixture(input: { runnerSource?: string } = {}) {
     executable_paths: ["dependencies/packages/000001/src/bin/smithers.js"],
     smithers_bin: "dependencies/packages/000001/src/bin/smithers.js"
   });
+  const extraExecutionFiles = Array.from({ length: input.extraExecutionFileCount ?? 0 }, (_, index) => {
+    const directory = `sibling-${index.toString().padStart(3, "0")}`;
+    const sourcePath = path.join(projectRoot, "fixture-extra-execution-files", directory, "index.js");
+    writeFileDurable(sourcePath, `export const sibling${index} = true;\n`);
+    return { sourcePath, snapshotPath: `extra/${directory}/index.js` };
+  });
+  if (input.deepExecutionFileDepth !== undefined) {
+    const directories = Array.from({ length: input.deepExecutionFileDepth }, () => "d");
+    const sourcePath = path.join(projectRoot, "fixture-deep-execution-file", ...directories, "index.js");
+    writeFileDurable(sourcePath, "export const deeplyNested = true;\n");
+    extraExecutionFiles.push({ sourcePath, snapshotPath: path.posix.join("deep", ...directories, "index.js") });
+  }
   const executionFiles = [
     { sourcePath: agentPath, snapshotPath: ".smithers/agents/index.ts" },
     { sourcePath: projectConfigPath, snapshotPath: "controls/ultrafuzz.toml" },
     { sourcePath: dependencyMapPath, snapshotPath: "dependencies/manifest.json" },
     { sourcePath: dependencyRootPackageJson, snapshotPath: "dependencies/root-package.json" },
     ...dependencyFiles,
-    ...moduleFiles
+    ...moduleFiles,
+    ...extraExecutionFiles
   ];
   sealWorkflowControlFiles({
     projectRoot,
@@ -312,6 +331,329 @@ test("verified workflow bytes and execution dependencies survive adversarial pat
 });
 
 test(
+  "snapshot verification keeps directory descriptors bounded across many sibling directories",
+  { concurrency: false, skip: process.platform === "win32" },
+  async () => {
+    const fixture = controlFixture({ extraExecutionFileCount: 128 });
+    const snapshot = verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout);
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
+    const originalCloseSync = fs.closeSync;
+    const activeDirectoryDescriptors = new Set<number>();
+    const descriptorLimit = 12;
+    let openedDirectoryDescriptors = 0;
+    let peakDirectoryDescriptors = 0;
+    let materialized: ReturnType<typeof materializeWorkflowExecutionSnapshot> | undefined;
+    const fileSystem = {
+      openDirectory: (directory: string): number => {
+        if (activeDirectoryDescriptors.size >= descriptorLimit) {
+          const error = new Error("simulated directory descriptor exhaustion") as NodeJS.ErrnoException;
+          error.code = "EMFILE";
+          throw error;
+        }
+        const descriptor = fs.openSync(
+          directory,
+          fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | (fs.constants.O_NOFOLLOW ?? 0)
+        );
+        activeDirectoryDescriptors.add(descriptor);
+        openedDirectoryDescriptors += 1;
+        peakDirectoryDescriptors = Math.max(peakDirectoryDescriptors, activeDirectoryDescriptors.size);
+        return descriptor;
+      }
+    };
+    Object.defineProperty(fs, "closeSync", {
+      ...originalDescriptor,
+      value: (descriptor: number): void => {
+        try {
+          originalCloseSync(descriptor);
+        } finally {
+          activeDirectoryDescriptors.delete(descriptor);
+        }
+      }
+    });
+    try {
+      materialized = materializeWorkflowExecutionSnapshot(
+        {
+          projectRoot: fixture.projectRoot,
+          layout: fixture.layout,
+          snapshot
+        },
+        fileSystem
+      );
+      assert.ok(openedDirectoryDescriptors > descriptorLimit);
+      assert.ok(peakDirectoryDescriptors <= descriptorLimit);
+      assert.equal(activeDirectoryDescriptors.size, 0);
+
+      const readDescriptor = Object.getOwnPropertyDescriptor(fs, "readSync")!;
+      const originalReadSync = fs.readSync;
+      let commandBoundaryReads = 0;
+      Object.defineProperty(fs, "readSync", {
+        ...readDescriptor,
+        value: (...args: unknown[]) => {
+          commandBoundaryReads += 1;
+          return Reflect.apply(originalReadSync, fs, args) as number;
+        }
+      });
+      try {
+        const anchor = acquireWorkflowExecutionSnapshotAnchor(materialized.env);
+        assert.notEqual(anchor, undefined);
+        anchor!.close();
+      } finally {
+        Object.defineProperty(fs, "readSync", readDescriptor);
+      }
+      assert.ok(commandBoundaryReads > 0);
+      assert.ok(commandBoundaryReads < 64, "command anchor rehashed the unrelated sibling closure");
+
+      await disposeWorkflowExecutionSnapshot(materialized, fileSystem);
+      materialized = undefined;
+      assert.equal(activeDirectoryDescriptors.size, 0);
+    } finally {
+      if (materialized !== undefined) await disposeWorkflowExecutionSnapshot(materialized, fileSystem);
+      Object.defineProperty(fs, "closeSync", originalDescriptor);
+    }
+  }
+);
+
+test("snapshot materialization is not orphaned by a final descriptor close error", { concurrency: false }, async () => {
+  const fixture = controlFixture();
+  const snapshot = verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout);
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "closeSync")!;
+  const originalCloseSync = fs.closeSync;
+  let openedDirectories = 0;
+  let snapshotDescriptor: number | undefined;
+  let closeFailureInjected = false;
+  const fileSystem = {
+    openDirectory: (directory: string): number => {
+      const descriptor = fs.openSync(
+        directory,
+        fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY ?? 0) | (fs.constants.O_NOFOLLOW ?? 0)
+      );
+      openedDirectories += 1;
+      if (openedDirectories === 2) snapshotDescriptor = descriptor;
+      return descriptor;
+    }
+  };
+  Object.defineProperty(fs, "closeSync", {
+    ...originalDescriptor,
+    value: (descriptor: number): void => {
+      originalCloseSync(descriptor);
+      if (!closeFailureInjected && descriptor === snapshotDescriptor) {
+        closeFailureInjected = true;
+        throw new Error("simulated final snapshot descriptor close failure");
+      }
+    }
+  });
+  let materialized: ReturnType<typeof materializeWorkflowExecutionSnapshot> | undefined;
+  try {
+    materialized = materializeWorkflowExecutionSnapshot(
+      { projectRoot: fixture.projectRoot, layout: fixture.layout, snapshot },
+      fileSystem
+    );
+  } finally {
+    Object.defineProperty(fs, "closeSync", originalDescriptor);
+  }
+  assert.equal(closeFailureInjected, true);
+  assert.equal(fs.existsSync(materialized.root), true);
+  await disposeWorkflowExecutionSnapshot(materialized);
+  assert.equal(fs.existsSync(materialized.root), false);
+});
+
+test("snapshot verification rejects execution trees beyond the bounded directory depth", () => {
+  const fixture = controlFixture({ deepExecutionFileDepth: 256 });
+  const snapshot = verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout);
+  assert.throws(
+    () => materializeWorkflowExecutionSnapshot({ projectRoot: fixture.projectRoot, layout: fixture.layout, snapshot }),
+    /workflow execution snapshot exceeds the directory-depth limit/u
+  );
+  const snapshotsRoot = path.join(fixture.layout.root, "smithers", "execution-snapshots");
+  assert.deepEqual(fs.readdirSync(snapshotsRoot), []);
+});
+
+test(
+  "allocation reconciliation parses the same claim-directory listing that it reconciles",
+  { concurrency: false },
+  async () => {
+    const fixture = controlFixture();
+    const materialized = materializeWorkflowExecutionSnapshot({
+      projectRoot: fixture.projectRoot,
+      layout: fixture.layout,
+      snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+    });
+    const claims = path.join(fixture.layout.root, "smithers", "execution-snapshot-claims");
+    const claimName = `${path.basename(materialized.root)}.materialized.json`;
+    const temporary = path.join(claims, `.${claimName}.pending-${process.pid}-unknown-${"a".repeat(24)}`);
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "readdirSync")!;
+    const originalReaddirSync = fs.readdirSync;
+    let claimDirectoryReads = 0;
+    Object.defineProperty(fs, "readdirSync", {
+      ...originalDescriptor,
+      value: (...args: unknown[]) => {
+        const result = Reflect.apply(originalReaddirSync, fs, args) as unknown;
+        if (path.resolve(String(args[0])) === claims) {
+          claimDirectoryReads += 1;
+          if (claimDirectoryReads === 1) {
+            fs.copyFileSync(path.join(claims, claimName), temporary, fs.constants.COPYFILE_EXCL);
+          }
+        }
+        return result;
+      }
+    });
+    try {
+      const swept = await sweepWorkflowExecutionSnapshotAllocations({ layout: fixture.layout });
+      assert.deepEqual(swept, { disposed: [], errors: [] });
+      assert.equal(claimDirectoryReads, 1);
+      assert.equal(fs.existsSync(temporary), true);
+    } finally {
+      Object.defineProperty(fs, "readdirSync", originalDescriptor);
+      if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+      await disposeWorkflowExecutionSnapshot(materialized);
+    }
+  }
+);
+
+test("allocation reconciliation durably completes a post-link publisher crash", { concurrency: false }, async () => {
+  const fixture = controlFixture();
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+  });
+  const claims = path.join(fixture.layout.root, "smithers", "execution-snapshot-claims");
+  const claimName = `${path.basename(materialized.root)}.materialized.json`;
+  const exitedWriter = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(exitedWriter.status, 0);
+  assert.ok(exitedWriter.pid > 0);
+  const temporary = path.join(claims, `.${claimName}.pending-${exitedWriter.pid}-unknown-${"b".repeat(24)}`);
+  fs.linkSync(path.join(claims, claimName), temporary);
+  const claimsStat = fs.statSync(claims);
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "fsyncSync")!;
+  const originalFsyncSync = fs.fsyncSync;
+  let claimDirectoryFsyncs = 0;
+  Object.defineProperty(fs, "fsyncSync", {
+    ...originalDescriptor,
+    value: (descriptor: number): void => {
+      const stat = fs.fstatSync(descriptor);
+      if (stat.dev === claimsStat.dev && stat.ino === claimsStat.ino) claimDirectoryFsyncs += 1;
+      originalFsyncSync(descriptor);
+    }
+  });
+  try {
+    const swept = await sweepWorkflowExecutionSnapshotAllocations({ layout: fixture.layout });
+    assert.deepEqual(swept, { disposed: [], errors: [] });
+    assert.equal(fs.existsSync(temporary), false);
+    assert.ok(claimDirectoryFsyncs >= 1);
+  } finally {
+    Object.defineProperty(fs, "fsyncSync", originalDescriptor);
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    await disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test("direct snapshot disposal waits for the workflow mutation lock", async () => {
+  const fixture = controlFixture();
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+  });
+  let release: (() => Promise<void>) | undefined = await acquireWorkflowMutationLock(fixture.layout);
+  let settled = false;
+  const disposal = disposeWorkflowExecutionSnapshot(materialized).finally(() => {
+    settled = true;
+  });
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    assert.equal(fs.existsSync(materialized.root), true);
+    await release();
+    release = undefined;
+    await disposal;
+    assert.equal(fs.existsSync(materialized.root), false);
+  } finally {
+    if (release !== undefined) await release();
+    await disposal.catch(() => undefined);
+    if (fs.existsSync(materialized.root)) await disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test(
+  "allocation claims bind Linux process ownership to the boot ID and proc start time",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const fixture = controlFixture();
+    const materialized = materializeWorkflowExecutionSnapshot({
+      projectRoot: fixture.projectRoot,
+      layout: fixture.layout,
+      snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+    });
+    try {
+      const claims = path.join(fixture.layout.root, "smithers", "execution-snapshot-claims");
+      const reserved = JSON.parse(
+        fs.readFileSync(path.join(claims, `${path.basename(materialized.root)}.reserved.json`), "utf8")
+      ) as { creator_process_start?: string };
+      const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const procStat = fs.readFileSync(`/proc/${process.pid}/stat`, "utf8");
+      const commandEnd = procStat.lastIndexOf(") ");
+      assert.ok(commandEnd >= 0);
+      const startTime = procStat
+        .slice(commandEnd + 2)
+        .trim()
+        .split(/\s+/u)[19];
+      assert.match(startTime ?? "", /^\d+$/u);
+      assert.equal(reserved.creator_process_start, `linux-proc-stat:${bootId}:${startTime}`);
+    } finally {
+      await disposeWorkflowExecutionSnapshot(materialized);
+    }
+  }
+);
+
+test("legacy six-character snapshot roots recover without entering the allocation sweep", async () => {
+  const fixture = controlFixture();
+  const snapshot = verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout);
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot
+  });
+  const legacyRoot = path.join(path.dirname(materialized.root), `${snapshot.generation.slice(0, 24)}-Ab12Cd`);
+  fs.renameSync(materialized.root, legacyRoot);
+  const now = new Date().toISOString();
+  writeJsonDurable(path.join(fixture.layout.root, "smithers", "start-submission.json"), {
+    schema_version: "ultrafuzz.start-submission.v1",
+    run_id: fixture.layout.runId,
+    workflow_run_id: "legacy-workflow-run",
+    workflow_link_id: "legacy-workflow-link",
+    control_generation: snapshot.generation,
+    phase: "invoking",
+    prepared_at: now,
+    updated_at: now,
+    invocation_attempts: [
+      {
+        attempt_id: "legacy-workflow-link:attempt-1",
+        authorized_at: now,
+        execution_snapshot_root: legacyRoot,
+        command: ["up", path.join(legacyRoot, path.relative(materialized.root, materialized.workflowPath))]
+      }
+    ]
+  });
+  try {
+    const swept = await sweepWorkflowExecutionSnapshotAllocations({ layout: fixture.layout });
+    assert.deepEqual(swept, { disposed: [], errors: [] });
+    assert.equal(fs.existsSync(legacyRoot), true);
+
+    const recovered = recoverWorkflowExecutionSnapshot({ layout: fixture.layout, snapshot, root: legacyRoot });
+    assert.equal(recovered.root, legacyRoot);
+    assert.equal(fs.readFileSync(recovered.workflowPath, "utf8"), snapshot.contents.workflow.toString("utf8"));
+    await disposeWorkflowExecutionSnapshot(recovered);
+    assert.equal(fs.existsSync(legacyRoot), false);
+  } finally {
+    if (fs.existsSync(legacyRoot)) {
+      fs.renameSync(legacyRoot, materialized.root);
+    }
+    await disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test(
   "controller commands consume the held snapshot inode and reject a lexical parent swap",
   { concurrency: false },
   async () => {
@@ -406,7 +748,7 @@ console.log(JSON.stringify({ ok: true }));
     } finally {
       if (fs.lstatSync(snapshotsRoot).isSymbolicLink()) fs.unlinkSync(snapshotsRoot);
       if (fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, snapshotsRoot);
-      disposeWorkflowExecutionSnapshot(materialized);
+      await disposeWorkflowExecutionSnapshot(materialized);
     }
   }
 );
@@ -451,7 +793,64 @@ console.log(JSON.stringify({ admitted: true }));
     assert.equal(delayed.workflowPath.includes("/proc/"), false);
     assert.equal(delayed.contents, snapshot.contents.workflow.toString("utf8"));
   } finally {
-    disposeWorkflowExecutionSnapshot(materialized);
+    await disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test("streaming waits for a delayed asynchronous line-consumer rejection after child close", async () => {
+  const fixture = controlFixture({
+    runnerSource: "#!/usr/bin/env node\nconsole.log(JSON.stringify({ complete: true }));\n"
+  });
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+  });
+  let callbackSettled = false;
+  try {
+    await assert.rejects(
+      streamSmithersCommand({
+        args: ["inspect", "same-run", "--format", "json"],
+        projectRoot: fixture.projectRoot,
+        env: { ...materialized.env },
+        maxLines: 10,
+        onLine: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          callbackSettled = true;
+          throw new Error("delayed line consumer failed");
+        }
+      }),
+      /delayed line consumer failed/u
+    );
+    assert.equal(callbackSettled, true);
+  } finally {
+    await disposeWorkflowExecutionSnapshot(materialized);
+  }
+});
+
+test("command anchor rejects a replaced sealed workflow agent before spawn", async () => {
+  const fixture = controlFixture();
+  const materialized = materializeWorkflowExecutionSnapshot({
+    projectRoot: fixture.projectRoot,
+    layout: fixture.layout,
+    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+  });
+  const agent = path.join(materialized.root, ".smithers", "agents", "index.ts");
+  const agentsDirectory = path.dirname(agent);
+  const agentMode = fs.statSync(agent).mode & 0o777;
+  const agentsDirectoryMode = fs.statSync(agentsDirectory).mode & 0o777;
+  fs.chmodSync(agentsDirectory, 0o700);
+  fs.renameSync(agent, `${agent}.displaced`);
+  fs.copyFileSync(`${agent}.displaced`, agent);
+  fs.chmodSync(agent, agentMode);
+  fs.chmodSync(agentsDirectory, agentsDirectoryMode);
+  try {
+    assert.throws(
+      () => acquireWorkflowExecutionSnapshotAnchor(materialized.env),
+      /workflow execution snapshot entry changed at the controller command boundary: \.smithers\/agents\/index\.ts/u
+    );
+  } finally {
+    await disposeWorkflowExecutionSnapshot(materialized);
   }
 });
 
@@ -476,10 +875,13 @@ test("runner capability rejects in-snapshot runner replacement before execution"
       env: { ...materialized.env }
     });
     assert.equal(result.ok, false);
-    assert.match(result.error ?? "", /workflow runner changed at the controller command boundary/u);
+    assert.match(
+      result.error ?? "",
+      /workflow execution snapshot entry changed at the controller command boundary: dependencies\/packages\/000001\/src\/bin/u
+    );
     assert.equal(result.stdout.includes("hostile"), false);
   } finally {
-    disposeWorkflowExecutionSnapshot(materialized);
+    await disposeWorkflowExecutionSnapshot(materialized);
   }
 });
 
@@ -507,11 +909,11 @@ test("runner capability invokes the bound interpreter instead of a substituted P
     assert.deepEqual(result.json, { trusted: true });
     assert.equal(fs.existsSync(marker), false);
   } finally {
-    disposeWorkflowExecutionSnapshot(materialized);
+    await disposeWorkflowExecutionSnapshot(materialized);
   }
 });
 
-test("snapshot capability falls back to exact lexical identities when descriptor paths are unavailable", () => {
+test("snapshot capability falls back to exact lexical identities when descriptor paths are unavailable", async () => {
   const fixture = controlFixture();
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: fixture.projectRoot,
@@ -546,11 +948,11 @@ test("snapshot capability falls back to exact lexical identities when descriptor
     anchor.close();
     fs.rmSync(materialized.root, { recursive: true, force: true });
     fs.renameSync(displaced, materialized.root);
-    disposeWorkflowExecutionSnapshot(materialized);
+    await disposeWorkflowExecutionSnapshot(materialized);
   }
 });
 
-test("snapshot materialization and disposal complete without directory handles or descriptor paths", () => {
+test("snapshot materialization and disposal complete without directory handles or descriptor paths", async () => {
   const fixture = controlFixture();
   const lexicalFileSystem = {
     openDirectory: () => undefined,
@@ -572,15 +974,15 @@ test("snapshot materialization and disposal complete without directory handles o
   assert.equal(fs.readFileSync(materialized.workflowPath, "utf8"), snapshot.contents.workflow.toString("utf8"));
   assert.equal(fs.readFileSync(materialized.env.ULTRAFUZZ_CONFIG_PATH!, "utf8"), '[project]\nname = "fixture"\n');
 
-  disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
+  await disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
   assert.equal(fs.existsSync(materialized.root), false);
-  assert.doesNotThrow(() => disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem));
+  await assert.doesNotReject(disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem));
 });
 
 test(
   "lexical snapshot cleanup rejects a root swapped during listing without traversing the replacement",
   { concurrency: false },
-  () => {
+  async () => {
     const fixture = controlFixture();
     const lexicalFileSystem = {
       openDirectory: () => undefined,
@@ -614,8 +1016,8 @@ test(
       }
     });
     try {
-      assert.throws(
-        () => disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem),
+      await assert.rejects(
+        disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem),
         /workflow execution snapshot directory changed during snapshot ownership/u
       );
       assert.equal(swapped, true);
@@ -626,7 +1028,9 @@ test(
         fs.unlinkSync(materialized.root);
       }
       if (fs.existsSync(displaced)) fs.renameSync(displaced, materialized.root);
-      if (fs.existsSync(materialized.root)) disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
+      if (fs.existsSync(materialized.root)) {
+        await disposeWorkflowExecutionSnapshot(materialized, lexicalFileSystem);
+      }
     }
   }
 );
@@ -714,7 +1118,7 @@ test(
   }
 );
 
-test("snapshot cleanup fails closed when its lexical ownership parent was renamed", () => {
+test("snapshot cleanup fails closed when its lexical ownership parent was renamed", async () => {
   const fixture = controlFixture();
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: fixture.projectRoot,
@@ -725,14 +1129,14 @@ test("snapshot cleanup fails closed when its lexical ownership parent was rename
   const displacedRoot = `${snapshotsRoot}.renamed`;
   fs.renameSync(snapshotsRoot, displacedRoot);
   try {
-    assert.throws(
-      () => disposeWorkflowExecutionSnapshot(materialized),
+    await assert.rejects(
+      disposeWorkflowExecutionSnapshot(materialized),
       /disappeared before cleanup could prove disposal/u
     );
     assert.equal(fs.existsSync(path.join(displacedRoot, path.basename(materialized.root))), true);
   } finally {
     fs.renameSync(displacedRoot, snapshotsRoot);
-    disposeWorkflowExecutionSnapshot(materialized);
+    await disposeWorkflowExecutionSnapshot(materialized);
   }
 });
 
@@ -767,18 +1171,19 @@ test(
     fs.mkdirSync(snapshotsRoot, { mode: 0o700 });
     const displacedRoot = `${snapshotsRoot}.displaced`;
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-swap-outside-"));
-    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "mkdtempSync")!;
-    const originalMkdtempSync = fs.mkdtempSync;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "mkdirSync")!;
+    const originalMkdirSync = fs.mkdirSync;
     let swapped = false;
-    Object.defineProperty(fs, "mkdtempSync", {
+    Object.defineProperty(fs, "mkdirSync", {
       ...originalDescriptor,
       value: (...args: unknown[]) => {
-        if (!swapped) {
+        const candidate = String(args[0]);
+        if (!swapped && /^[0-9a-f]{24}-[0-9a-f]{24}$/u.test(path.basename(candidate))) {
           swapped = true;
           fs.renameSync(snapshotsRoot, displacedRoot);
           fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
         }
-        return Reflect.apply(originalMkdtempSync, fs, args) as string;
+        return Reflect.apply(originalMkdirSync, fs, args) as string | undefined;
       }
     });
     try {
@@ -789,13 +1194,13 @@ test(
             layout: fixture.layout,
             snapshot
           }),
-        /workflow execution snapshots changed during snapshot ownership/u
+        /workflow execution snapshot allocation resolved to an unexpected root/u
       );
       assert.equal(swapped, true);
       assert.deepEqual(fs.readdirSync(outside), []);
       assert.deepEqual(fs.readdirSync(displacedRoot), []);
     } finally {
-      Object.defineProperty(fs, "mkdtempSync", originalDescriptor);
+      Object.defineProperty(fs, "mkdirSync", originalDescriptor);
     }
   }
 );
@@ -846,7 +1251,7 @@ test("materialization keeps every write on the opened root after its parent is s
   }
 });
 
-test("snapshot disposal is idempotent", () => {
+test("snapshot disposal is idempotent", async () => {
   const fixture = controlFixture();
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: fixture.projectRoot,
@@ -854,12 +1259,12 @@ test("snapshot disposal is idempotent", () => {
     snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
   });
 
-  disposeWorkflowExecutionSnapshot(materialized);
+  await disposeWorkflowExecutionSnapshot(materialized);
   assert.equal(fs.existsSync(materialized.root), false);
-  assert.doesNotThrow(() => disposeWorkflowExecutionSnapshot(materialized));
+  await assert.doesNotReject(disposeWorkflowExecutionSnapshot(materialized));
 });
 
-test("snapshot disposal refuses a replaced root and never follows it outside the run", () => {
+test("snapshot disposal refuses a replaced root and never follows it outside the run", async () => {
   const fixture = controlFixture();
   const materialized = materializeWorkflowExecutionSnapshot({
     projectRoot: fixture.projectRoot,
@@ -873,81 +1278,85 @@ test("snapshot disposal refuses a replaced root and never follows it outside the
   fs.renameSync(materialized.root, displacedRoot);
   fs.symlinkSync(outside, materialized.root, process.platform === "win32" ? "junction" : "dir");
 
-  assert.throws(
-    () => disposeWorkflowExecutionSnapshot(materialized),
+  await assert.rejects(
+    disposeWorkflowExecutionSnapshot(materialized),
     /workflow execution snapshot root changed before cleanup/u
   );
   assert.equal(fs.readFileSync(marker, "utf8"), "must survive\n");
 
   fs.unlinkSync(materialized.root);
   fs.renameSync(displacedRoot, materialized.root);
-  disposeWorkflowExecutionSnapshot(materialized);
+  await disposeWorkflowExecutionSnapshot(materialized);
   assert.equal(fs.existsSync(materialized.root), false);
   assert.equal(fs.readFileSync(marker, "utf8"), "must survive\n");
 });
 
-test("snapshot disposal stays confined when its parent is swapped at the final delete", { concurrency: false }, () => {
-  const fixture = controlFixture();
-  const materialized = materializeWorkflowExecutionSnapshot({
-    projectRoot: fixture.projectRoot,
-    layout: fixture.layout,
-    snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
-  });
-  const snapshotsRoot = path.dirname(materialized.root);
-  const displacedSnapshotsRoot = `${snapshotsRoot}.displaced`;
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-final-delete-outside-"));
-  const outsideSnapshot = path.join(outside, path.basename(materialized.root));
-  const marker = path.join(outsideSnapshot, "keep.txt");
-  fs.mkdirSync(outsideSnapshot);
-  fs.writeFileSync(marker, "must survive final delete\n", "utf8");
+test(
+  "snapshot disposal stays confined when its parent is swapped at the final delete",
+  { concurrency: false },
+  async () => {
+    const fixture = controlFixture();
+    const materialized = materializeWorkflowExecutionSnapshot({
+      projectRoot: fixture.projectRoot,
+      layout: fixture.layout,
+      snapshot: verifyWorkflowControlSnapshot(fixture.projectRoot, fixture.layout)
+    });
+    const snapshotsRoot = path.dirname(materialized.root);
+    const displacedSnapshotsRoot = `${snapshotsRoot}.displaced`;
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-snapshot-final-delete-outside-"));
+    const outsideSnapshot = path.join(outside, path.basename(materialized.root));
+    const marker = path.join(outsideSnapshot, "keep.txt");
+    fs.mkdirSync(outsideSnapshot);
+    fs.writeFileSync(marker, "must survive final delete\n", "utf8");
 
-  const originalRmDescriptor = Object.getOwnPropertyDescriptor(fs, "rmSync")!;
-  const originalRmdirDescriptor = Object.getOwnPropertyDescriptor(fs, "rmdirSync")!;
-  const originalRmSync = fs.rmSync;
-  const originalRmdirSync = fs.rmdirSync;
-  let swapped = false;
-  const swapParent = (): void => {
-    if (swapped) return;
-    swapped = true;
-    fs.renameSync(snapshotsRoot, displacedSnapshotsRoot);
-    fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
-  };
-  Object.defineProperty(fs, "rmSync", {
-    ...originalRmDescriptor,
-    value: (...args: unknown[]) => {
-      if (!swapped && args[0] === materialized.root) swapParent();
-      return Reflect.apply(originalRmSync, fs, args) as void;
-    }
-  });
-  Object.defineProperty(fs, "rmdirSync", {
-    ...originalRmdirDescriptor,
-    value: (...args: unknown[]) => {
-      const candidate = String(args[0]);
-      if (
-        !swapped &&
-        path.basename(candidate) === path.basename(materialized.root) &&
-        fs.realpathSync(candidate) === materialized.root
-      ) {
-        swapParent();
+    const originalRmDescriptor = Object.getOwnPropertyDescriptor(fs, "rmSync")!;
+    const originalRmdirDescriptor = Object.getOwnPropertyDescriptor(fs, "rmdirSync")!;
+    const originalRmSync = fs.rmSync;
+    const originalRmdirSync = fs.rmdirSync;
+    let swapped = false;
+    const swapParent = (): void => {
+      if (swapped) return;
+      swapped = true;
+      fs.renameSync(snapshotsRoot, displacedSnapshotsRoot);
+      fs.symlinkSync(outside, snapshotsRoot, process.platform === "win32" ? "junction" : "dir");
+    };
+    Object.defineProperty(fs, "rmSync", {
+      ...originalRmDescriptor,
+      value: (...args: unknown[]) => {
+        if (!swapped && args[0] === materialized.root) swapParent();
+        return Reflect.apply(originalRmSync, fs, args) as void;
       }
-      return Reflect.apply(originalRmdirSync, fs, args) as void;
+    });
+    Object.defineProperty(fs, "rmdirSync", {
+      ...originalRmdirDescriptor,
+      value: (...args: unknown[]) => {
+        const candidate = String(args[0]);
+        if (
+          !swapped &&
+          path.basename(candidate) === path.basename(materialized.root) &&
+          fs.realpathSync(candidate) === materialized.root
+        ) {
+          swapParent();
+        }
+        return Reflect.apply(originalRmdirSync, fs, args) as void;
+      }
+    });
+    try {
+      await disposeWorkflowExecutionSnapshot(materialized);
+      assert.equal(swapped, true);
+      assert.equal(fs.readFileSync(marker, "utf8"), "must survive final delete\n");
+      assert.equal(fs.existsSync(path.join(displacedSnapshotsRoot, path.basename(materialized.root))), false);
+    } finally {
+      Object.defineProperty(fs, "rmdirSync", originalRmdirDescriptor);
+      Object.defineProperty(fs, "rmSync", originalRmDescriptor);
+      if (fs.existsSync(displacedSnapshotsRoot)) {
+        if (fs.lstatSync(snapshotsRoot).isSymbolicLink()) fs.unlinkSync(snapshotsRoot);
+        fs.renameSync(displacedSnapshotsRoot, snapshotsRoot);
+      }
+      if (fs.existsSync(materialized.root)) await disposeWorkflowExecutionSnapshot(materialized);
     }
-  });
-  try {
-    disposeWorkflowExecutionSnapshot(materialized);
-    assert.equal(swapped, true);
-    assert.equal(fs.readFileSync(marker, "utf8"), "must survive final delete\n");
-    assert.equal(fs.existsSync(path.join(displacedSnapshotsRoot, path.basename(materialized.root))), false);
-  } finally {
-    Object.defineProperty(fs, "rmdirSync", originalRmdirDescriptor);
-    Object.defineProperty(fs, "rmSync", originalRmDescriptor);
-    if (fs.existsSync(displacedSnapshotsRoot)) {
-      if (fs.lstatSync(snapshotsRoot).isSymbolicLink()) fs.unlinkSync(snapshotsRoot);
-      fs.renameSync(displacedSnapshotsRoot, snapshotsRoot);
-    }
-    if (fs.existsSync(materialized.root)) disposeWorkflowExecutionSnapshot(materialized);
   }
-});
+);
 
 test("workflow control verification rejects a sealed execution dependency replacement", () => {
   const fixture = controlFixture();

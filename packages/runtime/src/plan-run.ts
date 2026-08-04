@@ -79,6 +79,7 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
+import { writeProperLockfileOwner } from "./proper-lockfile-owner.js";
 import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
@@ -426,9 +427,14 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
   const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
   const owner = startPreparationLockOwner();
   try {
-    writeJsonDurable(ownerPath, owner);
+    writeProperLockfileOwner(lockPath, ownerPath, owner, "workflow start preparation lock");
   } catch (error) {
-    await release();
+    try {
+      await release();
+    } catch {
+      // Preserve the owner publication/restoration failure. If identity-safe
+      // cleanup was impossible, the retained owner keeps reclaim fail-closed.
+    }
     throw error;
   }
   let released = false;

@@ -12,6 +12,8 @@ import {
 } from "@ultrafuzz/artifacts";
 import lockfile from "proper-lockfile";
 
+import { writeProperLockfileOwner } from "./proper-lockfile-owner.js";
+
 const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
 const WORKFLOW_LIFECYCLE_ACTION_LOCK = ".workflow-lifecycle-action";
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL = "lifecycle-action-journal.json";
@@ -197,6 +199,15 @@ export function workflowLifecycleCorrelationLabel(actionId: string, requestedLab
   return requestedLabel === undefined || requestedLabel.length === 0
     ? correlation
     : `${requestedLabel}--${correlation}`;
+}
+
+/** Exact internal correlation labels mapped back to their operator-facing labels. */
+export function workflowLifecyclePublicBranchLabels(layout: RunLayout): ReadonlyMap<string, string | null> {
+  const labels = new Map<string, string | null>();
+  for (const entry of readWorkflowLifecycleActionJournal(layout).entries) {
+    labels.set(workflowLifecycleCorrelationLabel(entry.action_id, entry.label), entry.label ?? null);
+  }
+  return labels;
 }
 
 export function transitionWorkflowLifecycleAction(
@@ -582,9 +593,14 @@ async function acquireOwnedRunLock(
     acquired_at: new Date().toISOString()
   };
   try {
-    writeJsonDurable(ownerPath, owner);
+    writeProperLockfileOwner(lockPath, ownerPath, owner, options.label);
   } catch (error) {
-    await release();
+    try {
+      await release();
+    } catch {
+      // Preserve the owner publication/restoration failure. If identity-safe
+      // cleanup was impossible, the retained owner keeps reclaim fail-closed.
+    }
     throw error;
   }
   let released = false;

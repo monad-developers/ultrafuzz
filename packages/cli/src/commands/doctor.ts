@@ -33,7 +33,7 @@ function renderDoctor(value: DoctorValue): string {
     `- local binary: ${engine.bin_path ?? "not present"}`,
     `- latest published stable: ${engine.latest_published_version}`,
     `- dependency layout: ${engine.layout_status}${engine.layout_detail === null ? "" : ` - ${engine.layout_detail}`}`,
-    `- compatibility patches: detached admission ${engine.compatibility_patches.detached_admission}, supervisor descriptor ${engine.compatibility_patches.supervisor_descriptor}, workflow path persistence ${engine.compatibility_patches.workflow_path_persistence}`
+    `- compatibility patches: detached admission ${engine.compatibility_patches.detached_admission}, fork/replay preparation ${engine.compatibility_patches.replay_prepare_only}, supervisor descriptor ${engine.compatibility_patches.supervisor_descriptor}, workflow path persistence ${engine.compatibility_patches.workflow_path_persistence}`
   ];
   return `${lines.join("\n")}\n`;
 }

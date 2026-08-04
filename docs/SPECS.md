@@ -58,22 +58,22 @@ implementation plumbing and are not a stable user API.
 
 The CLI product surface consists of:
 
-| Command                | Required behavior                                                                                                          |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `init`                 | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                            |
-| `validate`             | Validate config, topology, prompts, references, path guards, agent references, and trust posture without launching agents. |
-| `run`                  | Validate, render prompts, build run evidence, compile and launch a linked workflow.                                        |
-| `references status`    | Report whether pinned references are present in the local digest-checked cache.                                            |
-| `references sync`      | Explicitly fetch pinned references into the local cache.                                                                   |
-| `references update`    | Rewrite the project reference catalog to newer pinned commits when requested.                                              |
-| `ps`                   | List Ultrafuzz runs and linked workflow status.                                                                            |
-| `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                               |
-| `resume <run-id>`      | Delegate resume for the linked workflow after product checks.                                                              |
-| `replay <run-id>`      | Require a checkpoint frame and delegate replay for the linked workflow after product checks.                               |
-| `fork <run-id>`        | Delegate fork for the linked workflow after product checks.                                                                |
-| `report <run-id>`      | Show the agent-written final report artifacts.                                                                             |
-| `materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                                 |
-| `clean <run-id>`       | Remove selected generated run paths after confirmation and path checks.                                                    |
+| Command                       | Required behavior                                                                                                          |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `init`                        | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                            |
+| `validate`                    | Validate config, topology, prompts, references, path guards, agent references, and trust posture without launching agents. |
+| `run`                         | Validate, render prompts, build run evidence, compile and launch a linked workflow.                                        |
+| `references status`           | Report whether pinned references are present in the local digest-checked cache.                                            |
+| `references sync`             | Explicitly fetch pinned references into the local cache.                                                                   |
+| `references update`           | Rewrite the project reference catalog to newer pinned commits when requested.                                              |
+| `ps`                          | List Ultrafuzz runs and linked workflow status.                                                                            |
+| `inspect <run-id>`            | Show product evidence and linked workflow details for a run.                                                               |
+| `resume <run-id>`             | Delegate resume for the linked workflow after product checks.                                                              |
+| `replay <run-id> --frame <n>` | Require a checkpoint frame and delegate replay for the linked workflow after product checks.                               |
+| `fork <run-id> --frame <n>`   | Require a checkpoint frame and delegate fork for the linked workflow after product checks.                                 |
+| `report <run-id>`             | Show the agent-written final report artifacts.                                                                             |
+| `materialize <run-id>`        | Copy selected reviewed outputs into the target project after confirmation and path checks.                                 |
+| `clean <run-id>`              | Remove selected generated run paths after confirmation and path checks.                                                    |
 
 Commands that support automation SHOULD emit a schema-versioned JSON envelope
 with `ok`, `diagnostics`, and `data`.
@@ -331,7 +331,7 @@ and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
-linked workflow identity or lifecycle evidence. Replay MUST require an explicit
+linked workflow identity or lifecycle evidence. Replay and fork MUST each require an explicit
 checkpoint frame and MUST pass that frame to the workflow engine.
 
 ## Artifacts, Findings, And Reports

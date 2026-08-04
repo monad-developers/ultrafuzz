@@ -468,7 +468,7 @@ export async function withLinkedWorkflowExecution<T>(
     });
   } catch (error) {
     try {
-      disposeWorkflowExecutionSnapshot(executionSnapshot);
+      await disposeWorkflowExecutionSnapshot(executionSnapshot);
     } catch {
       // Preserve the operation failure exactly; cleanup must never mask it.
     }
@@ -476,7 +476,7 @@ export async function withLinkedWorkflowExecution<T>(
   }
   const diagnostics: RuntimeDiagnostic[] = [];
   try {
-    disposeWorkflowExecutionSnapshot(executionSnapshot);
+    await disposeWorkflowExecutionSnapshot(executionSnapshot);
   } catch (error) {
     diagnostics.push({
       ...smithersDiagnostic(error, "WORKFLOW_EXECUTION_SNAPSHOT_CLEANUP_FAILED"),

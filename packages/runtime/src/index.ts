@@ -30,3 +30,4 @@ export {
 export * from "./workspace-provenance.js";
 export * from "./workflow-control.js";
 export * from "./workflow-integrity.js";
+export { WORKFLOW_CHECKPOINT_FRAME_MAX } from "./workflow-mutation.js";

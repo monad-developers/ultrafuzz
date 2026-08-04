@@ -6,6 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { layoutForRunRoot } from "@ultrafuzz/artifacts";
+
 import {
   cancelRun,
   diagnoseProject,
@@ -29,6 +31,12 @@ import {
   SMITHERS_ORCHESTRATOR_VERSION
 } from "../src/smithers-package.js";
 import { withLinkedWorkflowExecution } from "../src/workflow-sync.js";
+import {
+  prepareWorkflowLifecycleAction,
+  transitionWorkflowLifecycleAction,
+  workflowLifecycleActionJournalPath,
+  workflowLifecycleCorrelationLabel
+} from "../src/workflow-mutation.js";
 import { createSmithersTestEnvironment } from "./helpers/smithers-capability.js";
 
 const WORKFLOW_RUN_ID = "ultrafuzz-inspect-run";
@@ -634,6 +642,84 @@ test("getRunTimeline adapts frames and fork lineage in tree mode", async () => {
   assert.equal(timeline.value?.lineage[1]?.depth, 1);
   assert.equal(timeline.value?.lineage[1]?.frames[0]?.frame, 5);
   assert.match(smithersLog(project), new RegExp(`timeline ${WORKFLOW_RUN_ID} --tree --json`, "u"));
+});
+
+test("getRunTimeline projects internal correlation labels back to the requested fork label", async () => {
+  const { project, env, runRoot } = await launchedProject({
+    timeline: { timeline: { runId: WORKFLOW_RUN_ID, branch: null, frames: [], children: [] } }
+  });
+  const layout = layoutForRunRoot(runRoot);
+  const action = prepareWorkflowLifecycleAction(layout, {
+    action: "fork",
+    sourceWorkflowRunId: WORKFLOW_RUN_ID,
+    sourceWorkflowLinkId: "source-link",
+    controlGeneration: "control-generation",
+    knownWorkflowRunIds: [WORKFLOW_RUN_ID],
+    forkFrame: 4,
+    label: "retry-triage"
+  });
+  const correlationLabel = workflowLifecycleCorrelationLabel(action.action_id, action.label);
+  transitionWorkflowLifecycleAction(layout, action.action_id, "failed", {
+    reconciliation_reason: "completed label projection fixture"
+  });
+  const unlabeledAction = prepareWorkflowLifecycleAction(layout, {
+    action: "fork",
+    sourceWorkflowRunId: WORKFLOW_RUN_ID,
+    sourceWorkflowLinkId: "source-link",
+    controlGeneration: "control-generation",
+    knownWorkflowRunIds: [WORKFLOW_RUN_ID],
+    forkFrame: 5
+  });
+  const unlabeledCorrelation = workflowLifecycleCorrelationLabel(unlabeledAction.action_id);
+  fs.writeFileSync(
+    path.join(project, "fake-timeline.json"),
+    `${JSON.stringify({
+      timeline: {
+        runId: WORKFLOW_RUN_ID,
+        branch: correlationLabel,
+        frames: [
+          {
+            frameNo: 4,
+            forks: [
+              { runId: `${WORKFLOW_RUN_ID}-forked`, branchLabel: correlationLabel },
+              { runId: `${WORKFLOW_RUN_ID}-unlabeled`, branchLabel: unlabeledCorrelation }
+            ]
+          }
+        ],
+        children: [
+          {
+            runId: `${WORKFLOW_RUN_ID}-forked`,
+            branch: correlationLabel,
+            frames: [],
+            children: []
+          }
+        ]
+      }
+    })}\n`,
+    "utf8"
+  );
+
+  const timeline = await getRunTimeline({ projectRoot: project, runId: "inspect-run", tree: true, env });
+
+  assert.equal(timeline.ok, true, JSON.stringify(timeline.diagnostics));
+  assert.equal(timeline.value?.branch, "retry-triage");
+  assert.equal(timeline.value?.frames[0]?.forks[0]?.branch_label, "retry-triage");
+  assert.equal(timeline.value?.frames[0]?.forks[1]?.branch_label, null);
+  assert.equal(timeline.value?.lineage[1]?.branch, "retry-triage");
+  assert.doesNotMatch(JSON.stringify(timeline.value), /ultrafuzz-lifecycle-/u);
+});
+
+test("getRunTimeline returns a structured failure when label evidence is corrupt", async () => {
+  const { project, env, runRoot } = await launchedProject({
+    timeline: { timeline: { runId: WORKFLOW_RUN_ID, branch: null, frames: [], children: [] } }
+  });
+  fs.writeFileSync(workflowLifecycleActionJournalPath(layoutForRunRoot(runRoot)), '{"schema_version":false}\n', "utf8");
+
+  const timeline = await getRunTimeline({ projectRoot: project, runId: "inspect-run", env });
+
+  assert.equal(timeline.ok, false);
+  assert.equal(timeline.diagnostics.at(-1)?.code, "WORKFLOW_TIMELINE_LABELS_INVALID");
+  assert.equal(timeline.diagnostics.at(-1)?.source, "runtime");
 });
 
 test("getRunTimeline stays read-only and omits --tree by default", async () => {
