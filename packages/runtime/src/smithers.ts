@@ -404,6 +404,9 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
           dependencyAgenticAttemptIds: node.dependsOn.flatMap(
             (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
+          ),
+          artifactDependencyAttemptIds: artifactAncestorNodeIds(node.id, input.graph.nodes).flatMap(
+            (ancestor) => attemptsByNodeId.get(ancestor) ?? []
           )
         })
       )
@@ -1798,6 +1801,7 @@ function compileTask(input: {
   renderedPromptPath?: string;
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
+  artifactDependencyAttemptIds: readonly string[];
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -1810,7 +1814,7 @@ function compileTask(input: {
   const retries = Math.max(0, input.node.retryPolicy.maxAttempts - 1);
   const artifactDir = getNodeArtifactDir(input.runLayout, input.attempt.attemptId, { create: true });
   const workspacePath = getNodeWorkspaceDir(input.runLayout, input.attempt.attemptId);
-  const dependencyArtifactDirs = input.dependencyAgenticAttemptIds.map((attemptId) =>
+  const dependencyArtifactDirs = input.artifactDependencyAttemptIds.map((attemptId) =>
     getNodeArtifactDir(input.runLayout, attemptId, { create: true })
   );
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
@@ -1927,6 +1931,19 @@ function cloudAgentCredentialEnv(
   const names = [agent.apiKeyEnv];
   if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY", "KIMI_BASE_URL");
   return names;
+}
+
+function artifactAncestorNodeIds(nodeId: string, nodes: readonly ExpandedNode[]): string[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const ancestors = new Set<string>();
+  const pending = [...(byId.get(nodeId)?.dependsOn ?? [])];
+  while (pending.length > 0) {
+    const candidate = pending.pop()!;
+    if (ancestors.has(candidate)) continue;
+    ancestors.add(candidate);
+    pending.push(...(byId.get(candidate)?.dependsOn ?? []));
+  }
+  return [...ancestors].sort();
 }
 
 function nodeAttemptsFor(node: ExpandedNode): NodeAttemptProvenance[] {

@@ -45,6 +45,7 @@ timeouts, backend settings, or artifact requirements.
 | --------------------------- | ---------------------------------------------------------------------- |
 | `repo_path`                 | Absolute path to the target repository being fuzzed.                   |
 | `workspace_path`            | Absolute path to this node attempt workspace.                          |
+| `schema_path`               | Absolute path to the task-local checked-in JSON schema bundle.         |
 | `artifact_path`             | Absolute path to this node attempt artifact directory.                 |
 | `artifact_dir`              | Alias for `artifact_path`.                                             |
 | `run_metadata_path`         | Absolute path to this run's `run.json`.                                |

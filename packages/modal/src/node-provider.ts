@@ -13,6 +13,7 @@ import {
   type Secret,
   type Volume
 } from "modal";
+import { materializePromptSchemas } from "@ultrafuzz/artifacts";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
@@ -396,6 +397,7 @@ export async function createModalNodeHandoffArchive(
     assertSafeTree(staging);
 
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
+    materializePromptSchemas(path.join(staging, ".ultrafuzz", "schemas"));
     copyFileChecked(root, workflowPath, path.join(staging, path.relative(root, workflowPath)));
     if (promptPath !== undefined) {
       copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));
@@ -423,12 +425,29 @@ export async function createModalNodeHandoffArchive(
     return {
       path: archive,
       sha256: sha256File(archive),
-      cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
+      cleanup: () => removeHandoffTemporaryRoot(temporaryRoot)
     };
   } catch (error) {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
   }
+}
+
+/**
+ * The archive staging tree contains a read-only schema directory. Restore
+ * write permission on that private temporary directory before removing it;
+ * otherwise non-root workers cannot unlink its files during cleanup.
+ */
+function removeHandoffTemporaryRoot(temporaryRoot: string): void {
+  const schemaDirectory = path.join(temporaryRoot, "project", ".ultrafuzz", "schemas");
+  try {
+    if (fs.existsSync(schemaDirectory) && !fs.lstatSync(schemaDirectory).isSymbolicLink()) {
+      fs.chmodSync(schemaDirectory, 0o700);
+    }
+  } catch {
+    // Preserve the original operation's result; rmSync below remains best effort.
+  }
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
 }
 
 interface ModalNodeResult {

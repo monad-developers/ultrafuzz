@@ -71,6 +71,19 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("includes the JSON schema bundle needed by rendered property prompts", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    try {
+      const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
+      expect(entries).toContain("./.ultrafuzz/schemas/property-lens.schema.json");
+      expect(entries).toContain("./.ultrafuzz/schemas/properties.schema.json");
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects committed symlinks before building a cloud handoff archive", async () => {
     const fixture = createProjectFixture();
     try {

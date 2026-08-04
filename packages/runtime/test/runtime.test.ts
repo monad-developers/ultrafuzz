@@ -3302,13 +3302,16 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /import \* as projectAgents from "\.\.\/agents\/index\.ts";/);
   assert.doesNotMatch(workflowSource, /import \* as projectAgents from "\.\.\/agents";/);
   assert.match(workflowSource, /agent=\{agentForTask\(task\)\}/);
-  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir\]/);
+  assert.match(workflowSource, /addDir:\s*\[task\.artifactDir, \.\.\.task\.dependencyArtifactDirs\]/);
+  assert.match(workflowSource, /materializePromptSchemas\(path\.join\(workspaceRoot, "\.ultrafuzz", "schemas"\)\)/);
   assert.match(workflowSource, /prompt\.replaceAll\(task\.artifactDir, mirroredArtifactDir\(task\)\)/);
   assert.match(workflowSource, /path\.join\(task\.workspacePath, "artifacts", task\.attemptId\)/);
   assert.match(workflowSource, /taskArtifactRoots\(task, artifactDir\)/);
   assert.match(workflowSource, /lstatSync\(candidate\)/);
   assert.match(workflowSource, /function isMissingPathError/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
+  assert.match(workflowSource, /function assertTaskInputs/);
+  assert.match(workflowSource, /artifact handoff directory is unavailable/);
   assert.match(workflowSource, /function canonicalEmptyArtifact/);
   assert.match(workflowSource, /output\.primary && output\.contract !== "ultrafuzz\/findings@1"/);
   assert.match(workflowSource, /artifactContractDefinition\(output\.contract\)\.validEmptyExample/);

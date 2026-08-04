@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import fs from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import os from "node:os";
 
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
@@ -13,6 +15,7 @@ import {
   NODE_STATE_STATUSES,
   RUN_STATE_STATUSES,
   PROPERTIES_SCHEMA_VERSION,
+  PROPERTY_LENS_SCHEMA_VERSION,
   PROPERTY_CAMPAIGN_SCHEMA_VERSION,
   USAGE_LEDGER_SCHEMA_VERSION,
   ARTIFACT_CONTRACT_IDS,
@@ -21,6 +24,7 @@ import {
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
+  lensPropertiesJsonSchema,
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
   runStateJsonSchema,
@@ -30,22 +34,98 @@ import {
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateImplementedPropertiesSchema,
+  validateLensPropertiesSchema,
   validateArtifactContract,
   validateNodeAttemptLedgerEntry,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   validateRunStateSchema,
-  validateUsageLedgerEntry
+  validateUsageLedgerEntry,
+  materializePromptSchemas
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+
+test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-bundle-"));
+  try {
+    const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+    const copied = materializePromptSchemas(destination);
+    assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
+    assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
+    assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
+    assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
+    assert.equal(statSync(destination).mode & 0o777, 0o500);
+  } finally {
+    for (const file of readdirSync(path.join(root, "workspace", ".ultrafuzz", "schemas"))) {
+      fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
+    }
+    fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas"), 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a hard-linked schema destination before changing its inode", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-hardlink-"));
+  const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+  const outside = path.join(root, "outside.json");
+  try {
+    materializePromptSchemas(destination);
+    const schema = path.join(destination, "property-lens.schema.json");
+    fs.chmodSync(destination, 0o700);
+    fs.unlinkSync(schema);
+    fs.writeFileSync(outside, "outside\n");
+    fs.linkSync(outside, schema);
+    fs.chmodSync(destination, 0o500);
+
+    assert.throws(() => materializePromptSchemas(destination), /destination entry is unsafe/u);
+    assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
+  } finally {
+    fs.chmodSync(destination, 0o700);
+    for (const file of readdirSync(destination)) {
+      fs.chmodSync(path.join(destination, file), 0o600);
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a schema destination that crosses an intermediate symlink", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-symlink-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(workspace, ".ultrafuzz"), "dir");
+  try {
+    assert.throws(
+      () => materializePromptSchemas(path.join(workspace, ".ultrafuzz", "schemas")),
+      /destination crosses a symlink/u
+    );
+    assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("artifact contract registry validates structured, empty, and malformed outputs", () => {
   const definition = artifactContractDefinition("ultrafuzz/report@1");
   assert.match(definition.digest, /^[0-9a-f]{64}$/u);
   assert.equal(validateArtifactContract("ultrafuzz/findings@1", "[]").ok, true);
   assert.equal(validateArtifactContract("ultrafuzz/json-object@1", "[]").ok, false);
+  assert.equal(
+    validateArtifactContract(
+      "ultrafuzz/property-lens@1",
+      JSON.stringify({
+        schema_version: PROPERTY_LENS_SCHEMA_VERSION,
+        properties: [
+          { id: "aviggiano-001", description: "Expected behavior", category: "accounting", priority: "high" }
+        ]
+      })
+    ).ok,
+    true
+  );
   assert.equal(validateArtifactContract("ultrafuzz/nonempty-markdown@1", " \n").ok, false);
   assert.equal(
     validateArtifactContract(
@@ -184,6 +264,35 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   const invalidSource = validatePropertiesSchema(sourceWithExtra);
   assert.equal(invalidSource.ok, false);
   assert.ok(invalidSource.issues.some((issue) => issue.path.endsWith(".sources[0]") && /note/u.test(issue.message)));
+});
+
+test("property lens schema requires normalized priorities and unique IDs", () => {
+  const valid = {
+    schema_version: PROPERTY_LENS_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "aviggiano-001",
+        description: "Expected behavior",
+        category: "accounting",
+        priority: "high"
+      }
+    ]
+  };
+  assert.equal(validateLensPropertiesSchema(valid).ok, true);
+  assert.equal(
+    validateLensPropertiesSchema({
+      ...valid,
+      properties: [{ ...valid.properties[0], priority: "Critical" }]
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateLensPropertiesSchema({
+      ...valid,
+      properties: [valid.properties[0], valid.properties[0]]
+    }).ok,
+    false
+  );
 });
 
 test("property implementation and campaign schemas retain canonical references", () => {
@@ -636,6 +745,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const propertiesSnapshot = readSchemaSnapshot("properties.schema.json");
+  const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
 
@@ -648,6 +758,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
+  assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
 });
 

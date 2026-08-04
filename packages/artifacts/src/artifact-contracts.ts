@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import { validateFindingsSchema } from "./findings-schema.js";
 import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
 import {
+  validateLensPropertiesSchema,
   validateImplementedPropertiesSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema
@@ -17,6 +18,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/json-array@1",
   "ultrafuzz/json-object@1",
   "ultrafuzz/nonempty-markdown@1",
+  "ultrafuzz/property-lens@1",
   "ultrafuzz/properties@1",
   "ultrafuzz/property-campaign@1",
   "ultrafuzz/report@1",
@@ -149,6 +151,11 @@ const definitions = defineContracts([
     validEmptyExample: '{"schema_version":"ultrafuzz.properties.v1","properties":[]}'
   },
   {
+    id: "ultrafuzz/property-lens@1",
+    format: "json",
+    description: "A typed property-lens catalog whose source properties use only high, medium, or low priority."
+  },
+  {
     id: "ultrafuzz/property-campaign@1",
     format: "json",
     description:
@@ -231,6 +238,14 @@ export function validateArtifactContract(
   }
   if (contract === "ultrafuzz/properties@1") {
     const result = validatePropertiesSchema(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
+  if (contract === "ultrafuzz/property-lens@1") {
+    const result = validateLensPropertiesSchema(parsed, artifactPath);
     return {
       ok: result.ok,
       issues: result.issues,

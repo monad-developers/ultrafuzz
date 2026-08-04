@@ -18,6 +18,17 @@ function generatedTestManifestSources(markdown: string): string[] {
 }
 
 describe("prompt semantic anchors", () => {
+  it("routes every property lens through the task-local JSON schema bundle", () => {
+    const propertyPrompts = loadBuiltInPromptAssets().filter((asset) => asset.relativePath.startsWith("properties/"));
+    expect(propertyPrompts.length).toBeGreaterThan(0);
+    for (const asset of propertyPrompts) {
+      expect(asset.markdown, asset.relativePath).not.toContain("packages/artifacts/schema/");
+      if (asset.markdown.includes("property-lens.schema.json") || asset.markdown.includes("properties.schema.json")) {
+        expect(asset.markdown, asset.relativePath).toContain("{{schema_path}}/");
+      }
+    }
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()

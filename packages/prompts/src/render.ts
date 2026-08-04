@@ -8,6 +8,7 @@ export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
 export const SUPPORTED_TEMPLATE_VARIABLES = [
   "repo_path",
   "workspace_path",
+  "schema_path",
   "artifact_path",
   "artifact_dir",
   "ancestor_artifacts",
@@ -729,6 +730,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
   return {
     repo_path: input.node.repoPath,
     workspace_path: input.node.workspacePath,
+    schema_path: path.join(input.node.workspacePath, ".ultrafuzz", "schemas"),
     artifact_path: input.node.artifactDir,
     artifact_dir: input.node.artifactDir,
     run_metadata_path: input.run.metadataPath,
@@ -777,6 +779,9 @@ function validateVariableOverrides(variables: PromptRenderInput["variables"]): v
   for (const [key, value] of Object.entries(variables)) {
     if (!isSupportedTemplateVariable(key)) {
       throw new PromptError("missing-template-variable", `unknown prompt render variable override: ${key}`);
+    }
+    if (key === "schema_path") {
+      throw new PromptError("invalid-render-input", "schema_path is task-local and cannot be overridden");
     }
     if (!(
       typeof value === "string" ||

@@ -30,6 +30,7 @@ const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIM
 const {
   artifactContractDefinition,
   assertRegularFileInside,
+  materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
   writeFileDurable
@@ -169,7 +170,7 @@ function baseAgentForTask(task: (typeof taskSpecs)[number]): AgentLike | AgentLi
   return factory({
     ...(task.modelName === null ? {} : { model: task.modelName }),
     ...(task.reasoningEffort === null ? {} : { reasoningEffort: task.reasoningEffort }),
-    addDir: [task.artifactDir]
+    addDir: [task.artifactDir, ...task.dependencyArtifactDirs]
   });
 }
 
@@ -335,6 +336,8 @@ function taskArtifactRoots(task: (typeof taskSpecs)[number], canonicalArtifactDi
 function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof preparationOutput> {
   preservePinnedSourceProof(task);
   const workspaceRoot = realpathSync(task.workspacePath);
+  materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
+  assertTaskInputs(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -363,6 +366,38 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
     }
   }
   return { prepared: true };
+}
+
+function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  const schemaRoot = path.join(workspaceRoot, ".ultrafuzz", "schemas");
+  for (const schema of ["property-lens.schema.json", "properties.schema.json"]) {
+    assertRegularFileInside(schemaRoot, path.join(schemaRoot, schema), `prompt schema ${schema}`);
+  }
+  if (task.promptPath !== undefined) {
+    assertRegularFileInside(path.dirname(task.promptPath), task.promptPath, "rendered task prompt");
+  }
+  for (const dependency of task.dependencyArtifactDirs) {
+    let stat;
+    try {
+      stat = lstatSync(dependency);
+    } catch (error) {
+      throw new Error(`artifact handoff directory is unavailable: ${dependency}`, { cause: error });
+    }
+    let resolvedDependency: string;
+    try {
+      resolvedDependency = realpathSync(dependency);
+    } catch (error) {
+      throw new Error(`artifact handoff directory is unavailable: ${dependency}`, { cause: error });
+    }
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      resolvedDependency !== dependency ||
+      !isStrictlyInsideDirectory(realpathSync(task.runRoot), resolvedDependency)
+    ) {
+      throw new Error(`artifact handoff directory is unsafe: ${dependency}`);
+    }
+  }
 }
 
 function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
