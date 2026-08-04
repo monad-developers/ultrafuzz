@@ -7,41 +7,41 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 
 ## Commands
 
-| Command                             | Purpose                                                                                                        |
-| ----------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `ultrafuzz init`                    | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                |
-| `ultrafuzz validate`                | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents. |
-| `ultrafuzz run`                     | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.            |
-| `ultrafuzz references status`       | Report whether pinned references are present in the local digest-checked cache.                                |
-| `ultrafuzz references sync`         | Explicitly fetch pinned references into the local cache.                                                       |
-| `ultrafuzz references update`       | Rewrite the project reference catalog to newer pinned commits when requested.                                  |
-| `ultrafuzz ps`                      | List Ultrafuzz runs and linked workflow status.                                                                |
-| `ultrafuzz inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                   |
-| `ultrafuzz status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.             |
-| `ultrafuzz pause <run-id>`          | Gracefully pause an active run after its in-flight tasks finish.                                               |
-| `ultrafuzz why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                           |
-| `ultrafuzz timeline <run-id>`       | Show checkpoint frames and fork lineage, including the frame numbers `fork --frame` accepts.                   |
-| `ultrafuzz events <run-id>`         | Show linked workflow lifecycle events, with optional streaming.                                                |
-| `ultrafuzz node <run-id> <node-id>` | Show one workflow node's status, attempts, retries, timing, and output metadata.                               |
-| `ultrafuzz snapshots <run-id>`      | List durability and workspace checkpoints for recovery and time-travel diagnosis.                              |
-| `ultrafuzz cancel <run-id>`         | Cancel an active run; cancellation is terminal, unlike pause.                                                  |
-| `ultrafuzz doctor`                  | Report validation, toolchain, and pinned workflow engine install posture without mutating anything.            |
-| `ultrafuzz resume <run-id>`         | Delegate resume for the linked workflow run after product checks.                                              |
-| `ultrafuzz replay <run-id>`         | Delegate replay for the linked workflow run after product checks.                                              |
-| `ultrafuzz fork <run-id>`           | Delegate fork for the linked workflow run after product checks.                                                |
-| `ultrafuzz report <run-id>`         | Locate the agent-written final report artifacts.                                                               |
-| `ultrafuzz materialize <run-id>`    | Copy selected reviewed outputs into the target project after confirmation and path checks.                     |
-| `ultrafuzz clean <run-id>`          | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                            |
-| `ultrafuzz dashboard`               | Serve the local loopback dashboard and API for product state inspection and editing.                           |
-| `ultrafuzz eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                      |
-| `ultrafuzz eval run`                | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                      |
-| `ultrafuzz eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                    |
-| `ultrafuzz eval score <id>`         | Score finished eval run reports against external ground truth.                                                 |
-| `ultrafuzz eval report <id>`        | Show the scored eval run variant ranking.                                                                      |
-| `ultrafuzz eval compare <id>`       | Compare scored eval variants against a baseline variant.                                                       |
-| `ultrafuzz eval analyze <type>`     | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.   |
-| `ultrafuzz eval history [id]`       | Validate/render public eval history, or append one complete scored run.                                        |
-| `ultrafuzz eval publish <id>`       | Replay a recorded eval run's node telemetry to the configured provider.                                        |
+| Command                             | Purpose                                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ultrafuzz init`                    | Create root config plus `.ultrafuzz/**` product surfaces and workflow plumbing.                                  |
+| `ultrafuzz validate`                | Validate config, topology, prompts, path guards, agent references, and trust posture without launching agents.   |
+| `ultrafuzz run`                     | Validate, render prompts, build run evidence, compile a workflow, and launch a linked workflow run.              |
+| `ultrafuzz references status`       | Report whether pinned references are present in the local digest-checked cache.                                  |
+| `ultrafuzz references sync`         | Explicitly fetch pinned references into the local cache.                                                         |
+| `ultrafuzz references update`       | Rewrite the project reference catalog to newer pinned commits when requested.                                    |
+| `ultrafuzz ps`                      | List Ultrafuzz runs and linked workflow status.                                                                  |
+| `ultrafuzz inspect <run-id>`        | Show product evidence and linked workflow details for a run.                                                     |
+| `ultrafuzz status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.               |
+| `ultrafuzz pause <run-id>`          | Gracefully pause an active run after its in-flight tasks finish.                                                 |
+| `ultrafuzz why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                             |
+| `ultrafuzz timeline <run-id>`       | Show checkpoint frames and fork lineage, including the frame numbers `replay --frame` and `fork --frame` accept. |
+| `ultrafuzz events <run-id>`         | Show linked workflow lifecycle events, with optional streaming.                                                  |
+| `ultrafuzz node <run-id> <node-id>` | Show one workflow node's status, attempts, retries, timing, and output metadata.                                 |
+| `ultrafuzz snapshots <run-id>`      | List durability and workspace checkpoints for recovery and time-travel diagnosis.                                |
+| `ultrafuzz cancel <run-id>`         | Cancel an active run; cancellation is terminal, unlike pause.                                                    |
+| `ultrafuzz doctor`                  | Report validation, toolchain, and pinned workflow engine install posture without mutating anything.              |
+| `ultrafuzz resume <run-id>`         | Delegate resume for the linked workflow run after product checks.                                                |
+| `ultrafuzz replay <run-id>`         | Replay the linked workflow run from a required checkpoint frame after product checks.                            |
+| `ultrafuzz fork <run-id>`           | Delegate fork for the linked workflow run after product checks.                                                  |
+| `ultrafuzz report <run-id>`         | Locate the agent-written final report artifacts.                                                                 |
+| `ultrafuzz materialize <run-id>`    | Copy selected reviewed outputs into the target project after confirmation and path checks.                       |
+| `ultrafuzz clean <run-id>`          | Remove selected generated `.ultrafuzz/**` paths after confirmation and path checks.                              |
+| `ultrafuzz dashboard`               | Serve the local loopback dashboard and API for product state inspection and editing.                             |
+| `ultrafuzz eval plan`               | Dry-run an eval suite matrix without launching workflows.                                                        |
+| `ultrafuzz eval run`                | Launch Ultrafuzz runs for an eval suite matrix and stream node telemetry.                                        |
+| `ultrafuzz eval status <id>`        | Show disclosure-safe node progress and ETA for every row in an eval matrix.                                      |
+| `ultrafuzz eval score <id>`         | Score finished eval run reports against external ground truth.                                                   |
+| `ultrafuzz eval report <id>`        | Show the scored eval run variant ranking.                                                                        |
+| `ultrafuzz eval compare <id>`       | Compare scored eval variants against a baseline variant.                                                         |
+| `ultrafuzz eval analyze <type>`     | Generate private offline tables, provenance, score, intersection, and cost reports from a finalized handoff.     |
+| `ultrafuzz eval history [id]`       | Validate/render public eval history, or append one complete scored run.                                          |
+| `ultrafuzz eval publish <id>`       | Replay a recorded eval run's node telemetry to the configured provider.                                          |
 
 Generated workflow-engine files are implementation plumbing. The stable product
 surfaces are root `ultrafuzz.toml`, `.ultrafuzz/**`, reviewed project files,
@@ -172,7 +172,7 @@ ultrafuzz node <run-id> <node-id> \
   [--json]
 ultrafuzz resume <run-id> [--project <path>] [--max-concurrency <n>] \
   [--reset-node <workflow-node-id>] [--json]
-ultrafuzz replay <run-id> [--project <path>] [--json]
+ultrafuzz replay <run-id> --frame <n> [--project <path>] [--json]
 ultrafuzz fork <run-id> \
   [--project <path>] \
   [--frame <n>] \
@@ -272,8 +272,9 @@ evidence first, matching single-run `status`, and `status` recommends it as the
 next step.
 
 `timeline` is read-only and returns `frames` with `frame`, `created_at`,
-`content_hash`, and fork points. Pass a listed frame number to
-`ultrafuzz fork <run-id> --frame <n>`. `--tree` adds forked runs recursively
+`content_hash`, and fork points. Pass a listed non-negative frame number to
+`ultrafuzz replay <run-id> --frame <n>` or `ultrafuzz fork <run-id> --frame <n>`.
+`--tree` adds forked runs recursively
 under `lineage`, each with its own depth and frames.
 
 `snapshots` is read-only and lists durability and workspace checkpoints with

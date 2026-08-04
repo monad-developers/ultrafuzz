@@ -41,6 +41,10 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       '    printf \'{"ok":true,"data":{"run":{"id":"%s"},"steps":[]}}\\n\' "$2"',
       "    ;;",
       "  replay)",
+      '    replay_frame=""',
+      '    previous=""',
+      '    for argument in "$@"; do [ "$previous" != "--frame" ] || replay_frame="$argument"; previous="$argument"; done',
+      '    case "$replay_frame" in ""|*[!0-9]*) printf \'replay requires integer --frame\\n\' >&2; exit 64 ;; esac',
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-replayed\"}'",
       "    ;;",
       "  fork)",
@@ -555,11 +559,24 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(parseJson(clean));
   assert.equal(fs.existsSync(path.join(runData.run_root, "artifacts", "final-report")), false);
 
+  const missingReplayFrame = await cli(project, ["replay", runData.run_id, "--json"], env);
+  assert.equal(missingReplayFrame.code, 1, missingReplayFrame.stderr);
+  assert.equal(
+    (parseJson(missingReplayFrame).diagnostics as Array<{ code?: string }>)[0]?.code,
+    "WORKFLOW_REPLAY_FRAME_REQUIRED"
+  );
+  const invalidReplayFrame = await cli(project, ["replay", runData.run_id, "--frame", "-1", "--json"], env);
+  assert.equal(invalidReplayFrame.code, 1, invalidReplayFrame.stderr);
+  assert.equal(
+    (parseJson(invalidReplayFrame).diagnostics as Array<{ code?: string }>)[0]?.code,
+    "WORKFLOW_REPLAY_FRAME_INVALID"
+  );
+
   for (const command of ["resume", "replay"]) {
     const args =
       command === "resume"
         ? [command, runData.run_id, "--max-concurrency", "8", "--json"]
-        : [command, runData.run_id, "--json"];
+        : [command, runData.run_id, "--frame", "7", "--json"];
     const lifecycle = await cli(project, args, env);
     assert.equal(lifecycle.code, 0, `${command}: ${lifecycle.stderr}${lifecycle.stdout}`);
     const lifecycleBody = parseJson(lifecycle);

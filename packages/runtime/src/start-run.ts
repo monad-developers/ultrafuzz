@@ -1324,11 +1324,21 @@ export async function pauseRun(input: PauseRunInput) {
 }
 
 async function submitLifecycleAction(input: WorkflowLifecycleInput, action: WorkflowLifecycleValue["action"]) {
-  if (action === "fork" && input.forkFrame === undefined) {
+  if ((action === "fork" || action === "replay") && input.forkFrame === undefined) {
     return runtimeFailure<WorkflowLifecycleValue>([
       {
-        code: "WORKFLOW_FORK_FRAME_REQUIRED",
-        message: "fork requires a checkpoint frame",
+        code: action === "fork" ? "WORKFLOW_FORK_FRAME_REQUIRED" : "WORKFLOW_REPLAY_FRAME_REQUIRED",
+        message: `${action} requires a checkpoint frame`,
+        severity: "error",
+        source: "runtime"
+      }
+    ]);
+  }
+  if ((action === "fork" || action === "replay") && (!Number.isSafeInteger(input.forkFrame) || input.forkFrame! < 0)) {
+    return runtimeFailure<WorkflowLifecycleValue>([
+      {
+        code: action === "fork" ? "WORKFLOW_FORK_FRAME_INVALID" : "WORKFLOW_REPLAY_FRAME_INVALID",
+        message: `${action} checkpoint frame must be a non-negative safe integer`,
         severity: "error",
         source: "runtime"
       }
@@ -1472,7 +1482,6 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
     if (submittedControllerInvocation === undefined) {
       throw new Error("workflow lifecycle invocation was not durably recorded");
     }
-    if (journalEntry !== undefined) externalNonIdempotentInvocationStarted = true;
     const lifecycleResult = await runSmithersLifecycleCommand({
       action,
       smithersRunId: evidence.smithersRunId,
@@ -1507,6 +1516,13 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       // foreground lifecycle failures remain transient.
       onDetachedInvocation: () => {
         retainExecutionSnapshot = true;
+      },
+      // Writing the durable `invoking` phase is intentionally earlier than
+      // process creation. Only a successful Node child-process `spawn` event
+      // crosses the external non-idempotent boundary; validation, anchoring,
+      // executable lookup, and spawn failures remain safe to retry in-process.
+      onExternalInvocationSpawned: () => {
+        externalNonIdempotentInvocationStarted = true;
       }
     });
     if (lifecycleResult.alreadyRunning === true) retainExecutionSnapshot = false;

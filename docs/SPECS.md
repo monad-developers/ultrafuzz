@@ -69,7 +69,7 @@ The CLI product surface consists of:
 | `ps`                   | List Ultrafuzz runs and linked workflow status.                                                                            |
 | `inspect <run-id>`     | Show product evidence and linked workflow details for a run.                                                               |
 | `resume <run-id>`      | Delegate resume for the linked workflow after product checks.                                                              |
-| `replay <run-id>`      | Delegate replay for the linked workflow after product checks.                                                              |
+| `replay <run-id>`      | Require a checkpoint frame and delegate replay for the linked workflow after product checks.                               |
 | `fork <run-id>`        | Delegate fork for the linked workflow after product checks.                                                                |
 | `report <run-id>`      | Show the agent-written final report artifacts.                                                                             |
 | `materialize <run-id>` | Copy selected reviewed outputs into the target project after confirmation and path checks.                                 |
@@ -331,7 +331,8 @@ and ledger entries MUST NOT persist raw inputs, outputs, or configuration.
 
 `status`, `pause`, `resume`, `replay`, and `fork` operate on the linked workflow run. They SHOULD
 perform product checks, delegate to the workflow engine, and persist updated
-linked workflow identity or lifecycle evidence.
+linked workflow identity or lifecycle evidence. Replay MUST require an explicit
+checkpoint frame and MUST pass that frame to the workflow engine.
 
 ## Artifacts, Findings, And Reports
 

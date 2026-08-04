@@ -1699,6 +1699,7 @@ export async function runSmithersLifecycleCommand(input: {
   env?: Record<string, string | undefined>;
   environmentVariableNames?: readonly string[];
   onDetachedInvocation?: () => void;
+  onExternalInvocationSpawned?: () => void;
 }): Promise<{
   stdout: string;
   stderr: string;
@@ -1712,6 +1713,15 @@ export async function runSmithersLifecycleCommand(input: {
     (input.correlationLabel === undefined || input.correlationLabel.length === 0)
   ) {
     throw new Error("fork and replay require a lifecycle correlation label");
+  }
+  if ((input.action === "fork" || input.action === "replay") && input.forkFrame === undefined) {
+    throw new Error(`${input.action} requires a checkpoint frame`);
+  }
+  if (
+    (input.action === "fork" || input.action === "replay") &&
+    (!Number.isSafeInteger(input.forkFrame) || input.forkFrame! < 0)
+  ) {
+    throw new Error(`${input.action} checkpoint frame must be a non-negative safe integer`);
   }
   let preResumeStderr = "";
   if (input.action === "resume" && input.resumeRecovery !== undefined) {
@@ -1976,7 +1986,8 @@ export async function runSmithersLifecycleCommand(input: {
       projectRoot: input.projectRoot,
       env: input.env,
       environmentVariableNames: input.environmentVariableNames,
-      keepWorkspaces: input.keepWorkspaces
+      keepWorkspaces: input.keepWorkspaces,
+      onSpawn: input.onExternalInvocationSpawned
     });
     const forkedRunId = parseForkedRunId(forkResult.stdout);
     if (forkedRunId === undefined) {
@@ -2045,6 +2056,8 @@ export async function runSmithersLifecycleCommand(input: {
             input.workflowPath,
             "--run-id",
             input.smithersRunId,
+            "--frame",
+            String(input.forkFrame),
             "--label",
             input.correlationLabel!,
             "--format",
@@ -2056,7 +2069,8 @@ export async function runSmithersLifecycleCommand(input: {
     projectRoot: input.projectRoot,
     env: input.env,
     environmentVariableNames: input.environmentVariableNames,
-    keepWorkspaces: input.keepWorkspaces
+    keepWorkspaces: input.keepWorkspaces,
+    ...(["fork", "replay"].includes(input.action) ? { onSpawn: input.onExternalInvocationSpawned } : {})
   });
   return {
     ...result,
@@ -2343,6 +2357,7 @@ async function execSmithersCli(input: {
   acceptedExitCodes?: readonly number[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  onSpawn?: () => void;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   return withWorkflowExecutionSnapshotAnchor(input.env, (anchor) => {
     const anchored = anchoredSmithersControllerInput(input.args, input.env, anchor);
@@ -2360,6 +2375,7 @@ async function execSmithersCliUnanchored(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   displayArgs?: readonly string[];
+  onSpawn?: () => void;
 }): Promise<{ stdout: string; stderr: string; command: string[]; exitCode: number }> {
   const command = [...input.args];
   const executionDeadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
@@ -2377,7 +2393,8 @@ async function execSmithersCliUnanchored(input: {
       cwd: input.projectRoot,
       env: smithersCommandEnv(input.projectRoot, input.env, input.environmentVariableNames, input.keepWorkspaces),
       signal: input.signal,
-      timeoutMs: commandTimeoutMs
+      timeoutMs: commandTimeoutMs,
+      onSpawn: input.onSpawn
     });
     executableAnchor?.assertCurrent();
     if (result.exitCode === 0) {
@@ -2421,6 +2438,7 @@ async function executeBoundedSmithersCommand(input: {
   env: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   timeoutMs?: number;
+  onSpawn?: () => void;
 }): Promise<BoundedSmithersCommandResult> {
   if (isAbortedSignal(input.signal)) {
     throw smithersCommandTerminationError("abort", "", "", null);
@@ -2430,6 +2448,7 @@ async function executeBoundedSmithersCommand(input: {
     env: input.env,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  child.once("spawn", () => input.onSpawn?.());
   let processError: Error | undefined;
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
     // `spawn()` reports an unavailable executable or cwd asynchronously. Keep

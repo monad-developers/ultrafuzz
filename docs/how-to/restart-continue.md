@@ -72,10 +72,13 @@ Use replay when you want the workflow engine to replay the linked run from the
 stored product evidence:
 
 ```bash
-ultrafuzz replay <run-id> --project /path/to/target-protocol
+ultrafuzz timeline <run-id> --project /path/to/target-protocol
+ultrafuzz replay <run-id> --project /path/to/target-protocol --frame 12
 ```
 
-Replay is a linked-workflow operation over existing run evidence. Use a fresh
+Replay requires an explicit non-negative checkpoint frame from `timeline`; it
+fails before invoking the workflow engine when `--frame` is omitted or invalid. Replay is a
+linked-workflow operation over existing run evidence. Use a fresh
 `ultrafuzz run` when modified config, topology, prompts, or references should
 define a new campaign.
 
@@ -91,7 +94,7 @@ ultrafuzz fork <run-id> --project /path/to/target-protocol --frame 12
 ultrafuzz fork <run-id> --project /path/to/target-protocol --reset-node triage --max-concurrency 4
 ```
 
-`timeline` lists the checkpoint frame numbers `--frame` accepts, and
+`timeline` lists the checkpoint frame numbers replay and fork `--frame` accept, and
 `ultrafuzz snapshots <run-id>` lists the durability and workspace checkpoints
 behind recovery. Both are read-only.
 

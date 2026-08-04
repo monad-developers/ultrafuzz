@@ -463,6 +463,7 @@ export interface WorkflowLifecycleInput {
   projectRoot: string;
   runId: string;
   maxConcurrency?: number;
+  /** Checkpoint frame required by both fork and replay lifecycle actions. */
   forkFrame?: number;
   resetNode?: string;
   force?: boolean;

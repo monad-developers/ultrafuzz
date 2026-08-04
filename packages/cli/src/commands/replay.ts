@@ -1,4 +1,4 @@
-import { Args, Command } from "@oclif/core";
+import { Args, Command, Flags } from "@oclif/core";
 import { replayRun } from "@ultrafuzz/runtime";
 
 import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot } from "../command-shared.js";
@@ -6,11 +6,19 @@ import { cliIo, commandFromRuntime, emitCommandResult, globalFlags, projectRoot 
 export default class Replay extends Command {
   static override summary = "Replay a linked run";
   static override args = { runId: Args.string({ required: true, description: "Ultrafuzz run ID" }) };
-  static override flags = globalFlags;
+  static override flags = {
+    ...globalFlags,
+    frame: Flags.integer({ summary: "Non-negative checkpoint frame to replay from" })
+  };
 
   async run(): Promise<void> {
     const { args, flags } = await this.parse(Replay);
-    const result = await replayRun({ projectRoot: projectRoot(flags), runId: args.runId, env: cliIo().env });
+    const result = await replayRun({
+      projectRoot: projectRoot(flags),
+      runId: args.runId,
+      forkFrame: flags.frame,
+      env: cliIo().env
+    });
     emitCommandResult(
       this,
       "replay",

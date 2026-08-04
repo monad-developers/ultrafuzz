@@ -1268,7 +1268,12 @@ class DashboardApp {
         });
         break;
       case "replay":
-        result = await replayRun({ projectRoot: this.projectRoot, runId: runId!, env: this.env });
+        result = await replayRun({
+          projectRoot: this.projectRoot,
+          runId: runId!,
+          forkFrame: optionalNumberField(body, "forkFrame"),
+          env: this.env
+        });
         break;
       case "fork":
         result = await forkRun({

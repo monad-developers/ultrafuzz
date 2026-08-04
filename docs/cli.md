@@ -16,14 +16,14 @@ accept `--json` and emit the `ultrafuzz.cli.result.v1` envelope.
 | `status <run-id>`         | Show a concise health verdict, progress, ETA, current-step duration, throughput, and gating nodes.                        |
 | `pause <run-id>`          | Gracefully pause a running workflow after in-flight tasks finish.                                                         |
 | `why <run-id>`            | Diagnose why a run is blocked, paused, quota-parked, waiting, or unable to progress.                                      |
-| `timeline <run-id>`       | Show checkpoint frames and fork lineage, with the frame numbers `fork --frame` accepts.                                   |
+| `timeline <run-id>`       | Show checkpoint frames and fork lineage, with the frame numbers `replay --frame` and `fork --frame` accept.               |
 | `events <run-id>`         | Show linked workflow lifecycle events, optionally streaming with `--watch`.                                               |
 | `node <run-id> <node-id>` | Show one workflow node's status, attempts, retries, timing, and output metadata.                                          |
 | `snapshots <run-id>`      | List durability and workspace checkpoints for recovery and time-travel diagnosis.                                         |
 | `cancel <run-id>`         | Cancel an active run; cancellation is terminal, unlike pause.                                                             |
 | `doctor`                  | Report validation, toolchain, and pinned workflow engine install posture.                                                 |
 | `resume <run-id>`         | Resume a linked run after product checks.                                                                                 |
-| `replay <run-id>`         | Replay a linked run after product checks.                                                                                 |
+| `replay <run-id>`         | Replay a linked run from a required checkpoint frame after product checks.                                                |
 | `fork <run-id>`           | Fork a linked run after product checks.                                                                                   |
 | `report <run-id>`         | Show the agent-written final report artifact.                                                                             |
 | `materialize <run-id>`    | Copy selected outputs into the project after confirmation and path checks.                                                |
@@ -82,7 +82,7 @@ selects another agent, backend-specific reasoning is cleared, including when
 - `why <run-id>` explains what is blocking a run, with typed blockers and the
   action that unblocks each one.
 - `timeline <run-id> [--tree]` lists checkpoint frames to pass to
-  `fork --frame <n>`, plus fork lineage.
+  `replay --frame <n>` or `fork --frame <n>`, plus fork lineage.
 - `snapshots <run-id>` lists durability and workspace checkpoints.
 - `events <run-id> [--watch] [--interval <seconds>]` shows the **linked
   workflow** lifecycle log, which is separate from Ultrafuzz's product
