@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parsePromptFrontmatter, PromptError } from "./frontmatter.js";
+import { builtInPromptRoot } from "./assets.js";
 
 export const RENDERED_PROMPT_FILE = "prompt.rendered.md";
 
@@ -392,7 +392,7 @@ function loadOutputContractTemplate(relativePath: string): string {
 }
 
 function outputContractTemplateRoot(): string {
-  return fileURLToPath(new URL("../../../.ultrafuzz/prompts/_templates/output-contract/", import.meta.url));
+  return path.join(builtInPromptRoot(), "_templates", "output-contract");
 }
 
 export function writeRenderedPrompt(result: PromptRenderResult): string {
