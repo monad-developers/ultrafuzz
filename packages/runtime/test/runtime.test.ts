@@ -798,6 +798,237 @@ function writeReferenceCache(xdgCacheHome: string): void {
   );
 }
 
+const FIXTURE_VULNERABILITY_DATABASE_COMMIT = "b".repeat(40);
+
+function appendFixtureVulnerabilityDatabaseReference(project: string): void {
+  fs.appendFileSync(
+    path.join(project, ".ultrafuzz", "references.yml"),
+    [
+      "",
+      "  vulnerability-database.web3:",
+      "    kind: vulnerability-database",
+      "    provider: github",
+      "    repo: monad-developers/web3-vulnerability-database",
+      `    commit: ${FIXTURE_VULNERABILITY_DATABASE_COMMIT}`,
+      "    paths:",
+      "      - database.yml",
+      "      - capabilities.yml",
+      "      - catalog.json",
+      '    resolved_at: "2026-08-04T00:00:00Z"',
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+function writeFixtureVulnerabilityDatabaseCache(xdgCacheHome: string): void {
+  const cacheDir = path.join(
+    xdgCacheHome,
+    "ultrafuzz",
+    "references",
+    "github",
+    "monad-developers",
+    "web3-vulnerability-database",
+    "vulnerability-database",
+    FIXTURE_VULNERABILITY_DATABASE_COMMIT
+  );
+  const sourcePath = "classes/accounting/selected-class.md";
+  const source = [
+    "---",
+    "id: accounting:selected-class",
+    "title: Selected accounting class",
+    "domain: accounting",
+    "capabilities:",
+    "  required:",
+    "    - audit.catalog",
+    "  optional:",
+    "    - audit.unmodeled",
+    "  incompatible: []",
+    "threats:",
+    "  - accounting:selected-class-review",
+    "attack_surfaces:",
+    "  - accounting:selected-surface",
+    "related_classes: []",
+    "sources:",
+    "  - id: runtime-fixture",
+    "    kind: documentation",
+    "    title: Runtime fixture",
+    "    url: https://example.com/runtime-fixture",
+    "---",
+    "",
+    "## Summary",
+    "",
+    "Review the selected accounting class.",
+    "",
+    "## Preconditions",
+    "",
+    "The fixture capability is present.",
+    "",
+    "## Broken invariant",
+    "",
+    "Accounting must remain balanced.",
+    "",
+    "## Attack pattern",
+    "",
+    "Exercise the accounting boundary.",
+    "",
+    "## Impact",
+    "",
+    "Assets may be misaccounted.",
+    "",
+    "## Detection guidance",
+    "",
+    "Inspect balance transitions.",
+    "",
+    "## False positives",
+    "",
+    "Intentional rounding is excluded.",
+    "",
+    "## Hunter instructions",
+    "",
+    "Trace assets through the accounting path.",
+    "",
+    "## Examples",
+    "",
+    "Compare credited and debited values.",
+    ""
+  ].join("\n");
+  const metadata = [
+    "schema_version: 1",
+    "name: runtime-test-database",
+    "description: Runtime integration fixture.",
+    "classes: classes/**/*.md",
+    "capabilities: capabilities.yml",
+    "catalog: catalog.json",
+    ""
+  ].join("\n");
+  const capabilities = [
+    "capabilities:",
+    "  - id: audit.catalog",
+    "    title: Audit catalog",
+    "    description: The protocol exposes the fixture capability.",
+    "  - id: audit.unmodeled",
+    "    title: Unmodeled audit capability",
+    "    description: The goal planner retains unknown when threat modeling omits this capability.",
+    ""
+  ].join("\n");
+  const metadataBytes = Buffer.from(metadata);
+  const capabilityBytes = Buffer.from(capabilities);
+  const sourceBytes = Buffer.from(source);
+  const record = {
+    id: "accounting:selected-class",
+    title: "Selected accounting class",
+    domain: "accounting",
+    capabilities: { required: ["audit.catalog"], optional: ["audit.unmodeled"], incompatible: [] },
+    threats: ["accounting:selected-class-review"],
+    attack_surfaces: ["accounting:selected-surface"],
+    related_classes: [],
+    sources: [
+      {
+        id: "runtime-fixture",
+        kind: "documentation",
+        title: "Runtime fixture",
+        url: "https://example.com/runtime-fixture"
+      }
+    ],
+    guidance: {
+      summary: "Review the selected accounting class.",
+      preconditions: "The fixture capability is present.",
+      broken_invariant: "Accounting must remain balanced.",
+      attack_pattern: "Exercise the accounting boundary.",
+      impact: "Assets may be misaccounted.",
+      detection: "Inspect balance transitions.",
+      false_positives: "Intentional rounding is excluded.",
+      hunter_instructions: "Trace assets through the accounting path.",
+      examples: "Compare credited and debited values."
+    },
+    source_path: sourcePath,
+    source_sha256: digestFixtureBytes(sourceBytes),
+    source_size_bytes: sourceBytes.byteLength,
+    selected_artifact_path: "vulnerability-db/selected/accounting/selected-class.md"
+  };
+  const identity = {
+    database_schema_version: 1,
+    files: {
+      metadata: fixtureFileDigest("database.yml", metadataBytes),
+      capabilities: fixtureFileDigest("capabilities.yml", capabilityBytes)
+    },
+    records: [
+      {
+        id: record.id,
+        path: record.source_path,
+        sha256: record.source_sha256,
+        size_bytes: record.source_size_bytes
+      }
+    ]
+  };
+  const catalog = {
+    schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
+    database_schema_version: 1,
+    database_aggregate_sha256: digestFixtureBytes(Buffer.from(canonicalFixtureJson(identity))),
+    capabilities: [
+      {
+        id: "audit.catalog",
+        title: "Audit catalog",
+        description: "The protocol exposes the fixture capability."
+      },
+      {
+        id: "audit.unmodeled",
+        title: "Unmodeled audit capability",
+        description: "The goal planner retains unknown when threat modeling omits this capability."
+      }
+    ],
+    records: [record]
+  };
+  fs.mkdirSync(path.join(cacheDir, "classes", "accounting"), { recursive: true });
+  fs.writeFileSync(path.join(cacheDir, "database.yml"), metadataBytes);
+  fs.writeFileSync(path.join(cacheDir, "capabilities.yml"), capabilityBytes);
+  fs.writeFileSync(path.join(cacheDir, "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+  fs.writeFileSync(path.join(cacheDir, sourcePath), sourceBytes);
+  const files = ["database.yml", "capabilities.yml", "catalog.json", sourcePath].map((relativePath) =>
+    fixtureFileDigest(relativePath, fs.readFileSync(path.join(cacheDir, relativePath)))
+  );
+  fs.writeFileSync(
+    path.join(cacheDir, CACHE_MANIFEST_FILE),
+    `${JSON.stringify(
+      {
+        schema_version: "1.0",
+        provider: "github",
+        repo: "monad-developers/web3-vulnerability-database",
+        commit: FIXTURE_VULNERABILITY_DATABASE_COMMIT,
+        fetched_at: "2026-08-04T00:00:00Z",
+        files
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function fixtureFileDigest(filePath: string, contents: Buffer): { path: string; size_bytes: number; sha256: string } {
+  return { path: filePath, size_bytes: contents.byteLength, sha256: digestFixtureBytes(contents) };
+}
+
+function digestFixtureBytes(contents: Buffer): string {
+  return crypto.createHash("sha256").update(contents).digest("hex");
+}
+
+function canonicalFixtureJson(value: unknown): string {
+  return JSON.stringify(canonicalFixtureValue(value));
+}
+
+function canonicalFixtureValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalFixtureValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalFixtureValue(child)])
+    );
+  }
+  return value;
+}
+
 function writeFanoutProject(project: string): void {
   fs.mkdirSync(path.join(project, ".ultrafuzz", "workspaces"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "setup"), { recursive: true });
@@ -911,6 +1142,7 @@ test("init preserves existing project-owned files and validate exposes launch po
   const init = initProject({ projectRoot: project });
   assert.equal(init.ok, true);
   assert.equal(init.value?.preserved.includes("ultrafuzz.toml"), true);
+  appendFixtureVulnerabilityDatabaseReference(project);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "topology.yml")), true);
   assert.equal(fs.existsSync(path.join(project, "topology.yml")), false);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/index.ts")), true);
@@ -2790,23 +3022,38 @@ test("plan uses an eval topology override without replacing the project topology
 
 test("plan applies smoke eval model profiles to a normally initialized target", async () => {
   const project = tempProject();
-  initProject({ projectRoot: project, force: true });
+  const init = initProject({ projectRoot: project, force: true });
+  assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
+  appendFixtureVulnerabilityDatabaseReference(project);
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeFixtureVulnerabilityDatabaseCache(xdgCacheHome);
   const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
 
-  const plan = await planRun({
-    projectRoot: project,
-    topologyPath: smokeTopology,
-    runId: "smoke-topology-profiles",
-    runtimeOverrides: {
-      models: {
-        profiles: {
-          benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
-          "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  let plan;
+  try {
+    plan = await planRun({
+      projectRoot: project,
+      topologyPath: smokeTopology,
+      runId: "smoke-topology-profiles",
+      runtimeOverrides: {
+        models: {
+          profiles: {
+            benchmark: { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "high" },
+            "smoke-coordination": { agent: "CodexAgent", model: "gpt-5.6-luna", reasoning: "medium" }
+          }
         }
-      }
-    },
-    env: {}
-  });
+      },
+      env: {}
+    });
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
 
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const declarations = plan.value!.graph.nodes.filter((node) => node.kind === "agentic");
