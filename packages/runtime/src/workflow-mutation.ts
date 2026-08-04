@@ -22,6 +22,7 @@ const WORKFLOW_MUTATION_LOCK_OWNER = "owner.json";
 const WORKFLOW_MUTATION_LOCK_OWNER_GRACE_MS = 2_000;
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
 const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
+export const WORKFLOW_CHECKPOINT_FRAME_MAX = 0x7fff_ffff;
 const LIFECYCLE_EVENT_TYPES = new Set([
   "workflow-lifecycle-invoking",
   "workflow-lifecycle-submitted",
@@ -190,9 +191,12 @@ export function prepareWorkflowLifecycleAction(
   return structuredClone(entry);
 }
 
-export function workflowLifecycleCorrelationLabel(actionId: string): string {
+export function workflowLifecycleCorrelationLabel(actionId: string, requestedLabel?: string): string {
   const digest = crypto.createHash("sha256").update(requiredJournalString(actionId, "action ID"), "utf8").digest("hex");
-  return `ultrafuzz-lifecycle-${digest}`;
+  const correlation = `ultrafuzz-lifecycle-${digest}`;
+  return requestedLabel === undefined || requestedLabel.length === 0
+    ? correlation
+    : `${requestedLabel}--${correlation}`;
 }
 
 export function transitionWorkflowLifecycleAction(
@@ -473,6 +477,21 @@ export function workflowRunIdsFromTimeline(value: unknown): string[] | undefined
   const ids = new Set<string>();
   collectTimelineWorkflowRunIds(root, ids);
   return [...ids].sort();
+}
+
+export function workflowFramesFromTimeline(value: unknown): number[] | undefined {
+  const root = timelineRecord(value);
+  if (root === undefined || !Array.isArray(root.frames)) return undefined;
+  const frames = root.frames.flatMap((frameValue) => {
+    const frame = objectRecord(frameValue);
+    return frame !== undefined &&
+      Number.isSafeInteger(frame.frameNo) &&
+      Number(frame.frameNo) >= 0 &&
+      Number(frame.frameNo) <= WORKFLOW_CHECKPOINT_FRAME_MAX
+      ? [Number(frame.frameNo)]
+      : [];
+  });
+  return [...new Set(frames)].sort((left, right) => left - right);
 }
 
 export function workflowDirectForksFromTimeline(value: unknown): WorkflowTimelineDirectFork[] | undefined {

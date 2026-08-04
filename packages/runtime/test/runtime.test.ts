@@ -69,7 +69,8 @@ import {
   verifyCommittedWorkflowRunLink,
   workflowLifecycleCorrelationLabel,
   workflowLifecycleActionJournalPath,
-  workflowRunLinkJournalPath
+  workflowRunLinkJournalPath,
+  WORKFLOW_CHECKPOINT_FRAME_MAX
 } from "../src/workflow-mutation.js";
 import { workflowControlGeneration } from "../src/workflow-integrity.js";
 import { sha256Stable } from "../src/utils.js";
@@ -332,6 +333,83 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function writeFakeTimelineHelpers(project: string): { recorder: string; renderer: string } {
+  const recorder = path.join(project, "fake-smithers-record-branch.mjs");
+  const renderer = path.join(project, "fake-smithers-render-timeline.mjs");
+  fs.writeFileSync(
+    recorder,
+    String.raw`
+import fs from "node:fs";
+
+const [timelinePath, parentRunId, frameText, branchLabel, childRunId] = process.argv.slice(2);
+const document = JSON.parse(fs.readFileSync(timelinePath, "utf8"));
+const root = document?.data?.timeline ?? document?.timeline;
+if (!root || typeof root !== "object") throw new Error("fake timeline root is missing");
+const findRun = (candidate, runId) => {
+  if (!candidate || typeof candidate !== "object") return undefined;
+  if (candidate.runId === runId) return candidate;
+  for (const child of Array.isArray(candidate.children) ? candidate.children : []) {
+    const found = findRun(child, runId);
+    if (found) return found;
+  }
+  return undefined;
+};
+const parent = findRun(root, parentRunId);
+if (!parent) throw new Error("fake timeline parent is missing");
+const frameNo = Number(frameText);
+const frame = (Array.isArray(parent.frames) ? parent.frames : []).find((candidate) => candidate?.frameNo === frameNo);
+if (!frame) throw new Error("fake timeline source frame is missing");
+frame.forks = Array.isArray(frame.forks) ? frame.forks : [];
+if (!frame.forks.some((candidate) => candidate?.runId === childRunId)) {
+  frame.forks.push({ runId: childRunId, branchLabel });
+}
+parent.children = Array.isArray(parent.children) ? parent.children : [];
+if (!findRun(root, childRunId)) {
+  parent.children.push({
+    runId: childRunId,
+    branch: branchLabel,
+    frames: (Array.isArray(parent.frames) ? parent.frames : []).map((candidate) => ({
+      frameNo: candidate.frameNo,
+      forks: []
+    })),
+    children: []
+  });
+}
+fs.writeFileSync(timelinePath, JSON.stringify(document, null, 2) + "\n");
+`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    renderer,
+    String.raw`
+import fs from "node:fs";
+
+const [timelinePath, requestedRunId] = process.argv.slice(2);
+const document = JSON.parse(fs.readFileSync(timelinePath, "utf8"));
+const root = document?.data?.timeline ?? document?.timeline;
+if (!root || typeof root !== "object") throw new Error("fake timeline root is missing");
+if (typeof root.runId !== "string") {
+  root.runId = requestedRunId;
+  fs.writeFileSync(timelinePath, JSON.stringify(document, null, 2) + "\n");
+}
+const findRun = (candidate, runId) => {
+  if (!candidate || typeof candidate !== "object") return undefined;
+  if (candidate.runId === runId) return candidate;
+  for (const child of Array.isArray(candidate.children) ? candidate.children : []) {
+    const found = findRun(child, runId);
+    if (found) return found;
+  }
+  return undefined;
+};
+const selected = findRun(root, requestedRunId);
+if (!selected) throw new Error("fake timeline requested run is missing");
+process.stdout.write(JSON.stringify({ data: { timeline: selected } }) + "\n");
+`,
+    "utf8"
+  );
+  return { recorder, renderer };
+}
+
 function fakeInstalledSmithersPaths(project: string): {
   packageRoot: string;
   packageJson: string;
@@ -479,6 +557,22 @@ function fakeSmithersEnv(
 ): Record<string, string | undefined> {
   const binDir = path.join(project, "fake-bin");
   fs.mkdirSync(binDir, { recursive: true });
+  const timelinePath = path.join(project, "fake-smithers-timeline.json");
+  const timelineHelpers = writeFakeTimelineHelpers(project);
+  fs.writeFileSync(
+    timelinePath,
+    `${JSON.stringify(
+      {
+        timeline: {
+          frames: [1, 7, 9, 11, 33, 44].map((frameNo) => ({ frameNo, forks: [] })),
+          children: []
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
   const smithers = path.join(binDir, "smithers");
   fs.writeFileSync(
     smithers,
@@ -517,18 +611,32 @@ function fakeSmithersEnv(
       '    printf \'{"ok":true,"data":{"run":{"id":"%s","status":"%s"},"runState":{"runId":"%s","state":"%s"},"steps":[]}}\\n\' "$2" "$inspect_state" "$2" "$inspect_state"',
       "    ;;",
       "  fork)",
+      '    source_run_id=""; fork_frame=""; branch_label=""; previous=""',
+      '    for argument in "$@"; do',
+      '      [ "$previous" != "--run-id" ] || source_run_id="$argument"',
+      '      [ "$previous" != "--frame" ] || fork_frame="$argument"',
+      '      [ "$previous" != "--label" ] || branch_label="$argument"',
+      '      previous="$argument"',
+      "    done",
+      '    node "$SMITHERS_FAKE_TIMELINE_RECORDER" "$SMITHERS_FAKE_TIMELINE" "$source_run_id" "$fork_frame" "$branch_label" ultrafuzz-lifecycle-run-forked',
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-forked\"}'",
       "    ;;",
       "  replay)",
-      '    replay_frame=""',
+      '    source_run_id=""; replay_frame=""; branch_label=""',
       '    previous=""',
-      '    for argument in "$@"; do [ "$previous" != "--frame" ] || replay_frame="$argument"; previous="$argument"; done',
+      '    for argument in "$@"; do',
+      '      [ "$previous" != "--run-id" ] || source_run_id="$argument"',
+      '      [ "$previous" != "--frame" ] || replay_frame="$argument"',
+      '      [ "$previous" != "--label" ] || branch_label="$argument"',
+      '      previous="$argument"',
+      "    done",
       '    case "$replay_frame" in ""|*[!0-9]*) printf \'replay requires integer --frame\\n\' >&2; exit 64 ;; esac',
       '    case " $* " in *" --ultrafuzz-prepare-only "*) ;; *) printf \'replay requires prepare-only mode\\n\' >&2; exit 65 ;; esac',
+      '    node "$SMITHERS_FAKE_TIMELINE_RECORDER" "$SMITHERS_FAKE_TIMELINE" "$source_run_id" "$replay_frame" "$branch_label" ultrafuzz-lifecycle-run-replayed',
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-lifecycle-run-replayed\"}'",
       "    ;;",
       "  timeline)",
-      '    printf \'{"data":{"timeline":{"runId":"%s","frames":[],"children":[]}}}\\n\' "$2"',
+      '    node "$SMITHERS_FAKE_TIMELINE_RENDERER" "$SMITHERS_FAKE_TIMELINE" "$2"',
       "    ;;",
       "  pause)",
       '    if [ -n "$SMITHERS_FAKE_PAUSE_EMPTY_SUCCESS" ]; then',
@@ -555,6 +663,9 @@ function fakeSmithersEnv(
   return createSmithersTestEnvironment(smithers, {
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     SMITHERS_FAKE_LOG: path.join(project, "smithers-commands.log"),
+    SMITHERS_FAKE_TIMELINE: timelinePath,
+    SMITHERS_FAKE_TIMELINE_RECORDER: timelineHelpers.recorder,
+    SMITHERS_FAKE_TIMELINE_RENDERER: timelineHelpers.renderer,
     SMITHERS_FAKE_INSPECT_STATE: input.inspectState
   });
 }
@@ -667,8 +778,10 @@ function fakeLifecycleSmithersEnv(
     cancelOutput?: string;
     timeline?: unknown;
     replayRunId?: string;
+    replayTimelineRunId?: string;
     replayExitCode?: number;
     forkRunId?: string;
+    forkTimelineRunId?: string;
     outputOverrides?: Record<string, unknown>;
     allowMissingVerifierArtifacts?: boolean;
     inspectExitCode?: number;
@@ -682,6 +795,7 @@ function fakeLifecycleSmithersEnv(
   const refreshedTokenEventsPath = path.join(project, "fake-smithers-refreshed-token-events.ndjson");
   const tokenReadMarkerPath = path.join(project, "fake-smithers-token-read");
   const timelinePath = path.join(project, "fake-smithers-timeline.json");
+  const timelineHelpers = writeFakeTimelineHelpers(project);
   const outputHelperPath = path.join(project, "fake-smithers-output.mjs");
   const outputOverridesPath = path.join(project, "fake-smithers-output-overrides.json");
   fs.writeFileSync(inspectPath, `${JSON.stringify(input.inspect, null, 2)}\n`, "utf8");
@@ -992,23 +1106,45 @@ process.stdout.write(JSON.stringify({
       '    node "$SMITHERS_FAKE_OUTPUT_HELPER" "$2" "$3" "$SMITHERS_FAKE_INSPECT" "$SMITHERS_FAKE_EVENTS" "$SMITHERS_FAKE_OUTPUT_OVERRIDES"',
       "    ;;",
       "  timeline)",
-      '    cat "$SMITHERS_FAKE_TIMELINE"',
+      '    node "$SMITHERS_FAKE_TIMELINE_RENDERER" "$SMITHERS_FAKE_TIMELINE" "$2"',
       "    ;;",
       "  rewind)",
       "    printf '%s\\n' '{\"ok\":true}'",
       "    ;;",
       "  replay)",
-      '    replay_frame=""',
+      '    source_run_id=""; replay_frame=""; branch_label=""',
       '    previous=""',
-      '    for argument in "$@"; do [ "$previous" != "--frame" ] || replay_frame="$argument"; previous="$argument"; done',
+      '    for argument in "$@"; do',
+      '      [ "$previous" != "--run-id" ] || source_run_id="$argument"',
+      '      [ "$previous" != "--frame" ] || replay_frame="$argument"',
+      '      [ "$previous" != "--label" ] || branch_label="$argument"',
+      '      previous="$argument"',
+      "    done",
       '    case "$replay_frame" in ""|*[!0-9]*) printf \'replay requires integer --frame\\n\' >&2; exit 64 ;; esac',
       '    case " $* " in *" --ultrafuzz-prepare-only "*) ;; *) printf \'replay requires prepare-only mode\\n\' >&2; exit 65 ;; esac',
+      ...((input.replayTimelineRunId ?? input.replayRunId) === undefined
+        ? []
+        : [
+            `    node "$SMITHERS_FAKE_TIMELINE_RECORDER" "$SMITHERS_FAKE_TIMELINE" "$source_run_id" "$replay_frame" "$branch_label" ${shellQuote((input.replayTimelineRunId ?? input.replayRunId)!)}`
+          ]),
       input.replayRunId === undefined
         ? "    printf '%s\\n' '{\"ok\":true}'"
         : `    printf '%s\\n' ${shellQuote(JSON.stringify({ forkedRunId: input.replayRunId }))}`,
       ...(input.replayExitCode === undefined ? [] : [`    exit ${input.replayExitCode}`]),
       "    ;;",
       "  fork)",
+      '    source_run_id=""; fork_frame=""; branch_label=""; previous=""',
+      '    for argument in "$@"; do',
+      '      [ "$previous" != "--run-id" ] || source_run_id="$argument"',
+      '      [ "$previous" != "--frame" ] || fork_frame="$argument"',
+      '      [ "$previous" != "--label" ] || branch_label="$argument"',
+      '      previous="$argument"',
+      "    done",
+      ...((input.forkTimelineRunId ?? input.forkRunId) === undefined
+        ? []
+        : [
+            `    node "$SMITHERS_FAKE_TIMELINE_RECORDER" "$SMITHERS_FAKE_TIMELINE" "$source_run_id" "$fork_frame" "$branch_label" ${shellQuote((input.forkTimelineRunId ?? input.forkRunId)!)}`
+          ]),
       input.forkRunId === undefined
         ? "    printf '%s\\n' '{\"ok\":true}'"
         : `    printf '%s\\n' ${shellQuote(JSON.stringify({ forkedRunId: input.forkRunId }))}`,
@@ -1050,6 +1186,8 @@ process.stdout.write(JSON.stringify({
       input.refreshedTokenEvents === undefined ? undefined : refreshedTokenEventsPath,
     SMITHERS_FAKE_TOKEN_READ_MARKER: tokenReadMarkerPath,
     SMITHERS_FAKE_TIMELINE: timelinePath,
+    SMITHERS_FAKE_TIMELINE_RECORDER: timelineHelpers.recorder,
+    SMITHERS_FAKE_TIMELINE_RENDERER: timelineHelpers.renderer,
     SMITHERS_FAKE_OUTPUT_HELPER: outputHelperPath,
     SMITHERS_FAKE_OUTPUT_OVERRIDES: outputOverridesPath,
     SMITHERS_FAKE_ARTIFACTS_MODULE: testArtifactsModuleUrl,
@@ -7479,7 +7617,9 @@ test("syncRun keeps colliding checkpoint names separate across workflow runs", a
       steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
     }),
     events: usageEvents(firstWorkflowRunId, 10),
-    timeline: { data: { timeline: { runId: firstWorkflowRunId, frames: [], children: [] } } },
+    timeline: {
+      data: { timeline: { runId: firstWorkflowRunId, frames: [{ frameNo: 7, forks: [] }], children: [] } }
+    },
     replayRunId: secondWorkflowRunId
   });
   const run = await startRun({ projectRoot: project, runId: "colliding-generation", env });
@@ -13335,7 +13475,7 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   );
   assert.match(
     commands,
-    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run-replayed --frame 44 --reset-node node:project-discovery --label ultrafuzz-lifecycle-[0-9a-f]{64} --format json/
+    /fork .*ultrafuzz-lifecycle-run\.tsx --run-id ultrafuzz-lifecycle-run-replayed --frame 44 --reset-node node:project-discovery --label after-edit--ultrafuzz-lifecycle-[0-9a-f]{64} --format json/
   );
   assert.match(
     commands,
@@ -13351,8 +13491,11 @@ test("resume, replay, and fork delegate linked runs to Smithers lifecycle verbs"
   assert.equal(typeof forkAction?.action_id, "string");
   assert.equal(forkAction?.label, "after-edit");
   assert.ok(commands.includes(`--label ${workflowLifecycleCorrelationLabel(replayAction!.action_id!)}`));
-  assert.ok(commands.includes(`--label ${workflowLifecycleCorrelationLabel(forkAction!.action_id!)}`));
-  assert.equal(commands.includes("--label after-edit"), false);
+  assert.ok(commands.includes(`--label ${workflowLifecycleCorrelationLabel(forkAction!.action_id!, "after-edit")}`));
+  assert.equal(
+    workflowLifecycleCorrelationLabel(forkAction!.action_id!, "after-edit").startsWith("after-edit--"),
+    true
+  );
   assert.ok(
     commands.indexOf("replay ") < commands.indexOf("up ", commands.indexOf("replay ")),
     "replay preparation must precede its detached resume"
@@ -13371,7 +13514,7 @@ test("fork and replay reject invalid checkpoint frames before journaling or invo
   const baselineSnapshots = workflowExecutionSnapshotCount(run.value!.run_root);
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
-  for (const frame of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+  for (const frame of [-1, 1.5, Number.NaN, WORKFLOW_CHECKPOINT_FRAME_MAX + 1, Number.MAX_SAFE_INTEGER + 1]) {
     const replayed = await replayRun({ projectRoot: project, runId, forkFrame: frame, env });
     assert.equal(replayed.ok, false, String(frame));
     assert.equal(replayed.diagnostics[0]?.code, "WORKFLOW_REPLAY_FRAME_INVALID", String(frame));
@@ -13383,6 +13526,73 @@ test("fork and replay reject invalid checkpoint frames before journaling or invo
   assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), "");
   assert.equal(fs.existsSync(workflowLifecycleActionJournalPath(layout)), false);
   assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots);
+});
+
+test("a nonexistent replay frame fails before effects and a later valid frame remains retryable", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "lifecycle-run";
+  const env = fakeSmithersEnv(project);
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const baselineSnapshots = workflowExecutionSnapshotCount(run.value!.run_root);
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const missing = await replayRun({ projectRoot: project, runId, forkFrame: 8, env });
+
+  assert.equal(missing.ok, false);
+  assert.match(missing.diagnostics[0]?.message ?? "", /frame 8 does not exist/u);
+  assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^replay\b/mu);
+  assert.equal(fs.existsSync(workflowLifecycleActionJournalPath(layout)), false);
+  assert.equal(workflowExecutionSnapshotCount(run.value!.run_root), baselineSnapshots);
+
+  const retried = await replayRun({ projectRoot: project, runId, forkFrame: 7, env });
+
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  assert.equal(retried.value?.workflow_run_id, "ultrafuzz-lifecycle-run-replayed");
+  assert.equal(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8").match(/^replay\b/gmu)?.length, 1);
+});
+
+test("fork and replay reject an unrelated returned workflow ID before committing or starting its link", async () => {
+  for (const action of ["fork", "replay"] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `${action}-unrelated-return`;
+    const sourceWorkflowRunId = `ultrafuzz-${runId}`;
+    const correlatedChildRunId = `${sourceWorkflowRunId}-correlated`;
+    const unrelatedRunId = `${sourceWorkflowRunId}-unrelated`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({ workflowRunId: sourceWorkflowRunId, steps: [] }),
+      timeline: {
+        data: { timeline: { runId: sourceWorkflowRunId, frames: [{ frameNo: 7, forks: [] }], children: [] } }
+      },
+      ...(action === "fork"
+        ? { forkRunId: unrelatedRunId, forkTimelineRunId: correlatedChildRunId }
+        : { replayRunId: unrelatedRunId, replayTimelineRunId: correlatedChildRunId })
+    });
+    const run = await startRun({ projectRoot: project, runId, env });
+    assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+    const layout = layoutForRunRoot(run.value!.run_root);
+    fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+    const rejected =
+      action === "fork"
+        ? await forkRun({ projectRoot: project, runId, forkFrame: 7, env })
+        : await replayRun({ projectRoot: project, runId, forkFrame: 7, env });
+
+    assert.equal(rejected.ok, false, action);
+    assert.match(rejected.diagnostics[0]?.message ?? "", /unique exact correlated direct child/u, action);
+    assert.equal(verifyCommittedWorkflowRunLink(layout).workflow_run_id, sourceWorkflowRunId, action);
+    const journal = JSON.parse(fs.readFileSync(workflowLifecycleActionJournalPath(layout), "utf8")) as {
+      entries?: Array<{ phase?: string; external_workflow_run_id?: string }>;
+    };
+    assert.equal(journal.entries?.at(-1)?.phase, "reconciliation-pending", action);
+    assert.equal(journal.entries?.at(-1)?.external_workflow_run_id, undefined, action);
+    assert.doesNotMatch(fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8"), /^up\b/mu, action);
+  }
 });
 
 test(
@@ -13397,7 +13607,9 @@ test(
     const childWorkflowRunId = `${sourceWorkflowRunId}-child`;
     const env = fakeLifecycleSmithersEnv(project, {
       inspect: workflowInspect({ workflowRunId: sourceWorkflowRunId, steps: [] }),
-      timeline: { data: { timeline: { runId: sourceWorkflowRunId, frames: [], children: [] } } },
+      timeline: {
+        data: { timeline: { runId: sourceWorkflowRunId, frames: [{ frameNo: 9, forks: [] }], children: [] } }
+      },
       replayRunId: childWorkflowRunId
     });
     const run = await startRun({ projectRoot: project, runId, env });
@@ -13468,7 +13680,9 @@ test("a replay failure after successful spawn remains reconciliation-fenced", as
   const sourceWorkflowRunId = `ultrafuzz-${runId}`;
   const env = fakeLifecycleSmithersEnv(project, {
     inspect: workflowInspect({ workflowRunId: sourceWorkflowRunId, steps: [] }),
-    timeline: { data: { timeline: { runId: sourceWorkflowRunId, frames: [], children: [] } } },
+    timeline: {
+      data: { timeline: { runId: sourceWorkflowRunId, frames: [{ frameNo: 11, forks: [] }], children: [] } }
+    },
     replayExitCode: 42
   });
   const run = await startRun({ projectRoot: project, runId, env });
@@ -13532,6 +13746,24 @@ test("fork and replay reconcile a durably returned external run without repeatin
       external_workflow_run_id: childWorkflowRunId,
       external_result_at: new Date().toISOString()
     });
+    const branchLabel = workflowLifecycleCorrelationLabel(entry.action_id);
+    fs.writeFileSync(
+      env.SMITHERS_FAKE_TIMELINE!,
+      `${JSON.stringify(
+        {
+          data: {
+            timeline: {
+              runId: sourceWorkflowRunId,
+              frames: [{ frameNo: 7, forks: [{ runId: childWorkflowRunId, branchLabel }] }],
+              children: [{ runId: childWorkflowRunId, branch: branchLabel, frames: [], children: [] }]
+            }
+          }
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
     fs.writeFileSync(
       env.SMITHERS_FAKE_INSPECT!,
       `${JSON.stringify(workflowInspect({ workflowRunId: childWorkflowRunId, steps: [] }), null, 2)}\n`,
@@ -13560,6 +13792,97 @@ test("fork and replay reconcile a durably returned external run without repeatin
     };
     assert.equal(metadata.workflow?.run_id, childWorkflowRunId);
   }
+});
+
+test("reconciliation of an already-active linked child issues no replacement up submission", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "active-reconciled-child";
+  const sourceWorkflowRunId = `ultrafuzz-${runId}`;
+  const childWorkflowRunId = `${sourceWorkflowRunId}-child`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId: childWorkflowRunId,
+      status: "running",
+      state: "running",
+      steps: [{ id: "node:project-discovery", state: "running", attempt: 1 }]
+    })
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const sourceLink = verifyCommittedWorkflowRunLink(layout);
+  const entry = prepareWorkflowLifecycleAction(layout, {
+    action: "replay",
+    sourceWorkflowRunId,
+    sourceWorkflowLinkId: sourceLink.link_id,
+    controlGeneration: workflowControlGeneration(project, layout),
+    knownWorkflowRunIds: [sourceWorkflowRunId],
+    forkFrame: 7
+  });
+  const invoking = appendEvent(layout, {
+    eventType: "workflow-lifecycle-invoking",
+    status: "running",
+    payload: {
+      action: "replay",
+      workflow_run_id: sourceWorkflowRunId,
+      workflow_link_id: sourceLink.link_id,
+      control_generation: workflowControlGeneration(project, layout),
+      lifecycle_action_id: entry.action_id
+    }
+  });
+  transitionWorkflowLifecycleAction(layout, entry.action_id, "invoking", {
+    controller_invocation_id: invoking.event_id,
+    controller_invoked_at: invoking.timestamp
+  });
+  transitionWorkflowLifecycleAction(layout, entry.action_id, "external-result", {
+    external_workflow_run_id: childWorkflowRunId,
+    external_result_at: new Date().toISOString()
+  });
+  const branchLabel = workflowLifecycleCorrelationLabel(entry.action_id);
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_TIMELINE!,
+    `${JSON.stringify(
+      {
+        data: {
+          timeline: {
+            runId: sourceWorkflowRunId,
+            frames: [
+              {
+                frameNo: 7,
+                forks: [{ runId: childWorkflowRunId, branchLabel }]
+              }
+            ],
+            children: [
+              { runId: childWorkflowRunId, branch: branchLabel, frames: [{ frameNo: 0, forks: [] }], children: [] }
+            ]
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
+
+  const reconciled = await replayRun({ projectRoot: project, runId, forkFrame: 7, env });
+
+  assert.equal(reconciled.ok, true, JSON.stringify(reconciled.diagnostics));
+  assert.equal(reconciled.value?.workflow_run_id, childWorkflowRunId);
+  assert.equal(reconciled.value?.submitted, false);
+  const commands = fs.readFileSync(env.SMITHERS_FAKE_LOG!, "utf8");
+  assert.match(commands, new RegExp(`^inspect ${childWorkflowRunId} --format json$`, "mu"));
+  assert.doesNotMatch(commands, /^up\b/mu);
+  const lifecycleEvents = fs
+    .readFileSync(path.join(layout.root, "events.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { event_type?: string });
+  assert.equal(lifecycleEvents.filter((event) => event.event_type === "workflow-lifecycle-invoking").length, 1);
+  assert.equal(lifecycleEvents.filter((event) => event.event_type === "workflow-lifecycle-submitted").length, 0);
+  assert.equal(lifecycleEvents.filter((event) => event.event_type === "workflow-lifecycle-already-running").length, 1);
 });
 
 type InitialWorkflowLinkCrashCut =
@@ -15162,6 +15485,24 @@ test("a torn workflow-link update is completed from its lifecycle journal withou
     `${JSON.stringify(workflowInspect({ workflowRunId: childWorkflowRunId, steps: [] }), null, 2)}\n`,
     "utf8"
   );
+  const branchLabel = workflowLifecycleCorrelationLabel(actionEntry.action_id);
+  fs.writeFileSync(
+    env.SMITHERS_FAKE_TIMELINE!,
+    `${JSON.stringify(
+      {
+        data: {
+          timeline: {
+            runId: sourceWorkflowRunId,
+            frames: [{ frameNo: 7, forks: [{ runId: childWorkflowRunId, branchLabel }] }],
+            children: [{ runId: childWorkflowRunId, branch: branchLabel, frames: [], children: [] }]
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
   fs.writeFileSync(env.SMITHERS_FAKE_LOG!, "", "utf8");
 
   const reconciled = await replayRun({ projectRoot: project, runId, forkFrame: 7, env });
@@ -15302,7 +15643,7 @@ test("lifecycle crash reconciliation adopts only one exact correlated direct bra
       controller_invocation_id: invoking.event_id,
       controller_invoked_at: invoking.timestamp
     });
-    const correlationLabel = workflowLifecycleCorrelationLabel(entry.action_id);
+    const correlationLabel = workflowLifecycleCorrelationLabel(entry.action_id, "operator-label");
     fs.writeFileSync(
       env.SMITHERS_FAKE_TIMELINE!,
       `${JSON.stringify(

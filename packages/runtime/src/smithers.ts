@@ -1725,6 +1725,8 @@ export async function runSmithersLifecycleCommand(input: {
   resetNode?: string;
   force?: boolean;
   retryFailed?: boolean;
+  /** Replace a live controller owner instead of treating the active run as already submitted. */
+  replaceActiveOwner?: boolean;
   correlationLabel?: string;
   resumeRecovery?: {
     runRoot: string;
@@ -1738,6 +1740,7 @@ export async function runSmithersLifecycleCommand(input: {
   environmentVariableNames?: readonly string[];
   onDetachedInvocation?: () => void;
   onExternalInvocationSpawned?: () => void;
+  validatePreparedWorkflowRunId?: (workflowRunId: string) => Promise<void>;
 }): Promise<{
   stdout: string;
   stderr: string;
@@ -1813,7 +1816,11 @@ export async function runSmithersLifecycleCommand(input: {
     if (existence.status !== "present") {
       throw new Error(`workflow inspection could not prove the linked run before resume: ${existence.reason}`);
     }
-    if (smithersSnapshotRunStateIsActive(inspection) && input.resetNode === undefined && input.force !== true) {
+    if (
+      smithersSnapshotRunStateIsActive(inspection) &&
+      input.resetNode === undefined &&
+      input.replaceActiveOwner !== true
+    ) {
       return {
         stdout: inspection.stdout,
         stderr: inspection.stderr,
@@ -2031,6 +2038,7 @@ export async function runSmithersLifecycleCommand(input: {
     if (forkedRunId === undefined) {
       throw new Error("workflow fork did not return a forked workflow run ID");
     }
+    await input.validatePreparedWorkflowRunId?.(forkedRunId);
     const resumeCommand = [
       "up",
       input.workflowPath,
@@ -2088,6 +2096,7 @@ export async function runSmithersLifecycleCommand(input: {
     if (replayedRunId === undefined) {
       throw new Error("workflow replay did not return a replayed workflow run ID");
     }
+    await input.validatePreparedWorkflowRunId?.(replayedRunId);
     const resumeCommand = [
       "up",
       input.workflowPath,

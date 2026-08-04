@@ -67,9 +67,11 @@ import {
   workflowLifecycleAction,
   workflowLifecycleCorrelationLabel,
   workflowDirectForksFromTimeline,
+  workflowFramesFromTimeline,
   workflowRunLinkEvent,
   workflowRunIdsFromTimeline,
-  workflowLifecycleGeneration
+  workflowLifecycleGeneration,
+  WORKFLOW_CHECKPOINT_FRAME_MAX
 } from "./workflow-mutation.js";
 import type {
   NonIdempotentWorkflowLifecycleAction,
@@ -1334,11 +1336,14 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       }
     ]);
   }
-  if ((action === "fork" || action === "replay") && (!Number.isSafeInteger(input.forkFrame) || input.forkFrame! < 0)) {
+  if (
+    (action === "fork" || action === "replay") &&
+    (!Number.isSafeInteger(input.forkFrame) || input.forkFrame! < 0 || input.forkFrame! > WORKFLOW_CHECKPOINT_FRAME_MAX)
+  ) {
     return runtimeFailure<WorkflowLifecycleValue>([
       {
         code: action === "fork" ? "WORKFLOW_FORK_FRAME_INVALID" : "WORKFLOW_REPLAY_FRAME_INVALID",
-        message: `${action} checkpoint frame must be a non-negative safe integer`,
+        message: `${action} checkpoint frame must be a non-negative 32-bit integer`,
         severity: "error",
         source: "runtime"
       }
@@ -1434,14 +1439,21 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       config: resolved.config,
       env: input.env
     });
-    const knownWorkflowRunIds = isNonIdempotentLifecycleAction(action)
-      ? (
-          await inspectWorkflowTimeline(projectRoot, evidence.smithersRunId, {
-            ...input.env,
-            ...executionSnapshot.env
-          })
-        ).workflowRunIds
+    const sourceTimeline = isNonIdempotentLifecycleAction(action)
+      ? await inspectWorkflowTimeline(projectRoot, evidence.smithersRunId, {
+          ...input.env,
+          ...executionSnapshot.env
+        })
       : undefined;
+    if (
+      sourceTimeline !== undefined &&
+      input.forkFrame !== undefined &&
+      !sourceTimeline.sourceFrames.includes(input.forkFrame)
+    ) {
+      throw new Error(
+        `${action} checkpoint frame ${input.forkFrame} does not exist in source workflow run ${evidence.smithersRunId}`
+      );
+    }
     const releaseInvocationLock = await acquireWorkflowMutationLock(evidence.layout);
     try {
       evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
@@ -1452,7 +1464,7 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
           sourceWorkflowRunId: evidence.smithersRunId,
           sourceWorkflowLinkId: evidence.workflowLinkId,
           controlGeneration: evidence.controlGeneration,
-          knownWorkflowRunIds: knownWorkflowRunIds ?? [],
+          knownWorkflowRunIds: sourceTimeline?.workflowRunIds ?? [],
           ...(input.forkFrame === undefined ? {} : { forkFrame: input.forkFrame }),
           ...(input.resetNode === undefined ? {} : { resetNode: input.resetNode }),
           ...(input.label === undefined ? {} : { label: input.label })
@@ -1491,10 +1503,13 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       forkFrame: input.forkFrame,
       resetNode: input.resetNode,
       force: input.force,
+      replaceActiveOwner: input.force === true,
       retryFailed: input.retryFailed,
       ...(journalEntry === undefined
         ? {}
-        : { correlationLabel: workflowLifecycleCorrelationLabel(journalEntry.action_id) }),
+        : {
+            correlationLabel: workflowLifecycleCorrelationLabel(journalEntry.action_id, journalEntry.label)
+          }),
       resumeRecovery:
         action === "resume"
           ? {
@@ -1523,8 +1538,35 @@ async function submitLifecycleAction(input: WorkflowLifecycleInput, action: Work
       // executable lookup, and spawn failures remain safe to retry in-process.
       onExternalInvocationSpawned: () => {
         externalNonIdempotentInvocationStarted = true;
-      }
+      },
+      ...(journalEntry === undefined
+        ? {}
+        : {
+            validatePreparedWorkflowRunId: async (workflowRunId: string) => {
+              const returnedChildTimeline = await inspectWorkflowTimeline(
+                projectRoot,
+                journalEntry!.source_workflow_run_id,
+                {
+                  ...input.env,
+                  ...executionSnapshot!.env
+                }
+              );
+              assertExactLifecycleChild(journalEntry!, workflowRunId, returnedChildTimeline);
+            }
+          })
     });
+    if (
+      journalEntry !== undefined &&
+      lifecycleResult.workflowRunId !== undefined &&
+      lifecycleResult.workflowRunId.length > 0 &&
+      lifecycleResult.workflowRunId !== journalEntry.source_workflow_run_id
+    ) {
+      const returnedChildTimeline = await inspectWorkflowTimeline(projectRoot, journalEntry.source_workflow_run_id, {
+        ...input.env,
+        ...executionSnapshot.env
+      });
+      assertExactLifecycleChild(journalEntry, lifecycleResult.workflowRunId, returnedChildTimeline);
+    }
     if (lifecycleResult.alreadyRunning === true) retainExecutionSnapshot = false;
     if (!retainExecutionSnapshot) {
       cleanupDiagnostics.push(...disposeTransientWorkflowExecutionSnapshot(executionSnapshot));
@@ -1800,16 +1842,16 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
   };
   try {
     let childWorkflowRunId = entry.external_workflow_run_id;
+    executionSnapshot = materializeWorkflowExecutionSnapshot({
+      projectRoot: input.projectRoot,
+      layout: input.evidence.layout,
+      snapshot: input.evidence.verifiedControl
+    });
+    const timeline = await inspectWorkflowTimeline(input.projectRoot, entry.source_workflow_run_id, {
+      ...input.lifecycleInput.env,
+      ...executionSnapshot.env
+    });
     if (childWorkflowRunId === undefined) {
-      executionSnapshot = materializeWorkflowExecutionSnapshot({
-        projectRoot: input.projectRoot,
-        layout: input.evidence.layout,
-        snapshot: input.evidence.verifiedControl
-      });
-      const timeline = await inspectWorkflowTimeline(input.projectRoot, entry.source_workflow_run_id, {
-        ...input.lifecycleInput.env,
-        ...executionSnapshot.env
-      });
       const baseline = new Set(entry.known_workflow_run_ids);
       const candidates = [
         ...new Set(
@@ -1852,6 +1894,8 @@ async function reconcilePendingWorkflowLifecycleAction(input: {
       } finally {
         await releaseLock();
       }
+    } else {
+      assertExactLifecycleChild(entry, childWorkflowRunId, timeline);
     }
     if (childWorkflowRunId === undefined || childWorkflowRunId === entry.source_workflow_run_id) {
       throw new Error("pending lifecycle action has an invalid external workflow run ID");
@@ -2069,7 +2113,7 @@ function isCorrelatedDirectFork(
 ): boolean {
   return (
     candidate.source_workflow_run_id === entry.source_workflow_run_id &&
-    candidate.branch_label === workflowLifecycleCorrelationLabel(entry.action_id) &&
+    candidate.branch_label === workflowLifecycleCorrelationLabel(entry.action_id, entry.label) &&
     (entry.fork_frame === undefined || candidate.frame === entry.fork_frame)
   );
 }
@@ -2084,7 +2128,7 @@ async function inspectWorkflowTimeline(
   projectRoot: string,
   workflowRunId: string,
   env: Record<string, string | undefined> | undefined
-): Promise<{ workflowRunIds: string[]; directForks: WorkflowTimelineDirectFork[] }> {
+): Promise<{ workflowRunIds: string[]; sourceFrames: number[]; directForks: WorkflowTimelineDirectFork[] }> {
   const snapshot = await runSmithersInspectionCommand({
     args: ["timeline", workflowRunId, "--tree", "--json"],
     projectRoot,
@@ -2096,11 +2140,38 @@ async function inspectWorkflowTimeline(
     );
   }
   const workflowRunIds = workflowRunIdsFromTimeline(snapshot.json);
+  const sourceFrames = workflowFramesFromTimeline(snapshot.json);
   const directForks = workflowDirectForksFromTimeline(snapshot.json);
-  if (workflowRunIds === undefined || directForks === undefined || !workflowRunIds.includes(workflowRunId)) {
+  if (
+    workflowRunIds === undefined ||
+    sourceFrames === undefined ||
+    directForks === undefined ||
+    !workflowRunIds.includes(workflowRunId)
+  ) {
     throw new Error("workflow timeline inspection did not contain the source workflow run");
   }
-  return { workflowRunIds, directForks };
+  return { workflowRunIds, sourceFrames, directForks };
+}
+
+function assertExactLifecycleChild(
+  entry: WorkflowLifecycleActionJournalEntry,
+  workflowRunId: string,
+  timeline: Awaited<ReturnType<typeof inspectWorkflowTimeline>>
+): void {
+  const baseline = new Set(entry.known_workflow_run_ids);
+  const candidates = [
+    ...new Set(
+      timeline.directForks
+        .filter((candidate) => isCorrelatedDirectFork(entry, candidate))
+        .map((candidate) => candidate.workflow_run_id)
+        .filter((candidate) => candidate !== entry.source_workflow_run_id && !baseline.has(candidate))
+    )
+  ];
+  if (candidates.length !== 1 || candidates[0] !== workflowRunId) {
+    throw new Error(
+      "workflow lifecycle result is not the unique exact correlated direct child of the requested source frame"
+    );
+  }
 }
 
 async function requireLinkedWorkflowEvidence(projectRoot: string, runId: string): Promise<LinkedWorkflowEvidence> {

@@ -67,10 +67,13 @@ test("replay prepares a child before starting the standard detached supervised r
     controllerLeaseSeconds: 31,
     env,
     onExternalInvocationSpawned: () => callbacks.push("prepare-spawned"),
+    validatePreparedWorkflowRunId: async (workflowRunId) => {
+      callbacks.push(`validated-${workflowRunId}`);
+    },
     onDetachedInvocation: () => callbacks.push("detached-submission")
   });
 
-  assert.deepEqual(callbacks, ["prepare-spawned", "detached-submission"]);
+  assert.deepEqual(callbacks, ["prepare-spawned", "validated-replay-child", "detached-submission"]);
   assert.equal(result.workflowRunId, "replay-child");
   assert.deepEqual(result.command, [
     "smithers",
@@ -120,6 +123,9 @@ test("a detached replay resume failure retains both uncertainty boundary callbac
       controllerLeaseSeconds: 30,
       env,
       onExternalInvocationSpawned: () => callbacks.push("prepare-spawned"),
+      validatePreparedWorkflowRunId: async (workflowRunId) => {
+        callbacks.push(`validated-${workflowRunId}`);
+      },
       onDetachedInvocation: () => callbacks.push("detached-submission")
     }),
     (error: unknown) => {
@@ -129,7 +135,7 @@ test("a detached replay resume failure retains both uncertainty boundary callbac
     }
   );
 
-  assert.deepEqual(callbacks, ["prepare-spawned", "detached-submission"]);
+  assert.deepEqual(callbacks, ["prepare-spawned", "validated-replay-child", "detached-submission"]);
   assert.deepEqual(
     fs
       .readFileSync(logPath, "utf8")
@@ -159,6 +165,9 @@ test("replay preparation without a child ID never starts the detached resume", a
       controllerLeaseSeconds: 30,
       env,
       onExternalInvocationSpawned: () => callbacks.push("prepare-spawned"),
+      validatePreparedWorkflowRunId: async (workflowRunId) => {
+        callbacks.push(`validated-${workflowRunId}`);
+      },
       onDetachedInvocation: () => callbacks.push("detached-submission")
     }),
     /did not return a replayed workflow run ID/u
