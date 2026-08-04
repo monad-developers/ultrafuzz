@@ -114,7 +114,7 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.ok(preparationStart > agentStart, source);
 
   const agent = source.slice(agentStart, preparationStart);
-  assert.match(agent, /return runAgentWithPostflight\(/u);
+  assert.match(agent, /const result = await runAgentWithPostflight\(/u);
   assert.match(agent, /\(\) => agent\.generate\(args\)/u);
   assert.match(agent, /await postflight\("artifact-preparation-postflight"/u);
   assert.match(agent, /await postflight\("workspace-provenance-postflight"/u);
@@ -123,6 +123,7 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.match(agent, /await postflight\("dedupe-materialization-postflight"/u);
   assert.match(agent, /await postflight\("final-report-materialization-postflight"/u);
   assert.match(agent, /await postflight\("findings-normalization-postflight"/u);
+  assert.match(agent, /await postflight\("canonical-findings-normalization-postflight"/u);
   assert.match(agent, /await postflight\("report-provenance-normalization-postflight"/u);
   assert.match(agent, /await postflight\("generated-test-manifest-normalization-postflight"/u);
   assert.match(agent, /await postflight\("generated-test-companion-materialization-postflight"/u);
@@ -136,7 +137,8 @@ test("generated Smithers agent preserves its final response as missing non-repor
   assert.match(agent, /normalizeLegacyReportProvenance\(task\)/u);
   assert.match(agent, /normalizeLegacyGeneratedTestManifests\(task\)/u);
   assert.match(agent, /materializeGeneratedTestCompanions\(task\)/u);
-  assert.match(agent, /verifyArtifacts\(task\)/u);
+  assert.match(agent, /verifiedArtifacts = collectVerifiedArtifacts\(task\)/u);
+  assert.match(agent, /return attachExecutorResult\(result, localExecutorResult\(task, args, verifiedArtifacts\)\)/u);
   assert.match(source, /output\.contract !== "ultrafuzz\/nonempty-markdown@1"/u);
   assert.match(source, /const fallback = `# \$\{title\}\\n\\n\$\{summary\}\\n`/u);
 });

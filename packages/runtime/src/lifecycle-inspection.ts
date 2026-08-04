@@ -13,7 +13,11 @@ import {
   type SmithersCommandSnapshot,
   type SmithersStreamResult
 } from "./smithers.js";
-import { readLinkedWorkflowEvidence } from "./start-run.js";
+import {
+  readLinkedWorkflowEvidence,
+  requireMatchingLinkedWorkflowEvidence,
+  type LinkedWorkflowEvidence
+} from "./start-run.js";
 import type {
   CancelRunInput,
   CancelRunValue,
@@ -37,6 +41,7 @@ import type {
 } from "./types.js";
 import { runtimeFailure, runtimeResult } from "./utils.js";
 import { synchronizeLinkedWorkflowRun } from "./workflow-sync.js";
+import { acquireWorkflowLifecycleActionLock, acquireWorkflowMutationLock } from "./workflow-mutation.js";
 
 const DEFAULT_EVENT_LIMIT = 200;
 const MAX_EVENT_LIMIT = 2_000;
@@ -45,33 +50,66 @@ const EVENT_DETAIL_LIMIT_CHARACTERS = 512;
 
 export async function cancelRun(input: CancelRunInput) {
   const projectRoot = path.resolve(input.projectRoot);
-  const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
-  if (!evidence.ok) {
-    return runtimeFailure<CancelRunValue>(evidence.diagnostics);
+  const initialEvidence = await readLinkedWorkflowEvidence(projectRoot, input.runId, { reconcilePendingLink: true });
+  if (!initialEvidence.ok) {
+    return runtimeFailure<CancelRunValue>(initialEvidence.diagnostics);
   }
+  let evidence = initialEvidence;
+  let controllerInvocation: ReturnType<typeof appendEvent> | undefined;
+  let releaseLifecycleActionLock: (() => Promise<void>) | undefined;
   try {
+    releaseLifecycleActionLock = await acquireWorkflowLifecycleActionLock(evidence.layout);
+    evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+    const releaseInvocationLock = await acquireWorkflowMutationLock(evidence.layout);
+    try {
+      evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+      controllerInvocation = appendEvent(evidence.layout, {
+        eventType: "workflow-lifecycle-invoking",
+        status: fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending",
+        payload: {
+          action: "cancel",
+          workflow_run_id: evidence.smithersRunId,
+          control_generation: evidence.controlGeneration,
+          workflow_link_id: evidence.workflowLinkId
+        }
+      });
+    } finally {
+      await releaseInvocationLock();
+    }
     const result = await requestSmithersCancel({
       smithersRunId: evidence.smithersRunId,
       projectRoot,
       env: input.env
     });
     const confirmed = result.status === "cancelled";
-    // Read the persisted status rather than assuming `running`: `pause`d and
-    // `pending` runs are cancellable too, and the append-only event evidence
-    // must not record a state the run was never in.
-    const persistedStatus = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending";
-    appendEvent(evidence.layout, {
-      eventType: confirmed ? "workflow-cancel-confirmed" : "workflow-cancel-requested",
-      status: confirmed ? "canceled" : persistedStatus,
-      payload: {
-        action: "cancel",
-        workflow_run_id: evidence.smithersRunId,
-        confirmed
-      }
-    });
-    // A durable request keeps the product run nonterminal; only a confirmed
-    // cancellation writes Ultrafuzz's canonical terminal spelling.
-    const state = confirmed ? updateRunStatus(evidence.layout, "canceled") : undefined;
+    let persistedStatus: ReturnType<typeof readRunState>["status"] | "pending" = "pending";
+    let state: ReturnType<typeof updateRunStatus> | undefined;
+    const releaseCompletionLock = await acquireWorkflowMutationLock(evidence.layout);
+    try {
+      evidence = await requireMatchingLinkedWorkflowEvidence(projectRoot, input.runId, evidence);
+      // Read the persisted status rather than assuming `running`: `pause`d and
+      // `pending` runs are cancellable too, and the append-only event evidence
+      // must not record a state the run was never in.
+      persistedStatus = fs.existsSync(evidence.layout.statePath) ? readRunState(evidence.layout).status : "pending";
+      // A durable request keeps the product run nonterminal; only a confirmed
+      // cancellation writes Ultrafuzz's canonical terminal spelling.
+      state = confirmed ? updateRunStatus(evidence.layout, "canceled") : undefined;
+      appendEvent(evidence.layout, {
+        eventType: confirmed ? "workflow-cancel-confirmed" : "workflow-cancel-requested",
+        status: confirmed ? "canceled" : persistedStatus,
+        payload: {
+          action: "cancel",
+          workflow_run_id: evidence.smithersRunId,
+          control_generation: evidence.controlGeneration,
+          workflow_link_id: evidence.workflowLinkId,
+          controller_invocation_id: controllerInvocation.event_id,
+          controller_invoked_at: controllerInvocation.timestamp,
+          confirmed
+        }
+      });
+    } finally {
+      await releaseCompletionLock();
+    }
     return runtimeResult<CancelRunValue>(true, {
       run_id: input.runId,
       workflow_run_id: evidence.smithersRunId,
@@ -82,7 +120,50 @@ export async function cancelRun(input: CancelRunInput) {
       run_status: state?.status ?? persistedStatus
     });
   } catch (error) {
-    return runtimeFailure<CancelRunValue>([smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED")]);
+    const diagnostic = smithersDiagnostic(error, "WORKFLOW_CANCEL_FAILED");
+    if (controllerInvocation !== undefined) {
+      await appendCancelFailureBestEffort(evidence, controllerInvocation, diagnostic);
+    }
+    return runtimeFailure<CancelRunValue>([diagnostic]);
+  } finally {
+    try {
+      await releaseLifecycleActionLock?.();
+    } catch {
+      // Preserve the lifecycle result when action-lock cleanup fails.
+    }
+  }
+}
+
+async function appendCancelFailureBestEffort(
+  evidence: LinkedWorkflowEvidence,
+  controllerInvocation: { event_id: string; timestamp: string },
+  diagnostic: RuntimeDiagnostic
+): Promise<void> {
+  try {
+    const releaseLock = await acquireWorkflowMutationLock(evidence.layout);
+    try {
+      const persistedStatus = fs.existsSync(evidence.layout.statePath)
+        ? readRunState(evidence.layout).status
+        : "pending";
+      appendEvent(evidence.layout, {
+        eventType: "workflow-lifecycle-failed",
+        status: persistedStatus,
+        payload: {
+          action: "cancel",
+          workflow_run_id: evidence.smithersRunId,
+          control_generation: evidence.controlGeneration,
+          workflow_link_id: evidence.workflowLinkId,
+          controller_invocation_id: controllerInvocation.event_id,
+          controller_invoked_at: controllerInvocation.timestamp,
+          run_status: persistedStatus,
+          diagnostic
+        }
+      });
+    } finally {
+      await releaseLock();
+    }
+  } catch {
+    // Preserve the cancel error when its durable failure event cannot be appended.
   }
 }
 

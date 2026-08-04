@@ -1,0 +1,899 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+import {
+  assertNoSymlinkComponents,
+  assertPathInside,
+  replayEvents,
+  writeJsonDurable,
+  type EventRecord,
+  type RunLayout
+} from "@ultrafuzz/artifacts";
+import lockfile from "proper-lockfile";
+
+const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
+const WORKFLOW_LIFECYCLE_ACTION_LOCK = ".workflow-lifecycle-action";
+const WORKFLOW_LIFECYCLE_ACTION_JOURNAL = "lifecycle-action-journal.json";
+const WORKFLOW_RUN_LINK_JOURNAL = "workflow-run-link-journal.json";
+const WORKFLOW_MUTATION_LOCK_STALE_MS = 30 * 60 * 1_000;
+const WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS = 10 * 60 * 1_000;
+const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
+const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
+const LIFECYCLE_EVENT_TYPES = new Set([
+  "workflow-lifecycle-invoking",
+  "workflow-lifecycle-submitted",
+  "workflow-lifecycle-already-running",
+  "workflow-lifecycle-failed",
+  "workflow-pause-requested",
+  "workflow-lifecycle-already-paused",
+  "workflow-cancel-requested",
+  "workflow-cancel-confirmed"
+]);
+
+const WORKFLOW_LIFECYCLE_ACTION_PHASES = [
+  "prepared",
+  "invoking",
+  "external-result",
+  "linked",
+  "submitted",
+  "reconciliation-pending",
+  "reconciled",
+  "cancelled",
+  "failed"
+] as const;
+
+const WORKFLOW_RUN_LINK_PHASES = ["prepared", "event-recorded", "committed"] as const;
+
+type WorkflowLifecycleActionPhase = (typeof WORKFLOW_LIFECYCLE_ACTION_PHASES)[number];
+type WorkflowRunLinkPhase = (typeof WORKFLOW_RUN_LINK_PHASES)[number];
+export type NonIdempotentWorkflowLifecycleAction = "fork" | "replay";
+export type WorkflowRunLinkAction = "start" | "resume" | NonIdempotentWorkflowLifecycleAction;
+
+export interface WorkflowLifecycleActionJournalEntry {
+  action_id: string;
+  action: NonIdempotentWorkflowLifecycleAction;
+  source_workflow_run_id: string;
+  source_workflow_link_id: string;
+  control_generation: string;
+  phase: WorkflowLifecycleActionPhase;
+  requested_at: string;
+  updated_at: string;
+  known_workflow_run_ids: string[];
+  fork_frame?: number;
+  reset_node?: string;
+  label?: string;
+  controller_invocation_id?: string;
+  controller_invoked_at?: string;
+  external_workflow_run_id?: string;
+  external_result_at?: string;
+  linked_at?: string;
+  submitted_at?: string;
+  reconciled_at?: string;
+  cancellation_attempted_at?: string;
+  reconciliation_reason?: string;
+  workflow_link_id?: string;
+}
+
+interface WorkflowLifecycleActionJournal {
+  schema_version: typeof WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION;
+  entries: WorkflowLifecycleActionJournalEntry[];
+}
+
+export interface WorkflowRunLinkJournalEntry {
+  link_id: string;
+  action: WorkflowRunLinkAction;
+  workflow_run_id: string;
+  control_generation: string;
+  phase: WorkflowRunLinkPhase;
+  prepared_at: string;
+  updated_at: string;
+  source_workflow_run_id?: string;
+  source_workflow_link_id?: string;
+  lifecycle_action_id?: string;
+  controller_invocation_id?: string;
+  controller_invoked_at?: string;
+  link_event_id?: string;
+  link_event_at?: string;
+  committed_at?: string;
+}
+
+interface WorkflowRunLinkJournal {
+  schema_version: typeof WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION;
+  run_id: string;
+  entries: WorkflowRunLinkJournalEntry[];
+}
+
+const TERMINAL_LIFECYCLE_ACTION_PHASES = new Set<WorkflowLifecycleActionPhase>(["reconciled", "cancelled", "failed"]);
+
+export interface WorkflowLifecycleGeneration {
+  eventId?: string;
+  eventType?: string;
+  eventTimestamp?: string;
+  action?: string;
+  workflowRunId?: string;
+  workflowLinkId?: string;
+  controllerInvocationId?: string;
+  eventCount: number;
+  invoking: boolean;
+}
+
+export async function acquireWorkflowMutationLock(layout: RunLayout): Promise<() => Promise<void>> {
+  return acquireRunLock(layout, WORKFLOW_MUTATION_LOCK, WORKFLOW_MUTATION_LOCK_STALE_MS, {
+    retries: 120,
+    factor: 1,
+    minTimeout: 50,
+    maxTimeout: 250
+  });
+}
+
+export async function acquireWorkflowLifecycleActionLock(layout: RunLayout): Promise<() => Promise<void>> {
+  return acquireRunLock(layout, WORKFLOW_LIFECYCLE_ACTION_LOCK, WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS, 0);
+}
+
+export function prepareWorkflowLifecycleAction(
+  layout: RunLayout,
+  input: {
+    action: NonIdempotentWorkflowLifecycleAction;
+    sourceWorkflowRunId: string;
+    sourceWorkflowLinkId: string;
+    controlGeneration: string;
+    knownWorkflowRunIds: readonly string[];
+    forkFrame?: number;
+    resetNode?: string;
+    label?: string;
+    now?: string;
+  }
+): WorkflowLifecycleActionJournalEntry {
+  const now = input.now ?? new Date().toISOString();
+  const entry: WorkflowLifecycleActionJournalEntry = {
+    action_id: crypto.randomUUID(),
+    action: input.action,
+    source_workflow_run_id: requiredJournalString(input.sourceWorkflowRunId, "source workflow run ID"),
+    source_workflow_link_id: requiredJournalString(input.sourceWorkflowLinkId, "source workflow link ID"),
+    control_generation: requiredJournalString(input.controlGeneration, "control generation"),
+    phase: "prepared",
+    requested_at: now,
+    updated_at: now,
+    known_workflow_run_ids: [
+      ...new Set(input.knownWorkflowRunIds.map((value) => requiredJournalString(value, "known workflow run ID")))
+    ].sort(),
+    ...(input.forkFrame === undefined ? {} : { fork_frame: input.forkFrame }),
+    ...(input.resetNode === undefined ? {} : { reset_node: input.resetNode }),
+    ...(input.label === undefined ? {} : { label: input.label })
+  };
+  const journal = readWorkflowLifecycleActionJournal(layout);
+  journal.entries.push(entry);
+  writeWorkflowLifecycleActionJournal(layout, journal);
+  return structuredClone(entry);
+}
+
+export function transitionWorkflowLifecycleAction(
+  layout: RunLayout,
+  actionId: string,
+  phase: WorkflowLifecycleActionPhase,
+  patch: Partial<
+    Pick<
+      WorkflowLifecycleActionJournalEntry,
+      | "controller_invocation_id"
+      | "controller_invoked_at"
+      | "external_workflow_run_id"
+      | "external_result_at"
+      | "linked_at"
+      | "submitted_at"
+      | "reconciled_at"
+      | "cancellation_attempted_at"
+      | "reconciliation_reason"
+      | "workflow_link_id"
+    >
+  > = {},
+  now = new Date().toISOString()
+): WorkflowLifecycleActionJournalEntry {
+  if (!WORKFLOW_LIFECYCLE_ACTION_PHASES.includes(phase)) {
+    throw new Error(`invalid workflow lifecycle action phase: ${String(phase)}`);
+  }
+  const journal = readWorkflowLifecycleActionJournal(layout);
+  const entry = journal.entries.find((candidate) => candidate.action_id === actionId);
+  if (entry === undefined) {
+    throw new Error(`workflow lifecycle action journal entry not found: ${actionId}`);
+  }
+  Object.assign(entry, patch, { phase, updated_at: now });
+  validateWorkflowLifecycleActionJournalEntry(entry);
+  writeWorkflowLifecycleActionJournal(layout, journal);
+  return structuredClone(entry);
+}
+
+export function pendingWorkflowLifecycleAction(layout: RunLayout): WorkflowLifecycleActionJournalEntry | undefined {
+  const entries = readWorkflowLifecycleActionJournal(layout).entries;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry !== undefined && !TERMINAL_LIFECYCLE_ACTION_PHASES.has(entry.phase)) {
+      return structuredClone(entry);
+    }
+  }
+  return undefined;
+}
+
+export function workflowLifecycleAction(
+  layout: RunLayout,
+  actionId: string
+): WorkflowLifecycleActionJournalEntry | undefined {
+  const entry = readWorkflowLifecycleActionJournal(layout).entries.find(
+    (candidate) => candidate.action_id === actionId
+  );
+  return entry === undefined ? undefined : structuredClone(entry);
+}
+
+export function workflowLifecycleActionJournalPath(layout: RunLayout): string {
+  const root = anchoredRunRoot(layout);
+  const journalPath = path.join(root, "smithers", WORKFLOW_LIFECYCLE_ACTION_JOURNAL);
+  assertPathInside(root, journalPath, "workflow lifecycle action journal");
+  assertNoSymlinkComponents(root, journalPath, "workflow lifecycle action journal");
+  return journalPath;
+}
+
+export function prepareWorkflowRunLink(
+  layout: RunLayout,
+  input: {
+    action: WorkflowRunLinkAction;
+    workflowRunId: string;
+    controlGeneration: string;
+    sourceWorkflowRunId?: string;
+    lifecycleActionId?: string;
+    controllerInvocationId?: string;
+    controllerInvokedAt?: string;
+    now?: string;
+  }
+): WorkflowRunLinkJournalEntry {
+  const journal = readWorkflowRunLinkJournal(layout);
+  if (journal.entries.some((entry) => entry.phase !== "committed")) {
+    throw new Error("a workflow run link is already pending reconciliation");
+  }
+  const current = journal.entries.at(-1);
+  if (current === undefined) {
+    if (input.action !== "start" || input.sourceWorkflowRunId !== undefined) {
+      throw new Error("the initial workflow run link must be prepared by start");
+    }
+  } else {
+    if (input.action === "start" || input.sourceWorkflowRunId !== current.workflow_run_id) {
+      throw new Error("workflow run link source does not match the committed link");
+    }
+    if (input.controlGeneration !== current.control_generation) {
+      throw new Error("workflow run link control generation changed");
+    }
+  }
+  const now = input.now ?? new Date().toISOString();
+  const entry: WorkflowRunLinkJournalEntry = {
+    link_id: crypto.randomUUID(),
+    action: input.action,
+    workflow_run_id: requiredJournalString(input.workflowRunId, "workflow run link target"),
+    control_generation: requiredJournalString(input.controlGeneration, "workflow run link control generation"),
+    phase: "prepared",
+    prepared_at: now,
+    updated_at: now,
+    ...(input.sourceWorkflowRunId === undefined
+      ? {}
+      : { source_workflow_run_id: requiredJournalString(input.sourceWorkflowRunId, "workflow run link source") }),
+    ...(current === undefined ? {} : { source_workflow_link_id: current.link_id }),
+    ...(input.lifecycleActionId === undefined
+      ? {}
+      : { lifecycle_action_id: requiredJournalString(input.lifecycleActionId, "workflow run link lifecycle action") }),
+    ...(input.controllerInvocationId === undefined
+      ? {}
+      : {
+          controller_invocation_id: requiredJournalString(
+            input.controllerInvocationId,
+            "workflow run link controller invocation"
+          )
+        }),
+    ...(input.controllerInvokedAt === undefined
+      ? {}
+      : {
+          controller_invoked_at: requiredJournalString(
+            input.controllerInvokedAt,
+            "workflow run link controller invocation time"
+          )
+        })
+  };
+  validateWorkflowRunLinkJournalEntry(entry);
+  journal.entries.push(entry);
+  writeWorkflowRunLinkJournal(layout, journal);
+  return structuredClone(entry);
+}
+
+export function transitionWorkflowRunLink(
+  layout: RunLayout,
+  linkId: string,
+  phase: WorkflowRunLinkPhase,
+  patch: Partial<Pick<WorkflowRunLinkJournalEntry, "link_event_id" | "link_event_at" | "committed_at">> = {},
+  now = new Date().toISOString()
+): WorkflowRunLinkJournalEntry {
+  if (!WORKFLOW_RUN_LINK_PHASES.includes(phase)) {
+    throw new Error(`invalid workflow run link phase: ${String(phase)}`);
+  }
+  const journal = readWorkflowRunLinkJournal(layout);
+  const entry = journal.entries.find((candidate) => candidate.link_id === linkId);
+  if (entry === undefined) throw new Error(`workflow run link journal entry not found: ${linkId}`);
+  const currentPhaseIndex = WORKFLOW_RUN_LINK_PHASES.indexOf(entry.phase);
+  const nextPhaseIndex = WORKFLOW_RUN_LINK_PHASES.indexOf(phase);
+  if (nextPhaseIndex < currentPhaseIndex) {
+    throw new Error("workflow run link journal phase cannot move backwards");
+  }
+  Object.assign(entry, patch, { phase, updated_at: now });
+  validateWorkflowRunLinkJournalEntry(entry);
+  writeWorkflowRunLinkJournal(layout, journal);
+  return structuredClone(entry);
+}
+
+export function pendingWorkflowRunLink(layout: RunLayout): WorkflowRunLinkJournalEntry | undefined {
+  const pending = readWorkflowRunLinkJournal(layout).entries.find((entry) => entry.phase !== "committed");
+  return pending === undefined ? undefined : structuredClone(pending);
+}
+
+export function currentWorkflowRunLink(layout: RunLayout): WorkflowRunLinkJournalEntry | undefined {
+  const current = readWorkflowRunLinkJournal(layout)
+    .entries.filter((entry) => entry.phase === "committed")
+    .at(-1);
+  return current === undefined ? undefined : structuredClone(current);
+}
+
+export function verifyCommittedWorkflowRunLink(layout: RunLayout): WorkflowRunLinkJournalEntry {
+  const journal = readWorkflowRunLinkJournal(layout);
+  if (journal.entries.length === 0) throw new Error("workflow run link journal is missing its initial link");
+  if (journal.entries.some((entry) => entry.phase !== "committed")) {
+    throw new Error("workflow run link requires reconciliation");
+  }
+  for (const entry of journal.entries) {
+    verifyWorkflowRunLinkAuthorization(layout, entry, true);
+    verifyWorkflowRunLinkEvent(layout, entry);
+  }
+  return structuredClone(journal.entries[journal.entries.length - 1]!);
+}
+
+export function verifyWorkflowRunLinkAuthorization(
+  layout: RunLayout,
+  entry: WorkflowRunLinkJournalEntry,
+  requireLinkedLifecycleAction = false
+): void {
+  validateWorkflowRunLinkJournalEntry(entry);
+  if (entry.action === "start") {
+    if (
+      entry.source_workflow_run_id !== undefined ||
+      entry.source_workflow_link_id !== undefined ||
+      entry.lifecycle_action_id !== undefined ||
+      entry.controller_invocation_id !== undefined ||
+      entry.controller_invoked_at !== undefined
+    ) {
+      throw new Error("initial workflow run link has invalid lifecycle authorization");
+    }
+    return;
+  }
+  const sourceWorkflowRunId = requiredJournalString(entry.source_workflow_run_id, "workflow run link source");
+  const controllerInvocationId = requiredJournalString(
+    entry.controller_invocation_id,
+    "workflow run link controller invocation"
+  );
+  const controllerInvokedAt = requiredJournalString(
+    entry.controller_invoked_at,
+    "workflow run link controller invocation time"
+  );
+  const invocation = uniqueEvent(layout, controllerInvocationId, "workflow run link controller invocation");
+  const invocationPayload = eventPayload(invocation);
+  if (
+    invocation.event_type !== "workflow-lifecycle-invoking" ||
+    invocation.timestamp !== controllerInvokedAt ||
+    invocationPayload.action !== entry.action ||
+    invocationPayload.workflow_run_id !== sourceWorkflowRunId ||
+    invocationPayload.workflow_link_id !== entry.source_workflow_link_id ||
+    invocationPayload.control_generation !== entry.control_generation ||
+    invocationPayload.lifecycle_action_id !== entry.lifecycle_action_id
+  ) {
+    throw new Error("workflow run link controller invocation does not match its journal entry");
+  }
+  if (entry.lifecycle_action_id === undefined) {
+    if (entry.action !== "resume") {
+      throw new Error("non-idempotent workflow run link is missing its lifecycle action journal binding");
+    }
+    return;
+  }
+  const lifecycleEntry = readWorkflowLifecycleActionJournal(layout).entries.find(
+    (candidate) => candidate.action_id === entry.lifecycle_action_id
+  );
+  if (
+    lifecycleEntry === undefined ||
+    lifecycleEntry.action !== entry.action ||
+    lifecycleEntry.source_workflow_run_id !== sourceWorkflowRunId ||
+    lifecycleEntry.source_workflow_link_id !== entry.source_workflow_link_id ||
+    lifecycleEntry.control_generation !== entry.control_generation ||
+    lifecycleEntry.controller_invocation_id !== controllerInvocationId ||
+    lifecycleEntry.controller_invoked_at !== controllerInvokedAt ||
+    lifecycleEntry.external_workflow_run_id !== entry.workflow_run_id
+  ) {
+    throw new Error("workflow run link does not match its lifecycle action journal entry");
+  }
+  if (
+    requireLinkedLifecycleAction &&
+    (lifecycleEntry.workflow_link_id !== entry.link_id ||
+      !["linked", "submitted", "reconciled"].includes(lifecycleEntry.phase))
+  ) {
+    throw new Error("workflow run link is not committed by its lifecycle action journal entry");
+  }
+}
+
+export function workflowRunLinkEvent(layout: RunLayout, linkId: string): EventRecord | undefined {
+  const matches = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => {
+    if (event.event_type !== "workflow-link-recorded") return false;
+    return eventPayload(event).workflow_link_id === linkId;
+  });
+  if (matches.length > 1) throw new Error("workflow run link has duplicate durable events");
+  return matches[0];
+}
+
+export function workflowRunLinkJournalPath(layout: RunLayout): string {
+  const root = anchoredRunRoot(layout);
+  const journalPath = path.join(root, "smithers", WORKFLOW_RUN_LINK_JOURNAL);
+  assertPathInside(root, journalPath, "workflow run link journal");
+  assertNoSymlinkComponents(root, journalPath, "workflow run link journal");
+  return journalPath;
+}
+
+export function workflowRunIdsFromTimeline(value: unknown): string[] | undefined {
+  const root = timelineRecord(value);
+  if (root === undefined) return undefined;
+  const ids = new Set<string>();
+  collectTimelineWorkflowRunIds(root, ids);
+  return [...ids].sort();
+}
+
+async function acquireRunLock(
+  layout: RunLayout,
+  lockName: string,
+  stale: number,
+  retries: number | { retries: number; factor: number; minTimeout: number; maxTimeout: number }
+): Promise<() => Promise<void>> {
+  const root = anchoredRunRoot(layout);
+  const lockPath = path.join(root, lockName);
+  assertPathInside(root, lockPath, "workflow mutation lock");
+  assertNoSymlinkComponents(root, lockPath, "workflow mutation lock");
+  return lockfile.lock(lockPath, {
+    lockfilePath: lockPath,
+    realpath: false,
+    stale,
+    update: 30_000,
+    retries
+  });
+}
+
+export function workflowLifecycleGeneration(layout: RunLayout): WorkflowLifecycleGeneration {
+  const lifecycleEvents = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) =>
+    LIFECYCLE_EVENT_TYPES.has(event.event_type)
+  );
+  const latest = lifecycleEvents.at(-1);
+  const payload =
+    latest !== undefined &&
+    typeof latest.payload === "object" &&
+    latest.payload !== null &&
+    !Array.isArray(latest.payload)
+      ? (latest.payload as Record<string, unknown>)
+      : undefined;
+  return latest === undefined
+    ? { eventCount: 0, invoking: false }
+    : {
+        eventId: latest.event_id,
+        eventType: latest.event_type,
+        eventTimestamp: latest.timestamp,
+        ...(typeof payload?.action === "string" ? { action: payload.action } : {}),
+        ...(typeof payload?.workflow_run_id === "string" ? { workflowRunId: payload.workflow_run_id } : {}),
+        ...(typeof payload?.workflow_link_id === "string" ? { workflowLinkId: payload.workflow_link_id } : {}),
+        ...(typeof payload?.controller_invocation_id === "string"
+          ? { controllerInvocationId: payload.controller_invocation_id }
+          : {}),
+        eventCount: lifecycleEvents.length,
+        invoking: latest.event_type === "workflow-lifecycle-invoking"
+      };
+}
+
+export function sameWorkflowLifecycleGeneration(
+  left: WorkflowLifecycleGeneration,
+  right: WorkflowLifecycleGeneration
+): boolean {
+  return (
+    left.eventId === right.eventId &&
+    left.eventType === right.eventType &&
+    left.eventCount === right.eventCount &&
+    left.invoking === right.invoking
+  );
+}
+
+function readWorkflowLifecycleActionJournal(layout: RunLayout): WorkflowLifecycleActionJournal {
+  const journalPath = workflowLifecycleActionJournalPath(layout);
+  if (!fs.existsSync(journalPath)) {
+    return { schema_version: WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION, entries: [] };
+  }
+  const parsed = JSON.parse(readStableJournalFile(layout, journalPath, "workflow lifecycle action journal")) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !("schema_version" in parsed) ||
+    parsed.schema_version !== WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION ||
+    !("entries" in parsed) ||
+    !Array.isArray(parsed.entries)
+  ) {
+    throw new Error("workflow lifecycle action journal is invalid");
+  }
+  const entries = parsed.entries.map((value) => validateWorkflowLifecycleActionJournalEntry(value));
+  const actionIds = new Set(entries.map((entry) => entry.action_id));
+  if (actionIds.size !== entries.length) {
+    throw new Error("workflow lifecycle action journal repeats an action ID");
+  }
+  return { schema_version: WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION, entries };
+}
+
+function readWorkflowRunLinkJournal(layout: RunLayout): WorkflowRunLinkJournal {
+  const journalPath = workflowRunLinkJournalPath(layout);
+  if (!fs.existsSync(journalPath)) {
+    return {
+      schema_version: WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION,
+      run_id: layout.runId,
+      entries: []
+    };
+  }
+  const parsed = JSON.parse(readStableJournalFile(layout, journalPath, "workflow run link journal")) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !("schema_version" in parsed) ||
+    parsed.schema_version !== WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION ||
+    !("run_id" in parsed) ||
+    parsed.run_id !== layout.runId ||
+    !("entries" in parsed) ||
+    !Array.isArray(parsed.entries)
+  ) {
+    throw new Error("workflow run link journal is invalid");
+  }
+  const entries = parsed.entries.map((value) => validateWorkflowRunLinkJournalEntry(value));
+  if (new Set(entries.map((entry) => entry.link_id)).size !== entries.length) {
+    throw new Error("workflow run link journal repeats a link ID");
+  }
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    const previous = entries[index - 1];
+    if (index === 0) {
+      if (entry.action !== "start" || entry.source_workflow_run_id !== undefined) {
+        throw new Error("workflow run link journal has an invalid initial link");
+      }
+    } else if (
+      previous === undefined ||
+      previous.phase !== "committed" ||
+      entry.action === "start" ||
+      entry.source_workflow_run_id !== previous.workflow_run_id ||
+      entry.source_workflow_link_id !== previous.link_id ||
+      entry.control_generation !== previous.control_generation
+    ) {
+      throw new Error("workflow run link journal chain is invalid");
+    }
+    if (entry.phase !== "committed" && index !== entries.length - 1) {
+      throw new Error("workflow run link journal has an unresolved historical link");
+    }
+  }
+  return {
+    schema_version: WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION,
+    run_id: layout.runId,
+    entries
+  };
+}
+
+function writeWorkflowLifecycleActionJournal(layout: RunLayout, journal: WorkflowLifecycleActionJournal): void {
+  const journalPath = workflowLifecycleActionJournalPath(layout);
+  const directory = path.dirname(journalPath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  assertNoSymlinkComponents(layout.root, directory, "workflow lifecycle action journal directory");
+  const directoryStat = fs.lstatSync(directory);
+  if (
+    !directoryStat.isDirectory() ||
+    directoryStat.isSymbolicLink() ||
+    fs.realpathSync.native(directory) !== directory
+  ) {
+    throw new Error("workflow lifecycle action journal directory is unsafe");
+  }
+  if (fs.existsSync(journalPath)) {
+    assertSafeJournalFile(layout, journalPath, "workflow lifecycle action journal");
+  }
+  writeJsonDurable(journalPath, journal);
+  assertSafeJournalFile(layout, journalPath, "workflow lifecycle action journal");
+}
+
+function writeWorkflowRunLinkJournal(layout: RunLayout, journal: WorkflowRunLinkJournal): void {
+  const journalPath = workflowRunLinkJournalPath(layout);
+  const directory = path.dirname(journalPath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  assertNoSymlinkComponents(layout.root, directory, "workflow run link journal directory");
+  const directoryStat = fs.lstatSync(directory);
+  if (
+    !directoryStat.isDirectory() ||
+    directoryStat.isSymbolicLink() ||
+    fs.realpathSync.native(directory) !== directory
+  ) {
+    throw new Error("workflow run link journal directory is unsafe");
+  }
+  if (fs.existsSync(journalPath)) assertSafeJournalFile(layout, journalPath, "workflow run link journal");
+  writeJsonDurable(journalPath, journal);
+  assertSafeJournalFile(layout, journalPath, "workflow run link journal");
+}
+
+function validateWorkflowLifecycleActionJournalEntry(value: unknown): WorkflowLifecycleActionJournalEntry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("workflow lifecycle action journal entry is invalid");
+  }
+  const entry = value as Record<string, unknown>;
+  const action = entry.action;
+  const phase = entry.phase;
+  if (
+    (action !== "fork" && action !== "replay") ||
+    typeof phase !== "string" ||
+    !WORKFLOW_LIFECYCLE_ACTION_PHASES.includes(phase as WorkflowLifecycleActionPhase) ||
+    !Array.isArray(entry.known_workflow_run_ids) ||
+    entry.known_workflow_run_ids.some((candidate) => typeof candidate !== "string" || candidate.length === 0)
+  ) {
+    throw new Error("workflow lifecycle action journal entry is invalid");
+  }
+  const requiredStrings = [
+    "action_id",
+    "source_workflow_run_id",
+    "source_workflow_link_id",
+    "control_generation",
+    "requested_at",
+    "updated_at"
+  ] as const;
+  for (const key of requiredStrings) {
+    requiredJournalString(entry[key], key);
+  }
+  const optionalStrings = [
+    "reset_node",
+    "label",
+    "controller_invocation_id",
+    "controller_invoked_at",
+    "external_workflow_run_id",
+    "external_result_at",
+    "linked_at",
+    "submitted_at",
+    "reconciled_at",
+    "cancellation_attempted_at",
+    "reconciliation_reason",
+    "workflow_link_id"
+  ] as const;
+  for (const key of optionalStrings) {
+    if (entry[key] !== undefined) requiredJournalString(entry[key], key);
+  }
+  if (entry.fork_frame !== undefined && (!Number.isSafeInteger(entry.fork_frame) || Number(entry.fork_frame) < 0)) {
+    throw new Error("workflow lifecycle action journal fork frame is invalid");
+  }
+  if (
+    ["external-result", "linked", "submitted", "reconciled"].includes(String(phase)) &&
+    (entry.external_workflow_run_id === undefined || entry.external_result_at === undefined)
+  ) {
+    throw new Error("workflow lifecycle action journal external result is incomplete");
+  }
+  if (
+    phase !== "prepared" &&
+    phase !== "failed" &&
+    (entry.controller_invocation_id === undefined || entry.controller_invoked_at === undefined)
+  ) {
+    throw new Error("workflow lifecycle action journal controller invocation is incomplete");
+  }
+  if (
+    ["linked", "submitted", "reconciled"].includes(String(phase)) &&
+    (entry.linked_at === undefined || entry.workflow_link_id === undefined)
+  ) {
+    throw new Error("workflow lifecycle action journal link is incomplete");
+  }
+  if (["submitted", "reconciled"].includes(String(phase)) && entry.submitted_at === undefined) {
+    throw new Error("workflow lifecycle action journal submission is incomplete");
+  }
+  if (phase === "reconciled" && entry.reconciled_at === undefined) {
+    throw new Error("workflow lifecycle action journal reconciliation is incomplete");
+  }
+  if (phase === "cancelled" && entry.cancellation_attempted_at === undefined) {
+    throw new Error("workflow lifecycle action journal cancellation is incomplete");
+  }
+  return entry as unknown as WorkflowLifecycleActionJournalEntry;
+}
+
+function validateWorkflowRunLinkJournalEntry(value: unknown): WorkflowRunLinkJournalEntry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("workflow run link journal entry is invalid");
+  }
+  const entry = value as Record<string, unknown>;
+  const action = entry.action;
+  const phase = entry.phase;
+  if (
+    (action !== "start" && action !== "resume" && action !== "fork" && action !== "replay") ||
+    typeof phase !== "string" ||
+    !WORKFLOW_RUN_LINK_PHASES.includes(phase as WorkflowRunLinkPhase)
+  ) {
+    throw new Error("workflow run link journal entry is invalid");
+  }
+  for (const key of ["link_id", "workflow_run_id", "control_generation", "prepared_at", "updated_at"] as const) {
+    requiredJournalString(entry[key], key);
+  }
+  for (const key of [
+    "source_workflow_run_id",
+    "source_workflow_link_id",
+    "lifecycle_action_id",
+    "controller_invocation_id",
+    "controller_invoked_at",
+    "link_event_id",
+    "link_event_at",
+    "committed_at"
+  ] as const) {
+    if (entry[key] !== undefined) requiredJournalString(entry[key], key);
+  }
+  if (action === "start") {
+    if (
+      entry.source_workflow_run_id !== undefined ||
+      entry.source_workflow_link_id !== undefined ||
+      entry.lifecycle_action_id !== undefined ||
+      entry.controller_invocation_id !== undefined ||
+      entry.controller_invoked_at !== undefined
+    ) {
+      throw new Error("initial workflow run link journal entry is invalid");
+    }
+  } else {
+    if (
+      entry.source_workflow_run_id === undefined ||
+      entry.source_workflow_link_id === undefined ||
+      entry.source_workflow_run_id === entry.workflow_run_id ||
+      entry.controller_invocation_id === undefined ||
+      entry.controller_invoked_at === undefined
+    ) {
+      throw new Error("lifecycle workflow run link journal entry is invalid");
+    }
+    if ((action === "fork" || action === "replay") !== (entry.lifecycle_action_id !== undefined)) {
+      throw new Error("workflow run link lifecycle action binding is invalid");
+    }
+  }
+  if (
+    (phase === "event-recorded" || phase === "committed") &&
+    (entry.link_event_id === undefined || entry.link_event_at === undefined)
+  ) {
+    throw new Error("workflow run link journal event is incomplete");
+  }
+  if (phase === "committed" && entry.committed_at === undefined) {
+    throw new Error("workflow run link journal commit is incomplete");
+  }
+  return entry as unknown as WorkflowRunLinkJournalEntry;
+}
+
+export function verifyWorkflowRunLinkEvent(layout: RunLayout, entry: WorkflowRunLinkJournalEntry): void {
+  const linkEventId = requiredJournalString(entry.link_event_id, "workflow run link event");
+  const linkEventAt = requiredJournalString(entry.link_event_at, "workflow run link event time");
+  const event = uniqueEvent(layout, linkEventId, "workflow run link event");
+  const payload = eventPayload(event);
+  if (
+    event.event_type !== "workflow-link-recorded" ||
+    event.timestamp !== linkEventAt ||
+    payload.workflow_link_id !== entry.link_id ||
+    payload.action !== entry.action ||
+    payload.workflow_run_id !== entry.workflow_run_id ||
+    payload.source_workflow_run_id !== entry.source_workflow_run_id ||
+    payload.source_workflow_link_id !== entry.source_workflow_link_id ||
+    payload.control_generation !== entry.control_generation ||
+    payload.lifecycle_action_id !== entry.lifecycle_action_id ||
+    payload.controller_invocation_id !== entry.controller_invocation_id ||
+    payload.controller_invoked_at !== entry.controller_invoked_at
+  ) {
+    throw new Error("workflow run link event does not match its journal entry");
+  }
+}
+
+function uniqueEvent(layout: RunLayout, eventId: string, label: string): EventRecord {
+  const matches = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => event.event_id === eventId);
+  if (matches.length !== 1) throw new Error(`${label} is missing or duplicated`);
+  return matches[0]!;
+}
+
+function eventPayload(event: EventRecord): Record<string, unknown> {
+  return typeof event.payload === "object" && event.payload !== null && !Array.isArray(event.payload)
+    ? (event.payload as Record<string, unknown>)
+    : {};
+}
+
+function anchoredRunRoot(layout: RunLayout): string {
+  const root = path.resolve(layout.root);
+  if (root !== layout.root) {
+    throw new Error("workflow mutation lock requires an absolute run root");
+  }
+  const stat = fs.lstatSync(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync.native(root) !== root) {
+    throw new Error("workflow mutation lock requires an anchored run root");
+  }
+  return root;
+}
+
+function assertSafeJournalFile(layout: RunLayout, journalPath: string, label: string): fs.Stats {
+  const root = anchoredRunRoot(layout);
+  assertPathInside(root, journalPath, label);
+  assertNoSymlinkComponents(root, journalPath, label);
+  const stat = fs.lstatSync(journalPath);
+  if (
+    !stat.isFile() ||
+    stat.isSymbolicLink() ||
+    stat.nlink !== 1 ||
+    fs.realpathSync.native(journalPath) !== journalPath
+  ) {
+    throw new Error(`${label} must be a single-link regular file`);
+  }
+  return stat;
+}
+
+function readStableJournalFile(layout: RunLayout, journalPath: string, label: string): string {
+  const before = assertSafeJournalFile(layout, journalPath, label);
+  const descriptor = fs.openSync(journalPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const opened = fs.fstatSync(descriptor);
+    if (!sameFileIdentity(before, opened)) {
+      throw new Error(`${label} changed while it was opened`);
+    }
+    const contents = fs.readFileSync(descriptor, "utf8");
+    const afterRead = fs.fstatSync(descriptor);
+    const afterPath = assertSafeJournalFile(layout, journalPath, label);
+    if (!sameFileIdentity(opened, afterRead) || !sameFileIdentity(afterRead, afterPath)) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return contents;
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function sameFileIdentity(left: fs.Stats, right: fs.Stats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs &&
+    right.isFile() &&
+    right.nlink === 1
+  );
+}
+
+function requiredJournalString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`workflow lifecycle action journal ${label} is invalid`);
+  }
+  return value;
+}
+
+function collectTimelineWorkflowRunIds(value: Record<string, unknown>, into: Set<string>): void {
+  if (typeof value.runId === "string" && value.runId.length > 0) into.add(value.runId);
+  if (Array.isArray(value.frames)) {
+    for (const frameValue of value.frames) {
+      const frame = objectRecord(frameValue);
+      if (frame === undefined || !Array.isArray(frame.forks)) continue;
+      for (const forkValue of frame.forks) {
+        const fork = objectRecord(forkValue);
+        if (typeof fork?.runId === "string" && fork.runId.length > 0) into.add(fork.runId);
+      }
+    }
+  }
+  if (!Array.isArray(value.children)) return;
+  for (const childValue of value.children) {
+    const child = objectRecord(childValue);
+    if (child !== undefined) collectTimelineWorkflowRunIds(child, into);
+  }
+}
+
+function timelineRecord(value: unknown): Record<string, unknown> | undefined {
+  const root = objectRecord(value);
+  const data = objectRecord(root?.data) ?? root;
+  return objectRecord(data?.timeline);
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}

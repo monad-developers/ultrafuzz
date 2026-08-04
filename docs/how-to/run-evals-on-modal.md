@@ -12,12 +12,15 @@ config contains the target and ground-truth locations and must not be
 committed.
 
 At launch time the runner copies the config to `/run/ultrafuzz-config` inside
-the sandbox. Subscription credentials are copied directly from the host to
-`/run/ultrafuzz-auth`; they are never placed in a Modal Secret, image,
-environment variable, launch-state file, or log. Kimi is the exception for
-same-volume resume: after the host token is refreshed, a refreshable snapshot of
-the selected Kimi Code credential is staged into a private per-row auth
-directory on the Modal Volume.
+the sandbox. Subscription credentials are never placed in a Modal Secret,
+image, environment variable, launch-state file, or log. Cloud Codex and Claude
+subscription authentication is rejected until a provider-backed refresh broker
+is available. Kimi subscription authentication stages the selected Kimi Code
+credential in a private per-row directory on a v2 Modal Volume. A disposable
+child receives only a private copy. After execution, the untrusted child
+credential is accepted only as a candidate refresh token: the trusted outer
+controller exchanges it with Kimi OAuth and persists only the normalized
+provider response.
 
 Non-secret run state is stored under `/data/<run-id>/<model>/workspace` on a
 private Modal Volume. This preserves Ultrafuzz state, generated tests, reports,
@@ -56,9 +59,9 @@ Modal credential if it descends from the host token staged for that row.
 API-key auth is also supported per model; Kimi accepts either
 `KIMI_API_KEY` or `MOONSHOT_API_KEY` on the launcher host, exposes the value to
 the worker as `KIMI_API_KEY`, and binds it through Kimi Code's provider
-`api_key` config field. DeepSeek V4 Pro requires `DEEPSEEK_API_KEY`; the worker
-forwards it only to the selected DeepSeek pair, whose generated adapter routes
-Claude Code to DeepSeek's Anthropic-compatible endpoint.
+`api_key` config field. DeepSeek API-key runs require `DEEPSEEK_API_KEY`; the
+worker forwards it only to the selected DeepSeek pair, whose generated adapter
+routes Claude Code to DeepSeek's Anthropic-compatible endpoint.
 
 For subscription auth, launch at most one Kimi row at a time. Use Kimi API-key
 auth or serial launches when comparing multiple Kimi profiles, so OAuth
@@ -136,15 +139,32 @@ graph. Repository variable `BENCHMARK_SMOKE_OPENAI_MODEL` can override the
 smoke model without changing its single OpenAI/Codex provider, fixed
 high/medium reasoning split, or target and topology limits.
 
-A manual `workflow_dispatch` runs the full lane instead. It evaluates every
-checked-in EVMBench target with GPT-5.6 Luna at `high`, Claude Sonnet 5 at
-`high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by default. Dispatch
-inputs `openai_model`, `openai_reasoning`, `anthropic_model`,
-`anthropic_reasoning`, `kimi_model`, `kimi_reasoning`, `deepseek_model`, and
-`deepseek_reasoning` provide explicit overrides. The full lane retains the
-production strategy set, including invariant, differential, and dynamic
-strategies, with all three disable flags set to `false`. Push events can never
-select this lane.
+A manual `workflow_dispatch` requires a `benchmark_scope`. The default `full`
+scope evaluates every checked-in EVMBench target with GPT-5.6 Luna at `high`,
+Claude Sonnet 5 at `high`, Kimi K3 at `max`, and DeepSeek V4 Pro at `max` by
+default. Dispatch inputs `openai_model`, `openai_reasoning`,
+`anthropic_model`, `anthropic_reasoning`, `kimi_model`, `kimi_reasoning`,
+`deepseek_model`, and `deepseek_reasoning` provide explicit full-lane
+overrides. The full lane retains the production strategy set, including
+invariant, differential, and dynamic strategies, with all three disable flags
+set to `false`. Push events can never select this lane.
+
+The `deepseek-v4-flash-smoke` scope is a fixed publication profile, not a
+free-form model override. It runs only `deepseek-v4-flash` at `max` over the
+same exact three-target smoke lane and GPT-5.6 Sol `xhigh` judge described
+above. Recovery discovers its immutable `smoke` plan artifact instead of
+assuming every manual dispatch is full, and automatic publication requires the
+successful producer's exact scope marker, exactly one launch job, and the
+trusted `deepseek` / `deepseek-v4-flash` / `max` profile all the way through
+manifest, config, terminal evidence, and public bundle validation. Dispatch this
+scope on `main`; feature-branch runs retain review artifacts but cannot publish
+history automatically.
+
+```bash
+gh workflow run eval-benchmarks.yml \
+  --ref main \
+  -f benchmark_scope=deepseek-v4-flash-smoke
+```
 
 Both lanes use the standard Modal benchmark resources described above. Each
 smoke target row has a 15,000-second model-work watchdog: the smoke graph's four
@@ -163,8 +183,8 @@ cost multiply across every selected target, runner model, and trial.
 
 Configure `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`, and `OPENAI_API_KEY` as
 Actions secrets. Full dispatches additionally require `ANTHROPIC_API_KEY` and
-either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`; automatic
-smoke runs do not.
+either `KIMI_API_KEY` or `MOONSHOT_API_KEY`, plus `DEEPSEEK_API_KEY`. The fixed
+DeepSeek Flash smoke requires `DEEPSEEK_API_KEY`; automatic push smokes do not.
 Set `KIMI_BASE_URL` as an Actions secret or variable only when the Kimi run
 should use a compatible non-default HTTPS endpoint.
 Public rows score from their local artifacts and do not require a Braintrust
@@ -415,10 +435,15 @@ worker checkpointing, or result classification. Those core integrations must
 land from their owning lanes; a smoke failure must remain a blocker rather than
 being bypassed with a test toggle or a smoke-only runner branch.
 
-The Modal entrypoint stages mounts and runtime-only credentials as root, then
-changes ownership of only those run-scoped paths and executes the worker as the
-image's non-root `ubuntu` user. This is required for unattended Claude Code
-runs because its skip-permissions mode cannot run with root privileges.
+The production benchmark entrypoint runs the trusted outer worker as root so it
+can create and supervise a separate disposable Modal Sandbox for every model
+attempt. A child receives no row Volume and has no `/data`; the controller
+copies in only the exact task archive and selected model credential. The model
+workflow runs as UID/GID 65532 with a clean environment, empty capabilities,
+and `no_new_privs`. The root child supervisor kills any surviving agent-owned
+processes before postflight. Results are copied into local quarantine, the child
+is confirmed stopped, and only then are canonical artifacts published. Modal
+controller and judge credentials are never forwarded to the child.
 
 ## Toolchain image
 

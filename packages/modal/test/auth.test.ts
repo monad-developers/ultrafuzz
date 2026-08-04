@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  brokerKimiSubscriptionAuthRotation,
   kimiSubscriptionAuthSecretValues,
   kimiSubscriptionAuthSecretValuesFromRoots,
   kimiSubscriptionCredentialFileName,
@@ -123,6 +124,157 @@ describe("runtime-only subscription auth", () => {
       expires_at: 2_003_600
     });
     expect(fs.existsSync(path.join(source, "oauth", "kimi-code.lock"))).toBe(false);
+  });
+
+  it("brokers Kimi rotation from only the candidate refresh token and validated provider fields", async () => {
+    const source = kimiAuthFixture({ fresh: true, oauthHost: "https://auth.persisted.example" });
+    const credentialPath = path.join(source, "credentials", "kimi-code.json");
+    const persistedBefore = fs.readFileSync(credentialPath, "utf8");
+    const initial = {
+      ...(JSON.parse(persistedBefore) as Record<string, unknown>),
+      token_type: "TrustedInitial",
+      scope: "trusted-initial-scope",
+      trusted_profile: { account: "stable-account" }
+    };
+    let exchanges = 0;
+    const fetchImpl: typeof fetch = async (request, init) => {
+      exchanges += 1;
+      expect(String(request)).toBe("https://auth.persisted.example/api/oauth/token");
+      expect(new Headers(init?.headers).get("X-Msh-Device-Id")).toBe("device-test");
+      expect(new URLSearchParams(String(init?.body)).get("refresh_token")).toBe("child-refresh-only");
+      return new Response(
+        JSON.stringify({
+          access_token: "provider-access",
+          refresh_token: "provider-refresh",
+          expires_in: 600,
+          token_type: "ProviderBearer",
+          scope: "provider-scope",
+          injected_provider_field: "must-not-emerge"
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    };
+
+    const brokered = await brokerKimiSubscriptionAuthRotation(
+      {
+        source,
+        model: "kimi-k3",
+        initialCredential: `${JSON.stringify(initial)}\n`,
+        candidateCredential: `${JSON.stringify({
+          access_token: { attacker: "candidate-access" },
+          refresh_token: "child-refresh-only",
+          expires_at: 9_999_999_999,
+          expires_in: 99_999,
+          token_type: "CandidateBearer",
+          scope: ["candidate-scope"],
+          trusted_profile: { account: "mutated-account" },
+          injected_candidate_field: "must-not-emerge"
+        })}\n`,
+        env: {}
+      },
+      { fetch: fetchImpl, now: () => 2_000_000_000 }
+    );
+
+    expect(exchanges).toBe(1);
+    expect(brokered).toEqual({
+      ...initial,
+      access_token: "provider-access",
+      refresh_token: "provider-refresh",
+      expires_at: 2_000_600,
+      expires_in: 600,
+      token_type: "ProviderBearer",
+      scope: "provider-scope"
+    });
+    expect(brokered).not.toHaveProperty("injected_candidate_field");
+    expect(brokered).not.toHaveProperty("injected_provider_field");
+    expect(fs.readFileSync(credentialPath, "utf8")).toBe(persistedBefore);
+  });
+
+  it("fails Kimi brokerage closed on rejected or invalid provider responses without writing the candidate", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentialPath = path.join(source, "credentials", "kimi-code.json");
+    const initialCredential = fs.readFileSync(credentialPath, "utf8");
+    const candidateCredential = `${JSON.stringify({
+      access_token: "untrusted-access",
+      refresh_token: "untrusted-refresh",
+      expires_at: 9_999_999_999,
+      injected: "untrusted"
+    })}\n`;
+    const persistedBefore = fs.readFileSync(credentialPath, "utf8");
+    const responses = [
+      new Response('{"error":"rejected"}', { status: 401, headers: { "content-type": "application/json" } }),
+      new Response(JSON.stringify({ access_token: "provider-access", expires_in: 600 }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      }),
+      new Response(
+        JSON.stringify({
+          access_token: "provider-access",
+          refresh_token: "provider-refresh",
+          expires_in: 600,
+          scope: ["not-a-provider-string"]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    ];
+
+    for (const response of responses) {
+      await expect(
+        brokerKimiSubscriptionAuthRotation(
+          { source, model: "kimi-k3", initialCredential, candidateCredential, env: {} },
+          { fetch: async () => response.clone(), now: () => 2_000_000_000 }
+        )
+      ).rejects.toThrow(/refresh failed with HTTP 401|unsupported response/u);
+      expect(fs.readFileSync(credentialPath, "utf8")).toBe(persistedBefore);
+    }
+  });
+
+  it("rejects missing, empty, NUL, and oversized child refresh tokens before Kimi brokerage", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const initialCredential = fs.readFileSync(path.join(source, "credentials", "kimi-code.json"), "utf8");
+    let exchanges = 0;
+    const fetchImpl: typeof fetch = async () => {
+      exchanges += 1;
+      throw new Error("broker must not exchange an invalid child token");
+    };
+    const candidates = [
+      {},
+      { refresh_token: "" },
+      { refresh_token: "   " },
+      { refresh_token: "bad\0token" },
+      { refresh_token: "x".repeat(64 * 1024 + 1) }
+    ];
+
+    for (const candidate of candidates) {
+      await expect(
+        brokerKimiSubscriptionAuthRotation(
+          {
+            source,
+            model: "kimi-k3",
+            initialCredential,
+            candidateCredential: JSON.stringify(candidate),
+            env: {}
+          },
+          { fetch: fetchImpl }
+        )
+      ).rejects.toThrow(/invalid refresh token/u);
+    }
+    await expect(
+      brokerKimiSubscriptionAuthRotation(
+        {
+          source,
+          model: "kimi-k3",
+          initialCredential,
+          candidateCredential: JSON.stringify({
+            refresh_token: "otherwise-valid",
+            padding: "x".repeat(1024 * 1024)
+          }),
+          env: {}
+        },
+        { fetch: fetchImpl }
+      )
+    ).rejects.toThrow(/unsafe size/u);
+    expect(exchanges).toBe(0);
   });
 
   it("uses a persisted Kimi provider OAuth host for refresh unless an env override is present", async () => {

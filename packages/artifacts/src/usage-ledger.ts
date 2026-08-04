@@ -41,6 +41,16 @@ export interface NormalizedUsage {
   agent?: string;
 }
 
+export interface UsageModelInvocation {
+  invocation_id: string;
+  node_id: string;
+  iteration: number;
+  attempt: number;
+  configured_model: string;
+  provider_reported_model: string;
+  terminal_evidence_complete: boolean;
+}
+
 export interface UsageLedgerEntry {
   schema_version: typeof USAGE_LEDGER_SCHEMA_VERSION;
   event_id: string;
@@ -51,6 +61,7 @@ export interface UsageLedgerEntry {
   checkpoint_generation_id: string;
   observed_at: string;
   usage: NormalizedUsage;
+  model_invocation?: UsageModelInvocation;
   usage_complete: boolean;
   usage_incomplete_reasons: UsageIncompleteReason[];
 }
@@ -64,6 +75,12 @@ export interface AppendUsageEventInput {
   iteration?: number;
   attempt?: number;
   usage: NormalizedUsage;
+  modelInvocation?: {
+    invocationId: string;
+    configuredModel: string;
+    providerReportedModel: string;
+    terminalEvidenceComplete: boolean;
+  };
   usageComplete: boolean;
   usageIncompleteReasons: UsageIncompleteReason[];
 }
@@ -103,6 +120,15 @@ const normalizedUsageSchema = z.strictObject({
   model: z.string().min(1).optional(),
   agent: z.string().min(1).optional()
 });
+const modelInvocationSchema = z.strictObject({
+  invocation_id: dimensionId,
+  node_id: dimensionId,
+  iteration: z.number().int().nonnegative().safe(),
+  attempt: z.number().int().nonnegative().safe(),
+  configured_model: dimensionId,
+  provider_reported_model: dimensionId,
+  terminal_evidence_complete: z.boolean()
+});
 
 export const usageLedgerEntrySchema = z
   .strictObject({
@@ -115,6 +141,7 @@ export const usageLedgerEntrySchema = z
     checkpoint_generation_id: dimensionId,
     observed_at: z.string().datetime({ offset: true }),
     usage: normalizedUsageSchema,
+    model_invocation: modelInvocationSchema.optional(),
     usage_complete: z.boolean(),
     usage_incomplete_reasons: z.array(usageReasonSchema)
   })
@@ -211,6 +238,48 @@ export const usageLedgerJsonSchema = {
         agent: { type: "string", minLength: 1 }
       }
     },
+    model_invocation: {
+      type: "object",
+      required: [
+        "invocation_id",
+        "node_id",
+        "iteration",
+        "attempt",
+        "configured_model",
+        "provider_reported_model",
+        "terminal_evidence_complete"
+      ],
+      additionalProperties: false,
+      properties: {
+        invocation_id: {
+          type: "string",
+          minLength: 1,
+          maxLength: DIMENSION_ID_MAX_LENGTH,
+          pattern: DIMENSION_ID_PATTERN.source
+        },
+        node_id: {
+          type: "string",
+          minLength: 1,
+          maxLength: DIMENSION_ID_MAX_LENGTH,
+          pattern: DIMENSION_ID_PATTERN.source
+        },
+        iteration: { type: "integer", minimum: 0 },
+        attempt: { type: "integer", minimum: 0 },
+        configured_model: {
+          type: "string",
+          minLength: 1,
+          maxLength: DIMENSION_ID_MAX_LENGTH,
+          pattern: DIMENSION_ID_PATTERN.source
+        },
+        provider_reported_model: {
+          type: "string",
+          minLength: 1,
+          maxLength: DIMENSION_ID_MAX_LENGTH,
+          pattern: DIMENSION_ID_PATTERN.source
+        },
+        terminal_evidence_complete: { type: "boolean" }
+      }
+    },
     usage_complete: { type: "boolean" },
     usage_incomplete_reasons: {
       type: "array",
@@ -292,6 +361,25 @@ export function createUsageLedgerEntry(
     checkpoint_generation_id: checkpointGenerationId,
     observed_at: input.observedAt,
     usage: input.usage,
+    ...(input.modelInvocation === undefined ||
+    input.nodeId === undefined ||
+    input.iteration === undefined ||
+    input.attempt === undefined
+      ? {}
+      : {
+          model_invocation: {
+            invocation_id: normalizeDimensionId(input.modelInvocation.invocationId, "model invocation ID"),
+            node_id: normalizeDimensionId(input.nodeId, "model invocation node ID"),
+            iteration: input.iteration,
+            attempt: input.attempt,
+            configured_model: normalizeDimensionId(input.modelInvocation.configuredModel, "configured model identity"),
+            provider_reported_model: normalizeDimensionId(
+              input.modelInvocation.providerReportedModel,
+              "provider-reported model identity"
+            ),
+            terminal_evidence_complete: input.modelInvocation.terminalEvidenceComplete
+          }
+        }),
     usage_complete: input.usageComplete,
     usage_incomplete_reasons: input.usageIncompleteReasons
   });

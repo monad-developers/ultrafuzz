@@ -22,7 +22,7 @@ import {
   renderEvalHistoryCharts,
   type EvalHistoryObservation
 } from "../src/history.js";
-import { PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION } from "../src/public-diagnostics.js";
+import { PUBLIC_EVAL_DIAGNOSTICS_V2_SCHEMA_VERSION } from "../src/public-diagnostics.js";
 import type { EvalMatrixRow, EvalRowScore, EvalScoreSummary, EvalSuiteSpec } from "../src/types.js";
 import { safeEvalId } from "../src/utils.js";
 import { cleanRecoveryEquivalence, recoveryEquivalenceSummary, testRow, testSuite } from "./helpers.js";
@@ -263,7 +263,7 @@ function publicDiagnostics(
     };
   });
   return {
-    schema_version: PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION,
+    schema_version: PUBLIC_EVAL_DIAGNOSTICS_V2_SCHEMA_VERSION,
     stage: "post-eval-pre-score",
     benchmark: "evmbench",
     lane: "smoke",
@@ -696,7 +696,7 @@ describe("longitudinal eval history", () => {
       })
     ).toMatchObject([{ status: "genuine-task-failures", target_publication: { status: "genuine-task-failures" } }]);
     const failedDatapointDiagnostics = publicDiagnostics([first, second], new Set(), new Set([second.id]));
-    expect(
+    expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",
         lane: "smoke",
@@ -713,7 +713,7 @@ describe("longitudinal eval history", () => {
         ]),
         publicEvalDiagnostics: failedDatapointDiagnostics
       })
-    ).toMatchObject([{ status: "failed", target_publication: { status: "failed" } }]);
+    ).toThrowError(expect.objectContaining({ code: "EVAL_HISTORY_GENERATION_INCOMPLETE" }));
     expect(() =>
       createEvalHistoryObservations({
         benchmark: "evmbench",

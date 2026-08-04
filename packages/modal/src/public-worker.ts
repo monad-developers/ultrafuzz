@@ -15,12 +15,16 @@ import {
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest,
   publicEvalDiagnosticsFailedTargetCount,
-  resolveTerminalReportPath,
   type BenchmarkCohortManifest,
   type EvalRunRecord,
   type EvalSuiteSpec
 } from "@ultrafuzz/evals";
 import { redactSecretsInText } from "@ultrafuzz/security";
+import {
+  VERIFIER_PUBLIC_EVIDENCE_MAX_BYTES,
+  parseVerifierReceipt,
+  parseWorkspaceSourceAttestation
+} from "@ultrafuzz/runtime";
 import { stringify } from "yaml";
 
 import { kimiSubscriptionAuthSecretValuesFromRoots, runnerApiKeyEnv } from "./auth.js";
@@ -31,8 +35,17 @@ import { remoteAuthDir } from "./layout.js";
 import type { ModalWorkerLineage } from "./launch-state.js";
 import {
   createPublicBenchmarkBundle,
+  parsePublicArtifactManifest,
   PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
+  PUBLIC_PRICING_CATALOGS_DIRECTORY,
+  PUBLIC_RUN_METADATA_FILE,
+  PUBLIC_SOURCE_ATTESTATION_FILE,
+  PUBLIC_TERMINAL_EVIDENCE_DIRECTORY,
+  PUBLIC_TERMINAL_EVIDENCE_FILES,
+  PUBLIC_USAGE_LEDGER_FILE,
   readPublicBenchmarkBundle,
+  readSealedPublicBenchmarkSourceNoFollow,
+  sealPublicBenchmarkBundleSource,
   type PublicBenchmarkBundle,
   type PublicBenchmarkBundleSource
 } from "./public-bundle.js";
@@ -51,7 +64,9 @@ const ULTRAFUZZ_ROOT = "/opt/ultrafuzz";
 const BAKED_CANDIDATE_ARCHIVE = "/opt/ultrafuzz-source.tgz";
 const CLI = path.join(ULTRAFUZZ_ROOT, "packages/cli/dist/index.js");
 const PUBLIC_BUNDLE_FILE = "public-results.json";
-const PUBLIC_WORKSPACE_ROOT = "/tmp/ultrafuzz-public-workspace";
+const PUBLIC_WORKSPACE_ROOT = "/workspace/ultrafuzz-public-workspace";
+const PUBLIC_CONTROL_FILE_MAX_BYTES = VERIFIER_PUBLIC_EVIDENCE_MAX_BYTES;
+const PUBLIC_EVAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 export const PUBLIC_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_SMOKE_MAX_PARALLEL_RUNS;
 export const PUBLIC_FULL_BENCHMARK_MAX_PARALLEL_EVAL_ROWS = BENCHMARK_FULL_MAX_PARALLEL_RUNS;
 export const PUBLIC_BENCHMARK_MAX_PARALLEL_WORKFLOW_NODES = BENCHMARK_SMOKE_MAX_PARALLEL_TARGETS;
@@ -142,7 +157,10 @@ export async function runPublicBenchmarkWorker(input: {
       const initialForbiddenSecretValues = await resolveForbiddenSecretValues();
       if (fs.existsSync(bundlePath)) {
         try {
-          const bundle = readPublicBenchmarkBundle(bundlePath, initialForbiddenSecretValues);
+          const bundle = readPublicBenchmarkBundle(bundlePath, {
+            expectedSchemaVersion: PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
+            forbiddenSecretValues: initialForbiddenSecretValues
+          });
           assertPublicWorkerBundleLineage(bundle, input.config, input.model, input.lineage);
           return "finished";
         } catch {
@@ -246,6 +264,7 @@ export async function runPublicBenchmarkWorker(input: {
         lane: input.config.public_benchmark.lane,
         modelSlug: input.model.slug,
         model: input.model.model,
+        providerReportedModel: publicDiagnosticsProviderReportedModel(checkpoint.diagnostics),
         reasoning: input.model.reasoning,
         candidateCommit: input.config.public_benchmark.candidate_commit,
         evalRunId: prepared.evalRunId,
@@ -265,6 +284,18 @@ export async function runPublicBenchmarkWorker(input: {
       return "finished";
     }
   });
+}
+
+function publicDiagnosticsProviderReportedModel(diagnostics: PublicEvalDiagnostics): string {
+  const reportedModels = new Set(
+    diagnostics.rows.flatMap((row) =>
+      "model_identity" in row && row.model_identity !== undefined ? [row.model_identity.provider_reported_model] : []
+    )
+  );
+  if (reportedModels.size !== 1) {
+    throw new Error("public benchmark diagnostics do not contain one provider-reported model identity");
+  }
+  return [...reportedModels][0]!;
 }
 
 export function publicBenchmarkWorkRoot(dataRoot: string): string {
@@ -443,7 +474,12 @@ export async function publicBenchmarkWorkerSecretValues(
           path.join(dataRoot, "kimi-code-auth")
         );
   return [
-    ...new Set([...runnerSecretValues, requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env)])
+    ...new Set([
+      ...runnerSecretValues,
+      requiredEnv(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY", env),
+      requiredEnv("MODAL_TOKEN_ID", env),
+      requiredEnv("MODAL_TOKEN_SECRET", env)
+    ])
   ];
 }
 
@@ -508,9 +544,14 @@ async function preparePublicBenchmark(
       timeoutMs: 5 * 60 * 1000,
       signal
     });
-    await writeFile(path.join(destination, "ultrafuzz.toml"), modalTargetToml(model, config.node_timeout_seconds), {
-      mode: 0o600
-    });
+    await writeFile(
+      path.join(destination, "ultrafuzz.toml"),
+      modalTargetToml(model, config.node_timeout_seconds, {
+        app: config.app_name,
+        image: config.image_name
+      }),
+      { mode: 0o600 }
+    );
     capModalTargetTopologyTimeouts(
       path.join(destination, ".ultrafuzz", "topology.yml"),
       Math.min(config.node_timeout_seconds, scope.max_runtime_seconds)
@@ -743,7 +784,10 @@ export function publicBundleSources(
   diagnostics: { root: string; source: string },
   lane: "smoke" | "full" = "full"
 ): PublicBenchmarkBundleSource[] {
-  const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  if (!PUBLIC_EVAL_ID_PATTERN.test(evalRunId)) throw new Error("public benchmark eval run ID is invalid");
+  const resolvedControlRoot = path.resolve(controlRoot);
+  const evalRoot = path.join(resolvedControlRoot, ".ultrafuzz/evals/runs", evalRunId);
+  assertExactCanonicalDirectory(evalRoot, "public benchmark eval root");
   const sources: PublicBenchmarkBundleSource[] = [
     "eval.json",
     "matrix.json",
@@ -755,35 +799,64 @@ export function publicBundleSources(
     "review/new-findings.jsonl"
   ].flatMap((relative) => {
     const source = path.join(evalRoot, relative);
-    return fs.existsSync(source) ? [{ path: `eval/${relative}`, root: evalRoot, source }] : [];
+    return fs.existsSync(source)
+      ? [sealPublicBenchmarkBundleSource({ path: `eval/${relative}`, root: evalRoot, source })]
+      : [];
   });
-  sources.push({ path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`, ...diagnostics });
-  const records = fs
-    .readFileSync(path.join(evalRoot, "runs.jsonl"), "utf8")
+  sources.push(sealPublicBenchmarkBundleSource({ path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`, ...diagnostics }));
+  const runsSource = sources.find((source) => source.path === "eval/runs.jsonl");
+  if (runsSource === undefined) throw new Error("public benchmark run journal is missing");
+  const records = readSealedPublicBenchmarkSourceNoFollow(
+    runsSource,
+    PUBLIC_CONTROL_FILE_MAX_BYTES,
+    "public benchmark run journal exceeds the size limit"
+  )
+    .toString("utf8")
     .split(/\r?\n/u)
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as EvalRunRecord);
+    .map((line, index) => {
+      try {
+        return JSON.parse(line) as EvalRunRecord;
+      } catch (error) {
+        throw new Error(`public benchmark run journal record ${index} is invalid JSON`, { cause: error });
+      }
+    });
   const finalRecordsByRow = new Map<string, EvalRunRecord>();
   for (const record of records) {
     if (record.row_id !== undefined) finalRecordsByRow.set(record.row_id, record);
   }
-  const matrix = JSON.parse(fs.readFileSync(path.join(evalRoot, "matrix.json"), "utf8")) as unknown;
-  if (
-    !Array.isArray(matrix) ||
-    matrix.length === 0 ||
-    matrix.some(
-      (row) => typeof row !== "object" || row === null || typeof (row as Record<string, unknown>).id !== "string"
+  const matrixSource = sources.find((source) => source.path === "eval/matrix.json");
+  if (matrixSource === undefined) throw new Error("public benchmark matrix is missing");
+  const matrix = parsePublicBundleSourceMatrix(
+    readSealedPublicBenchmarkSourceNoFollow(
+      matrixSource,
+      PUBLIC_CONTROL_FILE_MAX_BYTES,
+      "public benchmark matrix exceeds the size limit"
     )
-  ) {
-    throw new Error("public benchmark matrix is invalid");
-  }
-  for (const row of matrix as Array<{ id: string }>) {
+  );
+  const trustedTargetsRoot = path.join(path.dirname(resolvedControlRoot), "targets");
+  for (const row of matrix) {
     const record = finalRecordsByRow.get(row.id);
+    const expectedTargetRoot = path.join(trustedTargetsRoot, row.target_id);
+    if (row.target.path !== expectedTargetRoot) {
+      throw new Error(`public benchmark row has a mismatched target path: ${row.id}`);
+    }
+    assertExactCanonicalDirectory(expectedTargetRoot, `public benchmark target root for ${row.id}`);
+    const expectedRuntimeRunId = boundedEvalId([evalRunId, row.run_id], 118);
+    const expectedRunRoot = path.join(expectedTargetRoot, ".ultrafuzz", "runs", expectedRuntimeRunId);
+    if (record?.ultrafuzz_run_id !== expectedRuntimeRunId || record.ultrafuzz_run_root !== expectedRunRoot) {
+      throw new Error(`public benchmark row does not match its derived run root: ${row.id}`);
+    }
+    assertExactCanonicalDirectory(expectedRunRoot, `public benchmark run root for ${row.id}`);
+    const expectedReportPath = path.join(expectedRunRoot, "artifacts", "final-report", "report.json");
+    if (record.report_json_path !== expectedReportPath) {
+      throw new Error(`public benchmark row has a mismatched terminal report path: ${row.id}`);
+    }
     const terminalDisposition = record === undefined ? undefined : publicEvalRecordTerminalDisposition(record);
     const failedDatapoint =
       record?.final_status === "failed" &&
       record.workflow?.status === "failed" &&
-      ["genuine-task-failures", "operational-failure"].includes(terminalDisposition ?? "");
+      terminalDisposition === "genuine-task-failures";
     const scoreable =
       record !== undefined &&
       record.workflow?.terminal === true &&
@@ -791,13 +864,7 @@ export function publicBundleSources(
     if (!scoreable) {
       throw new Error(`public benchmark row is not a scoreable terminal outcome: ${row.id}`);
     }
-    const report = resolveTerminalReportPath({
-      ...(record.ultrafuzz_run_root === undefined ? {} : { runRoot: record.ultrafuzz_run_root }),
-      ...(record.report_json_path === undefined ? {} : { recordedPath: record.report_json_path })
-    }).path;
-    if (report === undefined || record.ultrafuzz_run_root === undefined) {
-      throw new Error(`public benchmark row is missing its terminal report: ${row.id}`);
-    }
+    const report = expectedReportPath;
     const reportFindingsSource = path.join(path.dirname(report), "findings.normalized.json");
     const smokeFindingsSource = path.join(
       record.ultrafuzz_run_root,
@@ -812,20 +879,269 @@ export function publicBundleSources(
     const candidates = [
       { name: "report.json", source: report },
       { name: "report.md", source: path.join(path.dirname(report), "report.md") },
-      { name: "findings.normalized.json", source: normalizedFindingsSource }
+      { name: "findings.normalized.json", source: normalizedFindingsSource },
+      { name: PUBLIC_SOURCE_ATTESTATION_FILE, source: path.join(path.dirname(report), PUBLIC_SOURCE_ATTESTATION_FILE) }
     ];
+    let sourceAttestation: PublicBenchmarkBundleSource | undefined;
     for (const candidate of candidates) {
       if (!fs.existsSync(candidate.source)) {
         throw new Error(`public benchmark row ${row.id} is missing ${candidate.name}`);
       }
-      sources.push({
+      const sealed = sealPublicBenchmarkBundleSource({
         path: `reports/${row.id}/${candidate.name}`,
         root: record.ultrafuzz_run_root,
         source: candidate.source
       });
+      sources.push(sealed);
+      if (candidate.name === PUBLIC_SOURCE_ATTESTATION_FILE) sourceAttestation = sealed;
+    }
+    if (sourceAttestation === undefined) {
+      throw new Error(`public benchmark row ${row.id} is missing ${PUBLIC_SOURCE_ATTESTATION_FILE}`);
+    }
+    sources.push(
+      ...publicExecutionEvidenceSources({
+        runRoot: expectedRunRoot,
+        runtimeRunId: expectedRuntimeRunId,
+        rowId: row.id,
+        targetRevision: row.target.ref,
+        sourceAttestation
+      })
+    );
+  }
+  return sources;
+}
+
+interface PublicBundleSourceMatrixRow {
+  id: string;
+  target_id: string;
+  run_id: string;
+  target: { path: string; ref: string };
+}
+
+function parsePublicBundleSourceMatrix(contents: Buffer): PublicBundleSourceMatrixRow[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("public benchmark matrix is invalid JSON", { cause: error });
+  }
+  if (!Array.isArray(value) || value.length === 0) throw new Error("public benchmark matrix is invalid");
+  const rows: PublicBundleSourceMatrixRow[] = [];
+  const rowIds = new Set<string>();
+  for (const [index, valueRow] of value.entries()) {
+    if (!isPlainRecord(valueRow) || !isPlainRecord(valueRow.target)) {
+      throw new Error(`public benchmark matrix row ${index} is invalid`);
+    }
+    const id = valueRow.id;
+    const targetId = valueRow.target_id;
+    const runId = valueRow.run_id;
+    const targetPath = valueRow.target.path;
+    const targetRevision = valueRow.target.ref;
+    if (
+      typeof id !== "string" ||
+      !PUBLIC_EVAL_ID_PATTERN.test(id) ||
+      rowIds.has(id) ||
+      typeof targetId !== "string" ||
+      !PUBLIC_EVAL_ID_PATTERN.test(targetId) ||
+      typeof runId !== "string" ||
+      !PUBLIC_EVAL_ID_PATTERN.test(runId) ||
+      typeof targetPath !== "string" ||
+      !path.isAbsolute(targetPath) ||
+      path.normalize(targetPath) !== targetPath ||
+      typeof targetRevision !== "string" ||
+      !/^[0-9a-f]{40}$/u.test(targetRevision)
+    ) {
+      throw new Error(`public benchmark matrix row ${index} has invalid execution identity`);
+    }
+    rowIds.add(id);
+    rows.push({ id, target_id: targetId, run_id: runId, target: { path: targetPath, ref: targetRevision } });
+  }
+  return rows;
+}
+
+function publicExecutionEvidenceSources(input: {
+  runRoot: string;
+  runtimeRunId: string;
+  rowId: string;
+  targetRevision: string;
+  sourceAttestation: PublicBenchmarkBundleSource;
+}): PublicBenchmarkBundleSource[] {
+  let attestation;
+  try {
+    attestation = parseWorkspaceSourceAttestation(
+      JSON.parse(
+        readSealedPublicBenchmarkSourceNoFollow(
+          input.sourceAttestation,
+          PUBLIC_CONTROL_FILE_MAX_BYTES,
+          "public benchmark source attestation exceeds the size limit"
+        ).toString("utf8")
+      ) as unknown,
+      input.targetRevision
+    );
+  } catch (error) {
+    throw new Error(`public benchmark row ${input.rowId} has invalid detached source evidence`, { cause: error });
+  }
+  const evidenceRoot = `reports/${input.rowId}/execution-evidence`;
+  const runMetadataSource = sealPublicBenchmarkBundleSource({
+    path: `${evidenceRoot}/${PUBLIC_RUN_METADATA_FILE}`,
+    root: input.runRoot,
+    source: path.join(input.runRoot, PUBLIC_RUN_METADATA_FILE)
+  });
+  const usageLedgerSource = sealPublicBenchmarkBundleSource({
+    path: `${evidenceRoot}/${PUBLIC_USAGE_LEDGER_FILE}`,
+    root: input.runRoot,
+    source: path.join(input.runRoot, PUBLIC_USAGE_LEDGER_FILE)
+  });
+  let runMetadata: unknown;
+  try {
+    runMetadata = JSON.parse(
+      readSealedPublicBenchmarkSourceNoFollow(
+        runMetadataSource,
+        PUBLIC_CONTROL_FILE_MAX_BYTES,
+        "public benchmark run metadata exceeds the size limit"
+      ).toString("utf8")
+    ) as unknown;
+  } catch (error) {
+    throw new Error(`public benchmark row ${input.rowId} has invalid runtime accounting metadata`, { cause: error });
+  }
+  const accounting =
+    typeof runMetadata === "object" && runMetadata !== null && !Array.isArray(runMetadata)
+      ? (runMetadata as Record<string, unknown>).accounting
+      : undefined;
+  const pricingCatalog =
+    typeof accounting === "object" && accounting !== null && !Array.isArray(accounting)
+      ? (accounting as Record<string, unknown>).pricing_catalog
+      : undefined;
+  const catalogSha256 =
+    typeof pricingCatalog === "object" && pricingCatalog !== null && !Array.isArray(pricingCatalog)
+      ? (pricingCatalog as Record<string, unknown>).catalog_sha256
+      : undefined;
+  if (typeof catalogSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(catalogSha256)) {
+    throw new Error(`public benchmark row ${input.rowId} is missing exact pricing catalog identity`);
+  }
+  const sources: PublicBenchmarkBundleSource[] = [
+    runMetadataSource,
+    usageLedgerSource,
+    sealPublicBenchmarkBundleSource({
+      path: `${evidenceRoot}/${PUBLIC_PRICING_CATALOGS_DIRECTORY}/${catalogSha256}.json`,
+      root: input.runRoot,
+      source: path.join(input.runRoot, PUBLIC_PRICING_CATALOGS_DIRECTORY, `${catalogSha256}.json`)
+    }),
+    sealPublicBenchmarkBundleSource({
+      path: `${evidenceRoot}/attempts.jsonl`,
+      root: input.runRoot,
+      source: path.join(input.runRoot, "attempts.jsonl")
+    })
+  ];
+  for (const relativePath of PUBLIC_TERMINAL_EVIDENCE_FILES) {
+    sources.push(
+      sealPublicBenchmarkBundleSource({
+        path: `${evidenceRoot}/${PUBLIC_TERMINAL_EVIDENCE_DIRECTORY}/${relativePath}`,
+        root: input.runRoot,
+        source: path.join(input.runRoot, ...relativePath.split("/"))
+      })
+    );
+  }
+  for (const task of attestation.tasks) {
+    const taskRoot = `${evidenceRoot}/${task.attempt_id}`;
+    const artifactRoot = path.join(input.runRoot, "artifacts", task.attempt_id);
+    const manifestSource = sealPublicBenchmarkBundleSource({
+      path: `${taskRoot}/artifact-manifest.json`,
+      root: input.runRoot,
+      source: path.join(artifactRoot, "artifact-manifest.json")
+    });
+    const receiptSource = sealPublicBenchmarkBundleSource({
+      path: `${taskRoot}/verifier-receipt.json`,
+      root: input.runRoot,
+      source: path.join(input.runRoot, "review", "verifier-receipts", task.attempt_id, `${task.executor_retry_id}.json`)
+    });
+    const outputSource = path.resolve(input.runRoot, task.smithers_output_path);
+    let receipt;
+    let manifest;
+    try {
+      manifest = parsePublicArtifactManifest(
+        JSON.parse(
+          readSealedPublicBenchmarkSourceNoFollow(
+            manifestSource,
+            PUBLIC_CONTROL_FILE_MAX_BYTES,
+            "public benchmark artifact manifest exceeds the size limit"
+          ).toString("utf8")
+        ) as unknown
+      );
+      receipt = parseVerifierReceipt(
+        JSON.parse(
+          readSealedPublicBenchmarkSourceNoFollow(
+            receiptSource,
+            PUBLIC_CONTROL_FILE_MAX_BYTES,
+            "public benchmark verifier receipt exceeds the size limit"
+          ).toString("utf8")
+        ) as unknown
+      );
+    } catch (error) {
+      throw new Error(`public benchmark row ${input.rowId} has invalid manifest or verifier receipt evidence`, {
+        cause: error
+      });
+    }
+    if (
+      manifest.run_id !== input.runtimeRunId ||
+      manifest.node_id !== task.attempt_id ||
+      manifest.producer_node_id !== task.attempt_id
+    ) {
+      throw new Error(`public benchmark row ${input.rowId} has a mismatched artifact manifest identity`);
+    }
+    sources.push(
+      manifestSource,
+      receiptSource,
+      sealPublicBenchmarkBundleSource({
+        path: `${taskRoot}/smithers-output.json`,
+        root: input.runRoot,
+        source: outputSource
+      })
+    );
+    for (const [index, artifact] of receipt.artifacts.entries()) {
+      const source = path.resolve(artifactRoot, artifact.path);
+      const relative = path.relative(artifactRoot, source);
+      if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error(`public benchmark row ${input.rowId} has an escaping verifier artifact`);
+      }
+      sources.push(
+        sealPublicBenchmarkBundleSource({
+          path: `${taskRoot}/artifacts/${String(index).padStart(4, "0")}.bin`,
+          root: input.runRoot,
+          source
+        })
+      );
+    }
+    const receiptArtifactPaths = new Set(receipt.artifacts.map((artifact) => artifact.path));
+    for (const [index, manifestFile] of manifest.files.entries()) {
+      if (receiptArtifactPaths.has(manifestFile.path)) continue;
+      const source = path.resolve(artifactRoot, manifestFile.path);
+      const relative = path.relative(artifactRoot, source);
+      if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        throw new Error(`public benchmark row ${input.rowId} has an escaping manifest artifact`);
+      }
+      sources.push(
+        sealPublicBenchmarkBundleSource({
+          path: `${taskRoot}/manifest-files/${String(index).padStart(4, "0")}.bin`,
+          root: input.runRoot,
+          source
+        })
+      );
     }
   }
   return sources;
+}
+
+function assertExactCanonicalDirectory(directoryPath: string, label: string): void {
+  const resolved = path.resolve(directoryPath);
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(resolved);
+  } catch (error) {
+    throw new Error(`${label} is unavailable`, { cause: error });
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`${label} is not a trusted directory`);
+  if (fs.realpathSync.native(resolved) !== resolved) throw new Error(`${label} is not an exact canonical directory`);
 }
 
 async function mapLimitStable<T>(

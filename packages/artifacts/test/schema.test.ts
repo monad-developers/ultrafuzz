@@ -571,6 +571,15 @@ test("usage ledger schema requires typed incompleteness markers", () => {
     checkpoint_generation_id: "checkpoint-1",
     observed_at: "2026-07-18T00:00:00.000Z",
     usage: {},
+    model_invocation: {
+      invocation_id: "model-invocation-1",
+      node_id: "node:project-discovery",
+      iteration: 0,
+      attempt: 1,
+      configured_model: "deepseek-v4-flash",
+      provider_reported_model: "ultrafuzz-provider-identity-missing",
+      terminal_evidence_complete: true
+    },
     usage_complete: false,
     usage_incomplete_reasons: [{ code: "usage-missing" }]
   };
@@ -580,6 +589,14 @@ test("usage ledger schema requires typed incompleteness markers", () => {
     validateUsageLedgerEntry({ ...entry, usage_incomplete_reasons: [] }).ok,
     false,
     "incomplete generated usage must carry a typed reason"
+  );
+  assert.equal(
+    validateUsageLedgerEntry({
+      ...entry,
+      model_invocation: { ...entry.model_invocation, invocation_id: "contains spaces" }
+    }).ok,
+    false,
+    "model invocation IDs must be safe stable dimensions"
   );
 });
 

@@ -3,7 +3,7 @@
 // smithers-description: Generated Ultrafuzz product workflow. Smithers owns execution; Ultrafuzz owns config, topology, prompts, artifacts, reports, and materialization evidence.
 // project-agents: .smithers/agents
 /** @jsxImportSource smithers-orchestrator */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -16,6 +16,7 @@ import {
   writeFileSync
 } from "node:fs";
 import path from "node:path";
+import { getToolContext } from "@smithers-orchestrator/tool-context";
 import { Fragment } from "react";
 import { createSmithers, type AgentLike } from "smithers-orchestrator";
 import { z } from "zod/v4";
@@ -33,10 +34,12 @@ const {
   assertAgentWorkspaceProvenance,
   assertSingleLinkRegularFile,
   assertWorkspaceBaseCommit,
+  cleanNativeWorkspaceOutputRoots,
   cleanWorkspaceOutputRootsForRetry,
+  normalizeFindings,
   normalizeFinalReportSeverityRecord,
-  persistWorkspaceSourceAttestation,
-  readWorkspaceSourceAttestation
+  persistLegacyWorkspaceSourceClaim,
+  readLegacyWorkspaceSourceClaim
 } = await import(runtimeModule);
 
 type AgentPostflightRunner = <T>(
@@ -48,6 +51,7 @@ type AgentPostflightRunner = <T>(
     | "dedupe-materialization-postflight"
     | "final-report-materialization-postflight"
     | "findings-normalization-postflight"
+    | "canonical-findings-normalization-postflight"
     | "report-provenance-normalization-postflight"
     | "generated-test-manifest-normalization-postflight"
     | "generated-test-companion-materialization-postflight"
@@ -69,8 +73,31 @@ const inputSchema = z.looseObject({
   task_id: z.string().optional()
 });
 
-const taskOutput = z.object({
-  summary: z.string().min(1)
+const boundedDimensionId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u);
+const sha256Digest = z.string().regex(/^[0-9a-f]{64}$/u);
+const executorResult = z.strictObject({
+  schema_version: z.literal("ultrafuzz.executor-result.v1"),
+  execution_mode: z.enum(["local", "cloud"]),
+  workflow_run_id: boundedDimensionId,
+  agent_task_id: boundedDimensionId,
+  agent_iteration: z.number().int().nonnegative(),
+  agent_attempt: z.number().int().nonnegative(),
+  strategy_attempt_id: boundedDimensionId,
+  workflow_execution_id: boundedDimensionId,
+  controller_invocation_id: boundedDimensionId,
+  checkpoint_generation_id: boundedDimensionId,
+  executor_retry_id: boundedDimensionId,
+  execution_identity: sha256Digest,
+  request_fingerprint: sha256Digest,
+  executor_result_digest: sha256Digest
+});
+
+const taskOutput = z.strictObject({
+  summary: z.string().min(1),
+  // Agent adapters receive the summary schema, then the trusted wrapper (or
+  // cloud provider) supplies this field. Declaring it prevents Zod from
+  // stripping the receipt before the verifier consumes the dependency row.
+  ultrafuzz_execution: executorResult.optional()
 });
 
 const preparationOutput = z.object({
@@ -81,18 +108,31 @@ const preparationOutput = z.object({
   })
 });
 
-const verificationOutput = z.object({
-  artifacts: z.array(
-    z.object({
-      path: z.string().min(1),
-      contract: z.string().min(1),
-      contract_digest: z.string().regex(/^[0-9a-f]{64}$/u),
-      sha256: z.string().regex(/^[0-9a-f]{64}$/u),
-      primary: z.boolean()
-    })
-  ),
-  primary_artifact: z.string().min(1)
+const verifiedArtifact = z.strictObject({
+  path: z.string().min(1),
+  contract: z.string().min(1),
+  contract_digest: sha256Digest,
+  sha256: sha256Digest,
+  primary: z.boolean()
 });
+
+const verificationOutput = z.strictObject({
+  schema_version: z.literal("ultrafuzz.verification-output.v2"),
+  executor: executorResult,
+  verifier: z.strictObject({
+    workflow_run_id: boundedDimensionId,
+    verifier_task_id: boundedDimensionId,
+    iteration: z.number().int().nonnegative(),
+    attempt: z.number().int().nonnegative(),
+    verification_identity: sha256Digest
+  }),
+  artifacts: z.array(verifiedArtifact),
+  primary_artifact: z.string().min(1),
+  artifact_set_digest: sha256Digest
+});
+
+const controllerBootId = dimensionDigest("controller", [process.pid, Date.now(), randomUUID()]);
+const workflowBootId = dimensionDigest("execution", [controllerBootId, process.cwd()]);
 
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
@@ -158,10 +198,10 @@ function promptForTask(
   inputTask?: { prompt?: string; prompt_path?: string }
 ): string {
   let prompt: string;
-  if (typeof inputTask?.prompt === "string") {
-    prompt = inputTask.prompt;
-  } else if (task.prompt.length > 0) {
+  if (task.prompt.length > 0) {
     prompt = task.prompt;
+  } else if (typeof inputTask?.prompt === "string") {
+    prompt = inputTask.prompt;
   } else {
     const promptPath = task.promptPath ?? inputTask?.prompt_path;
     prompt = promptPath ? readFileSync(promptPath, "utf8") : "";
@@ -222,13 +262,20 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       if ((args?.taskContext?.attempt ?? 1) > 1) {
         resetTaskArtifactsForRetry(task);
       }
+      // Native compiler/package-manager outputs are allowed after an attempt,
+      // but no mutable bytes from before this exact invocation may influence
+      // it. The underlying launcher has quiesced the prior model UID before
+      // generate returns, so this is the retry boundary for both attempt one
+      // and every subsequent retry.
+      cleanNativeWorkspaceOutputRoots(task.workspacePath);
+      prepareTaskWorkspaceOutputRoots(task);
       const workspace = assertAgentWorkspaceProvenance(
         task.workspacePath,
         task.baseCommit,
         typeof args?.rootDir === "string" ? args.rootDir : undefined,
         taskWorkspaceOutputRoots(task)
       );
-      persistWorkspaceSourceAttestation({
+      persistLegacyWorkspaceSourceClaim({
         artifactDir: task.artifactDir,
         targetRevision: task.baseCommit,
         current: {
@@ -239,7 +286,8 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
         dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) => path.resolve(process.cwd(), directory)),
         expectedTasks: sourceAttestationClosure(task)
       });
-      return runAgentWithPostflight(
+      let verifiedArtifacts: ReturnType<typeof collectVerifiedArtifacts> | undefined;
+      const result = await runAgentWithPostflight(
         () => agent.generate(args),
         async (result: unknown, postflight: AgentPostflightRunner) => {
           // Agent work may replace or clean its worktree, including the prepared
@@ -260,7 +308,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
           await postflight("source-attestation-persistence-postflight", () => {
             // Rebuild the runner-owned attestation from the post-invocation check so
             // model access to the artifact directory cannot substitute stale evidence.
-            persistWorkspaceSourceAttestation({
+            persistLegacyWorkspaceSourceClaim({
               artifactDir: task.artifactDir,
               targetRevision: task.baseCommit,
               current: {
@@ -282,6 +330,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
             materializeMissingFinalReportArtifacts(task)
           );
           await postflight("findings-normalization-postflight", () => normalizeLegacyFindingFields(task));
+          await postflight("canonical-findings-normalization-postflight", () => normalizeCanonicalFindings(task));
           await postflight("report-provenance-normalization-postflight", () => normalizeLegacyReportProvenance(task));
           await postflight("generated-test-manifest-normalization-postflight", () =>
             normalizeLegacyGeneratedTestManifests(task)
@@ -295,12 +344,94 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
           // Compatibility handling only adapts known legacy field representations;
           // generated-test companions are mirrored from their mandated workspace
           // path, and the strict verifier still validates every resulting artifact.
-          await postflight("artifact-validation-postflight", () => verifyArtifacts(task));
+          await postflight("artifact-validation-postflight", () => {
+            verifiedArtifacts = collectVerifiedArtifacts(task);
+          });
         }
       );
+      if (verifiedArtifacts === undefined) {
+        throw new Error("artifact-contract failure: agent verification result is missing");
+      }
+      return attachExecutorResult(result, localExecutorResult(task, args, verifiedArtifacts));
     }
   };
   return wrappedAgent;
+}
+
+function attachExecutorResult(
+  result: unknown,
+  execution: z.infer<typeof executorResult>
+): Awaited<ReturnType<AgentLike["generate"]>> {
+  if (!isPlainRecord(result) || !isPlainRecord(result.output)) {
+    throw new Error("artifact-contract failure: agent structured output is missing");
+  }
+  const summary = result.output.summary;
+  if (typeof summary !== "string" || summary.trim().length === 0) {
+    throw new Error("artifact-contract failure: agent summary is missing");
+  }
+  return {
+    ...result,
+    output: {
+      summary,
+      ultrafuzz_execution: executorResult.parse(execution)
+    }
+  } as Awaited<ReturnType<AgentLike["generate"]>>;
+}
+
+function localExecutorResult(
+  task: (typeof taskSpecs)[number],
+  args: Parameters<AgentLike["generate"]>[0],
+  verified: ReturnType<typeof collectVerifiedArtifacts>
+): z.infer<typeof executorResult> {
+  const context = getToolContext();
+  const workflowRunId = context?.runId;
+  const agentTaskId = context?.nodeId;
+  const iteration = context?.iteration;
+  const attempt = context?.attempt ?? args?.taskContext?.attempt;
+  if (
+    typeof workflowRunId !== "string" ||
+    workflowRunId.length === 0 ||
+    agentTaskId !== task.id ||
+    !Number.isInteger(iteration) ||
+    (iteration ?? -1) < 0 ||
+    !Number.isInteger(attempt) ||
+    (attempt ?? -1) < 0
+  ) {
+    throw new Error("workspace-provenance failure: agent execution lineage is unavailable");
+  }
+  const requestFingerprint = sha256Canonical([
+    workflowRunId,
+    agentTaskId,
+    task.attemptId,
+    task.baseCommit,
+    iteration,
+    attempt
+  ]);
+  const executionIdentity = sha256Canonical([workflowBootId, requestFingerprint, verified.artifact_set_digest]);
+  return {
+    schema_version: "ultrafuzz.executor-result.v1",
+    execution_mode: "local",
+    workflow_run_id: workflowRunId,
+    agent_task_id: agentTaskId,
+    agent_iteration: iteration,
+    agent_attempt: attempt,
+    strategy_attempt_id: task.attemptId,
+    workflow_execution_id: workflowBootId,
+    controller_invocation_id: controllerBootId,
+    checkpoint_generation_id: dimensionDigest("checkpoint", [workflowBootId, iteration]),
+    executor_retry_id: dimensionDigest("retry", [executionIdentity, iteration, attempt]),
+    execution_identity: executionIdentity,
+    request_fingerprint: requestFingerprint,
+    executor_result_digest: verified.artifact_set_digest
+  };
+}
+
+function dimensionDigest(prefix: string, value: unknown): string {
+  return `${prefix}-${sha256Canonical(value)}`;
+}
+
+function sha256Canonical(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function boundedAgentModel(agent: AgentLike): string | undefined {
@@ -337,8 +468,8 @@ function sourceAttestationClosure(task: (typeof taskSpecs)[number]): Array<{ att
   return [...expected].map(([attemptId, nodeId]) => ({ attemptId, nodeId }));
 }
 
-function sourceAttestation(task: (typeof taskSpecs)[number]): ReturnType<typeof readWorkspaceSourceAttestation> {
-  return readWorkspaceSourceAttestation({
+function sourceClaim(task: (typeof taskSpecs)[number]): ReturnType<typeof readLegacyWorkspaceSourceClaim> {
+  return readLegacyWorkspaceSourceClaim({
     artifactDir: task.artifactDir,
     targetRevision: task.baseCommit,
     expectedTasks: sourceAttestationClosure(task)
@@ -513,7 +644,7 @@ function prepareAnchoredDirectory(rootPath: string, relativePath: string, failur
       mkdirSync(current, { mode: 0o700 });
       const stat = lstatSync(current);
       if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(current) !== current) {
-        throw new Error(failureMessage);
+        throw new Error(failureMessage, { cause: error });
       }
     }
   }
@@ -889,6 +1020,27 @@ function normalizeLegacyFindingFields(task: (typeof taskSpecs)[number]): void {
   }
 }
 
+function normalizeCanonicalFindings(task: (typeof taskSpecs)[number]): void {
+  if (!task.outputs.some((output) => output.contract === "ultrafuzz/findings@1")) {
+    return;
+  }
+  const model = task.metadata.model;
+  const loop = task.metadata.loop;
+  normalizeFindings({
+    artifactDir: task.metadata.artifacts.dir,
+    nodeId: task.attemptId,
+    provenance: {
+      nodeId: task.attemptId,
+      strategy: task.metadata.node.logicalNodeId,
+      attemptIndex: model?.attemptIndex ?? loop?.attemptIndex,
+      modelId: model?.profileId,
+      model: model?.modelName ?? task.modelName ?? undefined,
+      modelIndex: model?.modelIndex,
+      loopIndex: loop?.index
+    }
+  });
+}
+
 function normalizeLegacyFindingArray(contents: string): string | undefined {
   let parsed: unknown;
   try {
@@ -1004,7 +1156,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
       }
       const contents = readFileSync(resolvedPath, "utf8");
       const originalIsValid = validateArtifactContract(output.contract, contents, output.path).ok;
-      const normalized = normalizeLegacyReportProvenanceFields(contents, task.baseCommit, sourceAttestation(task));
+      const normalized = normalizeLegacyReportProvenanceFields(contents, task.baseCommit);
       if (normalized !== undefined && validateArtifactContract(output.contract, normalized, output.path).ok) {
         writeFileSync(resolvedPath, normalized, { encoding: "utf8", flag: "w", mode: 0o600 });
         break;
@@ -1016,11 +1168,7 @@ function normalizeLegacyReportProvenance(task: (typeof taskSpecs)[number]): void
   }
 }
 
-function normalizeLegacyReportProvenanceFields(
-  contents: string,
-  targetRevision: string,
-  attestation: ReturnType<typeof sourceAttestation>
-): string | undefined {
+function normalizeLegacyReportProvenanceFields(contents: string, targetRevision: string): string | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
@@ -1038,8 +1186,8 @@ function normalizeLegacyReportProvenanceFields(
     runMetadata.target_revision = targetRevision;
     changed = true;
   }
-  if (JSON.stringify(runMetadata.source_attestation) !== JSON.stringify(attestation)) {
-    runMetadata.source_attestation = attestation;
+  if (Object.hasOwn(runMetadata, "source_attestation")) {
+    delete runMetadata.source_attestation;
     changed = true;
   }
   const issues = Array.isArray(report.issues)
@@ -1305,8 +1453,15 @@ function resolveNonEmptyRegularArtifactFile(
   return resolvedPath;
 }
 
-function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
-  const attestation = sourceAttestation(task);
+function collectVerifiedArtifacts(task: (typeof taskSpecs)[number]): {
+  artifacts: Array<z.infer<typeof verifiedArtifact>>;
+  primary_artifact: string;
+  artifact_set_digest: string;
+} {
+  // The internal claim proves the generated DAG's pre/post model source
+  // checks. Product sync later upgrades it into a receipt-bound detached v2
+  // attestation; v1 claims are never embedded into report.json.
+  sourceClaim(task);
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const artifacts = task.outputs.map((output) => {
@@ -1345,9 +1500,6 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     if (output.contract === "ultrafuzz/generated-tests@1") {
       verifyGeneratedTestFiles(artifactRoot, validation.value);
     }
-    if (output.contract === "ultrafuzz/report@1") {
-      verifyReportSourceAttestation(contents, task.baseCommit, attestation);
-    }
     return {
       path: output.path,
       contract: output.contract,
@@ -1360,27 +1512,52 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
   if (primary === undefined) {
     throw new Error("artifact-contract failure: primary artifact is missing");
   }
-  return { artifacts, primary_artifact: primary.path };
+  const primaryArtifact = primary.path;
+  return {
+    artifacts,
+    primary_artifact: primaryArtifact,
+    artifact_set_digest: sha256Canonical({ artifacts, primary_artifact: primaryArtifact })
+  };
 }
 
-function verifyReportSourceAttestation(
-  contents: string,
-  targetRevision: string,
-  attestation: ReturnType<typeof sourceAttestation>
-): void {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents);
-  } catch (error) {
-    throw new Error("workspace-provenance failure: final report is not valid JSON", { cause: error });
-  }
-  const runMetadata = isPlainRecord(parsed) && isPlainRecord(parsed.run_metadata) ? parsed.run_metadata : undefined;
+function verifyArtifacts(task: (typeof taskSpecs)[number], rawExecution: unknown): z.infer<typeof verificationOutput> {
+  const executor = executorResult.parse(rawExecution);
+  const context = getToolContext();
   if (
-    runMetadata?.target_revision !== targetRevision ||
-    JSON.stringify(runMetadata.source_attestation) !== JSON.stringify(attestation)
+    context?.runId !== executor.workflow_run_id ||
+    context?.nodeId !== task.verifierId ||
+    executor.agent_task_id !== task.id ||
+    executor.strategy_attempt_id !== task.attemptId ||
+    !Number.isInteger(context.iteration) ||
+    (context.iteration ?? -1) < 0 ||
+    !Number.isInteger(context.attempt) ||
+    (context.attempt ?? -1) < 0
   ) {
-    throw new Error("workspace-provenance failure: final report source attestation is not canonical");
+    throw new Error("workspace-provenance failure: verifier execution lineage is invalid");
   }
+  const verified = collectVerifiedArtifacts(task);
+  if (executor.execution_mode === "local" && executor.executor_result_digest !== verified.artifact_set_digest) {
+    throw new Error("workspace-provenance failure: verified artifacts changed after the agent attempt");
+  }
+  const verifier = {
+    workflow_run_id: context.runId,
+    verifier_task_id: context.nodeId,
+    iteration: context.iteration,
+    attempt: context.attempt,
+    verification_identity: sha256Canonical({
+      executor,
+      verifier_task_id: context.nodeId,
+      iteration: context.iteration,
+      attempt: context.attempt,
+      artifact_set_digest: verified.artifact_set_digest
+    })
+  };
+  return verificationOutput.parse({
+    schema_version: "ultrafuzz.verification-output.v2",
+    executor,
+    verifier,
+    ...verified
+  });
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): void {
@@ -1411,7 +1588,10 @@ export default smithers((ctx) => {
       ? ctx.input.operator_prompt
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
-  const cloudWorker = ctx.input.cloud_worker === true;
+  const cloudWorker = isCloudWorkerProcess;
+  if ((ctx.input.cloud_worker === true) !== cloudWorker) {
+    throw new Error("cloud worker input and trusted process identity must agree");
+  }
   const selectedTaskSpecs = cloudWorker ? taskSpecs.filter((task) => task.id === ctx.input.task_id) : taskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
     throw new Error("cloud worker task selection must identify exactly one concrete attempt");
@@ -1422,7 +1602,11 @@ export default smithers((ctx) => {
         {selectedTaskSpecs.map((task) => {
           const inputTask = inputTasks.get(task.id);
           if (task.execution.mode === "cloud" && !cloudWorker) {
-            if (cloudProvider === undefined || task.execution.provider !== "modal") {
+            if (
+              cloudProvider === undefined ||
+              task.execution.provider !== "modal" ||
+              task.execution.agentAuth === null
+            ) {
               throw new Error("cloud execution provider is unavailable");
             }
             return (
@@ -1436,6 +1620,8 @@ export default smithers((ctx) => {
                     task_id: task.id,
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
+                    workflow_execution_id: workflowBootId,
+                    controller_invocation_id: controllerBootId,
                     base_commit: task.baseCommit,
                     workflow_path: task.workflowPath,
                     ...(task.promptPath === undefined ? {} : { prompt_path: task.promptPath }),
@@ -1448,7 +1634,8 @@ export default smithers((ctx) => {
                       memory_mib: task.execution.resources.memoryMiB,
                       timeout_seconds: task.execution.resources.timeoutSeconds
                     },
-                    agent_credential_env: task.execution.agentCredentialEnv,
+                    ...(task.modelName === null ? {} : { agent_model: task.modelName }),
+                    agent_auth: task.execution.agentAuth,
                     ...(operatorPromptInput === undefined ? {} : { operator_prompt: operatorPromptInput })
                   }}
                   output={outputs.task}
@@ -1465,6 +1652,7 @@ export default smithers((ctx) => {
                   id={task.verifierId}
                   output={outputs.verification}
                   dependsOn={[task.id]}
+                  needs={{ agent: task.id }}
                   retries={0}
                   metadata={{
                     category: "artifact-contract",
@@ -1473,7 +1661,7 @@ export default smithers((ctx) => {
                     executionMode: "cloud"
                   }}
                 >
-                  {() => verifyArtifacts(task)}
+                  {(deps) => verifyArtifacts(task, deps.agent.ultrafuzz_execution)}
                 </Task>
               </Fragment>
             );
@@ -1510,6 +1698,7 @@ export default smithers((ctx) => {
                 id={task.verifierId}
                 output={outputs.verification}
                 dependsOn={[task.id]}
+                needs={{ agent: task.id }}
                 retries={0}
                 metadata={{
                   category: "artifact-contract",
@@ -1517,7 +1706,7 @@ export default smithers((ctx) => {
                   attemptId: task.attemptId
                 }}
               >
-                {() => verifyArtifacts(task)}
+                {(deps) => verifyArtifacts(task, deps.agent.ultrafuzz_execution)}
               </Task>
             </Worktree>
           );

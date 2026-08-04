@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -20,6 +21,7 @@ import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
 import { renderRuntimeTemplate } from "./runtime-template.js";
+import type { WorkflowExecutionControlFile } from "./workflow-integrity.js";
 import {
   assertSmithersPackageManifest,
   migrateLegacySmithersPackageManifest,
@@ -27,6 +29,7 @@ import {
   SMITHERS_ORCHESTRATOR_VERSION
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
+import { stableJson } from "./utils.js";
 import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const execFileAsync = promisify(execFile);
@@ -81,6 +84,10 @@ const SMITHERS_BASE_ENVIRONMENT_VARIABLES = new Set([
   "TMP",
   "TMPDIR",
   "TZ",
+  "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_CONFIG_PATH",
+  "ULTRAFUZZ_MODAL_MODULE",
+  "ULTRAFUZZ_RUNTIME_MODULE",
   "USER",
   "USERPROFILE",
   "WINDIR",
@@ -112,6 +119,40 @@ export const SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION = "ultrafuzz.smithers.wor
 export const SMITHERS_TASK_METADATA_SCHEMA_VERSION = "ultrafuzz.smithers.task.v1" as const;
 export const SMITHERS_SUBMISSION_SCHEMA_VERSION = "ultrafuzz.smithers.submission.v1" as const;
 export const SMITHERS_RESET_NODE_MARKER_SCHEMA_VERSION = "ultrafuzz.smithers.reset-node.v1" as const;
+
+type CloudAgentIdentity<Agent extends string, Provider extends string> = {
+  agent: Agent;
+  provider: Provider;
+};
+
+type CloudApiKeyAuth = {
+  mode: "api-key";
+  source_env: string;
+};
+
+type CloudKimiApiKeyAuth = CloudApiKeyAuth & {
+  fallback_source_env?: "MOONSHOT_API_KEY";
+  base_url_source_env?: "KIMI_BASE_URL";
+};
+
+type CloudSubscriptionAuth = {
+  mode: "subscription";
+  config_dir?: string;
+};
+
+export type CompiledCloudAgentAuthDescriptor =
+  | (CloudAgentIdentity<"CodexAgent", "openai"> & {
+      auth: CloudApiKeyAuth;
+    })
+  | (CloudAgentIdentity<"ClaudeAgent", "anthropic"> & {
+      auth: CloudApiKeyAuth;
+    })
+  | (CloudAgentIdentity<"KimiAgent", "kimi"> & {
+      auth: CloudKimiApiKeyAuth | CloudSubscriptionAuth;
+    })
+  | (CloudAgentIdentity<"DeepSeekAgent", "deepseek"> & {
+      auth: CloudApiKeyAuth;
+    });
 
 export interface SmithersCompileInput {
   config: ResolvedConfig;
@@ -158,6 +199,7 @@ export interface CompiledSmithersTask {
   artifactDir: string;
   dependencyArtifactDirs: readonly string[];
   renderedPromptPath?: string;
+  renderedPromptDigest?: string;
   execution: {
     mode: "local" | "cloud";
     provider?: "modal";
@@ -172,7 +214,7 @@ export interface CompiledSmithersTask {
       region?: string;
       credentialEnv: string[];
     };
-    agentCredentialEnv: string[];
+    agentAuth: CompiledCloudAgentAuthDescriptor | null;
   };
   metadata: SmithersTaskMetadata;
 }
@@ -255,6 +297,8 @@ export interface CompiledSmithersWorkflow {
   projectRoot: string;
   workflowPath: string;
   evidenceWorkflowPath: string;
+  expandedGraphPath: string;
+  configPath: string;
   inputPath: string;
   tasksPath: string;
   logsDir: string;
@@ -270,6 +314,8 @@ export interface SubmitSmithersInput {
   environmentVariableNames?: readonly string[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  workflowPath?: string;
+  inputJson?: string;
 }
 
 export interface SmithersSubmissionResult {
@@ -354,7 +400,10 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     );
   }
   const renderedByAttempt = new Map(
-    input.renderedPrompts.map((prompt) => [prompt.attempt_id ?? prompt.node_id, prompt.rendered_prompt_path])
+    input.renderedPrompts.map((prompt) => [
+      prompt.attempt_id ?? prompt.node_id,
+      { path: prompt.rendered_prompt_path, digest: prompt.rendered_prompt_digest }
+    ])
   );
   const tasks = input.graph.nodes.flatMap((node) =>
     nodeAttemptsFor(node)
@@ -368,7 +417,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           runLayout: input.runLayout,
           baseCommit,
           workflowName,
-          renderedPromptPath: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
+          renderedPrompt: renderedByAttempt.get(attempt.attemptId) ?? renderedByAttempt.get(node.id),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) => attemptsByNodeId.get(dependency) ?? []),
           dependencyAgenticAttemptIds: node.dependsOn.flatMap(
             (dependency) => agenticAttemptsByNodeId.get(dependency) ?? []
@@ -379,6 +428,8 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   const smithersDir = path.join(input.runLayout.root, "smithers");
   fs.mkdirSync(smithersDir, { recursive: true });
   const evidenceWorkflowPath = path.join(smithersDir, "workflow.tsx");
+  const expandedGraphPath = path.join(smithersDir, "expanded-graph.json");
+  const configPath = path.join(smithersDir, "config.fingerprint-input");
   const workflowPath = path.join(
     projectRoot,
     ".smithers",
@@ -397,10 +448,14 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
     projectRoot,
     workflowPath,
     evidenceWorkflowPath,
+    expandedGraphPath,
+    configPath,
     inputPath,
     tasksPath,
     logsDir
   };
+  writeJsonDurable(expandedGraphPath, input.graph);
+  writeFileDurable(configPath, stableJson(input.config));
   writeJsonDurable(tasksPath, {
     schema_version: SMITHERS_COMPILED_WORKFLOW_SCHEMA_VERSION,
     run_id: input.runLayout.runId,
@@ -415,6 +470,152 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
   writeExecutableWorkflow(projectRoot, workflowPath, renderWorkflowSource(compiled));
   writeFileDurable(evidenceWorkflowPath, renderEvidenceWorkflowSource(workflowPath, evidenceWorkflowPath));
   return compiled;
+}
+
+export function smithersExecutionControlFiles(
+  compiled: CompiledSmithersWorkflow,
+  layout: RunLayout
+): WorkflowExecutionControlFile[] {
+  const files = new Map<string, WorkflowExecutionControlFile>();
+  const add = (sourcePath: string, snapshotPath: string): void => {
+    const source = fs.realpathSync(path.resolve(sourcePath));
+    const existing = files.get(source);
+    if (existing !== undefined) return;
+    files.set(source, { sourcePath: source, snapshotPath: snapshotPath.split(path.sep).join("/") });
+  };
+
+  const planPath = path.join(layout.root, "plan.json");
+  add(planPath, "controls/plan.json");
+  const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as {
+    run_id?: unknown;
+    rendered_prompts?: unknown;
+  };
+  if (plan.run_id !== layout.runId || !Array.isArray(plan.rendered_prompts)) {
+    throw new Error("persisted run plan cannot define the workflow execution closure");
+  }
+  const plannedPrompts = new Map<string, Record<string, unknown>>();
+  for (const value of plan.rendered_prompts) {
+    if (isObjectRecord(value) && typeof value.attempt_id === "string") plannedPrompts.set(value.attempt_id, value);
+  }
+  for (const task of compiled.tasks) {
+    if (task.renderedPromptPath === undefined) continue;
+    add(task.renderedPromptPath, `controls/rendered-prompts/${task.attemptId}.md`);
+    const planned = plannedPrompts.get(task.attemptId);
+    if (
+      planned === undefined ||
+      planned.rendered_prompt_path !== task.renderedPromptPath ||
+      planned.rendered_prompt_digest !== task.renderedPromptDigest ||
+      typeof planned.rendered_prompt_snapshot_path !== "string"
+    ) {
+      throw new Error(`persisted prompt plan does not match compiled task ${task.attemptId}`);
+    }
+    add(
+      path.resolve(layout.root, planned.rendered_prompt_snapshot_path),
+      `controls/prompt-snapshots/${task.attemptId}.md`
+    );
+  }
+
+  const projectConfigPath = path.join(compiled.projectRoot, "ultrafuzz.toml");
+  if (fs.existsSync(projectConfigPath)) add(projectConfigPath, "controls/ultrafuzz.toml");
+
+  const agentsRoot = path.join(compiled.projectRoot, ".smithers", "agents");
+  for (const sourcePath of walkExecutionFiles(agentsRoot)) {
+    const source = fs.readFileSync(sourcePath, "utf8");
+    if (source.includes("ultrafuzz.toml") && !source.includes("ULTRAFUZZ_CONFIG_PATH")) {
+      throw new Error(`workflow agent must read its sealed config snapshot: ${sourcePath}`);
+    }
+    add(sourcePath, path.posix.join(".smithers/agents", relativeExecutionPath(agentsRoot, sourcePath)));
+  }
+
+  const queuedModules = Object.values(workflowModuleEntryUrls(compiled)).filter(
+    (value): value is string => value.length > 0
+  );
+  const visitedPackages = new Set<string>();
+  while (queuedModules.length > 0) {
+    const entryUrl = queuedModules.shift()!;
+    const entryPath = fileURLToPath(entryUrl);
+    const packageRoot = workflowPackageRoot(entryPath);
+    if (visitedPackages.has(packageRoot)) continue;
+    visitedPackages.add(packageRoot);
+    const packageJsonPath = path.join(packageRoot, "package.json");
+    const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
+      name?: unknown;
+      dependencies?: unknown;
+    };
+    if (typeof manifest.name !== "string" || !manifest.name.startsWith("@ultrafuzz/")) {
+      throw new Error(`workflow module is not an Ultrafuzz runtime package: ${entryPath}`);
+    }
+    add(packageJsonPath, path.posix.join("modules", manifest.name, "package.json"));
+    for (const directory of ["dist", "schema"]) {
+      const sourceRoot = path.join(packageRoot, directory);
+      if (!fs.existsSync(sourceRoot)) continue;
+      for (const sourcePath of walkExecutionFiles(sourceRoot)) {
+        add(sourcePath, path.posix.join("modules", manifest.name, relativeExecutionPath(packageRoot, sourcePath)));
+      }
+    }
+    const dockerfile = path.join(packageRoot, "Dockerfile");
+    if (fs.existsSync(dockerfile)) add(dockerfile, path.posix.join("modules", manifest.name, "Dockerfile"));
+    if (isObjectRecord(manifest.dependencies)) {
+      for (const dependency of Object.keys(manifest.dependencies).filter((name) => name.startsWith("@ultrafuzz/"))) {
+        const dependencyRoot = fs.realpathSync(path.join(packageRoot, "node_modules", ...dependency.split("/")));
+        queuedModules.push(pathToFileURL(path.join(dependencyRoot, "package.json")).href);
+      }
+    }
+  }
+
+  return [...files.values()].sort((left, right) => left.snapshotPath.localeCompare(right.snapshotPath));
+}
+
+function workflowModuleEntryUrls(compiled: CompiledSmithersWorkflow): {
+  artifacts: string;
+  runtime: string;
+  modal: string;
+} {
+  return {
+    artifacts: import.meta.resolve("@ultrafuzz/artifacts"),
+    runtime: import.meta.resolve("@ultrafuzz/runtime"),
+    modal: compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
+  };
+}
+
+function workflowPackageRoot(entryPath: string): string {
+  let current = path.dirname(fs.realpathSync(entryPath));
+  for (;;) {
+    const packageJson = path.join(current, "package.json");
+    if (fs.existsSync(packageJson)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) throw new Error(`cannot resolve workflow module package root for ${entryPath}`);
+    current = parent;
+  }
+}
+
+function walkExecutionFiles(root: string): string[] {
+  const resolvedRoot = path.resolve(root);
+  const pending = [resolvedRoot];
+  const files: string[] = [];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const entries = fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const candidate = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`workflow execution closure cannot contain a symlink: ${candidate}`);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile()) files.push(candidate);
+      else throw new Error(`workflow execution closure contains a non-regular entry: ${candidate}`);
+      if (files.length + pending.length > 20_000) throw new Error("workflow execution closure exceeds file limit");
+    }
+  }
+  return files.sort();
+}
+
+function relativeExecutionPath(root: string, filePath: string): string {
+  const relative = path.relative(path.resolve(root), path.resolve(filePath)).split(path.sep).join("/");
+  if (relative.length === 0 || relative.startsWith("../") || path.posix.isAbsolute(relative)) {
+    throw new Error(`workflow execution file escapes its package root: ${filePath}`);
+  }
+  return relative;
 }
 
 function smithersInputDocument(
@@ -437,14 +638,12 @@ function smithersInputDocument(
 }
 
 export async function submitSmithersWorkflow(input: SubmitSmithersInput): Promise<SmithersSubmissionResult> {
-  const inputJson = `${JSON.stringify(
-    smithersInputDocument(input.compiled, input.operatorPrompt, input.operatorInput),
-    null,
-    2
-  )}\n`;
+  const inputJson =
+    input.inputJson ??
+    `${JSON.stringify(smithersInputDocument(input.compiled, input.operatorPrompt, input.operatorInput), null, 2)}\n`;
   const command = [
     "up",
-    input.compiled.workflowPath,
+    input.workflowPath ?? input.compiled.workflowPath,
     "--detach",
     "--run-id",
     input.compiled.smithersRunId,
@@ -779,6 +978,7 @@ export async function runSmithersLifecycleCommand(input: {
   resumeRecovery?: {
     runRoot: string;
     inputPath: string;
+    inputJson: string;
     logsDir: string;
   };
   keepWorkspaces: boolean;
@@ -801,11 +1001,10 @@ export async function runSmithersLifecycleCommand(input: {
       env: input.env
     });
     if (smithersSnapshotHasErrorCode(inspection, "RUN_NOT_FOUND") || smithersSnapshotHasMissingRunHistory(inspection)) {
-      assertRegularFileInside(input.resumeRecovery.runRoot, input.resumeRecovery.inputPath, "persisted workflow input");
       assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
       fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
       assertNoSymlinkComponents(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
-      const inputJson = fs.readFileSync(input.resumeRecovery.inputPath, "utf8");
+      const inputJson = input.resumeRecovery.inputJson;
       const recoveryCommand = [
         "up",
         input.workflowPath,
@@ -892,11 +1091,6 @@ export async function runSmithersLifecycleCommand(input: {
     ) {
       if (input.resetNode === undefined && smithersSnapshotHasErrorCode(inspection, "WORKFLOW_RENDER_FAILED")) {
         if (!isCompatibleSmithersRunId(input.smithersRunId)) {
-          assertRegularFileInside(
-            input.resumeRecovery.runRoot,
-            input.resumeRecovery.inputPath,
-            "persisted workflow input"
-          );
           assertPathInside(input.resumeRecovery.runRoot, input.resumeRecovery.logsDir, "workflow log directory");
           fs.mkdirSync(input.resumeRecovery.logsDir, { recursive: true });
           assertNoSymlinkComponents(
@@ -918,7 +1112,7 @@ export async function runSmithersLifecycleCommand(input: {
               "--log-dir",
               input.resumeRecovery.logsDir,
               "--input",
-              fs.readFileSync(input.resumeRecovery.inputPath, "utf8"),
+              input.resumeRecovery.inputJson,
               "--format",
               "json",
               ...supervisorCommandArgs(input.controllerLeaseSeconds)
@@ -1706,7 +1900,7 @@ function compileTask(input: {
   runLayout: RunLayout;
   baseCommit: string;
   workflowName: string;
-  renderedPromptPath?: string;
+  renderedPrompt?: { path: string; digest: string };
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
 }): CompiledSmithersTask {
@@ -1728,7 +1922,13 @@ function compileTask(input: {
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
-  const agentCredentialEnv = cloudAgentCredentialEnv(input.config.execution.mode, profile.agent, agent);
+  const agentAuth = compiledCloudAgentAuthDescriptor(
+    input.config.execution.mode,
+    profile.agent,
+    agent,
+    profile.model,
+    input.config.execution.providers.modal?.credentialEnv ?? []
+  );
   const execution = {
     mode: input.config.execution.mode,
     ...(input.config.execution.provider === undefined ? {} : { provider: input.config.execution.provider }),
@@ -1741,7 +1941,7 @@ function compileTask(input: {
             credentialEnv: [...input.config.execution.providers.modal.credentialEnv]
           }
         }),
-    agentCredentialEnv
+    agentAuth
   } satisfies CompiledSmithersTask["execution"];
   const metadata: SmithersTaskMetadata = {
     schemaVersion: SMITHERS_TASK_METADATA_SCHEMA_VERSION,
@@ -1827,7 +2027,9 @@ function compileTask(input: {
     baseCommit: input.baseCommit,
     artifactDir,
     dependencyArtifactDirs,
-    ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
+    ...(input.renderedPrompt === undefined
+      ? {}
+      : { renderedPromptPath: input.renderedPrompt.path, renderedPromptDigest: input.renderedPrompt.digest }),
     execution,
     metadata
   };
@@ -1856,15 +2058,176 @@ function workspaceOutputRootsForTask(node: ExpandedNode, attemptId: string): str
   return [...new Set(roots)];
 }
 
-function cloudAgentCredentialEnv(
+const CLOUD_AUTH_ENVIRONMENT_VARIABLE_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const RESERVED_CLOUD_AUTH_ENVIRONMENT_VARIABLES = new Set([
+  "BASH_ENV",
+  "CDPATH",
+  "CI",
+  "DISABLE_AUTOUPDATER",
+  "ENV",
+  "HOME",
+  "IFS",
+  "LANG",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "LOGNAME",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PATH",
+  "PWD",
+  "SHELL",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "ULTRAFUZZ_ARTIFACTS_MODULE",
+  "ULTRAFUZZ_CLOUD_WORKER",
+  "ULTRAFUZZ_RUNTIME_MODULE",
+  "USER",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME"
+]);
+
+function compiledCloudAgentAuthDescriptor(
   executionMode: ResolvedConfig["execution"]["mode"],
   agentRef: string,
-  agent: ResolvedConfig["agents"][string] | undefined
-): string[] {
-  if (executionMode !== "cloud" || agent?.auth !== "api-key" || agent.apiKeyEnv === undefined) return [];
-  const names = [agent.apiKeyEnv];
-  if (agentRef === "KimiAgent" && agent.apiKeyEnv === "KIMI_API_KEY") names.push("MOONSHOT_API_KEY", "KIMI_BASE_URL");
-  return names;
+  agent: ResolvedConfig["agents"][string] | undefined,
+  modelName: string | undefined,
+  controllerCredentialEnv: readonly string[]
+): CompiledCloudAgentAuthDescriptor | null {
+  if (executionMode !== "cloud") return null;
+  if (agent === undefined) {
+    throw new Error(`cloud execution agent ${agentRef} has no authentication configuration`);
+  }
+  const identity = cloudAgentIdentity(agentRef);
+  if (agent.auth === "subscription") {
+    if (identity.agent !== "KimiAgent") {
+      throw new Error(
+        `cloud execution does not support ${identity.agent} subscription authentication without a trusted refresh broker`
+      );
+    }
+    if (agent.configDir !== undefined && agent.configDir.trim() === "") {
+      throw new Error(`cloud execution agent ${agentRef} has an empty subscription config directory`);
+    }
+    if (modelName === undefined || modelName.trim() === "") {
+      throw new Error("cloud KimiAgent subscription authentication requires an exact model alias");
+    }
+    const descriptor: CompiledCloudAgentAuthDescriptor = {
+      ...identity,
+      auth: {
+        mode: "subscription",
+        ...(agent.configDir === undefined ? {} : { config_dir: agent.configDir })
+      }
+    };
+    return descriptor;
+  }
+  if (agent.auth !== "api-key" || agent.apiKeyEnv === undefined) {
+    throw new Error(`cloud execution agent ${agentRef} has an invalid authentication mode`);
+  }
+  const sourceEnv = agent.apiKeyEnv;
+  assertCloudAuthSourceEnvironmentName(sourceEnv, controllerCredentialEnv);
+  assertCanonicalCloudAgentApiKeySource(identity, sourceEnv);
+  if (identity.agent === "KimiAgent" && sourceEnv === "KIMI_API_KEY") {
+    assertCloudAuthSourceEnvironmentName("MOONSHOT_API_KEY", controllerCredentialEnv);
+    assertCloudAuthSourceEnvironmentName("KIMI_BASE_URL", controllerCredentialEnv);
+    return {
+      ...identity,
+      auth: {
+        mode: "api-key",
+        source_env: sourceEnv,
+        fallback_source_env: "MOONSHOT_API_KEY",
+        base_url_source_env: "KIMI_BASE_URL"
+      }
+    };
+  }
+  switch (identity.agent) {
+    case "CodexAgent":
+      return {
+        agent: identity.agent,
+        provider: identity.provider,
+        auth: { mode: "api-key", source_env: sourceEnv }
+      };
+    case "ClaudeAgent":
+      return {
+        agent: identity.agent,
+        provider: identity.provider,
+        auth: { mode: "api-key", source_env: sourceEnv }
+      };
+    case "KimiAgent":
+      return {
+        agent: identity.agent,
+        provider: identity.provider,
+        auth: { mode: "api-key", source_env: sourceEnv }
+      };
+    case "DeepSeekAgent":
+      return {
+        agent: identity.agent,
+        provider: identity.provider,
+        auth: { mode: "api-key", source_env: sourceEnv }
+      };
+  }
+}
+
+function assertCanonicalCloudAgentApiKeySource(
+  identity:
+    | CloudAgentIdentity<"CodexAgent", "openai">
+    | CloudAgentIdentity<"ClaudeAgent", "anthropic">
+    | CloudAgentIdentity<"KimiAgent", "kimi">
+    | CloudAgentIdentity<"DeepSeekAgent", "deepseek">,
+  sourceEnv: string
+): void {
+  const allowed =
+    identity.agent === "CodexAgent"
+      ? (["OPENAI_API_KEY"] as const)
+      : identity.agent === "ClaudeAgent"
+        ? (["ANTHROPIC_API_KEY"] as const)
+        : identity.agent === "DeepSeekAgent"
+          ? (["DEEPSEEK_API_KEY"] as const)
+          : (["KIMI_API_KEY", "MOONSHOT_API_KEY"] as const);
+  if (!(allowed as readonly string[]).includes(sourceEnv)) {
+    throw new Error(
+      `cloud execution ${identity.agent}/${identity.provider} API-key source must be ${allowed.join(" or ")}, not ${sourceEnv}`
+    );
+  }
+}
+
+function cloudAgentIdentity(
+  agentRef: string
+):
+  | CloudAgentIdentity<"CodexAgent", "openai">
+  | CloudAgentIdentity<"ClaudeAgent", "anthropic">
+  | CloudAgentIdentity<"KimiAgent", "kimi">
+  | CloudAgentIdentity<"DeepSeekAgent", "deepseek"> {
+  switch (agentRef) {
+    case "CodexAgent":
+      return { agent: agentRef, provider: "openai" };
+    case "ClaudeAgent":
+      return { agent: agentRef, provider: "anthropic" };
+    case "KimiAgent":
+      return { agent: agentRef, provider: "kimi" };
+    case "DeepSeekAgent":
+      return { agent: agentRef, provider: "deepseek" };
+    default:
+      throw new Error(`cloud execution supports only built-in agents, not ${agentRef}`);
+  }
+}
+
+function assertCloudAuthSourceEnvironmentName(name: string, controllerCredentialEnv: readonly string[]): void {
+  if (!CLOUD_AUTH_ENVIRONMENT_VARIABLE_PATTERN.test(name)) {
+    throw new Error(`cloud agent authentication source environment name is invalid: ${name}`);
+  }
+  const normalized = name.toUpperCase();
+  if (
+    RESERVED_CLOUD_AUTH_ENVIRONMENT_VARIABLES.has(normalized) ||
+    normalized.startsWith("MODAL_") ||
+    normalized.startsWith("SMITHERS_")
+  ) {
+    throw new Error(`cloud agent authentication source environment name is reserved: ${name}`);
+  }
+  if (controllerCredentialEnv.some((candidate) => candidate.toUpperCase() === normalized)) {
+    throw new Error(`cloud agent authentication source overlaps a Modal controller credential: ${name}`);
+  }
 }
 
 function nodeAttemptsFor(node: ExpandedNode): NodeAttemptProvenance[] {
@@ -1991,6 +2354,7 @@ export function topologyRuntimeContextForTimeout(timeoutMs: number): string {
 }
 
 function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
+  const workflowModules = workflowModuleEntryUrls(compiled);
   const taskSpecs = JSON.stringify(
     compiled.tasks.map((task) => ({
       id: task.smithersNodeId,
@@ -2001,6 +2365,9 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       agentRef: task.agentRef,
       modelName: task.modelName ?? null,
       reasoningEffort: task.reasoningEffort ?? null,
+      // Workflow source is durable controller evidence and must never embed
+      // private rendered prompt bytes. Both local and cloud execution read the
+      // sealed prompt through promptPath at invocation time.
       prompt: "",
       promptPath:
         task.renderedPromptPath === undefined
@@ -2034,11 +2401,9 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
     __ULTRAFUZZ_RUN_ID_LITERAL__: JSON.stringify(compiled.runId),
     __ULTRAFUZZ_TASK_SPECS__: taskSpecs,
     __ULTRAFUZZ_WORKFLOW_NAME__: JSON.stringify(compiled.workflowName),
-    __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/artifacts")),
-    __ULTRAFUZZ_RUNTIME_MODULE__: JSON.stringify(import.meta.resolve("@ultrafuzz/runtime")),
-    __ULTRAFUZZ_MODAL_MODULE__: JSON.stringify(
-      compiled.tasks.some((task) => task.execution.mode === "cloud") ? import.meta.resolve("@ultrafuzz/modal") : ""
-    )
+    __ULTRAFUZZ_ARTIFACTS_MODULE__: JSON.stringify(workflowModules.artifacts),
+    __ULTRAFUZZ_RUNTIME_MODULE__: JSON.stringify(workflowModules.runtime),
+    __ULTRAFUZZ_MODAL_MODULE__: JSON.stringify(workflowModules.modal)
   });
 }
 

@@ -1,6 +1,8 @@
+import crypto from "node:crypto";
+
 const DEFAULT_PRICING_CATALOG_URL = "https://models.dev/api.json";
 const DEFAULT_PRICING_TIMEOUT_MS = 5_000;
-const MAX_CATALOG_BYTES = 25 * 1024 * 1024;
+export const MAX_PRICING_CATALOG_BYTES = 16 * 1024 * 1024;
 const MOONSHOT_PROVIDER_ID = "moonshotai";
 const DEEPSEEK_PROVIDER_ID = "deepseek";
 
@@ -9,6 +11,7 @@ export interface ModelPricing {
   cachedInputUsdPerMillion?: number;
   cacheWriteUsdPerMillion?: number;
   outputUsdPerMillion: number;
+  reasoningUsdPerMillion?: number;
   contextTiers?: ModelPricingContextTier[];
 }
 
@@ -18,12 +21,14 @@ export interface ModelPricingContextTier {
   cachedInputUsdPerMillion?: number;
   cacheWriteUsdPerMillion?: number;
   outputUsdPerMillion: number;
+  reasoningUsdPerMillion?: number;
 }
 
 export interface PricingCatalogMetadata {
   source: "models.dev" | "configured-catalog" | "disabled";
   status: "available" | "disabled" | "unavailable";
   fetched_at?: string;
+  catalog_sha256?: string;
   resolved_models: string[];
   unresolved_models: string[];
 }
@@ -31,6 +36,8 @@ export interface PricingCatalogMetadata {
 export interface PricingCatalogResult {
   prices: ReadonlyMap<string, ModelPricing>;
   metadata: PricingCatalogMetadata;
+  /** Exact response bytes whose SHA-256 is recorded in metadata. */
+  rawBody?: Uint8Array;
 }
 
 interface CatalogCost {
@@ -38,6 +45,7 @@ interface CatalogCost {
   output?: unknown;
   cache_read?: unknown;
   cache_write?: unknown;
+  reasoning?: unknown;
   tiers?: unknown;
   context_over_200k?: unknown;
 }
@@ -47,6 +55,7 @@ interface CatalogCostTier {
   output?: unknown;
   cache_read?: unknown;
   cache_write?: unknown;
+  reasoning?: unknown;
   tier?: unknown;
 }
 
@@ -108,19 +117,20 @@ export async function resolveLiveModelPricing(input: {
     if (!response.ok) {
       throw new Error(`pricing catalog returned HTTP ${response.status}`);
     }
-    const text = await response.text();
-    if (Buffer.byteLength(text, "utf8") > MAX_CATALOG_BYTES) {
+    const rawBody = Buffer.from(await response.arrayBuffer());
+    if (rawBody.byteLength > MAX_PRICING_CATALOG_BYTES) {
       throw new Error("pricing catalog exceeded the maximum response size");
     }
-    const catalog = JSON.parse(text) as unknown;
-    const prices = pricesForModels(catalog, models);
+    const prices = new Map(modelPricingFromCatalogBytes(rawBody, models));
     const resolvedModels = models.filter((model) => prices.has(model));
     return {
       prices,
+      rawBody,
       metadata: {
         source,
         status: "available",
         fetched_at: new Date().toISOString(),
+        catalog_sha256: crypto.createHash("sha256").update(rawBody).digest("hex"),
         resolved_models: resolvedModels,
         unresolved_models: models.filter((model) => !prices.has(model))
       }
@@ -136,6 +146,17 @@ export async function resolveLiveModelPricing(input: {
       }
     };
   }
+}
+
+export function modelPricingFromCatalogBytes(
+  rawBody: Uint8Array,
+  models: Iterable<string>
+): ReadonlyMap<string, ModelPricing> {
+  if (rawBody.byteLength > MAX_PRICING_CATALOG_BYTES) {
+    throw new Error("pricing catalog exceeded the maximum response size");
+  }
+  const catalog = JSON.parse(Buffer.from(rawBody).toString("utf8")) as unknown;
+  return pricesForModels(catalog, uniqueNormalizedModels(models));
 }
 
 function pricesForModels(catalog: unknown, models: string[]): Map<string, ModelPricing> {
@@ -176,11 +197,13 @@ function pricingFromCatalogModel(model: CatalogModel | undefined): ModelPricing 
   }
   const cachedInput = nonNegativeNumber(model.cost.cache_read);
   const cacheWrite = nonNegativeNumber(model.cost.cache_write);
+  const reasoning = nonNegativeNumber(model.cost.reasoning);
   const basePricing = {
     inputUsdPerMillion: input,
     ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
     ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
-    outputUsdPerMillion: output
+    outputUsdPerMillion: output,
+    ...(reasoning === undefined ? {} : { reasoningUsdPerMillion: reasoning })
   };
   const catalogTiers = Array.isArray(model.cost.tiers)
     ? model.cost.tiers
@@ -211,7 +234,8 @@ export function pricingForContext(pricing: ModelPricing, inputTokens: number): M
         ? {}
         : { cachedInputUsdPerMillion: tier.cachedInputUsdPerMillion }),
       ...(tier.cacheWriteUsdPerMillion === undefined ? {} : { cacheWriteUsdPerMillion: tier.cacheWriteUsdPerMillion }),
-      outputUsdPerMillion: tier.outputUsdPerMillion
+      outputUsdPerMillion: tier.outputUsdPerMillion,
+      ...(tier.reasoningUsdPerMillion === undefined ? {} : { reasoningUsdPerMillion: tier.reasoningUsdPerMillion })
     };
   }
   return selected;
@@ -251,12 +275,14 @@ function pricingContextTier(
   const input = nonNegativeNumber((value as CatalogCostTier).input) ?? base.inputUsdPerMillion;
   const cachedInput = nonNegativeNumber((value as CatalogCostTier).cache_read) ?? base.cachedInputUsdPerMillion;
   const cacheWrite = nonNegativeNumber((value as CatalogCostTier).cache_write) ?? base.cacheWriteUsdPerMillion;
+  const reasoning = nonNegativeNumber((value as CatalogCostTier).reasoning) ?? base.reasoningUsdPerMillion;
   return {
     contextTokens,
     inputUsdPerMillion: input,
     ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
     ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
-    outputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).output) ?? base.outputUsdPerMillion
+    outputUsdPerMillion: nonNegativeNumber((value as CatalogCostTier).output) ?? base.outputUsdPerMillion,
+    ...(reasoning === undefined ? {} : { reasoningUsdPerMillion: reasoning })
   };
 }
 
@@ -268,6 +294,7 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
   const cachedInput = nonNegativeNumber(value.cachedInputUsdPerMillion);
   const cacheWrite = nonNegativeNumber(value.cacheWriteUsdPerMillion);
   const output = nonNegativeNumber(value.outputUsdPerMillion);
+  const reasoning = nonNegativeNumber(value.reasoningUsdPerMillion);
   if (input === undefined || output === undefined) {
     return undefined;
   }
@@ -282,6 +309,7 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
           const tierCachedInput = nonNegativeNumber(tier.cachedInputUsdPerMillion);
           const tierCacheWrite = nonNegativeNumber(tier.cacheWriteUsdPerMillion);
           const tierOutput = nonNegativeNumber(tier.outputUsdPerMillion);
+          const tierReasoning = nonNegativeNumber(tier.reasoningUsdPerMillion);
           return contextTokens === undefined || tierInput === undefined || tierOutput === undefined
             ? []
             : [
@@ -290,7 +318,8 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
                   inputUsdPerMillion: tierInput,
                   ...(tierCachedInput === undefined ? {} : { cachedInputUsdPerMillion: tierCachedInput }),
                   ...(tierCacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: tierCacheWrite }),
-                  outputUsdPerMillion: tierOutput
+                  outputUsdPerMillion: tierOutput,
+                  ...(tierReasoning === undefined ? {} : { reasoningUsdPerMillion: tierReasoning })
                 }
               ];
         })
@@ -301,6 +330,7 @@ function storedModelPricing(value: unknown): ModelPricing | undefined {
     ...(cachedInput === undefined ? {} : { cachedInputUsdPerMillion: cachedInput }),
     ...(cacheWrite === undefined ? {} : { cacheWriteUsdPerMillion: cacheWrite }),
     outputUsdPerMillion: output,
+    ...(reasoning === undefined ? {} : { reasoningUsdPerMillion: reasoning }),
     ...(contextTiers.length === 0 ? {} : { contextTiers })
   };
 }

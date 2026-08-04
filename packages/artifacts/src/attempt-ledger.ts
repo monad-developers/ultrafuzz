@@ -68,6 +68,10 @@ export interface NodeAttemptLedgerEntry {
     input_sha256: ManifestDigest;
     output_sha256: ManifestDigest | null;
   };
+  evidence?: {
+    verifier_receipt_sha256: ManifestDigest;
+    smithers_output_sha256: ManifestDigest;
+  };
   failure_category?: NodeAttemptFailureCategory;
 }
 
@@ -86,6 +90,10 @@ export interface AppendNodeAttemptInput {
   reuse?: { status: "executed" } | { status: "reused"; sourceAttemptId: string };
   inputManifestDigest: string;
   outputManifestDigest?: string | null;
+  evidence?: {
+    verifierReceiptDigest: string;
+    smithersOutputDigest: string;
+  };
   failureCategory?: NodeAttemptFailureCategory;
 }
 
@@ -160,6 +168,12 @@ export const nodeAttemptLedgerEntrySchema = z
       input_sha256: digest,
       output_sha256: digest.nullable()
     }),
+    evidence: z
+      .strictObject({
+        verifier_receipt_sha256: digest,
+        smithers_output_sha256: digest
+      })
+      .optional(),
     failure_category: z.enum(NODE_ATTEMPT_FAILURE_CATEGORIES).optional()
   })
   .superRefine((entry, ctx) => {
@@ -278,6 +292,15 @@ export const nodeAttemptLedgerJsonSchema = {
         }
       }
     },
+    evidence: {
+      type: "object",
+      required: ["verifier_receipt_sha256", "smithers_output_sha256"],
+      additionalProperties: false,
+      properties: {
+        verifier_receipt_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        smithers_output_sha256: { type: "string", pattern: "^[a-f0-9]{64}$" }
+      }
+    },
     failure_category: { enum: [...NODE_ATTEMPT_FAILURE_CATEGORIES] }
   }
 } as const;
@@ -354,6 +377,14 @@ export function createNodeAttemptLedgerEntry(layout: Pick<RunLayout, "runId">, i
           ? null
           : normalizeDigest(input.outputManifestDigest, "output manifest digest")
     },
+    ...(input.evidence === undefined
+      ? {}
+      : {
+          evidence: {
+            verifier_receipt_sha256: normalizeDigest(input.evidence.verifierReceiptDigest, "verifier receipt digest"),
+            smithers_output_sha256: normalizeDigest(input.evidence.smithersOutputDigest, "workflow output digest")
+          }
+        }),
     ...(input.failureCategory === undefined ? {} : { failure_category: input.failureCategory })
   };
   return assertNodeAttemptLedgerEntry(entry);

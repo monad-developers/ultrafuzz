@@ -8,8 +8,12 @@ import ts from "typescript";
 export const AUTOMATIC_PUBLICATION_PLAN_SCHEMA_VERSION = "ultrafuzz.eval-history-automatic-publication-plan.v1";
 
 const GENERATION_SCHEMA_VERSION = "ultrafuzz.eval-history-publication-generation.v1";
+const AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION = "ultrafuzz.modal.public-benchmark-bundle.v7";
+const AUTOMATIC_PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION = "ultrafuzz.modal.public-eval-diagnostics.v4";
+const DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash";
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_CONFIG_BYTES = 1024 * 1024;
+const MAX_LAUNCH_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_POLICY_BYTES = 16 * 1024 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_LOWER_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
@@ -97,6 +101,16 @@ export function validateAutomaticPublicationManifest(value, context) {
     const modelSlug = safeLowerId(pair.model_slug, `benchmark pair ${index} model slug`);
     if (!modelSlug.startsWith(`benchmark-${expected.mode}-`)) {
       throw new Error(`benchmark pair ${index} model slug does not match the trusted lane`);
+    }
+    if (expected.expectedModel !== undefined && expected.expectedReasoning !== undefined) {
+      const expectedModelSlug = boundedSafeId(
+        `benchmark-${expected.mode}-${expected.expectedModel}-${expected.expectedReasoning}`,
+        `${expected.mode}:${provider}:${expected.expectedModel}:${expected.expectedReasoning}`,
+        96
+      );
+      if (modelSlug !== expectedModelSlug) {
+        throw new Error(`benchmark pair ${index} model slug does not match the exact expected model profile`);
+      }
     }
     if (pairId !== `${expected.benchmark}-${modelSlug}`) {
       throw new Error(`benchmark pair ${index} ID does not match its benchmark and model slug`);
@@ -209,6 +223,9 @@ export async function prepareAutomaticPublication(input) {
       throw new Error(`benchmark config ${pair.config_path} must contain exactly one model`);
     }
     validateAutomaticPairConfig(config, model, pair, context, usedModelSlugs);
+    const configFingerprint = fingerprintModalConfigFile(configPath);
+    const modelFingerprint = fingerprintModalModel(model);
+    const state = readAutomaticPublicationLaunchState(controlRoot, pair, launchStateModule);
     const bundleRelativePath = `${pair.pair}/${pair.model_slug}/public-results.json`;
     const bundlePath = regularFileInside(
       resultsRoot,
@@ -216,28 +233,24 @@ export async function prepareAutomaticPublication(input) {
       bundleModule.MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
       `public benchmark bundle ${pair.pair}`
     );
-    const bundle = bundleModule.readPublicBenchmarkBundle(bundlePath);
+    const bundle = bundleModule.readPublicBenchmarkBundle(bundlePath, {
+      expectedSchemaVersion: bundleModule.PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION
+    });
     const expectedEvalRunId = workerModule.publicEvalRunId(config.run_id, model.slug);
-    const mismatches = [
-      bundle.benchmark === context.benchmark ? undefined : "benchmark",
-      bundle.lane === context.mode ? undefined : "lane",
-      bundle.model_slug === model.slug ? undefined : "model slug",
-      bundle.model === model.model ? undefined : "model",
-      bundle.reasoning === model.reasoning ? undefined : "reasoning",
-      bundle.candidate_commit === context.candidateCommit ? undefined : "candidate commit",
-      bundle.eval_run_id === expectedEvalRunId ? undefined : "eval run",
-      bundle.lineage.logical_run_id === config.run_id ? undefined : "logical run",
-      bundle.lineage.generation === 1 ? undefined : "launch generation",
-      bundle.lineage.config_fingerprint === fingerprintModalConfigFile(configPath) ? undefined : "config fingerprint",
-      bundle.lineage.source_fingerprint === sourceFingerprint ? undefined : "source fingerprint",
-      bundle.lineage.model_fingerprint === fingerprintModalModel(model) ? undefined : "model fingerprint"
-    ].filter((entry) => entry !== undefined);
-    if (mismatches.length > 0) {
-      throw new Error(`public benchmark bundle ${pair.pair} has mismatched ${mismatches.join(", ")}`);
-    }
-    if (!Number.isSafeInteger(bundle.lineage.attempt) || bundle.lineage.attempt < 1 || bundle.lineage.attempt > 3) {
-      throw new Error(`public benchmark bundle ${pair.pair} has an invalid launch attempt`);
-    }
+    assertAutomaticPublicationFinalLaunch({
+      pair: pair.pair,
+      bundle,
+      config,
+      model,
+      state,
+      context,
+      expectedEvalRunId,
+      configFingerprint,
+      sourceFingerprint,
+      imageFingerprint: launchStateModule.fingerprintModalImage(state.image, state.image_id),
+      modelFingerprint
+    });
+    assertAutomaticPublicationModelEvidence(bundle, model.model, pair.pair);
     const publicationSummary = summarizePublicBenchmarkBundlePublication(
       bundle,
       {
@@ -303,6 +316,135 @@ export async function prepareAutomaticPublication(input) {
   return { generation, plan };
 }
 
+export function readAutomaticPublicationLaunchState(controlRoot, pair, launchStateModule) {
+  const statePath = regularFileInside(
+    controlRoot,
+    pair.state_path,
+    MAX_LAUNCH_STATE_BYTES,
+    `benchmark launch state ${pair.state_path}`
+  );
+  const value = readJsonRegular(statePath, MAX_LAUNCH_STATE_BYTES, `benchmark launch state ${pair.state_path}`);
+  try {
+    return launchStateModule.parseModalLaunchState(value);
+  } catch (error) {
+    throw new Error(`benchmark launch state ${pair.state_path} is invalid`, { cause: error });
+  }
+}
+
+export function assertAutomaticPublicationFinalLaunch(input) {
+  const { pair, bundle, config, model, state, context } = input;
+  if (bundle.schema_version !== AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION) {
+    throw new Error(`public benchmark bundle ${pair} must use ${AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION}`);
+  }
+  if (!Array.isArray(state.launches) || state.launches.length !== 1 || state.launches[0]?.slug !== model.slug) {
+    throw new Error(`benchmark launch state ${pair} does not contain exactly the configured model launch`);
+  }
+  const launch = state.launches[0];
+  const attempts = [...state.attempt_history, launch];
+  if (attempts.some((attempt) => attempt.slug !== model.slug)) {
+    throw new Error(`benchmark launch state ${pair} contains an attempt for another model`);
+  }
+  const currentGenerationAttempts = attempts
+    .filter((attempt) => attempt.generation === state.generation)
+    .sort((left, right) => left.attempt - right.attempt);
+  const contiguousAttempts =
+    currentGenerationAttempts.length === launch.attempt &&
+    currentGenerationAttempts.every((attempt, index) => attempt.attempt === index + 1);
+  const latestAttempt = attempts.reduce((latest, attempt) =>
+    attempt.generation > latest.generation ||
+    (attempt.generation === latest.generation && attempt.attempt > latest.attempt)
+      ? attempt
+      : latest
+  );
+  const currentLifecycle = state.recovery_lifecycle.filter((record) => record.attempt_id === launch.attempt_id);
+  const successfulLifecycles = state.recovery_lifecycle.filter((record) => record.terminal_reason === "succeeded");
+  const nonfinalLifecycles = state.recovery_lifecycle.filter((record) => record.attempt_id !== launch.attempt_id);
+  const safePreModelRetryHistory = nonfinalLifecycles.every(
+    (record) =>
+      record.terminal_reason === "operational-failure" &&
+      record.terminal_class === "operational-failure" &&
+      record.model_work_started === false
+  );
+  const lifecycle = currentLifecycle[0];
+  const exactModel =
+    launch.slug === model.slug &&
+    launch.model === model.model &&
+    launch.provider === model.provider &&
+    launch.agent === model.agent &&
+    launch.reasoning === model.reasoning &&
+    launch.auth_mode === model.auth_mode;
+  const finalAttempt =
+    latestAttempt.generation === launch.generation &&
+    latestAttempt.attempt === launch.attempt &&
+    latestAttempt.attempt_id === launch.attempt_id;
+  const exactLifecycle =
+    currentLifecycle.length === 1 &&
+    lifecycle?.logical_run_id === state.logical_run_id &&
+    lifecycle.model_slug === model.slug &&
+    lifecycle.generation === launch.generation &&
+    lifecycle.attempt === launch.attempt &&
+    lifecycle.terminal_reason === "succeeded" &&
+    lifecycle.terminal_class === "succeeded" &&
+    lifecycle.model_work_started === true &&
+    lifecycle.controller_requested === false &&
+    typeof lifecycle.finished_at === "string" &&
+    lifecycle.fingerprints.config === input.configFingerprint &&
+    lifecycle.fingerprints.source === input.sourceFingerprint &&
+    lifecycle.fingerprints.image === input.imageFingerprint &&
+    lifecycle.fingerprints.model === input.modelFingerprint;
+  const mismatches = [
+    state.logical_run_id === config.run_id ? undefined : "state logical run",
+    state.generation === 1 ? undefined : "state launch generation",
+    state.generation_mode === "fresh" ? undefined : "state generation mode",
+    state.generation_start_reason === "initial" ? undefined : "state generation start reason",
+    state.app === config.app_name ? undefined : "state app",
+    state.image === config.image_name ? undefined : "state image",
+    state.source_revision === context.candidateCommit ? undefined : "state candidate revision",
+    state.fingerprints.config === input.configFingerprint ? undefined : "state config fingerprint",
+    state.fingerprints.source === input.sourceFingerprint ? undefined : "state source fingerprint",
+    state.fingerprints.image === input.imageFingerprint ? undefined : "state image fingerprint",
+    exactModel ? undefined : "state model",
+    launch.model_fingerprint === input.modelFingerprint ? undefined : "state model fingerprint",
+    launch.generation === state.generation ? undefined : "state model generation",
+    launch.phase === "launched" ? undefined : "state launch phase",
+    Number.isSafeInteger(launch.attempt) && launch.attempt >= 1 && launch.attempt <= 3
+      ? undefined
+      : "state launch attempt",
+    contiguousAttempts ? undefined : "state launch attempt history",
+    finalAttempt ? undefined : "state final launch attempt",
+    successfulLifecycles.length === 1 ? undefined : "state successful launch history",
+    safePreModelRetryHistory ? undefined : "state unsafe nonfinal launch lifecycle",
+    exactLifecycle ? undefined : "state successful launch lifecycle",
+    bundle.benchmark === context.benchmark ? undefined : "benchmark",
+    bundle.lane === context.mode ? undefined : "lane",
+    bundle.model_slug === model.slug ? undefined : "model slug",
+    bundle.model === model.model ? undefined : "model",
+    bundle.provider_reported_model === model.model ? undefined : "provider-reported model",
+    bundle.reasoning === model.reasoning ? undefined : "reasoning",
+    context.expectedModel === undefined || bundle.model === context.expectedModel ? undefined : "exact expected model",
+    context.expectedModel === undefined || bundle.provider_reported_model === context.expectedModel
+      ? undefined
+      : "exact expected provider-reported model",
+    context.expectedReasoning === undefined || bundle.reasoning === context.expectedReasoning
+      ? undefined
+      : "exact expected reasoning",
+    bundle.candidate_commit === context.candidateCommit ? undefined : "candidate commit",
+    bundle.eval_run_id === input.expectedEvalRunId ? undefined : "eval run",
+    bundle.lineage.logical_run_id === state.logical_run_id ? undefined : "logical run lineage",
+    bundle.lineage.generation === launch.generation ? undefined : "launch generation lineage",
+    bundle.lineage.attempt === launch.attempt ? undefined : "launch attempt lineage",
+    bundle.lineage.attempt_id === launch.attempt_id ? undefined : "launch attempt ID lineage",
+    bundle.lineage.config_fingerprint === input.configFingerprint ? undefined : "config fingerprint lineage",
+    bundle.lineage.source_fingerprint === input.sourceFingerprint ? undefined : "source fingerprint lineage",
+    bundle.lineage.image_fingerprint === input.imageFingerprint ? undefined : "image fingerprint lineage",
+    bundle.lineage.model_fingerprint === input.modelFingerprint ? undefined : "model fingerprint lineage"
+  ].filter((entry) => entry !== undefined);
+  if (mismatches.length > 0) {
+    throw new Error(`public benchmark bundle ${pair} has mismatched ${mismatches.join(", ")}`);
+  }
+  return launch;
+}
+
 function publicationExpectations(input) {
   const candidateCommit = fullCommit(input.candidateCommit, "candidate commit");
   const repository = canonicalRepository(input.repository);
@@ -348,6 +490,7 @@ function publicationExpectations(input) {
   );
   const maxLiveRowsPerPair = Math.min(matrixRowsPerPair, maxParallelEvalRows);
   const providers = expectedBenchmarkProviders(input.mode, input.expectedProviders);
+  const expectedProfile = exactExpectedBenchmarkProfile(input, providers);
   return {
     candidateCommit,
     repository,
@@ -357,6 +500,7 @@ function publicationExpectations(input) {
     mode: input.mode,
     benchmark: smoke ? "ultrafuzz-bench" : "evmbench",
     providers,
+    ...expectedProfile,
     targetIds,
     targets,
     targetCount,
@@ -369,6 +513,27 @@ function publicationExpectations(input) {
     maxLiveRowsPerPair,
     maxLiveJudgeRows: checkedProduct(providers.length, maxLiveRowsPerPair, "maximum live judge rows")
   };
+}
+
+function exactExpectedBenchmarkProfile(input, providers) {
+  const hasModel = input.expectedModel !== undefined;
+  const hasReasoning = input.expectedReasoning !== undefined;
+  if (hasModel !== hasReasoning) {
+    throw new Error("expected benchmark model and reasoning must be supplied together");
+  }
+  if (!hasModel) return {};
+  if (providers.length !== 1) {
+    throw new Error("an exact expected benchmark model profile requires exactly one expected provider");
+  }
+  const expectedModel = requiredString(input.expectedModel, "expected benchmark model");
+  const expectedReasoning = requiredString(input.expectedReasoning, "expected benchmark reasoning");
+  if (!SAFE_MODEL.test(expectedModel) || /(?:^|[-_.:/])latest$/iu.test(expectedModel)) {
+    throw new Error("expected benchmark model must be safely pinned");
+  }
+  if (!SAFE_REASONING.test(expectedReasoning)) {
+    throw new Error("expected benchmark reasoning is invalid");
+  }
+  return { expectedModel, expectedReasoning };
 }
 
 function expectedBenchmarkProviders(mode, explicitProviders) {
@@ -716,6 +881,17 @@ function positiveSafeInteger(value, label) {
   return value;
 }
 
+function nonNegativeFinite(value, label) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function nearlyEqual(left, right) {
+  return Math.abs(left - right) <= Math.max(1e-12, Math.abs(left) * 1e-12, Math.abs(right) * 1e-12);
+}
+
 function checkedProduct(left, right, label) {
   const value = left * right;
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive safe integer`);
@@ -775,6 +951,10 @@ export function validateAutomaticPairConfig(config, model, pair, context, usedMo
     config.braintrust.judge_url === "https://api.openai.com/v1/chat/completions" ? undefined : "judge URL",
     model.slug === pair.model_slug ? undefined : "model slug",
     model.slug === expectedModelSlug ? undefined : "derived model slug",
+    context.expectedModel === undefined || model.model === context.expectedModel ? undefined : "expected model",
+    context.expectedReasoning === undefined || model.reasoning === context.expectedReasoning
+      ? undefined
+      : "expected reasoning",
     model.provider === pair.provider ? undefined : "model provider",
     model.agent === expectedAgent ? undefined : "model agent",
     model.auth_mode === "api-key" ? undefined : "model authentication mode"
@@ -904,6 +1084,235 @@ export function summarizePublicBenchmarkBundlePublication(bundle, expected, pair
     graded_case_count: gradedCaseCount,
     publication_url: canonicalPublicationUrl(publicationUrl)
   };
+}
+
+export function assertAutomaticPublicationModelEvidence(bundle, configuredModelValue, pair) {
+  const configuredModel = requiredString(configuredModelValue, `public benchmark bundle ${pair} configured model`);
+  if (!SAFE_MODEL.test(configuredModel)) {
+    throw new Error(`public benchmark bundle ${pair} configured model is invalid`);
+  }
+  if (
+    bundle.schema_version !== AUTOMATIC_PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION ||
+    bundle.model !== configuredModel ||
+    bundle.provider_reported_model !== configuredModel
+  ) {
+    throw new Error(`public benchmark bundle ${pair} has missing or substituted provider-reported identity`);
+  }
+  const diagnostics = looseRecord(
+    bundleFileJson(bundle, PUBLIC_EVAL_DIAGNOSTICS_PATH, pair),
+    `public benchmark bundle ${pair} diagnostics`
+  );
+  const summary = looseRecord(
+    bundleFileJson(bundle, "eval/summary.json", pair),
+    `public benchmark bundle ${pair} score summary`
+  );
+  if (
+    diagnostics.schema_version !== AUTOMATIC_PUBLIC_EVAL_DIAGNOSTICS_SCHEMA_VERSION ||
+    diagnostics.model !== configuredModel ||
+    !Array.isArray(diagnostics.rows) ||
+    diagnostics.rows.length === 0 ||
+    !Array.isArray(summary.rows) ||
+    summary.rows.length !== diagnostics.rows.length
+  ) {
+    throw new Error(`public benchmark bundle ${pair} has incomplete model/pricing diagnostics`);
+  }
+  const summaryByRow = new Map();
+  const summaryRowIds = new Set();
+  for (const [index, value] of summary.rows.entries()) {
+    const row = looseRecord(value, `public benchmark bundle ${pair} summary row ${index}`);
+    const rowId = safeId(row.row_id, `public benchmark bundle ${pair} summary row ${index} ID`);
+    assertUnique(summaryRowIds, rowId, "public benchmark summary row ID");
+    summaryByRow.set(rowId, row);
+  }
+  for (const [index, value] of diagnostics.rows.entries()) {
+    const row = looseRecord(value, `public benchmark bundle ${pair} diagnostics row ${index}`);
+    const rowId = safeId(row.row_id, `public benchmark bundle ${pair} diagnostics row ${index} ID`);
+    const identity = strictRecord(row.model_identity, `public benchmark bundle ${pair} row ${rowId} model identity`, [
+      "schema_version",
+      "configured_model",
+      "provider_reported_model",
+      "invocation_count",
+      "invocations"
+    ]);
+    if (
+      identity.schema_version !== "ultrafuzz.eval.model-identity.v1" ||
+      identity.configured_model !== configuredModel ||
+      identity.provider_reported_model !== configuredModel ||
+      !Number.isSafeInteger(identity.invocation_count) ||
+      identity.invocation_count <= 0 ||
+      !Array.isArray(identity.invocations) ||
+      identity.invocations.length !== identity.invocation_count
+    ) {
+      throw new Error(`public benchmark bundle ${pair} row ${rowId} model identity is incomplete or mixed`);
+    }
+    const invocationIds = new Set();
+    for (const [invocationIndex, invocationValue] of identity.invocations.entries()) {
+      const invocation = strictRecord(
+        invocationValue,
+        `public benchmark bundle ${pair} row ${rowId} invocation ${invocationIndex}`,
+        ["invocation_id", "configured_model", "provider_reported_model"]
+      );
+      const invocationId = requiredString(
+        invocation.invocation_id,
+        `public benchmark bundle ${pair} row ${rowId} invocation ${invocationIndex} ID`
+      );
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(invocationId) ||
+        invocation.configured_model !== configuredModel ||
+        invocation.provider_reported_model !== configuredModel
+      ) {
+        throw new Error(`public benchmark bundle ${pair} row ${rowId} contains substituted model identity`);
+      }
+      assertUnique(invocationIds, invocationId, "public benchmark model invocation ID");
+    }
+
+    const pricing = strictRecord(row.pricing, `public benchmark bundle ${pair} row ${rowId} pricing`, [
+      "schema_version",
+      "configured_model",
+      "provider_reported_model",
+      "catalog",
+      "rates_usd_per_million",
+      "usage",
+      "component_costs_usd",
+      "cost_usd",
+      "usage_complete",
+      "pricing_complete",
+      "partial_pricing",
+      "event_count",
+      "priced_event_count",
+      "unpriced_event_count",
+      "thinking_tokens_included_in_output"
+    ]);
+    const catalog = strictRecord(pricing.catalog, `public benchmark bundle ${pair} row ${rowId} pricing catalog`, [
+      "source",
+      "status",
+      "fetched_at",
+      "catalog_sha256",
+      "resolved_models",
+      "unresolved_models"
+    ]);
+    const rates = strictRecord(
+      pricing.rates_usd_per_million,
+      `public benchmark bundle ${pair} row ${rowId} pricing rates`,
+      ["uncached_input", "cache_read", "cache_write", "output", "reasoning"]
+    );
+    const usage = strictRecord(pricing.usage, `public benchmark bundle ${pair} row ${rowId} pricing usage`, [
+      "uncached_input_tokens",
+      "cache_read_tokens",
+      "cache_write_tokens",
+      "output_tokens",
+      "reasoning_tokens",
+      "inclusive_token_total",
+      "billable_token_total",
+      "total_tokens"
+    ]);
+    const componentCosts = strictRecord(
+      pricing.component_costs_usd,
+      `public benchmark bundle ${pair} row ${rowId} component costs`,
+      ["uncached_input", "cache_read", "cache_write", "output", "reasoning"]
+    );
+    if (
+      pricing.schema_version !== "ultrafuzz.eval.pricing-evidence.v1" ||
+      pricing.configured_model !== configuredModel ||
+      pricing.provider_reported_model !== configuredModel ||
+      catalog.source !== "models.dev" ||
+      catalog.status !== "available" ||
+      typeof catalog.fetched_at !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(catalog.catalog_sha256) ||
+      JSON.stringify(catalog.resolved_models) !== JSON.stringify([configuredModel]) ||
+      !Array.isArray(catalog.unresolved_models) ||
+      catalog.unresolved_models.length !== 0 ||
+      pricing.usage_complete !== true ||
+      pricing.pricing_complete !== true ||
+      pricing.partial_pricing !== false ||
+      pricing.event_count !== identity.invocation_count ||
+      pricing.priced_event_count !== pricing.event_count ||
+      pricing.unpriced_event_count !== 0
+    ) {
+      throw new Error(`public benchmark bundle ${pair} row ${rowId} pricing evidence is missing or partial`);
+    }
+    assertAutomaticPricingArithmetic({ rates, usage, componentCosts, pricing, pair, rowId });
+    if (
+      configuredModel === DEEPSEEK_V4_FLASH_MODEL &&
+      (pricing.thinking_tokens_included_in_output !== true ||
+        usage.cache_write_tokens !== 0 ||
+        usage.reasoning_tokens !== 0 ||
+        componentCosts.cache_write !== 0 ||
+        componentCosts.reasoning !== 0)
+    ) {
+      throw new Error(`public benchmark bundle ${pair} row ${rowId} has invalid DeepSeek Flash accounting`);
+    }
+    const summaryRow = summaryByRow.get(rowId);
+    const efficiency = looseRecord(summaryRow?.efficiency, `public benchmark bundle ${pair} row ${rowId} efficiency`);
+    const usageCompleteness = looseRecord(
+      efficiency.usage,
+      `public benchmark bundle ${pair} row ${rowId} usage completeness`
+    );
+    const costCompleteness = looseRecord(
+      efficiency.cost,
+      `public benchmark bundle ${pair} row ${rowId} cost completeness`
+    );
+    if (
+      efficiency.total_tokens !== usage.total_tokens ||
+      efficiency.cost_usd !== pricing.cost_usd ||
+      usageCompleteness.status !== "complete" ||
+      usageCompleteness.reason !== null ||
+      costCompleteness.status !== "complete" ||
+      costCompleteness.reason !== null
+    ) {
+      throw new Error(`public benchmark bundle ${pair} row ${rowId} score summary has incomplete pricing closure`);
+    }
+  }
+  if (summaryByRow.size !== diagnostics.rows.length) {
+    throw new Error(`public benchmark bundle ${pair} score summary row set does not match pricing evidence`);
+  }
+}
+
+function assertAutomaticPricingArithmetic({ rates, usage, componentCosts, pricing, pair, rowId }) {
+  const numericRates = {
+    uncached_input: nonNegativeFinite(rates.uncached_input, `${pair}/${rowId} uncached input rate`),
+    cache_read: nonNegativeFinite(rates.cache_read, `${pair}/${rowId} cache-read rate`),
+    cache_write:
+      rates.cache_write === null ? null : nonNegativeFinite(rates.cache_write, `${pair}/${rowId} cache-write rate`),
+    output: nonNegativeFinite(rates.output, `${pair}/${rowId} output rate`),
+    reasoning: nonNegativeFinite(rates.reasoning, `${pair}/${rowId} reasoning rate`)
+  };
+  const tokens = Object.fromEntries(
+    ["uncached_input", "cache_read", "cache_write", "output", "reasoning"].map((component) => {
+      const value = usage[`${component}_tokens`];
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`public benchmark bundle ${pair} row ${rowId} has invalid ${component} usage`);
+      }
+      return [component, value];
+    })
+  );
+  const inclusive = Object.values(tokens).reduce((total, value) => total + value, 0);
+  const expectedCosts = Object.fromEntries(
+    Object.keys(tokens).map((component) => {
+      const rate = numericRates[component];
+      if (rate === null && tokens[component] !== 0) {
+        throw new Error(`public benchmark bundle ${pair} row ${rowId} has unpriced ${component} usage`);
+      }
+      return [component, rate === null ? 0 : (tokens[component] * rate) / 1_000_000];
+    })
+  );
+  const expectedCost = Object.values(expectedCosts).reduce((total, value) => total + value, 0);
+  if (
+    usage.inclusive_token_total !== inclusive ||
+    usage.billable_token_total !== inclusive ||
+    usage.total_tokens !== inclusive ||
+    Object.keys(expectedCosts).some(
+      (component) =>
+        !nearlyEqual(
+          nonNegativeFinite(componentCosts[component], `${pair}/${rowId} ${component} cost`),
+          expectedCosts[component]
+        )
+    ) ||
+    !nearlyEqual(nonNegativeFinite(pricing.cost_usd, `${pair}/${rowId} total cost`), expectedCost) ||
+    (pricing.thinking_tokens_included_in_output === true && (tokens.reasoning !== 0 || componentCosts.reasoning !== 0))
+  ) {
+    throw new Error(`public benchmark bundle ${pair} row ${rowId} pricing arithmetic is inconsistent`);
+  }
 }
 
 function validatedBundleTargets(value, pair) {
@@ -1182,6 +1591,37 @@ function gitOutput(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+export function parseAutomaticPublicationProfileOptions(args) {
+  if (!Array.isArray(args) || args.length % 2 !== 0) {
+    throw new Error("automatic publication profile options must be flag/value pairs");
+  }
+  const values = new Map();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if (!["--expected-provider", "--expected-model", "--expected-reasoning"].includes(option)) {
+      throw new Error(`unknown automatic publication profile option: ${String(option)}`);
+    }
+    if (values.has(option)) {
+      throw new Error(`automatic publication profile option is duplicated: ${option}`);
+    }
+    values.set(option, requiredString(value, `automatic publication option ${option}`));
+  }
+  const expectedProvider = values.get("--expected-provider");
+  const expectedModel = values.get("--expected-model");
+  const expectedReasoning = values.get("--expected-reasoning");
+  if ((expectedModel === undefined) !== (expectedReasoning === undefined)) {
+    throw new Error("expected model and reasoning options must be supplied together");
+  }
+  if (expectedModel !== undefined && expectedProvider === undefined) {
+    throw new Error("an exact expected model profile requires an expected provider");
+  }
+  return {
+    ...(expectedProvider === undefined ? {} : { expectedProviders: [expectedProvider] }),
+    ...(expectedModel === undefined ? {} : { expectedModel, expectedReasoning })
+  };
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "policy") {
@@ -1196,11 +1636,11 @@ async function main() {
   }
   if (command !== "automatic") {
     throw new Error(
-      "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>]"
+      "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>] [--expected-model <model> --expected-reasoning <reasoning>]"
     );
   }
   const automaticUsage =
-    "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>]";
+    "usage: prepare-eval-history-publication.mjs automatic <manifest> <control-root> <results-root> <policy-root> <candidate-commit> <repository> <run-id> <run-attempt> <mode> <generation-output> <plan-output> [--expected-provider <provider>] [--expected-model <model> --expected-reasoning <reasoning>]";
   const [
     manifestPath,
     controlRoot,
@@ -1228,13 +1668,14 @@ async function main() {
       mode,
       generationPath,
       planPath
-    ].some((value) => value === undefined) ||
-    (extra.length !== 0 && extra.length !== 2)
+    ].some((value) => value === undefined)
   ) {
     throw new Error(automaticUsage);
   }
-  const [option, expectedProvider] = extra;
-  if (option !== undefined && (option !== "--expected-provider" || expectedProvider === undefined)) {
+  let profileOptions;
+  try {
+    profileOptions = parseAutomaticPublicationProfileOptions(extra);
+  } catch {
     throw new Error(automaticUsage);
   }
   const result = await prepareAutomaticPublication({
@@ -1249,7 +1690,7 @@ async function main() {
     mode,
     generationPath,
     planPath,
-    ...(expectedProvider === undefined ? {} : { expectedProviders: [expectedProvider] })
+    ...profileOptions
   });
   process.stdout.write(`${JSON.stringify({ pairs: result.plan.pairs.length })}\n`);
 }

@@ -366,7 +366,7 @@ describe("public Modal benchmark configuration", () => {
     ]);
   });
 
-  it("creates an explicit DeepSeek V4 smoke benchmark with max reasoning", () => {
+  it("creates the fixed DeepSeek V4 Flash smoke benchmark with max reasoning", () => {
     const workspace = path.resolve("../..");
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-deepseek-smoke-"));
     execFileSync(
@@ -383,7 +383,9 @@ describe("public Modal benchmark configuration", () => {
         cwd: workspace,
         env: {
           ...process.env,
-          BENCHMARK_MODELS_JSON: JSON.stringify([{ provider: "deepseek", model: "deepseek-v4-pro", reasoning: "max" }])
+          BENCHMARK_MODELS_JSON: JSON.stringify([
+            { provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" }
+          ])
         }
       }
     );
@@ -395,7 +397,7 @@ describe("public Modal benchmark configuration", () => {
     expect(manifest.pairs).toEqual([
       expect.objectContaining({
         provider: "deepseek",
-        model_slug: "benchmark-smoke-deepseek-v4-pro-max"
+        model_slug: "benchmark-smoke-deepseek-v4-flash-max"
       })
     ]);
     const config = JSON.parse(fs.readFileSync(path.join(output, manifest.pairs[0]!.config_path), "utf8")) as {
@@ -405,7 +407,7 @@ describe("public Modal benchmark configuration", () => {
       expect.objectContaining({
         agent: "DeepSeekAgent",
         auth_mode: "api-key",
-        model: "deepseek-v4-pro",
+        model: "deepseek-v4-flash",
         provider: "deepseek",
         reasoning: "max"
       })
@@ -483,7 +485,7 @@ describe("public Modal benchmark configuration", () => {
           inputs: Record<string, { default: string; type: string }>;
         };
       };
-      env: { BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
+      env: { BENCHMARK_SCOPE: string; BENCHMARK_MODE: string; BENCHMARK_CANDIDATE: string };
       concurrency: { group: string; "cancel-in-progress": string };
       jobs: Record<
         string,
@@ -497,6 +499,11 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.on.push.branches).toEqual(["**"]);
     expect(Object.hasOwn(workflow.on, "pull_request")).toBe(false);
     expect(workflow.on.workflow_dispatch.inputs).toEqual({
+      benchmark_scope: expect.objectContaining({
+        default: "full",
+        type: "choice",
+        options: ["full", "deepseek-v4-flash-smoke"]
+      }),
       openai_model: expect.objectContaining({ default: "gpt-5.6-luna", type: "string" }),
       openai_reasoning: expect.objectContaining({ default: "high", type: "string" }),
       anthropic_model: expect.objectContaining({ default: "claude-sonnet-5", type: "string" }),
@@ -509,9 +516,13 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.env.BENCHMARK_MODE).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'full'");
     expect(workflow.env.BENCHMARK_MODE).toContain("'smoke'");
+    expect(workflow.env.BENCHMARK_MODE).toContain("inputs.benchmark_scope == 'full'");
+    expect(workflow.env.BENCHMARK_SCOPE).toContain("inputs.benchmark_scope");
+    expect(workflow.env.BENCHMARK_SCOPE).toContain("'push-smoke'");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.event.after");
     expect(workflow.env.BENCHMARK_CANDIDATE).toContain("github.sha");
-    expect(workflow.concurrency.group).toContain("'full' || 'smoke'");
+    expect(workflow.concurrency.group).toContain("inputs.benchmark_scope");
+    expect(workflow.concurrency.group).toContain("'push-smoke'");
     expect(workflow.concurrency.group).toContain("github.ref");
     expect(workflow.concurrency.group).toContain("github.run_id");
     expect(workflow.concurrency.group).not.toContain("pull_request");
@@ -519,6 +530,8 @@ describe("public Modal benchmark configuration", () => {
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow.jobs.launch?.if).toContain("github.event_name == 'push'");
     expect(workflow.jobs.launch?.if).toContain("github.event.deleted == false");
+    expect(workflow.jobs.launch?.steps[0]?.name).toContain("Benchmark scope");
+    expect(workflow.jobs.launch?.steps[0]?.name).toContain("inputs.benchmark_scope");
     expect(fs.existsSync(path.join(workspace, ".github/workflows/target-e2e.yml"))).toBe(false);
 
     const prepare = workflow.jobs.launch?.steps.find(
@@ -541,10 +554,22 @@ describe("public Modal benchmark configuration", () => {
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("inputs.deepseek_reasoning");
     expect(prepare?.env?.BENCHMARK_DEEPSEEK_REASONING).toContain("'max'");
     expect(prepare?.run).toContain("BENCHMARK_MODELS_JSON");
+    expect(prepare?.run).toContain('BENCHMARK_SCOPE" = deepseek-v4-flash-smoke');
+    expect(prepare?.run).toContain(
+      `BENCHMARK_MODELS_JSON='[{"provider":"deepseek","model":"deepseek-v4-flash","reasoning":"max"}]'`
+    );
     expect(prepare?.run).toContain('--arg reasoning "high"');
     expect(prepare?.run).toContain('{provider: "kimi", model: $kimi_model, reasoning: $kimi_reasoning}');
     expect(prepare?.run).toContain('{provider: "deepseek", model: $deepseek_model, reasoning: $deepseek_reasoning}');
     expect(prepare?.run).toContain('"$BENCHMARK_MODE"');
+    const guard = workflow.jobs.launch?.steps.find(
+      (step) => step.name === "Validate Modal benchmark launch guardrails"
+    );
+    expect(guard?.run).toContain("profile_args=(");
+    expect(guard?.run).toContain("--expected-provider deepseek");
+    expect(guard?.run).toContain("--expected-model deepseek-v4-flash");
+    expect(guard?.run).toContain("--expected-reasoning max");
+    expect(guard?.run).toContain("profile_args=(--expected-provider openai)");
     for (const jobName of ["launch", "collect", "cleanup_incomplete_run"]) {
       const checkout = workflow.jobs[jobName]?.steps.find((step) =>
         String(step.with?.ref ?? "").includes("BENCHMARK_CANDIDATE")
@@ -718,6 +743,12 @@ describe("public Modal benchmark configuration", () => {
       cleanup.steps.find((step) => step.name === "Validate incomplete-run cleanup paths")?.env?.EXPECTED_CANDIDATE
     ).toBe("${{ env.BENCHMARK_CANDIDATE }}");
     expect(pathValidation).toContain("prepare-modal-benchmark-cleanup.mjs");
+    expect(pathValidation).toContain("profile_args=(");
+    expect(pathValidation).toContain("--expected-provider deepseek");
+    expect(pathValidation).toContain("--expected-model deepseek-v4-flash");
+    expect(pathValidation).toContain("--expected-reasoning max");
+    expect(pathValidation).toContain("profile_args=(--expected-provider openai)");
+    expect(pathValidation).toContain('"${profile_args[@]}"');
     const cleanupPreparation = fs.readFileSync(
       path.join(workspace, "scripts/ci/prepare-modal-benchmark-cleanup.mjs"),
       "utf8"
@@ -794,6 +825,7 @@ describe("public Modal benchmark configuration", () => {
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'push'");
     expect(cleanup.if).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
     expect(cleanup.env?.BENCHMARK_CANDIDATE).toBe("${{ github.event.workflow_run.head_sha }}");
+    expect(cleanup.env).not.toHaveProperty("BENCHMARK_MODE");
     expect(cleanup["timeout-minutes"]).toBeGreaterThanOrEqual(75);
 
     const checkouts = cleanup.steps.filter((step) => step.uses?.startsWith("actions/checkout@"));
@@ -810,6 +842,7 @@ describe("public Modal benchmark configuration", () => {
 
     const plan = cleanup.steps.find((step) => step.name === "Restore the incomplete run's immutable pre-compute plan")!;
     expect(plan["continue-on-error"]).toBeUndefined();
+    expect(plan.with?.name).toContain("steps.incomplete_plan.outputs.benchmark_mode");
     expect(plan.with?.name).toContain("${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}");
     expect(plan.with?.["run-id"]).toBe("${{ env.SOURCE_RUN_ID }}");
     expect(plan.with?.["github-token"]).toBe("${{ github.token }}");
@@ -817,6 +850,23 @@ describe("public Modal benchmark configuration", () => {
     const discovery = cleanup.steps.find((step) => step.name === "Discover the exact pre-compute benchmark plan")!;
     expect(discovery.run).toContain("attempts/$SOURCE_RUN_ATTEMPT/jobs");
     expect(discovery.run).toContain("compute_may_have_started");
+    expect(discovery.run).toContain("modal-benchmark-plan-smoke-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT");
+    expect(discovery.run).toContain("modal-benchmark-plan-full-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT");
+    expect(discovery.run).toContain('echo "benchmark_mode=$benchmark_mode"');
+    expect(discovery.run).toContain('echo "BENCHMARK_MODE=$benchmark_mode"');
+    expect(discovery.run).toContain("Benchmark scope deepseek-v4-flash-smoke");
+    expect(discovery.run).toContain('"workflow_dispatch:smoke:Benchmark scope deepseek-v4-flash-smoke")');
+    expect(discovery.run).toContain("expected_provider=deepseek");
+    expect(discovery.run).toContain("expected_model=deepseek-v4-flash");
+    expect(discovery.run).toContain("expected_reasoning=max");
+    expect(discovery.run).toContain('launch_job_count" -ne 1');
+    expect(discovery.run).toContain('startswith("Benchmark scope ")');
+    expect(discovery.run).toContain('echo "EXPECTED_PROVIDER=$expected_provider"');
+    expect(discovery.run).toContain('echo "EXPECTED_MODEL=$expected_model"');
+    expect(discovery.run).toContain('echo "EXPECTED_REASONING=$expected_reasoning"');
+    expect(discovery.run).toContain('} >> "$GITHUB_ENV"');
+    expect(discovery.run).toContain('} >> "$GITHUB_OUTPUT"');
+    expect(recoveryText).not.toContain("github.event.workflow_run.event == 'workflow_dispatch' && 'full'");
 
     const validation = cleanup.steps.find(
       (step) => step.name === "Validate incomplete-run identity and termination scopes"
@@ -826,7 +876,10 @@ describe("public Modal benchmark configuration", () => {
     const cleanupInvocation = validation?.run?.match(
       /node scripts\/ci\/prepare-modal-benchmark-cleanup\.mjs[\s\S]*$/u
     )?.[0];
-    expect(cleanupInvocation?.trimEnd().endsWith('"$CANDIDATE_SOURCE"')).toBe(true);
+    expect(validation?.run).toContain('profile_args=(--expected-provider "$EXPECTED_PROVIDER")');
+    expect(validation?.run).toContain('--expected-model "$EXPECTED_MODEL"');
+    expect(validation?.run).toContain('--expected-reasoning "$EXPECTED_REASONING"');
+    expect(cleanupInvocation?.trimEnd().endsWith('"${profile_args[@]}"')).toBe(true);
     const termination = cleanup.steps.find((step) => step.name === "Terminate every exact incomplete-run sandbox");
     expect(termination?.run).toContain("terminate-modal-benchmark.sh");
     expect(termination?.run).toContain("false");
@@ -891,6 +944,7 @@ describe("public Modal benchmark configuration", () => {
           if?: string;
           needs?: string | string[];
           permissions?: Record<string, string>;
+          outputs?: Record<string, string>;
           env?: Record<string, string>;
           steps: Array<{
             id?: string;
@@ -920,6 +974,9 @@ describe("public Modal benchmark configuration", () => {
     const qualifier = publication.jobs.qualify_modal_benchmark!;
     expect(qualifier.if).toBe("github.event_name == 'workflow_run'");
     expect(qualifier.permissions).toEqual({ actions: "read", contents: "read" });
+    expect(qualifier.outputs?.expected_provider).toBe("${{ steps.qualify.outputs.expected_provider }}");
+    expect(qualifier.outputs?.expected_model).toBe("${{ steps.qualify.outputs.expected_model }}");
+    expect(qualifier.outputs?.expected_reasoning).toBe("${{ steps.qualify.outputs.expected_reasoning }}");
     const qualifierCheckout = qualifier.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(qualifierCheckout?.with?.ref).toBe("main");
     expect(qualifierCheckout?.with?.["persist-credentials"]).toBe(false);
@@ -935,6 +992,9 @@ describe("public Modal benchmark configuration", () => {
     expect(automatic.needs).toBe("qualify_modal_benchmark");
     expect(automatic.if).toBe("needs.qualify_modal_benchmark.outputs.eligible == 'true'");
     expect(automatic.env?.BENCHMARK_MODE).toBe("${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}");
+    expect(automatic.env?.EXPECTED_PROVIDER).toBe("${{ needs.qualify_modal_benchmark.outputs.expected_provider }}");
+    expect(automatic.env?.EXPECTED_MODEL).toBe("${{ needs.qualify_modal_benchmark.outputs.expected_model }}");
+    expect(automatic.env?.EXPECTED_REASONING).toBe("${{ needs.qualify_modal_benchmark.outputs.expected_reasoning }}");
     expect(automatic.env?.CANDIDATE_COMMIT).toBe("${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}");
     const automaticToken = automatic.steps.find((step) => step.id === "publisher-token");
     expect(automaticToken?.uses).toBe("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1");
@@ -958,14 +1018,42 @@ describe("public Modal benchmark configuration", () => {
     expect(policyCheckout?.with?.ref).toBe("${{ env.CANDIDATE_COMMIT }}");
     expect(policyCheckout?.with?.["persist-credentials"]).toBe(false);
     expect(automatic.steps.some((step) => step.uses?.startsWith("actions/cache@"))).toBe(false);
+    const terminalArtifact = automatic.steps.find(
+      (step) => step.name === "Resolve the exact terminal benchmark artifact"
+    );
+    expect(terminalArtifact?.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(terminalArtifact?.run).toContain(
+      'artifact_name="modal-benchmark-control-$BENCHMARK_MODE-$PRODUCER_RUN_ID-$PRODUCER_RUN_ATTEMPT"'
+    );
+    expect(terminalArtifact?.run).toContain("actions/runs/$PRODUCER_RUN_ID/artifacts?name=$artifact_name");
+    expect(terminalArtifact?.run).toContain(".total_count == 1");
+    expect(terminalArtifact?.run).toContain(".artifacts[0].expired == false");
+    expect(terminalArtifact?.run).toContain(".artifacts[0].workflow_run.id == $run_id");
     const downloads = automatic.steps.filter((step) => step.uses?.startsWith("actions/download-artifact@"));
-    expect(downloads).toHaveLength(2);
+    expect(downloads).toHaveLength(1);
     for (const download of downloads) {
       expect(download.with?.path).toContain("${{ runner.temp }}");
       expect(download.with?.["run-id"]).toBe("${{ github.event.workflow_run.id }}");
       expect(download.with?.["github-token"]).toBe("${{ github.token }}");
-      expect(download.with?.name).toContain("${{ github.event.workflow_run.run_attempt }}");
+      expect(download.with?.name).toBe(
+        "modal-benchmark-control-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}"
+      );
     }
+    expect(publicationText).not.toContain("modal-benchmark-launch-");
+    expect(publicationText).not.toContain("public-benchmark-results-");
+    const terminalLayout = automatic.steps.find(
+      (step) => step.name === "Validate the terminal benchmark artifact layout"
+    );
+    expect(terminalLayout?.env?.BENCHMARK_CONTROL).toContain("/terminal/benchmark-control");
+    expect(terminalLayout?.env?.BENCHMARK_RESULTS).toContain("/terminal/benchmark-results");
+    expect(terminalLayout?.run).toContain('find "$TERMINAL_ARTIFACT" -mindepth 1 -maxdepth 1');
+    expect(terminalLayout?.run).toContain('"${#top_level[@]}" -ne 2');
+    expect(terminalLayout?.run).toContain('"${#manifests[@]}" -ne 1');
+    const terminalArtifactIndex = automatic.steps.indexOf(terminalArtifact!);
+    const downloadIndex = automatic.steps.indexOf(downloads[0]!);
+    const terminalLayoutIndex = automatic.steps.indexOf(terminalLayout!);
+    expect(terminalArtifactIndex).toBeLessThan(downloadIndex);
+    expect(downloadIndex).toBeLessThan(terminalLayoutIndex);
     const reachability = automatic.steps.find(
       (step) => step.name === "Verify the candidate remains reachable from main"
     )?.run;
@@ -973,11 +1061,18 @@ describe("public Modal benchmark configuration", () => {
     expect(reachability).toContain("comparison_status");
     const trustedValidation = automatic.steps.find(
       (step) => step.name === "Validate the atomic Modal benchmark generation"
-    )?.run;
-    expect(trustedValidation).toContain("prepare-eval-history-publication.mjs automatic");
-    expect(trustedValidation).toContain('"$PUBLICATION_POLICY_ROOT"');
-    expect(trustedValidation).not.toContain("publish-eval-history-cas.mjs");
-    expect(trustedValidation).not.toContain("pnpm install");
+    );
+    expect(trustedValidation?.env?.BENCHMARK_CONTROL).toContain("/terminal/benchmark-control");
+    expect(trustedValidation?.env?.BENCHMARK_RESULTS).toContain("/terminal/benchmark-results");
+    const trustedValidationRun = trustedValidation?.run;
+    expect(trustedValidationRun).toContain("prepare-eval-history-publication.mjs automatic");
+    expect(trustedValidationRun).toContain('"$PUBLICATION_POLICY_ROOT"');
+    expect(trustedValidationRun).toContain('profile_args=(--expected-provider "$EXPECTED_PROVIDER")');
+    expect(trustedValidationRun).toContain('--expected-model "$EXPECTED_MODEL"');
+    expect(trustedValidationRun).toContain('--expected-reasoning "$EXPECTED_REASONING"');
+    expect(trustedValidationRun).toContain('"${profile_args[@]}"');
+    expect(trustedValidationRun).not.toContain("publish-eval-history-cas.mjs");
+    expect(trustedValidationRun).not.toContain("pnpm install");
     const privilegedPublish = automatic.steps.find(
       (step) => step.name === "Publish the validated generation with remote-tip compare-and-swap retries"
     );
@@ -991,6 +1086,7 @@ describe("public Modal benchmark configuration", () => {
     const tokenIndex = automatic.steps.findIndex((step) => step.id === "publisher-token");
     const publishIndex = automatic.steps.indexOf(privilegedPublish!);
     expect(tokenIndex).toBeGreaterThan(buildIndex);
+    expect(validationIndex).toBeGreaterThan(terminalLayoutIndex);
     expect(tokenIndex).toBeGreaterThan(validationIndex);
     expect(publishIndex).toBeGreaterThan(tokenIndex);
     expect(publication.jobs).not.toHaveProperty("publish_manual");

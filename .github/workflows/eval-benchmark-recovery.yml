@@ -30,7 +30,7 @@ jobs:
     env:
       SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
       SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-      BENCHMARK_MODE: ${{ github.event.workflow_run.event == 'workflow_dispatch' && 'full' || 'smoke' }}
+      SOURCE_EVENT: ${{ github.event.workflow_run.event }}
       BENCHMARK_CANDIDATE: ${{ github.event.workflow_run.head_sha }}
 
     steps:
@@ -38,10 +38,11 @@ jobs:
         id: incomplete_plan
         env:
           GH_TOKEN: ${{ github.token }}
-          PLAN_ARTIFACT_NAME: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}
         run: |
           artifact_index="$RUNNER_TEMP/incomplete-modal-artifacts.json"
           job_index="$RUNNER_TEMP/incomplete-modal-jobs.json"
+          smoke_plan_name="modal-benchmark-plan-smoke-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
+          full_plan_name="modal-benchmark-plan-full-$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT"
           gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -52,12 +53,14 @@ jobs:
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/attempts/$SOURCE_RUN_ATTEMPT/jobs?per_page=100" \
             > "$job_index"
-          plan_count="$(jq --arg name "$PLAN_ARTIFACT_NAME" \
-            '[.artifacts[] | select(.name == $name)] | length' \
+          plan_count="$(jq \
+            --arg smoke_name "$smoke_plan_name" \
+            --arg full_name "$full_plan_name" \
+            '[.artifacts[] | select(.name == $smoke_name or .name == $full_name)] | length' \
             "$artifact_index")"
+          launch_job_count="$(jq '[.jobs[] | select(.name == "launch")] | length' "$job_index")"
           if [ "$plan_count" -eq 0 ]; then
             total_job_count="$(jq '.jobs | length' "$job_index")"
-            launch_job_count="$(jq '[.jobs[] | select(.name == "launch")] | length' "$job_index")"
             if [ "$launch_job_count" -gt 1 ]; then
               echo "Expected at most one launch job, found $launch_job_count" >&2
               exit 1
@@ -94,13 +97,66 @@ jobs:
             echo "No immutable plan exists and the exact attempt never reached a Modal compute step."
             echo "available=false" >> "$GITHUB_OUTPUT"
           elif [ "$plan_count" -eq 1 ]; then
-            if ! jq -e --arg name "$PLAN_ARTIFACT_NAME" \
+            if [ "$launch_job_count" -ne 1 ]; then
+              echo "Expected exactly one launch job for an immutable plan, found $launch_job_count" >&2
+              exit 1
+            fi
+            plan_name="$(jq -er \
+              --arg smoke_name "$smoke_plan_name" \
+              --arg full_name "$full_plan_name" \
+              '.artifacts[] | select(.name == $smoke_name or .name == $full_name) | .name' \
+              "$artifact_index")"
+            case "$plan_name" in
+              "$smoke_plan_name") benchmark_mode=smoke ;;
+              "$full_plan_name") benchmark_mode=full ;;
+              *) echo "The immutable plan has an unsupported benchmark mode." >&2; exit 1 ;;
+            esac
+            scope_count="$(jq \
+              '[.jobs[] | select(.name == "launch") | .steps[]? |
+                select(((.name // "") | startswith("Benchmark scope ")))] | length' \
+              "$job_index")"
+            if [ "$scope_count" -ne 1 ]; then
+              echo "The exact benchmark scope could not be established from the launch job." >&2
+              exit 1
+            fi
+            scope_name="$(jq -er \
+              '.jobs[] | select(.name == "launch") | .steps[]? |
+               select(((.name // "") | startswith("Benchmark scope ")) and .conclusion == "success") | .name' \
+              "$job_index")"
+            case "$SOURCE_EVENT:$benchmark_mode:$scope_name" in
+              "push:smoke:Benchmark scope push-smoke")
+                expected_provider=openai
+                expected_model=
+                expected_reasoning=
+                ;;
+              "workflow_dispatch:smoke:Benchmark scope deepseek-v4-flash-smoke")
+                expected_provider=deepseek
+                expected_model=deepseek-v4-flash
+                expected_reasoning=max
+                ;;
+              "workflow_dispatch:full:Benchmark scope full")
+                expected_provider=
+                expected_model=
+                expected_reasoning=
+                ;;
+              *) echo "The immutable plan mode, trigger, and benchmark scope are inconsistent." >&2; exit 1 ;;
+            esac
+            if ! jq -e --arg name "$plan_name" \
               '.artifacts[] | select(.name == $name and .expired == false)' \
               "$artifact_index" > /dev/null; then
               echo "The exact immutable plan exists but is no longer downloadable." >&2
               exit 1
             fi
-            echo "available=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "BENCHMARK_MODE=$benchmark_mode"
+              echo "EXPECTED_PROVIDER=$expected_provider"
+              echo "EXPECTED_MODEL=$expected_model"
+              echo "EXPECTED_REASONING=$expected_reasoning"
+            } >> "$GITHUB_ENV"
+            {
+              echo "available=true"
+              echo "benchmark_mode=$benchmark_mode"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "Expected at most one exact immutable plan, found $plan_count" >&2
             exit 1
@@ -147,7 +203,7 @@ jobs:
         if: steps.incomplete_plan.outputs.available == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-plan-${{ env.BENCHMARK_MODE }}-${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}
+          name: modal-benchmark-plan-${{ steps.incomplete_plan.outputs.benchmark_mode }}-${{ env.SOURCE_RUN_ID }}-${{ env.SOURCE_RUN_ATTEMPT }}
           path: ${{ runner.temp }}/incomplete-modal-benchmark-plan
           run-id: ${{ env.SOURCE_RUN_ID }}
           github-token: ${{ github.token }}
@@ -168,6 +224,17 @@ jobs:
             echo "The data-only candidate checkout does not match the incomplete run." >&2
             exit 1
           fi
+          profile_args=()
+          if [ -n "$EXPECTED_PROVIDER" ]; then
+            profile_args=(--expected-provider "$EXPECTED_PROVIDER")
+          fi
+          if [ -n "$EXPECTED_MODEL" ] || [ -n "$EXPECTED_REASONING" ]; then
+            if [ -z "$EXPECTED_MODEL" ] || [ -z "$EXPECTED_REASONING" ]; then
+              echo "Expected benchmark model and reasoning must be supplied together" >&2
+              exit 1
+            fi
+            profile_args+=(--expected-model "$EXPECTED_MODEL" --expected-reasoning "$EXPECTED_REASONING")
+          fi
           node scripts/ci/prepare-modal-benchmark-cleanup.mjs \
             "$BENCHMARK_PLAN/manifest.json" \
             "$CLEANUP_PAIR_LIST" \
@@ -175,7 +242,8 @@ jobs:
             "$EXPECTED_REPOSITORY" \
             "$SOURCE_RUN_ID-$SOURCE_RUN_ATTEMPT" \
             "$BENCHMARK_MODE" \
-            "$CANDIDATE_SOURCE"
+            "$CANDIDATE_SOURCE" \
+            "${profile_args[@]}"
 
       - name: Terminate every exact incomplete-run sandbox
         if: always() && steps.validate_incomplete_plan.outcome == 'success'

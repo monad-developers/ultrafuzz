@@ -17,6 +17,7 @@ import { classifyRecoveryEquivalence } from "./recovery-equivalence.js";
 import { graphFromPlannedGraph, type EvalReporter, type EvalRowResult } from "./reporter.js";
 import { createEvalReporters } from "./reporters/index.js";
 import { planEvalSuite, type PlanEvalSuiteInput } from "./suite.js";
+import { captureTerminalEvidenceAtRunRoot, type VerifiedTerminalEvidence } from "./terminal-disposition.js";
 import {
   EVAL_RUN_SCHEMA_VERSION,
   type EvalMatrixRow,
@@ -515,13 +516,31 @@ export async function watchEvalRow(
     ...(recoveryEquivalence === undefined ? {} : { recoveryEquivalence }),
     diagnostics
   };
-  for (const reporter of input.reporters) {
-    await reporter.onRowFinish(input.row, result);
+  let terminalEvidence: VerifiedTerminalEvidence | undefined;
+  if (result.status !== "launched") {
+    try {
+      terminalEvidence = captureTerminalEvidenceAtRunRoot(
+        runRoot,
+        input.record.ultrafuzz_run_id !== undefined && input.record.workflow_ids.length === 1
+          ? {
+              runtimeRunId: input.record.ultrafuzz_run_id,
+              workflowRunId: input.record.workflow_ids[0]!
+            }
+          : undefined
+      );
+    } catch {
+      // The terminal record remains explicitly operational, but without an
+      // evidence binding it cannot pass later publication verification.
+    }
   }
+  const terminalDisposition =
+    result.status === "launched" ? undefined : (terminalEvidence?.disposition.kind ?? "operational-failure");
   const updatedRecord: EvalRunRecord = {
     ...input.record,
     final_status: result.status,
     workflow: evalWorkflowLifecycle(state),
+    ...(terminalDisposition === undefined ? {} : { terminal_disposition: terminalDisposition }),
+    ...(terminalEvidence === undefined ? {} : { terminal_evidence: terminalEvidence.binding }),
     ...(recoveryEquivalence === undefined ? {} : { recovery_equivalence: recoveryEquivalence }),
     ...(syncFailureDiagnostic === undefined && timeoutDiagnostic === undefined
       ? {}
@@ -534,6 +553,9 @@ export async function watchEvalRow(
         })
   };
   appendJsonLine(path.join(input.evalRunRoot, "runs.jsonl"), updatedRecord);
+  for (const reporter of input.reporters) {
+    await reporter.onRowFinish(input.row, result);
+  }
   return {
     record: updatedRecord,
     diagnostics

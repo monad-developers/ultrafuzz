@@ -71,6 +71,48 @@
         "agent": { "type": "string", "minLength": 1 }
       }
     },
+    "model_invocation": {
+      "type": "object",
+      "required": [
+        "invocation_id",
+        "node_id",
+        "iteration",
+        "attempt",
+        "configured_model",
+        "provider_reported_model",
+        "terminal_evidence_complete"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "invocation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "node_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "attempt": { "type": "integer", "minimum": 0 },
+        "configured_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "provider_reported_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "terminal_evidence_complete": { "type": "boolean" }
+      }
+    },
     "usage_complete": { "type": "boolean" },
     "usage_incomplete_reasons": {
       "type": "array",

@@ -39,7 +39,7 @@ function claudeAuthOptions(): ClaudeAuthOptions {
 }
 
 function readClaudeAuthConfig(): ClaudeAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const claude = readStringTable(readFileSync(configPath, "utf8"), "agents.ClaudeAgent");
   return {
     auth: stringField(claude, "auth"),

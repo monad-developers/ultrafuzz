@@ -15,7 +15,11 @@ import {
   publicBenchmarkMaxRuntimeSeconds
 } from "../../packages/modal/dist/public-worker.js";
 
-import { readAutomaticPublicationManifest, validateAutomaticPairConfig } from "./prepare-eval-history-publication.mjs";
+import {
+  parseAutomaticPublicationProfileOptions,
+  readAutomaticPublicationManifest,
+  validateAutomaticPairConfig
+} from "./prepare-eval-history-publication.mjs";
 
 const MAX_CONTROL_FILE_BYTES = 1024 * 1024;
 const SAFE_BASENAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -23,6 +27,7 @@ const GENERATION = /^([1-9][0-9]*)-([1-9][0-9]*)$/u;
 const PUBLIC_CONTROL_POLLING_GRACE_SECONDS = 5 * 60;
 
 export function validateModalBenchmarkLaunch(input) {
+  assertExpectedProfileInput(input);
   const manifestPath = path.resolve(input.manifestPath);
   const policyRoot = path.resolve(input.policyRoot);
   assertBoundedRegularFile(manifestPath, "Modal benchmark launch manifest");
@@ -58,6 +63,9 @@ export function validateModalBenchmarkLaunch(input) {
     producerRunAttempt,
     mode,
     ...(input.expectedProviders === undefined ? {} : { expectedProviders: input.expectedProviders }),
+    ...(input.expectedModel === undefined
+      ? {}
+      : { expectedModel: input.expectedModel, expectedReasoning: input.expectedReasoning }),
     targets: dimensions.targets,
     targetIds: dimensions.targetIds,
     targetCount: dimensions.targetCount,
@@ -68,7 +76,7 @@ export function validateModalBenchmarkLaunch(input) {
     controlTimeoutSeconds: dimensions.controlTimeoutSeconds
   });
 
-  validatePairConfigs(manifest, path.dirname(manifestPath), manifestPath, dimensions);
+  validatePairConfigs(manifest, path.dirname(manifestPath), manifestPath, dimensions, input);
   return {
     mode: manifest.mode,
     benchmark: manifest.benchmark,
@@ -134,7 +142,7 @@ function assertConfiguredTargetCoverage(manifest, manifestPath, dimensions) {
   }
 }
 
-function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
+function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions, expectedProfile) {
   if (!Array.isArray(manifest.pairs) || manifest.pairs.length === 0) {
     throw new Error(`Modal benchmark launch manifest ${manifestPath} contains no dispatch pairs`);
   }
@@ -187,10 +195,27 @@ function validatePairConfigs(manifest, controlRoot, manifestPath, dimensions) {
         mode: manifest.mode,
         benchmark: manifest.benchmark,
         targets: dimensions.targets,
-        maxRuntimeSeconds: dimensions.maxRuntimeSeconds
+        maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
+        ...(expectedProfile.expectedModel === undefined
+          ? {}
+          : {
+              expectedModel: expectedProfile.expectedModel,
+              expectedReasoning: expectedProfile.expectedReasoning
+            })
       },
       usedModelSlugs
     );
+  }
+}
+
+function assertExpectedProfileInput(input) {
+  const hasModel = input.expectedModel !== undefined;
+  const hasReasoning = input.expectedReasoning !== undefined;
+  if (hasModel !== hasReasoning) {
+    throw new Error("expected benchmark model and reasoning must be supplied together");
+  }
+  if (hasModel && input.expectedProviders === undefined) {
+    throw new Error("an exact expected benchmark model profile requires an expected provider");
   }
 }
 
@@ -321,22 +346,18 @@ function isRecord(value) {
 
 function main(args) {
   const usage =
-    "usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <smoke|full> [--expected-provider <provider>]";
-  if (args.length !== 3 && args.length !== 5) {
-    throw new Error(usage);
-  }
-  const [manifestPath, policyRoot, expectedMode, option, expectedProvider] = args;
+    "usage: validate-modal-benchmark-launch.mjs <manifest> <policy-root> <smoke|full> [--expected-provider <provider>] [--expected-model <model> --expected-reasoning <reasoning>]";
+  if (args.length < 3) throw new Error(usage);
+  const [manifestPath, policyRoot, expectedMode, ...profileArgs] = args;
   if (expectedMode !== "smoke" && expectedMode !== "full") throw new Error("expected mode must be smoke or full");
-  if (option !== undefined && (option !== "--expected-provider" || expectedProvider === undefined)) {
-    throw new Error(usage);
-  }
+  const expectedProfile = parseAutomaticPublicationProfileOptions(profileArgs);
   console.log(
     JSON.stringify(
       validateModalBenchmarkLaunch({
         manifestPath,
         policyRoot,
         expectedMode,
-        ...(expectedProvider === undefined ? {} : { expectedProviders: [expectedProvider] })
+        ...expectedProfile
       })
     )
   );

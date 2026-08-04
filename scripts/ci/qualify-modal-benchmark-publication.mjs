@@ -4,6 +4,20 @@ import { pathToFileURL } from "node:url";
 const FULL_COMMIT = /^[0-9a-f]{40}$/u;
 const PRODUCER_WORKFLOW_PATH = ".github/workflows/eval-benchmarks.yml";
 const SUPPORTED_EVENTS = new Set(["push", "workflow_dispatch"]);
+const BENCHMARK_SCOPE_STEPS = new Map([
+  ["Benchmark scope push-smoke", { event: "push", benchmarkMode: "smoke", expectedProvider: "openai" }],
+  ["Benchmark scope full", { event: "workflow_dispatch", benchmarkMode: "full" }],
+  [
+    "Benchmark scope deepseek-v4-flash-smoke",
+    {
+      event: "workflow_dispatch",
+      benchmarkMode: "smoke",
+      expectedProvider: "deepseek",
+      expectedModel: "deepseek-v4-flash",
+      expectedReasoning: "max"
+    }
+  ]
+]);
 
 export function qualifyModalBenchmarkPublication(eventValue, jobsValue, repository) {
   const event = record(eventValue);
@@ -33,13 +47,30 @@ export function qualifyModalBenchmarkPublication(eventValue, jobsValue, reposito
   if (!candidateCommit) {
     return ineligible("the exact benchmark candidate commit could not be established");
   }
+  const launch = jobs.find((job) => job.name === "launch");
+  const scope = benchmarkScope(record(launch), eventName);
+  if (scope === undefined) {
+    return ineligible("the exact benchmark scope could not be established from the successful launch job");
+  }
 
   return {
     eligible: true,
     candidateCommit,
-    benchmarkMode: eventName === "workflow_dispatch" ? "full" : "smoke",
+    benchmarkMode: scope.benchmarkMode,
+    ...(scope.expectedProvider === undefined ? {} : { expectedProvider: scope.expectedProvider }),
+    ...(scope.expectedModel === undefined ? {} : { expectedModel: scope.expectedModel }),
+    ...(scope.expectedReasoning === undefined ? {} : { expectedReasoning: scope.expectedReasoning }),
     reason: "the exact launch and collect jobs completed successfully"
   };
+}
+
+function benchmarkScope(launch, eventName) {
+  const steps = Array.isArray(launch.steps) ? launch.steps.map(record) : [];
+  const scopeSteps = steps.filter((step) => string(step.name).startsWith("Benchmark scope "));
+  if (scopeSteps.length !== 1) return undefined;
+  const step = scopeSteps[0];
+  const scope = BENCHMARK_SCOPE_STEPS.get(string(step.name));
+  return scope !== undefined && step.conclusion === "success" && scope.event === eventName ? scope : undefined;
 }
 
 function jobRecords(value) {
@@ -80,6 +111,9 @@ function main(args) {
   const outputs = [`eligible=${String(result.eligible)}`];
   if (result.eligible) {
     outputs.push(`candidate_commit=${result.candidateCommit}`, `benchmark_mode=${result.benchmarkMode}`);
+    if (result.expectedProvider !== undefined) outputs.push(`expected_provider=${result.expectedProvider}`);
+    if (result.expectedModel !== undefined) outputs.push(`expected_model=${result.expectedModel}`);
+    if (result.expectedReasoning !== undefined) outputs.push(`expected_reasoning=${result.expectedReasoning}`);
   }
   fs.appendFileSync(outputPath, `${outputs.join("\n")}\n`);
   console.log(result.reason);

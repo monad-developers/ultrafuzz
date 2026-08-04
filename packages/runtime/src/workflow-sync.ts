@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -11,8 +12,10 @@ import {
   assertPathInside,
   FindingsValidationError,
   createNodeAttemptLedgerEntry,
+  getPricingCatalogSnapshotPath,
   getNodeArtifactDir,
   layoutForRunRoot,
+  listSafeFiles,
   normalizeFindings,
   manifestDigest,
   queryNodeAttempts,
@@ -26,6 +29,7 @@ import {
   updateRunStatus,
   validateSafeId,
   verifyArtifactManifestPrerequisites,
+  writeFileDurable,
   writeArtifactManifest,
   writeJsonDurable,
   writeRunState,
@@ -55,12 +59,15 @@ import {
   reconcileRequiredArtifactsFromWorkspace
 } from "./artifact-reconciliation.js";
 import {
+  MAX_PRICING_CATALOG_BYTES,
+  modelPricingFromCatalogBytes,
   modelPricingFromSnapshot,
   modelPricingSnapshot,
   pricingForContext,
   resolveLiveModelPricing,
   type ModelPricing,
-  type PricingCatalogMetadata
+  type PricingCatalogMetadata,
+  type PricingCatalogResult
 } from "./model-pricing.js";
 import { readLinkedWorkflowEvidence } from "./start-run.js";
 import {
@@ -79,6 +86,33 @@ import {
 } from "./smithers.js";
 import { runsRootForProject } from "./validate.js";
 import { projectWorkflowControlState } from "./workflow-control.js";
+import {
+  acquireWorkflowMutationLock,
+  sameWorkflowLifecycleGeneration,
+  workflowLifecycleGeneration
+} from "./workflow-mutation.js";
+import {
+  assertVerificationOutputMatchesArtifacts,
+  buildVerifierReceipt,
+  extractVerificationOutput,
+  persistVerifierOutputEvidence,
+  persistVerifierReceipt,
+  readVerifierOutputEvidence,
+  readVerifierReceipt,
+  snapshotVerifierArtifactManifest,
+  verificationOutputDigest,
+  verifierReceiptMatchesArtifactManifest,
+  verifierOutputBytesDigest,
+  type VerifierArtifactManifestSnapshot,
+  type VerificationOutput
+} from "./verifier-receipt.js";
+import {
+  LEGACY_WORKSPACE_SOURCE_CLAIM_FILE,
+  WORKSPACE_SOURCE_ATTESTATION_FILE,
+  persistWorkspaceSourceAttestation,
+  readLegacyWorkspaceSourceClaim,
+  type ExpectedWorkspaceSourceTask
+} from "./workspace-provenance.js";
 
 interface StoredWorkflowTask {
   attemptId: string;
@@ -86,6 +120,7 @@ interface StoredWorkflowTask {
   logicalNodeId: string;
   smithersNodeId: string;
   verifierSmithersNodeId: string;
+  baseCommit: string;
   dependencies: string[];
   agentRef?: string;
   modelName?: string;
@@ -111,6 +146,7 @@ interface WorkflowStep {
   id: string;
   state: string;
   attempt?: number;
+  iteration?: number;
 }
 
 interface WorkflowInspect {
@@ -205,6 +241,38 @@ interface AccountingSegment extends AccountingSummary {
   attempt_ids: string[];
 }
 
+interface RuntimeModelIdentityInvocation {
+  invocation_id: string;
+  configured_model: string;
+  provider_reported_model: string;
+}
+
+interface RuntimeModelIdentity {
+  schema_version: "ultrafuzz.runtime.model-identity.v1";
+  status: "complete" | "incomplete" | "invalid" | "mixed" | "substituted";
+  invocation_count: number;
+  configured_models: string[];
+  provider_reported_models: string[];
+  invocations: RuntimeModelIdentityInvocation[];
+}
+
+interface LifecycleModelInvocation {
+  invocationId: string;
+  nodeId: string;
+  iteration: number;
+  attempt: number;
+  configuredModel: string;
+  providerReportedModel: string;
+  observedAt: string;
+  sourceEventId: string;
+  checkpointGenerationId?: string;
+  startedEvidenceComplete: boolean;
+  terminalObserved: boolean;
+  terminalEvidenceComplete: boolean;
+  startedSequence?: number;
+  terminalSequence?: number;
+}
+
 interface CumulativeAccountingSummary extends AccountingSummary {
   source_run_ids: string[];
 }
@@ -260,6 +328,7 @@ interface NodeWorkflowEvidence {
   status: NodeStatus;
   workflowState?: string;
   attempt?: number;
+  iteration?: number;
   observedAt?: string;
   startedAt?: string;
   finishedAt?: string;
@@ -271,6 +340,15 @@ interface AttemptWorkflowEvidence {
   evidence: NodeWorkflowEvidence;
   source: "agent" | "verifier";
   taskId: string;
+  executorAttempt?: number;
+  executorIteration?: number;
+  verifierAttempt?: number;
+  verifierIteration?: number;
+}
+
+interface VerifierOutputEvidence {
+  output: VerificationOutput;
+  stdout: string;
 }
 
 interface NodeFinalization {
@@ -291,6 +369,7 @@ export interface WorkflowSynchronizationControl {
   now?: () => number;
   signal?: AbortSignal;
   deadlineMs?: number;
+  beforeCommit?: () => void | Promise<void>;
 }
 
 interface ArtifactReconciliationGrace {
@@ -312,6 +391,13 @@ const NODE_TERMINAL_STATUSES = new Set<NodeStatus>([
 ]);
 const ACCOUNTING_SCHEMA_VERSION = "2.0";
 const ACCOUNTING_CHECKPOINT_SCHEMA_VERSION = "1.0";
+const MODEL_IDENTITY_SCHEMA_VERSION = "ultrafuzz.runtime.model-identity.v1" as const;
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u;
+const CONFIGURED_MODEL_MISSING = "ultrafuzz-configured-model-missing";
+const CONFIGURED_MODEL_INVALID = "ultrafuzz-configured-model-invalid";
+const PROVIDER_IDENTITY_MISSING = "ultrafuzz-provider-identity-missing";
+const PROVIDER_IDENTITY_MIXED = "ultrafuzz-provider-identity-mixed";
+const PROVIDER_IDENTITY_INVALID = "ultrafuzz-provider-identity-invalid";
 const ACCOUNTING_USD_PRECISION = 12;
 export const ARTIFACT_RECONCILIATION_GRACE_MS = 5 * 60 * 1000;
 export const ARTIFACT_RECONCILIATION_RETRY_INTERVAL_MS = 15 * 1000;
@@ -357,12 +443,13 @@ export async function synchronizeLinkedWorkflowRun(
       ]
     };
   }
+  const evidenceCollectionLifecycleGeneration = workflowLifecycleGeneration(layout);
 
   const evidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
   if (!evidence.ok) {
     return { ok: false, diagnostics: evidence.diagnostics };
   }
-  const loaded = loadSynchronizationInputs(layout);
+  const loaded = loadSynchronizationInputs(evidence.verifiedControl.contents);
   if (!loaded.ok) {
     return { ok: false, diagnostics: loaded.diagnostics };
   }
@@ -497,151 +584,212 @@ export async function synchronizeLinkedWorkflowRun(
       source: "workflow"
     });
   }
-  let syncResult;
+  const collectedLifecycleGeneration = workflowLifecycleGeneration(layout);
+  await control.beforeCommit?.();
+  const releaseWorkflowMutationLock = await acquireWorkflowMutationLock(layout);
   try {
-    syncResult = await synchronizeTasks({
+    const currentLifecycleGeneration = workflowLifecycleGeneration(layout);
+    if (
+      currentLifecycleGeneration.invoking ||
+      !sameWorkflowLifecycleGeneration(evidenceCollectionLifecycleGeneration, collectedLifecycleGeneration) ||
+      !sameWorkflowLifecycleGeneration(collectedLifecycleGeneration, currentLifecycleGeneration)
+    ) {
+      diagnostics.push({
+        code: "WORKFLOW_SYNC_CONTINUATION_CHANGED",
+        message:
+          "workflow lifecycle changed during or after evidence collection; deferred synchronization of stale evidence",
+        severity: "warning",
+        source: "workflow"
+      });
+      return {
+        ok: true,
+        diagnostics,
+        value: {
+          run_id: layout.runId,
+          run_root: layout.root,
+          status: readRunState(layout).status,
+          workflow_run_id: evidence.smithersRunId,
+          synced_nodes: 0
+        }
+      };
+    }
+    const commitEvidence = await readLinkedWorkflowEvidence(projectRoot, input.runId);
+    if (
+      !commitEvidence.ok ||
+      commitEvidence.smithersRunId !== evidence.smithersRunId ||
+      commitEvidence.workflowLinkId !== evidence.workflowLinkId ||
+      commitEvidence.controlGeneration !== evidence.controlGeneration
+    ) {
+      diagnostics.push({
+        code: "WORKFLOW_SYNC_CONTROL_CHANGED",
+        message: "workflow control or active run linkage changed before commit; deferred synchronization",
+        severity: "warning",
+        source: "workflow"
+      });
+      return {
+        ok: true,
+        diagnostics,
+        value: {
+          run_id: layout.runId,
+          run_root: layout.root,
+          status: readRunState(layout).status,
+          workflow_run_id: evidence.smithersRunId,
+          synced_nodes: 0
+        }
+      };
+    }
+    let syncResult;
+    try {
+      syncResult = await synchronizeTasks({
+        layout,
+        graph: loaded.graph,
+        tasks: loaded.tasks,
+        workflowRunId: evidence.smithersRunId,
+        inspect,
+        events,
+        controllerInvocations,
+        currentContinuation,
+        inspectCollectionStartedAt: new Date(inspectCollectionStartedAtMs).toISOString(),
+        inspectCollectionCompletedAt: new Date(inspectCollectionCompletedAtMs).toISOString(),
+        projectRoot,
+        env: input.env,
+        control
+      });
+    } catch (error) {
+      const interrupted = synchronizationInterruptionDiagnostic(error);
+      if (interrupted !== undefined) {
+        return { ok: false, diagnostics: [interrupted] };
+      }
+      throw error;
+    }
+    diagnostics.push(...syncResult.diagnostics);
+    if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
+      diagnostics.push({
+        code: "WORKFLOW_TASK_EVIDENCE_MISSING",
+        message: `workflow completed but only ${syncResult.syncedNodes} of ${loaded.tasks.length} task(s) had synchronizable evidence`,
+        severity: "error",
+        source: "workflow"
+      });
+    }
+
+    const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preAccountingBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
+    }
+    const accountingResult = await synchronizeWorkflowAccounting({
       layout,
+      workflowRunId: evidence.smithersRunId,
+      events: tokenEvents,
+      lifecycleEvents: events,
+      tasks: loaded.tasks,
+      control,
+      env: input.env ?? process.env
+    });
+    if (accountingResult.budgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
+    }
+
+    const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preFinalMutationBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
+    }
+
+    const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
+      evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
+    });
+    const previousRunStatus = readRunState(layout).status;
+    const runStatusChanged = previousRunStatus !== finalStatus;
+    if (runStatusChanged) {
+      const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+      if (preStatusWriteBudgetDiagnostic !== undefined) {
+        return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
+      }
+      updateRunStatus(layout, finalStatus);
+    }
+    const observedAtMs = synchronizationClock(control);
+    const workflowControl = projectWorkflowControlState({
+      previousState: previousControlState,
+      state: readRunState(layout),
       graph: loaded.graph,
       tasks: loaded.tasks,
-      workflowRunId: evidence.smithersRunId,
-      inspect,
-      events,
-      controllerInvocations,
-      currentContinuation,
-      inspectCollectionStartedAt: new Date(inspectCollectionStartedAtMs).toISOString(),
-      inspectCollectionCompletedAt: new Date(inspectCollectionCompletedAtMs).toISOString(),
-      control
+      workflowStates: syncResult.workflowStates,
+      workflowState: inspect.runState ?? inspect.runStatus,
+      nowMs: observedAtMs
     });
-  } catch (error) {
-    const interrupted = synchronizationInterruptionDiagnostic(error);
-    if (interrupted !== undefined) {
-      return { ok: false, diagnostics: [interrupted] };
+    let deadlineApplied = false;
+    if (workflowControl.deadlineExceeded) {
+      try {
+        assertSynchronizationBudget(control);
+        await requestSmithersCancel({
+          smithersRunId: evidence.smithersRunId,
+          projectRoot,
+          env: input.env
+        });
+        workflowControl.state.status = "timed-out";
+        workflowControl.state.finished_at = new Date(observedAtMs).toISOString();
+        workflowControl.state.last_transition_at = new Date(observedAtMs).toISOString();
+        deadlineApplied = true;
+      } catch (error) {
+        diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
+      }
     }
-    throw error;
-  }
-  diagnostics.push(...syncResult.diagnostics);
-  if (workflowSucceeded(inspect) && syncResult.syncedNodes < loaded.tasks.length) {
-    diagnostics.push({
-      code: "WORKFLOW_TASK_EVIDENCE_MISSING",
-      message: `workflow completed but only ${syncResult.syncedNodes} of ${loaded.tasks.length} task(s) had synchronizable evidence`,
-      severity: "error",
-      source: "workflow"
-    });
-  }
-
-  const preAccountingBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-  if (preAccountingBudgetDiagnostic !== undefined) {
-    return { ok: false, diagnostics: [preAccountingBudgetDiagnostic] };
-  }
-  const accountingResult = await synchronizeWorkflowAccounting({
-    layout,
-    workflowRunId: evidence.smithersRunId,
-    events: tokenEvents,
-    control,
-    env: input.env ?? process.env
-  });
-  if (accountingResult.budgetDiagnostic !== undefined) {
-    return { ok: false, diagnostics: [accountingResult.budgetDiagnostic] };
-  }
-
-  const preFinalMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-  if (preFinalMutationBudgetDiagnostic !== undefined) {
-    return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
-  }
-
-  const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
-    evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
-  });
-  const previousRunStatus = readRunState(layout).status;
-  const runStatusChanged = previousRunStatus !== finalStatus;
-  if (runStatusChanged) {
-    const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-    if (preStatusWriteBudgetDiagnostic !== undefined) {
-      return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
+    const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preControlMutationBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
     }
-    updateRunStatus(layout, finalStatus);
-  }
-  const observedAtMs = synchronizationClock(control);
-  const workflowControl = projectWorkflowControlState({
-    previousState: previousControlState,
-    state: readRunState(layout),
-    graph: loaded.graph,
-    tasks: loaded.tasks,
-    workflowStates: syncResult.workflowStates,
-    workflowState: inspect.runState ?? inspect.runStatus,
-    nowMs: observedAtMs
-  });
-  let deadlineApplied = false;
-  if (workflowControl.deadlineExceeded) {
-    try {
-      assertSynchronizationBudget(control);
-      await requestSmithersCancel({
-        smithersRunId: evidence.smithersRunId,
-        projectRoot,
-        env: input.env
+    if (workflowControl.changed || deadlineApplied) {
+      writeRunState(layout, workflowControl.state);
+    }
+    if (deadlineApplied) {
+      appendEvent(layout, {
+        eventType: "workflow-deadline-exceeded",
+        status: "timed-out",
+        payload: {
+          workflow_run_id: evidence.smithersRunId,
+          deadline_at: workflowControl.state.workflow_deadline_at
+        }
       });
-      workflowControl.state.status = "timed-out";
-      workflowControl.state.finished_at = new Date(observedAtMs).toISOString();
-      workflowControl.state.last_transition_at = new Date(observedAtMs).toISOString();
-      deadlineApplied = true;
-    } catch (error) {
-      diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
     }
-  }
-  const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-  if (preControlMutationBudgetDiagnostic !== undefined) {
-    return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
-  }
-  if (workflowControl.changed || deadlineApplied) {
-    writeRunState(layout, workflowControl.state);
-  }
-  if (deadlineApplied) {
-    appendEvent(layout, {
-      eventType: "workflow-deadline-exceeded",
-      status: "timed-out",
-      payload: {
-        workflow_run_id: evidence.smithersRunId,
-        deadline_at: workflowControl.state.workflow_deadline_at
+    if (
+      runStatusChanged ||
+      syncResult.changed ||
+      accountingResult.changed ||
+      workflowControl.transitioned ||
+      deadlineApplied
+    ) {
+      const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+      if (preEventWriteBudgetDiagnostic !== undefined) {
+        return { ok: false, diagnostics: [preEventWriteBudgetDiagnostic] };
       }
-    });
-  }
-  if (
-    runStatusChanged ||
-    syncResult.changed ||
-    accountingResult.changed ||
-    workflowControl.transitioned ||
-    deadlineApplied
-  ) {
-    const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-    if (preEventWriteBudgetDiagnostic !== undefined) {
-      return { ok: false, diagnostics: [preEventWriteBudgetDiagnostic] };
+      appendEvent(layout, {
+        eventType: "workflow-synced",
+        status: deadlineApplied ? "timed-out" : finalStatus,
+        payload: {
+          workflow_run_id: evidence.smithersRunId,
+          workflow_status: inspect.runStatus,
+          workflow_state: inspect.runState,
+          synced_nodes: syncResult.syncedNodes,
+          accounting_available: accountingResult.available,
+          recovery_due: workflowControl.recoveryDue,
+          deadline_exceeded: deadlineApplied
+        }
+      });
     }
-    appendEvent(layout, {
-      eventType: "workflow-synced",
-      status: deadlineApplied ? "timed-out" : finalStatus,
-      payload: {
-        workflow_run_id: evidence.smithersRunId,
-        workflow_status: inspect.runStatus,
-        workflow_state: inspect.runState,
-        synced_nodes: syncResult.syncedNodes,
-        accounting_available: accountingResult.available,
-        recovery_due: workflowControl.recoveryDue,
-        deadline_exceeded: deadlineApplied
-      }
-    });
-  }
 
-  return {
-    ok: true,
-    diagnostics,
-    value: {
-      run_id: layout.runId,
-      run_root: layout.root,
-      status: readRunState(layout).status,
-      workflow_run_id: evidence.smithersRunId,
-      synced_nodes: syncResult.syncedNodes
-    }
-  };
+    return {
+      ok: true,
+      diagnostics,
+      value: {
+        run_id: layout.runId,
+        run_root: layout.root,
+        status: readRunState(layout).status,
+        workflow_run_id: evidence.smithersRunId,
+        synced_nodes: syncResult.syncedNodes
+      }
+    };
+  } finally {
+    await releaseWorkflowMutationLock();
+  }
 }
 
 function synchronizationBudgetDiagnostic(
@@ -715,6 +863,8 @@ async function synchronizeWorkflowAccounting(input: {
   layout: RunLayout;
   workflowRunId: string;
   events: WorkflowEvent[];
+  lifecycleEvents: WorkflowEvent[];
+  tasks: StoredWorkflowTask[];
   env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
@@ -722,15 +872,31 @@ async function synchronizeWorkflowAccounting(input: {
   available: boolean;
   budgetDiagnostic?: RuntimeDiagnostic;
 }> {
-  const usageReplay = appendWorkflowUsageEvents(input.layout, input.workflowRunId, input.events);
-  if (usageReplay.entries.length === 0 && usageReplay.malformedEntries === 0) {
+  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
+  const storedAccounting = recordField(metadata, "accounting");
+  const priorOutstandingInvocations = priorOutstandingModelInvocations(storedAccounting);
+  const lifecycleInvocations = mergeLifecycleModelInvocations(
+    lifecycleModelInvocations(input.workflowRunId, input.tasks, input.lifecycleEvents),
+    priorOutstandingInvocations
+  );
+  const usageReplay = appendWorkflowUsageEvents(
+    input.layout,
+    input.workflowRunId,
+    input.events,
+    lifecycleInvocations,
+    input.tasks
+  );
+  if (
+    usageReplay.entries.length === 0 &&
+    usageReplay.malformedEntries === 0 &&
+    lifecycleInvocations.length === 0 &&
+    !input.events.some((event) => event.type === "TokenUsageReported")
+  ) {
     return { changed: false, available: false };
   }
 
-  const metadata = readJsonIfExists<Record<string, unknown>>(input.layout.runMetadataPath) ?? {};
-  const storedAccounting = recordField(metadata, "accounting");
   const storedPricingCatalog = recordField(storedAccounting, "pricing_catalog");
-  const storedPricing =
+  const storedDeclaredPricing =
     stringField(storedAccounting, "schema_version") === ACCOUNTING_SCHEMA_VERSION
       ? modelPricingFromSnapshot(storedPricingCatalog?.model_prices)
       : new Map<string, ModelPricing>();
@@ -740,14 +906,34 @@ async function synchronizeWorkflowAccounting(input: {
       : new Set<string>();
   const ledgerEvents = workflowEventsFromUsageLedger(usageReplay.entries);
   const requiredModels = modelsRequiringPricing(ledgerEvents);
+  const storedCatalogSha256 = stringField(storedPricingCatalog, "catalog_sha256");
+  const storedCatalogRawBody = readPricingCatalogSnapshot(input.layout, storedCatalogSha256);
+  const storedCatalogSnapshotAvailable = storedCatalogRawBody !== undefined;
+  if (
+    storedPricingCatalog?.status === "available" &&
+    requiredModels.length > 0 &&
+    storedCatalogSha256 !== undefined &&
+    !storedCatalogSnapshotAvailable
+  ) {
+    throw new Error("stored pricing catalog snapshot is missing, linked, malformed, or digest-mismatched");
+  }
+  const storedPricing =
+    storedCatalogRawBody === undefined
+      ? storedDeclaredPricing
+      : new Map(modelPricingFromCatalogBytes(storedCatalogRawBody, requiredModels));
   const missingModels = requiredModels.filter(
     (model) => !storedPricing.has(model) && !previouslyUnresolvedModels.has(model)
   );
+  const storedCatalogEvidenceIncomplete =
+    storedPricingCatalog?.status === "available" && requiredModels.length > 0 && !storedCatalogSnapshotAvailable;
+  const modelsToResolve = missingModels.length > 0 || storedCatalogEvidenceIncomplete ? requiredModels : [];
   const livePricing =
-    missingModels.length === 0
+    modelsToResolve.length === 0
       ? undefined
       : await resolveLiveModelPricing({
-          models: missingModels,
+          // A live catalog digest covers one exact response, so every rate in
+          // the replacement snapshot must be derived from that same body.
+          models: requiredModels,
           env: input.env,
           signal: input.control.signal,
           timeoutMs:
@@ -762,15 +948,23 @@ async function synchronizeWorkflowAccounting(input: {
   if (postPricingBudgetDiagnostic !== undefined) {
     return { changed: false, available: false, budgetDiagnostic: postPricingBudgetDiagnostic };
   }
-  const resolvedPricing = new Map(storedPricing);
-  for (const [model, modelPricing] of livePricing?.prices ?? []) {
-    resolvedPricing.set(model, modelPricing);
+  if (livePricing?.metadata.status === "available") {
+    persistPricingCatalogSnapshot(input.layout, livePricing);
   }
+  // A catalog digest attests one exact raw response. Never combine rates from
+  // an older snapshot with metadata from a newer response: if a live snapshot
+  // is available it replaces the stored snapshot atomically.
+  const liveSnapshotAvailable = livePricing?.metadata.status === "available";
+  const resolvedPricing = liveSnapshotAvailable ? new Map(livePricing.prices) : new Map(storedPricing);
+  const pricingMetadata = liveSnapshotAvailable
+    ? { stored: undefined, live: livePricing.metadata }
+    : storedPricing.size > 0
+      ? { stored: storedPricingCatalog, live: undefined }
+      : { stored: undefined, live: livePricing?.metadata };
   const pricingCatalog = mergedPricingCatalogMetadata({
     requiredModels,
     resolvedPricing,
-    stored: storedPricingCatalog,
-    live: livePricing?.metadata
+    ...pricingMetadata
   });
   const cacheReadRatio = configuredCacheReadRatio(input.env?.ULTRAFUZZ_CACHE_READ_RATIO);
   const segments = accountingSegmentsFromUsageLedger(
@@ -796,6 +990,36 @@ async function synchronizeWorkflowAccounting(input: {
     sourceAccounting?.sourceRunIds ?? []
   );
   const lastUsageEvent = usageReplay.entries.at(-1);
+  const durableInvocationIds = new Set(
+    usageReplay.entries.flatMap((entry) =>
+      entry.model_invocation === undefined ? [] : [entry.model_invocation.invocation_id]
+    )
+  );
+  const durableUsageSourceEventIds = new Set(usageReplay.entries.map((entry) => entry.source_event_id));
+  const observedOutstandingInvocations = [
+    ...lifecycleInvocations.filter(
+      (invocation) =>
+        !durableInvocationIds.has(invocation.invocationId) &&
+        !(
+          durableUsageSourceEventIds.has(invocation.sourceEventId) &&
+          !invocation.startedEvidenceComplete &&
+          !invocation.terminalObserved
+        )
+    ),
+    ...unboundTokenModelInvocations(
+      input.workflowRunId,
+      input.tasks,
+      input.events,
+      lifecycleInvocations,
+      usageReplay.entries
+    )
+  ];
+  const outstandingInvocations = uniqueLifecycleModelInvocations(observedOutstandingInvocations);
+  const modelIdentity = modelIdentityFromUsageLedger(
+    usageReplay.entries,
+    usageReplay.malformedEntries,
+    outstandingInvocations
+  );
   const nextComparable = {
     schema_version: ACCOUNTING_SCHEMA_VERSION,
     source: "usage-ledger",
@@ -816,7 +1040,9 @@ async function synchronizeWorkflowAccounting(input: {
             workflow_run_id: lastUsageEvent.workflow_run_id
           })
     },
-    pricing_catalog: pricingCatalog
+    pricing_catalog: pricingCatalog,
+    model_identity: modelIdentity,
+    outstanding_model_invocations: outstandingInvocations.map(storedOutstandingModelInvocation)
   };
   if (sameJsonValue(comparableAccounting(recordField(metadata, "accounting")), comparableAccounting(nextComparable))) {
     return { changed: false, available: true };
@@ -840,6 +1066,52 @@ async function synchronizeWorkflowAccounting(input: {
   return { changed: true, available: true };
 }
 
+function persistPricingCatalogSnapshot(layout: RunLayout, catalog: PricingCatalogResult): void {
+  const digest = catalog.metadata.catalog_sha256;
+  const rawBody = catalog.rawBody;
+  if (
+    catalog.metadata.status !== "available" ||
+    digest === undefined ||
+    rawBody === undefined ||
+    rawBody.byteLength > MAX_PRICING_CATALOG_BYTES ||
+    sha256Bytes(rawBody) !== digest
+  ) {
+    throw new Error("available pricing catalog is missing its exact digest-bound response bytes");
+  }
+  const snapshotPath = getPricingCatalogSnapshotPath(layout, digest);
+  assertNoSymlinkComponents(layout.root, snapshotPath, "pricing catalog snapshot");
+  writeFileDurable(snapshotPath, rawBody);
+  if (!pricingCatalogSnapshotMatches(layout, digest)) {
+    throw new Error("durable pricing catalog snapshot does not match its recorded SHA-256 digest");
+  }
+}
+
+function pricingCatalogSnapshotMatches(layout: RunLayout, digest: string | undefined): boolean {
+  return readPricingCatalogSnapshot(layout, digest) !== undefined;
+}
+
+function readPricingCatalogSnapshot(layout: RunLayout, digest: string | undefined): Buffer | undefined {
+  if (digest === undefined || !/^[0-9a-f]{64}$/u.test(digest)) return undefined;
+  const snapshotPath = getPricingCatalogSnapshotPath(layout, digest);
+  let descriptor: number | undefined;
+  try {
+    assertNoSymlinkComponents(layout.root, snapshotPath, "pricing catalog snapshot");
+    descriptor = fs.openSync(snapshotPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_PRICING_CATALOG_BYTES) return undefined;
+    const rawBody = fs.readFileSync(descriptor);
+    return sha256Bytes(rawBody) === digest ? rawBody : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function sha256Bytes(value: Uint8Array): string {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 function accountingFromWorkflowEvents(
   events: WorkflowEvent[],
   modelPricing: ReadonlyMap<string, ModelPricing>,
@@ -860,7 +1132,13 @@ function accountingFromWorkflowEvents(
     ]);
     const cacheReadTokens = firstNumericField(payload, ["cacheReadTokens", "cache_read_tokens"]);
     const cacheWriteTokens = firstNumericField(payload, ["cacheWriteTokens", "cache_write_tokens"]);
-    const reasoningTokens = firstNumericField(payload, ["reasoningTokens", "reasoning_tokens"]);
+    const model = stringField(payload, "model");
+    // DeepSeek reports thinking tokens inside output_tokens. Treating its
+    // optional reasoning counter as an additional component would duplicate
+    // both the token total and the charge.
+    const reasoningTokens = isDeepSeekModel(model)
+      ? 0
+      : firstNumericField(payload, ["reasoningTokens", "reasoning_tokens"]);
     const explicitTotal = firstNumericField(payload, ["totalTokens", "total_tokens"]);
     const costUsd = firstNumericField(payload, [
       "costUsd",
@@ -869,7 +1147,6 @@ function accountingFromWorkflowEvents(
       "estimatedCostUsd",
       "estimated_cost_usd"
     ]);
-    const model = stringField(payload, "model");
     const normalizedUsage = normalizeUsageComponents({
       model,
       inputTokens: inputTokens ?? 0,
@@ -955,11 +1232,60 @@ function accountingFromWorkflowEvents(
 function appendWorkflowUsageEvents(
   layout: RunLayout,
   workflowRunId: string,
-  events: WorkflowEvent[]
+  events: WorkflowEvent[],
+  lifecycleInvocations: readonly LifecycleModelInvocation[],
+  tasks: StoredWorkflowTask[]
 ): UsageLedgerReplay {
   const replay = replayUsageEvents(layout);
   const usageEvents = events.filter((event) => event.type === "TokenUsageReported");
-  if (usageEvents.length === 0) {
+  const durableSourceEventIds = new Set(
+    replay.entries.filter((entry) => entry.workflow_run_id === workflowRunId).map((entry) => entry.source_event_id)
+  );
+  const durableInvocationIds = new Set(
+    replay.entries.flatMap((entry) =>
+      entry.model_invocation === undefined ? [] : [entry.model_invocation.invocation_id]
+    )
+  );
+  const lifecycleInvocationsByKey = new Map<string, LifecycleModelInvocation[]>();
+  for (const invocation of lifecycleInvocations) {
+    // A durable invocation is already immutably paired with its ledger event.
+    // Do not let a later partial token snapshot rebind a new event to it.
+    if (durableInvocationIds.has(invocation.invocationId)) continue;
+    const key = modelInvocationKey(invocation.nodeId, invocation.iteration, invocation.attempt);
+    const existing = lifecycleInvocationsByKey.get(key) ?? [];
+    existing.push(invocation);
+    lifecycleInvocationsByKey.set(key, existing);
+  }
+  const tasksByNode = new Map(tasks.map((task) => [task.smithersNodeId, task]));
+  const boundUsageEvents = usageEvents.flatMap((event) => {
+    const payload = event.payload ?? {};
+    const sourceEventId = workflowUsageSourceEventId(workflowRunId, event);
+    if (durableSourceEventIds.has(sourceEventId)) return [];
+    const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+    const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
+    const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+    const key =
+      nodeId === undefined || iteration === undefined || attempt === undefined
+        ? undefined
+        : modelInvocationKey(nodeId, iteration, attempt);
+    const invocation =
+      key === undefined ? undefined : takeTerminalLifecycleInvocation(lifecycleInvocationsByKey.get(key));
+    return [{ event, nodeId, invocation }];
+  });
+  const usageCandidates = boundUsageEvents.flatMap((bound) =>
+    bound.invocation?.terminalEvidenceComplete === true
+      ? [
+          normalizedUsageLedgerInput(
+            workflowRunId,
+            bound.event,
+            bound.nodeId === undefined ? undefined : tasksByNode.get(bound.nodeId),
+            bound.invocation
+          )
+        ]
+      : []
+  );
+  const candidates = usageCandidates;
+  if (candidates.length === 0) {
     return replay;
   }
   const existingGenerationBySourceEvent = new Map(
@@ -967,7 +1293,6 @@ function appendWorkflowUsageEvents(
       .filter((entry) => entry.workflow_run_id === workflowRunId)
       .map((entry) => [entry.source_event_id, entry.checkpoint_generation_id])
   );
-  const candidates = usageEvents.map((event) => normalizedUsageLedgerInput(workflowRunId, event));
   const firstUnseenImplicitCandidate = candidates.find(
     (candidate) =>
       candidate.checkpointGenerationId === undefined && !existingGenerationBySourceEvent.has(candidate.sourceEventId)
@@ -991,7 +1316,9 @@ function appendWorkflowUsageEvents(
 
 function normalizedUsageLedgerInput(
   workflowRunId: string,
-  event: WorkflowEvent
+  event: WorkflowEvent,
+  task: StoredWorkflowTask | undefined,
+  lifecycleInvocation: LifecycleModelInvocation
 ): Omit<AppendUsageEventInput, "checkpointGenerationId"> & { checkpointGenerationId?: string } {
   const payload = event.payload ?? {};
   const fields = [
@@ -1025,10 +1352,8 @@ function normalizedUsageLedgerInput(
   if (costUsd !== undefined) {
     usage.cost_usd = costUsd;
   }
-  const model = stringField(payload, "model");
-  if (model !== undefined) {
-    usage.model = model;
-  }
+  const providerReportedModel = providerModelEvidence(payload.model);
+  usage.model = providerReportedModel;
   const agent = stringField(payload, "agent");
   if (agent !== undefined) {
     usage.agent = agent;
@@ -1047,12 +1372,7 @@ function normalizedUsageLedgerInput(
     usageIncompleteReasons.push({ code: "attempt-identity-missing" });
   }
 
-  const sourceEventId = stableUsageDimension(
-    "workflow-event",
-    event.sourceEventId === undefined
-      ? [workflowRunId, "position", event.sequence ?? null, event.timestampMs ?? null]
-      : [workflowRunId, "explicit", event.sourceEventId]
-  );
+  const sourceEventId = workflowUsageSourceEventId(workflowRunId, event);
   const explicitGeneration = checkpointGenerationId(payload, workflowRunId);
   return {
     workflowRunId,
@@ -1063,9 +1383,203 @@ function normalizedUsageLedgerInput(
     ...(iteration === undefined ? {} : { iteration }),
     ...(attempt === undefined ? {} : { attempt }),
     usage,
+    ...(nodeId === undefined || iteration === undefined || attempt === undefined
+      ? {}
+      : {
+          modelInvocation: {
+            invocationId: lifecycleInvocation.invocationId,
+            configuredModel: configuredModelEvidence(task),
+            providerReportedModel,
+            terminalEvidenceComplete: lifecycleInvocation.terminalEvidenceComplete && task !== undefined
+          }
+        }),
     usageComplete: usageIncompleteReasons.length === 0,
     usageIncompleteReasons: uniqueUsageIncompleteReasons(usageIncompleteReasons)
   };
+}
+
+function takeTerminalLifecycleInvocation(
+  invocations: LifecycleModelInvocation[] | undefined
+): LifecycleModelInvocation | undefined {
+  if (invocations === undefined) return undefined;
+  const terminalIndex = invocations.findIndex((invocation) => invocation.terminalEvidenceComplete);
+  if (terminalIndex < 0) return undefined;
+  return invocations.splice(terminalIndex, 1)[0];
+}
+
+function lifecycleModelInvocations(
+  workflowRunId: string,
+  tasks: readonly StoredWorkflowTask[],
+  lifecycleEvents: readonly WorkflowEvent[]
+): LifecycleModelInvocation[] {
+  const invocations: LifecycleModelInvocation[] = [];
+  for (const task of tasks) {
+    const nodeEvents = lifecycleEvents.filter((event) => {
+      const payload = event.payload ?? {};
+      return (stringField(payload, "nodeId") ?? stringField(payload, "node_id")) === task.smithersNodeId;
+    });
+    for (const event of nodeEvents) {
+      const payload = event.payload ?? {};
+      const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+      if (attempt === undefined) continue;
+      const iteration = firstNonNegativeIntegerField(payload, ["iteration"]) ?? 0;
+      const observedAt = new Date(event.timestampMs ?? 0).toISOString();
+      const sourceEventId = workflowUsageSourceEventId(workflowRunId, event);
+      if (event.type === "NodeStarted") {
+        invocations.push({
+          invocationId: stableUsageDimension("model-invocation", [workflowRunId, sourceEventId]),
+          nodeId: task.smithersNodeId,
+          iteration,
+          attempt,
+          configuredModel: configuredModelEvidence(task),
+          providerReportedModel: PROVIDER_IDENTITY_MISSING,
+          observedAt,
+          sourceEventId,
+          ...(checkpointGenerationId(payload, workflowRunId) === undefined
+            ? {}
+            : { checkpointGenerationId: checkpointGenerationId(payload, workflowRunId) }),
+          startedEvidenceComplete: true,
+          terminalObserved: false,
+          terminalEvidenceComplete: false,
+          ...(event.sequence === undefined ? {} : { startedSequence: event.sequence })
+        });
+        continue;
+      }
+      if (terminalOutcomeForEvent(event) === undefined) continue;
+      let invocation: LifecycleModelInvocation | undefined;
+      for (let index = invocations.length - 1; index >= 0; index -= 1) {
+        const candidate = invocations[index]!;
+        if (
+          candidate.nodeId === task.smithersNodeId &&
+          candidate.iteration === iteration &&
+          candidate.attempt === attempt &&
+          !candidate.terminalObserved
+        ) {
+          invocation = candidate;
+          break;
+        }
+      }
+      if (invocation === undefined) {
+        invocation = {
+          invocationId: stableUsageDimension("model-invocation", [workflowRunId, sourceEventId]),
+          nodeId: task.smithersNodeId,
+          iteration,
+          attempt,
+          configuredModel: configuredModelEvidence(task),
+          providerReportedModel: PROVIDER_IDENTITY_MISSING,
+          observedAt,
+          sourceEventId,
+          startedEvidenceComplete: false,
+          terminalObserved: true,
+          terminalEvidenceComplete: false
+        };
+        invocations.push(invocation);
+      }
+      invocation.providerReportedModel = providerModelFromTerminalEvent(event);
+      invocation.observedAt = observedAt;
+      invocation.sourceEventId = sourceEventId;
+      invocation.terminalObserved = true;
+      invocation.terminalEvidenceComplete = invocation.startedEvidenceComplete;
+      invocation.checkpointGenerationId ??= checkpointGenerationId(payload, workflowRunId);
+      if (event.sequence !== undefined) invocation.terminalSequence = event.sequence;
+    }
+  }
+  return invocations.sort(
+    (left, right) =>
+      (left.startedSequence ?? left.terminalSequence ?? Number.MAX_SAFE_INTEGER) -
+        (right.startedSequence ?? right.terminalSequence ?? Number.MAX_SAFE_INTEGER) ||
+      Date.parse(left.observedAt) - Date.parse(right.observedAt) ||
+      modelInvocationKey(left.nodeId, left.iteration, left.attempt).localeCompare(
+        modelInvocationKey(right.nodeId, right.iteration, right.attempt)
+      )
+  );
+}
+
+function unboundTokenModelInvocations(
+  workflowRunId: string,
+  tasks: readonly StoredWorkflowTask[],
+  events: readonly WorkflowEvent[],
+  lifecycleInvocations: readonly LifecycleModelInvocation[],
+  durableEntries: readonly UsageLedgerEntry[]
+): LifecycleModelInvocation[] {
+  const tasksByNode = new Map(tasks.map((task) => [task.smithersNodeId, task]));
+  const durableSourceEventIds = new Set(
+    durableEntries.filter((entry) => entry.workflow_run_id === workflowRunId).map((entry) => entry.source_event_id)
+  );
+  const durableInvocationIds = new Set(
+    durableEntries.flatMap((entry) =>
+      entry.model_invocation === undefined ? [] : [entry.model_invocation.invocation_id]
+    )
+  );
+  const invocationsByKey = new Map<string, LifecycleModelInvocation[]>();
+  for (const invocation of lifecycleInvocations) {
+    if (durableInvocationIds.has(invocation.invocationId)) continue;
+    const key = modelInvocationKey(invocation.nodeId, invocation.iteration, invocation.attempt);
+    const existing = invocationsByKey.get(key) ?? [];
+    existing.push(invocation);
+    invocationsByKey.set(key, existing);
+  }
+  return events.flatMap((event): LifecycleModelInvocation[] => {
+    if (event.type !== "TokenUsageReported") return [];
+    const payload = event.payload ?? {};
+    const sourceEventId = workflowUsageSourceEventId(workflowRunId, event);
+    if (durableSourceEventIds.has(sourceEventId)) return [];
+    const nodeId = stringField(payload, "nodeId") ?? stringField(payload, "node_id");
+    const iteration = firstNonNegativeIntegerField(payload, ["iteration"]);
+    const attempt = firstNonNegativeIntegerField(payload, ["attempt"]);
+    if (nodeId !== undefined && iteration !== undefined && attempt !== undefined) {
+      const key = modelInvocationKey(nodeId, iteration, attempt);
+      if (invocationsByKey.get(key)?.shift() !== undefined) return [];
+    }
+    return [
+      {
+        invocationId: stableUsageDimension("model-invocation", [workflowRunId, sourceEventId]),
+        nodeId: nodeId ?? "ultrafuzz-model-invocation-node-missing",
+        iteration: iteration ?? 0,
+        attempt: attempt ?? 0,
+        configuredModel: configuredModelEvidence(nodeId === undefined ? undefined : tasksByNode.get(nodeId)),
+        providerReportedModel: providerModelEvidence(payload.model),
+        observedAt: new Date(event.timestampMs ?? 0).toISOString(),
+        sourceEventId,
+        startedEvidenceComplete: false,
+        terminalObserved: false,
+        terminalEvidenceComplete: false,
+        ...(event.sequence === undefined ? {} : { startedSequence: event.sequence })
+      }
+    ];
+  });
+}
+
+function providerModelFromTerminalEvent(event: WorkflowEvent): string {
+  const payload = event.payload ?? {};
+  const error = recordField(payload, "error");
+  const errorResult = recordField(error, "result");
+  const errorResponse = recordField(errorResult, "response");
+  return providerModelEvidence(errorResponse?.modelId);
+}
+
+function configuredModelEvidence(task: StoredWorkflowTask | undefined): string {
+  const model = task?.modelName ?? task?.metadata?.model?.modelName;
+  if (model === undefined) return CONFIGURED_MODEL_MISSING;
+  return MODEL_ID_PATTERN.test(model) ? model : CONFIGURED_MODEL_INVALID;
+}
+
+function providerModelEvidence(value: unknown): string {
+  if (value === undefined) return PROVIDER_IDENTITY_MISSING;
+  return typeof value === "string" && MODEL_ID_PATTERN.test(value) ? value : PROVIDER_IDENTITY_INVALID;
+}
+
+function workflowUsageSourceEventId(workflowRunId: string, event: WorkflowEvent): string {
+  return stableUsageDimension(
+    "workflow-event",
+    event.sourceEventId === undefined
+      ? [workflowRunId, "position", event.sequence ?? null, event.timestampMs ?? null]
+      : [workflowRunId, "explicit", event.sourceEventId]
+  );
+}
+
+function modelInvocationKey(nodeId: string, iteration: number, attempt: number): string {
+  return JSON.stringify([nodeId, iteration, attempt]);
 }
 
 function checkpointGenerationId(payload: Record<string, unknown>, workflowRunId: string): string | undefined {
@@ -1116,6 +1630,269 @@ function workflowEventsFromUsageLedger(entries: readonly UsageLedgerEntry[]): Wo
       agent: entry.usage.agent
     }
   }));
+}
+
+function modelIdentityFromUsageLedger(
+  entries: readonly UsageLedgerEntry[],
+  malformedEntries: number,
+  openInvocations: readonly LifecycleModelInvocation[]
+): RuntimeModelIdentity {
+  const durableInvocations = entries.map((entry): RuntimeModelIdentityInvocation => ({
+    invocation_id: entry.model_invocation?.invocation_id ?? entry.event_id,
+    configured_model: entry.model_invocation?.configured_model ?? CONFIGURED_MODEL_MISSING,
+    provider_reported_model: entry.model_invocation?.provider_reported_model ?? providerModelEvidence(entry.usage.model)
+  }));
+  const invocations = [
+    ...durableInvocations,
+    ...openInvocations.map((invocation): RuntimeModelIdentityInvocation => ({
+      invocation_id: invocation.invocationId,
+      configured_model: invocation.configuredModel,
+      provider_reported_model: invocation.providerReportedModel
+    }))
+  ];
+  const configuredModels = sortedUniqueStrings(invocations.map((invocation) => invocation.configured_model));
+  const providerReportedModels = sortedUniqueStrings(
+    invocations.map((invocation) => invocation.provider_reported_model)
+  );
+  const invocationIds = invocations.map((invocation) => invocation.invocation_id);
+  const invocationAttemptKeys = entries.flatMap((entry): string[] => {
+    const invocation = entry.model_invocation;
+    return invocation === undefined
+      ? []
+      : [modelInvocationKey(invocation.node_id, invocation.iteration, invocation.attempt)];
+  });
+
+  let status: RuntimeModelIdentity["status"];
+  if (
+    malformedEntries > 0 ||
+    new Set(invocationIds).size !== invocationIds.length ||
+    configuredModels.includes(CONFIGURED_MODEL_INVALID) ||
+    providerReportedModels.includes(PROVIDER_IDENTITY_INVALID)
+  ) {
+    status = "invalid";
+  } else if (
+    invocations.length === 0 ||
+    openInvocations.length > 0 ||
+    entries.some(
+      (entry) => entry.model_invocation === undefined || !entry.model_invocation.terminal_evidence_complete
+    ) ||
+    invocationAttemptKeys.length !== entries.length ||
+    configuredModels.includes(CONFIGURED_MODEL_MISSING) ||
+    providerReportedModels.includes(PROVIDER_IDENTITY_MISSING)
+  ) {
+    status = "incomplete";
+  } else if (
+    configuredModels.length !== 1 ||
+    providerReportedModels.length !== 1 ||
+    providerReportedModels.includes(PROVIDER_IDENTITY_MIXED)
+  ) {
+    status = "mixed";
+  } else if (invocations.some((invocation) => invocation.configured_model !== invocation.provider_reported_model)) {
+    status = "substituted";
+  } else {
+    status = "complete";
+  }
+
+  return {
+    schema_version: MODEL_IDENTITY_SCHEMA_VERSION,
+    status,
+    invocation_count: invocations.length,
+    configured_models: configuredModels,
+    provider_reported_models: providerReportedModels,
+    invocations
+  };
+}
+
+function priorOutstandingModelInvocations(accounting: Record<string, unknown> | undefined): LifecycleModelInvocation[] {
+  const storedOutstanding = accounting?.outstanding_model_invocations;
+  if (Array.isArray(storedOutstanding)) {
+    return uniqueLifecycleModelInvocations(
+      storedOutstanding.flatMap((value, index) => {
+        const parsed = parseStoredOutstandingModelInvocation(value);
+        return parsed.length > 0 ? parsed : [invalidStoredOutstandingModelInvocation(value, index)];
+      })
+    );
+  }
+
+  // Backward-compatible fail-closed recovery for accounting written before
+  // the full outstanding invocation record was introduced. Only a missing
+  // provider sentinel proves that the legacy identity was nondurable.
+  const modelIdentity = recordField(accounting, "model_identity");
+  const invocations = modelIdentity?.invocations;
+  if (!Array.isArray(invocations)) return [];
+  return invocations.flatMap((value): LifecycleModelInvocation[] => {
+    if (!isRecord(value) || value.provider_reported_model !== PROVIDER_IDENTITY_MISSING) return [];
+    const invocationId = stringField(value, "invocation_id");
+    const configuredModel = stringField(value, "configured_model");
+    if (
+      invocationId === undefined ||
+      !MODEL_ID_PATTERN.test(invocationId) ||
+      configuredModel === undefined ||
+      !MODEL_ID_PATTERN.test(configuredModel)
+    ) {
+      return [];
+    }
+    return [
+      {
+        invocationId,
+        nodeId: "ultrafuzz-model-invocation-node-unresolved",
+        iteration: 0,
+        attempt: 0,
+        configuredModel,
+        providerReportedModel: PROVIDER_IDENTITY_MISSING,
+        observedAt: new Date(0).toISOString(),
+        sourceEventId: invocationId,
+        startedEvidenceComplete: false,
+        terminalObserved: false,
+        terminalEvidenceComplete: false
+      }
+    ];
+  });
+}
+
+function invalidStoredOutstandingModelInvocation(value: unknown, index: number): LifecycleModelInvocation {
+  const invocationId = stableUsageDimension("model-invocation-invalid", [index, value]);
+  return {
+    invocationId,
+    nodeId: "ultrafuzz-model-invocation-node-invalid",
+    iteration: 0,
+    attempt: 0,
+    configuredModel: CONFIGURED_MODEL_INVALID,
+    providerReportedModel: PROVIDER_IDENTITY_INVALID,
+    observedAt: new Date(0).toISOString(),
+    sourceEventId: invocationId,
+    startedEvidenceComplete: false,
+    terminalObserved: false,
+    terminalEvidenceComplete: false
+  };
+}
+
+function parseStoredOutstandingModelInvocation(value: unknown): LifecycleModelInvocation[] {
+  if (!isRecord(value)) return [];
+  const invocationId = stringField(value, "invocation_id");
+  const nodeId = stringField(value, "node_id");
+  const iteration = firstNonNegativeIntegerField(value, ["iteration"]);
+  const attempt = firstNonNegativeIntegerField(value, ["attempt"]);
+  const configuredModel = stringField(value, "configured_model");
+  const providerReportedModel = stringField(value, "provider_reported_model");
+  const observedAt = stringField(value, "observed_at");
+  const sourceEventId = stringField(value, "source_event_id");
+  const startedEvidenceComplete = booleanField(value, "started_evidence_complete");
+  const terminalObserved = booleanField(value, "terminal_observed");
+  const terminalEvidenceComplete = booleanField(value, "terminal_evidence_complete");
+  if (
+    invocationId === undefined ||
+    !MODEL_ID_PATTERN.test(invocationId) ||
+    nodeId === undefined ||
+    !MODEL_ID_PATTERN.test(nodeId) ||
+    iteration === undefined ||
+    attempt === undefined ||
+    configuredModel === undefined ||
+    !MODEL_ID_PATTERN.test(configuredModel) ||
+    providerReportedModel === undefined ||
+    !MODEL_ID_PATTERN.test(providerReportedModel) ||
+    observedAt === undefined ||
+    !Number.isFinite(Date.parse(observedAt)) ||
+    sourceEventId === undefined ||
+    !MODEL_ID_PATTERN.test(sourceEventId) ||
+    startedEvidenceComplete === undefined ||
+    terminalObserved === undefined ||
+    terminalEvidenceComplete === undefined
+  ) {
+    return [];
+  }
+  const checkpointGenerationId = stringField(value, "checkpoint_generation_id");
+  if (checkpointGenerationId !== undefined && !MODEL_ID_PATTERN.test(checkpointGenerationId)) return [];
+  const startedSequence = firstNonNegativeIntegerField(value, ["started_sequence"]);
+  const terminalSequence = firstNonNegativeIntegerField(value, ["terminal_sequence"]);
+  return [
+    {
+      invocationId,
+      nodeId,
+      iteration,
+      attempt,
+      configuredModel,
+      providerReportedModel,
+      observedAt,
+      sourceEventId,
+      ...(checkpointGenerationId === undefined ? {} : { checkpointGenerationId }),
+      startedEvidenceComplete,
+      terminalObserved,
+      terminalEvidenceComplete,
+      ...(startedSequence === undefined ? {} : { startedSequence }),
+      ...(terminalSequence === undefined ? {} : { terminalSequence })
+    }
+  ];
+}
+
+function storedOutstandingModelInvocation(invocation: LifecycleModelInvocation): Record<string, unknown> {
+  return {
+    invocation_id: invocation.invocationId,
+    node_id: invocation.nodeId,
+    iteration: invocation.iteration,
+    attempt: invocation.attempt,
+    configured_model: invocation.configuredModel,
+    provider_reported_model: invocation.providerReportedModel,
+    observed_at: invocation.observedAt,
+    source_event_id: invocation.sourceEventId,
+    ...(invocation.checkpointGenerationId === undefined
+      ? {}
+      : { checkpoint_generation_id: invocation.checkpointGenerationId }),
+    started_evidence_complete: invocation.startedEvidenceComplete,
+    terminal_observed: invocation.terminalObserved,
+    terminal_evidence_complete: invocation.terminalEvidenceComplete,
+    ...(invocation.startedSequence === undefined ? {} : { started_sequence: invocation.startedSequence }),
+    ...(invocation.terminalSequence === undefined ? {} : { terminal_sequence: invocation.terminalSequence })
+  };
+}
+
+function mergeLifecycleModelInvocations(
+  observed: readonly LifecycleModelInvocation[],
+  prior: readonly LifecycleModelInvocation[]
+): LifecycleModelInvocation[] {
+  const byId = new Map(prior.map((invocation) => [invocation.invocationId, invocation]));
+  for (const invocation of observed) {
+    const existing = byId.get(invocation.invocationId);
+    if (existing === undefined) {
+      byId.set(invocation.invocationId, invocation);
+      continue;
+    }
+    const observedAt =
+      Date.parse(invocation.observedAt) >= Date.parse(existing.observedAt)
+        ? invocation.observedAt
+        : existing.observedAt;
+    byId.set(invocation.invocationId, {
+      ...existing,
+      ...invocation,
+      configuredModel:
+        invocation.configuredModel === CONFIGURED_MODEL_MISSING ? existing.configuredModel : invocation.configuredModel,
+      providerReportedModel:
+        invocation.providerReportedModel === PROVIDER_IDENTITY_MISSING
+          ? existing.providerReportedModel
+          : invocation.providerReportedModel,
+      observedAt,
+      checkpointGenerationId: invocation.checkpointGenerationId ?? existing.checkpointGenerationId,
+      startedEvidenceComplete: existing.startedEvidenceComplete || invocation.startedEvidenceComplete,
+      terminalObserved: existing.terminalObserved || invocation.terminalObserved,
+      terminalEvidenceComplete: existing.terminalEvidenceComplete || invocation.terminalEvidenceComplete,
+      startedSequence: invocation.startedSequence ?? existing.startedSequence,
+      terminalSequence: invocation.terminalSequence ?? existing.terminalSequence
+    });
+  }
+  return [...byId.values()].sort(compareLifecycleModelInvocations);
+}
+
+function uniqueLifecycleModelInvocations(invocations: readonly LifecycleModelInvocation[]): LifecycleModelInvocation[] {
+  return mergeLifecycleModelInvocations(invocations, []);
+}
+
+function compareLifecycleModelInvocations(left: LifecycleModelInvocation, right: LifecycleModelInvocation): number {
+  return (
+    (left.startedSequence ?? left.terminalSequence ?? Number.MAX_SAFE_INTEGER) -
+      (right.startedSequence ?? right.terminalSequence ?? Number.MAX_SAFE_INTEGER) ||
+    Date.parse(left.observedAt) - Date.parse(right.observedAt) ||
+    left.invocationId.localeCompare(right.invocationId)
+  );
 }
 
 function accountingSegmentsFromUsageLedger(
@@ -1554,7 +2331,7 @@ function priceUsageComponents(input: {
     cache_read: pricing.cachedInputUsdPerMillion,
     cache_write: pricing.cacheWriteUsdPerMillion,
     output: pricing.outputUsdPerMillion,
-    reasoning: pricing.outputUsdPerMillion
+    reasoning: pricing.reasoningUsdPerMillion ?? pricing.outputUsdPerMillion
   };
   let billableTokens = 0;
   let pricedComponents = 0;
@@ -1663,6 +2440,10 @@ function pricingForModel(
   return modelPricing.get(model.trim().toLowerCase());
 }
 
+function isDeepSeekModel(model: string | undefined): boolean {
+  return model?.toLowerCase().startsWith("deepseek") === true;
+}
+
 function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
   const models = new Set<string>();
   for (const event of events) {
@@ -1671,7 +2452,7 @@ function modelsRequiringPricing(events: WorkflowEvent[]): string[] {
     }
     const payload = event.payload ?? {};
     const model = stringField(payload, "model")?.trim().toLowerCase();
-    if (model !== undefined && model.length > 0) {
+    if (model !== undefined && model.length > 0 && !model.startsWith("ultrafuzz-provider-identity-")) {
       models.add(model);
     }
   }
@@ -1690,7 +2471,9 @@ function comparableAccounting(value: Record<string, unknown> | undefined): Recor
     segments: value.segments,
     cumulative: value.cumulative,
     checkpoint: value.checkpoint,
-    pricing_catalog: value.pricing_catalog
+    pricing_catalog: value.pricing_catalog,
+    model_identity: value.model_identity,
+    outstanding_model_invocations: value.outstanding_model_invocations
   };
 }
 
@@ -1710,17 +2493,29 @@ function mergedPricingCatalogMetadata(input: {
       : "models.dev");
   const storedFetchedAt = stringField(input.stored, "fetched_at");
   const fetchedAt = input.live?.fetched_at ?? storedFetchedAt;
+  const storedCatalogSha256 = stringField(input.stored, "catalog_sha256");
+  const catalogSha256 =
+    input.live?.catalog_sha256 ??
+    (storedCatalogSha256 !== undefined && /^[a-f0-9]{64}$/u.test(storedCatalogSha256)
+      ? storedCatalogSha256
+      : undefined);
   const storedStatus =
     input.stored?.status === "available" ||
     input.stored?.status === "disabled" ||
     input.stored?.status === "unavailable"
       ? input.stored.status
       : undefined;
-  const status = unresolvedModels.length === 0 ? "available" : (input.live?.status ?? storedStatus ?? "unavailable");
+  const status =
+    unresolvedModels.length === 0
+      ? "available"
+      : source === "disabled" || storedStatus === "disabled"
+        ? "disabled"
+        : "unavailable";
   return {
     source,
     status,
     ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt }),
+    ...(catalogSha256 === undefined ? {} : { catalog_sha256: catalogSha256 }),
     resolved_models: resolvedModels,
     unresolved_models: unresolvedModels,
     model_prices: modelPricingSnapshot(input.resolvedPricing)
@@ -1752,6 +2547,8 @@ async function synchronizeTasks(input: {
   currentContinuation: ControllerInvocation | undefined;
   inspectCollectionStartedAt: string;
   inspectCollectionCompletedAt: string;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
   control: WorkflowSynchronizationControl;
 }): Promise<{
   diagnostics: RuntimeDiagnostic[];
@@ -1808,6 +2605,38 @@ async function synchronizeTasks(input: {
       continue;
     }
     const evidence = attemptEvidence.evidence;
+    let verifierOutputEvidence: VerifierOutputEvidence | undefined;
+    let verifierOutputError: unknown;
+    if (evidence.status === "succeeded" && attemptEvidence.source === "verifier") {
+      try {
+        verifierOutputEvidence = await fetchVerifierOutputEvidence({
+          workflowRunId: input.workflowRunId,
+          task,
+          agentAttempt: attemptEvidence.executorAttempt,
+          agentIteration: attemptEvidence.executorIteration,
+          verifierAttempt: attemptEvidence.verifierAttempt,
+          verifierIteration: attemptEvidence.verifierIteration,
+          projectRoot: input.projectRoot,
+          env: input.env,
+          control: input.control
+        });
+      } catch (error) {
+        verifierOutputError = error;
+      }
+    }
+    if (verifierOutputEvidence !== undefined) {
+      const recorded = queryNodeAttempts(input.layout, { strategyAttemptId: task.attemptId }).find(
+        (entry) => entry.executor_retry_id === verifierOutputEvidence!.output.executor.executor_retry_id
+      );
+      if (recorded !== undefined) {
+        try {
+          assertExistingVerifierReceipt(input.layout, task, node.outputs, recorded, verifierOutputEvidence);
+        } catch (error) {
+          verifierOutputEvidence = undefined;
+          verifierOutputError = error;
+        }
+      }
+    }
     const closureInvalidatedForCurrentAttempt = artifactClosureInvalidatedForCurrentAttempt(previous, evidence);
     const invalidPrerequisiteClosure =
       evidence.status !== "succeeded"
@@ -1824,7 +2653,8 @@ async function synchronizeTasks(input: {
       evidence.status === "succeeded"
         ? previous?.status !== "succeeded" ||
           !artifactManifestExists(input.layout, task.attemptId) ||
-          invalidPrerequisiteClosure !== undefined
+          invalidPrerequisiteClosure !== undefined ||
+          verifierOutputEvidence === undefined
         : ["failed", "skipped", "timed-out"].includes(evidence.status) && previous?.status !== evidence.status;
     const prerequisiteFinalization =
       needsFinalization && evidence.status === "succeeded" && invalidPrerequisiteClosure === undefined
@@ -1849,6 +2679,8 @@ async function synchronizeTasks(input: {
             tasksByAttempt,
             force: previous?.status === "succeeded",
             previous,
+            verifierOutputEvidence,
+            verifierOutputError,
             nowMs: synchronizationClock(input.control),
             control: input.control
           })))
@@ -1860,16 +2692,9 @@ async function synchronizeTasks(input: {
           provenance: {},
           events: []
         };
+    let effectiveFinalization = finalization;
+    let patchStatus = finalization.status;
     diagnostics.push(...finalization.diagnostics);
-    const patchStatus = finalization.status;
-    nodeStatuses.set(task.attemptId, patchStatus);
-    workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
-    const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
-    concreteStatuses.push(patchStatus);
-    taskStatusesByConcreteNode.set(task.concreteNodeId, concreteStatuses);
-    const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
-    concreteAttempts.push(task.attemptId);
-    taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
     let retryCount = previous?.retry_count ?? 0;
     try {
       const ledger = appendTerminalTaskAttempts({
@@ -1878,22 +2703,86 @@ async function synchronizeTasks(input: {
         workflowRunId: input.workflowRunId,
         events: eventsByNode.get(task.smithersNodeId) ?? [],
         controllerInvocations,
-        currentAttempt: evidence.attempt,
+        currentAttempt: attemptEvidence.executorAttempt,
         currentStatus: patchStatus,
-        finalization
+        finalization: effectiveFinalization,
+        expectedOutputs: node.outputs,
+        tasksByAttempt,
+        verifierOutputEvidence,
+        currentFailureCategory: currentTerminalFailureCategory({
+          evidence,
+          evidenceSource: attemptEvidence.source,
+          finalization: effectiveFinalization
+        })
       });
       retryCount = Math.max(0, ledger.executedAttempts - (ledger.currentAttemptExecuted ? 1 : 0));
       changed ||= ledger.appended;
     } catch (error) {
-      diagnostics.push(diagnosticFromError(error, "artifacts", "NODE_ATTEMPT_LEDGER_WRITE_FAILED"));
+      const persistenceCode =
+        patchStatus === "succeeded" ? "NODE_SUCCESS_EVIDENCE_PERSIST_FAILED" : "NODE_ATTEMPT_LEDGER_WRITE_FAILED";
+      const persistenceDiagnostic = {
+        ...diagnosticFromError(error, "artifacts", persistenceCode),
+        code: persistenceCode
+      };
+      diagnostics.push(persistenceDiagnostic);
+      if (patchStatus === "succeeded") {
+        patchStatus = "failed";
+        effectiveFinalization = {
+          status: "failed",
+          diagnostics: [...finalization.diagnostics, persistenceDiagnostic],
+          lastError: persistenceDiagnostic.message,
+          provenance: {
+            ...finalization.provenance,
+            failure: {
+              category: "artifact-contract",
+              causal_task_id: task.verifierSmithersNodeId,
+              causal_failure_category: "artifact-contract",
+              dependent_task_ids: []
+            }
+          },
+          events: [
+            ...finalization.events,
+            {
+              eventType: "node-success-evidence-persist-failed",
+              status: "failed",
+              payload: { message: persistenceDiagnostic.message }
+            }
+          ]
+        };
+      } else {
+        const operationalProvenance = { ...effectiveFinalization.provenance };
+        delete operationalProvenance.terminal_disposition;
+        effectiveFinalization = {
+          ...effectiveFinalization,
+          diagnostics: [...effectiveFinalization.diagnostics, persistenceDiagnostic],
+          lastError: [effectiveFinalization.lastError, persistenceDiagnostic.message].filter(Boolean).join("; "),
+          provenance: operationalProvenance,
+          events: [
+            ...effectiveFinalization.events,
+            {
+              eventType: "node-attempt-ledger-write-failed",
+              status: "failed",
+              payload: { message: persistenceDiagnostic.message }
+            }
+          ]
+        };
+      }
     }
+    nodeStatuses.set(task.attemptId, patchStatus);
+    workflowStates.set(task.attemptId, evidence.workflowState ?? patchStatus);
+    const concreteStatuses = taskStatusesByConcreteNode.get(task.concreteNodeId) ?? [];
+    concreteStatuses.push(patchStatus);
+    taskStatusesByConcreteNode.set(task.concreteNodeId, concreteStatuses);
+    const concreteAttempts = taskAttemptsByConcreteNode.get(task.concreteNodeId) ?? [];
+    concreteAttempts.push(task.attemptId);
+    taskAttemptsByConcreteNode.set(task.concreteNodeId, concreteAttempts);
     const patch = {
       status: patchStatus,
       retry_count: retryCount,
       timed_out: patchStatus === "timed-out",
       ...(evidence.startedAt ? { started_at: evidence.startedAt } : {}),
       finished_at: finishedAtForStatus(patchStatus, previous, evidence.finishedAt),
-      last_error: finalization.lastError,
+      last_error: effectiveFinalization.lastError,
       provenance: {
         ...withoutTerminalDisposition(previous?.provenance),
         workflow: {
@@ -1904,14 +2793,14 @@ async function synchronizeTasks(input: {
           state: evidence.workflowState,
           attempt: evidence.attempt
         },
-        ...finalization.provenance
+        ...effectiveFinalization.provenance
       }
     };
     const stateChanged = nodePatchChanges(previous, patch);
     if (stateChanged) {
       assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, finalization.events, input.control);
+      appendNodeEvents(input.layout, task.attemptId, effectiveFinalization.events, input.control);
       changed = true;
     }
     syncedNodes += 1;
@@ -1965,6 +2854,83 @@ async function synchronizeTasks(input: {
   }
 
   return { diagnostics, nodeStatuses, workflowStates, syncedNodes, changed };
+}
+
+async function fetchVerifierOutputEvidence(input: {
+  workflowRunId: string;
+  task: StoredWorkflowTask;
+  agentAttempt?: number;
+  agentIteration?: number;
+  verifierAttempt?: number;
+  verifierIteration?: number;
+  projectRoot: string;
+  env?: Record<string, string | undefined>;
+  control: WorkflowSynchronizationControl;
+}): Promise<VerifierOutputEvidence> {
+  assertSynchronizationBudget(input.control);
+  const snapshot = await runSmithersInspectionCommand({
+    args: ["output", input.workflowRunId, input.task.verifierSmithersNodeId, "--json"],
+    projectRoot: input.projectRoot,
+    env: input.env,
+    ...inspectionExecutionControl(input.control, synchronizationClock(input.control))
+  });
+  assertSynchronizationBudget(input.control);
+  if (!snapshot.ok) {
+    throw new Error(snapshot.stderr.trim() || snapshot.error || "workflow verifier output could not be read");
+  }
+  const output = extractVerificationOutput(snapshot.json);
+  if (
+    output.executor.workflow_run_id !== input.workflowRunId ||
+    output.executor.agent_task_id !== input.task.smithersNodeId ||
+    (input.agentAttempt !== undefined && output.executor.agent_attempt !== input.agentAttempt) ||
+    (input.agentIteration !== undefined && output.executor.agent_iteration !== input.agentIteration) ||
+    output.executor.strategy_attempt_id !== input.task.attemptId ||
+    output.verifier.workflow_run_id !== input.workflowRunId ||
+    output.verifier.verifier_task_id !== input.task.verifierSmithersNodeId ||
+    (input.verifierAttempt !== undefined && output.verifier.attempt !== input.verifierAttempt) ||
+    (input.verifierIteration !== undefined && output.verifier.iteration !== input.verifierIteration)
+  ) {
+    throw new Error("verifier-receipt failure: workflow output lineage does not match the task");
+  }
+  return { output, stdout: snapshot.stdout };
+}
+
+function assertExistingVerifierReceipt(
+  layout: RunLayout,
+  task: StoredWorkflowTask,
+  expectedOutputs: Readonly<PlannedGraphNode["outputs"]>,
+  ledgerEntry: NodeAttemptLedgerEntry,
+  evidence: VerifierOutputEvidence
+): void {
+  if (ledgerEntry.outcome !== "succeeded" || ledgerEntry.manifests.output_sha256 === null) {
+    throw new Error("verifier-receipt failure: executor retry already has a non-successful ledger outcome");
+  }
+  const stored = readVerifierReceipt(layout, task.attemptId, ledgerEntry.executor_retry_id);
+  const storedOutput = readVerifierOutputEvidence(layout, task.attemptId, ledgerEntry.executor_retry_id);
+  const receipt = stored.receipt;
+  const artifactManifest = snapshotVerifierArtifactManifest({
+    layout,
+    nodeId: task.attemptId,
+    output: storedOutput.output,
+    expectedOutputs
+  });
+  if (
+    receipt.ledger_attempt_id !== ledgerEntry.attempt_id ||
+    receipt.node_id !== task.logicalNodeId ||
+    receipt.agent_task_id !== task.smithersNodeId ||
+    receipt.verifier_task_id !== task.verifierSmithersNodeId ||
+    receipt.output_manifest_digest !== ledgerEntry.manifests.output_sha256 ||
+    !verifierReceiptMatchesArtifactManifest(receipt, artifactManifest) ||
+    receipt.smithers_output_path !== storedOutput.relativePath ||
+    receipt.smithers_output_sha256 !== storedOutput.digest ||
+    ledgerEntry.evidence?.verifier_receipt_sha256 !== stored.digest ||
+    ledgerEntry.evidence?.smithers_output_sha256 !== storedOutput.digest ||
+    verificationOutputDigest(storedOutput.output) !== receipt.verification_output_digest ||
+    receipt.verification_output_digest !== verificationOutputDigest(evidence.output) ||
+    receipt.smithers_output_sha256 !== verifierOutputBytesDigest(evidence.stdout)
+  ) {
+    throw new Error("verifier-receipt failure: persisted receipt does not match immutable attempt evidence");
+  }
 }
 
 function artifactClosureInvalidatedForCurrentAttempt(
@@ -2234,6 +3200,8 @@ async function finalizeTerminalTask(input: {
   tasksByAttempt: Map<string, StoredWorkflowTask>;
   force: boolean;
   previous: NodeState | undefined;
+  verifierOutputEvidence?: VerifierOutputEvidence;
+  verifierOutputError?: unknown;
   nowMs: number;
   control: WorkflowSynchronizationControl;
 }): Promise<NodeFinalization> {
@@ -2291,6 +3259,28 @@ async function finalizeTerminalTask(input: {
     };
   }
 
+  if (input.verifierOutputEvidence === undefined) {
+    const diagnostic = diagnosticFromError(
+      input.verifierOutputError ?? new Error("trusted verifier output is missing"),
+      "artifact-contracts",
+      "VERIFIER_RECEIPT_OUTPUT_INVALID"
+    );
+    return {
+      status: "failed",
+      diagnostics: [diagnostic],
+      lastError: diagnostic.message,
+      provenance: {
+        failure: {
+          category: "artifact-contract",
+          causal_task_id: input.task.verifierSmithersNodeId,
+          causal_failure_category: "artifact-contract",
+          dependent_task_ids: []
+        }
+      },
+      events: []
+    };
+  }
+
   const diagnostics: RuntimeDiagnostic[] = [];
   const events: PendingNodeEvent[] = [];
   assertSynchronizationBudget(input.control);
@@ -2340,6 +3330,16 @@ async function finalizeTerminalTask(input: {
   }
   assertSynchronizationBudget(input.control);
   const gate = verifyRequiredArtifactsForAttempt(input.layout, input.node, input.task.attemptId);
+  try {
+    assertVerificationOutputMatchesArtifacts({
+      layout: input.layout,
+      nodeId: input.task.attemptId,
+      output: input.verifierOutputEvidence.output,
+      expectedOutputs: input.node.outputs
+    });
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "artifact-contracts", "VERIFIER_RECEIPT_ARTIFACT_MISMATCH"));
+  }
   const grace = nextArtifactReconciliationGrace({
     previous: previousGrace,
     nowMs: input.nowMs,
@@ -2416,11 +3416,15 @@ async function finalizeTerminalTask(input: {
   if (fs.existsSync(findingsPath)) {
     try {
       assertSynchronizationBudget(input.control);
+      const verifiedFindingsDigest = sha256File(findingsPath);
       const report = normalizeFindings({
         artifactDir,
         nodeId: input.task.attemptId,
         provenance: findingsProvenance(input.node, input.task)
       });
+      if (sha256File(findingsPath) !== verifiedFindingsDigest) {
+        throw new FindingsValidationError("verified findings.json is not in canonical normalized form");
+      }
       findingsCount = report.count;
       events.push({
         eventType: "findings-normalized",
@@ -2445,6 +3449,16 @@ async function finalizeTerminalTask(input: {
     const manifest = writeArtifactManifest({
       layout: input.layout,
       nodeId: input.task.attemptId,
+      // Source claims and attestations are control evidence, not model
+      // artifacts. The detached v2 attestation binds this manifest by digest,
+      // so including either file would also create a self-reference.
+      include: listSafeFiles(artifactDir, {
+        exclude: (relativePath) =>
+          relativePath === "artifact-manifest.json" ||
+          relativePath === LEGACY_WORKSPACE_SOURCE_CLAIM_FILE ||
+          relativePath === WORKSPACE_SOURCE_ATTESTATION_FILE
+      }).map((entry) => entry.relativePath),
+      createdAt: input.evidence.finishedAt ?? readRunState(input.layout).created_at,
       outputs: input.node.outputs,
       prerequisiteNodeIds: input.task.dependencies,
       provenance: artifactProvenance(input.node, input.task, input.workflowRunId)
@@ -2565,6 +3579,10 @@ function appendTerminalTaskAttempts(input: {
   currentAttempt?: number;
   currentStatus: NodeStatus;
   finalization: NodeFinalization;
+  expectedOutputs: PlannedGraphNode["outputs"];
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
+  verifierOutputEvidence?: VerifierOutputEvidence;
+  currentFailureCategory?: NodeAttemptFailureCategory;
 }): { appended: boolean; executedAttempts: number; currentAttemptExecuted: boolean } {
   const terminalAttempts = terminalWorkflowAttempts(input.events);
   const state = readRunState(input.layout);
@@ -2577,8 +3595,19 @@ function appendTerminalTaskAttempts(input: {
       metadata: input.task.metadata ?? null
     })
   );
-  const manifestPath = path.join(getNodeArtifactDir(input.layout, input.task.attemptId), "artifact-manifest.json");
-  const outputManifestDigest = fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined;
+  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
+  const manifestPath = path.join(artifactDir, "artifact-manifest.json");
+  const artifactManifest =
+    input.currentStatus === "succeeded" && input.verifierOutputEvidence !== undefined
+      ? snapshotVerifierArtifactManifest({
+          layout: input.layout,
+          nodeId: input.task.attemptId,
+          output: input.verifierOutputEvidence.output,
+          expectedOutputs: input.expectedOutputs
+        })
+      : undefined;
+  const outputManifestDigest =
+    artifactManifest?.outputManifestDigest ?? (fs.existsSync(manifestPath) ? sha256File(manifestPath) : undefined);
   const existing = queryNodeAttempts(input.layout, { strategyAttemptId: input.task.attemptId });
   let sourceEntries: NodeAttemptLedgerEntry[] | undefined;
   const currentTerminalAttempt =
@@ -2596,24 +3625,33 @@ function appendTerminalTaskAttempts(input: {
     if (attempt === currentTerminalAttempt && attempt.outcome === "succeeded" && !terminalStatus(input.currentStatus)) {
       continue;
     }
+    const trustedExecutor =
+      attempt === currentTerminalAttempt && attempt.outcome === "succeeded"
+        ? input.verifierOutputEvidence?.output.executor
+        : undefined;
     const controllerInvocationId = dimensionId(
       "controller",
-      attempt.controllerInvocationId ??
-        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt) ??
+      trustedExecutor?.controller_invocation_id ??
+        attempt.controllerInvocationId ??
+        controllerInvocationForAttempt(input.controllerInvocations, attempt.startedAt, attempt.startedSequence) ??
         input.workflowRunId
     );
     const workflowExecutionId = dimensionId(
       "execution",
-      attempt.workflowExecutionId ?? stableLedgerDimension("execution", [input.workflowRunId, controllerInvocationId])
+      trustedExecutor?.workflow_execution_id ??
+        attempt.workflowExecutionId ??
+        stableLedgerDimension("execution", [input.workflowRunId, controllerInvocationId])
     );
     const checkpointGenerationId = dimensionId(
       "checkpoint",
-      attempt.checkpointGenerationId ??
+      trustedExecutor?.checkpoint_generation_id ??
+        attempt.checkpointGenerationId ??
         stableLedgerDimension("checkpoint", [workflowExecutionId, String(attempt.iteration)])
     );
     const executorRetryId = dimensionId(
       "retry",
-      attempt.executorRetryId ??
+      trustedExecutor?.executor_retry_id ??
+        attempt.executorRetryId ??
         stableLedgerDimension("retry", [
           input.workflowRunId,
           input.task.attemptId,
@@ -2632,7 +3670,7 @@ function appendTerminalTaskAttempts(input: {
     }
     let outcome = attempt.outcome;
     let failureCategory = attempt.failureCategory;
-    let outputDigest = outcome === "succeeded" ? outputManifestDigest : undefined;
+    let outputDigest = outcome === "succeeded" && attempt === currentTerminalAttempt ? outputManifestDigest : undefined;
     if (
       attempt === currentTerminalAttempt &&
       outcome === "succeeded" &&
@@ -2645,6 +3683,9 @@ function appendTerminalTaskAttempts(input: {
     } else if (outcome === "succeeded" && outputDigest === undefined) {
       outcome = "failed";
       failureCategory = "artifact-validation";
+    }
+    if (attempt === currentTerminalAttempt && input.currentFailureCategory !== undefined) {
+      failureCategory = input.currentFailureCategory;
     }
     const reuseSource =
       outcome === "reused"
@@ -2715,6 +3756,63 @@ function appendTerminalTaskAttempts(input: {
     parentAttemptId = attempt.attemptId;
     currentAttemptExecuted ||= attempt.isCurrent && attempt.appendInput!.reuse?.status !== "reused";
   }
+  if (input.currentStatus === "succeeded") {
+    const current = prepared.find((attempt) => attempt.isCurrent);
+    if (
+      current === undefined ||
+      input.verifierOutputEvidence === undefined ||
+      outputManifestDigest === undefined ||
+      artifactManifest === undefined
+    ) {
+      throw new Error("verifier-receipt failure: current successful attempt has no exact receipt lineage");
+    }
+    if (
+      currentTerminalAttempt !== undefined &&
+      existing.some(
+        (entry) =>
+          entry.outcome !== "succeeded" &&
+          entry.lifecycle.started_at === currentTerminalAttempt.startedAt &&
+          entry.lifecycle.finished_at === currentTerminalAttempt.finishedAt
+      )
+    ) {
+      throw new Error("verifier-receipt failure: workflow attempt already has an immutable non-successful outcome");
+    }
+    const ledgerEntry =
+      current.recordedEntry ??
+      createNodeAttemptLedgerEntry(
+        input.layout,
+        pending.find(
+          (candidate) => candidate.executorRetryId === input.verifierOutputEvidence!.output.executor.executor_retry_id
+        ) ?? current.appendInput!
+      );
+    const persistedEvidence = persistCurrentSourceEvidence({
+      layout: input.layout,
+      task: input.task,
+      tasksByAttempt: input.tasksByAttempt,
+      ledgerEntry,
+      verifierOutputEvidence: input.verifierOutputEvidence,
+      artifactManifest
+    });
+    if (current.recordedEntry !== undefined) {
+      if (
+        current.recordedEntry.evidence?.verifier_receipt_sha256 !== persistedEvidence.verifierReceiptDigest ||
+        current.recordedEntry.evidence?.smithers_output_sha256 !== persistedEvidence.smithersOutputDigest
+      ) {
+        throw new Error("verifier-receipt failure: successful ledger evidence binding is missing or conflicting");
+      }
+    } else {
+      const currentPending = pending.find(
+        (candidate) => candidate.executorRetryId === input.verifierOutputEvidence!.output.executor.executor_retry_id
+      );
+      if (currentPending === undefined) {
+        throw new Error("verifier-receipt failure: successful ledger append is missing");
+      }
+      currentPending.evidence = {
+        verifierReceiptDigest: persistedEvidence.verifierReceiptDigest,
+        smithersOutputDigest: persistedEvidence.smithersOutputDigest
+      };
+    }
+  }
   const results = pending.length === 0 ? [] : appendNodeAttempts(input.layout, pending);
   const allEntries = new Map(existing.map((entry) => [entry.attempt_id, entry]));
   for (const result of results) {
@@ -2727,7 +3825,99 @@ function appendTerminalTaskAttempts(input: {
   };
 }
 
-function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAttempt[] {
+function persistCurrentSourceEvidence(input: {
+  layout: RunLayout;
+  task: StoredWorkflowTask;
+  tasksByAttempt: Map<string, StoredWorkflowTask>;
+  ledgerEntry: NodeAttemptLedgerEntry;
+  verifierOutputEvidence: VerifierOutputEvidence;
+  artifactManifest: VerifierArtifactManifestSnapshot;
+}): { verifierReceiptDigest: string; smithersOutputDigest: string } {
+  const output = input.verifierOutputEvidence.output;
+  const persistedOutput = persistVerifierOutputEvidence({
+    layout: input.layout,
+    output,
+    smithersOutputBytes: input.verifierOutputEvidence.stdout
+  });
+  const receipt = buildVerifierReceipt({
+    layout: input.layout,
+    nodeId: input.task.logicalNodeId,
+    ledgerEntry: input.ledgerEntry,
+    output,
+    smithersOutputBytes: input.verifierOutputEvidence.stdout,
+    smithersOutputPath: persistedOutput.relativePath,
+    artifactManifest: input.artifactManifest
+  });
+  const persistedReceipt = persistVerifierReceipt(input.layout, receipt);
+  const expectedTasks = workspaceSourceClosure(input.task, input.tasksByAttempt);
+  const artifactDir = getNodeArtifactDir(input.layout, input.task.attemptId);
+  const legacyClaim = readLegacyWorkspaceSourceClaim({
+    artifactDir,
+    targetRevision: input.task.baseCommit,
+    expectedTasks
+  });
+  const currentClaim = legacyClaim.tasks.find((entry) => entry.attempt_id === input.task.attemptId);
+  if (currentClaim === undefined || currentClaim.node_id !== input.task.logicalNodeId) {
+    throw new Error("workspace-provenance failure: current legacy source claim is missing");
+  }
+  persistWorkspaceSourceAttestation({
+    artifactDir,
+    targetRevision: input.task.baseCommit,
+    current: {
+      attempt_id: input.task.attemptId,
+      ledger_attempt_id: input.ledgerEntry.attempt_id,
+      node_id: input.task.logicalNodeId,
+      expected_base_commit: currentClaim.expected_base_commit,
+      initial_head: currentClaim.initial_head,
+      agent_root_verified: currentClaim.agent_root_verified,
+      tracked_clean: currentClaim.tracked_clean,
+      workflow_run_id: output.executor.workflow_run_id,
+      workflow_execution_id: input.ledgerEntry.workflow_execution_id,
+      controller_invocation_id: input.ledgerEntry.controller_invocation_id,
+      checkpoint_generation_id: input.ledgerEntry.checkpoint_generation_id,
+      executor_retry_id: input.ledgerEntry.executor_retry_id,
+      verifier_task_id: output.verifier.verifier_task_id,
+      verifier_receipt_digest: persistedReceipt.digest,
+      smithers_output_path: persistedOutput.relativePath,
+      smithers_output_sha256: persistedOutput.digest,
+      output_manifest_digest: input.artifactManifest.outputManifestDigest
+    },
+    dependencyArtifactDirs: input.task.dependencies.map((attemptId) => getNodeArtifactDir(input.layout, attemptId)),
+    expectedTasks
+  });
+  return {
+    verifierReceiptDigest: persistedReceipt.digest,
+    smithersOutputDigest: persistedOutput.digest
+  };
+}
+
+function workspaceSourceClosure(
+  task: StoredWorkflowTask,
+  tasksByAttempt: Map<string, StoredWorkflowTask>
+): ExpectedWorkspaceSourceTask[] {
+  const expected = new Map<string, string>();
+  const visiting = new Set<string>();
+  const visit = (candidate: StoredWorkflowTask): void => {
+    if (expected.has(candidate.attemptId)) return;
+    if (visiting.has(candidate.attemptId)) {
+      throw new Error("workspace-provenance failure: source attestation dependency cycle is invalid");
+    }
+    visiting.add(candidate.attemptId);
+    for (const dependencyId of candidate.dependencies) {
+      const dependency = tasksByAttempt.get(dependencyId);
+      if (dependency === undefined) {
+        throw new Error(`workspace-provenance failure: unknown source attestation dependency ${dependencyId}`);
+      }
+      visit(dependency);
+    }
+    visiting.delete(candidate.attemptId);
+    expected.set(candidate.attemptId, candidate.logicalNodeId);
+  };
+  visit(task);
+  return [...expected].map(([attemptId, nodeId]) => ({ attemptId, nodeId }));
+}
+
+function terminalWorkflowAttempts(events: readonly WorkflowEvent[]): TerminalWorkflowAttempt[] {
   const attempts: Array<Partial<TerminalWorkflowAttempt> & Pick<TerminalWorkflowAttempt, "retry" | "iteration">> = [];
   for (const event of events) {
     const payload = event.payload ?? {};
@@ -2768,10 +3958,17 @@ function terminalWorkflowAttempts(events: WorkflowEvent[]): TerminalWorkflowAtte
       (attempt): attempt is TerminalWorkflowAttempt =>
         attempt.startedAt !== undefined && attempt.finishedAt !== undefined && attempt.outcome !== undefined
     )
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      if (left.finishedSequence !== undefined && right.finishedSequence !== undefined) {
+        const sequenceOrder = left.finishedSequence - right.finishedSequence;
+        if (sequenceOrder !== 0) {
+          return sequenceOrder;
+        }
+      }
+      return (
         left.finishedAt.localeCompare(right.finishedAt) || left.iteration - right.iteration || left.retry - right.retry
-    );
+      );
+    });
 }
 
 function latestWorkflowAttempt(
@@ -2894,11 +4091,18 @@ function controllerInvocationsForSynchronization(
   return [
     ...controllerInvocationsForWorkflow(layout, workflowRunId),
     ...controllerInvocationsFromWorkflowEvents(events, workflowRunId)
-  ].sort(
-    (left, right) =>
-      left.invokedAt.localeCompare(right.invokedAt) ||
-      (left.workflowEventSequence ?? -1) - (right.workflowEventSequence ?? -1)
-  );
+  ].sort((left, right) => {
+    if (left.workflowEventSequence !== undefined && right.workflowEventSequence !== undefined) {
+      return left.workflowEventSequence - right.workflowEventSequence || left.invokedAt.localeCompare(right.invokedAt);
+    }
+    if (left.workflowEventSequence !== undefined) {
+      return 1;
+    }
+    if (right.workflowEventSequence !== undefined) {
+      return -1;
+    }
+    return left.invokedAt.localeCompare(right.invokedAt);
+  });
 }
 
 function inspectionCollectionFollowsContinuation(
@@ -2939,8 +4143,20 @@ function synchronizationContinuationBoundary(
 
 function controllerInvocationForAttempt(
   invocations: readonly ControllerInvocation[],
-  startedAt: string
+  startedAt: string,
+  startedSequence: number | undefined
 ): string | undefined {
+  if (startedSequence !== undefined) {
+    const sequencedInvocation = invocations
+      .filter(
+        (invocation) =>
+          invocation.workflowEventSequence !== undefined && invocation.workflowEventSequence <= startedSequence
+      )
+      .at(-1);
+    if (sequencedInvocation !== undefined) {
+      return sequencedInvocation.id;
+    }
+  }
   return invocations.filter((invocation) => invocation.invokedAt <= startedAt).at(-1)?.id ?? invocations[0]?.id;
 }
 
@@ -2972,6 +4188,9 @@ function finalizationFailureCategory(
   if (outcome !== "failed") {
     return undefined;
   }
+  if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_POSTFLIGHT_FAILED")) {
+    return "artifact-validation";
+  }
   if (finalization.diagnostics.some((diagnostic) => diagnostic.code === "PREREQUISITE_ARTIFACT_MANIFEST_INVALID")) {
     return "dependency";
   }
@@ -2986,6 +4205,21 @@ function finalizationFailureCategory(
     return "artifact-validation";
   }
   return "unknown";
+}
+
+function currentTerminalFailureCategory(input: {
+  evidence: NodeWorkflowEvidence;
+  evidenceSource: AttemptWorkflowEvidence["source"];
+  finalization: NodeFinalization;
+}): NodeAttemptFailureCategory | undefined {
+  if (input.finalization.diagnostics.some((diagnostic) => diagnostic.code === "AGENT_POSTFLIGHT_FAILED")) {
+    return finalizationFailureCategory(input.finalization, "failed");
+  }
+  return input.finalization.diagnostics.length === 0 &&
+    input.evidenceSource === "agent" &&
+    agentPostflightFailureCode(input.evidence.error) !== undefined
+    ? "artifact-validation"
+    : undefined;
 }
 
 function reusedSourceAttempt(input: {
@@ -3100,7 +4334,7 @@ function tasksInDependencyOrder(tasks: StoredWorkflowTask[]): StoredWorkflowTask
 function mergeNodeWorkflowEvidence(
   step: WorkflowStep | undefined,
   events: WorkflowEvent[],
-  inspectCollectionStartedAt: string,
+  _inspectCollectionStartedAt: string,
   inspectCollectionCompletedAt: string,
   currentContinuation: ControllerInvocation | undefined
 ): NodeWorkflowEvidence | undefined {
@@ -3110,8 +4344,12 @@ function mergeNodeWorkflowEvidence(
       : events.filter((event) => workflowEventFollowsContinuation(event, currentContinuation));
   const fromEvents = evidenceFromEvents(currentEvents);
   const stepEvidence = step === undefined ? undefined : evidenceFromStep(step);
+  // Inspect rows carry only node/state/attempt. After a continuation they do
+  // not prove that a terminal row belongs to the post-boundary execution,
+  // even when the inspection command itself ran later. Require a matching
+  // post-boundary event (and, for success, the receipt-bound output row).
   const fromStep =
-    currentContinuation === undefined || timestampIsAfter(inspectCollectionStartedAt, currentContinuation.invokedAt)
+    currentContinuation === undefined || (stepEvidence !== undefined && !terminalStatus(stepEvidence.status))
       ? stepEvidence
       : undefined;
   if (fromEvents === undefined) {
@@ -3148,6 +4386,9 @@ function mergeNodeWorkflowEvidence(
 }
 
 function workflowEventFollowsContinuation(event: WorkflowEvent, continuation: ControllerInvocation): boolean {
+  if (event.sequence !== undefined && continuation.workflowEventSequence !== undefined) {
+    return event.sequence > continuation.workflowEventSequence;
+  }
   if (event.timestampMs === undefined) {
     return false;
   }
@@ -3156,14 +4397,7 @@ function workflowEventFollowsContinuation(event: WorkflowEvent, continuation: Co
   if (!Number.isFinite(evidenceMs) || !Number.isFinite(continuationMs)) {
     return false;
   }
-  if (evidenceMs !== continuationMs) {
-    return evidenceMs > continuationMs;
-  }
-  return (
-    event.sequence !== undefined &&
-    continuation.workflowEventSequence !== undefined &&
-    event.sequence > continuation.workflowEventSequence
-  );
+  return evidenceMs > continuationMs;
 }
 
 function timestampIsAfter(candidate: string | undefined, reference: string | undefined): boolean {
@@ -3184,12 +4418,26 @@ function completionEvidenceForTask(
     return undefined;
   }
   if (agentEvidence.status !== "succeeded") {
-    return { evidence: agentEvidence, source: "agent", taskId: task.smithersNodeId };
+    return {
+      evidence: agentEvidence,
+      source: "agent",
+      taskId: task.smithersNodeId,
+      executorAttempt: agentEvidence.attempt,
+      executorIteration: agentEvidence.iteration
+    };
   }
   if (verifierEvidence === undefined) {
     return undefined;
   }
-  return { evidence: verifierEvidence, source: "verifier", taskId: task.verifierSmithersNodeId };
+  return {
+    evidence: verifierEvidence,
+    source: "verifier",
+    taskId: task.verifierSmithersNodeId,
+    executorAttempt: agentEvidence.attempt,
+    executorIteration: agentEvidence.iteration,
+    verifierAttempt: verifierEvidence.attempt,
+    verifierIteration: verifierEvidence.iteration
+  };
 }
 
 function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {
@@ -3197,7 +4445,8 @@ function evidenceFromStep(step: WorkflowStep): NodeWorkflowEvidence {
   return {
     status,
     workflowState: step.state,
-    ...(step.attempt !== undefined ? { attempt: step.attempt } : {})
+    ...(step.attempt !== undefined ? { attempt: step.attempt } : {}),
+    ...(step.iteration !== undefined ? { iteration: step.iteration } : {})
   };
 }
 
@@ -3207,11 +4456,19 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
     const payload = event.payload ?? {};
     const timestamp = event.timestampMs === undefined ? undefined : new Date(event.timestampMs).toISOString();
     const attempt = numberField(payload, "attempt");
+    const iteration = numberField(payload, "iteration");
     const attemptPatch = attempt === undefined ? {} : { attempt };
+    const iterationPatch = iteration === undefined ? {} : { iteration };
     const observationPatch = timestamp === undefined ? {} : { observedAt: timestamp };
     switch (event.type) {
       case "NodePending":
-        evidence = { status: "pending", workflowState: "pending", ...attemptPatch, ...observationPatch };
+        evidence = {
+          status: "pending",
+          workflowState: "pending",
+          ...attemptPatch,
+          ...iterationPatch,
+          ...observationPatch
+        };
         break;
       case "NodeStarted":
         evidence = {
@@ -3219,6 +4476,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: "in-progress",
           timedOut: false,
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { startedAt: timestamp } : {})
         };
@@ -3229,6 +4487,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "succeeded",
           workflowState: "finished",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {})
         };
@@ -3240,6 +4499,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: "timeout",
           timedOut: true,
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           error: stringField(payload, "message") ?? "workflow task timed out"
@@ -3255,6 +4515,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: timedOut ? "timeout" : "failed",
           timedOut,
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           ...(error ? { error } : {})
@@ -3267,6 +4528,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "skipped",
           workflowState: "skipped",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {})
         };
@@ -3277,6 +4539,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "failed",
           workflowState: "cancelled",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch,
           ...(timestamp ? { finishedAt: timestamp } : {}),
           error: "workflow task was cancelled"
@@ -3288,6 +4551,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           workflowState: "retrying",
           timedOut: false,
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch
         };
         break;
@@ -3297,6 +4561,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "running",
           workflowState: "waiting-approval",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch
         };
         break;
@@ -3306,6 +4571,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "running",
           workflowState: "waiting-event",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch
         };
         break;
@@ -3315,6 +4581,7 @@ function evidenceFromEvents(events: WorkflowEvent[]): NodeWorkflowEvidence | und
           status: "running",
           workflowState: "waiting-timer",
           ...attemptPatch,
+          ...iterationPatch,
           ...observationPatch
         };
         break;
@@ -3519,7 +4786,14 @@ function parseInspectSnapshot(value: unknown): WorkflowInspect {
     if (id === undefined || state === undefined) {
       return [];
     }
-    return [{ id, state, attempt: numberField(entry, "attempt") ?? numberField(entry, "attemptIndex") }];
+    return [
+      {
+        id,
+        state,
+        attempt: numberField(entry, "attempt") ?? numberField(entry, "attemptIndex"),
+        iteration: numberField(entry, "iteration") ?? numberField(entry, "iterationIndex")
+      }
+    ];
   });
   return {
     runStatus: stringField(run, "status") ?? stringField(data, "status"),
@@ -3573,19 +4847,18 @@ function parseWorkflowEvents(stdout: string): WorkflowEvent[] {
 }
 
 function loadSynchronizationInputs(
-  layout: RunLayout
+  contents: Readonly<{ graph: Buffer; tasks: Buffer }>
 ): { ok: true; graph: PlannedGraph; tasks: StoredWorkflowTask[] } | { ok: false; diagnostics: RuntimeDiagnostic[] } {
   const diagnostics: RuntimeDiagnostic[] = [];
   let graph: PlannedGraph | undefined;
   let tasks: StoredWorkflowTask[] | undefined;
   try {
-    graph = JSON.parse(fs.readFileSync(layout.graphPath, "utf8")) as PlannedGraph;
+    graph = JSON.parse(contents.graph.toString("utf8")) as PlannedGraph;
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "RUN_GRAPH_READ_FAILED"));
   }
   try {
-    const tasksPath = path.join(layout.root, "smithers", "tasks.json");
-    const parsed = JSON.parse(fs.readFileSync(tasksPath, "utf8")) as { tasks?: unknown };
+    const parsed = JSON.parse(contents.tasks.toString("utf8")) as { tasks?: unknown };
     tasks = Array.isArray(parsed.tasks) ? parsed.tasks.flatMap(parseStoredTask) : [];
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "runtime", "WORKFLOW_TASKS_READ_FAILED"));
@@ -3605,12 +4878,15 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
   const logicalNodeId = stringField(value, "logicalNodeId");
   const smithersNodeId = stringField(value, "smithersNodeId");
   const verifierSmithersNodeId = stringField(value, "verifierSmithersNodeId");
+  const baseCommit = stringField(value, "baseCommit");
   if (
     attemptId === undefined ||
     concreteNodeId === undefined ||
     logicalNodeId === undefined ||
     smithersNodeId === undefined ||
-    verifierSmithersNodeId === undefined
+    verifierSmithersNodeId === undefined ||
+    baseCommit === undefined ||
+    !/^[0-9a-f]{40}$/u.test(baseCommit)
   ) {
     return [];
   }
@@ -3624,6 +4900,7 @@ function parseStoredTask(value: unknown): StoredWorkflowTask[] {
       logicalNodeId,
       smithersNodeId,
       verifierSmithersNodeId,
+      baseCommit,
       dependencies: stringArrayField(value, "dependencies"),
       agentRef: stringField(value, "agentRef"),
       modelName: stringField(value, "modelName"),
@@ -3937,4 +5214,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function sortedUniqueStrings(values: string[]): string[] {
+  return uniqueStrings(values).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }

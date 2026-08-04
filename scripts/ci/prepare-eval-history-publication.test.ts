@@ -6,8 +6,12 @@ import path from "node:path";
 
 import {
   automaticProducerPolicyDimensions,
+  assertAutomaticPublicationFinalLaunch,
+  assertAutomaticPublicationModelEvidence,
   assertPublicBenchmarkBundleMatrixScope,
+  parseAutomaticPublicationProfileOptions,
   readAutomaticPublicationManifest,
+  readAutomaticPublicationLaunchState,
   summarizePublicBenchmarkBundlePublication,
   trustedCandidateRuntimePolicyDimensions,
   validateAutomaticPublicationManifest,
@@ -30,35 +34,317 @@ afterEach(() => {
 });
 
 describe("trusted automatic eval-history publication handoff", () => {
+  it("accepts complete exact DeepSeek V4 Flash identity and pricing evidence", () => {
+    const { bundle, model, pair } = deepSeekAutomaticPublicationBundle();
+    expect(assertAutomaticPublicationModelEvidence(bundle, model, pair)).toBeUndefined();
+  });
+
+  it("accepts a self-consistent current v7/v4 profile after the bound catalog rate changes", () => {
+    const fixture = deepSeekAutomaticPublicationBundle();
+    const pricing = fixture.diagnostics.rows[0]!.pricing;
+    pricing.rates_usd_per_million.output = 0.3;
+    pricing.component_costs_usd.output = 0.000075;
+    pricing.cost_usd = 0.0002164;
+    fixture.summary.rows[0]!.efficiency.cost_usd = pricing.cost_usd;
+    fixture.syncBundleFiles();
+    expect(assertAutomaticPublicationModelEvidence(fixture.bundle, fixture.model, fixture.pair)).toBeUndefined();
+  });
+
+  it("rejects missing, partial, mixed, or substituted DeepSeek V4 Flash evidence", () => {
+    const cases: Array<[string, (fixture: ReturnType<typeof deepSeekAutomaticPublicationBundle>) => void]> = [
+      [
+        "missing top-level provider identity",
+        ({ bundle }) => Reflect.deleteProperty(bundle, "provider_reported_model")
+      ],
+      [
+        "missing invocation identity",
+        ({ diagnostics }) =>
+          Reflect.deleteProperty(diagnostics.rows[0]!.model_identity.invocations[0]!, "provider_reported_model")
+      ],
+      ["partial pricing", ({ diagnostics }) => (diagnostics.rows[0]!.pricing.pricing_complete = false)],
+      [
+        "mixed invocation identity",
+        ({ diagnostics }) =>
+          (diagnostics.rows[0]!.model_identity.invocations[0]!.provider_reported_model = "deepseek-v4-pro")
+      ],
+      ["dated provider identity", ({ bundle }) => (bundle.provider_reported_model = "deepseek-v4-flash-202607")],
+      [
+        "substituted catalog source",
+        ({ diagnostics }) => (diagnostics.rows[0]!.pricing.catalog.source = "provider-default")
+      ],
+      [
+        "substituted output rate",
+        ({ diagnostics }) => (diagnostics.rows[0]!.pricing.rates_usd_per_million.output = 0.3)
+      ],
+      [
+        "reasoning double charge",
+        ({ diagnostics }) => {
+          const pricing = diagnostics.rows[0]!.pricing;
+          pricing.usage.reasoning_tokens = 25;
+          pricing.usage.inclusive_token_total += 25;
+          pricing.usage.billable_token_total += 25;
+          pricing.usage.total_tokens += 25;
+          pricing.component_costs_usd.reasoning = 0.000007;
+          pricing.cost_usd += 0.000007;
+        }
+      ]
+    ];
+
+    for (const [label, mutate] of cases) {
+      const fixture = deepSeekAutomaticPublicationBundle();
+      mutate(fixture);
+      fixture.syncBundleFiles();
+      expect(
+        () => assertAutomaticPublicationModelEvidence(fixture.bundle, fixture.model, fixture.pair),
+        label
+      ).toThrow();
+    }
+  });
+
+  it("binds a v7 bundle to the exact final successful launch receipt", () => {
+    const receipt = automaticPublicationReceipt();
+    expect(assertAutomaticPublicationFinalLaunch(receipt)).toEqual(receipt.state.launches[0]);
+  });
+
+  it("accepts a final success after an explicitly safe pre-model retry", () => {
+    const receipt = automaticPublicationReceipt();
+    const priorLaunch = structuredClone(receipt.state.launches[0]!);
+    priorLaunch.attempt_id = "safe-pre-model-retry";
+    const finalLaunch = receipt.state.launches[0]!;
+    finalLaunch.attempt = 2;
+    finalLaunch.attempt_id = "final-after-safe-retry";
+    receipt.state.attempt_history = [priorLaunch];
+
+    const priorLifecycle = structuredClone(receipt.state.recovery_lifecycle[0]!);
+    priorLifecycle.attempt_id = priorLaunch.attempt_id;
+    priorLifecycle.terminal_reason = "operational-failure";
+    priorLifecycle.terminal_class = "operational-failure";
+    priorLifecycle.model_work_started = false;
+    const finalLifecycle = receipt.state.recovery_lifecycle[0]!;
+    finalLifecycle.attempt = 2;
+    finalLifecycle.attempt_id = finalLaunch.attempt_id;
+    receipt.state.recovery_lifecycle = [priorLifecycle, finalLifecycle];
+    receipt.bundle.lineage.attempt = 2;
+    receipt.bundle.lineage.attempt_id = finalLaunch.attempt_id;
+
+    expect(assertAutomaticPublicationFinalLaunch(receipt)).toEqual(finalLaunch);
+  });
+
+  it("rejects nonfinal attempts that may have started model work or have ambiguous terminal state", () => {
+    for (const mutate of [
+      (lifecycle: ReturnType<typeof automaticPublicationReceipt>["state"]["recovery_lifecycle"][number]) => {
+        lifecycle.terminal_reason = "operational-failure";
+        lifecycle.terminal_class = "operational-failure";
+        lifecycle.model_work_started = true;
+      },
+      (lifecycle: ReturnType<typeof automaticPublicationReceipt>["state"]["recovery_lifecycle"][number]) => {
+        lifecycle.terminal_reason = "unknown";
+        lifecycle.terminal_class = "unknown";
+        lifecycle.model_work_started = "unknown";
+      },
+      (lifecycle: ReturnType<typeof automaticPublicationReceipt>["state"]["recovery_lifecycle"][number]) => {
+        lifecycle.terminal_reason = "active";
+        lifecycle.terminal_class = "active";
+        lifecycle.model_work_started = false;
+        delete lifecycle.finished_at;
+      }
+    ]) {
+      const receipt = automaticPublicationReceipt();
+      const priorLaunch = structuredClone(receipt.state.launches[0]!);
+      priorLaunch.attempt_id = "unsafe-prior-attempt";
+      const finalLaunch = receipt.state.launches[0]!;
+      finalLaunch.attempt = 2;
+      finalLaunch.attempt_id = "final-after-unsafe-attempt";
+      receipt.state.attempt_history = [priorLaunch];
+
+      const priorLifecycle = structuredClone(receipt.state.recovery_lifecycle[0]!);
+      priorLifecycle.attempt_id = priorLaunch.attempt_id;
+      mutate(priorLifecycle);
+      const finalLifecycle = receipt.state.recovery_lifecycle[0]!;
+      finalLifecycle.attempt = 2;
+      finalLifecycle.attempt_id = finalLaunch.attempt_id;
+      receipt.state.recovery_lifecycle = [priorLifecycle, finalLifecycle];
+      receipt.bundle.lineage.attempt = 2;
+      receipt.bundle.lineage.attempt_id = finalLaunch.attempt_id;
+
+      expect(() => assertAutomaticPublicationFinalLaunch(receipt)).toThrow(/unsafe nonfinal launch lifecycle/u);
+    }
+  });
+
+  it("rejects legacy v3, v4, v5, and v6 bundles in automatic publication", () => {
+    for (const schemaVersion of [
+      "ultrafuzz.modal.public-benchmark-bundle.v3",
+      "ultrafuzz.modal.public-benchmark-bundle.v4",
+      "ultrafuzz.modal.public-benchmark-bundle.v5",
+      "ultrafuzz.modal.public-benchmark-bundle.v6"
+    ]) {
+      const receipt = automaticPublicationReceipt();
+      receipt.bundle.schema_version = schemaVersion;
+      expect(() => assertAutomaticPublicationFinalLaunch(receipt)).toThrow(/must use .*\.v7/u);
+    }
+  });
+
+  it("rejects missing, invalid, and symlinked final launch state files", () => {
+    const root = temporaryRoot("ultrafuzz-publication-state-");
+    const pair = smokeManifest().pairs[0]!;
+    const statePath = path.join(root, pair.state_path);
+    const parser = {
+      parseModalLaunchState(value: unknown) {
+        if (
+          typeof value !== "object" ||
+          value === null ||
+          !("schema_version" in value) ||
+          value.schema_version !== "ultrafuzz.modal.launch-state.v3"
+        ) {
+          throw new Error("not a current launch state");
+        }
+        return value;
+      }
+    };
+
+    expect(() => readAutomaticPublicationLaunchState(root, pair, parser)).toThrow();
+    fs.writeFileSync(statePath, `${JSON.stringify({ schema_version: "ultrafuzz.modal.launch-state.v2" })}\n`);
+    expect(() => readAutomaticPublicationLaunchState(root, pair, parser)).toThrow(/launch state .* is invalid/u);
+    const finalState = automaticPublicationReceipt().state;
+    fs.writeFileSync(statePath, `${JSON.stringify(finalState)}\n`);
+    expect(readAutomaticPublicationLaunchState(root, pair, parser)).toEqual(finalState);
+    fs.unlinkSync(statePath);
+    const outside = path.join(root, "outside.state.json");
+    fs.writeFileSync(outside, `${JSON.stringify(automaticPublicationReceipt().state)}\n`);
+    fs.symlinkSync(outside, statePath);
+    expect(() => readAutomaticPublicationLaunchState(root, pair, parser)).toThrow(/symbolic link/u);
+  });
+
+  it("rejects stale same-run bundles and nonterminal launch state", () => {
+    const stale = automaticPublicationReceipt();
+    const priorLaunch = structuredClone(stale.state.launches[0]!);
+    priorLaunch.attempt_id = "prior-attempt";
+    const currentLaunch = stale.state.launches[0]!;
+    currentLaunch.attempt = 2;
+    currentLaunch.attempt_id = "current-attempt";
+    stale.state.attempt_history = [priorLaunch];
+    const priorLifecycle = structuredClone(stale.state.recovery_lifecycle[0]!);
+    priorLifecycle.attempt_id = priorLaunch.attempt_id;
+    priorLifecycle.terminal_reason = "operational-failure";
+    priorLifecycle.terminal_class = "operational-failure";
+    const currentLifecycle = stale.state.recovery_lifecycle[0]!;
+    currentLifecycle.attempt = 2;
+    currentLifecycle.attempt_id = currentLaunch.attempt_id;
+    stale.state.recovery_lifecycle = [priorLifecycle, currentLifecycle];
+    stale.bundle.lineage.attempt = 1;
+    stale.bundle.lineage.attempt_id = priorLaunch.attempt_id;
+    expect(() => assertAutomaticPublicationFinalLaunch(stale)).toThrow(/launch attempt.*lineage/u);
+
+    const active = automaticPublicationReceipt();
+    const lifecycle = active.state.recovery_lifecycle[0]!;
+    lifecycle.terminal_reason = "active";
+    lifecycle.terminal_class = "active";
+    lifecycle.model_work_started = "unknown";
+    delete lifecycle.finished_at;
+    expect(() => assertAutomaticPublicationFinalLaunch(active)).toThrow(/successful launch/u);
+  });
+
+  it("rejects replayed successes and state identity or fingerprint substitutions", () => {
+    const replayed = automaticPublicationReceipt();
+    const priorLaunch = structuredClone(replayed.state.launches[0]!);
+    priorLaunch.attempt_id = "prior-success";
+    const currentLaunch = replayed.state.launches[0]!;
+    currentLaunch.attempt = 2;
+    currentLaunch.attempt_id = "replayed-success";
+    replayed.state.attempt_history = [priorLaunch];
+    const priorLifecycle = structuredClone(replayed.state.recovery_lifecycle[0]!);
+    priorLifecycle.attempt_id = priorLaunch.attempt_id;
+    const currentLifecycle = replayed.state.recovery_lifecycle[0]!;
+    currentLifecycle.attempt = 2;
+    currentLifecycle.attempt_id = currentLaunch.attempt_id;
+    replayed.state.recovery_lifecycle = [priorLifecycle, currentLifecycle];
+    replayed.bundle.lineage.attempt = 2;
+    replayed.bundle.lineage.attempt_id = currentLaunch.attempt_id;
+    expect(() => assertAutomaticPublicationFinalLaunch(replayed)).toThrow(/successful launch history/u);
+
+    for (const mutate of [
+      (receipt: ReturnType<typeof automaticPublicationReceipt>) => (receipt.state.logical_run_id = "ci-other-run"),
+      (receipt: ReturnType<typeof automaticPublicationReceipt>) => (receipt.state.source_revision = "b".repeat(40)),
+      (receipt: ReturnType<typeof automaticPublicationReceipt>) => (receipt.state.fingerprints.config = "9".repeat(64)),
+      (receipt: ReturnType<typeof automaticPublicationReceipt>) =>
+        (receipt.bundle.lineage.image_fingerprint = "8".repeat(64)),
+      (receipt: ReturnType<typeof automaticPublicationReceipt>) =>
+        (receipt.bundle.lineage.model_fingerprint = "7".repeat(64))
+    ]) {
+      const receipt = automaticPublicationReceipt();
+      mutate(receipt);
+      expect(() => assertAutomaticPublicationFinalLaunch(receipt)).toThrow(/mismatched/u);
+    }
+  });
+
   it("accepts only the exact event-bound smoke manifest", () => {
     expect(validateAutomaticPublicationManifest(smokeManifest(), smokeContext())).toEqual(smokeManifest());
   });
 
-  it("requires an explicit trusted provider set for a DeepSeek smoke publication manifest", () => {
-    const manifest = smokeManifest();
-    const modelSlug = "benchmark-smoke-deepseek-v4-flash-max";
-    const pair = `ultrafuzz-bench-${modelSlug}`;
-    const providerConcurrency = manifest.concurrency.max_live_runner_workflows_by_provider as Record<string, number>;
-    delete providerConcurrency.openai;
-    providerConcurrency.deepseek = 3;
-    manifest.pairs = [
-      {
-        ...manifest.pairs[0]!,
-        pair,
-        model_slug: modelSlug,
-        provider: "deepseek",
-        config_path: `${pair}.json`,
-        state_path: `${pair}.state.json`
-      }
-    ];
+  it("requires an explicit trusted provider and exact profile for a DeepSeek smoke manifest", () => {
+    const manifest = deepSeekSmokeManifest();
 
     expect(() => validateAutomaticPublicationManifest(manifest, smokeContext())).toThrow();
+    const exactContext = {
+      ...smokeContext(),
+      expectedProviders: ["deepseek"],
+      expectedModel: "deepseek-v4-flash",
+      expectedReasoning: "max"
+    };
+    expect(validateAutomaticPublicationManifest(manifest, exactContext)).toEqual(manifest);
+
+    const substituted = deepSeekSmokeManifest("deepseek-v4-pro", "high");
+    expect(() => validateAutomaticPublicationManifest(substituted, exactContext)).toThrow(
+      /exact expected model profile/u
+    );
+  });
+
+  it("parses exact automatic publication profile flags and rejects ambiguous combinations", () => {
     expect(
-      validateAutomaticPublicationManifest(manifest, {
-        ...smokeContext(),
-        expectedProviders: ["deepseek"]
-      })
-    ).toEqual(manifest);
+      parseAutomaticPublicationProfileOptions([
+        "--expected-reasoning",
+        "max",
+        "--expected-provider",
+        "deepseek",
+        "--expected-model",
+        "deepseek-v4-flash"
+      ])
+    ).toEqual({
+      expectedProviders: ["deepseek"],
+      expectedModel: "deepseek-v4-flash",
+      expectedReasoning: "max"
+    });
+    for (const options of [
+      ["--expected-provider", "deepseek", "--expected-model", "deepseek-v4-flash"],
+      ["--expected-provider", "deepseek", "--expected-reasoning", "max"],
+      ["--expected-model", "deepseek-v4-flash", "--expected-reasoning", "max"],
+      ["--expected-provider", "deepseek", "--expected-provider", "openai"],
+      ["--unknown", "value"]
+    ]) {
+      expect(() => parseAutomaticPublicationProfileOptions(options)).toThrow();
+    }
+  });
+
+  it("rejects coherent producer model or reasoning substitutions outside the trusted DeepSeek Flash scope", () => {
+    const exactContext = {
+      ...context,
+      generation: "12345-2",
+      benchmark: "ultrafuzz-bench",
+      targets: smokeTargets(),
+      expectedModel: "deepseek-v4-flash",
+      expectedReasoning: "max"
+    };
+    expect(
+      validateAutomaticPairConfig(...deepSeekPairConfigArguments("deepseek-v4-flash", "max"), exactContext, new Set())
+    ).toBeUndefined();
+    for (const [model, reasoning] of [
+      ["deepseek-v4-pro", "max"],
+      ["deepseek-v4-flash", "high"]
+    ]) {
+      expect(() =>
+        validateAutomaticPairConfig(...deepSeekPairConfigArguments(model!, reasoning!), exactContext, new Set())
+      ).toThrow(/expected model|expected reasoning/u);
+    }
   });
 
   it("accepts a safe overridden smoke runner before unpacking producer bundles", () => {
@@ -439,6 +725,240 @@ function smokeContext() {
   return { ...context, targets: smokeTargets() };
 }
 
+function deepSeekAutomaticPublicationBundle() {
+  const model = "deepseek-v4-flash";
+  const pair = "ultrafuzz-bench-benchmark-smoke-deepseek-v4-flash-max";
+  const rowId = "very-liquid-vaults-foundry-row-1";
+  const totalTokens = 1_750;
+  const costUsd = 0.0002114;
+  const diagnostics = {
+    schema_version: "ultrafuzz.modal.public-eval-diagnostics.v4",
+    model,
+    rows: [
+      {
+        row_id: rowId,
+        model_identity: {
+          schema_version: "ultrafuzz.eval.model-identity.v1",
+          configured_model: model,
+          provider_reported_model: model,
+          invocation_count: 1,
+          invocations: [
+            {
+              invocation_id: "workflow-1/node-1/attempt-1/event-1",
+              configured_model: model,
+              provider_reported_model: model
+            }
+          ]
+        },
+        pricing: {
+          schema_version: "ultrafuzz.eval.pricing-evidence.v1",
+          configured_model: model,
+          provider_reported_model: model,
+          catalog: {
+            source: "models.dev",
+            status: "available",
+            fetched_at: "2026-08-03T00:00:00.000Z",
+            catalog_sha256: "a".repeat(64),
+            resolved_models: [model],
+            unresolved_models: [] as string[]
+          },
+          rates_usd_per_million: {
+            uncached_input: 0.14,
+            cache_read: 0.0028,
+            cache_write: null,
+            output: 0.28,
+            reasoning: 0.28
+          },
+          usage: {
+            uncached_input_tokens: 1_000,
+            cache_read_tokens: 500,
+            cache_write_tokens: 0,
+            output_tokens: 250,
+            reasoning_tokens: 0,
+            inclusive_token_total: totalTokens,
+            billable_token_total: totalTokens,
+            total_tokens: totalTokens
+          },
+          component_costs_usd: {
+            uncached_input: 0.00014,
+            cache_read: 0.0000014,
+            cache_write: 0,
+            output: 0.00007,
+            reasoning: 0
+          },
+          cost_usd: costUsd,
+          usage_complete: true,
+          pricing_complete: true,
+          partial_pricing: false,
+          event_count: 1,
+          priced_event_count: 1,
+          unpriced_event_count: 0,
+          thinking_tokens_included_in_output: true
+        }
+      }
+    ]
+  };
+  const summary = {
+    rows: [
+      {
+        row_id: rowId,
+        efficiency: {
+          total_tokens: totalTokens,
+          cost_usd: costUsd,
+          usage: { status: "complete", reason: null },
+          cost: { status: "complete", reason: null }
+        }
+      }
+    ]
+  };
+  const bundle = {
+    schema_version: "ultrafuzz.modal.public-benchmark-bundle.v7",
+    model,
+    provider_reported_model: model,
+    files: [
+      {
+        path: "eval/public-eval-diagnostics.json",
+        contents_base64: Buffer.from(`${JSON.stringify(diagnostics)}\n`, "utf8").toString("base64")
+      },
+      {
+        path: "eval/summary.json",
+        contents_base64: Buffer.from(`${JSON.stringify(summary)}\n`, "utf8").toString("base64")
+      }
+    ]
+  };
+  const syncBundleFiles = () => {
+    bundle.files[0]!.contents_base64 = Buffer.from(`${JSON.stringify(diagnostics)}\n`, "utf8").toString("base64");
+    bundle.files[1]!.contents_base64 = Buffer.from(`${JSON.stringify(summary)}\n`, "utf8").toString("base64");
+  };
+  return { bundle, diagnostics, model, pair, summary, syncBundleFiles };
+}
+
+function automaticPublicationReceipt() {
+  const configFingerprint = "1".repeat(64);
+  const sourceFingerprint = "2".repeat(64);
+  const imageFingerprint = "3".repeat(64);
+  const modelFingerprint = "4".repeat(64);
+  const candidateCommit = "a".repeat(40);
+  const logicalRunId = "ci-12345-2-smoke-ultrafuzz-bench-openai";
+  const model = {
+    slug: "benchmark-smoke-gpt-5-6-luna-high",
+    model: "gpt-5.6-luna",
+    provider: "openai",
+    agent: "CodexAgent",
+    reasoning: "high",
+    auth_mode: "api-key"
+  };
+  const attemptId = "final-attempt";
+  const launchedAt = "2026-08-03T00:00:00.000Z";
+  const finishedAt = "2026-08-03T00:10:00.000Z";
+  const launch = {
+    ...model,
+    generation: 1,
+    attempt: 1,
+    attempt_id: attemptId,
+    model_fingerprint: modelFingerprint,
+    volume_name: "benchmark-volume",
+    remote_root: "/benchmark",
+    workspace_mode: "fresh",
+    phase: "launched",
+    reserved_at: launchedAt,
+    sandbox_id: "sandbox-1",
+    launched_at: launchedAt
+  };
+  const state = {
+    schema_version: "ultrafuzz.modal.launch-state.v3",
+    logical_run_id: logicalRunId,
+    generation: 1,
+    generation_mode: "fresh",
+    generation_start_reason: "initial",
+    app: "ultrafuzz-evals",
+    image: `ufz-runner-${candidateCommit}`,
+    image_id: "image-1",
+    timeout_ms: 86_400_000,
+    source_revision: candidateCommit,
+    fingerprints: {
+      config: configFingerprint,
+      source: sourceFingerprint,
+      image: imageFingerprint
+    },
+    launches: [launch],
+    attempt_history: [] as Array<typeof launch>,
+    recovery_lifecycle: [
+      {
+        schema_version: "ultrafuzz.modal.recovery-lifecycle.v1",
+        logical_run_id: logicalRunId,
+        model_slug: model.slug,
+        generation: 1,
+        attempt: 1,
+        attempt_id: attemptId,
+        trigger_action: "initial-launch",
+        start_reason: "initial",
+        terminal_reason: "succeeded",
+        terminal_class: "succeeded",
+        launched_at: launchedAt,
+        finished_at: finishedAt,
+        worker_exit_code: 0,
+        fingerprints: {
+          config: configFingerprint,
+          source: sourceFingerprint,
+          image: imageFingerprint,
+          model: modelFingerprint
+        },
+        model_work_started: true as boolean | "unknown",
+        last_durable_transition_at: finishedAt,
+        node_counts_before: "unknown",
+        node_counts_after: { succeeded: 7 },
+        progress_made: true,
+        controller_requested: false,
+        node_attempt_ledger_digest: "5".repeat(64),
+        evaluation_lineage_digest: "6".repeat(64)
+      }
+    ]
+  };
+  const evalRunId = `${logicalRunId}-${model.slug}`;
+  return {
+    pair: `ultrafuzz-bench-${model.slug}`,
+    bundle: {
+      schema_version: "ultrafuzz.modal.public-benchmark-bundle.v7",
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      model_slug: model.slug,
+      model: model.model,
+      provider_reported_model: model.model,
+      reasoning: model.reasoning,
+      candidate_commit: candidateCommit,
+      eval_run_id: evalRunId,
+      lineage: {
+        logical_run_id: logicalRunId,
+        generation: 1,
+        attempt: 1,
+        attempt_id: attemptId,
+        config_fingerprint: configFingerprint,
+        source_fingerprint: sourceFingerprint,
+        image_fingerprint: imageFingerprint,
+        model_fingerprint: modelFingerprint
+      }
+    },
+    config: {
+      run_id: logicalRunId,
+      app_name: "ultrafuzz-evals",
+      image_name: `ufz-runner-${candidateCommit}`
+    },
+    model,
+    state,
+    context: {
+      benchmark: "ultrafuzz-bench",
+      mode: "smoke",
+      candidateCommit
+    },
+    expectedEvalRunId: evalRunId,
+    configFingerprint,
+    sourceFingerprint,
+    imageFingerprint,
+    modelFingerprint
+  };
+}
+
 function fullPublicationContext() {
   return { ...context, mode: "full" as const, targets: fullTargets() };
 }
@@ -476,6 +996,63 @@ function smokeManifest() {
       }
     ]
   };
+}
+
+function deepSeekSmokeManifest(model = "deepseek-v4-flash", reasoning = "max") {
+  const manifest = smokeManifest();
+  const modelSlug = `benchmark-smoke-${model}-${reasoning}`;
+  const pair = `ultrafuzz-bench-${modelSlug}`;
+  const providerConcurrency = manifest.concurrency.max_live_runner_workflows_by_provider as Record<string, number>;
+  delete providerConcurrency.openai;
+  providerConcurrency.deepseek = 3;
+  manifest.pairs = [
+    {
+      ...manifest.pairs[0]!,
+      pair,
+      model_slug: modelSlug,
+      provider: "deepseek",
+      config_path: `${pair}.json`,
+      state_path: `${pair}.state.json`
+    }
+  ];
+  return manifest;
+}
+
+function deepSeekPairConfigArguments(modelName: string, reasoning: string) {
+  const manifest = deepSeekSmokeManifest(modelName, reasoning);
+  const pair = manifest.pairs[0]!;
+  const model = {
+    slug: pair.model_slug,
+    model: modelName,
+    provider: "deepseek",
+    agent: "DeepSeekAgent",
+    reasoning,
+    auth_mode: "api-key"
+  };
+  const config = {
+    schema_version: "ultrafuzz.modal.benchmark.v1",
+    run_id: "ci-12345-2-smoke-ultrafuzz-bench-deepseek",
+    app_name: "ultrafuzz-evals",
+    image_name: `ufz-runner-${"a".repeat(40)}`,
+    node_timeout_seconds: 1800,
+    loops: 1,
+    braintrust: {
+      project: "ultrafuzz-public-benchmarks",
+      api_key_env: "BRAINTRUST_API_KEY",
+      judge_api_key_env: "OPENAI_API_KEY",
+      judge_url: "https://api.openai.com/v1/chat/completions"
+    },
+    public_benchmark: {
+      benchmark: "ultrafuzz-bench",
+      lane: "smoke",
+      runner_model_profile: pair.model_slug,
+      candidate_repository: context.repository,
+      candidate_commit: context.candidateCommit,
+      targets: smokeTargets(),
+      max_runtime_seconds: 15_000
+    }
+  };
+  return [config, model, pair] as const;
 }
 
 function fullManifest() {

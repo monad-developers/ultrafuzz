@@ -406,7 +406,13 @@ async function configureTarget(target: string): Promise<void> {
     agentsPath,
     `# Authorized defensive benchmark\n\nThis checkout is being analyzed in an isolated, sanctioned defensive security benchmark. Work only on this checkout and local test or fuzz tooling.\n\n${existingAgents}`
   );
-  await writeFile(path.join(target, "ultrafuzz.toml"), modalTargetToml(MODEL, CONFIG.node_timeout_seconds));
+  await writeFile(
+    path.join(target, "ultrafuzz.toml"),
+    modalTargetToml(MODEL, CONFIG.node_timeout_seconds, {
+      app: CONFIG.app_name,
+      image: CONFIG.image_name
+    })
+  );
   const topologyPath = path.join(target, ".ultrafuzz/topology.yml");
   const topology = topologyWithStrategyLoops(await readFile(topologyPath, "utf8"), CONFIG.loops);
   await writeFile(topologyPath, topology);

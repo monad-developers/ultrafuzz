@@ -342,8 +342,15 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).not.toContain("crytic/echidna");
     expect(standaloneDockerfile).not.toContain("crytic/medusa");
     expect(commands).toContain("@anthropic-ai/claude-code@2.1.220");
+    expect(commands).toContain("@moonshot-ai/kimi-code@0.29.1");
+    expect(commands).toContain("util-linux");
+    expect(commands).toContain("USER root");
+    expect(commands).not.toContain("USER ubuntu");
     expect(standaloneDockerfile).toContain("@anthropic-ai/claude-code@2.1.220");
     expect(standaloneDockerfile).toContain("@moonshot-ai/kimi-code@0.29.1");
+    expect(standaloneDockerfile).toContain("util-linux");
+    expect(standaloneDockerfile).toContain("USER root");
+    expect(standaloneDockerfile).not.toContain("USER ubuntu");
   });
 
   it("archives tracked files only", () => {
@@ -428,6 +435,40 @@ describe("Modal image source staging", () => {
     await expect(launchModalBenchmark({ configPath, repoRoot: path.resolve("../.."), env: {} })).rejects.toThrow(
       /exact local Git HEAD/u
     );
+  });
+
+  it("rejects cloud Codex and Claude subscriptions before contacting Modal", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-modal-subscription-admission-"));
+    const configPath = path.join(root, "benchmark.json");
+    const repoRoot = path.resolve("../..");
+    const candidateCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8"
+    }).trim();
+    const base = publicCollectionLineage().config;
+    for (const provider of ["openai", "anthropic"] as const) {
+      const model = {
+        ...base.models[0]!,
+        provider,
+        agent: provider === "openai" ? ("CodexAgent" as const) : ("ClaudeAgent" as const),
+        auth_mode: "subscription" as const
+      };
+      fs.writeFileSync(
+        configPath,
+        `${JSON.stringify({
+          ...base,
+          models: [model],
+          public_benchmark: {
+            ...base.public_benchmark,
+            candidate_commit: candidateCommit,
+            runner_model_profile: model.slug
+          }
+        })}\n`
+      );
+      await expect(launchModalBenchmark({ configPath, repoRoot, env: {} })).rejects.toThrow(
+        new RegExp(`${provider} subscription authentication without a trusted refresh broker`, "u")
+      );
+    }
   });
 });
 
@@ -693,10 +734,12 @@ describe("Modal result collection", () => {
     });
 
     const selected = await selectModalCollectedEvidence(files, config, config.models[0], {
-      OPENAI_API_KEY: "opaque-secret"
+      OPENAI_API_KEY: "opaque-secret",
+      MODAL_TOKEN_ID: "modal-id",
+      MODAL_TOKEN_SECRET: "modal-secret"
     });
     expect(selected.files).toBe(files);
-    expect(selected.forbiddenSecretValues).toEqual(["opaque-secret"]);
+    expect(selected.forbiddenSecretValues).toEqual(["opaque-secret", "modal-id", "modal-secret"]);
   });
 
   it("retains pre- and post-reconciliation Kimi subscription secrets for public collection", async () => {
@@ -719,10 +762,23 @@ describe("Modal result collection", () => {
           public_benchmark: { ...config.public_benchmark, runner_model_profile: model.slug }
         },
         model,
-        { KIMI_CODE_HOME: kimiAuthRoot, OPENAI_API_KEY: "judge-secret" },
+        {
+          KIMI_CODE_HOME: kimiAuthRoot,
+          OPENAI_API_KEY: "judge-secret",
+          MODAL_TOKEN_ID: "modal-id",
+          MODAL_TOKEN_SECRET: "modal-secret"
+        },
         ["pre-access", "pre-refresh"]
       )
-    ).resolves.toEqual(["pre-access", "pre-refresh", "post-access", "post-refresh", "judge-secret"]);
+    ).resolves.toEqual([
+      "pre-access",
+      "pre-refresh",
+      "post-access",
+      "post-refresh",
+      "judge-secret",
+      "modal-id",
+      "modal-secret"
+    ]);
 
     const files = {
       "status.json": "status"
@@ -756,9 +812,11 @@ describe("Modal result collection", () => {
     await expect(
       publicBenchmarkCollectionSecretValues(config, model, {
         MOONSHOT_API_KEY: "moonshot-secret",
-        OPENAI_API_KEY: "judge-secret"
+        OPENAI_API_KEY: "judge-secret",
+        MODAL_TOKEN_ID: "modal-id",
+        MODAL_TOKEN_SECRET: "modal-secret"
       })
-    ).resolves.toEqual(["moonshot-secret", "judge-secret"]);
+    ).resolves.toEqual(["moonshot-secret", "judge-secret", "modal-id", "modal-secret"]);
     await expect(
       publicBenchmarkCollectionSecretValues(config, model, { OPENAI_API_KEY: "judge-secret" })
     ).rejects.toThrow(/KIMI_API_KEY or MOONSHOT_API_KEY/u);
@@ -779,11 +837,15 @@ describe("Modal result collection", () => {
       modalBenchmarkSecretValues(config, model, {
         MOONSHOT_API_KEY: "moonshot-secret",
         OPENAI_API_KEY: "judge-secret",
+        MODAL_TOKEN_ID: "modal-id",
+        MODAL_TOKEN_SECRET: "modal-secret",
         KIMI_BASE_URL: "https://kimi.example.invalid/v1/"
       })
     ).toEqual({
       KIMI_API_KEY: "moonshot-secret",
       OPENAI_API_KEY: "judge-secret",
+      MODAL_TOKEN_ID: "modal-id",
+      MODAL_TOKEN_SECRET: "modal-secret",
       KIMI_BASE_URL: "https://kimi.example.invalid/v1"
     });
 
@@ -791,6 +853,8 @@ describe("Modal result collection", () => {
       modalBenchmarkSecretValues(config, model, {
         MOONSHOT_API_KEY: "moonshot-secret",
         OPENAI_API_KEY: "judge-secret",
+        MODAL_TOKEN_ID: "modal-id",
+        MODAL_TOKEN_SECRET: "modal-secret",
         KIMI_BASE_URL: "http://kimi.example.invalid/v1"
       })
     ).toThrow(/KIMI_BASE_URL must be an HTTPS URL/u);
@@ -1025,27 +1089,35 @@ describe("Modal worker identity", () => {
     ).toBe("permanent-operational-failure");
   });
 
-  it("makes the compiled source tree readable by the non-root worker", () => {
-    expect(modalImageBuildCommand()).toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
+  it("keeps the compiled source tree owned by the trusted root worker", () => {
+    expect(modalImageBuildCommand()).toContain("chown -R root:root /opt/ultrafuzz");
+    expect(modalImageBuildCommand()).not.toContain("chown -R ubuntu:ubuntu /opt/ultrafuzz");
     expect(modalImageBuildCommand()).toContain("@moonshot-ai/kimi-code@0.29.1");
   });
 
-  it("stages as root and executes the worker as the non-root image user", () => {
-    const command = modalWorkerEntrypointCommand("anthropic");
+  it("executes trusted outer controllers as root without marking them as node workers", () => {
+    const command = modalWorkerEntrypointCommand();
 
-    expect(command).toContain('chown -R ubuntu:ubuntu "$data_root"');
-    expect(command).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/claude'");
-    expect(command).toContain("runuser -u ubuntu -- env HOME='/home/ubuntu'");
+    expect(command).toContain('chown -R root:root "$data_root"');
+    expect(command).not.toContain("mount --bind");
+    expect(command).toContain("exec env HOME='/root' USER='root' LOGNAME='root'");
+    expect(command).not.toContain("ULTRAFUZZ_CLOUD_WORKER");
+    expect(command).not.toContain("persistent_auth_path");
+    expect(command).not.toContain("runuser");
+    expect(command).not.toContain("ubuntu:ubuntu");
     expect(command).toContain("/opt/ultrafuzz/packages/modal/dist/worker.js");
     expect(command).toContain("/run/ultrafuzz-config/lineage.json");
     expect(command).toContain("/run/ultrafuzz-config/launch-ready");
     expect(command).toContain("staging_deadline=$((SECONDS + 900))");
     expect(command).toContain("if (( SECONDS >= staging_deadline ))");
-    expect(command.match(/wait_for_staged_input '\/run\//gu)).toHaveLength(4);
+    expect(command.match(/wait_for_staged_input '\/run\//gu)).toHaveLength(3);
     expect(() => execFileSync("bash", ["-n", "-c", command])).not.toThrow();
 
+    expect(() => modalWorkerEntrypointCommand("openai")).toThrow(/without a trusted refresh broker/u);
+    expect(() => modalWorkerEntrypointCommand("anthropic")).toThrow(/without a trusted refresh broker/u);
+
     const kimi = modalWorkerEntrypointCommand("kimi");
-    expect(kimi).toContain("chown -R ubuntu:ubuntu '/run/ultrafuzz-auth/kimi'");
+    expect(kimi).toContain("chown -R root:root '/run/ultrafuzz-auth/kimi'");
     expect(kimi).toContain("wait_for_staged_input '/run/ultrafuzz-auth/kimi/config.toml'");
     expect(kimi).toContain("KIMI_CODE_HOME='/run/ultrafuzz-auth/kimi'");
     expect(kimi).toContain('ULTRAFUZZ_KIMI_SHARED_AUTH_HOME="$data_root/kimi-code-auth"');
@@ -1358,11 +1430,9 @@ describe("Modal worker identity", () => {
     expect(copiedRemotePaths[5]).toBe(REMOTE_LAUNCH_READY_PATH);
     expect(copiedRemotePaths).toHaveLength(6);
     expect(copiedRemotePaths).not.toContain("/run/ultrafuzz-auth/kimi/credentials/kimi-code.json");
-    const shellScripts = execCalls
-      .filter((command) => command[0] === "bash" && command[1] === "-lc")
-      .map((command) => command[2] ?? "");
-    expect(shellScripts.join("\n")).toContain("kimi-code.lock");
-    expect(shellScripts.join("\n")).toContain("ultrafuzz-source-refresh-token.sha256");
+    const stagedCommands = execCalls.flat().join("\n");
+    expect(stagedCommands).toContain(".ultrafuzz-stage.lock");
+    expect(stagedCommands).toContain("ultrafuzz-source-refresh-token.sha256");
     expect(copied.some((entry) => entry.localPath === path.join(kimiAuthRoot, "credentials"))).toBe(false);
     expect(readinessObservedDurableState).toBe(true);
     expect((await readModalLaunchState(statePath))?.launches[0]?.phase).toBe("launched");

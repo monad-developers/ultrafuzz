@@ -31,6 +31,7 @@ export interface RunLayout {
   statePath: string;
   eventsPath: string;
   usageLedgerPath: string;
+  pricingCatalogsDir: string;
   attemptLedgerPath: string;
   eventsIndexDir: string;
   workspacesPath: string;
@@ -74,7 +75,8 @@ export function createRunLayout(input: CreateRunLayoutInput): RunLayout {
     layout.artifactsDir,
     layout.workspacesDir,
     layout.eventsIndexDir,
-    layout.reviewDir
+    layout.reviewDir,
+    layout.pricingCatalogsDir
   ]) {
     fs.mkdirSync(directory, { recursive: true });
   }
@@ -172,10 +174,21 @@ export function layoutForRunRoot(root: string, runId = path.basename(root)): Run
     statePath: path.join(absoluteRoot, "state.json"),
     eventsPath: path.join(absoluteRoot, "events.jsonl"),
     usageLedgerPath: path.join(absoluteRoot, "usage.jsonl"),
+    pricingCatalogsDir: path.join(absoluteRoot, "pricing-catalogs"),
     attemptLedgerPath: path.join(absoluteRoot, "attempts.jsonl"),
     eventsIndexDir: path.join(absoluteRoot, "events.index"),
     workspacesPath: path.join(absoluteRoot, "workspaces.json")
   };
+}
+
+export function getPricingCatalogSnapshotPath(
+  layout: Pick<RunLayout, "pricingCatalogsDir">,
+  catalogSha256: string
+): string {
+  if (!/^[0-9a-f]{64}$/u.test(catalogSha256)) {
+    throw new Error(`pricing catalog digest must be a lowercase SHA-256 value: ${catalogSha256}`);
+  }
+  return safeResolveInside(layout.pricingCatalogsDir, `${catalogSha256}.json`, "pricing catalog snapshot path");
 }
 
 export function getNodeArtifactDir(

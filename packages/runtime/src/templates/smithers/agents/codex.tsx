@@ -35,7 +35,7 @@ function codexAuthOptions(): CodexAuthOptions {
 }
 
 function readCodexAuthConfig(): CodexAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const codex = readStringTable(readFileSync(configPath, "utf8"), "agents.CodexAgent");
   return {
     auth: stringField(codex, "auth"),

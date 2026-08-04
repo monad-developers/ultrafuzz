@@ -291,7 +291,7 @@ function kimiAuthOptions(reasoningEffort: KimiReasoningEffort): KimiAuthOptions 
 }
 
 function readKimiAuthConfig(): KimiAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const kimi = readStringTable(readFileSync(configPath, "utf8"), "agents.KimiAgent");
   return {
     auth: stringField(kimi, "auth"),

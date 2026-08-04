@@ -244,9 +244,10 @@ EVMBench and Ultrafuzz-bench reports are non-sensitive public benchmark output.
 The Modal publication bundle therefore includes the scored generation and the
 allowlisted report and normalized-finding files. It also carries the strict
 post-eval diagnostic that certifies each scoreable terminal outcome. A complete
-cohort may include one report-backed failed workflow, preserving that failure as
-a scored datapoint; two failed rows or missing terminal evidence still block
-publication. Bundle path, size, and SHA-256 checks are distinct from
+cohort may include one report-backed genuine task-output failure, preserving
+that failure as a scored datapoint. Operational failures, two genuine failure
+targets, or missing terminal evidence still block publication. Bundle path,
+size, and SHA-256 checks are distinct from
 the aggregate-only `eval bundle` privacy contract used for arbitrary targets.
 
 `eval publish --provider braintrust <eval-run-id>` replays the journal from

@@ -27,6 +27,14 @@ export interface KimiSubscriptionAuthPreparationOptions {
   now?: () => number;
 }
 
+export interface KimiSubscriptionAuthBrokerInput {
+  candidateCredential: string;
+  initialCredential: string;
+  model: string;
+  source: string;
+  env?: Record<string, string | undefined>;
+}
+
 export function subscriptionAuthCopy(
   model: Pick<ModalModelSpec, "provider" | "auth_mode">,
   env: Record<string, string | undefined> = process.env,
@@ -115,44 +123,53 @@ export async function refreshKimiSubscriptionAuth(
     if (token.refresh_token.trim() === "") {
       throw new Error("Kimi subscription token is near expiry and has no refresh token; run `kimi login`");
     }
-    const fetchImpl = options.fetch ?? fetch;
-    const response = await fetchImpl(`${oauthHost}/api/oauth/token`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "X-Msh-Platform": "kimi_code_cli",
-        "X-Msh-Version": "0.29.1",
-        "X-Msh-Device-Id": (await readFile(path.join(source, "device_id"), "utf8")).trim(),
-        "X-Msh-Device-Name": os.hostname(),
-        "X-Msh-Device-Model": os.arch(),
-        "X-Msh-Os-Version": `${os.type()} ${os.release()}`
+    const refreshed = await exchangeKimiOAuthRefresh(
+      {
+        oauthHost,
+        refreshToken: token.refresh_token,
+        source
       },
-      body: new URLSearchParams({
-        client_id: "17e5f671-d194-4dfb-9706-5516cb48c098",
-        grant_type: "refresh_token",
-        refresh_token: token.refresh_token
-      })
-    });
-    const payload = await response.json().catch(() => undefined);
-    if (!response.ok) {
-      throw new Error(`Kimi subscription token refresh failed with HTTP ${response.status}`);
-    }
-    const refreshed = kimiOAuthRefresh(payload);
-    const next = {
-      ...token,
-      access_token: refreshed.access_token,
-      refresh_token: refreshed.refresh_token,
-      expires_at: now + refreshed.expires_in,
-      expires_in: refreshed.expires_in,
-      token_type: refreshed.token_type ?? token.token_type ?? "Bearer",
-      scope: refreshed.scope ?? token.scope ?? ""
-    };
+      options
+    );
+    const next = mergeKimiOAuthRefresh(token, refreshed, now);
     await writeJsonAtomic(credentialPath, next);
     return credentialPath;
   } finally {
     await release();
   }
+}
+
+/**
+ * Declassifies a child-written Kimi credential only through Kimi's trusted OAuth endpoint.
+ *
+ * Every child-controlled field except `refresh_token` is ignored. The returned document is
+ * reconstructed from the trusted initial credential and a validated provider response; callers
+ * may then commit it with their own lineage/CAS protocol. This function never writes either the
+ * raw child candidate or the brokered result.
+ */
+export async function brokerKimiSubscriptionAuthRotation(
+  input: KimiSubscriptionAuthBrokerInput,
+  options: KimiSubscriptionAuthPreparationOptions = {}
+): Promise<Record<string, unknown>> {
+  const config = kimiConfig(await readFile(path.join(input.source, "config.toml"), "utf8"));
+  const credential = kimiCredentialRef(input.source, config, input.model);
+  const initial = kimiOAuthToken(input.initialCredential, "trusted initial Kimi subscription credential");
+  const refreshToken = kimiCandidateRefreshToken(input.candidateCredential);
+  const now = Math.floor((options.now?.() ?? Date.now()) / 1000);
+  const refreshed = await exchangeKimiOAuthRefresh(
+    {
+      oauthHost: kimiOAuthHost(input.env ?? process.env, credential.oauthHost),
+      refreshToken,
+      source: input.source
+    },
+    options
+  );
+  return mergeKimiOAuthRefresh(initial, refreshed, now);
+}
+
+export function kimiSubscriptionCredentialLineageSha256(credential: string): string {
+  const token = kimiOAuthToken(credential, "trusted initial Kimi subscription credential");
+  return kimiRefreshTokenSha256(token.refresh_token);
 }
 
 export async function kimiSubscriptionCredentialFileName(
@@ -275,6 +292,23 @@ interface KimiOAuthToken {
   [key: string]: unknown;
 }
 
+interface KimiOAuthRefresh {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  token_type?: string;
+  scope?: string;
+}
+
+interface KimiOAuthExchangeInput {
+  oauthHost: string;
+  refreshToken: string;
+  source: string;
+}
+
+const KIMI_REFRESH_TOKEN_MAX_BYTES = 64 * 1024;
+const KIMI_CREDENTIAL_CANDIDATE_MAX_BYTES = 1024 * 1024;
+
 function kimiConfig(text: string): KimiConfig {
   const value = parse(text) as unknown;
   if (!isRecord(value)) throw new Error("Kimi Code config.toml must contain a TOML document");
@@ -373,13 +407,76 @@ function kimiOAuthToken(
   return { ...value, refresh_token: refreshToken } as KimiOAuthToken;
 }
 
-function kimiOAuthRefresh(value: unknown): {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  token_type?: string;
-  scope?: string;
-} {
+async function exchangeKimiOAuthRefresh(
+  input: KimiOAuthExchangeInput,
+  options: KimiSubscriptionAuthPreparationOptions
+): Promise<KimiOAuthRefresh> {
+  const fetchImpl = options.fetch ?? fetch;
+  const response = await fetchImpl(`${input.oauthHost}/api/oauth/token`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-Msh-Platform": "kimi_code_cli",
+      "X-Msh-Version": "0.29.1",
+      "X-Msh-Device-Id": (await readFile(path.join(input.source, "device_id"), "utf8")).trim(),
+      "X-Msh-Device-Name": os.hostname(),
+      "X-Msh-Device-Model": os.arch(),
+      "X-Msh-Os-Version": `${os.type()} ${os.release()}`
+    },
+    body: new URLSearchParams({
+      client_id: "17e5f671-d194-4dfb-9706-5516cb48c098",
+      grant_type: "refresh_token",
+      refresh_token: input.refreshToken
+    })
+  });
+  const payload = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    throw new Error(`Kimi subscription token refresh failed with HTTP ${response.status}`);
+  }
+  return kimiOAuthRefresh(payload);
+}
+
+function mergeKimiOAuthRefresh(
+  initial: KimiOAuthToken,
+  refreshed: KimiOAuthRefresh,
+  now: number
+): Record<string, unknown> {
+  return {
+    ...initial,
+    access_token: refreshed.access_token,
+    refresh_token: refreshed.refresh_token,
+    expires_at: now + refreshed.expires_in,
+    expires_in: refreshed.expires_in,
+    token_type: refreshed.token_type ?? initial.token_type ?? "Bearer",
+    scope: refreshed.scope ?? initial.scope ?? ""
+  };
+}
+
+function kimiCandidateRefreshToken(candidateCredential: string): string {
+  const candidateBytes = Buffer.byteLength(candidateCredential, "utf8");
+  if (candidateBytes <= 0 || candidateBytes > KIMI_CREDENTIAL_CANDIDATE_MAX_BYTES) {
+    throw new Error("untrusted Kimi credential candidate has an unsafe size");
+  }
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(candidateCredential) as unknown;
+  } catch (error) {
+    throw new Error("untrusted Kimi credential candidate is not valid JSON", { cause: error });
+  }
+  const refreshToken = isRecord(candidate) ? candidate.refresh_token : undefined;
+  if (
+    typeof refreshToken !== "string" ||
+    refreshToken.trim() === "" ||
+    refreshToken.includes("\0") ||
+    Buffer.byteLength(refreshToken, "utf8") > KIMI_REFRESH_TOKEN_MAX_BYTES
+  ) {
+    throw new Error("untrusted Kimi credential candidate has an invalid refresh token");
+  }
+  return refreshToken;
+}
+
+function kimiOAuthRefresh(value: unknown): KimiOAuthRefresh {
   if (
     !isRecord(value) ||
     typeof value.access_token !== "string" ||
@@ -388,7 +485,9 @@ function kimiOAuthRefresh(value: unknown): {
     value.refresh_token === "" ||
     typeof value.expires_in !== "number" ||
     !Number.isFinite(value.expires_in) ||
-    value.expires_in <= 0
+    value.expires_in <= 0 ||
+    (value.token_type !== undefined && (typeof value.token_type !== "string" || value.token_type.trim() === "")) ||
+    (value.scope !== undefined && (typeof value.scope !== "string" || value.scope.trim() === ""))
   ) {
     throw new Error("Kimi subscription token refresh returned an unsupported response");
   }

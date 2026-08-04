@@ -102,6 +102,7 @@ import {
   remoteAuthPath,
   resolvePersistentRemoteRoot
 } from "./layout.js";
+import { modalVolumeFromNameV2 } from "./modal-volume.js";
 import {
   MAX_PUBLIC_BENCHMARK_BUNDLE_BYTES,
   parsePublicBenchmarkBundle,
@@ -146,8 +147,8 @@ import {
 } from "./recovery.js";
 
 const DEFAULT_TOOLCHAIN_IMAGE = "ultrafuzz-security-toolchain:latest";
-const MODAL_RUNTIME_USER = "ubuntu";
-const MODAL_RUNTIME_HOME = "/home/ubuntu";
+const MODAL_RUNTIME_USER = "root";
+const MODAL_RUNTIME_HOME = "/root";
 const MAX_GENERIC_WORKER_LOG_BYTES = 1024 * 1024;
 const MODAL_LAUNCH_STAGING_TIMEOUT_SECONDS = 15 * 60;
 const MODAL_ATTEMPT_TAG = /^[1-9][0-9]*$/u;
@@ -156,15 +157,65 @@ const MODAL_ATTEMPT_ID_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_BUILD_SCOPE_TAG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MODAL_FINGERPRINT_TAG = /^[a-f0-9]{64}$/u;
 const KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX = ".ultrafuzz-source-refresh-token.sha256";
+const CLOUD_AUTH_VOLUME_STAGE_HELPERS = `
+const sleepState = new Int32Array(new SharedArrayBuffer(4));
+const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
+const fsyncDirectory = (directory) => {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+};
+const acquireVolumeStageLock = (destination) => {
+  const parent = path.dirname(destination);
+  const lock = destination + ".ultrafuzz-stage.lock";
+  const owner = crypto.randomUUID();
+  const ownerPath = path.join(lock, "owner");
+  const deadline = Date.now() + 120000;
+  for (;;) {
+    try {
+      fs.mkdirSync(lock, { mode: 0o700 });
+      fs.writeFileSync(ownerPath, owner, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      const ownerDescriptor = fs.openSync(ownerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try { fs.fsyncSync(ownerDescriptor); } finally { fs.closeSync(ownerDescriptor); }
+      fsyncDirectory(lock);
+      fsyncDirectory(parent);
+      return () => {
+        if (fs.readFileSync(ownerPath, "utf8") !== owner) throw new Error("persistent credential stage lock ownership changed");
+        fs.rmSync(lock, { recursive: true });
+        fsyncDirectory(parent);
+      };
+    } catch (error) {
+      if (!error || error.code !== "EEXIST") throw error;
+      const current = fs.lstatSync(lock);
+      if (!current.isDirectory() || current.isSymbolicLink() || current.uid !== process.geteuid() ||
+          current.gid !== process.getegid() || (current.mode & 0o077) !== 0) {
+        throw new Error("persistent credential stage lock is unsafe");
+      }
+      if (Date.now() - current.mtimeMs > 5 * 60 * 1000) {
+        const stale = lock + ".stale-" + crypto.randomUUID();
+        try { fs.renameSync(lock, stale); } catch (renameError) {
+          if (renameError && (renameError.code === "ENOENT" || renameError.code === "EEXIST")) continue;
+          throw renameError;
+        }
+        fs.rmSync(stale, { recursive: true });
+        fsyncDirectory(parent);
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error("persistent credential stage lock timed out");
+      Atomics.wait(sleepState, 0, 0, 100);
+    }
+  }
+};
+`;
 export const KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT = `
 const fs = require("node:fs");
 const crypto = require("node:crypto");
+const path = require("node:path");
+${CLOUD_AUTH_VOLUME_STAGE_HELPERS}
 const [pending, destination, mode = "resume"] = process.argv.slice(1);
 if (mode !== "fresh" && mode !== "resume") {
   throw new Error("Kimi credential staging mode must be fresh or resume");
 }
 const sourceHashPath = destination + ${JSON.stringify(KIMI_SHARED_CREDENTIAL_SOURCE_SHA256_SUFFIX)};
-const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const sourceHash = () => {
   try {
     const value = fs.readFileSync(sourceHashPath, "utf8").trim();
@@ -188,6 +239,24 @@ const token = (file) => {
     return {};
   }
 };
+const releaseStageLock = acquireVolumeStageLock(destination);
+try {
+const pendingDescriptor = fs.openSync(
+  pending,
+  fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+);
+try {
+  const staged = fs.fstatSync(pendingDescriptor);
+  if (!staged.isFile() || staged.nlink !== 1 || staged.size <= 0 || staged.size > 1024 * 1024) {
+    throw new Error("Kimi credential stage input is unsafe");
+  }
+  if (staged.uid !== process.geteuid() || staged.gid !== process.getegid()) {
+    if (process.geteuid() !== 0) throw new Error("Kimi credential stage owner is unsafe");
+    fs.fchownSync(pendingDescriptor, process.geteuid(), process.getegid());
+  }
+  fs.fchmodSync(pendingDescriptor, 0o600);
+  fs.fsyncSync(pendingDescriptor);
+} finally { fs.closeSync(pendingDescriptor); }
 const pendingToken = token(pending);
 if (pendingToken.value === undefined) {
   throw new Error("Kimi credential snapshot must be a JSON object");
@@ -227,6 +296,7 @@ if (replace) {
     fs.writeFileSync(sourceHashPath, pendingRefreshTokenHash + "\\n", { mode: 0o600 });
   }
 }
+} finally { releaseStageLock(); }
 `;
 const LEGACY_UNSAFE_COLLECT_FILES = ["failure-details.json"] as const;
 export const MODAL_COLLECT_RESULT_FILES = [
@@ -359,6 +429,8 @@ export async function launchModalBenchmark(input: {
     throw new Error("public benchmark candidate commit must equal the exact local Git HEAD");
   }
   const selected = selectModels(config, input.modelSlugs);
+  assertSupportedCloudSubscriptionAuth(selected);
+  assertSingleKimiSubscriptionRow(selected);
   const statePath = path.resolve(input.statePath ?? defaultStatePath(config.run_id));
   const mode = input.mode ?? "resume";
   if (mode === "fresh" && selected.length !== config.models.length) {
@@ -488,7 +560,6 @@ async function prepareSelectedModelAuthCopies(
     secrets: Record<string, string>;
   }>
 > {
-  assertSingleKimiSubscriptionRow(selected);
   const prepared: Array<{
     model: ModalModelSpec;
     auth: SubscriptionAuthCopy | undefined;
@@ -517,6 +588,15 @@ async function prepareSelectedModelAuthCopies(
   } catch (error) {
     await cleanupSubscriptionAuthCopies(preparedAuthCopies);
     throw error;
+  }
+}
+
+function assertSupportedCloudSubscriptionAuth(selected: readonly ModalModelSpec[]): void {
+  const unsupported = selected.find((model) => model.auth_mode === "subscription" && model.provider !== "kimi");
+  if (unsupported !== undefined) {
+    throw new Error(
+      `Modal cloud execution does not support ${unsupported.provider} subscription authentication without a trusted refresh broker`
+    );
   }
 }
 
@@ -613,7 +693,7 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
 
   const volumeName = record?.volume_name ?? modalVolumeName(input.state.logical_run_id, input.model.slug);
   const remoteRoot = record?.remote_root ?? persistentDataRoot(input.state.logical_run_id, input.model.slug);
-  const volume = await input.modal.volumes.fromName(volumeName, {
+  const volume = await modalVolumeFromNameV2(input.modal, volumeName, {
     createIfMissing: record === undefined || input.state.generation_mode === "fresh"
   });
 
@@ -640,6 +720,15 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
       }
       return;
     }
+
+    await reconcileKimiSubscriptionCredentialFromLaunchVolume({
+      modal: input.modal,
+      app: input.app,
+      image: input.image,
+      launch: record,
+      model: input.model,
+      env: input.env
+    });
 
     const persisted = await readVolumeFiles(input.modal, input.app, input.image, volume, record.remote_root, [
       "status.json",
@@ -696,17 +785,6 @@ async function launchOrResumeModel(input: LaunchModelInput): Promise<void> {
     }
     nextStartReason = runnerStatus.model_work_started ? "post-model-resume" : "pre-model-retry";
     if (runnerStatus.retry_after_ms > 0) await sleep(runnerStatus.retry_after_ms);
-  }
-
-  if (record !== undefined) {
-    await reconcileKimiSubscriptionCredentialFromLaunchVolume({
-      modal: input.modal,
-      app: input.app,
-      image: input.image,
-      launch: record,
-      model: input.model,
-      env: input.env
-    });
   }
 
   const secret = await input.modal.secrets.fromObject(input.secrets);
@@ -952,34 +1030,15 @@ async function stageKimiSharedCredential(
 ): Promise<void> {
   const sharedHome = path.posix.dirname(path.posix.dirname(destination));
   const pending = `${destination}.pending-${randomUUID()}`;
-  const oauthName = path.posix.basename(destination).replace(/\.json$/u, "");
-  const oauthLockDir = path.posix.join(sharedHome, "oauth", `${oauthName}.lock`);
-  const oauthLockTarget = path.posix.join(sharedHome, "oauth", oauthName);
   try {
     await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.dirname(destination)]);
     await runChecked(sandbox, ["install", "-d", "-m", "700", path.posix.join(sharedHome, "oauth")]);
     await sandbox.filesystem.copyFromLocal(source, pending);
-    await runChecked(sandbox, [
-      "bash",
-      "-lc",
-      [
-        "set -euo pipefail",
-        `touch ${shellQuote(oauthLockTarget)}`,
-        `lock=${shellQuote(oauthLockDir)}`,
-        "deadline=$((SECONDS + 120))",
-        'until mkdir "$lock"; do if (( SECONDS >= deadline )); then echo "Kimi credential stage lock timed out" >&2; exit 70; fi; sleep 1; done',
-        "trap 'rmdir \"$lock\"' EXIT",
-        `node -e ${shellQuote(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT)} ${shellQuote(pending)} ${shellQuote(destination)} ${shellQuote(workspaceMode)}`,
-        `chmod -R go-rwx ${shellQuote(sharedHome)}`
-      ].join("; ")
-    ]);
+    await runChecked(sandbox, ["node", "-e", KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT, pending, destination, workspaceMode]);
+    await runChecked(sandbox, ["chmod", "-R", "go-rwx", sharedHome]);
   } finally {
     await runChecked(sandbox, ["rm", "-f", pending]).catch(() => undefined);
   }
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function normalizedSha256(value: string | undefined): string | undefined {
@@ -1215,10 +1274,15 @@ function modalRecoveryAnalysisSummary(records: ModalLaunchState["recovery_lifecy
 }
 
 export function modalImageBuildCommand(): string {
-  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R ubuntu:ubuntu /opt/ultrafuzz";
+  return "install -m 0444 -o root -g root /tmp/ultrafuzz-source.tgz /opt/ultrafuzz-source.tgz && rm -rf /opt/ultrafuzz && mkdir -p /opt/ultrafuzz && tar --no-same-owner --no-same-permissions -xzf /opt/ultrafuzz-source.tgz -C /opt/ultrafuzz && npm install -g @moonshot-ai/kimi-code@0.29.1 && cd /opt/ultrafuzz && pnpm install --frozen-lockfile && pnpm --filter @ultrafuzz/cli... build && pnpm --filter @ultrafuzz/modal build && chown -R root:root /opt/ultrafuzz";
 }
 
 export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvider): string {
+  if (subscriptionProvider === "openai" || subscriptionProvider === "anthropic") {
+    throw new Error(
+      `Modal cloud execution does not support ${subscriptionProvider} subscription authentication without a trusted refresh broker`
+    );
+  }
   const authPath = subscriptionProvider === undefined ? undefined : remoteAuthPath(subscriptionProvider);
   const ownedRuntimeDirectories = [
     REMOTE_CONFIG_DIR,
@@ -1247,7 +1311,7 @@ export function modalWorkerEntrypointCommand(subscriptionProvider?: ModelProvide
     ...ownedRuntimeDirectories.map(
       (directory) => `chown -R ${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER} '${directory}'`
     ),
-    `exec runuser -u ${MODAL_RUNTIME_USER} -- env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${kimiRuntimeEnv.join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
+    `exec env HOME='${MODAL_RUNTIME_HOME}' USER='${MODAL_RUNTIME_USER}' LOGNAME='${MODAL_RUNTIME_USER}' ${kimiRuntimeEnv.join(" ")} node /opt/ultrafuzz/packages/modal/dist/worker.js`
   ].join("; ");
 }
 
@@ -1397,7 +1461,7 @@ export async function overseeModalBenchmarkOnce(
           if (model === undefined || fingerprintModalModel(model) !== launch.model_fingerprint) {
             throw new Error(`incompatible Modal recovery model for ${launch.slug}`);
           }
-          const volume = await modal.volumes.fromName(launch.volume_name, { createIfMissing: false });
+          const volume = await modalVolumeFromNameV2(modal, launch.volume_name, { createIfMissing: false });
           let row = recoveryState.rows.find((candidate) => candidate.slug === launch.slug)!;
           let resolution = await resolveModalRecoveryOwner({
             modal,
@@ -2460,7 +2524,9 @@ export async function publicBenchmarkCollectionSecretValues(
     ...new Set([
       ...retainedSecretValues,
       ...runnerSecretValues,
-      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY")
+      requiredEnv(env, config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY"),
+      requiredEnv(env, "MODAL_TOKEN_ID"),
+      requiredEnv(env, "MODAL_TOKEN_SECRET")
     ])
   ];
 }
@@ -2593,14 +2659,15 @@ export function modalSecurityToolchainCommands(): string[] {
   return [
     "ENV DEBIAN_FRONTEND=noninteractive",
     "ENV PATH=/usr/local/bin:/opt/security-venv/bin:/root/.local/bin:$PATH",
-    "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip xz-utils && rm -rf /var/lib/apt/lists/*",
+    "RUN apt-get update && apt-get install -y --no-install-recommends bash build-essential ca-certificates curl git jq libssl3t64 python3 python3-pip python3-venv ripgrep tar unzip util-linux xz-utils && rm -rf /var/lib/apt/lists/*",
     "RUN curl -fsSL https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.xz -o /tmp/node.tar.xz && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && rm /tmp/node.tar.xz",
-    "RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@0.144.3 @anthropic-ai/claude-code@2.1.220 recon-generate@0.0.42",
+    "RUN npm install -g pnpm@11.1.1 bun@1.3.14 @openai/codex@0.144.3 @anthropic-ai/claude-code@2.1.220 @moonshot-ai/kimi-code@0.29.1 recon-generate@0.0.42",
     "RUN curl -fsSL https://github.com/foundry-rs/foundry/releases/download/v1.7.1/foundry_v1.7.1_linux_amd64.tar.gz -o /tmp/foundry.tar.gz && tar -xzf /tmp/foundry.tar.gz -C /usr/local/bin && rm /tmp/foundry.tar.gz",
     "RUN curl -fsSL https://github.com/Recon-Fuzz/recon-fuzzer/releases/download/v0.4.17/recon-linux-x86_64.tar.gz -o /tmp/recon.tar.gz && tar -xzf /tmp/recon.tar.gz -C /usr/local/bin && rm /tmp/recon.tar.gz",
     "RUN python3 -m venv /opt/security-venv && /opt/security-venv/bin/pip install --no-cache-dir slither-analyzer==0.11.5 'covg-eval @ git+https://github.com/Recon-Fuzz/recon-magic-framework.git@f92ad26ff857526d221c3e8488c5aea2a20e8fdf#subdirectory=tools/covg_eval'",
     "ENV DISABLE_AUTOUPDATER=1",
     "RUN install -d -m 0755 -o ubuntu -g ubuntu /workspace",
+    "USER root",
     "WORKDIR /workspace"
   ];
 }
@@ -2721,7 +2788,11 @@ export function modalBenchmarkSecretValues(
 }
 
 function secretEnvNames(config: ModalBenchmarkConfig, model: ModalModelSpec): Set<string> {
-  const names = new Set<string>();
+  // The outer benchmark sandbox is a trusted controller. It needs Modal
+  // credentials so the generated workflow can create a distinct disposable
+  // sandbox for each concrete model attempt. The node provider never forwards
+  // these controller credentials into an agent sandbox.
+  const names = new Set<string>(["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]);
   if (isPublicModalBenchmarkConfig(config)) {
     names.add(config.braintrust.judge_api_key_env ?? "OPENAI_API_KEY");
   } else {

@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  parseAutomaticPublicationProfileOptions,
   readAutomaticPublicationManifest,
   validateAutomaticPairConfig,
   validateBenchmarkPolicyFiles
@@ -26,6 +27,7 @@ const CONFIG_KEYS = [
 const MODEL_KEYS = ["agent", "auth_mode", "model", "provider", "reasoning", "slug"];
 
 export function prepareModalBenchmarkCleanup(input) {
+  assertExpectedProfileInput(input);
   if (!FULL_COMMIT.test(input.expectedCandidate)) throw new Error("cleanup candidate must be a full commit");
   if (!GENERATION.test(input.expectedGeneration)) throw new Error("cleanup generation is invalid");
   if (input.expectedMode !== "smoke" && input.expectedMode !== "full") {
@@ -57,7 +59,11 @@ export function prepareModalBenchmarkCleanup(input) {
     maxParallelEvalRows: dimensions.maxParallelEvalRows,
     maxParallelWorkflowNodes: dimensions.maxParallelWorkflowNodes,
     maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
-    controlTimeoutSeconds: dimensions.controlTimeoutSeconds
+    controlTimeoutSeconds: dimensions.controlTimeoutSeconds,
+    ...(input.expectedProvider === undefined ? {} : { expectedProviders: [input.expectedProvider] }),
+    ...(input.expectedModel === undefined
+      ? {}
+      : { expectedModel: input.expectedModel, expectedReasoning: input.expectedReasoning })
   });
 
   const configs = new Set();
@@ -93,7 +99,10 @@ export function prepareModalBenchmarkCleanup(input) {
         mode: input.expectedMode,
         benchmark: manifest.benchmark,
         targets: manifest.targets,
-        maxRuntimeSeconds: dimensions.maxRuntimeSeconds
+        maxRuntimeSeconds: dimensions.maxRuntimeSeconds,
+        ...(input.expectedModel === undefined
+          ? {}
+          : { expectedModel: input.expectedModel, expectedReasoning: input.expectedReasoning })
       },
       modelSlugs
     );
@@ -104,6 +113,17 @@ export function prepareModalBenchmarkCleanup(input) {
 
   fs.writeFileSync(input.outputPath, `${rows.join("\n")}\n`, { flag: "wx", mode: 0o600 });
   return { imageName: manifest.image_name, rows };
+}
+
+function assertExpectedProfileInput(input) {
+  const hasModel = input.expectedModel !== undefined;
+  const hasReasoning = input.expectedReasoning !== undefined;
+  if (hasModel !== hasReasoning) {
+    throw new Error("expected benchmark model and reasoning must be supplied together");
+  }
+  if (hasModel && input.expectedProvider === undefined) {
+    throw new Error("an exact expected benchmark model profile requires an expected provider");
+  }
 }
 
 function assertBoundedRegularFile(filePath, label) {
@@ -124,11 +144,9 @@ function assertExactKeys(value, expected, label) {
 }
 
 function main(args) {
-  if (args.length !== 7) {
-    throw new Error(
-      "usage: prepare-modal-benchmark-cleanup.mjs <manifest> <output> <candidate> <repository> <generation> <mode> <policy-root>"
-    );
-  }
+  const usage =
+    "usage: prepare-modal-benchmark-cleanup.mjs <manifest> <output> <candidate> <repository> <generation> <mode> <policy-root> [--expected-provider <provider>] [--expected-model <model> --expected-reasoning <reasoning>]";
+  if (args.length < 7) throw new Error(usage);
   const [
     manifestPath,
     outputPath,
@@ -136,8 +154,10 @@ function main(args) {
     expectedRepository,
     expectedGeneration,
     expectedMode,
-    policyRoot
+    policyRoot,
+    ...profileArgs
   ] = args;
+  const expectedProfile = parseAutomaticPublicationProfileOptions(profileArgs);
   if (expectedMode !== "smoke" && expectedMode !== "full") {
     throw new Error("cleanup mode must be smoke or full");
   }
@@ -154,6 +174,15 @@ function main(args) {
     expectedRepository,
     expectedGeneration,
     expectedMode,
+    ...(expectedProfile.expectedProviders === undefined
+      ? {}
+      : { expectedProvider: expectedProfile.expectedProviders[0] }),
+    ...(expectedProfile.expectedModel === undefined
+      ? {}
+      : {
+          expectedModel: expectedProfile.expectedModel,
+          expectedReasoning: expectedProfile.expectedReasoning
+        }),
     policyDimensions: modalBenchmarkPolicyDimensions(trustedPolicyRoot, expectedMode)
   });
 }

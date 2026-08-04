@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { ClaudeCodeAgent as SmithersClaudeCodeAgent } from "smithers-orchestrator";
@@ -26,9 +27,26 @@ type DeepSeekSmithersUsage = {
   totalTokens: number;
 };
 
+type DeepSeekProviderIdentity = {
+  observedModels: string[];
+  invalid: boolean;
+};
+type DeepSeekUsageEvidence = { status: "complete"; usage: DeepSeekUsage } | { status: "incomplete" };
+type DeepSeekInvocationUsage =
+  { status: "unseen" } | { status: "complete"; usage: DeepSeekUsage } | { status: "invalid" };
+type DeepSeekInvocationEvidence = {
+  providerIdentity: DeepSeekProviderIdentity;
+  usage: DeepSeekInvocationUsage;
+  terminalResults: number;
+};
+
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_REASONING_EFFORTS = ["low", "high", "max"] as const;
 const DEEPSEEK_CLAUDE_CONFIG_DIR = ".ultrafuzz/deepseek-claude";
+const PROVIDER_MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u;
+const PROVIDER_IDENTITY_MISSING = "ultrafuzz-provider-identity-missing";
+const PROVIDER_IDENTITY_MIXED = "ultrafuzz-provider-identity-mixed";
+const PROVIDER_IDENTITY_INVALID = "ultrafuzz-provider-identity-invalid";
 
 /**
  * DeepSeek's supported coding-agent integration is Claude Code over its
@@ -48,37 +66,74 @@ export function createDeepSeekAgent(options: DeepSeekTaskOptions = {}): Smithers
 }
 
 export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
-  private pendingUsage: DeepSeekSmithersUsage | undefined;
+  private readonly invocationEvidence = new AsyncLocalStorage<DeepSeekInvocationEvidence>();
 
   override generate(
     ...args: Parameters<SmithersClaudeCodeAgent["generate"]>
   ): ReturnType<SmithersClaudeCodeAgent["generate"]> {
-    return this.withDeepSeekUsage(super.generate(...args)) as ReturnType<SmithersClaudeCodeAgent["generate"]>;
+    const evidence = emptyDeepSeekInvocationEvidence();
+    return this.invocationEvidence.run(evidence, () =>
+      this.withDeepSeekUsage(super.generate(...args), evidence)
+    ) as ReturnType<SmithersClaudeCodeAgent["generate"]>;
   }
 
   override stream(
     ...args: Parameters<SmithersClaudeCodeAgent["stream"]>
   ): ReturnType<SmithersClaudeCodeAgent["stream"]> {
-    return this.withDeepSeekStreamUsage(super.stream(...args)) as ReturnType<SmithersClaudeCodeAgent["stream"]>;
+    const evidence = emptyDeepSeekInvocationEvidence();
+    return this.invocationEvidence.run(evidence, () =>
+      this.withDeepSeekStreamUsage(super.stream(...args), evidence)
+    ) as ReturnType<SmithersClaudeCodeAgent["stream"]>;
   }
 
   override createOutputInterpreter(): DeepSeekOutputInterpreter {
     const base = super.createOutputInterpreter();
+    const evidence = this.invocationEvidence.getStore() ?? emptyDeepSeekInvocationEvidence();
+    let terminalEvent: Record<string, unknown> | undefined;
     return {
       ...base,
       onStdoutLine: (line) => {
-        const usage = deepSeekUsageFromResultLine(line);
-        if (usage !== undefined) this.pendingUsage = deepSeekSmithersUsage(usage);
+        collectDeepSeekProviderIdentity(line, evidence.providerIdentity);
+        const usageEvidence = deepSeekUsageEvidenceFromResultLine(line);
+        if (usageEvidence !== undefined) recordDeepSeekTerminalUsage(evidence, usageEvidence);
         const events = base.onStdoutLine?.(line) ?? [];
-        if (usage === undefined) return events;
-        const completedUsage = deepSeekCompletedUsage(usage);
-        return events.map((event) => (event.type === "completed" ? { ...event, usage: completedUsage } : event));
+        const forwarded = [];
+        for (const event of events) {
+          if (event.type !== "completed") {
+            forwarded.push(event);
+            continue;
+          }
+          if (terminalEvent !== undefined) evidence.usage = { status: "invalid" };
+          terminalEvent = event;
+        }
+        // Usage cannot be trusted until the process exits: a malformed stream
+        // may append a second terminal result after Smithers accepts the first.
+        return forwarded;
+      },
+      onExit: (result) => {
+        const exitEvents = base.onExit?.(result) ?? [];
+        const forwarded = [];
+        for (const event of exitEvents) {
+          if (event.type !== "completed") {
+            forwarded.push(event);
+            continue;
+          }
+          if (terminalEvent !== undefined) evidence.usage = { status: "invalid" };
+          terminalEvent = event;
+        }
+        if (terminalEvent === undefined) return forwarded;
+        const usage = resolvedDeepSeekUsage(evidence);
+        forwarded.push(
+          usage === undefined
+            ? withRecordProperties(terminalEvent, { usage: undefined })
+            : withRecordProperties(terminalEvent, { usage: deepSeekCompletedUsage(usage) })
+        );
+        return forwarded;
       }
     };
   }
 
   override async buildCommand(params: DeepSeekCommandParams): Promise<DeepSeekCommand> {
-    this.pendingUsage = undefined;
     const command = await super.buildCommand(params);
     const opts = this.opts as DeepSeekAgentOptions;
     return {
@@ -91,6 +146,10 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
         ANTHROPIC_API_KEY: "",
         ANTHROPIC_AUTH_TOKEN: opts.ultrafuzzApiKey,
         ANTHROPIC_BASE_URL: DEEPSEEK_ANTHROPIC_BASE_URL,
+        // The generated workflow needs the configured source variable only
+        // long enough to construct this adapter. Do not leave a second copy of
+        // the credential in the actual Claude Code process environment.
+        DEEPSEEK_API_KEY: "",
         // Keep first-party Claude auth, alternate provider routing, and host
         // proxies from competing with the explicit DeepSeek endpoint/token.
         ANTHROPIC_CONFIG_DIR: "",
@@ -124,27 +183,114 @@ export class DeepSeekClaudeCodeAgent extends SmithersClaudeCodeAgent {
     };
   }
 
-  private withDeepSeekUsage<T>(promise: Promise<T>): Promise<T> {
+  private withDeepSeekUsage<T>(promise: Promise<T>, evidence: DeepSeekInvocationEvidence): Promise<T> {
     return promise
-      .then((result) => attachDeepSeekResultUsage(result, this.pendingUsage))
+      .then((result) =>
+        attachDeepSeekResultEvidence(
+          result,
+          deepSeekSmithersUsageFromEvidence(evidence),
+          resolvedDeepSeekProviderModel(evidence.providerIdentity)
+        )
+      )
       .catch((error: unknown) => {
-        throw attachDeepSeekFailureUsage(error, this.pendingUsage);
-      })
-      .finally(() => {
-        this.pendingUsage = undefined;
+        throw attachDeepSeekFailureEvidence(
+          error,
+          deepSeekSmithersUsageFromEvidence(evidence),
+          resolvedDeepSeekProviderModel(evidence.providerIdentity)
+        );
       });
   }
 
-  private withDeepSeekStreamUsage<T>(promise: Promise<T>): Promise<T> {
+  private withDeepSeekStreamUsage<T>(promise: Promise<T>, evidence: DeepSeekInvocationEvidence): Promise<T> {
     return promise
-      .then((result) => attachDeepSeekStreamUsage(result, this.pendingUsage))
+      .then((result) =>
+        attachDeepSeekStreamEvidence(
+          result,
+          deepSeekSmithersUsageFromEvidence(evidence),
+          resolvedDeepSeekProviderModel(evidence.providerIdentity)
+        )
+      )
       .catch((error: unknown) => {
-        throw attachDeepSeekFailureUsage(error, this.pendingUsage);
-      })
-      .finally(() => {
-        this.pendingUsage = undefined;
+        throw attachDeepSeekFailureEvidence(
+          error,
+          deepSeekSmithersUsageFromEvidence(evidence),
+          resolvedDeepSeekProviderModel(evidence.providerIdentity)
+        );
       });
   }
+}
+
+function emptyDeepSeekInvocationEvidence(): DeepSeekInvocationEvidence {
+  return {
+    providerIdentity: emptyDeepSeekProviderIdentity(),
+    usage: { status: "unseen" },
+    terminalResults: 0
+  };
+}
+
+function emptyDeepSeekProviderIdentity(): DeepSeekProviderIdentity {
+  return { observedModels: [], invalid: false };
+}
+
+function collectDeepSeekProviderIdentity(line: string, identity: DeepSeekProviderIdentity): void {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(line) as unknown;
+  } catch {
+    return;
+  }
+  if (!isRecord(payload)) return;
+  // Claude Code's system/init model is command configuration, not a provider
+  // response, and its terminal result is CLI synthesis. Only the assistant
+  // message embeds the raw Anthropic-compatible provider response model.
+  if (payload.type !== "assistant") return;
+  if (!isRecord(payload.message)) {
+    identity.invalid = true;
+    return;
+  }
+  observeDeepSeekProviderModel(payload.message, "model", identity);
+}
+
+function observeDeepSeekProviderModel(
+  owner: Record<string, unknown>,
+  field: string,
+  identity: DeepSeekProviderIdentity
+): void {
+  if (!Object.hasOwn(owner, field)) {
+    identity.invalid = true;
+    return;
+  }
+  const value = owner[field];
+  if (typeof value !== "string" || !PROVIDER_MODEL_ID_PATTERN.test(value)) {
+    identity.invalid = true;
+    return;
+  }
+  identity.observedModels.push(value);
+}
+
+function resolvedDeepSeekProviderModel(identity: DeepSeekProviderIdentity): string {
+  if (identity.invalid) return PROVIDER_IDENTITY_INVALID;
+  const observed = [...new Set(identity.observedModels)];
+  if (observed.length === 0) return PROVIDER_IDENTITY_MISSING;
+  return observed.length === 1 ? observed[0]! : PROVIDER_IDENTITY_MIXED;
+}
+
+function recordDeepSeekTerminalUsage(invocation: DeepSeekInvocationEvidence, evidence: DeepSeekUsageEvidence): void {
+  invocation.terminalResults += 1;
+  if (invocation.terminalResults !== 1 || invocation.usage.status !== "unseen" || evidence.status === "incomplete") {
+    invocation.usage = { status: "invalid" };
+    return;
+  }
+  invocation.usage = { status: "complete", usage: evidence.usage };
+}
+
+function resolvedDeepSeekUsage(invocation: DeepSeekInvocationEvidence): DeepSeekUsage | undefined {
+  return invocation.usage.status === "complete" ? invocation.usage.usage : undefined;
+}
+
+function deepSeekSmithersUsageFromEvidence(invocation: DeepSeekInvocationEvidence): DeepSeekSmithersUsage | undefined {
+  const usage = resolvedDeepSeekUsage(invocation);
+  return usage === undefined ? undefined : deepSeekSmithersUsage(usage);
 }
 
 function deepSeekAuthOptions(): DeepSeekAuthOptions {
@@ -160,7 +306,7 @@ function deepSeekAuthOptions(): DeepSeekAuthOptions {
 }
 
 function readDeepSeekAuthConfig(): DeepSeekAuthConfig {
-  const configPath = path.join(process.cwd(), "ultrafuzz.toml");
+  const configPath = process.env.ULTRAFUZZ_CONFIG_PATH ?? path.join(process.cwd(), "ultrafuzz.toml");
   const deepseek = readStringTable(readFileSync(configPath, "utf8"), "agents.DeepSeekAgent");
   return {
     auth: stringField(deepseek, "auth"),
@@ -197,14 +343,15 @@ function deepSeekReasoningEffort(value: string | undefined): DeepSeekReasoningEf
  * token count already includes thinking tokens, so exposing a separate
  * reasoning count would double-count both tokens and spend.
  */
-function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
+function deepSeekUsageEvidenceFromResultLine(line: string): DeepSeekUsageEvidence | undefined {
   let payload: unknown;
   try {
     payload = JSON.parse(line) as unknown;
   } catch {
     return undefined;
   }
-  if (!isRecord(payload) || payload.type !== "result" || !isRecord(payload.usage)) return undefined;
+  if (!isRecord(payload) || payload.type !== "result") return undefined;
+  if (!isRecord(payload.usage)) return { status: "incomplete" };
   const usage = payload.usage;
   const inputTokens = firstTokenCount(usage, ["prompt_cache_miss_tokens", "input_tokens", "inputTokens"]);
   const outputTokens = firstTokenCount(usage, ["output_tokens", "outputTokens", "completion_tokens"]);
@@ -214,10 +361,13 @@ function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
     "cacheReadTokens",
     "cached_input_tokens"
   ]);
-  if (inputTokens === undefined && outputTokens === undefined && cacheReadTokens === undefined) return undefined;
+  // A cache hit count may be omitted when it is zero, but both uncached input
+  // and output are required provider measurements. Never turn a partial result
+  // into apparently complete zero-filled telemetry.
+  if (inputTokens === undefined || outputTokens === undefined) return { status: "incomplete" };
   const normalized = {
-    inputTokens: inputTokens ?? 0,
-    outputTokens: outputTokens ?? 0,
+    inputTokens,
+    outputTokens,
     // DeepSeek enables its disk cache for every request and reports hit/miss
     // counts. Claude Code's aggregate result may omit an all-zero hit field;
     // zero is authoritative in that case rather than unknown telemetry.
@@ -225,8 +375,8 @@ function deepSeekUsageFromResultLine(line: string): DeepSeekUsage | undefined {
     cacheWriteTokens: 0 as const
   };
   const totalTokens = normalized.inputTokens + normalized.cacheReadTokens + normalized.outputTokens;
-  if (!Number.isSafeInteger(totalTokens)) return undefined;
-  return { ...normalized, totalTokens };
+  if (!Number.isSafeInteger(totalTokens)) return { status: "incomplete" };
+  return { status: "complete", usage: { ...normalized, totalTokens } };
 }
 
 function firstTokenCount(value: Record<string, unknown>, fields: readonly string[]): number | undefined {
@@ -264,40 +414,216 @@ function deepSeekSmithersUsage(usage: DeepSeekUsage): DeepSeekSmithersUsage {
   };
 }
 
-function attachDeepSeekResultUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
-  if (usage === undefined || !isRecord(result)) return result;
-  try {
-    result.usage = usage;
-    result.totalUsage = usage;
-  } catch {
-    // Telemetry must never turn a successful provider invocation into a model
-    // failure if an exotic Smithers result becomes immutable.
+class DeepSeekProviderEvidenceError extends Error {
+  readonly usage?: DeepSeekSmithersUsage;
+  readonly totalUsage?: DeepSeekSmithersUsage;
+  readonly result!: Readonly<{ response: Readonly<{ modelId: string }> }>;
+
+  constructor(message: string, cause: unknown, usage: DeepSeekSmithersUsage | undefined, modelId: string) {
+    super(message, { cause });
+    this.name = "DeepSeekProviderEvidenceError";
+    const immutableUsage = usage === undefined ? undefined : immutableDeepSeekSmithersUsage(usage);
+    Object.defineProperties(this, {
+      cause: {
+        configurable: false,
+        enumerable: false,
+        value: cause,
+        writable: false
+      },
+      usage: {
+        configurable: false,
+        enumerable: true,
+        value: immutableUsage,
+        writable: false
+      },
+      totalUsage: {
+        configurable: false,
+        enumerable: true,
+        value: immutableUsage,
+        writable: false
+      },
+      result: {
+        configurable: false,
+        enumerable: true,
+        value: Object.freeze({ response: Object.freeze({ modelId }) }),
+        writable: false
+      }
+    });
   }
-  return result;
+}
+
+function immutableDeepSeekSmithersUsage(usage: DeepSeekSmithersUsage): DeepSeekSmithersUsage {
+  return Object.freeze({
+    ...usage,
+    inputTokenDetails: Object.freeze({ ...usage.inputTokenDetails }),
+    outputTokenDetails: Object.freeze({ ...usage.outputTokenDetails })
+  });
+}
+
+function attachDeepSeekResultEvidence<T>(result: T, usage: DeepSeekSmithersUsage | undefined, modelId: string): T {
+  if (!isRecord(result)) {
+    throw new DeepSeekProviderEvidenceError(
+      "DeepSeek provider result cannot carry authoritative evidence",
+      result,
+      usage,
+      modelId
+    );
+  }
+  try {
+    return attachDeepSeekResultIdentity(attachDeepSeekResultUsage(result, usage), modelId);
+  } catch {
+    throw new DeepSeekProviderEvidenceError(
+      "DeepSeek provider result cannot carry authoritative evidence",
+      result,
+      usage,
+      modelId
+    );
+  }
+}
+
+function attachDeepSeekStreamEvidence<T>(result: T, usage: DeepSeekSmithersUsage | undefined, modelId: string): T {
+  if (!isRecord(result)) {
+    throw new DeepSeekProviderEvidenceError(
+      "DeepSeek provider stream cannot carry authoritative evidence",
+      result,
+      usage,
+      modelId
+    );
+  }
+  try {
+    return attachDeepSeekStreamIdentity(attachDeepSeekStreamUsage(result, usage), modelId);
+  } catch {
+    throw new DeepSeekProviderEvidenceError(
+      "DeepSeek provider stream cannot carry authoritative evidence",
+      result,
+      usage,
+      modelId
+    );
+  }
+}
+
+function attachDeepSeekResultUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
+  return withRecordProperties(result, { usage, totalUsage: usage });
 }
 
 function attachDeepSeekStreamUsage<T>(result: T, usage: DeepSeekSmithersUsage | undefined): T {
-  if (usage === undefined || !isRecord(result)) return result;
-  try {
-    result.usage = Promise.resolve(usage);
-    result.totalUsage = Promise.resolve(usage);
-  } catch {
-    // Telemetry must never turn a successful provider invocation into a model
-    // failure if an exotic Smithers stream result becomes immutable.
-  }
-  return result;
+  return withRecordProperties(result, {
+    usage: Promise.resolve(usage),
+    totalUsage: Promise.resolve(usage)
+  });
 }
 
-function attachDeepSeekFailureUsage(error: unknown, usage: DeepSeekSmithersUsage | undefined): unknown {
-  if (usage === undefined || !isRecord(error)) return error;
-  try {
-    error.usage = usage;
-  } catch {
-    // Preserve the original failure if an exotic error object is immutable.
-  }
-  return error;
+function attachDeepSeekResultIdentity<T>(result: T, modelId: string): T {
+  if (!isRecord(result)) return result;
+  const response = safeRecordProperty(result, "response") ?? {};
+  return withRecordProperties(result, {
+    response: withRecordProperties(response, { modelId })
+  });
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function attachDeepSeekStreamIdentity<T>(result: T, modelId: string): T {
+  if (!isRecord(result)) return result;
+  const response = safeProperty(result, "response");
+  return withRecordProperties(result, {
+    response: Promise.resolve(response).then((value) => withRecordProperties(isRecord(value) ? value : {}, { modelId }))
+  });
+}
+
+function attachDeepSeekFailureEvidence(
+  error: unknown,
+  usage: DeepSeekSmithersUsage | undefined,
+  modelId: string
+): unknown {
+  if (isDeepSeekProviderEvidenceError(error)) return error;
+  if (!isRecord(error)) {
+    return new DeepSeekProviderEvidenceError(
+      "DeepSeek provider invocation failed with an opaque error",
+      error,
+      usage,
+      modelId
+    );
+  }
+  try {
+    const withUsage = withRecordProperties(error, { usage, totalUsage: usage });
+    const result = safeRecordProperty(withUsage, "result") ?? {};
+    const response = safeRecordProperty(result, "response") ?? {};
+    return withRecordProperties(withUsage, {
+      result: withRecordProperties(result, {
+        response: withRecordProperties(response, { modelId })
+      })
+    });
+  } catch {
+    return new DeepSeekProviderEvidenceError(
+      "DeepSeek provider invocation failed with an opaque error",
+      error,
+      usage,
+      modelId
+    );
+  }
+}
+
+function isDeepSeekProviderEvidenceError(value: unknown): value is DeepSeekProviderEvidenceError {
+  try {
+    return value instanceof DeepSeekProviderEvidenceError;
+  } catch {
+    return false;
+  }
+}
+
+function safeProperty(value: Record<string, unknown>, key: string): unknown {
+  try {
+    return value[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeRecordProperty(value: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const property = safeProperty(value, key);
+  return isRecord(property) ? property : undefined;
+}
+
+/**
+ * Provider evidence is accounting-critical, so an immutable Smithers result
+ * cannot merely skip decoration. Mutate ordinary results to preserve object
+ * identity; if that is impossible, clone the same prototype and descriptors
+ * while overriding only the trusted fields.
+ */
+function withRecordProperties<T>(value: T, properties: Record<string, unknown>): T {
+  if (!isRecord(value)) return value;
+  try {
+    const applied = Object.entries(properties).every(([key, property]) => {
+      if (!Reflect.set(value, key, property, value)) return false;
+      return Object.is(safeProperty(value, key), property);
+    });
+    if (applied) return value;
+  } catch {
+    // Frozen, sealed, or accessor-backed values are cloned below.
+  }
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    for (const [key, property] of Object.entries(properties)) {
+      descriptors[key] = {
+        configurable: true,
+        enumerable: true,
+        value: property,
+        writable: true
+      };
+    }
+    return Object.create(Object.getPrototypeOf(value), descriptors) as T;
+  } catch (cause) {
+    // Never return an opaque value that may still expose Smithers' configured
+    // model as if it were provider evidence. Failing the invocation leaves its
+    // identity closure incomplete and therefore unpublishable.
+    throw new Error("DeepSeek result cannot carry authoritative provider evidence", { cause });
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    return !Array.isArray(value);
+  } catch {
+    return false;
+  }
 }

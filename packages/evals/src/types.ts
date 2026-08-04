@@ -1,6 +1,8 @@
 import type { RunStatus } from "@ultrafuzz/artifacts";
 import type { RuntimeDiagnostic } from "@ultrafuzz/runtime";
 
+import type { TerminalDisposition, TerminalEvidenceBinding } from "./terminal-disposition.js";
+
 export const EVAL_SPEC_SCHEMA_VERSION = "ultrafuzz.eval.v1" as const;
 export const EVAL_RESULT_SCHEMA_VERSION = "ultrafuzz.eval.result.v1" as const;
 export const EVAL_RUN_SCHEMA_VERSION = "ultrafuzz.eval.run.v1" as const;
@@ -316,6 +318,10 @@ export interface EvalRunRecord {
   workflow?: EvalWorkflowLifecycle;
   /** Immutable execution-exposure classification captured from append-only run evidence. */
   recovery_equivalence?: EvalRecoveryEquivalence;
+  /** Controller-derived terminal outcome, bound to `ultrafuzz_run_root` and verified before publication. */
+  terminal_disposition?: TerminalDisposition["kind"];
+  /** Exact immutable state/tasks byte digests captured with `terminal_disposition`. */
+  terminal_evidence?: TerminalEvidenceBinding;
   /** Legacy launcher timestamp retained for reading existing eval runs. */
   started_at?: string;
   /** Legacy launcher timestamp retained for reading existing eval runs. */

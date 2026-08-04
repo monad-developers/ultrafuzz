@@ -1,6 +1,8 @@
 import fs from "node:fs";
 
 import {
+  DEFAULT_MODAL_APP,
+  DEFAULT_MODAL_IMAGE,
   DEFAULT_MODAL_MAX_PARALLEL_AGENTS,
   DEFAULT_MODAL_MAX_PARALLEL_NODES,
   type ModalModelSpec,
@@ -8,12 +10,24 @@ import {
 } from "./defaults.js";
 import { remoteAuthDir } from "./layout.js";
 
-export function modalTargetToml(model: ModalModelSpec, nodeTimeoutSeconds: number): string {
+export interface ModalTargetExecutionOptions {
+  app?: string;
+  image?: string;
+  region?: string;
+}
+
+export function modalTargetToml(
+  model: ModalModelSpec,
+  nodeTimeoutSeconds: number,
+  execution: ModalTargetExecutionOptions = {}
+): string {
   const selectedProfile = modelProfileToml(model);
   const codex = agentToml(model, "CodexAgent", "openai");
   const claude = agentToml(model, "ClaudeAgent", "anthropic");
   const deepseek = agentToml(model, "DeepSeekAgent", "deepseek");
   const kimi = agentToml(model, "KimiAgent", "kimi");
+  const modalApp = execution.app ?? DEFAULT_MODAL_APP;
+  const modalImage = execution.image ?? DEFAULT_MODAL_IMAGE;
   return `schema_version = "1.0"
 dynamic_strategies_enumerator = 3
 
@@ -27,6 +41,18 @@ max_parallel_nodes = ${DEFAULT_MODAL_MAX_PARALLEL_NODES}
 keep_workspaces = true
 workspace_mode = "git-worktree"
 default_timeout_seconds = ${nodeTimeoutSeconds}
+
+[execution]
+mode = "cloud"
+provider = "modal"
+
+[execution.resources]
+timeout_seconds = ${nodeTimeoutSeconds}
+
+[execution.providers.modal]
+app = ${tomlString(modalApp)}
+image = ${tomlString(modalImage)}
+${execution.region === undefined ? "" : `region = ${tomlString(execution.region)}\n`}credential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]
 
 [models]
 synthesized_default = false

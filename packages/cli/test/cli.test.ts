@@ -39,8 +39,14 @@ function fakeSmithersEnv(project: string): Record<string, string | undefined> {
       "#!/bin/sh",
       'if [ -n "$SMITHERS_FAKE_LOG" ]; then printf \'%s\\n\' "$*" >> "$SMITHERS_FAKE_LOG"; fi',
       'case "$1" in',
+      "  replay)",
+      "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-replayed\"}'",
+      "    ;;",
       "  fork)",
       "    printf '%s\\n' '{\"forkedRunId\":\"ultrafuzz-cli-run-forked\"}'",
+      "    ;;",
+      "  timeline)",
+      '    printf \'{"data":{"timeline":{"runId":"%s","frames":[],"children":[]}}}\\n\' "$2"',
       "    ;;",
       "  pause)",
       "    printf '%s\\n' '{\"status\":\"pause-requested\"}'",
@@ -523,13 +529,13 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     "clean",
     runData.run_id,
     "--select",
-    "runs/cli-run/artifacts/project-discovery",
+    "runs/cli-run/artifacts/final-report",
     "--yes",
     "--json"
   ]);
   assert.equal(clean.code, 0, clean.stderr);
   assertNoSmithersSurface(parseJson(clean));
-  assert.equal(fs.existsSync(path.join(runData.run_root, "artifacts", "project-discovery")), false);
+  assert.equal(fs.existsSync(path.join(runData.run_root, "artifacts", "final-report")), false);
 
   for (const command of ["resume", "replay"]) {
     const args =
@@ -542,7 +548,10 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
     assertNoSmithersSurface(lifecycleBody);
     const lifecycleData = lifecycleBody.data as { submitted: boolean; workflow_run_id: string };
     assert.equal(lifecycleData.submitted, true);
-    assert.equal(lifecycleData.workflow_run_id, "ultrafuzz-cli-run");
+    assert.equal(
+      lifecycleData.workflow_run_id,
+      command === "replay" ? "ultrafuzz-cli-run-replayed" : "ultrafuzz-cli-run"
+    );
   }
 
   const retried = await cli(
@@ -555,7 +564,7 @@ test("run, ps, status, inspect, report, materialize, clean, and lifecycle comman
   assertNoSmithersSurface(retriedBody);
   const retriedData = retriedBody.data as { submitted: boolean; workflow_run_id: string };
   assert.equal(retriedData.submitted, true);
-  assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run");
+  assert.equal(retriedData.workflow_run_id, "ultrafuzz-cli-run-replayed");
 
   const fork = await cli(
     project,
@@ -600,8 +609,8 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const run = await cli(project, ["run", "--run-id", "watch-failure-run", "--json"], env);
   assert.equal(run.code, 0, run.stderr);
   const runRoot = (parseJson(run).data as { run_root: string }).run_root;
-  // A corrupt state.json makes the poll throw rather than return a failure
-  // result; the stream must stay newline-delimited for `jq` consumers.
+  // A corrupt state.json fails sealed workflow-control validation; the stream
+  // must stay newline-delimited for `jq` consumers.
   fs.writeFileSync(path.join(runRoot, "state.json"), "{ not json", "utf8");
 
   const watched = await cli(project, ["status", "watch-failure-run", "--watch", "--json"], env);
@@ -612,7 +621,7 @@ test("status --watch --json keeps a failing poll on one NDJSON line", async () =
   const body = JSON.parse(lines[0]!) as Record<string, unknown>;
   assert.equal(body.ok, false);
   assert.equal(body.command, "status");
-  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "RUN_STATUS_FAILED");
+  assert.equal((body.diagnostics as Array<{ code: string }>)[0]?.code, "WORKFLOW_CONTROL_EVIDENCE_INVALID");
 });
 
 test("old commands and backend flags are rejected instead of aliased or shimmed", async () => {

@@ -23,6 +23,9 @@ jobs:
       eligible: ${{ steps.qualify.outputs.eligible }}
       candidate_commit: ${{ steps.qualify.outputs.candidate_commit }}
       benchmark_mode: ${{ steps.qualify.outputs.benchmark_mode }}
+      expected_provider: ${{ steps.qualify.outputs.expected_provider }}
+      expected_model: ${{ steps.qualify.outputs.expected_model }}
+      expected_reasoning: ${{ steps.qualify.outputs.expected_reasoning }}
 
     steps:
       - name: Check out trusted main qualification tooling
@@ -60,6 +63,9 @@ jobs:
     timeout-minutes: 45
     env:
       BENCHMARK_MODE: ${{ needs.qualify_modal_benchmark.outputs.benchmark_mode }}
+      EXPECTED_PROVIDER: ${{ needs.qualify_modal_benchmark.outputs.expected_provider }}
+      EXPECTED_MODEL: ${{ needs.qualify_modal_benchmark.outputs.expected_model }}
+      EXPECTED_REASONING: ${{ needs.qualify_modal_benchmark.outputs.expected_reasoning }}
       CANDIDATE_COMMIT: ${{ needs.qualify_modal_benchmark.outputs.candidate_commit }}
       PRODUCER_RUN_ID: ${{ github.event.workflow_run.id }}
       PRODUCER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
@@ -88,21 +94,57 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm -w build
 
-      - name: Download exact benchmark control metadata
+      - name: Resolve the exact terminal benchmark artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_name="modal-benchmark-control-$BENCHMARK_MODE-$PRODUCER_RUN_ID-$PRODUCER_RUN_ATTEMPT"
+          artifacts_path="$RUNNER_TEMP/modal-benchmark-terminal-artifacts.json"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN_ID/artifacts?name=$artifact_name&per_page=100" \
+            > "$artifacts_path"
+          jq -e \
+            --arg name "$artifact_name" \
+            --argjson run_id "$PRODUCER_RUN_ID" \
+            '.total_count == 1 and
+             (.artifacts | length) == 1 and
+             .artifacts[0].name == $name and
+             .artifacts[0].expired == false and
+             .artifacts[0].workflow_run.id == $run_id' \
+            "$artifacts_path" > /dev/null
+
+      - name: Download exact terminal benchmark control and results
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: modal-benchmark-launch-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
-          path: ${{ runner.temp }}/trusted-modal-publication/control
+          name: modal-benchmark-control-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/trusted-modal-publication/terminal
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
-      - name: Download exact public benchmark results
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: public-benchmark-results-${{ env.BENCHMARK_MODE }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
-          path: ${{ runner.temp }}/trusted-modal-publication/results
-          run-id: ${{ github.event.workflow_run.id }}
-          github-token: ${{ github.token }}
+      - name: Validate the terminal benchmark artifact layout
+        env:
+          TERMINAL_ARTIFACT: ${{ runner.temp }}/trusted-modal-publication/terminal
+          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-control
+          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-results
+        run: |
+          mapfile -d '' top_level < <(find "$TERMINAL_ARTIFACT" -mindepth 1 -maxdepth 1 -print0 | sort -z)
+          if [ "${#top_level[@]}" -ne 2 ] || \
+             [ "${top_level[0]}" != "$BENCHMARK_CONTROL" ] || \
+             [ "${top_level[1]}" != "$BENCHMARK_RESULTS" ]; then
+            echo "Terminal benchmark artifact must contain exactly benchmark-control and benchmark-results" >&2
+            exit 1
+          fi
+          for directory in "$BENCHMARK_CONTROL" "$BENCHMARK_RESULTS"; do
+            if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+              echo "Terminal benchmark artifact contains an invalid directory: $directory" >&2
+              exit 1
+            fi
+          done
+          mapfile -d '' manifests < <(find "$TERMINAL_ARTIFACT" -type f -name manifest.json -print0)
+          if [ "${#manifests[@]}" -ne 1 ] || [ "${manifests[0]}" != "$BENCHMARK_CONTROL/manifest.json" ]; then
+            echo "Terminal benchmark artifact must contain exactly one control manifest" >&2
+            exit 1
+          fi
 
       - name: Check out the exact candidate benchmark policy
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -125,13 +167,24 @@ jobs:
 
       - name: Validate the atomic Modal benchmark generation
         env:
-          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/control
-          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/results
+          BENCHMARK_CONTROL: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-control
+          BENCHMARK_RESULTS: ${{ runner.temp }}/trusted-modal-publication/terminal/benchmark-results
           PUBLICATION_GENERATION: ${{ runner.temp }}/eval-history-generation.json
           PUBLICATION_PLAN: ${{ runner.temp }}/eval-history-publication-plan.json
           PUBLICATION_POLICY_ROOT: ${{ github.workspace }}/eval-history-benchmark-policy
           PUBLICATION_UNPACKED: ${{ runner.temp }}/trusted-modal-publication/unpacked
         run: |
+          profile_args=()
+          if [ -n "$EXPECTED_PROVIDER" ]; then
+            profile_args=(--expected-provider "$EXPECTED_PROVIDER")
+          fi
+          if [ -n "$EXPECTED_MODEL" ] || [ -n "$EXPECTED_REASONING" ]; then
+            if [ -z "$EXPECTED_MODEL" ] || [ -z "$EXPECTED_REASONING" ]; then
+              echo "Expected benchmark model and reasoning must be supplied together" >&2
+              exit 1
+            fi
+            profile_args+=(--expected-model "$EXPECTED_MODEL" --expected-reasoning "$EXPECTED_REASONING")
+          fi
           node scripts/ci/prepare-eval-history-publication.mjs automatic \
             "$BENCHMARK_CONTROL/manifest.json" \
             "$BENCHMARK_CONTROL" \
@@ -143,7 +196,8 @@ jobs:
             "$PRODUCER_RUN_ATTEMPT" \
             "$BENCHMARK_MODE" \
             "$PUBLICATION_GENERATION" \
-            "$PUBLICATION_PLAN"
+            "$PUBLICATION_PLAN" \
+            "${profile_args[@]}"
           mkdir "$PUBLICATION_UNPACKED"
           while IFS=$'\t' read -r bundle_path unpack_path eval_run_id benchmark lane model_slug; do
             metadata="$(node packages/modal/dist/cli.js unpack-public \

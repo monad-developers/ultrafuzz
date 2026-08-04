@@ -3,7 +3,11 @@
 import path from "node:path";
 
 import type { ModalLaunchMode, ModelProvider } from "./defaults.js";
-import { extractPublicBenchmarkBundle, readPublicBenchmarkBundle } from "./public-bundle.js";
+import {
+  PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
+  extractPublicBenchmarkBundle,
+  readPublicBenchmarkBundle
+} from "./public-bundle.js";
 import {
   buildModalImage,
   collectModalBenchmark,
@@ -155,8 +159,9 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "unpack-public") {
-    const bundle = readPublicBenchmarkBundle(requiredOption(argv, "--bundle"));
-    extractPublicBenchmarkBundle(bundle, path.resolve(requiredOption(argv, "--output")));
+    const access = { expectedSchemaVersion: PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION } as const;
+    const bundle = readPublicBenchmarkBundle(requiredOption(argv, "--bundle"), access);
+    extractPublicBenchmarkBundle(bundle, path.resolve(requiredOption(argv, "--output")), access);
     console.log(
       JSON.stringify({
         benchmark: bundle.benchmark,

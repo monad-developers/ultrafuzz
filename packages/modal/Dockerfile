@@ -10,7 +10,7 @@ ENV DISABLE_AUTOUPDATER=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      bash build-essential ca-certificates curl git jq libssl3t64 \
+      bash build-essential ca-certificates curl git jq libssl3t64 util-linux \
       python3 python3-pip python3-venv ripgrep tar unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,7 +37,7 @@ RUN python3 -m venv /opt/security-venv \
 
 RUN install -d -m 0755 -o ubuntu -g ubuntu /workspace
 
-ENV HOME=/home/ubuntu
-USER ubuntu
+ENV HOME=/root
+USER root
 WORKDIR /workspace
 CMD ["bash"]

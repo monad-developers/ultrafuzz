@@ -1,9 +1,13 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { boundedEvalId, captureTerminalEvidenceAtRunRoot, type PublicEvalDiagnosticsRow } from "@ultrafuzz/evals";
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
@@ -21,6 +25,7 @@ import {
   type ModalCollectedLineage
 } from "../src/runner.js";
 import { publicEvalRunId } from "../src/public-worker.js";
+import { writeTerminalEvidenceFixture } from "./helpers/terminal-evidence.js";
 
 const MODEL: ModalModelSpec = {
   slug: "benchmark-smoke-claude-sonnet-5-low",
@@ -28,6 +33,14 @@ const MODEL: ModalModelSpec = {
   provider: "anthropic",
   agent: "ClaudeAgent",
   reasoning: "low",
+  auth_mode: "api-key"
+};
+const DEEPSEEK_FLASH_MODEL: ModalModelSpec = {
+  slug: "benchmark-smoke-deepseek-v4-flash-max",
+  model: "deepseek-v4-flash",
+  provider: "deepseek",
+  agent: "DeepSeekAgent",
+  reasoning: "max",
   auth_mode: "api-key"
 };
 const CONFIG: PublicModalBenchmarkConfig = {
@@ -103,10 +116,107 @@ describe("public post-eval diagnostics", () => {
     expect(serialized).not.toContain("details");
   });
 
+  it("derives exact DeepSeek V4 Flash identity and models.dev pricing from run.json", () => {
+    const config: PublicModalBenchmarkConfig = {
+      ...CONFIG,
+      models: [DEEPSEEK_FLASH_MODEL],
+      public_benchmark: {
+        ...CONFIG.public_benchmark,
+        runner_model_profile: DEEPSEEK_FLASH_MODEL.slug
+      }
+    };
+    const fixture = evalFixture(DEEPSEEK_FLASH_MODEL, config);
+    writeCompleteModelAccountingFixture(fixture.runRoot, DEEPSEEK_FLASH_MODEL.model, {
+      rates: {
+        inputUsdPerMillion: 0.14,
+        cachedInputUsdPerMillion: 0.0028,
+        outputUsdPerMillion: 0.28,
+        reasoningUsdPerMillion: 0.28
+      }
+    });
+    refreshTerminalEvidenceBinding(fixture);
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config,
+      model: DEEPSEEK_FLASH_MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary,
+      createdAt: "2026-08-03T00:10:00.000Z"
+    });
+
+    expect(diagnostics.schema_version).toBe("ultrafuzz.modal.public-eval-diagnostics.v4");
+    expect(diagnostics.rows[0]).toMatchObject({
+      model_identity: {
+        schema_version: "ultrafuzz.eval.model-identity.v1",
+        configured_model: "deepseek-v4-flash",
+        provider_reported_model: "deepseek-v4-flash",
+        invocation_count: 1,
+        invocations: [
+          {
+            invocation_id: "workflow-one/task-one/0",
+            configured_model: "deepseek-v4-flash",
+            provider_reported_model: "deepseek-v4-flash"
+          }
+        ]
+      },
+      pricing: {
+        schema_version: "ultrafuzz.eval.pricing-evidence.v1",
+        configured_model: "deepseek-v4-flash",
+        provider_reported_model: "deepseek-v4-flash",
+        catalog: {
+          source: "models.dev",
+          status: "available",
+          fetched_at: "2026-07-20T00:00:00.000Z",
+          catalog_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+          resolved_models: ["deepseek-v4-flash"],
+          unresolved_models: []
+        },
+        rates_usd_per_million: {
+          uncached_input: 0.14,
+          cache_read: 0.0028,
+          cache_write: null,
+          output: 0.28,
+          reasoning: 0.28
+        },
+        usage: {
+          uncached_input_tokens: 1_000,
+          cache_read_tokens: 100,
+          cache_write_tokens: 0,
+          output_tokens: 20,
+          reasoning_tokens: 0,
+          inclusive_token_total: 1_120,
+          billable_token_total: 1_120,
+          total_tokens: 1_120
+        },
+        component_costs_usd: {
+          uncached_input: 0.00014,
+          cache_read: (100 * 0.0028) / 1_000_000,
+          cache_write: 0,
+          output: (20 * 0.28) / 1_000_000,
+          reasoning: 0
+        },
+        cost_usd: (1_000 * 0.14 + 100 * 0.0028 + 20 * 0.28) / 1_000_000,
+        usage_complete: true,
+        pricing_complete: true,
+        partial_pricing: false,
+        event_count: 1,
+        priced_event_count: 1,
+        unpriced_event_count: 0,
+        thinking_tokens_included_in_output: true
+      },
+      scoring_ready: true,
+      reason_codes: []
+    });
+  });
+
   it("accepts the runtime-prefixed workflow ID emitted for a maximum-length eval child run", () => {
     const fixture = evalFixture();
     const workflowId = `ultrafuzz-${"r".repeat(128)}`;
+    writeCleanTaskSuccessFixture(fixture.runRoot, fixture.runtimeRunId, workflowId);
     fixture.runSummary.records[0]!.workflow_ids = [workflowId];
+    refreshTerminalEvidenceBinding(fixture);
 
     const diagnostics = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -139,7 +249,9 @@ describe("public post-eval diagnostics", () => {
     const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-long-workflow-"));
     const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
     const workflowId = `ultrafuzz-${"r".repeat(128)}`;
+    writeCleanTaskSuccessFixture(fixture.runRoot, fixture.runtimeRunId, workflowId);
     fixture.runSummary.records[0]!.workflow_ids = [workflowId];
+    refreshTerminalEvidenceBinding(fixture);
     fs.mkdirSync(evalRoot, { recursive: true });
     fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
     fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
@@ -156,6 +268,177 @@ describe("public post-eval diagnostics", () => {
     expect(diagnostics.summary.scoring_ready).toBe(true);
   });
 
+  it("rejects symlinked, hard-linked, or oversized diagnostic control files", () => {
+    const fixture = evalFixture();
+    const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-control-safety-"));
+    const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
+    fs.mkdirSync(evalRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
+
+    const externalMatrix = path.join(controlRoot, "external-matrix.json");
+    fs.writeFileSync(externalMatrix, `${JSON.stringify(fixture.matrix)}\n`);
+    fs.linkSync(externalMatrix, path.join(evalRoot, "matrix.json"));
+    expect(() =>
+      createPublicEvalDiagnosticsFromRun({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        controlRoot,
+        evalRunId: fixture.evalRunId
+      })
+    ).toThrow(/single-link regular file/u);
+
+    fs.rmSync(path.join(evalRoot, "matrix.json"));
+    fs.rmSync(externalMatrix);
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
+    const externalSummary = path.join(controlRoot, "external-summary.json");
+    fs.renameSync(path.join(evalRoot, "run-summary.json"), externalSummary);
+    fs.symlinkSync(externalSummary, path.join(evalRoot, "run-summary.json"));
+    expect(() =>
+      createPublicEvalDiagnosticsFromRun({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        controlRoot,
+        evalRunId: fixture.evalRunId
+      })
+    ).toThrow(/run summary is unavailable/u);
+
+    fs.rmSync(path.join(evalRoot, "run-summary.json"));
+    fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), "");
+    fs.truncateSync(path.join(evalRoot, "runs.jsonl"), 16 * 1024 * 1024 + 1);
+    expect(() =>
+      createPublicEvalDiagnosticsFromRun({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        controlRoot,
+        evalRunId: fixture.evalRunId
+      })
+    ).toThrow(/bounded single-link regular file/u);
+  });
+
+  it("rejects a symlink in the nested eval-control ancestor chain", () => {
+    const fixture = evalFixture();
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-ancestor-"));
+    const controlRoot = path.join(root, "control");
+    const external = path.join(root, "external");
+    const evalRoot = path.join(external, "evals", "runs", fixture.evalRunId);
+    fs.mkdirSync(controlRoot, { recursive: true });
+    fs.mkdirSync(evalRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
+    fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
+    fs.symlinkSync(external, path.join(controlRoot, ".ultrafuzz"));
+
+    expect(() =>
+      createPublicEvalDiagnosticsFromRun({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        controlRoot,
+        evalRunId: fixture.evalRunId
+      })
+    ).toThrow(/eval control directory is unavailable/u);
+  });
+
+  it("allows unrelated sibling churn in a pinned directory ancestor", () => {
+    const fixture = evalFixture();
+    const unrelatedSibling = path.join(path.dirname(fixture.runRoot), "unrelated-sibling");
+    const originalReadSync = fs.readSync.bind(fs);
+    let churned = false;
+    const readSpy = vi.spyOn(fs, "readSync").mockImplementation(((
+      descriptor: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number
+    ) => {
+      if (!churned) {
+        churned = true;
+        fs.mkdirSync(unrelatedSibling);
+      }
+      return originalReadSync(descriptor, buffer, offset, length, position);
+    }) as typeof fs.readSync);
+    try {
+      const diagnostics = createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: fixture.runSummary
+      });
+
+      expect(churned).toBe(true);
+      expect(diagnostics.summary.scoring_ready).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+      fs.rmSync(unrelatedSibling, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects replacement of the eval directory while its coherent input snapshot is being read", () => {
+    const fixture = evalFixture();
+    const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-snapshot-race-"));
+    const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
+    const displacedRoot = path.join(controlRoot, "displaced-eval-root");
+    fs.mkdirSync(evalRoot, { recursive: true });
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
+    fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
+    const originalReadSync = fs.readSync.bind(fs);
+    let replaced = false;
+    const readSpy = vi.spyOn(fs, "readSync").mockImplementation(((
+      descriptor: number,
+      buffer: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number
+    ) => {
+      if (!replaced) {
+        replaced = true;
+        fs.renameSync(evalRoot, displacedRoot);
+        fs.mkdirSync(evalRoot, { recursive: true });
+        fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}\n`);
+        fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}\n`);
+      }
+      return originalReadSync(descriptor, buffer, offset, length, position);
+    }) as typeof fs.readSync);
+    try {
+      expect(() =>
+        createPublicEvalDiagnosticsFromRun({
+          config: CONFIG,
+          model: MODEL,
+          lineage: LINEAGE,
+          controlRoot,
+          evalRunId: fixture.evalRunId
+        })
+      ).toThrow(/path changed|directory changed/u);
+      expect(replaced).toBe(true);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  it("accepts valid matrix and summary controls larger than the diagnostics output limit", () => {
+    const fixture = evalFixture();
+    const controlRoot = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-large-input-"));
+    const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", fixture.evalRunId);
+    fs.mkdirSync(evalRoot, { recursive: true });
+    const padding = " ".repeat(1024 * 1024 + 1);
+    fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify(fixture.matrix)}${padding}`);
+    fs.writeFileSync(path.join(evalRoot, "run-summary.json"), `${JSON.stringify(fixture.runSummary)}${padding}`);
+
+    const diagnostics = createPublicEvalDiagnosticsFromRun({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      controlRoot,
+      evalRunId: fixture.evalRunId
+    });
+
+    expect(diagnostics.summary.scoring_ready).toBe(true);
+  });
+
   it("validates hash-bounded public eval IDs composed from maximum-length inputs", () => {
     const fixture = evalFixture();
     const runId = `public-${"r".repeat(121)}`;
@@ -167,9 +450,20 @@ describe("public post-eval diagnostics", () => {
       public_benchmark: { ...CONFIG.public_benchmark, runner_model_profile: model.slug }
     };
     const lineage: ModalWorkerLineage = { ...LINEAGE, logical_run_id: runId };
-    fixture.matrix[0]!.variant_id = model.slug;
-    fixture.runSummary.records[0]!.variant_id = model.slug;
     const evalRunId = publicEvalRunId(runId, model.slug);
+    fixture.matrix[0]!.variant_id = model.slug;
+    fixture.matrix[0]!.runner_model_profile = model.slug;
+    fixture.matrix[0]!.runner_model = model.model;
+    fixture.matrix[0]!.runner_reasoning = model.reasoning;
+    const runtimeRunId = boundedEvalId([evalRunId, fixture.matrix[0]!.run_id], 118);
+    const fingerprints = writeCleanTaskSuccessFixture(fixture.runRoot, runtimeRunId);
+    fixture.runSummary.eval_run_id = evalRunId;
+    fixture.runSummary.records[0]!.eval_run_id = evalRunId;
+    fixture.runSummary.records[0]!.variant_id = model.slug;
+    fixture.runSummary.records[0]!.ultrafuzz_run_id = runtimeRunId;
+    fixture.runSummary.records[0]!.graph_fingerprint = fingerprints.graphFingerprint;
+    fixture.runSummary.records[0]!.config_fingerprint = fingerprints.configFingerprint;
+    refreshTerminalEvidenceBinding(fixture);
 
     const diagnostics = createPublicEvalDiagnostics({
       config,
@@ -189,7 +483,15 @@ describe("public post-eval diagnostics", () => {
     const fixture = evalFixture();
     const record = fixture.runSummary.records[0] as unknown as Record<string, unknown>;
     record.final_status = "launched";
-    record.workflow = { status: "running", terminal: false };
+    record.workflow = {
+      status: "running",
+      terminal: false,
+      started_at: "2026-07-20T00:00:00.000Z",
+      finished_at: null
+    };
+    delete record.terminal_disposition;
+    delete record.terminal_evidence;
+    fixture.runSummary.incomplete = 1;
     delete record.report_json_path;
     record.diagnostics = [
       { code: "unsafe code with spaces", message: "do not persist me", details: { token: "secret" } }
@@ -208,6 +510,7 @@ describe("public post-eval diagnostics", () => {
       final_status: "launched",
       workflow_status: "running",
       workflow_terminal: false,
+      terminal_disposition: "unavailable",
       terminal_report_present: false,
       diagnostic_codes: ["unavailable"],
       scoring_ready: false
@@ -216,9 +519,103 @@ describe("public post-eval diagnostics", () => {
       "workflow-nonterminal",
       "workflow-not-scoreable",
       "final-status-not-scoreable",
-      "terminal-report-missing"
+      "terminal-report-missing",
+      "model-identity-missing",
+      "pricing-evidence-missing"
     ]);
     expect(JSON.stringify(diagnostics)).not.toContain("do not persist me");
+  });
+
+  it("accepts a valid terminal report above one MiB but rejects a report above sixteen MiB", () => {
+    const accepted = evalFixture();
+    const acceptedReport = accepted.runSummary.records[0]!.report_json_path;
+    fs.writeFileSync(
+      acceptedReport,
+      `${JSON.stringify({ schema_version: "1.0", issues: [], padding: "x".repeat(1024 * 1024 + 1) })}\n`
+    );
+    expect(
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: accepted.evalRunId,
+        matrix: accepted.matrix,
+        runSummary: accepted.runSummary
+      }).rows[0]
+    ).toMatchObject({ terminal_report_present: true, scoring_ready: true });
+
+    const rejected = evalFixture();
+    fs.truncateSync(rejected.runSummary.records[0]!.report_json_path, 16 * 1024 * 1024 + 1);
+    expect(
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: rejected.evalRunId,
+        matrix: rejected.matrix,
+        runSummary: rejected.runSummary
+      }).rows[0]
+    ).toMatchObject({
+      terminal_report_present: false,
+      scoring_ready: false,
+      reason_codes: ["terminal-report-missing"]
+    });
+  });
+
+  it("does not block or follow a FIFO run graph or symlinked report ancestor", () => {
+    const fifoFixture = evalFixture();
+    const fifoRecord = fifoFixture.runSummary.records[0] as unknown as Record<string, unknown>;
+    delete fifoRecord.terminal_disposition;
+    delete fifoRecord.terminal_evidence;
+    const graphPath = path.join(fifoFixture.runRoot, "graph.json");
+    fs.rmSync(graphPath);
+    execFileSync("mkfifo", [graphPath]);
+    expect(
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fifoFixture.evalRunId,
+        matrix: fifoFixture.matrix,
+        runSummary: fifoFixture.runSummary
+      }).rows[0]
+    ).toMatchObject({ terminal_report_present: false, scoring_ready: false });
+
+    const symlinkFixture = evalFixture();
+    const reportDirectory = path.dirname(symlinkFixture.runSummary.records[0]!.report_json_path);
+    const externalDirectory = path.join(path.dirname(symlinkFixture.runRoot), "external-report-directory");
+    fs.mkdirSync(externalDirectory);
+    fs.writeFileSync(path.join(externalDirectory, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
+    fs.rmSync(reportDirectory, { recursive: true });
+    fs.symlinkSync(externalDirectory, reportDirectory);
+    expect(
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: symlinkFixture.evalRunId,
+        matrix: symlinkFixture.matrix,
+        runSummary: symlinkFixture.runSummary
+      }).rows[0]
+    ).toMatchObject({ terminal_report_present: false, scoring_ready: false });
+  });
+
+  it("does not derive a disposition after the fact for a legacy terminal record", () => {
+    const fixture = evalFixture();
+    delete (fixture.runSummary.records[0] as Partial<(typeof fixture.runSummary.records)[number]>).terminal_disposition;
+
+    const diagnostics = createPublicEvalDiagnostics({
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    });
+
+    expect(diagnostics.rows[0]?.terminal_disposition).toBe("unavailable");
+    expect(diagnostics.rows[0]?.scoring_ready).toBe(false);
+    expect(diagnostics.rows[0]?.reason_codes).toContain("terminal-disposition-not-scoreable");
   });
 
   it("persists a missing-row diagnostic when the outer watchdog fires before run-summary", () => {
@@ -233,7 +630,11 @@ describe("public post-eval diagnostics", () => {
           id: "target-a-runner-trial-1",
           target_id: "target-a",
           variant_id: MODEL.slug,
-          trial_id: "trial-1"
+          trial_id: "trial-1",
+          run_id: "matrix-run-one",
+          runner_model_profile: MODEL.slug,
+          runner_model: MODEL.model,
+          runner_reasoning: MODEL.reasoning
         }
       ])}\n`
     );
@@ -266,6 +667,7 @@ describe("public post-eval diagnostics", () => {
           {
             node_id: nodeId,
             status: timedOut ? "timed-out" : "failed",
+            retry_count: 0,
             timed_out: timedOut,
             last_error: `private failure detail ${index} sk-ant-secret-value`,
             provenance: {
@@ -294,9 +696,22 @@ describe("public post-eval diagnostics", () => {
         ];
       })
     );
-    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+    const fingerprints = writeTerminalEvidenceFixture({
+      runRoot: fixture.runRoot,
+      runtimeRunId: fixture.runtimeRunId,
+      workflowRunId: "workflow-one",
+      state: {
+        ...terminalStateMetadata("failed"),
+        nodes
+      },
+      tasks: []
+    });
     fixture.runSummary.records[0]!.final_status = "failed";
-    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+    fixture.runSummary.records[0]!.terminal_disposition = "operational-failure";
+    fixture.runSummary.records[0]!.workflow = terminalWorkflow("failed");
+    fixture.runSummary.records[0]!.graph_fingerprint = fingerprints.graphFingerprint;
+    fixture.runSummary.records[0]!.config_fingerprint = fingerprints.configFingerprint;
+    refreshTerminalEvidenceBinding(fixture);
 
     const diagnostics = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -366,11 +781,27 @@ describe("public post-eval diagnostics", () => {
         {
           node_id: nodeId,
           status: "failed",
+          retry_count: 0,
           timed_out: false
         }
       ])
     );
-    fs.writeFileSync(path.join(fixture.runRoot, "state.json"), `${JSON.stringify({ nodes })}\n`);
+    const fingerprints = writeTerminalEvidenceFixture({
+      runRoot: fixture.runRoot,
+      runtimeRunId: fixture.runtimeRunId,
+      workflowRunId: "workflow-one",
+      state: {
+        ...terminalStateMetadata("failed"),
+        nodes
+      },
+      tasks: []
+    });
+    fixture.runSummary.records[0]!.final_status = "failed";
+    fixture.runSummary.records[0]!.workflow = terminalWorkflow("failed");
+    fixture.runSummary.records[0]!.terminal_disposition = "operational-failure";
+    fixture.runSummary.records[0]!.graph_fingerprint = fingerprints.graphFingerprint;
+    fixture.runSummary.records[0]!.config_fingerprint = fingerprints.configFingerprint;
+    refreshTerminalEvidenceBinding(fixture);
 
     const diagnostics = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -452,11 +883,68 @@ describe("public post-eval diagnostics", () => {
     ).toThrow(/unsanitized public eval diagnostics/u);
   });
 
+  it("rejects transplanted model, candidate, schema, fingerprint, and lifecycle identities before scoring", () => {
+    const fixture = evalFixture();
+    const input = {
+      config: CONFIG,
+      model: MODEL,
+      lineage: LINEAGE,
+      evalRunId: fixture.evalRunId,
+      matrix: fixture.matrix,
+      runSummary: fixture.runSummary
+    };
+
+    const wrongModelMatrix = structuredClone(fixture.matrix);
+    wrongModelMatrix[0]!.runner_model = "another-model";
+    expect(() => createPublicEvalDiagnostics({ ...input, matrix: wrongModelMatrix })).toThrow(/model identity/u);
+
+    const wrongCandidate = structuredClone(fixture.runSummary);
+    wrongCandidate.records[0]!.candidate_commit = "f".repeat(40);
+    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: wrongCandidate })).toThrow(/record identity/u);
+
+    const missingSchema = structuredClone(fixture.runSummary) as unknown as {
+      records: Array<Record<string, unknown>>;
+    };
+    delete missingSchema.records[0]!.schema_version;
+    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: missingSchema })).toThrow();
+
+    expect(() =>
+      createPublicEvalDiagnostics({
+        ...input,
+        runSummary: { ...fixture.runSummary, launched: 0 }
+      })
+    ).toThrow(/lifecycle counts/u);
+    expect(() =>
+      createPublicEvalDiagnostics({
+        ...input,
+        runSummary: { ...fixture.runSummary, unexpected: true }
+      })
+    ).toThrow();
+
+    const wrongFingerprint = structuredClone(fixture.runSummary);
+    wrongFingerprint.records[0]!.graph_fingerprint = "f".repeat(64);
+    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: wrongFingerprint })).toThrow(
+      /lifecycle identity/u
+    );
+
+    const wrongLauncher = structuredClone(fixture.runSummary);
+    (wrongLauncher.records[0]!.launcher as { status: "succeeded" | "failed" }).status = "failed";
+    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: wrongLauncher })).toThrow(/execution identity/u);
+
+    const ambiguousWorkflow = structuredClone(fixture.runSummary);
+    ambiguousWorkflow.records[0]!.workflow_ids.push("workflow-two");
+    expect(() => createPublicEvalDiagnostics({ ...input, runSummary: ambiguousWorkflow })).toThrow(
+      /execution identity/u
+    );
+  });
+
   it("allows a report-backed genuine task failure to proceed to scoring", () => {
     const fixture = evalFixture();
-    writeGenuineTaskFailureFixture(fixture.runRoot);
+    writeGenuineTaskFailureFixture(fixture.runRoot, fixture.runtimeRunId);
     fixture.runSummary.records[0]!.final_status = "failed";
-    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+    fixture.runSummary.records[0]!.terminal_disposition = "genuine-task-failures";
+    fixture.runSummary.records[0]!.workflow = terminalWorkflow("failed");
+    refreshTerminalEvidenceBinding(fixture);
 
     const diagnostics = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -482,6 +970,9 @@ describe("public post-eval diagnostics", () => {
       row_id: "target-a-runner-trial-2",
       trial_id: "trial-2"
     };
+    const legacyRows = ([diagnostics.rows[0]!, legacySecondRow] as PublicEvalDiagnosticsRow[]).map(
+      ({ model_identity: _identity, pricing: _pricing, ...row }) => row
+    );
     expect(() =>
       parsePublicEvalDiagnostics({
         ...diagnostics,
@@ -495,15 +986,49 @@ describe("public post-eval diagnostics", () => {
           terminal_reports_present: 2,
           scoring_ready: true
         },
-        rows: [diagnostics.rows[0], legacySecondRow]
+        rows: legacyRows
+      })
+    ).not.toThrow();
+
+    const previousRows = legacyRows.map((row) => ({
+      ...row,
+      workflow_ids: [...row.workflow_ids, "workflow-two"]
+    }));
+    expect(() =>
+      parsePublicEvalDiagnostics({
+        ...diagnostics,
+        schema_version: "ultrafuzz.modal.public-eval-diagnostics.v2",
+        summary: {
+          ...diagnostics.summary,
+          planned: 2,
+          launched: 2,
+          workflow_failed: 2,
+          genuine_task_failure_rows: 2,
+          terminal_reports_present: 2,
+          scoring_ready: true
+        },
+        rows: previousRows
       })
     ).not.toThrow();
   });
 
-  it("publishes one report-backed failed target across rows but rejects two targets", () => {
+  it("rejects report-backed operational failures even when only one target failed", () => {
     const fixture = evalFixture();
+    const statePath = path.join(fixture.runRoot, "state.json");
+    const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as { nodes: Record<string, unknown> };
+    const fingerprints = writeTerminalEvidenceFixture({
+      runRoot: fixture.runRoot,
+      runtimeRunId: fixture.runtimeRunId,
+      workflowRunId: "workflow-one",
+      state: { ...terminalStateMetadata("failed"), nodes: state.nodes },
+      tasks: []
+    });
     fixture.runSummary.records[0]!.final_status = "failed";
-    fixture.runSummary.records[0]!.workflow = { status: "failed", terminal: true };
+    fixture.runSummary.records[0]!.terminal_disposition = "operational-failure";
+    fixture.runSummary.records[0]!.workflow = terminalWorkflow("failed");
+    fixture.runSummary.records[0]!.graph_fingerprint = fingerprints.graphFingerprint;
+    fixture.runSummary.records[0]!.config_fingerprint = fingerprints.configFingerprint;
+    refreshTerminalEvidenceBinding(fixture);
 
     const oneFailure = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -519,10 +1044,10 @@ describe("public post-eval diagnostics", () => {
       workflow_status: "failed",
       terminal_disposition: "operational-failure",
       terminal_report_present: true,
-      scoring_ready: true,
-      reason_codes: []
+      scoring_ready: false,
+      reason_codes: ["workflow-not-scoreable", "final-status-not-scoreable", "terminal-disposition-not-scoreable"]
     });
-    expect(oneFailure.summary).toMatchObject({ workflow_failed: 1, scoring_ready: true });
+    expect(oneFailure.summary).toMatchObject({ workflow_failed: 1, scoring_ready: false });
 
     const sameTargetSecondRow = {
       ...fixture.matrix[0]!,
@@ -533,7 +1058,7 @@ describe("public post-eval diagnostics", () => {
       ...fixture.runSummary.records[0]!,
       row_id: sameTargetSecondRow.id,
       trial_id: sameTargetSecondRow.trial_id,
-      workflow_ids: ["workflow-2"]
+      workflow_ids: ["workflow-one"]
     };
     const sameTargetFailures = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -541,11 +1066,17 @@ describe("public post-eval diagnostics", () => {
       lineage: LINEAGE,
       evalRunId: fixture.evalRunId,
       matrix: [...fixture.matrix, sameTargetSecondRow],
-      runSummary: { records: [...fixture.runSummary.records, sameTargetSecondRecord] }
+      runSummary: {
+        eval_run_id: fixture.evalRunId,
+        launched: 2,
+        failed: 0,
+        incomplete: 0,
+        records: [...fixture.runSummary.records, sameTargetSecondRecord]
+      }
     });
 
-    expect(sameTargetFailures.rows.every((row) => row.scoring_ready)).toBe(true);
-    expect(sameTargetFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: true });
+    expect(sameTargetFailures.rows.every((row) => !row.scoring_ready)).toBe(true);
+    expect(sameTargetFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: false });
 
     const secondTargetRow = {
       ...sameTargetSecondRow,
@@ -556,7 +1087,7 @@ describe("public post-eval diagnostics", () => {
       ...sameTargetSecondRecord,
       row_id: secondTargetRow.id,
       target_id: secondTargetRow.target_id,
-      workflow_ids: ["workflow-3"]
+      workflow_ids: ["workflow-one"]
     };
     const twoTargetFailures = createPublicEvalDiagnostics({
       config: CONFIG,
@@ -564,11 +1095,33 @@ describe("public post-eval diagnostics", () => {
       lineage: LINEAGE,
       evalRunId: fixture.evalRunId,
       matrix: [...fixture.matrix, secondTargetRow],
-      runSummary: { records: [...fixture.runSummary.records, secondTargetRecord] }
+      runSummary: {
+        eval_run_id: fixture.evalRunId,
+        launched: 2,
+        failed: 0,
+        incomplete: 0,
+        records: [...fixture.runSummary.records, secondTargetRecord]
+      }
     });
 
-    expect(twoTargetFailures.rows.every((row) => row.scoring_ready)).toBe(true);
+    expect(twoTargetFailures.rows.every((row) => !row.scoring_ready)).toBe(true);
     expect(twoTargetFailures.summary).toMatchObject({ workflow_failed: 2, scoring_ready: false });
+  });
+
+  it("rejects a transplanted recorded disposition that disagrees with the bound run root", () => {
+    const fixture = evalFixture();
+    fs.writeFileSync(path.join(fixture.runRoot, "smithers", "tasks.json"), "{malformed", "utf8");
+
+    expect(() =>
+      createPublicEvalDiagnostics({
+        config: CONFIG,
+        model: MODEL,
+        lineage: LINEAGE,
+        evalRunId: fixture.evalRunId,
+        matrix: fixture.matrix,
+        runSummary: fixture.runSummary
+      })
+    ).toThrow(/does not match exact durable evidence bytes/u);
   });
 
   it("writes atomically with owner-only permissions and no temporary residue", async () => {
@@ -592,39 +1145,257 @@ describe("public post-eval diagnostics", () => {
   });
 });
 
-function evalFixture() {
+function evalFixture(model: ModalModelSpec = MODEL, config: PublicModalBenchmarkConfig = CONFIG) {
   const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-public-diagnostics-"));
   const runRoot = path.join(root, "run");
   const reportPath = path.join(runRoot, "artifacts", "final-report", "report.json");
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
   fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
-  const evalRunId = "public-diagnostics-benchmark-smoke-claude-sonnet-5-low";
+  const evalRunId = `public-diagnostics-${model.slug}`;
   const matrix = [
     {
       id: "target-a-runner-trial-1",
       target_id: "target-a",
-      variant_id: MODEL.slug,
-      trial_id: "trial-1"
+      variant_id: model.slug,
+      trial_id: "trial-1",
+      run_id: "matrix-run-one",
+      runner_model_profile: model.slug,
+      runner_model: model.model,
+      runner_reasoning: model.reasoning
     }
   ];
+  const runtimeRunId = boundedEvalId([evalRunId, matrix[0]!.run_id], 118);
+  const fingerprints = writeCleanTaskSuccessFixture(runRoot, runtimeRunId);
+  writeCompleteModelAccountingFixture(runRoot, model.model);
   const runSummary = {
+    eval_run_id: evalRunId,
+    launched: 1,
+    failed: 0,
+    incomplete: 0,
     records: [
       {
+        schema_version: "ultrafuzz.eval.run.v1",
+        eval_run_id: evalRunId,
         row_id: matrix[0]!.id,
         target_id: matrix[0]!.target_id,
         variant_id: matrix[0]!.variant_id,
         trial_id: matrix[0]!.trial_id,
         status: "launched" as const,
         final_status: "succeeded",
-        workflow_ids: ["workflow-1"],
-        workflow: { status: "succeeded", terminal: true },
+        ultrafuzz_run_id: runtimeRunId,
+        workflow_ids: ["workflow-one"],
+        launcher: {
+          status: "succeeded" as const,
+          started_at: "2026-07-20T00:00:00.000Z",
+          finished_at: "2026-07-20T00:00:01.000Z"
+        },
+        workflow: {
+          status: "succeeded" as "succeeded" | "failed",
+          terminal: true,
+          started_at: "2026-07-20T00:00:00.000Z",
+          finished_at: "2026-07-20T00:00:01.000Z"
+        },
+        graph_fingerprint: fingerprints.graphFingerprint,
+        config_fingerprint: fingerprints.configFingerprint,
+        candidate_commit: config.public_benchmark.candidate_commit,
+        execution_artifact_id: `git:${config.public_benchmark.candidate_commit}`,
+        terminal_disposition: "clean",
+        terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding,
         ultrafuzz_run_root: runRoot,
         report_json_path: reportPath,
         diagnostics: [{ code: "SAFE_CODE", message: "secret diagnostic message", details: { path: runRoot } }]
       }
     ]
   };
-  return { evalRunId, matrix, runSummary, runRoot };
+  return { evalRunId, matrix, runSummary, runRoot, runtimeRunId };
+}
+
+function writeCompleteModelAccountingFixture(
+  runRoot: string,
+  configuredModel: string,
+  overrides: {
+    providerReportedModel?: string;
+    rates?: {
+      inputUsdPerMillion: number;
+      cachedInputUsdPerMillion: number;
+      outputUsdPerMillion: number;
+      reasoningUsdPerMillion: number;
+    };
+  } = {}
+): void {
+  const providerReportedModel = overrides.providerReportedModel ?? configuredModel;
+  const rates = overrides.rates ?? {
+    inputUsdPerMillion: 1,
+    cachedInputUsdPerMillion: 0.1,
+    outputUsdPerMillion: 2,
+    reasoningUsdPerMillion: 2
+  };
+  const summary = {
+    uncached_input_tokens: 1_000,
+    cache_read_tokens: 100,
+    cache_write_tokens: 0,
+    output_tokens: 20,
+    reasoning_tokens: 0,
+    inclusive_token_total: 1_120,
+    billable_token_total: 1_120,
+    total_tokens: 1_120,
+    estimated_spend_usd:
+      (1_000 * rates.inputUsdPerMillion + 100 * rates.cachedInputUsdPerMillion + 20 * rates.outputUsdPerMillion) /
+      1_000_000,
+    component_costs_usd: {
+      uncached_input: (1_000 * rates.inputUsdPerMillion) / 1_000_000,
+      cache_read: (100 * rates.cachedInputUsdPerMillion) / 1_000_000,
+      cache_write: 0,
+      output: (20 * rates.outputUsdPerMillion) / 1_000_000,
+      reasoning: 0
+    },
+    usage_complete: true,
+    pricing_complete: true,
+    partial_pricing: false,
+    event_count: 1,
+    priced_event_count: 1,
+    unpriced_event_count: 0,
+    models: [configuredModel]
+  };
+  const catalogBytes = Buffer.from(
+    `${JSON.stringify({
+      fixture: {
+        models: {
+          [configuredModel]: {
+            cost: {
+              input: rates.inputUsdPerMillion,
+              cache_read: rates.cachedInputUsdPerMillion,
+              output: rates.outputUsdPerMillion,
+              reasoning: rates.reasoningUsdPerMillion
+            }
+          }
+        }
+      }
+    })}\n`,
+    "utf8"
+  );
+  const catalogSha256 = crypto.createHash("sha256").update(catalogBytes).digest("hex");
+  const pricingCatalogsDir = path.join(runRoot, "pricing-catalogs");
+  fs.mkdirSync(pricingCatalogsDir, { recursive: true });
+  fs.writeFileSync(path.join(pricingCatalogsDir, `${catalogSha256}.json`), catalogBytes);
+  fs.writeFileSync(
+    path.join(runRoot, "usage.jsonl"),
+    `${JSON.stringify({
+      schema_version: "1.0",
+      event_id: "usage-event-fixture",
+      run_id: path.basename(runRoot),
+      workflow_run_id: "workflow-one",
+      source_event_id: "source-event-fixture",
+      attempt_id: "usage-attempt-fixture",
+      checkpoint_generation_id: "checkpoint-fixture",
+      observed_at: "2026-07-20T00:00:00.000Z",
+      usage: {
+        input_tokens: 1_000,
+        cache_read_tokens: 100,
+        cache_write_tokens: 0,
+        output_tokens: 20,
+        reasoning_tokens: 0,
+        total_tokens: 1_120,
+        model: providerReportedModel
+      },
+      model_invocation: {
+        invocation_id: "workflow-one/task-one/0",
+        node_id: "node:task-one",
+        iteration: 0,
+        attempt: 0,
+        configured_model: configuredModel,
+        provider_reported_model: providerReportedModel,
+        terminal_evidence_complete: true
+      },
+      usage_complete: true,
+      usage_incomplete_reasons: []
+    })}\n`
+  );
+  fs.writeFileSync(
+    path.join(runRoot, "run.json"),
+    `${JSON.stringify(
+      {
+        schema_version: "1.0",
+        accounting: {
+          schema_version: "ultrafuzz.accounting.v2",
+          model_identity: {
+            schema_version: "ultrafuzz.runtime.model-identity.v1",
+            status: "complete",
+            invocation_count: 1,
+            configured_models: [configuredModel],
+            provider_reported_models: [providerReportedModel],
+            invocations: [
+              {
+                invocation_id: "workflow-one/task-one/0",
+                configured_model: configuredModel,
+                provider_reported_model: providerReportedModel
+              }
+            ]
+          },
+          current: summary,
+          cumulative: summary,
+          pricing_catalog: {
+            source: "models.dev",
+            status: "available",
+            fetched_at: "2026-07-20T00:00:00.000Z",
+            catalog_sha256: catalogSha256,
+            resolved_models: [configuredModel],
+            unresolved_models: [],
+            model_prices: { [configuredModel]: rates }
+          }
+        }
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+function refreshTerminalEvidenceBinding(fixture: ReturnType<typeof evalFixture>): void {
+  fixture.runSummary.records[0]!.terminal_evidence = captureTerminalEvidenceAtRunRoot(fixture.runRoot).binding;
+}
+
+function writeCleanTaskSuccessFixture(
+  runRoot: string,
+  runtimeRunId: string,
+  workflowRunId = "workflow-one"
+): { graphFingerprint: string; configFingerprint: string } {
+  const attemptId = "task-one";
+  return writeTerminalEvidenceFixture({
+    runRoot,
+    runtimeRunId,
+    workflowRunId,
+    state: {
+      ...terminalStateMetadata("succeeded"),
+      nodes: {
+        [attemptId]: {
+          node_id: attemptId,
+          status: "succeeded",
+          retry_count: 0,
+          timed_out: false,
+          finished_at: "2026-07-20T00:00:00.000Z",
+          provenance: {
+            workflow: {
+              run_id: workflowRunId,
+              task_id: `verify:${attemptId}`,
+              agent_task_id: `node:${attemptId}`,
+              verifier_task_id: `verify:${attemptId}`,
+              state: "finished"
+            },
+            output_contracts: { ok: true, missing: [] }
+          }
+        }
+      }
+    },
+    tasks: [
+      {
+        attemptId,
+        concreteNodeId: attemptId,
+        smithersNodeId: `node:${attemptId}`,
+        verifierSmithersNodeId: `verify:${attemptId}`
+      }
+    ]
+  });
 }
 
 function collectedLineage(): ModalCollectedLineage {
@@ -644,21 +1415,31 @@ function collectedLineage(): ModalCollectedLineage {
   };
 }
 
-function writeGenuineTaskFailureFixture(runRoot: string): void {
+function writeGenuineTaskFailureFixture(runRoot: string, runtimeRunId: string): void {
   const attemptId = "task-one";
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
-    `${JSON.stringify({
+  writeTerminalEvidenceFixture({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: "workflow-one",
+    state: {
+      ...terminalStateMetadata("failed"),
       nodes: {
         [attemptId]: {
           node_id: attemptId,
           status: "failed",
+          retry_count: 0,
           timed_out: false,
           finished_at: "2026-07-20T00:00:00.000Z",
           last_error: "task output did not pass final validation",
           provenance: {
-            workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
-            required_artifacts: { ok: true, missing: [] },
+            workflow: {
+              run_id: "workflow-one",
+              task_id: `verify:${attemptId}`,
+              agent_task_id: `node:${attemptId}`,
+              verifier_task_id: `verify:${attemptId}`,
+              state: "finished"
+            },
+            output_contracts: { ok: false, missing: [] },
             terminal_disposition: {
               schema_version: "ultrafuzz.terminal-disposition.v1",
               kind: "task-output-validation-failure"
@@ -666,13 +1447,51 @@ function writeGenuineTaskFailureFixture(runRoot: string): void {
           }
         }
       }
-    })}\n`
-  );
-  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runRoot, "smithers", "tasks.json"),
-    `${JSON.stringify({
-      tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
-    })}\n`
-  );
+    },
+    tasks: [
+      {
+        attemptId,
+        concreteNodeId: attemptId,
+        smithersNodeId: `node:${attemptId}`,
+        verifierSmithersNodeId: `verify:${attemptId}`
+      }
+    ]
+  });
+}
+
+function terminalStateMetadata(status: "succeeded" | "failed") {
+  return {
+    schema_version: "1.1",
+    status,
+    graph_fingerprint: "a".repeat(64),
+    config_fingerprint: "b".repeat(64),
+    created_at: "2026-07-20T00:00:00.000Z",
+    last_transition_at: "2026-07-20T00:00:01.000Z",
+    controller_lease: {
+      status: "active",
+      duration_ms: 30_000,
+      renewed_at: "2026-07-20T00:00:00.000Z",
+      expires_at: "2026-07-20T00:00:30.000Z",
+      recovery_attempts: 0
+    },
+    concurrency: {
+      requested_concurrency: 1,
+      effective_concurrency: 0,
+      ready_queue_depth: 0,
+      active_work: 0,
+      queued_duration_ms: 0,
+      active_duration_ms: 0,
+      idle_duration_ms: 0,
+      observed_at: "2026-07-20T00:00:01.000Z"
+    }
+  } as const;
+}
+
+function terminalWorkflow(status: "succeeded" | "failed") {
+  return {
+    status,
+    terminal: true,
+    started_at: "2026-07-20T00:00:00.000Z",
+    finished_at: "2026-07-20T00:00:01.000Z"
+  } as const;
 }

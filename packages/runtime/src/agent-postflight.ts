@@ -8,6 +8,7 @@ export const AGENT_POSTFLIGHT_FAILURE_CODES = [
   "dedupe-materialization-postflight",
   "final-report-materialization-postflight",
   "findings-normalization-postflight",
+  "canonical-findings-normalization-postflight",
   "report-provenance-normalization-postflight",
   "generated-test-manifest-normalization-postflight",
   "generated-test-companion-materialization-postflight",
@@ -25,8 +26,9 @@ export class AgentPostflightError extends Error {
   readonly code: AgentPostflightFailureCode;
   readonly details!: Readonly<{ failureRetryable: false }>;
   readonly usage?: unknown;
+  readonly result?: Readonly<{ response: Readonly<{ modelId: string }> }>;
 
-  constructor(code: AgentPostflightFailureCode, cause: unknown, usage?: unknown) {
+  constructor(code: AgentPostflightFailureCode, cause: unknown, usage?: unknown, modelId?: string) {
     super(`${AGENT_POSTFLIGHT_FAILURE_PREFIX}${code}: ${errorDetail(cause)}`, { cause });
     this.name = "AgentPostflightError";
     this.code = code;
@@ -44,6 +46,14 @@ export class AgentPostflightError extends Error {
         writable: false
       });
     }
+    if (modelId !== undefined) {
+      Object.defineProperty(this, "result", {
+        configurable: false,
+        enumerable: true,
+        value: Object.freeze({ response: Object.freeze({ modelId }) }),
+        writable: false
+      });
+    }
   }
 }
 
@@ -55,15 +65,27 @@ export async function runAgentWithPostflight<T>(
   // retry behavior, and provider-specific usage handling remain unchanged.
   const result = await generate();
   const usage = successfulAgentUsage(result);
+  const modelId = successfulAgentModelId(result);
   const run: AgentPostflightRunner = async (code, operation) => {
     try {
       return await operation();
     } catch (error) {
-      throw new AgentPostflightError(code, error, usage);
+      throw new AgentPostflightError(code, error, usage, modelId);
     }
   };
   await postflight(result, run);
   return result;
+}
+
+function successfulAgentModelId(value: unknown): string | undefined {
+  const response = recordProperty(value, "response");
+  if (response === undefined) return undefined;
+  try {
+    const modelId = response.modelId;
+    return typeof modelId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$/u.test(modelId) ? modelId : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function agentPostflightFailureCode(value: unknown): AgentPostflightFailureCode | undefined {
@@ -91,6 +113,18 @@ function propertyValue(value: unknown, key: "usage" | "totalUsage"): unknown {
   if ((typeof value !== "object" && typeof value !== "function") || value === null) return undefined;
   try {
     return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function recordProperty(value: unknown, key: string): Record<string, unknown> | undefined {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return undefined;
+  try {
+    const property = (value as Record<string, unknown>)[key];
+    return typeof property === "object" && property !== null && !Array.isArray(property)
+      ? (property as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,9 +8,18 @@ import { expect, it } from "vitest";
 
 import {
   adaptBenchmarkManifestToEvalSuite,
+  boundedEvalId,
+  captureTerminalEvidenceAtRunRoot,
   loadBenchmarkCohortManifest,
   loadBenchmarkLanesManifest
 } from "@ultrafuzz/evals";
+import {
+  parseVerificationOutput,
+  parseVerifierReceipt,
+  verificationOutputDigest,
+  verifierOutputBytesDigest,
+  verifierReceiptDigest
+} from "@ultrafuzz/runtime";
 
 import type { PublicModalBenchmarkConfig } from "../src/config.js";
 import type { ModalModelSpec } from "../src/defaults.js";
@@ -41,18 +51,26 @@ import {
   publicScoreCommandTimeoutSeconds,
   writePublicBundleAtomic
 } from "../src/public-worker.js";
-import { PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION, type PublicBenchmarkBundle } from "../src/public-bundle.js";
+import {
+  PUBLIC_BENCHMARK_BUNDLE_SCHEMA_VERSION,
+  PUBLIC_SOURCE_ATTESTATION_FILE,
+  PUBLIC_TERMINAL_EVIDENCE_DIRECTORY,
+  PUBLIC_TERMINAL_EVIDENCE_FILES,
+  createPublicBenchmarkBundle,
+  type PublicBenchmarkBundle
+} from "../src/public-bundle.js";
 import { createExactCandidateSourceArchive } from "../src/runner.js";
 import { WorkerResultWriter } from "../src/worker-result.js";
+import { writeTerminalEvidenceFixture } from "./helpers/terminal-evidence.js";
 
 it("keeps high-fanout public benchmark work off the persistent Modal volume", () => {
   const dataRoot = "/data/public-run/model";
   const workRoot = publicBenchmarkWorkRoot(dataRoot);
 
   expect(path.isAbsolute(workRoot)).toBe(true);
-  expect(workRoot).toBe("/tmp/ultrafuzz-public-workspace");
+  expect(workRoot).toBe("/workspace/ultrafuzz-public-workspace");
   expect(workRoot.startsWith(`${path.resolve(dataRoot)}${path.sep}`)).toBe(false);
-  expect(() => publicBenchmarkWorkRoot("/tmp")).toThrow(/persistent volume/u);
+  expect(() => publicBenchmarkWorkRoot("/workspace")).toThrow(/persistent volume/u);
   expect(() => publicBenchmarkWorkRoot(path.join(workRoot, "nested"))).toThrow(/persistent volume/u);
 });
 
@@ -314,13 +332,13 @@ it("checkpoints diagnostics even when eval run exits nonzero", async () => {
   expect(order).toEqual(["run", "build", "persist", "flush"]);
 });
 
-it("continues after the eval command reports one publishable failed datapoint", () => {
+it("continues only after one publishable genuine task-failure target", () => {
   const failedRow = {
     target_id: "target-a",
     final_status: "failed",
     workflow_status: "failed",
     workflow_terminal: true,
-    terminal_disposition: "operational-failure"
+    terminal_disposition: "genuine-task-failures"
   };
   expect(
     publicEvalRunErrorCanBePublished({
@@ -332,6 +350,12 @@ it("continues after the eval command reports one publishable failed datapoint", 
     publicEvalRunErrorCanBePublished({
       summary: { scoring_ready: true },
       rows: [failedRow, { ...failedRow, target_id: "target-b" }]
+    } as PublicEvalDiagnostics)
+  ).toBe(false);
+  expect(
+    publicEvalRunErrorCanBePublished({
+      summary: { scoring_ready: true },
+      rows: [{ ...failedRow, terminal_disposition: "operational-failure" }]
     } as PublicEvalDiagnostics)
   ).toBe(false);
   expect(
@@ -577,7 +601,12 @@ it("publishes only the final journal record for each benchmark row", () => {
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-duplicate-journal";
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
-  const runRoot = path.join(root, "target-run");
+  const rowId = "target-a-runner-trial-1";
+  const targetId = "target-a";
+  const matrixRunId = "target-run";
+  const targetRoot = path.join(root, "targets", targetId);
+  const runtimeRunId = boundedEvalId([evalRunId, matrixRunId], 118);
+  const runRoot = path.join(targetRoot, ".ultrafuzz", "runs", runtimeRunId);
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   const reportPath = path.join(reportRoot, "report.json");
   fs.mkdirSync(evalRoot, { recursive: true });
@@ -585,59 +614,131 @@ it("publishes only the final journal record for each benchmark row", () => {
   fs.writeFileSync(reportPath, '{"schema_version":"1.0","issues":[]}\n');
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  const terminalIdentity = writeMinimalPublicExecutionEvidence({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: "workflow-one",
+    targetRevision: "1".repeat(40)
+  });
   const record = {
     schema_version: "ultrafuzz.eval.run.v1",
     eval_run_id: evalRunId,
-    row_id: "target-a-runner-trial-1",
-    target_id: "target-a",
+    row_id: rowId,
+    target_id: targetId,
     variant_id: "runner",
     trial_id: "trial-1",
-    run_id: "target-run",
-    ultrafuzz_run_id: "target-run",
+    ultrafuzz_run_id: runtimeRunId,
     ultrafuzz_run_root: runRoot,
     report_json_path: reportPath,
     status: "launched",
+    candidate_commit: "a".repeat(40),
+    graph_fingerprint: terminalIdentity.graphFingerprint,
+    config_fingerprint: terminalIdentity.configFingerprint,
+    workflow_ids: ["workflow-one"],
     workflow: { status: "succeeded", terminal: true }
   };
   fs.writeFileSync(
     path.join(evalRoot, "runs.jsonl"),
-    `${JSON.stringify(record)}\n${JSON.stringify({ ...record, final_status: "succeeded" })}\n`
+    `${JSON.stringify(record)}\n${JSON.stringify({
+      ...record,
+      final_status: "succeeded",
+      terminal_disposition: "clean",
+      terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding
+    })}\n`
   );
-  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: record.row_id }])}\n`);
+  fs.writeFileSync(
+    path.join(evalRoot, "matrix.json"),
+    `${JSON.stringify([
+      {
+        id: rowId,
+        target_id: targetId,
+        variant_id: "runner",
+        trial_id: "trial-1",
+        run_id: matrixRunId,
+        target: { id: targetId, path: targetRoot, ref: "1".repeat(40) }
+      }
+    ])}\n`
+  );
   const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   fs.writeFileSync(diagnosticsPath, "{}\n");
   const diagnostics = { root, source: diagnosticsPath };
 
   const sources = publicBundleSources(controlRoot, evalRunId, diagnostics);
-  expect(sources).toContainEqual({
-    path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`,
-    root,
-    source: diagnosticsPath
-  });
-  const reportSources = sources.filter((source) => source.path.startsWith("reports/"));
+  expect(sources).toContainEqual(
+    expect.objectContaining({
+      path: `eval/${PUBLIC_EVAL_DIAGNOSTICS_FILE}`,
+      root,
+      source: diagnosticsPath
+    })
+  );
+  expect(sources).toContainEqual(
+    expect.objectContaining({
+      path: `reports/${rowId}/execution-evidence/task-one__model_0__attempt_0/manifest-files/0001.bin`,
+      source: path.join(runRoot, "artifacts", "task-one__model_0__attempt_0", "prompt.rendered.md")
+    })
+  );
+  const terminalEvidenceRoot = `reports/${rowId}/execution-evidence/${PUBLIC_TERMINAL_EVIDENCE_DIRECTORY}`;
+  const terminalSources = sources.filter((source) => source.path.startsWith(`${terminalEvidenceRoot}/`));
+  expect(terminalSources.map((source) => source.path)).toEqual(
+    PUBLIC_TERMINAL_EVIDENCE_FILES.map((relativePath) => `${terminalEvidenceRoot}/${relativePath}`)
+  );
+  expect(terminalSources.map((source) => source.source)).toEqual(
+    PUBLIC_TERMINAL_EVIDENCE_FILES.map((relativePath) => path.join(runRoot, ...relativePath.split("/")))
+  );
+  expect(terminalSources.every((source) => source.root === runRoot)).toBe(true);
+  const reportSources = sources.filter(
+    (source) => source.path.startsWith("reports/") && !source.path.includes("/execution-evidence/")
+  );
   expect(reportSources.map((source) => source.path)).toEqual([
     "reports/target-a-runner-trial-1/report.json",
     "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/findings.normalized.json",
+    `reports/target-a-runner-trial-1/${PUBLIC_SOURCE_ATTESTATION_FILE}`
   ]);
 
-  writeGenuineTaskFailureFixture(runRoot);
+  fs.rmSync(path.join(runRoot, "smithers", "expanded-graph.json"));
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(/durable evidence is unavailable/u);
+  writeMinimalPublicExecutionEvidence({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: "workflow-one",
+    targetRevision: "1".repeat(40)
+  });
+
+  const sourceAttestationPath = path.join(reportRoot, PUBLIC_SOURCE_ATTESTATION_FILE);
+  fs.rmSync(sourceAttestationPath);
+  expect(() => publicBundleSources(controlRoot, evalRunId, diagnostics)).toThrow(
+    new RegExp(`missing ${PUBLIC_SOURCE_ATTESTATION_FILE.replaceAll(".", "\\.")}`, "u")
+  );
+  writeMinimalPublicExecutionEvidence({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: "workflow-one",
+    targetRevision: "1".repeat(40)
+  });
+
+  const failedTerminalIdentity = writeGenuineTaskFailureFixture(runRoot);
   fs.appendFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
       ...record,
       final_status: "failed",
+      terminal_disposition: "genuine-task-failures",
+      terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding,
+      graph_fingerprint: failedTerminalIdentity.graphFingerprint,
+      config_fingerprint: failedTerminalIdentity.configFingerprint,
       workflow: { status: "failed", terminal: true }
     })}\n`
   );
   expect(
     publicBundleSources(controlRoot, evalRunId, diagnostics)
-      .filter((source) => source.path.startsWith("reports/"))
+      .filter((source) => source.path.startsWith("reports/") && !source.path.includes("/execution-evidence/"))
       .map((source) => source.path)
   ).toEqual([
     "reports/target-a-runner-trial-1/report.json",
     "reports/target-a-runner-trial-1/report.md",
-    "reports/target-a-runner-trial-1/findings.normalized.json"
+    "reports/target-a-runner-trial-1/findings.normalized.json",
+    `reports/target-a-runner-trial-1/${PUBLIC_SOURCE_ATTESTATION_FILE}`
   ]);
 
   fs.rmSync(path.join(reportRoot, "report.md"));
@@ -649,7 +750,12 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   const controlRoot = path.join(root, "control");
   const evalRunId = "eval-smoke-dedupe";
   const evalRoot = path.join(controlRoot, ".ultrafuzz/evals/runs", evalRunId);
-  const runRoot = path.join(root, "target-run");
+  const rowId = "target-a-runner-trial-1";
+  const targetId = "target-a";
+  const matrixRunId = "target-run";
+  const targetRoot = path.join(root, "targets", targetId);
+  const runtimeRunId = boundedEvalId([evalRunId, matrixRunId], 118);
+  const runRoot = path.join(targetRoot, ".ultrafuzz", "runs", runtimeRunId);
   const reportRoot = path.join(runRoot, "artifacts/final-report");
   const dedupeRoot = path.join(runRoot, "artifacts/dedupe-findings");
   fs.mkdirSync(evalRoot, { recursive: true });
@@ -658,36 +764,65 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
   fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
   fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
   fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  const terminalIdentity = writeMinimalPublicExecutionEvidence({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: "workflow-one",
+    targetRevision: "1".repeat(40)
+  });
   fs.writeFileSync(path.join(dedupeRoot, "deduped-findings.json"), "[]\n");
-  const rowId = "target-a-runner-trial-1";
   const record = {
     row_id: rowId,
+    ultrafuzz_run_id: runtimeRunId,
     ultrafuzz_run_root: runRoot,
     report_json_path: path.join(reportRoot, "report.json"),
     final_status: "succeeded",
-    workflow: { status: "succeeded", terminal: true }
+    terminal_disposition: "clean",
+    terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding,
+    workflow_ids: ["workflow-one"],
+    workflow: { status: "succeeded", terminal: true },
+    graph_fingerprint: terminalIdentity.graphFingerprint,
+    config_fingerprint: terminalIdentity.configFingerprint
   };
   fs.writeFileSync(path.join(evalRoot, "runs.jsonl"), `${JSON.stringify(record)}\n`);
-  fs.writeFileSync(path.join(evalRoot, "matrix.json"), `${JSON.stringify([{ id: rowId }])}\n`);
+  fs.writeFileSync(
+    path.join(evalRoot, "matrix.json"),
+    `${JSON.stringify([
+      {
+        id: rowId,
+        target_id: targetId,
+        variant_id: "runner",
+        trial_id: "trial-1",
+        run_id: matrixRunId,
+        target: { id: targetId, path: targetRoot, ref: "1".repeat(40) }
+      }
+    ])}\n`
+  );
   const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
   fs.writeFileSync(diagnosticsPath, "{}\n");
 
   const reportSources = publicBundleSources(controlRoot, evalRunId, { root, source: diagnosticsPath }, "smoke").filter(
-    (source) => source.path.startsWith("reports/")
+    (source) => source.path.startsWith("reports/") && !source.path.includes("/execution-evidence/")
   );
   expect(reportSources.map((source) => source.path)).toEqual([
     `reports/${rowId}/report.json`,
     `reports/${rowId}/report.md`,
-    `reports/${rowId}/findings.normalized.json`
+    `reports/${rowId}/findings.normalized.json`,
+    `reports/${rowId}/${PUBLIC_SOURCE_ATTESTATION_FILE}`
   ]);
-  expect(reportSources.at(-1)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
+  expect(reportSources.at(-2)?.source).toBe(path.join(dedupeRoot, "deduped-findings.json"));
 
   fs.rmSync(path.join(dedupeRoot, "deduped-findings.json"));
+  const failedTerminalIdentity = writeGenuineTaskFailureFixture(runRoot);
   fs.appendFileSync(
     path.join(evalRoot, "runs.jsonl"),
     `${JSON.stringify({
       ...record,
       final_status: "failed",
+      terminal_disposition: "genuine-task-failures",
+      terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding,
+      graph_fingerprint: failedTerminalIdentity.graphFingerprint,
+      config_fingerprint: failedTerminalIdentity.configFingerprint,
       workflow: { status: "failed", terminal: true }
     })}\n`
   );
@@ -696,8 +831,96 @@ it("publishes smoke dedupe evidence through the trusted normalized-findings bund
     evalRunId,
     { root, source: diagnosticsPath },
     "smoke"
-  ).filter((source) => source.path.startsWith("reports/"));
-  expect(failedReportSources.at(-1)?.source).toBe(path.join(reportRoot, "findings.normalized.json"));
+  ).filter((source) => source.path.startsWith("reports/") && !source.path.includes("/execution-evidence/"));
+  expect(failedReportSources.at(-2)?.source).toBe(path.join(reportRoot, "findings.normalized.json"));
+});
+
+it("derives every public report root from the trusted matrix execution identity", () => {
+  const fixture = writePublicBundleSourceFixture("derived-root");
+  const attackerRoot = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", "ultrafuzz-attacker-root-"));
+  const transplanted = {
+    ...fixture.record,
+    ultrafuzz_run_root: attackerRoot,
+    report_json_path: path.join(attackerRoot, "artifacts/final-report/report.json")
+  };
+  fs.writeFileSync(fixture.runsPath, `${JSON.stringify(transplanted)}\n`);
+
+  expect(() => publicBundleSources(fixture.controlRoot, fixture.evalRunId, fixture.diagnostics)).toThrow(
+    /derived run root/u
+  );
+
+  fs.writeFileSync(fixture.runsPath, `${JSON.stringify(fixture.record)}\n`);
+  fs.writeFileSync(
+    fixture.matrixPath,
+    `${JSON.stringify([{ ...fixture.matrixRow, target: { ...fixture.matrixRow.target, path: attackerRoot } }])}\n`
+  );
+  expect(() => publicBundleSources(fixture.controlRoot, fixture.evalRunId, fixture.diagnostics)).toThrow(
+    /mismatched target path/u
+  );
+});
+
+it("rejects a transplanted terminal report path even inside the derived run root", () => {
+  const fixture = writePublicBundleSourceFixture("report-path");
+  fs.writeFileSync(
+    fixture.runsPath,
+    `${JSON.stringify({
+      ...fixture.record,
+      report_json_path: path.join(fixture.runRoot, "artifacts", "alternate", "report.json")
+    })}\n`
+  );
+
+  expect(() => publicBundleSources(fixture.controlRoot, fixture.evalRunId, fixture.diagnostics)).toThrow(
+    /mismatched terminal report path/u
+  );
+});
+
+it("refuses symlinked journals and derived run roots before selecting publication sources", () => {
+  const journalFixture = writePublicBundleSourceFixture("journal-symlink");
+  const outsideJournal = path.join(journalFixture.root, "outside-runs.jsonl");
+  fs.writeFileSync(outsideJournal, `${JSON.stringify(journalFixture.record)}\n`);
+  fs.rmSync(journalFixture.runsPath);
+  fs.symlinkSync(outsideJournal, journalFixture.runsPath);
+  expect(() =>
+    publicBundleSources(journalFixture.controlRoot, journalFixture.evalRunId, journalFixture.diagnostics)
+  ).toThrow(/symlink/u);
+
+  const rootFixture = writePublicBundleSourceFixture("run-root-symlink");
+  const outsideRunRoot = path.join(rootFixture.root, "outside-run-root");
+  fs.renameSync(rootFixture.runRoot, outsideRunRoot);
+  fs.symlinkSync(outsideRunRoot, rootFixture.runRoot, "dir");
+  expect(() => publicBundleSources(rootFixture.controlRoot, rootFixture.evalRunId, rootFixture.diagnostics)).toThrow(
+    /trusted directory/u
+  );
+});
+
+it("keeps every selected source bound to the original root and file identities through bundle assembly", () => {
+  const fixture = writePublicBundleSourceFixture("sealed-root");
+  const sources = publicBundleSources(fixture.controlRoot, fixture.evalRunId, fixture.diagnostics);
+  const originalRunRoot = `${fixture.runRoot}.original`;
+  fs.renameSync(fixture.runRoot, originalRunRoot);
+  fs.cpSync(originalRunRoot, fixture.runRoot, { recursive: true });
+
+  expect(() =>
+    createPublicBenchmarkBundle({
+      benchmark: "evmbench",
+      lane: "full",
+      modelSlug: "deepseek-v4-flash",
+      model: "deepseek-v4-flash",
+      providerReportedModel: "deepseek-v4-flash",
+      reasoning: "max",
+      candidateCommit: "a".repeat(40),
+      evalRunId: fixture.evalRunId,
+      lineage: {
+        logical_run_id: "sealed-root",
+        generation: 1,
+        attempt: 1,
+        attempt_id: "attempt-one",
+        fingerprints: { config: "b".repeat(64), source: "c".repeat(64), image: "d".repeat(64) },
+        model_fingerprint: "e".repeat(64)
+      },
+      files: sources
+    })
+  ).toThrow(/source (?:root|parent|path) changed/u);
 });
 
 it("rejects a persisted public bundle unless every worker lineage field matches", () => {
@@ -900,35 +1123,443 @@ function execGit(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
-function writeGenuineTaskFailureFixture(runRoot: string): void {
-  const attemptId = "task-one";
-  fs.writeFileSync(
-    path.join(runRoot, "state.json"),
+function writeMinimalPublicExecutionEvidence(input: {
+  runRoot: string;
+  runtimeRunId: string;
+  workflowRunId: string;
+  targetRevision: string;
+}): { graphFingerprint: string; configFingerprint: string } {
+  const nodeId = "task-one";
+  const attemptId = `${nodeId}__model_0__attempt_0`;
+  const ledgerAttemptId = "ledger-task-one";
+  const executorRetryId = "executor-retry-task-one";
+  const workflowExecutionId = "workflow-execution-one";
+  const controllerInvocationId = "controller-invocation-one";
+  const checkpointGenerationId = "checkpoint-generation-one";
+  const verifierTaskId = `verify:${attemptId}`;
+  const artifactPath = "result.json";
+  const artifactContents = Buffer.from('{"ok":true}\n', "utf8");
+  const extraPath = "prompt.rendered.md";
+  const extraContents = Buffer.from("# Rendered fixture prompt\n", "utf8");
+  const artifactSha = crypto.createHash("sha256").update(artifactContents).digest("hex");
+  const extraSha = crypto.createHash("sha256").update(extraContents).digest("hex");
+  const artifact = {
+    path: artifactPath,
+    contract: "ultrafuzz/findings@1",
+    contract_digest: crypto.createHash("sha256").update("fixture-contract").digest("hex"),
+    sha256: artifactSha,
+    primary: true
+  };
+  const artifactSetDigest = crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ artifacts: [artifact], primary_artifact: artifactPath }))
+    .digest("hex");
+  const executor = {
+    schema_version: "ultrafuzz.executor-result.v1" as const,
+    execution_mode: "local" as const,
+    workflow_run_id: input.workflowRunId,
+    agent_task_id: `node:${attemptId}`,
+    agent_iteration: 0,
+    agent_attempt: 0,
+    strategy_attempt_id: attemptId,
+    workflow_execution_id: workflowExecutionId,
+    controller_invocation_id: controllerInvocationId,
+    checkpoint_generation_id: checkpointGenerationId,
+    executor_retry_id: executorRetryId,
+    execution_identity: crypto.createHash("sha256").update("fixture-execution").digest("hex"),
+    request_fingerprint: crypto.createHash("sha256").update("fixture-request").digest("hex"),
+    executor_result_digest: artifactSetDigest
+  };
+  const verificationIdentity = crypto
+    .createHash("sha256")
+    .update(
+      JSON.stringify({
+        executor,
+        verifier_task_id: verifierTaskId,
+        iteration: 0,
+        attempt: 0,
+        artifact_set_digest: artifactSetDigest
+      })
+    )
+    .digest("hex");
+  const output = parseVerificationOutput({
+    schema_version: "ultrafuzz.verification-output.v2",
+    executor,
+    verifier: {
+      workflow_run_id: input.workflowRunId,
+      verifier_task_id: verifierTaskId,
+      iteration: 0,
+      attempt: 0,
+      verification_identity: verificationIdentity
+    },
+    artifacts: [artifact],
+    primary_artifact: artifactPath,
+    artifact_set_digest: artifactSetDigest
+  });
+  const artifactRoot = path.join(input.runRoot, "artifacts", attemptId);
+  fs.mkdirSync(artifactRoot, { recursive: true });
+  fs.writeFileSync(path.join(artifactRoot, artifactPath), artifactContents);
+  fs.writeFileSync(path.join(artifactRoot, extraPath), extraContents);
+  const manifestContents = Buffer.from(
     `${JSON.stringify({
+      schema_version: "1.0",
+      run_id: input.runtimeRunId,
+      node_id: attemptId,
+      producer_node_id: attemptId,
+      created_at: "2026-07-20T00:00:00.000Z",
+      files: [
+        {
+          path: artifactPath,
+          size_bytes: artifactContents.byteLength,
+          sha256: artifactSha,
+          provenance: { producer_node_id: attemptId, run_id: input.runtimeRunId }
+        },
+        {
+          path: extraPath,
+          size_bytes: extraContents.byteLength,
+          sha256: extraSha,
+          provenance: { producer_node_id: attemptId, run_id: input.runtimeRunId }
+        }
+      ],
+      output_contracts: [
+        {
+          path: artifactPath,
+          contract: artifact.contract,
+          contract_digest: artifact.contract_digest,
+          primary: true
+        }
+      ],
+      prerequisite_manifests: [],
+      provenance: { producer_node_id: attemptId, run_id: input.runtimeRunId }
+    })}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), manifestContents);
+  const outputManifestDigest = crypto.createHash("sha256").update(manifestContents).digest("hex");
+  const outputContents = Buffer.from(JSON.stringify(output), "utf8");
+  const smithersOutputDigest = verifierOutputBytesDigest(outputContents.toString("utf8"));
+  const smithersOutputPath = `review/verifier-receipts/${attemptId}/${executorRetryId}.smithers-output.json`;
+  const receipt = parseVerifierReceipt({
+    schema_version: "ultrafuzz.verifier-receipt.v1",
+    run_id: input.runtimeRunId,
+    strategy_attempt_id: attemptId,
+    node_id: nodeId,
+    ledger_attempt_id: ledgerAttemptId,
+    workflow_run_id: input.workflowRunId,
+    agent_task_id: executor.agent_task_id,
+    agent_iteration: 0,
+    agent_attempt: 0,
+    verifier_task_id: verifierTaskId,
+    workflow_execution_id: workflowExecutionId,
+    controller_invocation_id: controllerInvocationId,
+    checkpoint_generation_id: checkpointGenerationId,
+    executor_retry_id: executorRetryId,
+    execution_identity: executor.execution_identity,
+    request_fingerprint: executor.request_fingerprint,
+    executor_result_digest: executor.executor_result_digest,
+    verifier_iteration: 0,
+    verifier_attempt: 0,
+    verification_identity: verificationIdentity,
+    smithers_output_path: smithersOutputPath,
+    smithers_output_sha256: smithersOutputDigest,
+    verification_output_digest: verificationOutputDigest(output),
+    artifacts: [artifact],
+    primary_artifact: artifactPath,
+    artifact_set_digest: artifactSetDigest,
+    output_manifest_digest: outputManifestDigest
+  });
+  const receiptDigest = verifierReceiptDigest(receipt);
+  const receiptRoot = path.join(input.runRoot, "review", "verifier-receipts", attemptId);
+  fs.mkdirSync(receiptRoot, { recursive: true });
+  fs.writeFileSync(path.join(receiptRoot, `${executorRetryId}.json`), `${JSON.stringify(receipt)}\n`);
+  fs.writeFileSync(path.join(receiptRoot, `${executorRetryId}.smithers-output.json`), outputContents);
+  fs.writeFileSync(
+    path.join(input.runRoot, "attempts.jsonl"),
+    `${JSON.stringify({
+      schema_version: "1.0",
+      attempt_id: ledgerAttemptId,
+      run_id: input.runtimeRunId,
+      node_id: nodeId,
+      strategy_attempt_id: attemptId,
+      executor_retry_id: executorRetryId,
+      checkpoint_generation_id: checkpointGenerationId,
+      workflow_execution_id: workflowExecutionId,
+      controller_invocation_id: controllerInvocationId,
+      lifecycle: { started_at: "2026-07-20T00:00:00.000Z", finished_at: "2026-07-20T00:00:01.000Z" },
+      outcome: "succeeded",
+      reuse: { status: "executed" },
+      manifests: { input_sha256: "1".repeat(64), output_sha256: outputManifestDigest },
+      evidence: { verifier_receipt_sha256: receiptDigest, smithers_output_sha256: smithersOutputDigest }
+    })}\n`
+  );
+  const reportRoot = path.join(input.runRoot, "artifacts", "final-report");
+  fs.mkdirSync(reportRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(reportRoot, PUBLIC_SOURCE_ATTESTATION_FILE),
+    `${JSON.stringify({
+      schema_version: "ultrafuzz.workspace-source-attestation.v2",
+      target_revision: input.targetRevision,
+      task_count: 1,
+      tasks: [
+        {
+          attempt_id: attemptId,
+          ledger_attempt_id: ledgerAttemptId,
+          node_id: nodeId,
+          expected_base_commit: input.targetRevision,
+          initial_head: input.targetRevision,
+          agent_root_verified: true,
+          tracked_clean: true,
+          workflow_run_id: input.workflowRunId,
+          workflow_execution_id: workflowExecutionId,
+          controller_invocation_id: controllerInvocationId,
+          checkpoint_generation_id: checkpointGenerationId,
+          executor_retry_id: executorRetryId,
+          verifier_task_id: verifierTaskId,
+          verifier_receipt_digest: receiptDigest,
+          smithers_output_path: smithersOutputPath,
+          smithers_output_sha256: smithersOutputDigest,
+          output_manifest_digest: outputManifestDigest
+        }
+      ]
+    })}\n`
+  );
+  const pricingCatalogBytes = Buffer.from('{"fixture":{"models":{}}}\n', "utf8");
+  const pricingCatalogSha256 = crypto.createHash("sha256").update(pricingCatalogBytes).digest("hex");
+  const pricingCatalogsDir = path.join(input.runRoot, "pricing-catalogs");
+  fs.mkdirSync(pricingCatalogsDir, { recursive: true });
+  fs.writeFileSync(path.join(pricingCatalogsDir, `${pricingCatalogSha256}.json`), pricingCatalogBytes);
+  fs.writeFileSync(
+    path.join(input.runRoot, "run.json"),
+    `${JSON.stringify({
+      run_id: input.runtimeRunId,
+      accounting: {
+        pricing_catalog: {
+          source: "models.dev",
+          status: "available",
+          catalog_sha256: pricingCatalogSha256
+        }
+      }
+    })}\n`
+  );
+  fs.writeFileSync(path.join(input.runRoot, "usage.jsonl"), "");
+  return writeTerminalEvidenceFixture({
+    runRoot: input.runRoot,
+    runtimeRunId: input.runtimeRunId,
+    workflowRunId: input.workflowRunId,
+    state: {
+      schema_version: "1.1",
+      run_id: input.runtimeRunId,
+      status: "succeeded",
+      created_at: "2026-07-20T00:00:00.000Z",
+      last_transition_at: "2026-07-20T00:00:01.000Z",
+      controller_lease: {
+        status: "active",
+        duration_ms: 30_000,
+        renewed_at: "2026-07-20T00:00:00.000Z",
+        expires_at: "2026-07-20T00:00:30.000Z",
+        recovery_attempts: 0
+      },
+      concurrency: {
+        requested_concurrency: 1,
+        effective_concurrency: 0,
+        ready_queue_depth: 0,
+        active_work: 0,
+        queued_duration_ms: 0,
+        active_duration_ms: 0,
+        idle_duration_ms: 0,
+        observed_at: "2026-07-20T00:00:01.000Z"
+      },
+      nodes: {
+        [attemptId]: {
+          node_id: attemptId,
+          status: "succeeded",
+          retry_count: 0,
+          timed_out: false,
+          finished_at: "2026-07-20T00:00:01.000Z",
+          provenance: {
+            workflow: {
+              run_id: input.workflowRunId,
+              task_id: `verify:${attemptId}`,
+              agent_task_id: `node:${attemptId}`,
+              verifier_task_id: `verify:${attemptId}`,
+              state: "finished"
+            },
+            output_contracts: { ok: true, missing: [] }
+          }
+        },
+        [nodeId]: {
+          node_id: nodeId,
+          status: "succeeded",
+          retry_count: 0,
+          timed_out: false,
+          finished_at: "2026-07-20T00:00:01.000Z",
+          provenance: {
+            workflow: {
+              run_id: input.workflowRunId,
+              aggregate_attempt_statuses: ["succeeded"]
+            }
+          }
+        }
+      }
+    },
+    tasks: [
+      {
+        attemptId,
+        concreteNodeId: nodeId,
+        smithersNodeId: `node:${attemptId}`,
+        verifierSmithersNodeId: `verify:${attemptId}`
+      }
+    ]
+  });
+}
+
+function writePublicBundleSourceFixture(suffix: string) {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR ?? "/tmp", `ultrafuzz-public-source-${suffix}-`));
+  const controlRoot = path.join(root, "control");
+  const evalRunId = `eval-${suffix}`;
+  const rowId = "target-a-runner-trial-1";
+  const targetId = "target-a";
+  const matrixRunId = `run-${suffix}`;
+  const runtimeRunId = boundedEvalId([evalRunId, matrixRunId], 118);
+  const targetRoot = path.join(root, "targets", targetId);
+  const runRoot = path.join(targetRoot, ".ultrafuzz", "runs", runtimeRunId);
+  const reportRoot = path.join(runRoot, "artifacts", "final-report");
+  const evalRoot = path.join(controlRoot, ".ultrafuzz", "evals", "runs", evalRunId);
+  fs.mkdirSync(reportRoot, { recursive: true });
+  fs.mkdirSync(evalRoot, { recursive: true });
+  fs.writeFileSync(path.join(reportRoot, "report.json"), '{"schema_version":"1.0","issues":[]}\n');
+  fs.writeFileSync(path.join(reportRoot, "report.md"), "# Report\n");
+  fs.writeFileSync(path.join(reportRoot, "findings.normalized.json"), "[]\n");
+  const terminalIdentity = writeMinimalPublicExecutionEvidence({
+    runRoot,
+    runtimeRunId,
+    workflowRunId: `workflow-${suffix}`,
+    targetRevision: "1".repeat(40)
+  });
+  const record = {
+    schema_version: "ultrafuzz.eval.run.v1",
+    eval_run_id: evalRunId,
+    row_id: rowId,
+    target_id: targetId,
+    variant_id: "runner",
+    trial_id: "trial-1",
+    ultrafuzz_run_id: runtimeRunId,
+    ultrafuzz_run_root: runRoot,
+    report_json_path: path.join(reportRoot, "report.json"),
+    status: "launched",
+    final_status: "succeeded",
+    terminal_disposition: "clean",
+    terminal_evidence: captureTerminalEvidenceAtRunRoot(runRoot).binding,
+    workflow_ids: [`workflow-${suffix}`],
+    workflow: { status: "succeeded", terminal: true },
+    graph_fingerprint: terminalIdentity.graphFingerprint,
+    config_fingerprint: terminalIdentity.configFingerprint,
+    candidate_commit: "a".repeat(40),
+    diagnostics: []
+  };
+  const matrixRow = {
+    id: rowId,
+    target_id: targetId,
+    variant_id: "runner",
+    trial_id: "trial-1",
+    run_id: matrixRunId,
+    target: { id: targetId, path: targetRoot, ref: "1".repeat(40) }
+  };
+  const runsPath = path.join(evalRoot, "runs.jsonl");
+  const matrixPath = path.join(evalRoot, "matrix.json");
+  fs.writeFileSync(runsPath, `${JSON.stringify(record)}\n`);
+  fs.writeFileSync(matrixPath, `${JSON.stringify([matrixRow])}\n`);
+  const diagnosticsPath = path.join(root, PUBLIC_EVAL_DIAGNOSTICS_FILE);
+  fs.writeFileSync(diagnosticsPath, "{}\n");
+  return {
+    root,
+    controlRoot,
+    evalRunId,
+    runRoot,
+    runsPath,
+    matrixPath,
+    record,
+    matrixRow,
+    diagnostics: { root, source: diagnosticsPath }
+  };
+}
+
+function writeGenuineTaskFailureFixture(runRoot: string): { graphFingerprint: string; configFingerprint: string } {
+  const nodeId = "task-one";
+  const attemptId = `${nodeId}__model_0__attempt_0`;
+  const workflowRunId = "workflow-one";
+  return writeTerminalEvidenceFixture({
+    runRoot,
+    runtimeRunId: path.basename(runRoot),
+    workflowRunId,
+    state: {
+      schema_version: "1.1",
+      run_id: path.basename(runRoot),
+      status: "failed",
+      created_at: "2026-07-20T00:00:00.000Z",
+      last_transition_at: "2026-07-20T00:00:01.000Z",
+      controller_lease: {
+        status: "active",
+        duration_ms: 30_000,
+        renewed_at: "2026-07-20T00:00:00.000Z",
+        expires_at: "2026-07-20T00:00:30.000Z",
+        recovery_attempts: 0
+      },
+      concurrency: {
+        requested_concurrency: 1,
+        effective_concurrency: 0,
+        ready_queue_depth: 0,
+        active_work: 0,
+        queued_duration_ms: 0,
+        active_duration_ms: 0,
+        idle_duration_ms: 0,
+        observed_at: "2026-07-20T00:00:01.000Z"
+      },
       nodes: {
         [attemptId]: {
           node_id: attemptId,
           status: "failed",
+          retry_count: 0,
           timed_out: false,
           finished_at: "2026-07-20T00:00:00.000Z",
           last_error: "task output did not pass final validation",
           provenance: {
-            workflow: { run_id: "workflow-one", task_id: `node:${attemptId}`, state: "finished" },
-            required_artifacts: { ok: true, missing: [] },
+            workflow: {
+              run_id: workflowRunId,
+              task_id: `verify:${attemptId}`,
+              agent_task_id: `node:${attemptId}`,
+              verifier_task_id: `verify:${attemptId}`,
+              state: "finished"
+            },
+            output_contracts: { ok: false, missing: [] },
             terminal_disposition: {
               schema_version: "ultrafuzz.terminal-disposition.v1",
               kind: "task-output-validation-failure"
             }
           }
+        },
+        [nodeId]: {
+          node_id: nodeId,
+          status: "failed",
+          retry_count: 0,
+          timed_out: false,
+          finished_at: "2026-07-20T00:00:00.000Z",
+          provenance: {
+            workflow: {
+              run_id: workflowRunId,
+              aggregate_attempt_statuses: ["failed"]
+            }
+          }
         }
       }
-    })}\n`
-  );
-  fs.mkdirSync(path.join(runRoot, "smithers"), { recursive: true });
-  fs.writeFileSync(
-    path.join(runRoot, "smithers", "tasks.json"),
-    `${JSON.stringify({
-      tasks: [{ attemptId, concreteNodeId: attemptId, smithersNodeId: `node:${attemptId}` }]
-    })}\n`
-  );
+    },
+    tasks: [
+      {
+        attemptId,
+        concreteNodeId: nodeId,
+        smithersNodeId: `node:${attemptId}`,
+        verifierSmithersNodeId: `verify:${attemptId}`
+      }
+    ]
+  });
 }

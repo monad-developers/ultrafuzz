@@ -8,9 +8,11 @@ import { describe, expect, it } from "vitest";
 import { summarizeEvalTerminal } from "../src/efficiency.js";
 import { publishEvalRun } from "../src/publish.js";
 import { launchEvalRow, runEvalSuite, watchEvalRow } from "../src/runner.js";
+import { captureTerminalEvidenceAtRunRoot } from "../src/terminal-disposition.js";
 import { EVAL_RUN_SCHEMA_VERSION } from "../src/types.js";
 import { readJsonLines } from "../src/utils.js";
 import { RecordingReporter, cleanRecoveryEquivalence, testRow, testSuite, writeRunFixture } from "./helpers.js";
+import { writeTerminalEvidenceFixture } from "./terminal-evidence-fixture.js";
 
 const T0 = "2026-07-09T00:00:00.000Z";
 const T1 = "2026-07-09T00:05:00.000Z";
@@ -30,15 +32,53 @@ function terminalRunFixture(runRoot: string): void {
       { event_id: "evt-3", event_type: "node-synced", timestamp: T1, node_id: "setup-1", status: "succeeded" }
     ],
     state: {
-      schema_version: "1.0",
+      schema_version: "1.1",
       run_id: "run-1",
       status: "succeeded",
+      graph_fingerprint: "a".repeat(64),
+      config_fingerprint: "b".repeat(64),
       created_at: T0,
+      last_transition_at: T1,
+      controller_lease: {
+        status: "active",
+        duration_ms: 30_000,
+        renewed_at: T0,
+        expires_at: T1,
+        recovery_attempts: 0
+      },
+      concurrency: {
+        requested_concurrency: 1,
+        effective_concurrency: 0,
+        ready_queue_depth: 0,
+        active_work: 0,
+        queued_duration_ms: 0,
+        active_duration_ms: 0,
+        idle_duration_ms: 0,
+        observed_at: T1
+      },
       started_at: T0,
       finished_at: T1,
       nodes: {
         "setup-1": {
           node_id: "setup-1",
+          status: "succeeded",
+          retry_count: 0,
+          timed_out: false,
+          started_at: T0,
+          finished_at: T1,
+          provenance: {
+            workflow: {
+              run_id: "workflow-run-1",
+              task_id: "verify:setup-1",
+              agent_task_id: "node:setup-1",
+              verifier_task_id: "verify:setup-1",
+              state: "finished"
+            },
+            output_contracts: { ok: true, missing: [] }
+          }
+        },
+        "final-report": {
+          node_id: "final-report",
           status: "succeeded",
           retry_count: 0,
           timed_out: false,
@@ -72,6 +112,39 @@ function terminalRunFixture(runRoot: string): void {
           issues: [],
           non_production_outcomes: []
         })
+      }
+    }
+  });
+  writeTaskManifest(runRoot, "setup-1");
+}
+
+function writeTaskManifest(runRoot: string, attemptId: string): void {
+  const state = JSON.parse(fs.readFileSync(path.join(runRoot, "state.json"), "utf8")) as {
+    nodes: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  writeTerminalEvidenceFixture({
+    runRoot,
+    runtimeRunId: "run-1",
+    workflowRunId: "workflow-run-1",
+    state,
+    tasks: [
+      {
+        attemptId,
+        concreteNodeId: attemptId,
+        smithersNodeId: `node:${attemptId}`,
+        verifierSmithersNodeId: `verify:${attemptId}`
+      }
+    ],
+    groups: { setup: {} },
+    graphNodeMetadata: {
+      [attemptId]: { logical_id: attemptId, kind: "agentic", depends_on: [], group: "setup" },
+      "final-report": {
+        logical_id: "final-report",
+        kind: "agentic",
+        depends_on: [attemptId],
+        artifact_dir: "artifacts/final-report",
+        outputs: [{ path: "report.json", contract: "ultrafuzz/report@1", primary: false }]
       }
     }
   });
@@ -140,7 +213,7 @@ describe("runner", () => {
     writeRunFixture({
       runRoot,
       state: {
-        schema_version: "1.0",
+        schema_version: "1.1",
         run_id: "run-detached",
         status: "running",
         created_at: T0,
@@ -202,7 +275,7 @@ describe("runner", () => {
         ok: true,
         runId: "run-1",
         runRoot,
-        workflowIds: ["workflow-1"],
+        workflowIds: ["workflow-run-1"],
         diagnostics: []
       })
     });
@@ -210,6 +283,7 @@ describe("runner", () => {
     expect(result.records[0]).toMatchObject({
       status: "launched",
       final_status: "succeeded",
+      terminal_disposition: "clean",
       workflow: { status: "succeeded", terminal: true }
     });
     expect(result.incomplete).toBe(0);
@@ -230,7 +304,7 @@ describe("runner", () => {
     writeRunFixture({
       runRoot,
       state: {
-        schema_version: "1.0",
+        schema_version: "1.1",
         run_id: "run-1",
         status: "running",
         created_at: T0,
@@ -258,6 +332,7 @@ describe("runner", () => {
     expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
     expect(result.records[0]).toMatchObject({
       final_status: "timed-out",
+      terminal_disposition: "operational-failure",
       workflow: { status: "running", terminal: false }
     });
   });
@@ -305,6 +380,7 @@ describe("runner", () => {
       expect(result).toMatchObject({ launched: 1, failed: 0, incomplete: 1 });
       expect(result.records[0]).toMatchObject({
         final_status: status,
+        terminal_disposition: "operational-failure",
         workflow: { status, terminal: true }
       });
     }
@@ -371,7 +447,7 @@ describe("runner", () => {
         ultrafuzz_run_id: "run-1",
         ultrafuzz_run_root: runRoot,
         status: "launched",
-        workflow_ids: ["wf-1"],
+        workflow_ids: ["workflow-run-1"],
         started_at: T0,
         finished_at: T0,
         diagnostics: []
@@ -385,11 +461,25 @@ describe("runner", () => {
     });
 
     expect(watched.record.final_status).toBe("succeeded");
+    expect(watched.record.terminal_disposition).toBe("clean");
+    expect(watched.record.terminal_evidence).toEqual({
+      schema_version: "ultrafuzz.terminal-evidence-binding.v3",
+      state_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      tasks_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      control_integrity_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      graph_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      expanded_graph_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      config_fingerprint_input_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      run_metadata_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      usage_ledger_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      pricing_catalog_sha256: null
+    });
     expect(watched.record.workflow).toMatchObject({ status: "succeeded", terminal: true, finished_at: T1 });
     expect(
-      readJsonLines<{ workflow?: { finished_at?: string } }>(path.join(base, "eval-run", "runs.jsonl")).at(-1)?.workflow
-        ?.finished_at
-    ).toBe(T1);
+      readJsonLines<{ terminal_disposition?: string; workflow?: { finished_at?: string } }>(
+        path.join(base, "eval-run", "runs.jsonl")
+      ).at(-1)
+    ).toMatchObject({ terminal_disposition: "clean", workflow: { finished_at: T1 } });
     const methods = reporter.calls.map((call) => call.method);
     expect(methods[0]).toBe("onRowStart");
     expect(methods[methods.length - 1]).toBe("onRowFinish");
@@ -406,6 +496,186 @@ describe("runner", () => {
     expect(syncCalls).toBe(0);
     // Cursor persisted under the eval run root for crash-safe resume.
     expect(fs.existsSync(path.join(base, "eval-run", "telemetry", `${row.id}.cursor.json`))).toBe(true);
+  });
+
+  it("captures terminal evidence before invoking an untrusted row-finish reporter", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-reporter-order-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+    const expectedBinding = captureTerminalEvidenceAtRunRoot(runRoot).binding;
+    const reporter = new RecordingReporter();
+    const originalFinish = reporter.onRowFinish.bind(reporter);
+    reporter.onRowFinish = async (finishedRow, result) => {
+      fs.writeFileSync(path.join(runRoot, "state.json"), "{reporter-mutated", "utf8");
+      await originalFinish(finishedRow, result);
+    };
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: {
+        schema_version: EVAL_RUN_SCHEMA_VERSION,
+        eval_run_id: "eval-1",
+        row_id: row.id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        ultrafuzz_run_id: "run-1",
+        ultrafuzz_run_root: runRoot,
+        status: "launched",
+        workflow_ids: ["workflow-run-1"],
+        diagnostics: []
+      },
+      reporters: [reporter],
+      evalRunRoot: path.join(base, "eval-run"),
+      sync: async () => undefined,
+      pollIntervalMs: 1
+    });
+
+    expect(watched.record.terminal_disposition).toBe("clean");
+    expect(watched.record.terminal_evidence).toEqual(expectedBinding);
+    const afterReporter = captureTerminalEvidenceAtRunRoot(runRoot);
+    expect(afterReporter.disposition.kind).toBe("operational-failure");
+    expect(afterReporter.binding).not.toEqual(expectedBinding);
+  });
+
+  it("persists a verified task-output failure from the exact terminal run root", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-genuine-failure-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+    fs.writeFileSync(
+      path.join(runRoot, "state.json"),
+      `${JSON.stringify({
+        schema_version: "1.1",
+        run_id: "run-1",
+        status: "failed",
+        graph_fingerprint: "a".repeat(64),
+        config_fingerprint: "b".repeat(64),
+        created_at: T0,
+        last_transition_at: T1,
+        controller_lease: {
+          status: "active",
+          duration_ms: 30_000,
+          renewed_at: T0,
+          expires_at: T1,
+          recovery_attempts: 0
+        },
+        concurrency: {
+          requested_concurrency: 1,
+          effective_concurrency: 0,
+          ready_queue_depth: 0,
+          active_work: 0,
+          queued_duration_ms: 0,
+          active_duration_ms: 0,
+          idle_duration_ms: 0,
+          observed_at: T1
+        },
+        started_at: T0,
+        finished_at: T1,
+        nodes: {
+          "setup-1": {
+            node_id: "setup-1",
+            status: "failed",
+            retry_count: 0,
+            timed_out: false,
+            finished_at: T1,
+            last_error: "task output did not pass final validation",
+            provenance: {
+              workflow: {
+                run_id: "workflow-run-1",
+                task_id: "verify:setup-1",
+                agent_task_id: "node:setup-1",
+                verifier_task_id: "verify:setup-1",
+                state: "finished"
+              },
+              output_contracts: { ok: false, missing: [] },
+              terminal_disposition: {
+                schema_version: "ultrafuzz.terminal-disposition.v1",
+                kind: "task-output-validation-failure"
+              }
+            }
+          }
+        }
+      })}\n`,
+      "utf8"
+    );
+    writeTaskManifest(runRoot, "setup-1");
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: {
+        schema_version: EVAL_RUN_SCHEMA_VERSION,
+        eval_run_id: "eval-1",
+        row_id: row.id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        ultrafuzz_run_id: "run-1",
+        ultrafuzz_run_root: runRoot,
+        status: "launched",
+        workflow_ids: ["workflow-run-1"],
+        diagnostics: []
+      },
+      reporters: [],
+      evalRunRoot: path.join(base, "eval-run"),
+      sync: async () => undefined,
+      pollIntervalMs: 1
+    });
+
+    expect(watched.record).toMatchObject({
+      final_status: "failed",
+      terminal_disposition: "genuine-task-failures",
+      workflow: { status: "failed", terminal: true }
+    });
+    expect(
+      readJsonLines<{ terminal_disposition?: string }>(path.join(base, "eval-run", "runs.jsonl")).at(-1)
+        ?.terminal_disposition
+    ).toBe("genuine-task-failures");
+  });
+
+  it("persists operational failure when terminal controller evidence is malformed", async () => {
+    const base = mkdtempSync(path.join(tmpdir(), "ufz-evals-watch-operational-failure-"));
+    const suite = testSuite(path.join(base, "gt"));
+    const row = testRow(suite);
+    const runRoot = path.join(base, "target", ".ultrafuzz", "runs", "run-1");
+    terminalRunFixture(runRoot);
+    fs.writeFileSync(path.join(runRoot, "smithers", "tasks.json"), "{malformed", "utf8");
+
+    const watched = await watchEvalRow({
+      plan: { suite_path: "suite.yml", project_root: base, suite, matrix: [row] },
+      row,
+      record: {
+        schema_version: EVAL_RUN_SCHEMA_VERSION,
+        eval_run_id: "eval-1",
+        row_id: row.id,
+        target_id: row.target_id,
+        variant_id: row.variant_id,
+        trial_id: row.trial_id,
+        ultrafuzz_run_id: "run-1",
+        ultrafuzz_run_root: runRoot,
+        status: "launched",
+        workflow_ids: ["workflow-run-1"],
+        diagnostics: []
+      },
+      reporters: [],
+      evalRunRoot: path.join(base, "eval-run"),
+      sync: async () => undefined,
+      pollIntervalMs: 1
+    });
+
+    expect(watched.record).toMatchObject({
+      final_status: "succeeded",
+      terminal_disposition: "operational-failure"
+    });
+    expect(
+      readJsonLines<{ terminal_disposition?: string }>(path.join(base, "eval-run", "runs.jsonl")).at(-1)
+        ?.terminal_disposition
+    ).toBe("operational-failure");
   });
 
   it("defers onRowStart until the detached subprocess writes graph.json", async () => {
@@ -442,7 +712,7 @@ describe("runner", () => {
         ultrafuzz_run_id: "run-1",
         ultrafuzz_run_root: runRoot,
         status: "launched",
-        workflow_ids: ["wf-1"],
+        workflow_ids: ["workflow-run-1"],
         started_at: T0,
         finished_at: T0,
         diagnostics: []
@@ -507,7 +777,7 @@ describe("runner", () => {
         ultrafuzz_run_id: "run-1",
         ultrafuzz_run_root: runRoot,
         status: "launched",
-        workflow_ids: ["wf-1"],
+        workflow_ids: ["workflow-run-1"],
         diagnostics: []
       },
       reporters: [],
@@ -519,6 +789,7 @@ describe("runner", () => {
 
     expect(watched.record).toMatchObject({
       final_status: "timed-out",
+      terminal_disposition: "operational-failure",
       workflow: { status: "running", terminal: false }
     });
     expect(watched.record).not.toHaveProperty("recovery_equivalence");
@@ -558,7 +829,7 @@ describe("runner", () => {
         ultrafuzz_run_id: "run-1",
         ultrafuzz_run_root: runRoot,
         status: "launched",
-        workflow_ids: ["wf-1"],
+        workflow_ids: ["workflow-run-1"],
         diagnostics: []
       },
       reporters: [],

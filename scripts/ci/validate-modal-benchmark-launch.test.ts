@@ -59,6 +59,109 @@ describe("Modal benchmark launch guardrails", () => {
     expect(JSON.parse(output)).toEqual(expected);
   });
 
+  it("binds a fixed DeepSeek launch to the exact expected model and reasoning profile", () => {
+    const fixture = preparedSmokeFixture({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+    const expectedInput = {
+      ...fixture.input,
+      expectedProviders: ["deepseek"],
+      expectedModel: "deepseek-v4-flash",
+      expectedReasoning: "max"
+    };
+    expect(validateModalBenchmarkLaunch(expectedInput)).toMatchObject({ pair_count: 1 });
+
+    for (const profile of [
+      { provider: "deepseek", model: "deepseek-v3.2", reasoning: "max" },
+      { provider: "deepseek", model: "deepseek-v4-flash", reasoning: "high" }
+    ]) {
+      const substituted = preparedSmokeFixture(profile);
+      expect(() =>
+        validateModalBenchmarkLaunch({
+          ...substituted.input,
+          expectedProviders: ["deepseek"],
+          expectedModel: "deepseek-v4-flash",
+          expectedReasoning: "max"
+        })
+      ).toThrow(/exact expected model profile|expected model|expected reasoning/u);
+    }
+
+    const output = execFileSync(
+      process.execPath,
+      [
+        path.join(path.resolve("."), "scripts/ci/validate-modal-benchmark-launch.mjs"),
+        fixture.manifestPath,
+        path.resolve("."),
+        "smoke",
+        "--expected-provider",
+        "deepseek",
+        "--expected-model",
+        "deepseek-v4-flash",
+        "--expected-reasoning",
+        "max"
+      ],
+      { cwd: path.resolve("."), encoding: "utf8" }
+    );
+    expect(JSON.parse(output)).toMatchObject({ pair_count: 1 });
+  });
+
+  it("rejects half-specified or provider-free exact launch profiles", () => {
+    const fixture = preparedSmokeFixture({ provider: "deepseek", model: "deepseek-v4-flash", reasoning: "max" });
+    expect(() =>
+      validateModalBenchmarkLaunch({
+        ...fixture.input,
+        expectedProviders: ["deepseek"],
+        expectedModel: "deepseek-v4-flash"
+      })
+    ).toThrow(/model and reasoning must be supplied together/u);
+    expect(() =>
+      validateModalBenchmarkLaunch({
+        ...fixture.input,
+        expectedProviders: ["deepseek"],
+        expectedReasoning: "max"
+      })
+    ).toThrow(/model and reasoning must be supplied together/u);
+    expect(() =>
+      validateModalBenchmarkLaunch({
+        ...fixture.input,
+        expectedModel: "deepseek-v4-flash",
+        expectedReasoning: "max"
+      })
+    ).toThrow(/requires an expected provider/u);
+
+    const script = path.join(path.resolve("."), "scripts/ci/validate-modal-benchmark-launch.mjs");
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          script,
+          fixture.manifestPath,
+          path.resolve("."),
+          "smoke",
+          "--expected-provider",
+          "deepseek",
+          "--expected-model",
+          "deepseek-v4-flash"
+        ],
+        { cwd: path.resolve("."), encoding: "utf8", stdio: "pipe" }
+      )
+    ).toThrow();
+    expect(() =>
+      execFileSync(
+        process.execPath,
+        [
+          script,
+          fixture.manifestPath,
+          path.resolve("."),
+          "smoke",
+          "--expected-model",
+          "deepseek-v4-flash",
+          "--expected-reasoning",
+          "max"
+        ],
+        { cwd: path.resolve("."), encoding: "utf8", stdio: "pipe" }
+      )
+    ).toThrow();
+  });
+
   it("rejects one-target canonical smoke manifests before dispatch", () => {
     const fixture = preparedSmokeFixture();
     const manifest = readJson<LaunchManifest>(fixture.manifestPath);
@@ -124,6 +227,19 @@ describe("Modal benchmark launch guardrails", () => {
     );
   });
 
+  it("rejects a pair config that would launch more than one model", () => {
+    const fixture = preparedSmokeFixture();
+    const config = readJson<LaunchConfig>(fixture.configPath);
+    config.models.push({
+      ...config.models[0]!,
+      slug: "unexpected-second-model",
+      model: "gpt-5.6-sol"
+    });
+    writeJson(fixture.configPath, config);
+
+    expect(() => validateModalBenchmarkLaunch(fixture.input)).toThrow(/exactly .*runner model profile/u);
+  });
+
   it("rejects whitespace-padded Kimi reasoning during CI model matrix preparation", () => {
     const output = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-modal-launch-kimi-"));
     roots.push(output);
@@ -179,6 +295,7 @@ interface LaunchManifest {
 }
 
 interface LaunchConfig {
+  models: Array<{ slug: string; model: string; [key: string]: unknown }>;
   public_benchmark: { targets: LaunchTarget[] };
 }
 

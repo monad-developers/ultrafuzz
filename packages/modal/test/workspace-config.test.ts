@@ -19,6 +19,24 @@ describe("Modal target model profiles", () => {
     expect(config).toContain('[agents.DeepSeekAgent]\nauth = "api-key"\napi_key_env = "DEEPSEEK_API_KEY"');
     expect(config).toContain("max_parallel_agents = 16");
     expect(config).toContain("max_parallel_nodes = 32");
+    expect(config).toContain(
+      '[execution]\nmode = "cloud"\nprovider = "modal"\n\n[execution.resources]\ntimeout_seconds = 7200'
+    );
+    expect(config).toContain(
+      '[execution.providers.modal]\napp = "ultrafuzz-evals"\nimage = "ultrafuzz-security-runner:latest"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]'
+    );
+  });
+
+  it("routes benchmark agents through the exact outer Modal app and image", () => {
+    const config = modalTargetToml(DEFAULT_BENCHMARK_MODELS[7]!, 900, {
+      app: "benchmark-controller",
+      image: "candidate-image:sha",
+      region: "us-east"
+    });
+
+    expect(config).toContain(
+      '[execution.providers.modal]\napp = "benchmark-controller"\nimage = "candidate-image:sha"\nregion = "us-east"\ncredential_env = ["MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]'
+    );
   });
 
   it("uses the staged API key for a public Claude benchmark target", () => {

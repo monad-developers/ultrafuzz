@@ -178,6 +178,9 @@ importers:
 
   packages/modal:
     dependencies:
+      '@smithers-orchestrator/tool-context':
+        specifier: 0.31.0
+        version: 0.31.0
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
@@ -233,6 +236,9 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@smithers-orchestrator/tool-context':
+        specifier: 0.31.0
+        version: 0.31.0
       '@ultrafuzz/artifacts':
         specifier: workspace:*
         version: link:../artifacts
@@ -263,7 +269,7 @@ importers:
         version: 4.1.4
       smithers-orchestrator:
         specifier: 0.31.0
-        version: 0.31.0(e3868a59f6d0fa90bb584c74b4d589e0)
+        version: 0.31.0(56789c6ee794782fdf34e8c80568e9ad)
 
   packages/security: {}
 
@@ -9530,7 +9536,7 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/cli@0.31.0(d9aed8a1dd1835be93b3a876c21b972b)':
+  '@smithers-orchestrator/cli@0.31.0(84eb6257a812b7e2cf4753c25ff93d48)':
     dependencies:
       '@clack/core': 1.4.3
       '@clack/prompts': 1.7.0
@@ -9553,7 +9559,7 @@ snapshots:
       '@smithers-orchestrator/observability': 0.31.0(273113a47414cc9957513de85f69960e)
       '@smithers-orchestrator/openapi': 0.31.0(747ab11820cc121c01f5577c7e3fd864)
       '@smithers-orchestrator/protocol': 0.31.0
-      '@smithers-orchestrator/review': 0.31.0(5dda6c4ddd2dccb39487592e3986d3f1)
+      '@smithers-orchestrator/review': 0.31.0(0796b0d117be304b1d2415674d9b46f1)
       '@smithers-orchestrator/scheduler': 0.31.0(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.9.1)(pg@8.22.0)
       '@smithers-orchestrator/scorers': 0.31.0(c052ea6e363a86463e759b0468a28d73)
       '@smithers-orchestrator/server': 0.31.0(cd19956d7fb7c84e217b3fdb41ced485)
@@ -9570,7 +9576,7 @@ snapshots:
       incur: 0.4.19
       picocolors: 1.1.1
       react: 19.2.7
-      smithers-orchestrator: 0.31.0(e3868a59f6d0fa90bb584c74b4d589e0)
+      smithers-orchestrator: 0.31.0(56789c6ee794782fdf34e8c80568e9ad)
       yaml: 2.9.0
       zod: 4.4.3
     transitivePeerDependencies:
@@ -10065,7 +10071,7 @@ snapshots:
       - supports-color
       - typescript
 
-  '@smithers-orchestrator/gateway-ui@0.31.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
+  '@smithers-orchestrator/gateway-ui@0.31.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)':
     dependencies:
       '@smithers-orchestrator/gateway-client': 0.31.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
       '@smithers-orchestrator/gateway-react': 0.31.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
@@ -10507,7 +10513,7 @@ snapshots:
       - sqlite3
       - utf-8-validate
 
-  '@smithers-orchestrator/review@0.31.0(5dda6c4ddd2dccb39487592e3986d3f1)':
+  '@smithers-orchestrator/review@0.31.0(0796b0d117be304b1d2415674d9b46f1)':
     dependencies:
       '@pierre/diffs': 1.2.12(@shikijs/themes@4.3.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@smithers-orchestrator/agents': 0.31.0(c052ea6e363a86463e759b0468a28d73)
@@ -10516,7 +10522,7 @@ snapshots:
       '@smithers-orchestrator/ui-styleguide': 0.31.0
       effect: 3.21.4
       mermaid: 11.16.0
-      smithers-orchestrator: 0.31.0(e3868a59f6d0fa90bb584c74b4d589e0)
+      smithers-orchestrator: 0.31.0(56789c6ee794782fdf34e8c80568e9ad)
       zod: 4.4.3
     transitivePeerDependencies:
       - '@aws-sdk/client-rds-data'
@@ -14788,12 +14794,12 @@ snapshots:
 
   sisteransi@1.0.5: {}
 
-  smithers-orchestrator@0.31.0(e3868a59f6d0fa90bb584c74b4d589e0):
+  smithers-orchestrator@0.31.0(56789c6ee794782fdf34e8c80568e9ad):
     dependencies:
       '@mdx-js/esbuild': 3.1.1(esbuild@0.28.1)
       '@smithers-orchestrator/agents': 0.31.0(c052ea6e363a86463e759b0468a28d73)
       '@smithers-orchestrator/aws': 0.31.0(@effect/platform@0.96.3(effect@3.21.4))(@effect/sql@0.51.1(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/workflow@0.18.2(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(@effect/rpc@0.75.1(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(effect@3.21.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.9.1)(@opentelemetry/resources@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-logs@0.217.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-metrics@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-node@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-web@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
-      '@smithers-orchestrator/cli': 0.31.0(d9aed8a1dd1835be93b3a876c21b972b)
+      '@smithers-orchestrator/cli': 0.31.0(84eb6257a812b7e2cf4753c25ff93d48)
       '@smithers-orchestrator/cloudflare': 0.31.0(@effect/platform@0.96.3(effect@3.21.4))(@effect/sql@0.51.1(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/workflow@0.18.2(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(@effect/rpc@0.75.1(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(effect@3.21.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.9.1)(@opentelemetry/resources@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-logs@0.217.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-metrics@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-node@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-web@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/semantic-conventions@1.43.0)(@xterm/xterm@6.0.0)(pg@8.22.0)
       '@smithers-orchestrator/components': 0.31.0(c052ea6e363a86463e759b0468a28d73)
       '@smithers-orchestrator/control-plane': 0.31.0
@@ -14804,7 +14810,7 @@ snapshots:
       '@smithers-orchestrator/errors': 0.31.0
       '@smithers-orchestrator/gateway-client': 0.31.0(@tanstack/query-core@5.101.2)(react@19.2.7)(typescript@6.0.3)
       '@smithers-orchestrator/gateway-react': 0.31.0(@tanstack/query-core@5.101.2)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(typescript@6.0.3)
-      '@smithers-orchestrator/gateway-ui': 0.31.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(immer@11.1.15)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
+      '@smithers-orchestrator/gateway-ui': 0.31.0(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.6)(@shikijs/themes@4.3.1)(@tanstack/query-core@5.101.2)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(react-dom@19.2.7(react@19.2.7))(react-is@19.2.8)(react@19.2.7)(redux@5.0.1)(typescript@6.0.3)
       '@smithers-orchestrator/gcp': 0.31.0(@effect/platform@0.96.3(effect@3.21.4))(@effect/sql@0.51.1(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/workflow@0.18.2(@effect/experimental@0.60.0(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(@effect/platform@0.96.3(effect@3.21.4))(@effect/rpc@0.75.1(@effect/platform@0.96.3(effect@3.21.4))(effect@3.21.4))(effect@3.21.4))(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.9.1)(@opentelemetry/resources@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-logs@0.217.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-metrics@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-node@2.7.1(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-web@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/semantic-conventions@1.43.0)(pg@8.22.0)
       '@smithers-orchestrator/graph': 0.31.0(@electric-sql/pglite@0.5.4)(@opentelemetry/api@1.9.1)(pg@8.22.0)
       '@smithers-orchestrator/memory': 0.31.0(f795729e563bfc086c24cbb8f7acc4ab)

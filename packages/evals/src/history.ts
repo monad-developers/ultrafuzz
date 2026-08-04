@@ -655,18 +655,13 @@ function verifiedPublishableFailureRows(
       diagnostic.final_status === "failed" &&
       diagnostic.workflow_status === "failed" &&
       diagnostic.terminal_disposition === "genuine-task-failures";
-    const failedDatapoint =
-      diagnostic.final_status === "failed" &&
-      diagnostic.workflow_status === "failed" &&
-      diagnostic.terminal_disposition === "operational-failure";
-    if (!succeeded && !genuineTaskFailure && !failedDatapoint) {
+    if (!succeeded && !genuineTaskFailure) {
       throw new EvalError(
         "EVAL_HISTORY_GENERATION_INCOMPLETE",
         `public eval diagnostics outcome is not publishable for row ${diagnostic.row_id}`
       );
     }
     if (genuineTaskFailure) failureStatuses.set(diagnostic.row_id, "genuine-task-failures");
-    if (failedDatapoint) failureStatuses.set(diagnostic.row_id, "failed");
   }
   return failureStatuses;
 }
