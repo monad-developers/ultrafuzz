@@ -15,7 +15,7 @@ Consolidate properties from these topology-required lens artifacts into a single
 Each lens now emits `properties/<lens>.json` alongside its Markdown table. Read
 and validate every lens JSON artifact first; it is the machine-readable source
 of truth. Use the Markdown only as a human-readable companion and parity check.
-Use `packages/artifacts/schema/property-lens.schema.json` to validate each
+Use `{{schema_path}}/property-lens.schema.json` to validate each
 source catalog and assign every retained priority as `high`, `medium`, or
 `low`.
 
@@ -48,7 +48,7 @@ only.
 ## 2. Artifacts
 
 Write `{{artifact_path}}/properties.json` first and validate it against
-`packages/artifacts/schema/properties.schema.json`. Use the schema as the
+`{{schema_path}}/properties.schema.json`. Use the schema as the
 source of truth for the required fields, types, and source records.
 
 Every property must have at least one source. Keep source pairs unique and

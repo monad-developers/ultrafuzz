@@ -142,6 +142,20 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Priorities: high, medium");
   });
 
+  it("renders the task-local schema bundle path", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Lens schema: {{schema_path}}/property-lens.schema.json";
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain(
+      path.join(input.node.workspacePath, ".ultrafuzz", "schemas", "property-lens.schema.json")
+    );
+    expect(result.variablesUsed).toContain("schema_path");
+  });
+
   it("returns model provenance for task metadata", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

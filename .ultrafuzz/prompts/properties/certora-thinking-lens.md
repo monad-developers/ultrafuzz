@@ -31,7 +31,7 @@ Base test setup:
 {{artifact_handoff:base-test-setup}}
 
 You must produce a typed JSON catalog and a matching Markdown companion. Use
-`packages/artifacts/schema/property-lens.schema.json` as the JSON Schema for
+`{{schema_path}}/property-lens.schema.json` as the JSON Schema for
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 

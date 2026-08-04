@@ -27,7 +27,7 @@ Base test setup:
 When producing structured candidates, use `josselin-feist` as the `lens_id` and `source_lens_id` for compatibility with the first implementation. The assigned source material is the Montyly rounding reference.
 
 You must produce a typed JSON catalog and a matching Markdown companion. Use
-`packages/artifacts/schema/property-lens.schema.json` as the JSON Schema for
+`{{schema_path}}/property-lens.schema.json` as the JSON Schema for
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 

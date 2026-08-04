@@ -13,6 +13,7 @@ import {
   type Secret,
   type Volume
 } from "modal";
+import { materializePromptSchemas } from "@ultrafuzz/artifacts";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
 
 const PROVIDER_ID = "ultrafuzz-modal-node";
@@ -396,6 +397,7 @@ export async function createModalNodeHandoffArchive(
     assertSafeTree(staging);
 
     fs.mkdirSync(path.join(staging, path.relative(root, runRoot)), { recursive: true, mode: 0o700 });
+    materializePromptSchemas(path.join(staging, ".ultrafuzz", "schemas"));
     copyFileChecked(root, workflowPath, path.join(staging, path.relative(root, workflowPath)));
     if (promptPath !== undefined) {
       copyFileChecked(root, promptPath, path.join(staging, path.relative(root, promptPath)));

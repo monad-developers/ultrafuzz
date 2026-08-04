@@ -232,6 +232,7 @@ The prompt variable set includes:
 
 - `repo_path`
 - `workspace_path`
+- `schema_path`
 - `artifact_path`
 - `artifact_dir`
 - `ancestor_artifacts`

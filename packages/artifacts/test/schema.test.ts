@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import os from "node:os";
 
 import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
@@ -39,10 +40,25 @@ import {
   validatePropertyCampaignSchema,
   validatePropertyReferences,
   validateRunStateSchema,
-  validateUsageLedgerEntry
+  validateUsageLedgerEntry,
+  materializePromptSchemas
 } from "../src/index.js";
 
 const packageRoot = findPackageRoot(path.dirname(fileURLToPath(import.meta.url)));
+
+test("materializes the checked-in JSON schema bundle into a task-local directory", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-bundle-"));
+  try {
+    const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+    const copied = materializePromptSchemas(destination);
+    assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
+    assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
+    assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("artifact contract registry validates structured, empty, and malformed outputs", () => {
   const definition = artifactContractDefinition("ultrafuzz/report@1");
