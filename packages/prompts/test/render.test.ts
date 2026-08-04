@@ -123,6 +123,25 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
   });
 
+  it("renders the resolved invariant priority selection when supplied by the planner", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt =
+      "Threshold: {{invariant_property_priority_threshold}}\nFilter: {{invariant_property_priority_filter}}\nPriorities: {{invariant_property_priorities}}";
+    input.resolvedConfig = {
+      invariantPropertyPriorityThreshold: "medium",
+      invariantPropertyPriorityFilter: "properties with priority at or above `medium`",
+      invariantPropertyPriorities: ["high", "medium"]
+    };
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain("Threshold: medium");
+    expect(result.renderedMarkdown).toContain("Filter: properties with priority at or above `medium`");
+    expect(result.renderedMarkdown).toContain("Priorities: high, medium");
+  });
+
   it("returns model provenance for task metadata", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

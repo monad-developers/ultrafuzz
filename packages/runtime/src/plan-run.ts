@@ -22,6 +22,7 @@ import {
 } from "@ultrafuzz/artifacts";
 import {
   applyDefaultProfileOverrides,
+  invariantPropertyPrioritySelection,
   redactResolvedConfig,
   serializeRedactedResolvedConfigToml
 } from "@ultrafuzz/config";
@@ -660,6 +661,9 @@ function renderPromptsForPlan(input: {
 }): RenderedPromptPlan[] {
   const logicalNodes = promptLogicalNodes(input.graph, input.layout);
   const concreteNodes = promptConcreteNodes(input.graph, input.layout);
+  const invariantPrioritySelection = invariantPropertyPrioritySelection(
+    input.resolvedConfig.invariants.propertyPriorityThreshold
+  );
   const rendered: RenderedPromptPlan[] = [];
 
   for (const node of input.graph.nodes) {
@@ -710,6 +714,8 @@ function renderPromptsForPlan(input: {
           },
           dynamicStrategiesEnumerator: input.resolvedConfig.dynamicStrategiesEnumerator,
           invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
+          invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
+          invariantPropertyPriorities: invariantPrioritySelection.priorities,
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });

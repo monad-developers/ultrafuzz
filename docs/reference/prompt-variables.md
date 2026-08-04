@@ -58,15 +58,15 @@ timeouts, backend settings, or artifact requirements.
 
 ## Triage And Invariant Variables
 
-| Variable                                | Meaning                                                                   |
-| --------------------------------------- | ------------------------------------------------------------------------- |
-| `triage_quorum`                         | Resolved triage quorum.                                                   |
-| `triage_panel_size`                     | Resolved triage panel size.                                               |
-| `dynamic_strategies_enumerator`         | Resolved dynamic strategy enumerator count.                               |
-| `invariant_property_priority_threshold` | Resolved invariant property priority threshold.                           |
-| `invariant_property_priority_filter`    | Human-readable invariant priority filter, when provided by the renderer.  |
-| `invariant_property_priorities`         | Comma-separated invariant priority values, when provided by the renderer. |
-| `invariant_testing_fuzzer_timeout`      | Resolved invariant testing fuzzer timeout.                                |
+| Variable                                | Meaning                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------ |
+| `triage_quorum`                         | Resolved triage quorum.                                                        |
+| `triage_panel_size`                     | Resolved triage panel size.                                                    |
+| `dynamic_strategies_enumerator`         | Resolved dynamic strategy enumerator count.                                    |
+| `invariant_property_priority_threshold` | Resolved invariant property priority threshold.                                |
+| `invariant_property_priority_filter`    | Human-readable inclusive invariant priority filter derived from the threshold. |
+| `invariant_property_priorities`         | Comma-separated invariant priority values selected by the inclusive threshold. |
+| `invariant_testing_fuzzer_timeout`      | Resolved invariant testing fuzzer timeout.                                     |
 
 ## Artifact Variables
 
