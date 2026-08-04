@@ -2477,6 +2477,59 @@ test("plan creates run layout, graph fingerprint, and rendered prompt before Smi
   assert.equal(plan.value!.graph.nodes[0]?.model_fanout[0]?.agent_ref, "CodexAgent");
 });
 
+test("plan wires the inclusive invariant priority selection into rendered prompts", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "test"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "prompts", "test", "priority.md"),
+    `---
+id: priority-plumbing-test
+display_name: Priority plumbing test
+---
+Threshold={{invariant_property_priority_threshold}}
+Filter={{invariant_property_priority_filter}}
+Priorities={{invariant_property_priorities}}
+`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(project, ".ultrafuzz", "topology.yml"),
+    `version: 2
+defaults:
+  strategy_loops: 1
+nodes:
+  - id: __start__
+    kind: meta
+    role: start
+    depends_on: []
+  - id: priority-plumbing-test
+    kind: agentic
+    prompt: test/priority.md
+    depends_on:
+      - __start__
+    outputs:
+      - path: findings.json
+        contract: ultrafuzz/findings@1
+        primary: true
+  - id: __finish__
+    kind: meta
+    role: finish
+    depends_on:
+      - priority-plumbing-test
+`,
+    "utf8"
+  );
+
+  const plan = await planRun({ projectRoot: project, runId: "priority-plumbing", env: {} });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const promptPath = plan.value!.rendered_prompts[0]!.rendered_prompt_path;
+  const rendered = fs.readFileSync(promptPath, "utf8");
+  assert.match(rendered, /Threshold=high/u);
+  assert.match(rendered, /Filter=properties with priority at or above `high`/u);
+  assert.match(rendered, /Priorities=high/u);
+});
+
 test("repairs only missing rendered prompts from compatible persisted run metadata", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });

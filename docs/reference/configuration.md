@@ -190,10 +190,10 @@ posture: copied outputs are left as ordinary unstaged working-tree changes.
 
 ## Invariants
 
-| Key                                | Type                       | Meaning                                             |
-| ---------------------------------- | -------------------------- | --------------------------------------------------- |
-| `property_priority_threshold`      | `high`, `medium`, or `low` | Priority threshold rendered into invariant prompts. |
-| `invariant_testing_fuzzer_timeout` | duration string            | Timeout rendered into invariant testing prompts.    |
+| Key                                | Type                       | Meaning                                                                                                                                  |
+| ---------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `property_priority_threshold`      | `high`, `medium`, or `low` | Inclusive priority threshold rendered into invariant prompts (`high` only; `medium` includes high and medium; `low` includes all three). |
+| `invariant_testing_fuzzer_timeout` | duration string            | Timeout rendered into invariant testing prompts.                                                                                         |
 
 Durations accept `s`, `min`, or `h`, such as `1800s`, `30min`, or `1h`.
 

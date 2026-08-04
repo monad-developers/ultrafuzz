@@ -10,6 +10,7 @@ import {
   REDACTION_PLACEHOLDER,
   assertNoRedactionPlaceholders,
   applyDefaultProfileOverrides,
+  invariantPropertyPrioritySelection,
   loadProjectConfig,
   parseProjectConfigToml,
   redactDiagnostics,
@@ -21,6 +22,19 @@ import {
   validateExecutionNodeOverrides,
   validateTriageConfig
 } from "../src/index.js";
+
+describe("invariant property priority selection", () => {
+  it.each([
+    ["high", ["high"]],
+    ["medium", ["high", "medium"]],
+    ["low", ["high", "medium", "low"]]
+  ] as const)("includes priorities at or above %s", (threshold, priorities) => {
+    expect(invariantPropertyPrioritySelection(threshold)).toEqual({
+      priorities,
+      filter: `properties with priority at or above \`${threshold}\``
+    });
+  });
+});
 
 describe("config loading and resolution", () => {
   it("uses quorum 3 and panel size 4 by default", () => {
