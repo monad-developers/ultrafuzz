@@ -261,7 +261,11 @@ function readFindingHandoff(runRoot: string): JsonRecord[] {
     const artifactPath = logicalArtifactPath(runRoot, logicalNodeId, fileName);
     if (artifactPath === undefined) continue;
     const value = readUnknown(runRoot, artifactPath);
-    const findings = Array.isArray(value) ? value : isRecord(value) && Array.isArray(value.findings) ? value.findings : [];
+    const findings = Array.isArray(value)
+      ? value
+      : isRecord(value) && Array.isArray(value.findings)
+        ? value.findings
+        : [];
     const records = findings.filter(isRecord);
     if (records.length > 0) return records;
   }
@@ -864,9 +868,7 @@ function appendAuditContext(lines: string[], value: unknown): void {
 }
 
 function safeReportLink(value: unknown): string | undefined {
-  return typeof value === "string" && /^\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+$/u.test(value)
-    ? value
-    : undefined;
+  return typeof value === "string" && /^\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+$/u.test(value) ? value : undefined;
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {

@@ -1761,7 +1761,11 @@ function materializeCanonicalThreatModelArtifact(task: (typeof taskSpecs)[number
   for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
     const jsonPath = path.resolve(artifactRoot, "threat-model.json");
     if (!existsSync(jsonPath)) continue;
-    resolveRegularArtifactFile(artifactRoot, jsonPath, "artifact-contract failure: threat-model.json is not a regular file");
+    resolveRegularArtifactFile(
+      artifactRoot,
+      jsonPath,
+      "artifact-contract failure: threat-model.json is not a regular file"
+    );
     const model = verifyThreatModelVulnerabilityDatabaseCapabilities(artifactRoot, runRoot);
     verifyThreatModelEvidenceFiles(model, workspaceRoot);
     materializeCanonicalThreatModelMarkdown(artifactRoot);
@@ -1785,7 +1789,11 @@ function materializeGoalPlanDatabaseArtifacts(task: (typeof taskSpecs)[number]):
   for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
     const goalPlanPath = path.resolve(artifactRoot, "goal-plan.json");
     if (!existsSync(goalPlanPath)) continue;
-    resolveRegularArtifactFile(artifactRoot, goalPlanPath, "artifact-contract failure: goal-plan.json is not a regular file");
+    resolveRegularArtifactFile(
+      artifactRoot,
+      goalPlanPath,
+      "artifact-contract failure: goal-plan.json is not a regular file"
+    );
     materializeGoalPlanVulnerabilityDatabaseSnapshots(artifactRoot, { threatModelArtifactDirs, runRoot });
   }
 }
@@ -1800,7 +1808,11 @@ function normalizeFindingProvenance(task: (typeof taskSpecs)[number]): void {
     for (const candidateRoot of taskArtifactRoots(task, artifactDir)) {
       const candidatePath = path.resolve(candidateRoot, output.path);
       if (!existsSync(candidatePath)) continue;
-      resolveRegularArtifactFile(candidateRoot, candidatePath, `artifact-contract failure: output is not a regular file ${output.path}`);
+      resolveRegularArtifactFile(
+        candidateRoot,
+        candidatePath,
+        `artifact-contract failure: output is not a regular file ${output.path}`
+      );
       normalizeFindings({
         artifactDir: candidateRoot,
         relativePath: output.path,
@@ -1839,7 +1851,10 @@ function dependencyFindingProvenance(
     ...(lifecycleLedger === undefined ? {} : { lifecycleLedger }),
     requireLifecycleCoverage
   });
-  return { allowedSourceNodes: uniqueStrings(expectations.flatMap((expectation) => expectation.source_nodes)), expectations };
+  return {
+    allowedSourceNodes: uniqueStrings(expectations.flatMap((expectation) => expectation.source_nodes)),
+    expectations
+  };
 }
 
 function dependencyFindingSources(
@@ -1847,7 +1862,13 @@ function dependencyFindingSources(
   artifactDir: string
 ): Array<{ node_id: string; artifact_path: string; finding: unknown }> {
   const artifactsParent = realpathSync(path.dirname(artifactDir));
-  const findingFiles = ["severity-classified-findings.json", "triaged-findings.json", "deduped-findings.json", "findings.normalized.json", "findings.json"];
+  const findingFiles = [
+    "severity-classified-findings.json",
+    "triaged-findings.json",
+    "deduped-findings.json",
+    "findings.normalized.json",
+    "findings.json"
+  ];
   const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
   for (const attemptId of task.metadata.dependencies.attemptIds) {
     const dependency = taskSpecs.find((candidate) => candidate.attemptId === attemptId);
@@ -1862,10 +1883,20 @@ function dependencyFindingSources(
       for (const fileName of findingFiles) {
         const findingPath = path.resolve(dependencyRoot, fileName);
         if (!existsSync(findingPath)) continue;
-        const resolvedPath = resolveRegularArtifactFile(dependencyRoot, findingPath, `artifact-contract failure: dependency findings are not a regular file ${fileName}`);
-        const validation = validateArtifactContract("ultrafuzz/findings@1", readFileSync(resolvedPath, "utf8"), fileName);
+        const resolvedPath = resolveRegularArtifactFile(
+          dependencyRoot,
+          findingPath,
+          `artifact-contract failure: dependency findings are not a regular file ${fileName}`
+        );
+        const validation = validateArtifactContract(
+          "ultrafuzz/findings@1",
+          readFileSync(resolvedPath, "utf8"),
+          fileName
+        );
         if (!validation.ok || !Array.isArray(validation.value)) continue;
-        upstream.push(...validation.value.map((finding) => ({ node_id: nodeId, artifact_path: resolvedPath, finding })));
+        upstream.push(
+          ...validation.value.map((finding) => ({ node_id: nodeId, artifact_path: resolvedPath, finding }))
+        );
         collected = true;
         break;
       }
@@ -1879,7 +1910,11 @@ function currentFindingLifecycleLedger(task: (typeof taskSpecs)[number], artifac
   for (const artifactRoot of taskArtifactRoots(task, artifactDir)) {
     const ledgerPath = path.resolve(artifactRoot, "finding-lifecycle-ledger.json");
     if (!existsSync(ledgerPath)) continue;
-    const resolvedPath = resolveRegularArtifactFile(artifactRoot, ledgerPath, "artifact-contract failure: finding lifecycle ledger is not a regular file");
+    const resolvedPath = resolveRegularArtifactFile(
+      artifactRoot,
+      ledgerPath,
+      "artifact-contract failure: finding lifecycle ledger is not a regular file"
+    );
     try {
       return JSON.parse(readFileSync(resolvedPath, "utf8")) as unknown;
     } catch {
@@ -2401,9 +2436,11 @@ function normalizeReportFindingSourceNodes(
   if (!isPlainRecord(value) || expectations === undefined) return { value, changed: false };
   const keys = new Set(findingIdentityKeys(value));
   const matched = expectations.filter((expectation) => expectation.finding_keys.some((key) => keys.has(key)));
-  if (matched.length === 0) throw new Error("artifact-contract failure: report finding does not match dependency provenance");
+  if (matched.length === 0)
+    throw new Error("artifact-contract failure: report finding does not match dependency provenance");
   const sourceNodes = uniqueStrings(matched.flatMap((expectation) => expectation.source_nodes));
-  if (sourceNodes.length === 0) throw new Error("artifact-contract failure: report finding has no dependency discovery provenance");
+  if (sourceNodes.length === 0)
+    throw new Error("artifact-contract failure: report finding has no dependency discovery provenance");
   const current = Array.isArray(value.source_nodes)
     ? value.source_nodes
     : typeof value.source_node_id === "string"

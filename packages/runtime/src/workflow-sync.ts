@@ -2131,7 +2131,10 @@ async function finalizeTerminalTask(input: {
           assertSynchronizationBudget(input.control);
           const canonical = materializeCanonicalThreatModelMarkdown(artifactDir);
           reconciledArtifacts = Array.from(
-            new Set([...reconciledArtifacts, path.relative(artifactDir, canonical.markdownPath).split(path.sep).join("/")])
+            new Set([
+              ...reconciledArtifacts,
+              path.relative(artifactDir, canonical.markdownPath).split(path.sep).join("/")
+            ])
           ).sort();
         }
       }
@@ -2253,7 +2256,10 @@ async function finalizeTerminalTask(input: {
       events.push({
         eventType: "findings-normalized",
         status: "succeeded",
-        payload: { count: report.count, path: path.relative(input.layout.root, report.normalized_path).split(path.sep).join("/") }
+        payload: {
+          count: report.count,
+          path: path.relative(input.layout.root, report.normalized_path).split(path.sep).join("/")
+        }
       });
     } catch (error) {
       if (synchronizationInterruptionDiagnostic(error) !== undefined) throw error;
@@ -3411,7 +3417,13 @@ function dependencyFindingProvenanceForTask(input: {
 }): { allowedSourceNodes: string[]; expectations: ReturnType<typeof buildFindingSourceExpectations> } {
   const upstream: Array<{ node_id: string; artifact_path: string; finding: unknown }> = [];
   const artifactsParent = path.dirname(getNodeArtifactDir(input.layout, input.task.attemptId, { create: true }));
-  const findingFiles = ["severity-classified-findings.json", "triaged-findings.json", "deduped-findings.json", "findings.normalized.json", "findings.json"];
+  const findingFiles = [
+    "severity-classified-findings.json",
+    "triaged-findings.json",
+    "deduped-findings.json",
+    "findings.normalized.json",
+    "findings.json"
+  ];
   for (const dependencyId of input.task.dependencies) {
     const dependencyRoot = getNodeArtifactDir(input.layout, dependencyId, { create: true });
     if (!isStrictlyInsideDirectory(artifactsParent, dependencyRoot)) continue;
@@ -3419,9 +3431,15 @@ function dependencyFindingProvenanceForTask(input: {
       const findingPath = path.resolve(dependencyRoot, fileName);
       if (!fs.existsSync(findingPath)) continue;
       const resolvedPath = safeResolveInside(dependencyRoot, fileName, "dependency findings path");
-      const validation = validateArtifactContract("ultrafuzz/findings@1", fs.readFileSync(resolvedPath, "utf8"), fileName);
+      const validation = validateArtifactContract(
+        "ultrafuzz/findings@1",
+        fs.readFileSync(resolvedPath, "utf8"),
+        fileName
+      );
       if (!validation.ok || !Array.isArray(validation.value)) continue;
-      upstream.push(...validation.value.map((finding) => ({ node_id: dependencyId, artifact_path: resolvedPath, finding })));
+      upstream.push(
+        ...validation.value.map((finding) => ({ node_id: dependencyId, artifact_path: resolvedPath, finding }))
+      );
       break;
     }
   }

@@ -1177,15 +1177,13 @@ test("report reconciliation links dedicated audit context and preserves dynamic 
   const goalPlanDir = path.join(artifactsRoot, "goal-plan");
   const severityDir = path.join(artifactsRoot, "severity-classification");
   const reportDir = path.join(artifactsRoot, "final-report");
-  for (const directory of [threatDir, goalPlanDir, severityDir, reportDir]) fs.mkdirSync(directory, { recursive: true });
+  for (const directory of [threatDir, goalPlanDir, severityDir, reportDir])
+    fs.mkdirSync(directory, { recursive: true });
 
   fs.writeFileSync(path.join(threatDir, "THREAT_MODEL.md"), "# Threat model\n\nDETAIL-MUST-STAY-DEDICATED\n", "utf8");
   writeJsonRecord(path.join(threatDir, "threat-model.json"), { schema_version: "test" });
   writeJsonRecord(path.join(goalPlanDir, "goal-plan.json"), { schema_version: "test" });
-  const sourceNodes = [
-    "dynamic:threat:liquidation:overdue",
-    "dynamic:class:liquidation:fixed-term-before-overdue"
-  ];
+  const sourceNodes = ["dynamic:threat:liquidation:overdue", "dynamic:class:liquidation:fixed-term-before-overdue"];
   fs.writeFileSync(
     path.join(severityDir, "severity-classified-findings.json"),
     `${JSON.stringify([
@@ -1583,7 +1581,10 @@ test("report bundle creates a portable ZIP without workspaces or stale report ba
   const goalPlanManifest = JSON.parse(zip.readAsText("artifacts/goal-plan/artifact-manifest.json")) as {
     files: Array<{ path: string }>;
   };
-  assert.equal(goalPlanManifest.files.some((entry) => entry.path === selectedClassPath), true);
+  assert.equal(
+    goalPlanManifest.files.some((entry) => entry.path === selectedClassPath),
+    true
+  );
   const finalReportManifest = JSON.parse(zip.readAsText("artifacts/final-report/artifact-manifest.json")) as {
     files: Array<{ path: string; size_bytes: number; sha256: string }>;
   };
