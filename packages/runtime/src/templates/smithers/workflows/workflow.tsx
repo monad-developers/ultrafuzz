@@ -383,7 +383,18 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
     } catch (error) {
       throw new Error(`artifact handoff directory is unavailable: ${dependency}`, { cause: error });
     }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    let resolvedDependency: string;
+    try {
+      resolvedDependency = realpathSync(dependency);
+    } catch (error) {
+      throw new Error(`artifact handoff directory is unavailable: ${dependency}`, { cause: error });
+    }
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      resolvedDependency !== dependency ||
+      !isStrictlyInsideDirectory(realpathSync(task.runRoot), resolvedDependency)
+    ) {
       throw new Error(`artifact handoff directory is unsafe: ${dependency}`);
     }
   }

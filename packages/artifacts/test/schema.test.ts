@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +56,54 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
     assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
+    assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
+    assert.equal(statSync(destination).mode & 0o777, 0o500);
+  } finally {
+    for (const file of readdirSync(path.join(root, "workspace", ".ultrafuzz", "schemas"))) {
+      fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
+    }
+    fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas"), 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a hard-linked schema destination before changing its inode", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-hardlink-"));
+  const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+  const outside = path.join(root, "outside.json");
+  try {
+    materializePromptSchemas(destination);
+    const schema = path.join(destination, "property-lens.schema.json");
+    fs.chmodSync(destination, 0o700);
+    fs.unlinkSync(schema);
+    fs.writeFileSync(outside, "outside\n");
+    fs.linkSync(outside, schema);
+    fs.chmodSync(destination, 0o500);
+
+    assert.throws(() => materializePromptSchemas(destination), /destination entry is unsafe/u);
+    assert.equal(fs.readFileSync(outside, "utf8"), "outside\n");
+  } finally {
+    fs.chmodSync(destination, 0o700);
+    for (const file of readdirSync(destination)) {
+      fs.chmodSync(path.join(destination, file), 0o600);
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a schema destination that crosses an intermediate symlink", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-symlink-"));
+  const workspace = path.join(root, "workspace");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(workspace, ".ultrafuzz"), "dir");
+  try {
+    assert.throws(
+      () => materializePromptSchemas(path.join(workspace, ".ultrafuzz", "schemas")),
+      /destination crosses a symlink/u
+    );
+    assert.deepEqual(readdirSync(outside), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
