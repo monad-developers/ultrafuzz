@@ -437,6 +437,8 @@ interface ModalNodeResult {
   artifact_archive: string;
   artifact_sha256: string;
   storage_lineage: string;
+  durable_checkpoint: string;
+  durable_checkpoint_index: string;
 }
 
 async function waitForModalNodeResult(
@@ -488,11 +490,69 @@ async function readModalNodeResult(
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
-    parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}`
+    parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
+    isDurableCheckpointPath(parsed.durable_checkpoint, attemptRoot) &&
+    parsed.durable_checkpoint_index === path.posix.join(attemptRoot, "checkpoints", "index.json")
   ) {
+    await validateDurableCheckpoint(sandbox, parsed as unknown as ModalNodeResult, attemptRoot, input);
     return parsed as unknown as ModalNodeResult;
   }
   throw new Error("cloud node result is invalid");
+}
+
+function isDurableCheckpointPath(value: unknown, attemptRoot: string): value is string {
+  return (
+    typeof value === "string" &&
+    value.startsWith(`${path.posix.join(attemptRoot, "checkpoints")}/`) &&
+    value.endsWith(".json") &&
+    value !== path.posix.join(attemptRoot, "checkpoints", "index.json")
+  );
+}
+
+async function validateDurableCheckpoint(
+  sandbox: Sandbox,
+  result: ModalNodeResult,
+  attemptRoot: string,
+  input: ModalNodeSandboxInput
+): Promise<void> {
+  let checkpoint: unknown;
+  let index: unknown;
+  try {
+    [checkpoint, index] = await Promise.all([
+      sandbox.filesystem.readText(result.durable_checkpoint).then((value) => JSON.parse(value) as unknown),
+      sandbox.filesystem.readText(result.durable_checkpoint_index).then((value) => JSON.parse(value) as unknown)
+    ]);
+  } catch (error) {
+    throw new Error("cloud node durable checkpoint is unavailable", { cause: error });
+  }
+  const workspacePath = path.posix.join(attemptRoot, "workspace");
+  const handoffArchive = path.posix.join(attemptRoot, "input", "project.tgz");
+  const lineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  if (
+    !isRecord(checkpoint) ||
+    checkpoint.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
+    checkpoint.stage !== "completed" ||
+    checkpoint.storage_lineage !== lineage ||
+    checkpoint.workspace_path !== workspacePath ||
+    checkpoint.run_root !== input.run_root ||
+    checkpoint.handoff_archive !== handoffArchive
+  ) {
+    throw new Error("cloud node durable checkpoint is invalid");
+  }
+  if (
+    !isRecord(index) ||
+    index.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
+    index.storage_lineage !== lineage ||
+    index.workspace_path !== workspacePath ||
+    index.run_root !== input.run_root ||
+    index.handoff_archive !== handoffArchive ||
+    !Array.isArray(index.checkpoints) ||
+    !index.checkpoints.some(
+      (entry) => isRecord(entry) && entry.manifest === result.durable_checkpoint && entry.stage === "completed"
+    )
+  ) {
+    throw new Error("cloud node durable checkpoint index is invalid");
+  }
 }
 
 async function publishModalNodeResult(
