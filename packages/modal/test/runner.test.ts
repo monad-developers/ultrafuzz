@@ -351,6 +351,10 @@ describe("Modal image source staging", () => {
     expect(standaloneDockerfile).toContain("util-linux");
     expect(standaloneDockerfile).toContain("USER root");
     expect(standaloneDockerfile).not.toContain("USER ubuntu");
+    expect(commands).toMatch(/apt-get install[^\n]*\bzstd\b/u);
+    expect(standaloneDockerfile).toMatch(/apt-get install[\s\S]*\bzstd\b/u);
+    expect(commands).toContain("RUN command -v zstd && zstd --version");
+    expect(standaloneDockerfile).toContain("RUN command -v zstd");
   });
 
   it("archives tracked files only", () => {
