@@ -17,6 +17,7 @@
 !.ultrafuzz/evals/*.yml
 .ultrafuzz/evals/runs/
 packages/*/.ultrafuzz/
+packages/prompts/.pack-test-*/
 node_modules/
 dist/
 dist-test/
