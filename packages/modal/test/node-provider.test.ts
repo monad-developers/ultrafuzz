@@ -2409,8 +2409,9 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     let listCalls = 0;
     client.sandboxes.list = vi.fn(async function* () {
       listCalls += 1;
-      // The first four calls are the two delayed pre-snapshot proof sweeps.
-      if (listCalls > 4) yield candidate;
+      // The first six calls are the two delayed pre-snapshot proof sweeps:
+      // credential lease, exact legacy attempt, and app-wide legacy migration.
+      if (listCalls > 6) yield candidate;
     }) as never;
     selectKimiSubscription(fixture.input, kimiSource);
     const provider = createModalNodeSandboxProvider({
@@ -2456,8 +2457,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     client.sandboxes.list = vi.fn(async function* (params: { tags: Record<string, string> }) {
       if (!createCommitted) return;
       postCommitListCalls += 1;
-      const completedFilterSet = Math.ceil(postCommitListCalls / 3);
-      // All three filters in the first complete post-create proof sweep are
+      const completedFilterSet = Math.ceil(postCommitListCalls / 4);
+      // All four filters in the first complete post-create proof sweep are
       // empty; the sandbox becomes visible only in the following sweep.
       if (completedFilterSet === 1) return;
       const tags = await committed.getTags();
@@ -2482,7 +2483,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         })
       ).rejects.toThrow("create response lost after commit");
       expect(committed.terminate).toHaveBeenCalledOnce();
-      expect(postCommitListCalls).toBeGreaterThan(3);
+      expect(postCommitListCalls).toBeGreaterThan(4);
       expect(firstVisiblePostCommitSweep).toBe(2);
       expect(releaseLease).toHaveBeenCalledOnce();
       expect(
@@ -2557,6 +2558,55 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(events.at(-1)).toBe("lease-release");
     } finally {
       result.cleanup();
+      fixture.cleanup();
+      fs.rmSync(kimiSource, { recursive: true, force: true });
+    }
+  });
+
+  it("stops app-wide legacy sandboxes from other attempts before snapshotting Kimi credentials", async () => {
+    const fixture = createProjectFixture();
+    const kimiSource = createKimiSubscriptionFixture();
+    fs.rmSync(path.join(kimiSource, "device_id"));
+    const legacy = fakeSandbox(undefined, {
+      sandboxId: "cross-attempt-legacy-sandbox",
+      tags: {
+        purpose: "ultrafuzz-node",
+        run: "legacy-run",
+        attempt: "legacy-attempt"
+      }
+    });
+    const modernNonKimi = fakeSandbox(undefined, {
+      sandboxId: "modern-non-kimi-sandbox",
+      tags: modalNodeTags("parallel-run", "parallel-node:attempt")
+    });
+    const client = fakeClient({ listed: [legacy, modernNonKimi], preserveListedTags: true });
+    const releaseLease = vi.fn(async () => undefined);
+    const lease = testKimiExecutionLease(kimiSource, releaseLease);
+    selectKimiSubscription(fixture.input, kimiSource);
+    const provider = createModalNodeSandboxProvider({
+      ...providerOptions(client),
+      kimiExecutionLease: vi.fn(async () => lease) as never,
+      kimiRemoteQuiescence: { settlementMs: 1, timeoutMs: 100 }
+    });
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/ENOENT|no such file/u);
+      expect(legacy.terminate).toHaveBeenCalledOnce();
+      expect(modernNonKimi.terminate).not.toHaveBeenCalled();
+      expect(
+        client.sandboxes.list.mock.calls.some(
+          ([params]) => Object.keys(params.tags).length === 1 && params.tags.purpose === "ultrafuzz-node"
+        )
+      ).toBe(true);
+      expect(releaseLease).toHaveBeenCalledOnce();
+    } finally {
       fixture.cleanup();
       fs.rmSync(kimiSource, { recursive: true, force: true });
     }

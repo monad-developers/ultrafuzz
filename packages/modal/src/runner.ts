@@ -168,12 +168,12 @@ const fsyncDirectory = (directory) => {
   const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
   try { fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
 };
-const acquireVolumeStageLock = (destination) => {
+const acquireVolumeStageLock = (destination, timeoutMs = 120000) => {
   const parent = path.dirname(destination);
   const lock = destination + ".ultrafuzz-stage.lock";
   const owner = crypto.randomUUID();
   const ownerPath = path.join(lock, "owner");
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
       fs.mkdirSync(lock, { mode: 0o700 });
@@ -193,16 +193,6 @@ const acquireVolumeStageLock = (destination) => {
       if (!current.isDirectory() || current.isSymbolicLink() || current.uid !== process.geteuid() ||
           current.gid !== process.getegid() || (current.mode & 0o077) !== 0) {
         throw new Error("persistent credential stage lock is unsafe");
-      }
-      if (Date.now() - current.mtimeMs > 5 * 60 * 1000) {
-        const stale = lock + ".stale-" + crypto.randomUUID();
-        try { fs.renameSync(lock, stale); } catch (renameError) {
-          if (renameError && (renameError.code === "ENOENT" || renameError.code === "EEXIST")) continue;
-          throw renameError;
-        }
-        fs.rmSync(stale, { recursive: true });
-        fsyncDirectory(parent);
-        continue;
       }
       if (Date.now() >= deadline) throw new Error("persistent credential stage lock timed out");
       Atomics.wait(sleepState, 0, 0, 100);

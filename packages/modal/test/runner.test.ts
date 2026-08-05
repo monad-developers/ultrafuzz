@@ -1184,6 +1184,43 @@ describe("Modal worker identity", () => {
     expect(fs.existsSync(lineage)).toBe(false);
   });
 
+  it("fails closed on an abandoned Kimi credential stage lock without superseding its owner", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-lock-"));
+    const pending = path.join(root, "kimi-code.json.pending");
+    const destination = path.join(root, "kimi-code.json");
+    const lock = `${destination}.ultrafuzz-stage.lock`;
+    const owner = path.join(lock, "owner");
+    fs.writeFileSync(
+      pending,
+      `${JSON.stringify({ access_token: "pending-access", refresh_token: "pending-refresh" })}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      destination,
+      `${JSON.stringify({ access_token: "current-access", refresh_token: "current-refresh" })}\n`,
+      "utf8"
+    );
+    fs.mkdirSync(lock, { mode: 0o700 });
+    fs.writeFileSync(owner, "original-owner", { mode: 0o600 });
+    const abandonedAt = new Date("2020-01-01T00:00:00.000Z");
+    fs.utimesSync(lock, abandonedAt, abandonedAt);
+    const boundedScript = KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT.replace(
+      "acquireVolumeStageLock(destination);",
+      "acquireVolumeStageLock(destination, 25);"
+    );
+    expect(boundedScript).not.toBe(KIMI_SHARED_CREDENTIAL_STAGE_SCRIPT);
+
+    expect(() => execFileSync("node", ["-e", boundedScript, pending, destination])).toThrow(
+      /persistent credential stage lock timed out/u
+    );
+    expect(fs.readFileSync(owner, "utf8")).toBe("original-owner");
+    expect(JSON.parse(fs.readFileSync(destination, "utf8"))).toMatchObject({
+      access_token: "current-access",
+      refresh_token: "current-refresh"
+    });
+    expect(fs.existsSync(pending)).toBe(true);
+  });
+
   it("does not replace a rotated shared Modal Kimi credential with a stale ancestor", () => {
     const root = mkdtempSync(path.join(tmpdir(), "ultrafuzz-kimi-stage-"));
     const pending = path.join(root, "kimi-code.json.pending");

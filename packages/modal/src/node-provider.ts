@@ -1765,6 +1765,7 @@ async function proveKimiCredentialLeaseQuiescence(
       for (const tags of uniqueFilters.values()) {
         await collectKimiRemoteSandboxes(scope, tags, candidates, budget);
       }
+      await collectLegacyKimiRemoteSandboxes(scope, candidates, budget);
     } catch (error) {
       throw new Error("cloud Kimi credential lease remote enumeration could not be proven", { cause: error });
     }
@@ -1817,6 +1818,40 @@ async function collectKimiRemoteSandboxes(
     // A timed-out SDK iterator is untrusted and may never settle. Request
     // cancellation when supported, but never let iterator cleanup exceed the
     // credential-fence deadline.
+    if (iterator.return !== undefined) void iterator.return().catch(() => undefined);
+  }
+}
+
+async function collectLegacyKimiRemoteSandboxes(
+  scope: KimiRemoteProofScope,
+  candidates: Map<string, Sandbox>,
+  budget: MonotonicDeadline
+): Promise<void> {
+  const iterator = scope.client.sandboxes
+    .list({ appId: scope.app.appId, tags: { purpose: "ultrafuzz-node" } })
+    [Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      const next = await beforeMonotonicDeadline(() => iterator.next(), budget, "legacy remote sandbox enumeration");
+      if (next.done) return;
+      let tags: Record<string, string> | undefined;
+      try {
+        tags = await beforeMonotonicDeadline(
+          () => next.value.getTags(),
+          budget,
+          "legacy remote sandbox tag inspection"
+        );
+      } catch {
+        // An app-wide candidate whose protocol identity cannot be proven must
+        // be treated as a legacy credential consumer and stopped.
+        candidates.set(next.value.sandboxId, next.value);
+        continue;
+      }
+      if (tags.isolation_protocol !== MODAL_NODE_ISOLATION_PROTOCOL) {
+        candidates.set(next.value.sandboxId, next.value);
+      }
+    }
+  } finally {
     if (iterator.return !== undefined) void iterator.return().catch(() => undefined);
   }
 }
