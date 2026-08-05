@@ -178,6 +178,7 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
   assert.match(reset, /for \(const entry of readdirSync\(anchoredRoot\)\)/u);
   assert.match(reset, /rmSync\(candidate, \{ recursive: true, force: true \}\)/u);
   assert.match(reset, /prepareArtifactMirror\(task, \{ replayWorkspacePatches: false \}\)/u);
+  assert.match(reset, /WORKSPACE_PATCH_BASELINE_FILE/u);
 });
 
 test("generated Smithers agent preserves its final response as missing non-report Markdown", () => {
@@ -614,7 +615,8 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /replayWorkspacePatches: boolean/u);
   assert.match(helper, /if \(!replayWorkspacePatches\)/u);
   assert.match(helper, /!workspacePatchBaselineTrees\.has\(task\.attemptId\)/u);
-  assert.match(helper, /materializeWorkspacePatchDependencies\(task, workspaceRoot, true\)/u);
+  assert.match(helper, /readWorkspacePatchBaseline\(task\)/u);
+  assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);
   assert.match(helper, /taskPublishesWorkspacePatch\(task\) && !workspacePatchBaselineTrees\.has/u);
   assert.match(
     source,

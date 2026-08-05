@@ -82,6 +82,7 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
   }
+  assertPatchPathsMatchManifest(workspaceRoot, capture.manifest.base_tree, capture.patch, capture.manifest.files);
   const head = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   if (head !== capture.manifest.base_commit) {
     throw new Error(`workspace patch base commit mismatch: expected ${capture.manifest.base_commit}, got ${head}`);
@@ -118,6 +119,32 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
   const unique = new Map<string, WorkspacePatchFile>();
   for (const entry of paths) unique.set(entry.path, entry);
   return [...unique.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function assertPatchPathsMatchManifest(
+  workspaceRoot: string,
+  baselineTree: string,
+  patch: string,
+  manifestFiles: WorkspacePatchFile[]
+): void {
+  if (patch.length === 0) {
+    if (manifestFiles.length !== 0) throw new Error("workspace patch manifest lists files for an empty patch");
+    return;
+  }
+  if (/\b(?:new|old) file mode (?:120000|160000)\b|\b(?:new|old) mode 160000\b/u.test(patch)) {
+    throw new Error("workspace patch contains a symlink or submodule entry");
+  }
+  const patchFiles = withTemporaryIndex(workspaceRoot, (index) => {
+    runGit(workspaceRoot, ["read-tree", baselineTree], index);
+    runGit(workspaceRoot, ["apply", "--cached", "--check", "--binary", "--whitespace=nowarn", "-"], index, patch);
+    runGit(workspaceRoot, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], index, patch);
+    return parseChangedPaths(runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index));
+  });
+  const expected = manifestFiles.map((entry) => entry.path).sort();
+  const actual = patchFiles.map((entry) => entry.path).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error("workspace patch manifest files do not match the patch paths");
+  }
 }
 
 function validateManifest(manifest: WorkspacePatchManifest): void {

@@ -36,13 +36,14 @@ test("captures tracked and untracked setup changes relative to the dependency ba
       path.join(root, "foundry.toml"),
       "[profile.default]\ntest = 'tests'\n[profile.ultrafuzz]\ntest = 'test/foundry'\n"
     );
+    writeFileSync(path.join(root, ".gitignore"), "cache/\n");
     writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
 
     const captured = captureWorkspacePatch(root, baseline);
     assert.equal(captured.manifest.schema_version, "ultrafuzz.workspace-patch.v1");
     assert.deepEqual(
       captured.manifest.files.map((entry) => entry.path),
-      ["foundry.toml", "UltrafuzzSmoke.t.sol"]
+      [".gitignore", "foundry.toml", "UltrafuzzSmoke.t.sol"]
     );
     assert.match(captured.patch, /UltrafuzzSmoke\.t\.sol/u);
   } finally {
@@ -67,6 +68,11 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
       readFileSync(path.join(source, "foundry.toml"), "utf8")
     );
     assert.equal(readFileSync(path.join(downstream, "UltrafuzzSmoke.t.sol"), "utf8"), "contract UltrafuzzSmoke {}\n");
+
+    assert.throws(
+      () => applyWorkspacePatch(downstream, { ...captured, manifest: { ...captured.manifest, files: [] } }),
+      /manifest files do not match/u
+    );
 
     writeFileSync(path.join(downstream, "unrelated.txt"), "drift\n");
     assert.throws(() => applyWorkspacePatch(downstream, captured), /base tree mismatch/u);
