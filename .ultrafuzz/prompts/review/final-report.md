@@ -451,7 +451,33 @@ human-readable Strategy section. Do not call this metric Temperature.
 
 ## Additional Sections
 
-Add `## Property provenance` after the production issue entries. For every
+Add `## Property implementation coverage` after the production issue entries
+and before `## Property provenance`. Read the implementation handoff's
+`selection` object and property records. When it is present, render the
+configured priority threshold, included priorities, selected/implemented/
+blocked/pending/deferred counts, and a concise list of blocker summaries. When
+the handoff is historical or lacks `selection`, render `unavailable` instead
+of guessing. In `report.json`, emit `property_implementation_coverage` with
+this exact shape:
+
+```json
+{
+  "priority_threshold": "high",
+  "priorities": ["high"],
+  "selected_property_ids": ["property-1"],
+  "implemented_property_ids": ["property-1"],
+  "blocked_property_ids": [],
+  "pending_property_ids": [],
+  "deferred_property_ids": []
+}
+```
+
+Use the canonical catalog order for every ID array. Keep the arrays as the
+machine-readable source of truth; counts in Markdown must match them exactly.
+If selection metadata is unavailable, use the string `"unavailable"` in
+`report.json` and write `unavailable` in Markdown.
+
+Add `## Property provenance` after the implementation coverage section. For every
 property-derived production or non-production finding, render one concise table
 row containing:
 
@@ -486,11 +512,11 @@ appendix short and do not include exploit-style PoC sections for these outcomes.
 
 The human-readable report contains, in this order: the fixed title, issue index
 table when production issues exist, fixed preamble, Run summary, concise
-production issue entries with their Strategy sections, Property provenance,
-optional prior finding disposition section, and non-production actionable
-outcomes appendix. If there are no production issues and no appendix outcomes,
-skip the issue index table and write `No issues reported.` before the Property
-provenance section.
+production issue entries with their Strategy sections, Property implementation
+coverage, Property provenance, optional prior finding disposition section, and
+non-production actionable outcomes appendix. If there are no production issues
+and no appendix outcomes, skip the issue index table and write `No issues
+reported.` before the Property implementation coverage section.
 
 Save the human-readable report to `{{artifact_path}}/report.md`.
 
@@ -569,6 +595,11 @@ Before finishing, verify that:
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
+- `report.md` contains `## Property implementation coverage` with counts that
+  match the implementation handoff, or the literal `unavailable` for
+  historical artifacts.
+- `report.json.property_implementation_coverage` is either the exact
+  machine-readable coverage object or the string `unavailable`.
 - `report.json.run_metadata.tokens_used` and
   `report.json.run_metadata.estimated_spend` match the values rendered in
   `report.md`, and preserve the exact cumulative accounting values from

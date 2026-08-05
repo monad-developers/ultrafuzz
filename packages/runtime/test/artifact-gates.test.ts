@@ -1087,6 +1087,123 @@ test("property implementation gate rejects an unknown canonical property referen
   );
 });
 
+test("property implementation gate enforces declared selection coverage and actionable blockers", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-implementation-selection" });
+  writeArtifact(
+    layout,
+    "property-specification-fanin",
+    "properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-high",
+          description: "ScFuzzBench supply liveness must not unexpectedly revert",
+          category: "dos-liveness",
+          priority: "high",
+          sources: [{ source_node_id: "property-specification-recon", source_property_id: "iSpoke_supply" }]
+        },
+        {
+          id: "property-medium",
+          description: "A medium-priority non-benchmark relation",
+          category: "liveness",
+          priority: "medium",
+          sources: [{ source_node_id: "property-specification-aviggiano", source_property_id: "aviggiano-medium" }]
+        }
+      ]
+    })
+  );
+  const nodeId = "stateful-invariant-implement-properties";
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: ["property-high"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "deferred",
+          implementation_paths: [],
+          test_paths: []
+        }
+      ]
+    })
+  );
+  const node = {
+    ...plannedNode(["implemented-properties.json"]),
+    id: nodeId,
+    logical_id: nodeId
+  };
+
+  const missingBlocker = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.equal(missingBlocker.ok, false);
+  assert.ok(
+    missingBlocker.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_BLOCKER_MISSING")
+  );
+
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: ["property-high"]
+      },
+      properties: [
+        {
+          property_id: "property-high",
+          status: "blocked",
+          implementation_paths: [],
+          test_paths: [],
+          blocker: {
+            code: "missing-oracle",
+            summary: "No stable target getter exposes the required value.",
+            next_action: "Add a read-only harness oracle or document the source-backed blocker."
+          }
+        }
+      ]
+    })
+  );
+  const withBlocker = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.equal(withBlocker.ok, true, JSON.stringify(withBlocker.diagnostics));
+
+  writeArtifact(
+    layout,
+    nodeId,
+    "implemented-properties.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: {
+        priority_threshold: "high",
+        priorities: ["high"],
+        property_ids: []
+      },
+      properties: []
+    })
+  );
+  const missingSelectionId = verifyRequiredArtifactsForAttempt(layout, node, nodeId);
+  assert.equal(missingSelectionId.ok, false);
+  assert.ok(
+    missingSelectionId.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH"
+    )
+  );
+  assert.ok(
+    missingSelectionId.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_IMPLEMENTATION_COVERAGE_INCOMPLETE"
+    )
+  );
+});
+
 test("property implementation gate rejects an unknown finding property reference", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-implementation-finding" });
   writeArtifact(

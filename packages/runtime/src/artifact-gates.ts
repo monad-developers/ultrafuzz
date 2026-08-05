@@ -1278,10 +1278,93 @@ function verifyPropertyProvenanceArtifacts(
     if (fs.existsSync(findingsPath)) {
       references.push(...findingPropertyReferences(readJsonFile(findingsPath), findingsPath));
     }
-    return propertyReferenceDiagnostics(catalog.value, references);
+    return [
+      ...propertyReferenceDiagnostics(catalog.value, references),
+      ...verifyImplementationSelectionCoverage(catalog.value, implementation.value, implementationPath)
+    ];
   }
 
   return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
+}
+
+/**
+ * Validate the explicit priority selection emitted by new invariant
+ * implementation agents. Historical artifacts omit `selection`; those remain
+ * valid and continue to receive the legacy canonical-reference checks above.
+ */
+function verifyImplementationSelectionCoverage(
+  catalog: PropertiesArtifact,
+  implementation: ImplementedPropertiesArtifact,
+  implementationPath: string
+): RuntimeDiagnostic[] {
+  const selection = implementation.selection;
+  if (selection === undefined) return [];
+
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const priorityOrder = ["high", "medium", "low"] as const;
+  const thresholdIndex = priorityOrder.indexOf(selection.priority_threshold);
+  const expectedPriorities = priorityOrder.slice(0, thresholdIndex + 1);
+  if (
+    selection.priorities.length !== expectedPriorities.length ||
+    selection.priorities.some((priority, index) => priority !== expectedPriorities[index])
+  ) {
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_INVALID",
+      message: `Implementation selection priorities must include exactly the priorities at or above ${JSON.stringify(selection.priority_threshold)}`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${implementationPath}#$.selection.priorities`
+    });
+  }
+
+  const expectedIds = catalog.properties
+    .filter((property) => selection.priorities.includes(property.priority))
+    .map((property) => property.id);
+  const selectedIds = new Set(selection.property_ids);
+  const expectedIdSet = new Set(expectedIds);
+  const missingSelectedIds = expectedIds.filter((propertyId) => !selectedIds.has(propertyId));
+  const extraSelectedIds = selection.property_ids.filter((propertyId) => !expectedIdSet.has(propertyId));
+  const selectionOrderMatches =
+    selection.property_ids.length === expectedIds.length &&
+    selection.property_ids.every((propertyId, index) => propertyId === expectedIds[index]);
+  if (missingSelectedIds.length > 0 || extraSelectedIds.length > 0 || !selectionOrderMatches) {
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH",
+      message: `Implementation selection must list every canonical property matching its priority scope in catalog order (missing: ${JSON.stringify(missingSelectedIds)}, extra: ${JSON.stringify(extraSelectedIds)})`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${implementationPath}#$.selection.property_ids`
+    });
+  }
+
+  const recordsById = new Map(implementation.properties.map((record) => [record.property_id, record]));
+  const recordIds = new Set(recordsById.keys());
+  const missingRecords = expectedIds.filter((propertyId) => !recordIds.has(propertyId));
+  const extraRecords = implementation.properties
+    .map((record) => record.property_id)
+    .filter((propertyId) => !expectedIdSet.has(propertyId));
+  if (missingRecords.length > 0 || extraRecords.length > 0) {
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_COVERAGE_INCOMPLETE",
+      message: `Implementation records must cover exactly the selected canonical properties (missing: ${JSON.stringify(missingRecords)}, extra: ${JSON.stringify(extraRecords)})`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${implementationPath}#$.properties`
+    });
+  }
+
+  for (const [recordIndex, record] of implementation.properties.entries()) {
+    if (!expectedIdSet.has(record.property_id) || record.status === "implemented") continue;
+    if (record.blocker !== undefined) continue;
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_BLOCKER_MISSING",
+      message: `Selected property ${JSON.stringify(record.property_id)} is ${record.status} and must carry an actionable blocker with code, summary, and next_action`,
+      severity: "error",
+      source: "property-provenance",
+      path: `${implementationPath}#$.properties[${recordIndex}].blocker`
+    });
+  }
+  return diagnostics;
 }
 
 function verifyCampaignPropertyReferences(

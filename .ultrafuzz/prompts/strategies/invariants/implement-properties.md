@@ -127,6 +127,11 @@ repository test root when it uses `test/` instead.
 ```json
 {
   "schema_version": "ultrafuzz.implemented-properties.v1",
+  "selection": {
+    "priority_threshold": "{{invariant_property_priority_threshold}}",
+    "priorities": ["high"],
+    "property_ids": ["property-1"]
+  },
   "properties": [
     {
       "property_id": "property-1",
@@ -135,6 +140,21 @@ repository test root when it uses `test/` instead.
       "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
     }
   ]
+}
+```
+
+The `selection` object is required for current runs. Set `priorities` to the
+exact configured priority set above and list every canonical ID in
+`properties.json` whose priority is in that set, in catalog order. Emit one
+implementation record for every selected ID. A selected property that cannot
+be implemented must use `status` `blocked`, `pending`, or `deferred` and carry
+an actionable `blocker` object with this shape:
+
+```json
+{
+  "code": "missing-oracle",
+  "summary": "The target exposes no stable getter for the required value.",
+  "next_action": "Add a read-only harness oracle or document the source-backed blocker."
 }
 ```
 

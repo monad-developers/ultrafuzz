@@ -75,11 +75,30 @@ export interface ImplementedPropertyRecord extends Record<string, unknown> {
   status: PropertyImplementationStatus;
   implementation_paths: string[];
   test_paths: string[];
+  /** A typed, actionable explanation for a selected property that is not implemented. */
+  blocker?: PropertyImplementationBlocker;
+}
+
+export interface PropertyImplementationBlocker extends Record<string, unknown> {
+  code: string;
+  summary: string;
+  next_action: string;
+}
+
+/**
+ * Selection metadata makes the implementation handoff auditable. It is
+ * optional so historical artifacts (which predate the field) remain readable.
+ */
+export interface ImplementedPropertySelection extends Record<string, unknown> {
+  priority_threshold: PropertyPriority;
+  priorities: PropertyPriority[];
+  property_ids: string[];
 }
 
 export interface ImplementedPropertiesArtifact {
   schema_version: typeof IMPLEMENTED_PROPERTIES_SCHEMA_VERSION;
   properties: ImplementedPropertyRecord[];
+  selection?: ImplementedPropertySelection;
 }
 
 export interface PropertyCampaignFailure extends Record<string, unknown> {
@@ -191,13 +210,54 @@ const implementedPropertySchema = z.looseObject({
   property_id: nonEmptyString,
   status: z.enum(["implemented", "pending", "deferred", "blocked"]),
   implementation_paths: nonEmptyStringArray,
-  test_paths: nonEmptyStringArray
+  test_paths: nonEmptyStringArray,
+  blocker: z
+    .strictObject({
+      code: nonEmptyString,
+      summary: nonEmptyString,
+      next_action: nonEmptyString
+    })
+    .optional()
+});
+
+const implementedPropertySelectionSchema = z.strictObject({
+  priority_threshold: propertyPrioritySchema,
+  priorities: z
+    .array(propertyPrioritySchema)
+    .min(1)
+    .superRefine((priorities, context) => {
+      const seen = new Set<PropertyPriority>();
+      for (const [priorityIndex, priority] of priorities.entries()) {
+        if (seen.has(priority)) {
+          context.addIssue({
+            code: "custom",
+            message: `Duplicate implementation selection priority ${JSON.stringify(priority)}`,
+            path: [priorityIndex]
+          });
+        }
+        seen.add(priority);
+      }
+    }),
+  property_ids: z.array(nonEmptyString).superRefine((propertyIds, context) => {
+    const seen = new Set<string>();
+    for (const [propertyIndex, propertyId] of propertyIds.entries()) {
+      if (seen.has(propertyId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate implementation selection property ID ${JSON.stringify(propertyId)}`,
+          path: [propertyIndex]
+        });
+      }
+      seen.add(propertyId);
+    }
+  })
 });
 
 export const implementedPropertiesSchema = z
   .object({
     schema_version: z.literal(IMPLEMENTED_PROPERTIES_SCHEMA_VERSION),
-    properties: z.array(implementedPropertySchema)
+    properties: z.array(implementedPropertySchema),
+    selection: implementedPropertySelectionSchema.optional()
   })
   .superRefine((artifact, context) => {
     const propertyIds = new Set<string>();

@@ -256,6 +256,20 @@ Property-derived `findings.json` entries carry the same optional
 `property_ids` and use the raw failure's ID. Setup or harness findings that do
 not originate from a catalog property omit the field.
 
+Current invariant implementation runs also emit a `selection` object with the
+configured `priority_threshold`, its inclusive `priorities`, and the complete
+ordered `property_ids` selected from the canonical catalog. Every selected
+property has one implementation record. A selected property that is not
+implemented carries a typed `blocker` object with `code`, `summary`, and
+`next_action`; this preserves an actionable reason instead of silently
+deferring benchmark-relevant coverage. Historical artifacts may omit
+`selection` and remain readable.
+
+The final report mirrors this handoff in
+`property_implementation_coverage`, preserving the threshold, inclusive
+priorities, and ordered implemented/blocked/pending/deferred ID arrays for
+analysis. Reports produced before this field existed use `"unavailable"`.
+
 Runtime artifact gates reject unknown canonical IDs and campaign references to
 properties that were not recorded with `implemented` status. They validate each
 campaign result record independently, judge unexplained findings against the
