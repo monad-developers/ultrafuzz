@@ -11,6 +11,49 @@ import { assertRegularFileInside, writeFileDurable } from "@ultrafuzz/artifacts"
 const runtimePackageRoot = findRuntimePackageRoot(path.dirname(fileURLToPath(import.meta.url)));
 const workflowTemplatePath = path.join(runtimePackageRoot, "src", "templates", "smithers", "workflows", "workflow.tsx");
 
+function loadSafeInvariantSuiteDirectory(): (root: string, candidate: string) => string {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function safeInvariantSuiteDirectory");
+  const helperEnd = source.indexOf("\n\n", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  // The workflow template is TypeScript, while this focused test exercises the
+  // generated helper's filesystem behavior directly. Strip only its annotations
+  // so the extracted function can run in Node's Function constructor.
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replaceAll("root: string", "root")
+    .replaceAll("candidate: string", "candidate")
+    .replaceAll(": string {", " {")
+    .replaceAll("const missing: string[]", "const missing");
+  return new Function(
+    "path",
+    "lstatSync",
+    "mkdirSync",
+    "realpathSync",
+    "isStrictlyInsideDirectory",
+    `${helper}; return safeInvariantSuiteDirectory;`
+  )(path, fs.lstatSync, fs.mkdirSync, fs.realpathSync, (root: string, candidate: string) =>
+    candidate.startsWith(`${root}${path.sep}`)
+  ) as (root: string, candidate: string) => string;
+}
+
+test("safe invariant-suite directory permits nested paths under a symlinked root alias", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-invariant-directory-"));
+  const realRoot = path.join(root, "files");
+  const rootAlias = path.join(root, "files-alias");
+  fs.mkdirSync(realRoot);
+  fs.symlinkSync(realRoot, rootAlias, "dir");
+
+  const safeInvariantSuiteDirectory = loadSafeInvariantSuiteDirectory();
+  const resolved = safeInvariantSuiteDirectory(rootAlias, path.join(rootAlias, "src", "access"));
+
+  assert.equal(resolved, path.join(realRoot, "src", "access"));
+  assert.equal(fs.statSync(resolved).isDirectory(), true);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("generated Smithers verifier rejects zero-byte generated-test companions", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function resolveNonEmptyRegularArtifactFile");
