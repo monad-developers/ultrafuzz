@@ -556,12 +556,76 @@ test("project discovery gate preserves repeated backslashes in Markdown formula 
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
 
+  const collapsedSpacing = structuredClone(ledger);
+  collapsedSpacing.entries[0]!.verbatim = source.trim().replace("lbFactor +", "lbFactor+");
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(collapsedSpacing));
+  const spacingMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(spacingMismatch.ok, false);
+  assert.ok(
+    spacingMismatch.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH")
+  );
+
   const collapsed = structuredClone(ledger);
   collapsed.entries[0]!.verbatim = source.trim().replaceAll("\\\\", "\\");
   writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(collapsed));
   const invalid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(invalid.ok, false);
   assert.ok(invalid.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH"));
+});
+
+test("project discovery gate parses source text containing a closing ledger marker", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-marker-collision" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const verbatim = "- Total borrowed assets <= total supplied assets\n- ### End ledger entry: evidence-marker";
+  const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(sourceDir, "overview.md"), `${verbatim}\n`, "utf8");
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-marker",
+        source_path: "docs/overview.md",
+        source_location: "lines 1-2",
+        kind: "inequality",
+        verbatim,
+        inventory_ids: ["inventory-marker"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-marker",
+        description: "The source statement remains linked to its inventory row.",
+        ledger_ids: ["evidence-marker"]
+      }
+    ],
+    scan_probes: []
+  };
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    node.id,
+    "setup/project-discovery.md",
+    [
+      "### Ledger entry: evidence-marker",
+      "source_path: docs/overview.md",
+      "source_location: lines 1-2",
+      `verbatim: ${verbatim}`,
+      "inventory-marker",
+      "### End ledger entry: evidence-marker",
+      "### Inventory row: inventory-marker",
+      "description: The source statement remains linked to its inventory row.",
+      "ledger_ids: evidence-marker",
+      "### End inventory row: inventory-marker"
+    ].join("\n")
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
 test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {

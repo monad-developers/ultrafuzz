@@ -1525,7 +1525,11 @@ function normalizeInvariantSourceText(value: string): string {
 }
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
-  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+  return lines
+    .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
+    .map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, ""))
+    .join("\n")
+    .replace(/\n+$/u, "");
 }
 
 function symbolFromInvariantLocation(location: string): string | undefined {

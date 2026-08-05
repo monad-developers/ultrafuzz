@@ -845,7 +845,11 @@ function normalizeInvariantSourceText(value: string): string {
 }
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
-  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+  return lines
+    .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
+    .map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, ""))
+    .join("\n")
+    .replace(/\n+$/u, "");
 }
 
 function invariantSymbolDeclaration(source: string, symbol: string): string | undefined {
@@ -870,13 +874,16 @@ function markdownDelimitedBlock(markdown: string, marker: string): string | unde
     .replace("### Ledger entry:", "### End ledger entry:")
     .replace("### Inventory row:", "### End inventory row:")
     .replace("### Canonical property:", "### End canonical property:");
-  const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "mu");
-  endPattern.lastIndex = start + match[0].length;
-  const endMatch = endPattern.exec(markdown);
+  const contentStart = start + match[0].length;
+  const endPattern = new RegExp(`^${escapeRegExp(endMarker)}[ \\t]*$`, "gmu");
+  let endMatch: RegExpExecArray | null = null;
+  for (const candidate of markdown.slice(contentStart).matchAll(endPattern)) {
+    endMatch = candidate;
+  }
   if (endMatch === null || endMatch.index === undefined) {
     return undefined;
   }
-  return markdown.slice(start, endMatch.index + endMatch[0].length);
+  return markdown.slice(start, contentStart + endMatch.index + endMatch[0].length);
 }
 
 function markdownContainsToken(markdown: string, token: string): boolean {

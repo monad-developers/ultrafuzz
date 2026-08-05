@@ -63,6 +63,11 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);
   assert.match(source, /repeated backslashes and other literals remain intact/u);
+  const helperStart = source.indexOf("function normalizeInvariantSourceLines");
+  const workflowStart = source.indexOf("export default smithers");
+  assert.ok(helperStart >= 0, source);
+  assert.ok(workflowStart > helperStart, source);
+  assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
 });
 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
