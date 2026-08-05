@@ -532,7 +532,9 @@ test("property implementation schema rejects source-less implemented records", (
 
   const invalid = validateImplementedPropertiesSchema(sourceLess);
   assert.equal(invalid.ok, false);
-  assert.ok(invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message)));
+  assert.ok(
+    invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message))
+  );
 });
 
 test("property implementation schema rejects duplicate canonical references", () => {
