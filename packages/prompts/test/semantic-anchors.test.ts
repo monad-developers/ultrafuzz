@@ -188,6 +188,11 @@ describe("prompt semantic anchors", () => {
     );
     expect(discovery).toMatch(/source path and line or symbol location/u);
     expect(discovery).toContain("including statements under generic headings");
+    expect(discovery).toContain("Byte-preserving ledger construction");
+    expect(discovery).toMatch(/derive the value by reading the cited file and slicing the requested\s+line range/u);
+    expect(discovery).toMatch(/serializes the ledger with\s+`JSON\.stringify`/u);
+    expect(discovery).toMatch(/repeated\s+backslashes and other literals/u);
+    expect(discovery).toMatch(/Build the Markdown\s+handoff from those same parsed ledger objects/u);
   });
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {

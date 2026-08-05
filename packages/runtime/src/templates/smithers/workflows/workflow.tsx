@@ -33,6 +33,7 @@ const {
   materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
+  validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   writeFileDurable
@@ -214,6 +215,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
+      materializeInvariantSuiteCompanions(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
@@ -336,6 +338,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
+  materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
@@ -1453,23 +1456,24 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     const sourceBytes = snapshot.bytes;
     const source = snapshot.content;
     const locationMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
-    const locatedSource =
+    const sourceLines =
       locationMatch === null
-        ? source
-        : normalizeInvariantSourceLines(
-            source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]))
-          );
+        ? undefined
+        : source.split(/\r\n|\r|\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]));
+    const locatedSource = sourceLines === undefined ? source : normalizeInvariantSourceLines(sourceLines);
     const sourceMatches =
       locationMatch === null
         ? symbolFromInvariantLocation(entry.source_location) !== undefined &&
           invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!) !== undefined &&
-          normalizeInvariantSourceText(
-            invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!)!
+          normalizeInvariantSourceLines(
+            invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!)!.split(/\r?\n/u)
           ).includes(normalizeInvariantSourceLines([entry.verbatim]))
         : locatedSource === normalizeInvariantSourceLines([entry.verbatim]);
     if (!sourceMatches) {
+      const expected = sourceLines === undefined ? undefined : normalizeInvariantSourceLines(sourceLines);
+      const expectedDetail = expected === undefined ? "the source declaration" : JSON.stringify(expected);
       throw new Error(
-        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}`
+        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}; expected ${expectedDetail}, received ${JSON.stringify(entry.verbatim)}. Derive verbatim from the cited source with a JSON serializer so repeated backslashes and other literals remain intact.`
       );
     }
     if (!files.has(entry.source_path)) {
@@ -1524,7 +1528,11 @@ function normalizeInvariantSourceText(value: string): string {
 }
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
-  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+  return lines
+    .flatMap((line) => line.replace(/\r\n?/gu, "\n").split("\n"))
+    .map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, ""))
+    .join("\n")
+    .replace(/\n+$/u, "");
 }
 
 function symbolFromInvariantLocation(location: string): string | undefined {
