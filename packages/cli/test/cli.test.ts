@@ -244,38 +244,21 @@ function writeJsonRecord(filePath: string, value: Record<string, unknown>): void
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function appendFixtureVulnerabilityDatabaseReference(project: string): void {
-  fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "references.yml"),
-    [
-      "",
-      "  vulnerability-database.web3:",
-      "    kind: vulnerability-database",
-      "    provider: github",
-      "    repo: monad-developers/web3-vulnerability-database",
-      `    commit: ${"b".repeat(40)}`,
-      "    paths:",
-      "      - database.yml",
-      "      - capabilities.yml",
-      "      - catalog.json",
-      '    resolved_at: "2026-08-04T00:00:00Z"',
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-}
-
 test("init and validate emit schema-versioned launch JSON", async () => {
   const project = tempProject();
   fs.writeFileSync(path.join(project, "ultrafuzz.toml"), "# owned\n", "utf8");
 
   const init = await cli(project, ["init", "--json"]);
   assert.equal(init.code, 0, init.stderr);
-  appendFixtureVulnerabilityDatabaseReference(project);
   const initBody = parseJson(init);
   assertNoSmithersSurface(initBody);
   assert.equal((initBody.data as { preserved: string[] }).preserved.includes("ultrafuzz.toml"), true);
 
+  // A clean shipped scaffold validates with no fixture mutation whatsoever: the pinned
+  // vulnerability-database reference is part of the scaffolded catalog.
+  const shippedReferences = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.match(shippedReferences, /^ {2}vulnerability-database\.web3:$/mu);
+  assert.match(shippedReferences, /^ {4}commit: fbf00e990b1316879b674e9903548dba452e40d5$/mu);
   const validate = await cli(project, ["validate", "--json"]);
   const body = parseJson(validate);
   assert.equal(validate.code, 0, validate.stderr);
@@ -286,6 +269,20 @@ test("init and validate emit schema-versioned launch JSON", async () => {
     assert.equal(Boolean(posture[key]), true, `${key} posture missing`);
   }
   assert.equal("repository_mutation" in posture, false);
+
+  // Repointing the pinned reference at an unknown ID is a topology error, so the shipped catalog
+  // entry is load-bearing rather than decorative.
+  const topologyPath = path.join(project, ".ultrafuzz", "topology.yml");
+  fs.writeFileSync(
+    topologyPath,
+    fs
+      .readFileSync(topologyPath, "utf8")
+      .replace("reference: vulnerability-database.web3", "reference: absent.database"),
+    "utf8"
+  );
+  const tampered = await cli(project, ["validate", "--json"]);
+  assert.notEqual(tampered.code, 0);
+  assert.match(tampered.stdout + tampered.stderr, /absent\.database/u);
 });
 
 test("run exposes the trusted reference expectation catalog option", async () => {
@@ -682,9 +679,13 @@ test("references status is restored and reports offline cache state", async () =
     assert.equal(body.command, "references status");
     assert.equal(body.ok, false);
     const data = body.data as { references?: Array<{ id: string; ok: boolean }> };
-    assert.equal(data.references?.length, 9);
+    assert.equal(data.references?.length, 10);
     assert.equal(
       data.references?.some((reference) => reference.id === "properties.certora-thinking"),
+      true
+    );
+    assert.equal(
+      data.references?.some((reference) => reference.id === "vulnerability-database.web3"),
       true
     );
     assert.equal(
@@ -1501,6 +1502,29 @@ test("historical loose reports preserve conforming Markdown and reject missing o
   const nonconforming = await cli(project, ["report", runData.run_id, "--json"]);
   assert.equal(nonconforming.code, 1);
   assert.match(JSON.stringify(parseJson(nonconforming).diagnostics), /historical|Markdown|final-review/iu);
+
+  // A preserved agent report is only gated by the directive shape check, so its links must be
+  // restricted to in-document anchors and safe report-relative audit-context artifacts.
+  const withLink = (link: string): string =>
+    historicalMarkdown.replace("Historical public summary.", `Historical public summary. [context](${link})`);
+  for (const rejected of [
+    "https://example.invalid",
+    "mailto:someone@example.invalid",
+    "javascript:alert(1)",
+    "/etc/passwd",
+    "../../../../etc/passwd",
+    "../threat-model/../../../escape.md"
+  ]) {
+    fs.writeFileSync(markdownPath, withLink(rejected), "utf8");
+    const result = await cli(project, ["report", runData.run_id, "--json"]);
+    assert.equal(result.code, 1, `link ${rejected} must be rejected`);
+    assert.match(JSON.stringify(parseJson(result).diagnostics), /historical|Markdown|final-review/iu);
+  }
+  for (const accepted of ["#m-01---historical-issue", "../threat-model/THREAT_MODEL.md"]) {
+    fs.writeFileSync(markdownPath, withLink(accepted), "utf8");
+    const result = await cli(project, ["report", runData.run_id, "--json"]);
+    assert.equal(result.code, 0, `link ${accepted} must be accepted: ${result.stderr}${result.stdout}`);
+  }
 
   fs.unlinkSync(markdownPath);
   const missing = await cli(project, ["report", runData.run_id, "--json"]);

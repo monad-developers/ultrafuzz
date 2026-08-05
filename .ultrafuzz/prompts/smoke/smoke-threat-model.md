@@ -29,6 +29,13 @@ Present and absent require repository evidence; unknown must not become absent.
 Emit every registry capability exactly once and do not invent capability IDs.
 Ignore vulnerability-class records until the downstream goal planner.
 
+The authoritative contract for this artifact is the canonical JSON Schema
+`{{artifact_schema_dir}}/threat-model.schema.json`
+(`$id: https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model`),
+generated from the same `ultrafuzz/threat-model@1` validator that gates this
+node. The collections below restate that schema; when the two ever disagree,
+the schema file wins.
+
 Write `{{artifact_path}}/threat-model.json` with
 `schema_version: "ultrafuzz.threat-model.v1"` and these exact collections:
 

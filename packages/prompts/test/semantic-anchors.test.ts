@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { describe, expect, it } from "vitest";
 
-import { loadBuiltInPromptAssets } from "../src/index.js";
+import { loadBuiltInPromptAssets, renderPrompt } from "../src/index.js";
 
 function prompt(relativePath: string): string {
   const asset = loadBuiltInPromptAssets().find((entry) => entry.relativePath === relativePath);
@@ -11,6 +11,80 @@ function prompt(relativePath: string): string {
     throw new Error(`missing built-in prompt ${relativePath}`);
   }
   return asset.markdown;
+}
+
+const RENDER_RUN_ARTIFACTS = "/tmp/ufz-dedupe-render/runs/run-1/artifacts";
+
+function artifactDirFor(concreteNodeId: string): string {
+  return `${RENDER_RUN_ARTIFACTS}/${concreteNodeId}`;
+}
+
+/**
+ * Renders a real dedupe prompt against a graph whose dynamic goal groups already expanded into
+ * several generated children. This exercises the supported artifact-template mechanism end to end
+ * instead of asserting that the template text merely mentions it.
+ */
+function renderDedupePrompt(body: string, generatedChildren: Record<string, string[]>): string {
+  const producers = [...new Set([...body.matchAll(/\{\{artifact_path:([a-z0-9_-]+)\}\}/gu)].map((match) => match[1]!))];
+  const logicalNodes = producers.map((id) => ({
+    id,
+    outputs: [
+      { path: "findings.json", contract: "ultrafuzz/findings@1", primary: true, description: "Findings." },
+      { path: "generated-tests.json", contract: "ultrafuzz/generated-tests@1", primary: false, description: "Tests." }
+    ],
+    // A dynamic group resolves to its generated children, never to the group's own directory.
+    artifactDir: artifactDirFor((generatedChildren[id] ?? [id])[0]!),
+    artifactDirs: (generatedChildren[id] ?? [id]).map(artifactDirFor)
+  }));
+  return renderPrompt({
+    prompt: body,
+    graph: {
+      logicalNodes: [
+        ...logicalNodes,
+        {
+          id: "dedupe-findings",
+          dependsOn: producers,
+          outputs: [
+            {
+              path: "deduped-findings.json",
+              contract: "ultrafuzz/findings@1",
+              primary: true,
+              description: "Deduped findings."
+            }
+          ],
+          artifactDir: artifactDirFor("dedupe-findings")
+        }
+      ]
+    },
+    node: {
+      logicalId: "dedupe-findings",
+      concreteId: "dedupe-findings",
+      artifactDir: artifactDirFor("dedupe-findings"),
+      workspacePath: "/tmp/ufz-dedupe-render/workspace",
+      repoPath: "/tmp/ufz-dedupe-render/repo",
+      dependsOn: producers,
+      attemptIndex: 0,
+      loopIndex: 0,
+      loopCount: 1,
+      outputs: [
+        {
+          path: "deduped-findings.json",
+          contract: "ultrafuzz/findings@1",
+          primary: true,
+          description: "Deduped findings."
+        }
+      ]
+    },
+    run: {
+      id: "run-1",
+      artifactsDir: RENDER_RUN_ARTIFACTS,
+      metadataPath: "/tmp/ufz-dedupe-render/runs/run-1/run.json"
+    },
+    outputs: {
+      findingsPath: `${artifactDirFor("dedupe-findings")}/deduped-findings.json`,
+      patchPath: `${artifactDirFor("dedupe-findings")}/patch.diff`
+    }
+  }).renderedMarkdown;
 }
 
 function generatedTestManifestSources(markdown: string): string[] {
@@ -549,15 +623,123 @@ describe("prompt semantic anchors", () => {
     const hunter = prompt("strategies/goal-hunter.mdx");
     const dedupe = prompt("review/dedupe-findings.md");
     const report = prompt("review/final-report.md");
-    expect(planner).toContain("{{class:liquidation:fixed-term-before-overdue}}");
-    expect(planner).toContain("{{liquidation:overdue}}");
+    // The invented example follows dotted upstream class IDs without publishing a catalog identifier.
+    expect(planner).toContain("{{class:clockwork.deferred-settlement-gap}}");
+    expect(planner).toContain("{{clockwork:late-tick}}");
     expect(threatModel).toContain("canonical repository-relative POSIX path");
     expect(threatModel).toContain("existing regular file in the current task workspace");
     expect(smokeThreatModel).toMatch(/canonical\s+repository-relative POSIX path/u);
     expect(hunter).toContain("{{item.goal_prompt}}");
     expect(dedupe).toContain("stable first-seen union");
     expect(report).toContain("`source_nodes`");
-    expect(report).toContain("`THREAT_MODEL.md`");
+    expect(report).toContain("- Threat model: [THREAT_MODEL.md](");
+  });
+
+  it("renders one exact path per generated dynamic child in the dedupe prompts", () => {
+    for (const relativePath of ["review/dedupe-findings.md", "smoke/smoke-dedupe-findings.md"]) {
+      const body = prompt(relativePath);
+      // Never a guessed filesystem location or node-ID pattern for generated children.
+      expect(body, relativePath).not.toMatch(/artifacts\/dynamic[:-]/u);
+      expect(body, relativePath).not.toMatch(/dynamic:(threat|class):<|dynamic:(threat|class):\*/u);
+
+      const generatedChildren = {
+        "threat-goals": [
+          "dynamic:threat:liquidation:overdue",
+          "dynamic:threat:oracle:stale",
+          "dynamic:threat:vault:donation"
+        ],
+        "class-goals": ["dynamic:class:accounting:rounding", "dynamic:class:access:missing-guard"]
+      };
+      const rendered = renderDedupePrompt(body, generatedChildren);
+
+      // Every generated child contributes exactly one enumerated bullet per requested artifact:
+      // nothing is truncated to a prefix and nothing collapses several children onto one path.
+      for (const [group, children] of Object.entries(generatedChildren)) {
+        for (const artifact of ["findings.json", "generated-tests.json"]) {
+          if (!body.includes(`{{artifact_path:${group}}}/${artifact}`)) continue;
+          for (const child of children) {
+            const expectedBullet = `- ${artifactDirFor(child)}/${artifact}`;
+            expect(rendered.split(expectedBullet).length - 1, `${relativePath} ${group} ${artifact} ${child}`).toBe(1);
+          }
+          // The group's own logical directory is never emitted as if it were a child.
+          expect(rendered, `${relativePath} ${group}`).not.toContain(`${artifactDirFor(group)}/${artifact}`);
+        }
+      }
+      // A fixed lane still renders a single unbulleted path.
+      expect(rendered).toContain(`${artifactDirFor("goal-roaming")}/findings.json`);
+      expect(rendered).not.toContain("{{artifact_path:");
+    }
+  });
+
+  it("keeps report structure deterministic instead of asking the model to invent one", () => {
+    const report = prompt("review/final-report.md");
+    const smokeReport = prompt("smoke/smoke-final-report.md");
+    for (const [name, body] of [
+      ["final-report", report],
+      ["smoke-final-report", smokeReport]
+    ] as const) {
+      // The shape must match the deterministic renderer in packages/cli/src/report-artifacts.ts,
+      // which joins both threat-model links into one bullet and regenerates the whole section.
+      expect(body, name).toContain("## Audit context");
+      expect(body, name).toContain("- Threat model: [THREAT_MODEL.md](");
+      expect(body, name).toContain("; [threat-model.json](");
+      expect(body, name).toContain("- Goal plan: [goal-plan.json](");
+      expect(body, name).not.toContain("- Threat model record: [threat-model.json]");
+      expect(body.replace(/\s+/gu, " "), name).toMatch(/do not invent a different heading, ordering, or link text/iu);
+      expect(body, name).toContain("- **Source nodes**:");
+    }
+    // The vague "add a concise section" instruction must not come back.
+    expect(report).not.toMatch(/Add a concise `## Audit context` section after Run summary with links/u);
+  });
+
+  it("points threat-model prompts at the canonical schema JSON file", () => {
+    // The pointer is a rendered core variable, not a project-relative literal: the agent works in a
+    // worktree, so only an absolute rendered path resolves in both a local and a relocated run.
+    for (const relativePath of ["setup/threat-model.md", "smoke/smoke-threat-model.md"]) {
+      const body = prompt(relativePath);
+      expect(body, relativePath).toContain("{{artifact_schema_dir}}/threat-model.schema.json");
+      expect(body, relativePath).not.toContain("`.ultrafuzz/schema/");
+      expect(body, relativePath).toContain("https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model");
+      expect(body, relativePath).toMatch(/schema file wins/u);
+    }
+    const planner = prompt("setup/goal-plan.md");
+    expect(planner).toContain("{{artifact_schema_dir}}/goal-plan.schema.json");
+    expect(planner).not.toContain("`.ultrafuzz/schema/");
+    expect(planner).toContain("https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan");
+  });
+
+  it("renders the canonical schema pointer as an absolute path", () => {
+    const projectRoot = "/tmp/ultrafuzz-schema-render";
+    const rendered = renderPrompt({
+      prompt: {
+        id: "threat-model",
+        displayName: "Threat model",
+        source: "project",
+        body: "Schema: {{artifact_schema_dir}}/threat-model.schema.json\n"
+      },
+      graph: { logicalNodes: [{ id: "threat-model" }], concreteNodes: [] },
+      node: {
+        logicalId: "threat-model",
+        concreteId: "threat-model-a1",
+        artifactDir: `${projectRoot}/.ultrafuzz/runs/run-1/artifacts/threat-model-a1`,
+        workspacePath: `${projectRoot}/.ultrafuzz/runs/run-1/workspaces/threat-model-a1`,
+        repoPath: projectRoot
+      },
+      run: {
+        id: "run-1",
+        artifactsDir: `${projectRoot}/.ultrafuzz/runs/run-1/artifacts`,
+        metadataPath: `${projectRoot}/.ultrafuzz/runs/run-1/run.json`
+      },
+      outputs: {
+        findingsPath: `${projectRoot}/.ultrafuzz/runs/run-1/artifacts/threat-model-a1/findings.json`,
+        patchPath: `${projectRoot}/.ultrafuzz/runs/run-1/artifacts/threat-model-a1/patch.diff`
+      },
+      resolvedConfig: { artifactSchemaDir: `${projectRoot}/.ultrafuzz/schema` }
+    });
+
+    expect(rendered.renderedMarkdown).toContain(`${projectRoot}/.ultrafuzz/schema/threat-model.schema.json`);
+    expect(rendered.renderedMarkdown).not.toContain("{{artifact_schema_dir}}");
+    expect(rendered.variablesUsed).toContain("artifact_schema_dir");
   });
 
   it("keeps the empty findings array contract in prompt-owned templates", () => {

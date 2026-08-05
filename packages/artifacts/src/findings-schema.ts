@@ -48,6 +48,7 @@ export const findingSchema = z.looseObject({
   summary: nonEmptyString,
   triage_classification: z.enum(TRIAGE_CLASSIFICATIONS).optional(),
   producer_node_id: nodeReference.optional(),
+  producer_attempt_id: nodeReference.optional(),
   source_node_id: nodeReference.optional(),
   source_nodes: sourceNodesSchema.optional(),
   strategy: nonEmptyString.optional(),
@@ -83,6 +84,7 @@ export const findingJsonSchema = {
     summary: { type: "string", minLength: 1 },
     triage_classification: { enum: TRIAGE_CLASSIFICATIONS },
     producer_node_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
+    producer_attempt_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
     source_node_id: { type: "string", pattern: NODE_REFERENCE_PATTERN.source },
     source_nodes: {
       type: "array",

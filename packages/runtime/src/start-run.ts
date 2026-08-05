@@ -53,7 +53,8 @@ export async function startRun(input: StartRunInput) {
     workflowName: `ultrafuzz-${plan.run_id}`,
     renderedPrompts: plan.rendered_prompts,
     operatorPrompt: input.prompt,
-    operatorInput: input.workflowInput
+    operatorInput: input.workflowInput,
+    ...(plan.vulnerability_database === undefined ? {} : { vulnerabilityDatabase: plan.vulnerability_database })
   });
   persistSmithersEvidence(plan.layout, plan.graph, compiled);
   appendEvent(plan.layout, {

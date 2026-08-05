@@ -324,7 +324,24 @@ Ultrafuzz is an automated smart-contract fuzzing campaign assistant. Issues belo
 - Tokens used: `<token usage, or unavailable>`
 - Estimated spend: `<cost estimate such as $123 or $123+ when pricing is partial, or unavailable>`
 - Strategy loops: `<configured loop summary, or unavailable>`
+
+## Audit context
+
+- Threat model: [THREAT_MODEL.md](<relative path to THREAT_MODEL.md>); [threat-model.json](<relative path to threat-model.json>)
+- Goal plan: [goal-plan.json](<relative path to goal-plan.json>)
 ```
+
+Render `## Audit context` with exactly this heading, bullet order, and link
+text, immediately after `## Run summary`. Use repository-relative or
+report-relative paths to the run's own `threat-model` and `goal-plan` artifacts;
+never absolute paths or external URLs. Omit an individual link whose artifact
+the run did not produce, omit the `Goal plan` bullet when there is no goal plan,
+and omit the whole section when the run produced none of them. Do not invent a
+different heading, ordering, or link text: `ultrafuzz report` regenerates this
+exact section deterministically from the run's own artifacts and overwrites
+anything else.
+Keep detailed threat content in those dedicated artifacts; do not duplicate it
+in `report.md`.
 
 Each production issue entry must use exactly this Markdown section order. The
 following example is structural only; replace the title, actor names, actions,
@@ -340,6 +357,7 @@ Depositor can withdraw after accounting state diverges which leads to claimable 
 
 - **Impact**: High: Locked claimable funds prevent affected depositors from recovering principal.
 - **Likelihood**: Medium: The withdrawal path is reachable through the public redeem flow after the recorded state transition.
+- **Source nodes**: `dynamic:threat:liquidation:overdue`, `stateful-invariant-campaign`
 
 ### Proof of Concept
 
@@ -449,15 +467,12 @@ Render the human-readable Strategy section as a Markdown table with columns
 without percentages. Keep loop-attempt provenance in `report.json`, not in the
 human-readable Strategy section. Do not call this metric Temperature.
 
-For every production issue, render one concise `Source nodes` bullet from the
-stable `source_nodes` union in the severity-classified finding. Preserve that
-same array in the `report.json` issue and keep compatibility `source_node_id`
-equal to its first entry. Do not replace discovery sources with `final-report`.
-
-Add a concise `## Audit context` section after Run summary with links to
-`THREAT_MODEL.md`, `threat-model.json`, and `goal-plan.json`. Keep detailed
-threat content in those dedicated artifacts; do not duplicate it in
-`report.md`.
+Render the `- **Source nodes**:` bullet exactly as shown in the issue template,
+as the last Severity bullet, listing the stable `source_nodes` union from the
+severity-classified finding as comma-separated backticked IDs in union order.
+Preserve that same array in the `report.json` issue and keep compatibility
+`source_node_id` equal to its first entry. Do not replace discovery sources with
+`final-report`.
 
 ## Additional Sections
 
@@ -601,7 +616,8 @@ Before finishing, verify that:
 - Production issues with generated tests include exactly one inline fenced code
   block whose language matches the target-native reproducer.
 - Production issues include a `### Strategy` detection-rate table.
-- Production issues render their complete discovery `Source nodes` union.
+- Production issues render the `- **Source nodes**:` Severity bullet with their
+  complete discovery union.
 - Production issues do not include a standalone reachability section.
 - Production issue Impact and Likelihood bullets each begin with exactly High,
   Medium, or Low followed by a colon.
@@ -617,8 +633,8 @@ Before finishing, verify that:
 - `report.md` contains `## Property provenance`, including every
   property-derived finding and no invented property IDs for non-property
   findings.
-- `report.md` contains concise links to the dedicated threat-model and goal-plan
-  artifacts without copying their detailed analysis.
+- `report.md` renders the fixed `## Audit context` section for every artifact
+  the run produced, without copying their detailed analysis.
 - `report.md` contains `## Property implementation coverage` with counts that
   match the implementation handoff, or the literal `unavailable` for
   historical artifacts.

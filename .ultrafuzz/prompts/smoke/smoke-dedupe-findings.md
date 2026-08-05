@@ -17,8 +17,8 @@ Read every input, including valid empty arrays:
 - Externalized accounting: `{{artifact_path:externalized-state-accounting}}/findings.json`
 - Lifecycle/views: `{{artifact_path:lifecycle-view-boundaries}}/findings.json`
 - Roaming goal: `{{artifact_path:goal-roaming}}/findings.json`
-- Every child of the `threat-goals` and `class-goals` dynamic groups, including
-  valid empty findings arrays
+- Threat-goal children, one exact path per generated node: {{artifact_path:threat-goals}}/findings.json
+- Class-goal children, one exact path per generated node: {{artifact_path:class-goals}}/findings.json
 
 Use affected code, reachable workflow, violated property, root cause, and
 reproduction shape as the dedupe key. Merge only findings proven to share a

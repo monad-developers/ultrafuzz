@@ -58,16 +58,16 @@ Every dynamic item contains a scalar `replacements` map. Its `goal_prompt`
 must preserve item-scoped MDX placeholders until the dynamic-node renderer
 resolves them.
 
-Threat goal example:
+Threat goal example (using invented IDs):
 
 ```text
-Your /goal is to find any vulnerability affecting overdue liquidation using threat model threat \{{liquidation:overdue}}.
+Your /goal is to find any vulnerability affecting a delayed clock tick using threat model threat \{{clockwork:late-tick}}.
 ```
 
-Class goal example:
+Class goal example (using invented IDs):
 
 ```text
-Your /goal is to find a vulnerability of type \{{class:liquidation:fixed-term-before-overdue}} using threat model \{{liquidation:overdue}}.
+Your /goal is to find a vulnerability of type \{{class:clockwork.deferred-settlement-gap}} using threat model \{{clockwork:late-tick}}.
 ```
 
 The replacement value for each threat key contains the full selected threat,
@@ -77,6 +77,13 @@ instructions and relevant examples. Never flatten a placeholder to a bare
 literal ID.
 
 ## Output
+
+The authoritative contract for this artifact is the canonical JSON Schema
+`{{artifact_schema_dir}}/goal-plan.schema.json`
+(`$id: https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/goal-plan`),
+generated from the same `ultrafuzz/goal-plan@1` validator that gates this node.
+The rules below restate that schema; when the two ever disagree, the schema
+file wins.
 
 Write `{{artifact_path}}/goal-plan.json` with
 `schema_version: "ultrafuzz.goal-plan.v1"` and `policy: "additive-v1"`.

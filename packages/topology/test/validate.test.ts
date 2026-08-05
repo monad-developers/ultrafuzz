@@ -242,3 +242,58 @@ function dynamicTopology() {
   topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
   return topology;
 }
+
+describe("dynamic source cardinality", () => {
+  function dynamicTopology() {
+    const topology = validTopology({ defaults: { strategy_loops: 1 } });
+    topology.nodes[2] = {
+      ...topology.nodes[2]!,
+      outputs: [{ path: "plan.json", contract: "ultrafuzz/json-object@1", primary: true }]
+    };
+    topology.nodes.splice(3, 0, {
+      id: "fanout",
+      prompt: "strategies/fanout.md",
+      group: "strategies",
+      depends_on: ["strategy"],
+      dynamic: {
+        from: { node: "strategy", path: "$.goals" },
+        key: "id",
+        node_id: "dynamic:item:{{ item.id }}"
+      },
+      outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+    });
+    topology.nodes[4] = { ...topology.nodes[4]!, depends_on: ["fanout"] };
+    return topology;
+  }
+
+  it("accepts a single-attempt source", () => {
+    expect(() => validateTopology(dynamicTopology())).not.toThrow();
+  });
+
+  it("rejects a source that expands into multiple parallel loop attempts", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, loops: 2 };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt; it resolves to 2/u);
+  });
+
+  it("rejects a source that fans out across multiple model profiles", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, model_profiles: ["default", "secondary"] };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt; it resolves to 2/u);
+  });
+
+  it("rejects a source whose group defaults fan out across multiple model profiles", () => {
+    const topology = dynamicTopology();
+    topology.groups = {
+      ...topology.groups,
+      strategies: { label: "Strategies", defaults: { model_profiles: ["default", "secondary"] } }
+    };
+    expect(() => validateTopology(topology)).toThrow(/must resolve to exactly one concrete attempt/u);
+  });
+
+  it("accepts a series source whose loops lower to its last attempt", () => {
+    const topology = dynamicTopology();
+    topology.nodes[2] = { ...topology.nodes[2]!, loops: 3, loop_mode: "series" };
+    expect(() => validateTopology(topology)).not.toThrow();
+  });
+});

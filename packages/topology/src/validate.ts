@@ -78,6 +78,7 @@ export function validateTopology(
   validateEntryExit(topology.nodes);
 
   const effectiveLoopCounts = resolveEffectiveLoopCounts(topology, options, limits);
+  validateDynamicSourceCardinality(topology, nodeById, effectiveLoopCounts);
   validateExpandedSize(effectiveLoopCounts, limits);
   validateConcreteIdCollisions(topology.nodes, effectiveLoopCounts);
   validatePromptArtifacts(topology, options);
@@ -727,6 +728,49 @@ function validateDynamicContracts(
     }
     validateDynamicNodeIdTemplate(node.id, dynamic.node_id, dynamic.key);
   }
+}
+
+/**
+ * A dynamic group reads exactly one concrete source attempt, so the source must resolve to exactly
+ * one dependency attempt after loop and model fanout. Rejecting this during validation gives a
+ * targeted diagnostic instead of deferring the identical constraint to workflow compilation, which
+ * only fails once the run is already planned.
+ */
+function validateDynamicSourceCardinality(
+  topology: NormalizedProjectTopology,
+  nodeById: Map<string, NormalizedTopologyNode>,
+  effectiveLoopCounts: Record<string, number>
+): void {
+  for (const node of topology.nodes) {
+    if (node.dynamic === undefined) continue;
+    const source = nodeById.get(node.dynamic.from.node);
+    if (source === undefined) continue;
+    const loops = effectiveLoopCounts[source.id] ?? source.loops;
+    // Series loops lower to their last concrete attempt; parallel loops lower to every attempt.
+    const dependencyAttempts = source.loop_mode === "series" && loops > 1 ? 1 : loops;
+    const models = declaredModelProfileCount(source, topology);
+    const concreteAttempts = dependencyAttempts * models;
+    if (concreteAttempts !== 1) {
+      throw topologyError(
+        "INVALID_DYNAMIC_SOURCE",
+        `Dynamic node \`${node.id}\` source \`${source.id}\` must resolve to exactly one concrete attempt; it resolves to ${concreteAttempts}`,
+        {
+          nodeId: node.id,
+          dependency: source.id,
+          loops: dependencyAttempts,
+          modelProfiles: models,
+          concreteAttempts
+        }
+      );
+    }
+  }
+}
+
+function declaredModelProfileCount(node: NormalizedTopologyNode, topology: NormalizedProjectTopology): number {
+  if (node.kind !== "agentic") return 1;
+  if (node.model_profiles.length > 0) return node.model_profiles.length;
+  const groupProfiles = node.group === undefined ? undefined : topology.groups[node.group]?.defaults?.model_profiles;
+  return groupProfiles !== undefined && groupProfiles.length > 0 ? groupProfiles.length : 1;
 }
 
 function validateDynamicNodeIdTemplate(nodeId: string, template: string, key: string): void {

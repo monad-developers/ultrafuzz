@@ -347,20 +347,36 @@ function normalizeSourceNodes(
       normalized.splice(0, normalized.length, ...expected);
     }
     record.source_nodes = normalized;
-    // `source_node_id` is the stable compatibility field for the discovery
-    // node. Initial findings are produced by a concrete attempt, while
-    // downstream transformations retain the union of upstream source nodes.
-    record.source_node_id = preserveExisting
-      ? normalized[0]
-      : typeof record.source_node_id === "string"
-        ? normalized[0]
-        : (nodeId ?? normalized[0]);
+    // `source_node_id` is the stable compatibility alias for `source_nodes[0]` in every direction:
+    // initial findings and downstream transformations alike. The storage/attempt identity stays in
+    // the explicit `producer_attempt_id` field (and in artifact-manifest/run-state provenance) so a
+    // dynamic hunter's canonical output round-trips through the downstream dedupe gate unchanged.
+    record.source_node_id = normalized[0];
+    if (preserveExisting) {
+      if (record.producer_attempt_id !== undefined) {
+        if (typeof record.producer_attempt_id !== "string") {
+          throw new FindingsValidationError("field producer_attempt_id must be a non-empty string");
+        }
+        record.producer_attempt_id = validateNodeReference(
+          record.producer_attempt_id.trim(),
+          "finding producer attempt ID"
+        );
+      }
+    } else {
+      // The producer attempt identity is runtime-assigned, never model-supplied: drop any
+      // stale/spoofed value before recording the attempt ID for aliased dynamic producers.
+      delete record.producer_attempt_id;
+      if (nodeId !== undefined && nodeId !== normalized[0]) {
+        record.producer_attempt_id = validateNodeReference(nodeId, "finding producer attempt ID");
+      }
+    }
   } else {
     if (requireSourceNodes) {
       throw new FindingsValidationError("field source_nodes must retain at least one discovery node ID");
     }
     delete record.source_nodes;
     delete record.source_node_id;
+    delete record.producer_attempt_id;
   }
 }
 

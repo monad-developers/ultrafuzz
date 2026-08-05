@@ -11,12 +11,12 @@ import {
   assertRegularFileInside,
   getNodeArtifactDir,
   getNodeWorkspaceDir,
+  safeResolveInside,
   writeFileDurable,
   writeJsonDurable,
   type RunLayout
 } from "@ultrafuzz/artifacts";
 import { invariantPropertyPrioritySelection, resolveExecutionResources, type ResolvedConfig } from "@ultrafuzz/config";
-import { parsePromptFrontmatter } from "@ultrafuzz/prompts";
 import { redactSecretsInText, redactSecretsInValue } from "@ultrafuzz/security";
 import type { ExpandedGraph, ExpandedNode, ModelFanoutProvenance } from "@ultrafuzz/topology";
 
@@ -28,7 +28,7 @@ import {
   SMITHERS_ORCHESTRATOR_VERSION
 } from "./smithers-package.js";
 import type { RenderedPromptPlan, RuntimeDiagnostic } from "./types.js";
-import { sha256Stable } from "./utils.js";
+import { DEFERRED_PROMPT_TEMPLATE_DIR, sha256Stable } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
@@ -262,6 +262,8 @@ export interface SmithersCompileInput {
   renderedPrompts: readonly RenderedPromptPlan[];
   operatorPrompt?: string;
   operatorInput?: unknown;
+  /** Run-root-relative materialized vulnerability-database planner catalog, when the run has one. */
+  vulnerabilityDatabase?: { relative_path: string; sha256: string };
 }
 
 export interface NodeAttemptProvenance {
@@ -295,6 +297,14 @@ export interface CompiledSmithersTask {
   workspacePath: string;
   artifactDir: string;
   dependencyArtifactDirs: readonly string[];
+  /**
+   * Pinned-reference artifact trees this attempt depends on. Reference nodes are not agentic
+   * attempts, so their materialized trees would otherwise never reach a cloud worker even though
+   * postprocessors require them.
+   */
+  referenceArtifactDirs: readonly string[];
+  /** Digest-bound materialized planner catalog required by threat-model/goal-plan postprocessors. */
+  vulnerabilityDatabaseCatalog?: { path: string; sha256: string };
   renderedPromptPath?: string;
   /** Immutable raw prompt snapshot used only when runtime topology expansion delays rendering. */
   promptTemplatePath?: string;
@@ -415,6 +425,12 @@ export interface DynamicPromptRuntimeContext {
     invariantPropertyPriorityFilter: string;
     invariantPropertyPriorities: string[];
     invariantTestingFuzzerTimeout: number;
+    /**
+     * Run-root-relative path to the digest-bound materialized planner catalog. Deferred and dynamic
+     * rendering resolves it against the actual run root so a relocated or cloud root stays correct.
+     */
+    vulnerabilityDatabaseRelativePath?: string;
+    vulnerabilityDatabaseSha256?: string;
   };
 }
 
@@ -544,6 +560,13 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
       nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
     );
   }
+  const referenceAttemptsByNodeId = new Map<string, string[]>();
+  for (const node of input.graph.nodes.filter((candidate) => candidate.kind === "reference")) {
+    referenceAttemptsByNodeId.set(
+      node.id,
+      nodeAttemptsFor(node).map((attempt) => attempt.attemptId)
+    );
+  }
   const renderedByAttempt = new Map(
     input.renderedPrompts.map((prompt) => [prompt.attempt_id ?? prompt.node_id, prompt.rendered_prompt_path])
   );
@@ -566,7 +589,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           promptTemplatePath:
             dynamicAncestorGroupsForNode(node, nodeById).length === 0
               ? undefined
-              : snapshotPromptTemplate(input.runLayout, projectRoot, node),
+              : snapshotPromptTemplate(input.runLayout, input.graph, node),
           dynamicDependencies: node.dependsOn.filter((dependency) => dynamicNodeIds.has(dependency)),
           deferredPromptGroups: dynamicAncestorGroupsForNode(node, nodeById),
           dependencyAttemptIds: node.dependsOn.flatMap((dependency) =>
@@ -581,7 +604,11 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
           // those artifact directories.
           artifactDependencyAttemptIds: artifactAncestorNodeIds(node.id, input.graph.nodes).flatMap((ancestor) =>
             dynamicNodeIds.has(ancestor) ? [] : (attemptsByNodeId.get(ancestor) ?? [])
-          )
+          ),
+          dependencyReferenceAttemptIds: node.dependsOn.flatMap(
+            (dependency) => referenceAttemptsByNodeId.get(dependency) ?? []
+          ),
+          ...(input.vulnerabilityDatabase === undefined ? {} : { vulnerabilityDatabase: input.vulnerabilityDatabase })
         })
       )
   );
@@ -596,6 +623,7 @@ export function compileSmithersWorkflow(input: SmithersCompileInput): CompiledSm
         nodeById,
         attemptsByNodeId,
         agenticAttemptsByNodeId,
+        referenceAttemptsByNodeId,
         projectRoot,
         workflowName
       })
@@ -2042,32 +2070,33 @@ function dynamicAncestorGroupsForNode(node: ExpandedNode, nodeById: ReadonlyMap<
   return [...discovered].sort();
 }
 
-function snapshotPromptTemplate(runLayout: RunLayout, projectRoot: string, node: ExpandedNode): string {
+/**
+ * Resolves the immutable transformed prompt body that planning hashed and validated.
+ *
+ * The project file is deliberately never reread: a run-scoped prompt transform makes the on-disk
+ * bytes differ from the bytes the plan is bound to, which would either fail compilation for dynamic
+ * templates or leave a deferred static descendant rendering stale artifact references.
+ */
+function snapshotPromptTemplate(runLayout: RunLayout, graph: ExpandedGraph, node: ExpandedNode): string {
   if (node.promptPath === undefined) {
     throw new Error(`runtime-rendered node ${node.id} is missing a prompt path`);
   }
-  const promptRoot = path.join(projectRoot, ".ultrafuzz", "prompts");
-  const sourcePath = path.join(promptRoot, node.promptPath);
-  assertPathInside(promptRoot, sourcePath, `prompt template for ${node.id}`);
-  assertNoSymlinkComponents(promptRoot, sourcePath, `prompt template for ${node.id}`);
-  assertRegularFileInside(promptRoot, sourcePath, `prompt template for ${node.id}`);
-  const template = parsePromptFrontmatter(fs.readFileSync(sourcePath, "utf8")).body;
-  const digest = crypto.createHash("sha256").update(template).digest("hex");
+  const digest = graph.fingerprintInputs?.promptDigests?.[node.promptPath] ?? node.dynamic?.templateDigest;
+  if (digest === undefined) {
+    throw new Error(`deferred prompt template digest is unavailable for ${node.id}`);
+  }
   if (node.dynamic?.templateDigest !== undefined && node.dynamic.templateDigest !== digest) {
     throw new Error(`dynamic prompt template digest changed for ${node.id}`);
   }
-  const snapshotDir = path.join(runLayout.root, "dynamic-prompt-templates");
-  assertPathInside(runLayout.root, snapshotDir, "dynamic prompt template directory");
-  assertNoSymlinkComponents(runLayout.root, snapshotDir, "dynamic prompt template directory");
-  fs.mkdirSync(snapshotDir, { recursive: true });
-  assertNoSymlinkComponents(runLayout.root, snapshotDir, "dynamic prompt template directory");
-  const snapshotPath = path.join(snapshotDir, `${digest}.md`);
-  if (fs.existsSync(snapshotPath)) {
-    assertRegularFileInside(runLayout.root, snapshotPath, `dynamic prompt template for ${node.id}`);
-    const actual = crypto.createHash("sha256").update(fs.readFileSync(snapshotPath)).digest("hex");
-    if (actual !== digest) throw new Error(`dynamic prompt template snapshot collision for ${node.id}`);
-  } else {
-    writeFileDurable(snapshotPath, template);
+  const snapshotPath = safeResolveInside(
+    runLayout.root,
+    `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`,
+    `deferred prompt template for ${node.id}`
+  );
+  assertRegularFileInside(runLayout.root, snapshotPath, `deferred prompt template for ${node.id}`);
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(snapshotPath, "utf8")).digest("hex");
+  if (actual !== digest) {
+    throw new Error(`deferred prompt template snapshot digest changed for ${node.id}`);
   }
   return snapshotPath;
 }
@@ -2078,6 +2107,7 @@ function compileDynamicGroup(input: {
   nodeById: ReadonlyMap<string, ExpandedNode>;
   attemptsByNodeId: ReadonlyMap<string, string[]>;
   agenticAttemptsByNodeId: ReadonlyMap<string, string[]>;
+  referenceAttemptsByNodeId: ReadonlyMap<string, string[]>;
   projectRoot: string;
   workflowName: string;
 }): CompiledSmithersDynamicGroup {
@@ -2099,7 +2129,7 @@ function compileDynamicGroup(input: {
   if (sourcePrimary === undefined) {
     throw new Error(`dynamic group ${input.node.id} source has no primary output`);
   }
-  const templatePath = snapshotPromptTemplate(input.input.runLayout, input.projectRoot, input.node);
+  const templatePath = snapshotPromptTemplate(input.input.runLayout, input.input.graph, input.node);
   const templateDigest = crypto.createHash("sha256").update(fs.readFileSync(templatePath)).digest("hex");
   const dependencyAttemptIds = input.node.dependsOn.flatMap(
     (dependency) => input.attemptsByNodeId.get(dependency) ?? []
@@ -2125,7 +2155,13 @@ function compileDynamicGroup(input: {
       deferredPromptGroups: [input.node.id],
       dependencyAttemptIds,
       dependencyAgenticAttemptIds,
-      artifactDependencyAttemptIds
+      artifactDependencyAttemptIds,
+      dependencyReferenceAttemptIds: input.node.dependsOn.flatMap(
+        (dependency) => input.referenceAttemptsByNodeId.get(dependency) ?? []
+      ),
+      ...(input.input.vulnerabilityDatabase === undefined
+        ? {}
+        : { vulnerabilityDatabase: input.input.vulnerabilityDatabase })
     })
   );
   const priorities = invariantPropertyPrioritySelection(input.input.config.invariants.propertyPriorityThreshold);
@@ -2170,7 +2206,13 @@ function compileDynamicGroup(input: {
         invariantPropertyPriorityThreshold: input.input.config.invariants.propertyPriorityThreshold,
         invariantPropertyPriorityFilter: priorities.filter,
         invariantPropertyPriorities: priorities.priorities,
-        invariantTestingFuzzerTimeout: input.input.config.invariants.invariantTestingFuzzerTimeoutSeconds
+        invariantTestingFuzzerTimeout: input.input.config.invariants.invariantTestingFuzzerTimeoutSeconds,
+        ...(input.input.vulnerabilityDatabase === undefined
+          ? {}
+          : {
+              vulnerabilityDatabaseRelativePath: input.input.vulnerabilityDatabase.relative_path,
+              vulnerabilityDatabaseSha256: input.input.vulnerabilityDatabase.sha256
+            })
       }
     }
   };
@@ -2190,6 +2232,8 @@ function compileTask(input: {
   dependencyAttemptIds: readonly string[];
   dependencyAgenticAttemptIds: readonly string[];
   artifactDependencyAttemptIds: readonly string[];
+  dependencyReferenceAttemptIds?: readonly string[];
+  vulnerabilityDatabase?: { relative_path: string; sha256: string };
 }): CompiledSmithersTask {
   const profile = modelProfileFor(input.config, input.attempt);
   const timeoutMs =
@@ -2205,6 +2249,20 @@ function compileTask(input: {
   const dependencyArtifactDirs = input.artifactDependencyAttemptIds.map((attemptId) =>
     getNodeArtifactDir(input.runLayout, attemptId, { create: true })
   );
+  const referenceArtifactDirs = (input.dependencyReferenceAttemptIds ?? []).map((attemptId) =>
+    getNodeArtifactDir(input.runLayout, attemptId, { create: true })
+  );
+  const vulnerabilityDatabaseCatalog =
+    input.vulnerabilityDatabase === undefined
+      ? undefined
+      : {
+          path: safeResolveInside(
+            input.runLayout.root,
+            input.vulnerabilityDatabase.relative_path,
+            "materialized vulnerability database catalog"
+          ),
+          sha256: input.vulnerabilityDatabase.sha256
+        };
   const dependencySmithersNodeIds = input.dependencyAgenticAttemptIds.map(verifierSmithersNodeIdForAttempt);
   const executionResources = resolveExecutionResources(input.config, input.node.logicalId);
   const agent = input.config.agents[profile.agent];
@@ -2304,6 +2362,8 @@ function compileTask(input: {
     workspacePath,
     artifactDir,
     dependencyArtifactDirs,
+    referenceArtifactDirs,
+    ...(vulnerabilityDatabaseCatalog === undefined ? {} : { vulnerabilityDatabaseCatalog }),
     ...(input.renderedPromptPath ? { renderedPromptPath: input.renderedPromptPath } : {}),
     ...(input.promptTemplatePath ? { promptTemplatePath: input.promptTemplatePath } : {}),
     ...(input.dynamicDependencies && input.dynamicDependencies.length > 0
@@ -2487,6 +2547,22 @@ function renderWorkflowSource(compiled: CompiledSmithersWorkflow): string {
       dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
         executionPath(compiled.projectRoot, task, directory, "dependency artifact directory")
       ),
+      referenceArtifactDirs: task.referenceArtifactDirs.map((directory) =>
+        executionPath(compiled.projectRoot, task, directory, "reference artifact directory")
+      ),
+      ...(task.vulnerabilityDatabaseCatalog === undefined
+        ? {}
+        : {
+            vulnerabilityDatabase: {
+              catalogPath: executionPath(
+                compiled.projectRoot,
+                task,
+                task.vulnerabilityDatabaseCatalog.path,
+                "vulnerability database catalog"
+              ),
+              catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
+            }
+          }),
       runRoot: executionPath(compiled.projectRoot, task, path.resolve(task.artifactDir, "..", ".."), "run root"),
       workflowPath: executionPath(compiled.projectRoot, task, compiled.workflowPath, "workflow path"),
       sourceProjectRoot: compiled.projectRoot,

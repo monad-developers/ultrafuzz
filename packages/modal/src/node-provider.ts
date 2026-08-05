@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
+  isCloudExecutionGeneration,
+  isInsideCloudHandoffRoot,
+  isSafeCloudHandoffPath,
+  parseCloudSelectedTask,
+  type CloudSelectedTask
+} from "@ultrafuzz/artifacts";
+import {
   ModalClient,
   SandboxFilesystemNotFoundError,
   type App,
@@ -88,6 +96,16 @@ export interface ModalNodeSandboxInput {
   artifact_dir: string;
   workspace_dir: string;
   dependency_artifact_dirs: string[];
+  /** Materialized pinned-reference trees this attempt's postprocessors require. */
+  reference_artifact_dirs?: string[];
+  /** Digest-bound materialized planner catalog required by threat-model/goal-plan postprocessors. */
+  vulnerability_database?: { catalogPath: string; catalogSha256: string };
+  /**
+   * The exact, versioned, already-materialized selected task DTO. A worker never rematerializes
+   * controller-owned state, so this crosses the trust boundary and is validated against the shared
+   * contract rather than accepted as an arbitrary record.
+   */
+  selected_task?: CloudSelectedTask;
   project_archive_sha256?: string;
   resources: {
     cpu: number;
@@ -97,6 +115,37 @@ export interface ModalNodeSandboxInput {
   agent_credential_env: string[];
   operator_prompt?: string;
 }
+
+/**
+ * Every key the versioned cloud node input contract defines.
+ *
+ * The dispatch is an untrusted document at the provider boundary, so the outer object is exact: an
+ * unknown key -- a future field, a hydrated-only alias such as `selectedTask`, or smuggled state --
+ * is refused before any archive, credential, or sandbox work happens.
+ */
+const MODAL_NODE_INPUT_KEYS: ReadonlySet<string> = new Set([
+  "schema_version",
+  "run_id",
+  "task_id",
+  "attempt_id",
+  "execution_generation",
+  "workflow_path",
+  "prompt_path",
+  "run_root",
+  "artifact_dir",
+  "workspace_dir",
+  "dependency_artifact_dirs",
+  "reference_artifact_dirs",
+  "vulnerability_database",
+  "selected_task",
+  "project_archive_sha256",
+  "resources",
+  "agent_credential_env",
+  "operator_prompt"
+]);
+
+/** The sandbox is created from exactly these three numbers, so the nested object is exact too. */
+const MODAL_NODE_RESOURCE_KEYS: ReadonlySet<string> = new Set(["cpu", "memory_mib", "timeout_seconds"]);
 
 interface ModalNodeClient {
   apps: {
@@ -134,6 +183,7 @@ async function runModalNodeSandbox(
   request: NodeSandboxProviderRequest
 ): Promise<NodeSandboxProviderResult> {
   const input = parseModalNodeSandboxInput(request.input);
+  assertSelectedTaskSourceProjectRoot(input, request.rootDir);
   const env = options.env ?? process.env;
   const [tokenIdName, tokenSecretName] = options.credentialEnv;
   const tokenId = requiredCredential(env, tokenIdName);
@@ -297,9 +347,14 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   if (!isRecord(value) || value.schema_version !== "ultrafuzz.modal.node.v1") {
     throw new Error("cloud node input is invalid");
   }
+  const unsupported = Object.keys(value).filter((key) => !MODAL_NODE_INPUT_KEYS.has(key));
+  if (unsupported.length > 0) {
+    throw new Error(`cloud node input has unsupported keys: ${[...unsupported].sort().join(", ")}`);
+  }
   const resources = value.resources;
   if (
     !isRecord(resources) ||
+    Object.keys(resources).some((key) => !MODAL_NODE_RESOURCE_KEYS.has(key)) ||
     typeof resources.cpu !== "number" ||
     !Number.isFinite(resources.cpu) ||
     resources.cpu <= 0 ||
@@ -323,8 +378,18 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
       throw new Error(`cloud node ${key} is invalid`);
     }
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value.execution_generation as string)) {
+  // The generation names the sandbox, the volume attempt root, and the storage lineage, so the
+  // dispatch identity is validated against the one shared bounded pattern both boundaries use.
+  if (!isCloudExecutionGeneration(value.execution_generation)) {
     throw new Error("cloud node execution generation is invalid");
+  }
+  // Every location in a cloud dispatch is stated project-relative. Validating the canonical safe
+  // shape here, before any filesystem work, is what makes traversal, absolute paths, and
+  // sibling-prefix escapes rejections rather than anchored-path errors deep inside archiving.
+  for (const key of ["workflow_path", "run_root", "artifact_dir", "workspace_dir"] as const) {
+    if (!isSafeCloudHandoffPath(value[key])) {
+      throw new Error(`cloud node ${key} is invalid`);
+    }
   }
   if (!isSafeModalAttemptId(value.attempt_id as string)) {
     throw new Error("cloud node attempt_id is invalid");
@@ -335,14 +400,62 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
   ) {
     throw new Error("cloud node credential environment configuration is invalid");
   }
-  if (
-    !Array.isArray(value.dependency_artifact_dirs) ||
-    !value.dependency_artifact_dirs.every((entry) => typeof entry === "string" && entry.trim() !== "")
-  ) {
+  if (!Array.isArray(value.dependency_artifact_dirs) || !value.dependency_artifact_dirs.every(isSafeCloudHandoffPath)) {
     throw new Error("cloud node dependency artifact configuration is invalid");
   }
-  if (value.prompt_path !== undefined && (typeof value.prompt_path !== "string" || value.prompt_path.trim() === "")) {
+  if (
+    value.reference_artifact_dirs !== undefined &&
+    (!Array.isArray(value.reference_artifact_dirs) || !value.reference_artifact_dirs.every(isSafeCloudHandoffPath))
+  ) {
+    throw new Error("cloud node reference artifact configuration is invalid");
+  }
+  if (value.vulnerability_database !== undefined) {
+    const database = value.vulnerability_database;
+    if (
+      !isRecord(database) ||
+      Object.keys(database).some((key) => !["catalogPath", "catalogSha256"].includes(key)) ||
+      !isSafeCloudHandoffPath(database.catalogPath) ||
+      typeof database.catalogSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(database.catalogSha256)
+    ) {
+      throw new Error("cloud node vulnerability database configuration is invalid");
+    }
+  }
+  if (value.prompt_path !== undefined && !isSafeCloudHandoffPath(value.prompt_path)) {
     throw new Error("cloud node prompt path is invalid");
+  }
+  const input = value as unknown as ModalNodeSandboxInput;
+  const confined: Array<[string, string]> = [
+    ["artifact_dir", input.artifact_dir],
+    ["workspace_dir", input.workspace_dir],
+    ...(input.prompt_path === undefined ? [] : [["prompt_path", input.prompt_path] as [string, string]]),
+    ...input.dependency_artifact_dirs.map((entry): [string, string] => ["dependency_artifact_dirs", entry]),
+    ...(input.reference_artifact_dirs ?? []).map((entry): [string, string] => ["reference_artifact_dirs", entry]),
+    ...(input.vulnerability_database === undefined
+      ? []
+      : [["vulnerability_database.catalogPath", input.vulnerability_database.catalogPath] as [string, string]])
+  ];
+  for (const [label, candidate] of confined) {
+    if (!isInsideCloudHandoffRoot(input.run_root, candidate)) {
+      throw new Error(`cloud node ${label} must stay inside the run root`);
+    }
+  }
+  if (value.selected_task !== undefined) {
+    // The handoff is the worker's only view of the compiled graph, so it is validated against the
+    // shared contract and cross-checked against the dispatch it travels with.
+    let selected: CloudSelectedTask;
+    try {
+      selected = parseCloudSelectedTask(value.selected_task, {
+        taskId: input.task_id,
+        attemptId: input.attempt_id,
+        executionGeneration: input.execution_generation,
+        // A cloud dispatch may only carry a handoff that claims the cloud/modal execution identity.
+        ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION
+      });
+    } catch (error) {
+      throw new Error(`cloud node selected task handoff is invalid: ${(error as Error).message}`, { cause: error });
+    }
+    assertSelectedTaskAgreesWithDispatch(selected, input);
   }
   if (
     value.project_archive_sha256 !== undefined &&
@@ -354,6 +467,43 @@ export function parseModalNodeSandboxInput(value: unknown): ModalNodeSandboxInpu
     throw new Error("cloud node operator prompt is invalid");
   }
   return value as unknown as ModalNodeSandboxInput;
+}
+
+/**
+ * Binds the handoff to the dispatch it travels with.
+ *
+ * The archive is built from the top-level dispatch fields while the worker executes from the handoff,
+ * so any disagreement would mean the worker runs an attempt whose inputs were never archived.
+ */
+function assertSelectedTaskAgreesWithDispatch(selected: CloudSelectedTask, input: ModalNodeSandboxInput): void {
+  const agreements: Array<[string, unknown, unknown]> = [
+    ["runRoot", selected.runRoot, input.run_root],
+    ["workflowPath", selected.workflowPath, input.workflow_path],
+    ["artifactDir", selected.artifactDir, input.artifact_dir],
+    ["workspacePath", selected.workspacePath, input.workspace_dir],
+    ["promptPath", selected.promptPath, input.prompt_path],
+    ["metadata.run.ultrafuzzRunId", selected.metadata.run.ultrafuzzRunId, input.run_id],
+    [
+      "dependencyArtifactDirs",
+      JSON.stringify([...selected.dependencyArtifactDirs].sort()),
+      JSON.stringify([...input.dependency_artifact_dirs].sort())
+    ],
+    [
+      "referenceArtifactDirs",
+      JSON.stringify([...selected.referenceArtifactDirs].sort()),
+      JSON.stringify([...(input.reference_artifact_dirs ?? [])].sort())
+    ],
+    [
+      "vulnerabilityDatabase",
+      JSON.stringify(selected.vulnerabilityDatabase ?? null),
+      JSON.stringify(input.vulnerability_database ?? null)
+    ]
+  ];
+  for (const [label, left, right] of agreements) {
+    if (left !== right) {
+      throw new Error(`cloud node selected task handoff ${label} disagrees with the dispatched cloud node input`);
+    }
+  }
 }
 
 export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
@@ -377,6 +527,7 @@ export async function createModalNodeHandoffArchive(
   input: ModalNodeSandboxInput
 ): Promise<{ path: string; sha256: string; cleanup: () => void }> {
   const root = fs.realpathSync(path.resolve(projectRoot));
+  assertSelectedTaskSourceProjectRoot(input, root);
   const workflowPath = checkedPath(root, input.workflow_path, "workflow path");
   const runRoot = checkedPath(root, input.run_root, "run root");
   const promptPath =
@@ -384,11 +535,29 @@ export async function createModalNodeHandoffArchive(
   const dependencyArtifactDirs = input.dependency_artifact_dirs.map((value) =>
     checkedPath(root, value, "dependency artifact directory")
   );
+  const referenceArtifactDirs = (input.reference_artifact_dirs ?? []).map((value) =>
+    checkedPath(root, value, "reference artifact directory")
+  );
+  const vulnerabilityDatabaseCatalog =
+    input.vulnerability_database === undefined
+      ? undefined
+      : checkedPath(root, input.vulnerability_database.catalogPath, "vulnerability database catalog");
   const artifactDir = checkedPath(root, input.artifact_dir, "artifact directory", false);
-  assertChildPath(runRoot, workflowPath, "workflow path");
+  // The generated workflow lives at `.smithers/workflows/`, a project child outside every run root,
+  // so `checkedPath` above is its confinement boundary. Everything else is run-root evidence.
   if (promptPath !== undefined) assertChildPath(runRoot, promptPath, "rendered prompt path");
   for (const dependencyArtifactDir of dependencyArtifactDirs) {
     assertChildPath(runRoot, dependencyArtifactDir, "dependency artifact directory");
+  }
+  for (const referenceArtifactDir of referenceArtifactDirs) {
+    assertChildPath(runRoot, referenceArtifactDir, "reference artifact directory");
+  }
+  if (vulnerabilityDatabaseCatalog !== undefined) {
+    assertChildPath(runRoot, vulnerabilityDatabaseCatalog, "vulnerability database catalog");
+    const actual = crypto.createHash("sha256").update(fs.readFileSync(vulnerabilityDatabaseCatalog)).digest("hex");
+    if (actual !== input.vulnerability_database!.catalogSha256) {
+      throw new Error("vulnerability database catalog does not match its declared cloud-input digest");
+    }
   }
   assertChildPath(runRoot, artifactDir, "artifact directory");
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-handoff-"));
@@ -421,9 +590,26 @@ export async function createModalNodeHandoffArchive(
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
       copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
     }
+    // Reference trees and the run-root planner catalog are explicit cloud inputs: the threat-model
+    // and goal-plan postprocessors verify both against the pinned database, and neither is an
+    // agentic dependency artifact directory.
+    for (const referenceArtifactDir of referenceArtifactDirs) {
+      copyTreeChecked(referenceArtifactDir, path.join(staging, path.relative(root, referenceArtifactDir)));
+    }
+    if (vulnerabilityDatabaseCatalog !== undefined) {
+      copyFileChecked(
+        root,
+        vulnerabilityDatabaseCatalog,
+        path.join(staging, path.relative(root, vulnerabilityDatabaseCatalog))
+      );
+    }
     copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     for (const relative of [
+      // Prompt-referenced canonical artifact contracts. `git archive HEAD` only carries them when
+      // the project committed `.ultrafuzz/schema`, so copy them explicitly like the agent registry.
+      ".ultrafuzz/schema/threat-model.schema.json",
+      ".ultrafuzz/schema/goal-plan.schema.json",
       ".smithers/package.json",
       ".smithers/agents/index.ts",
       ".smithers/agents/codex.ts",
@@ -447,6 +633,13 @@ export async function createModalNodeHandoffArchive(
   } catch (error) {
     removeHandoffTemporaryRoot(temporaryRoot);
     throw error;
+  }
+}
+
+function assertSelectedTaskSourceProjectRoot(input: ModalNodeSandboxInput, projectRoot: string): void {
+  const root = fs.realpathSync(path.resolve(projectRoot));
+  if (input.selected_task !== undefined && input.selected_task.sourceProjectRoot !== root) {
+    throw new Error("selected task source project root does not match the archived project root");
   }
 }
 

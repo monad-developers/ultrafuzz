@@ -99,10 +99,27 @@ Dynamic findings:
 Dynamic generated-test manifest:
 {{artifact_path:dynamic-strategy-generator}}/generated-tests.json
 
-Also consume every generated child from the `threat-goals` and `class-goals`
-dynamic groups plus the fixed `goal-roaming` lane. Dynamic children are
-ordinary finding producers even when a group contains dozens or hundreds of
-nodes; never inspect only a fixed prefix of the group.
+Also consume every runtime-generated child of the threat/class goal groups plus
+the fixed roaming goal. Ultrafuzz renders one exact artifact path per generated
+node below, so read the enumerated paths and never guess a filesystem location,
+a group directory, or a node-ID pattern:
+
+Threat-goal findings: {{artifact_path:threat-goals}}/findings.json
+
+Threat-goal generated tests: {{artifact_path:threat-goals}}/generated-tests.json
+
+Class-goal findings: {{artifact_path:class-goals}}/findings.json
+
+Class-goal generated tests: {{artifact_path:class-goals}}/generated-tests.json
+
+Roaming-goal findings: {{artifact_path:goal-roaming}}/findings.json
+
+Roaming-goal generated tests: {{artifact_path:goal-roaming}}/generated-tests.json
+
+A dynamic group renders as a bulleted list with one line per generated node, so
+the same instruction covers a group with one child and a group with hundreds.
+Dynamic children are ordinary finding producers; never inspect only a fixed
+prefix of the enumerated list.
 
 Admin/config boundary findings: {{artifact_path:admin-config-boundaries}}/findings.json
 

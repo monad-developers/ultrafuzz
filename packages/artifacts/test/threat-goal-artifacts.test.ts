@@ -21,6 +21,7 @@ import {
   verifyGoalPlanSelectedRecordSnapshots,
   verifyGoalPlanThreatModelBytes
 } from "../src/index.js";
+import { isNamespacedDynamicReplacementKey, promptTemplateOccurrences } from "@ultrafuzz/prompts";
 
 const digest = "a".repeat(64);
 
@@ -828,6 +829,7 @@ test("selected vulnerability-class snapshots are manifest-backed exact artifacts
     schema_version: "ultrafuzz.vulnerability-db.snapshot.v1",
     database_schema_version: 1,
     aggregate_sha256: digest,
+    catalog_sha256: digest,
     files: {},
     records: [
       {
@@ -936,6 +938,138 @@ test("selected vulnerability-class snapshots are manifest-backed exact artifacts
   assert.throws(() => verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan), /byte map does not exactly match/u);
   fs.unlinkSync(unplannedPath);
 
+  const missingCatalogDigest = structuredClone(manifest) as Record<string, unknown>;
+  delete missingCatalogDigest.catalog_sha256;
+  assert.throws(
+    () => verifyGoalPlanSelectedRecordSnapshotBytes(plan, missingCatalogDigest, new Map([[selectedPath, contents]])),
+    /catalog_sha256/u,
+    "the snapshot manifest must declare the planner catalog digest"
+  );
+  const tamperedCatalogDigest = { ...structuredClone(manifest), catalog_sha256: "b".repeat(64) };
+  assert.throws(
+    () => verifyGoalPlanSelectedRecordSnapshotBytes(plan, tamperedCatalogDigest, new Map([[selectedPath, contents]])),
+    /does not match goal-plan provenance/u,
+    "a one-field catalog digest mismatch must be rejected"
+  );
+
   fs.appendFileSync(path.join(artifactDir, selectedPath), "tampered");
   assert.throws(() => verifyGoalPlanSelectedRecordSnapshots(artifactDir, plan), /bytes do not match/u);
 });
+
+test("selected-record paths reject traversal segments in the contract and the in-memory verifier", () => {
+  const unsafePaths = [
+    "vulnerability-db/selected/../../../escape.md",
+    "vulnerability-db/selected/./accounting/share-inflation.md",
+    "vulnerability-db/selected/accounting/../share-inflation.md",
+    "vulnerability-db/selected/accounting//share-inflation.md",
+    "vulnerability-db/selected/.md",
+    "vulnerability-db/selected/",
+    "vulnerability-db/selected/accounting/share-inflation.md/..",
+    "/vulnerability-db/selected/accounting/share-inflation.md",
+    "vulnerability-db/selected/accounting\\share-inflation.md",
+    "other/selected/accounting/share-inflation.md",
+    "vulnerability-db/selected/accounting/share-inflation.txt"
+  ];
+  assert.equal(
+    validateGoalPlan(classGoalPlanFixture("vulnerability-db/selected/accounting/share-inflation.md")).ok,
+    true,
+    "the canonical selected path stays valid"
+  );
+  for (const unsafePath of unsafePaths) {
+    const tampered = classGoalPlanFixture(unsafePath);
+    assert.equal(validateGoalPlan(tampered).ok, false, unsafePath);
+    // The exported in-memory verifier must never hand a caller an unnormalized path either.
+    assert.throws(() => verifyGoalPlanSelectedRecordSnapshotBytes(tampered, {}, new Map()), /goal plan/u, unsafePath);
+  }
+});
+
+test("goal-plan replacement keys are exactly the keys the dynamic fanout consumer accepts", () => {
+  const plan = goalPlanFixture();
+  const goals = plan.threat_goals as Array<Record<string, unknown>>;
+  const base = goals[0]!;
+
+  // An unnamespaced key is contract-valid today and deterministically aborts the next node.
+  const unnamespaced = structuredClone(plan);
+  const unnamespacedGoal = (unnamespaced.threat_goals as Array<Record<string, unknown>>)[0]!;
+  unnamespacedGoal.replacements = { ...(base.replacements as Record<string, unknown>), detail: "extra" };
+  unnamespacedGoal.goal_prompt = `${String(base.goal_prompt)} Extra {{detail}}.`;
+  assert.equal(validateGoalPlan(unnamespaced).ok, false, "unnamespaced replacement keys must be rejected");
+
+  // Every accepted plan item must be consumable: the contract and the consumer share one predicate.
+  const accepted = validateGoalPlan(plan);
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.issues));
+  for (const goal of accepted.value!.threat_goals) {
+    for (const key of Object.keys(goal.replacements)) {
+      assert.equal(isNamespacedDynamicReplacementKey(key), true, key);
+    }
+  }
+  for (const goal of accepted.value!.class_goals) {
+    for (const key of Object.keys(goal.replacements)) {
+      assert.equal(isNamespacedDynamicReplacementKey(key), true, key);
+    }
+  }
+});
+
+test("escaped required goal placeholders are rejected instead of rendering as literals", () => {
+  const plan = goalPlanFixture();
+  const goal = (plan.threat_goals as Array<Record<string, unknown>>)[0]!;
+  const threatId = String(goal.id);
+
+  const escaped = structuredClone(plan);
+  const escapedGoal = (escaped.threat_goals as Array<Record<string, unknown>>)[0]!;
+  escapedGoal.goal_prompt = `Your /goal is to find a bug using threat model threat \\{{${threatId}}}.`;
+  const result = validateGoalPlan(escaped);
+  assert.equal(result.ok, false, "an escaped required placeholder can never be bound by the renderer");
+  assert.ok(result.issues.some((issue) => /must not escape the required item-scoped placeholder/u.test(issue.message)));
+
+  // The shared occurrence parser is the single source of truth for what will be bound.
+  assert.deepEqual(
+    promptTemplateOccurrences(String(escapedGoal.goal_prompt)).map((occurrence) => occurrence.name),
+    []
+  );
+  assert.deepEqual(
+    promptTemplateOccurrences(String(goal.goal_prompt)).map((occurrence) => occurrence.name),
+    [threatId]
+  );
+});
+
+function classGoalPlanFixture(selectedPath: string): Record<string, unknown> {
+  const classId = "accounting:share-inflation";
+  const plan = goalPlanFixture();
+  const selectedRecord = { id: classId, path: selectedPath, sha256: digest, size_bytes: 42 };
+  plan.catalog_class_ids = [classId];
+  plan.selected_class_records = [selectedRecord];
+  plan.class_goals = [
+    {
+      kind: "class",
+      id: classId,
+      node_id: "dynamic:class:" + classId,
+      class_id: classId,
+      class_replacement_key: "class:" + classId,
+      threat_ids: [],
+      threat_replacement_keys: ["threat-model:coverage-gap"],
+      attack_surface_ids: [],
+      coverage_gap: true,
+      title: "Share inflation",
+      selected_record: selectedRecord,
+      goal_prompt:
+        "Your /goal is to find a vulnerability of type {{class:accounting:share-inflation}} using threat model {{threat-model:coverage-gap}}.",
+      replacements: {
+        "class:accounting:share-inflation": "Focused hunter instructions.",
+        "threat-model:coverage-gap": "Inspect the full threat model because the explicit mapping is missing."
+      },
+      selection_rationale: "Applicable class exposes a coverage gap."
+    }
+  ];
+  plan.applicability_decisions = [
+    { class_id: classId, decision: "applicable", checks: [], rationale: "No hard incompatibility exists." }
+  ];
+  plan.counts = {
+    threats: 1,
+    applicable_classes: 1,
+    inapplicable_classes: 0,
+    dynamic_goals: 2,
+    total_goals: 3
+  };
+  return plan;
+}

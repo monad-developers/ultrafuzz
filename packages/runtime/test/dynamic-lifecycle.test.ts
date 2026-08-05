@@ -383,9 +383,15 @@ test("dynamic child success is resumable, idempotent, provenance-safe, and opens
 
   const findings = JSON.parse(fs.readFileSync(path.join(generated.artifactDir, "findings.json"), "utf8")) as Array<{
     source_node_id?: string;
+    source_nodes?: string[];
     producer_node_id?: string;
+    producer_attempt_id?: string;
   }>;
-  assert.equal(findings[0]?.source_node_id, generated.attemptId);
+  // The compatibility alias must equal source_nodes[0] so the downstream dedupe gate accepts this
+  // canonical upstream artifact; the storage/attempt identity stays explicit and in the manifest.
+  assert.deepEqual(findings[0]?.source_nodes, [fixture.generatedNodeId]);
+  assert.equal(findings[0]?.source_node_id, fixture.generatedNodeId);
+  assert.equal(findings[0]?.producer_attempt_id, generated.attemptId);
   assert.equal(findings[0]?.producer_node_id, fixture.generatedNodeId);
   const manifest = JSON.parse(fs.readFileSync(path.join(generated.artifactDir, "artifact-manifest.json"), "utf8")) as {
     producer_node_id?: string;

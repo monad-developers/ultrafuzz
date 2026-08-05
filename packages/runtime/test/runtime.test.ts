@@ -9,8 +9,19 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import * as ts from "typescript";
 
-import type { RunState } from "@ultrafuzz/artifacts";
-import { CACHE_MANIFEST_FILE, RUN_REFERENCE_MANIFEST_FILE } from "@ultrafuzz/references";
+import {
+  GOAL_PLAN_JSON_SCHEMA_ID,
+  THREAT_MODEL_JSON_SCHEMA_ID,
+  goalPlanJsonSchema,
+  threatModelJsonSchema,
+  type RunState
+} from "@ultrafuzz/artifacts";
+import {
+  CACHE_MANIFEST_FILE,
+  RUN_REFERENCE_MANIFEST_FILE,
+  loadReferenceCatalog,
+  parseReferenceCatalog
+} from "@ultrafuzz/references";
 
 import {
   assertSmithersPackageManifest,
@@ -41,6 +52,12 @@ import {
   syncRun,
   validateProject
 } from "../src/index.js";
+import { projectArtifactSchemaDir, projectArtifactSchemaJson } from "../src/init.js";
+import {
+  shippedReferenceCatalog,
+  writeShippedDocumentReferenceCaches,
+  writeShippedVulnerabilityDatabaseCache
+} from "./reference-fixtures.js";
 
 const runningUnderBun = typeof process.versions.bun === "string";
 
@@ -798,237 +815,6 @@ function writeReferenceCache(xdgCacheHome: string): void {
   );
 }
 
-const FIXTURE_VULNERABILITY_DATABASE_COMMIT = "b".repeat(40);
-
-function appendFixtureVulnerabilityDatabaseReference(project: string): void {
-  fs.appendFileSync(
-    path.join(project, ".ultrafuzz", "references.yml"),
-    [
-      "",
-      "  vulnerability-database.web3:",
-      "    kind: vulnerability-database",
-      "    provider: github",
-      "    repo: monad-developers/web3-vulnerability-database",
-      `    commit: ${FIXTURE_VULNERABILITY_DATABASE_COMMIT}`,
-      "    paths:",
-      "      - database.yml",
-      "      - capabilities.yml",
-      "      - catalog.json",
-      '    resolved_at: "2026-08-04T00:00:00Z"',
-      ""
-    ].join("\n"),
-    "utf8"
-  );
-}
-
-function writeFixtureVulnerabilityDatabaseCache(xdgCacheHome: string): void {
-  const cacheDir = path.join(
-    xdgCacheHome,
-    "ultrafuzz",
-    "references",
-    "github",
-    "monad-developers",
-    "web3-vulnerability-database",
-    "vulnerability-database",
-    FIXTURE_VULNERABILITY_DATABASE_COMMIT
-  );
-  const sourcePath = "classes/accounting/selected-class.md";
-  const source = [
-    "---",
-    "id: accounting:selected-class",
-    "title: Selected accounting class",
-    "domain: accounting",
-    "capabilities:",
-    "  required:",
-    "    - audit.catalog",
-    "  optional:",
-    "    - audit.unmodeled",
-    "  incompatible: []",
-    "threats:",
-    "  - accounting:selected-class-review",
-    "attack_surfaces:",
-    "  - accounting:selected-surface",
-    "related_classes: []",
-    "sources:",
-    "  - id: runtime-fixture",
-    "    kind: documentation",
-    "    title: Runtime fixture",
-    "    url: https://example.com/runtime-fixture",
-    "---",
-    "",
-    "## Summary",
-    "",
-    "Review the selected accounting class.",
-    "",
-    "## Preconditions",
-    "",
-    "The fixture capability is present.",
-    "",
-    "## Broken invariant",
-    "",
-    "Accounting must remain balanced.",
-    "",
-    "## Attack pattern",
-    "",
-    "Exercise the accounting boundary.",
-    "",
-    "## Impact",
-    "",
-    "Assets may be misaccounted.",
-    "",
-    "## Detection guidance",
-    "",
-    "Inspect balance transitions.",
-    "",
-    "## False positives",
-    "",
-    "Intentional rounding is excluded.",
-    "",
-    "## Hunter instructions",
-    "",
-    "Trace assets through the accounting path.",
-    "",
-    "## Examples",
-    "",
-    "Compare credited and debited values.",
-    ""
-  ].join("\n");
-  const metadata = [
-    "schema_version: 1",
-    "name: runtime-test-database",
-    "description: Runtime integration fixture.",
-    "classes: classes/**/*.md",
-    "capabilities: capabilities.yml",
-    "catalog: catalog.json",
-    ""
-  ].join("\n");
-  const capabilities = [
-    "capabilities:",
-    "  - id: audit.catalog",
-    "    title: Audit catalog",
-    "    description: The protocol exposes the fixture capability.",
-    "  - id: audit.unmodeled",
-    "    title: Unmodeled audit capability",
-    "    description: The goal planner retains unknown when threat modeling omits this capability.",
-    ""
-  ].join("\n");
-  const metadataBytes = Buffer.from(metadata);
-  const capabilityBytes = Buffer.from(capabilities);
-  const sourceBytes = Buffer.from(source);
-  const record = {
-    id: "accounting:selected-class",
-    title: "Selected accounting class",
-    domain: "accounting",
-    capabilities: { required: ["audit.catalog"], optional: ["audit.unmodeled"], incompatible: [] },
-    threats: ["accounting:selected-class-review"],
-    attack_surfaces: ["accounting:selected-surface"],
-    related_classes: [],
-    sources: [
-      {
-        id: "runtime-fixture",
-        kind: "documentation",
-        title: "Runtime fixture",
-        url: "https://example.com/runtime-fixture"
-      }
-    ],
-    guidance: {
-      summary: "Review the selected accounting class.",
-      preconditions: "The fixture capability is present.",
-      broken_invariant: "Accounting must remain balanced.",
-      attack_pattern: "Exercise the accounting boundary.",
-      impact: "Assets may be misaccounted.",
-      detection: "Inspect balance transitions.",
-      false_positives: "Intentional rounding is excluded.",
-      hunter_instructions: "Trace assets through the accounting path.",
-      examples: "Compare credited and debited values."
-    },
-    source_path: sourcePath,
-    source_sha256: digestFixtureBytes(sourceBytes),
-    source_size_bytes: sourceBytes.byteLength,
-    selected_artifact_path: "vulnerability-db/selected/accounting/selected-class.md"
-  };
-  const identity = {
-    database_schema_version: 1,
-    files: {
-      metadata: fixtureFileDigest("database.yml", metadataBytes),
-      capabilities: fixtureFileDigest("capabilities.yml", capabilityBytes)
-    },
-    records: [
-      {
-        id: record.id,
-        path: record.source_path,
-        sha256: record.source_sha256,
-        size_bytes: record.source_size_bytes
-      }
-    ]
-  };
-  const catalog = {
-    schema_version: "ultrafuzz.vulnerability-db.planner-catalog.v1",
-    database_schema_version: 1,
-    database_aggregate_sha256: digestFixtureBytes(Buffer.from(canonicalFixtureJson(identity))),
-    capabilities: [
-      {
-        id: "audit.catalog",
-        title: "Audit catalog",
-        description: "The protocol exposes the fixture capability."
-      },
-      {
-        id: "audit.unmodeled",
-        title: "Unmodeled audit capability",
-        description: "The goal planner retains unknown when threat modeling omits this capability."
-      }
-    ],
-    records: [record]
-  };
-  fs.mkdirSync(path.join(cacheDir, "classes", "accounting"), { recursive: true });
-  fs.writeFileSync(path.join(cacheDir, "database.yml"), metadataBytes);
-  fs.writeFileSync(path.join(cacheDir, "capabilities.yml"), capabilityBytes);
-  fs.writeFileSync(path.join(cacheDir, "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
-  fs.writeFileSync(path.join(cacheDir, sourcePath), sourceBytes);
-  const files = ["database.yml", "capabilities.yml", "catalog.json", sourcePath].map((relativePath) =>
-    fixtureFileDigest(relativePath, fs.readFileSync(path.join(cacheDir, relativePath)))
-  );
-  fs.writeFileSync(
-    path.join(cacheDir, CACHE_MANIFEST_FILE),
-    `${JSON.stringify(
-      {
-        schema_version: "1.0",
-        provider: "github",
-        repo: "monad-developers/web3-vulnerability-database",
-        commit: FIXTURE_VULNERABILITY_DATABASE_COMMIT,
-        fetched_at: "2026-08-04T00:00:00Z",
-        files
-      },
-      null,
-      2
-    )}\n`
-  );
-}
-
-function fixtureFileDigest(filePath: string, contents: Buffer): { path: string; size_bytes: number; sha256: string } {
-  return { path: filePath, size_bytes: contents.byteLength, sha256: digestFixtureBytes(contents) };
-}
-
-function digestFixtureBytes(contents: Buffer): string {
-  return crypto.createHash("sha256").update(contents).digest("hex");
-}
-
-function canonicalFixtureJson(value: unknown): string {
-  return JSON.stringify(canonicalFixtureValue(value));
-}
-
-function canonicalFixtureValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalFixtureValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, canonicalFixtureValue(child)])
-    );
-  }
-  return value;
-}
-
 function writeFanoutProject(project: string): void {
   fs.mkdirSync(path.join(project, ".ultrafuzz", "workspaces"), { recursive: true });
   fs.mkdirSync(path.join(project, ".ultrafuzz", "prompts", "setup"), { recursive: true });
@@ -1142,7 +928,6 @@ test("init preserves existing project-owned files and validate exposes launch po
   const init = initProject({ projectRoot: project });
   assert.equal(init.ok, true);
   assert.equal(init.value?.preserved.includes("ultrafuzz.toml"), true);
-  appendFixtureVulnerabilityDatabaseReference(project);
   assert.equal(fs.existsSync(path.join(project, ".ultrafuzz", "topology.yml")), true);
   assert.equal(fs.existsSync(path.join(project, "topology.yml")), false);
   assert.equal(fs.existsSync(path.join(project, ".smithers/agents/index.ts")), true);
@@ -3020,13 +2805,167 @@ test("plan uses an eval topology override without replacing the project topology
   assert.equal(fs.readFileSync(canonicalTopology, "utf8"), "not: [valid\n");
 });
 
+test("a clean scaffold pins the reviewed vulnerability database verbatim", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  // The scaffolded catalog is the shipped catalog, byte for byte: no test mutates it into passing.
+  const scaffoldedYaml = fs.readFileSync(path.join(project, ".ultrafuzz", "references.yml"), "utf8");
+  assert.deepEqual(parseReferenceCatalog(scaffoldedYaml), shippedReferenceCatalog());
+
+  const pinned = loadReferenceCatalog(project).references["vulnerability-database.web3"];
+  assert.ok(pinned, "the shipped scaffold must define vulnerability-database.web3");
+  assert.equal(pinned.kind, "vulnerability-database");
+  assert.equal(pinned.provider, "github");
+  assert.equal(pinned.repo, "monad-developers/web3-vulnerability-database");
+  assert.equal(pinned.commit, "fbf00e990b1316879b674e9903548dba452e40d5");
+  assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
+  assert.equal(pinned.resolved_at, "2026-08-04T22:33:24Z");
+});
+
+test("a clean scaffold publishes the canonical artifact schema files the prompts reference", () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  for (const [relativePath, schema, id] of [
+    [".ultrafuzz/schema/threat-model.schema.json", threatModelJsonSchema, THREAT_MODEL_JSON_SCHEMA_ID],
+    [".ultrafuzz/schema/goal-plan.schema.json", goalPlanJsonSchema, GOAL_PLAN_JSON_SCHEMA_ID]
+  ] as const) {
+    const filePath = path.join(project, ...relativePath.split("/"));
+    assert.equal(fs.statSync(filePath).isFile(), true, `${relativePath} must exist in a clean scaffold`);
+    fs.accessSync(filePath, fs.constants.R_OK);
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    // Generated from the one runtime validator, so the file an agent reads and the gate it must
+    // pass can never disagree.
+    assert.deepEqual(parsed, schema);
+    assert.equal(parsed.$id, id);
+    // The published bytes are the digest-stable canonical form.
+    assert.equal(
+      crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex"),
+      crypto.createHash("sha256").update(projectArtifactSchemaJson(schema)).digest("hex")
+    );
+  }
+
+  // Every prompt names its canonical schema through the rendered `artifact_schema_dir` variable,
+  // so the agent resolves an absolute path rather than a literal that only works from the project
+  // root. Each referenced file must be one the scaffold actually publishes.
+  const promptRoot = path.join(project, ".ultrafuzz", "prompts");
+  const referenced = new Set<string>();
+  for (const promptPath of listFilesRecursively(promptRoot)) {
+    const body = fs.readFileSync(promptPath, "utf8");
+    assert.equal(
+      /`\.ultrafuzz\/schema\//u.test(body),
+      false,
+      `${promptPath} must not hardcode a project-relative schema path`
+    );
+    for (const match of body.matchAll(/\{\{artifact_schema_dir\}\}\/([A-Za-z0-9._-]+\.schema\.json)/gu)) {
+      referenced.add(match[1]!);
+    }
+  }
+  assert.deepEqual([...referenced].sort(), ["goal-plan.schema.json", "threat-model.schema.json"]);
+  for (const fileName of referenced) {
+    const filePath = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(fs.statSync(filePath).isFile(), true, fileName);
+    fs.accessSync(filePath, fs.constants.R_OK);
+  }
+});
+
+function listFilesRecursively(root: string): string[] {
+  return fs
+    .readdirSync(root, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? listFilesRecursively(path.join(root, entry.name)) : [path.join(root, entry.name)]
+    );
+}
+
+test("the shipped default topology expands against the shipped reference catalog", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+
+  const shipped = await validateProject({ projectRoot: project, env: {} });
+  assert.equal(shipped.ok, true, JSON.stringify(shipped.diagnostics));
+  assert.ok((shipped.value!.topology?.expanded_nodes ?? 0) > 0);
+});
+
+test("a clean scaffold plans the threat-model, goal-plan, and dynamic fanout nodes", async () => {
+  const project = tempProject();
+  assert.equal(initProject({ projectRoot: project, force: true }).ok, true);
+  // Populate the normal reference cache with a valid local representation of every shipped pinned
+  // reference. The shipped catalog itself is untouched, so this only removes network dependence.
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeShippedDocumentReferenceCaches(xdgCacheHome, loadReferenceCatalog(project));
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
+
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  let plan;
+  try {
+    const validation = await validateProject({ projectRoot: project, env: {} });
+    assert.equal(validation.ok, true, JSON.stringify(validation.diagnostics));
+    plan = await planRun({ projectRoot: project, runId: "clean-scaffold", env: {} });
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+  const logicalIds = new Set(plan.value!.graph.nodes.map((node) => node.logical_id));
+  for (const required of [
+    "reference-vulnerability-database",
+    "threat-model",
+    "goal-plan",
+    "goal-roaming",
+    "threat-goals",
+    "class-goals",
+    "dedupe-findings",
+    "final-report"
+  ]) {
+    assert.equal(logicalIds.has(required), true, `${required} must be planned by a clean scaffold`);
+  }
+  // The dynamic goal groups stay dynamic declarations rather than being silently flattened away.
+  const dynamicIds = plan
+    .value!.graph.nodes.filter((node) => node.dynamic !== undefined)
+    .map((node) => node.logical_id)
+    .sort();
+  assert.deepEqual(dynamicIds, ["class-goals", "threat-goals"]);
+
+  // The digest-bound planner catalog is materialized under the run root for the compiled tasks.
+  const catalogPath = path.join(plan.value!.run_root, "vulnerability-db", "catalog.json");
+  assert.equal(fs.existsSync(catalogPath), true);
+  assert.equal(plan.value!.vulnerability_database?.relative_path, "vulnerability-db/catalog.json");
+  assert.equal(
+    plan.value!.vulnerability_database?.sha256,
+    crypto.createHash("sha256").update(fs.readFileSync(catalogPath)).digest("hex")
+  );
+
+  // The threat-model and goal-plan prompts must render an absolute, readable canonical schema path
+  // rather than an unresolved placeholder or a literal that only resolves from the project root.
+  for (const [logicalId, fileName] of [
+    ["threat-model", "threat-model.schema.json"],
+    ["goal-plan", "goal-plan.schema.json"]
+  ] as const) {
+    const renderedPath: string[] = plan
+      .value!.rendered_prompts.filter((entry) => entry.logical_node_id === logicalId)
+      .map((entry) => entry.rendered_prompt_path);
+    assert.equal(renderedPath.length > 0, true, `${logicalId} must render a prompt`);
+    const body = fs.readFileSync(renderedPath[0]!, "utf8");
+    const expected = path.join(projectArtifactSchemaDir(project), fileName);
+    assert.equal(body.includes(expected), true, `${logicalId} must reference ${expected}`);
+    assert.equal(body.includes("{{artifact_schema_dir}}"), false);
+    assert.equal(body.includes("unavailable/"), false);
+    fs.accessSync(expected, fs.constants.R_OK);
+  }
+});
+
 test("plan applies smoke eval model profiles to a normally initialized target", async () => {
   const project = tempProject();
   const init = initProject({ projectRoot: project, force: true });
   assert.equal(init.ok, true, JSON.stringify(init.diagnostics));
-  appendFixtureVulnerabilityDatabaseReference(project);
   const xdgCacheHome = path.join(project, "xdg-cache");
-  writeFixtureVulnerabilityDatabaseCache(xdgCacheHome);
+  writeShippedVulnerabilityDatabaseCache(xdgCacheHome);
   const smokeTopology = path.resolve(process.cwd(), "../..", "benchmarks", "smoke-benchmark.yml");
 
   const previousXdgCacheHome = process.env.XDG_CACHE_HOME;

@@ -9,7 +9,7 @@ import {
   publishFileDurableExclusive,
   validateSafeId
 } from "@ultrafuzz/artifacts";
-import { isDynamicItemTemplateVariable } from "@ultrafuzz/prompts";
+import { isDynamicItemTemplateVariable, isNamespacedDynamicReplacementKey } from "@ultrafuzz/prompts";
 
 import { sha256Stable, stableJson } from "./utils.js";
 
@@ -31,6 +31,7 @@ export interface DynamicExpansionInput {
   templateDigest: string;
   templateFingerprint: string;
   maxDynamicNodes: number;
+  sequence?: number;
   alreadyExpandedNodes?: number;
   reservedNodeIds?: Iterable<string>;
 }
@@ -63,6 +64,15 @@ export interface DynamicExpansionManifest {
     fingerprint: string;
   };
   max_dynamic_nodes: number;
+  /**
+   * Explicit monotonic publication order. Two independently sourced groups can legitimately share
+   * a `dynamic_nodes_before` boundary when one of them expands to zero items, so contiguity must be
+   * validated in publication order rather than by sorting on the counts themselves.
+   *
+   * Optional for backward compatibility: a run whose manifests were published before this field
+   * existed must still resume, so a set without it keeps the historical count-based ordering.
+   */
+  sequence?: number;
   dynamic_nodes_before: number;
   dynamic_nodes_after: number;
   items: DynamicExpansionItem[];
@@ -191,6 +201,7 @@ export function planDynamicExpansion(input: DynamicExpansionInput): DynamicExpan
       fingerprint: input.templateFingerprint
     },
     max_dynamic_nodes: input.maxDynamicNodes,
+    sequence: input.sequence ?? 0,
     dynamic_nodes_before: alreadyExpanded,
     dynamic_nodes_after: alreadyExpanded + items.length,
     items
@@ -290,8 +301,19 @@ export function loadOrCreateDynamicExpansion(input: {
       templateDigest: input.templateDigest,
       templateFingerprint: input.templateFingerprint,
       maxDynamicNodes: input.maxDynamicNodes,
+      sequence: priorManifests.length,
       alreadyExpandedNodes: priorManifests.reduce((sum, entry) => sum + entry.items.length, 0),
       reservedNodeIds: reserved
+    });
+    // Validate the complete candidate set in memory first: a manifest that would make the set
+    // invalid must never reach durable storage, otherwise every automatic resume keeps failing
+    // until an operator removes or repairs the published file by hand.
+    const candidateSet = [...priorManifests, manifest];
+    validateManifestSet(candidateSet, manifestDir);
+    assertManifestSetMatchesInput(candidateSet, {
+      runId: input.runId,
+      maxDynamicNodes: input.maxDynamicNodes,
+      reservedNodeIds: input.reservedNodeIds
     });
     publishFileDurableExclusive(manifestDir, `${input.groupNodeId}.json`, `${JSON.stringify(manifest, null, 2)}\n`);
     const publishedManifests = readExpansionManifests(manifestDir);
@@ -325,7 +347,7 @@ export function dynamicItemVariables(item: Record<string, unknown>): Record<stri
       throw dynamicError("DYNAMIC_REPLACEMENTS_INVALID", "Dynamic item replacements must be an object");
     }
     for (const [name, value] of Object.entries(replacements)) {
-      if (!isDynamicItemTemplateVariable(name) || !name.includes(":")) {
+      if (!isNamespacedDynamicReplacementKey(name)) {
         throw dynamicError("DYNAMIC_REPLACEMENT_KEY_INVALID", `Invalid namespaced replacement key ${name}`, { name });
       }
       if (!isScalar(value)) {
@@ -474,7 +496,8 @@ export function validateDynamicExpansionManifest(
       "items"
     ],
     "document",
-    fail
+    fail,
+    ["sequence"]
   );
   if (document.schema_version !== DYNAMIC_EXPANSION_SCHEMA_VERSION) fail("schema_version is unsupported");
   if (typeof document.run_id !== "string") fail("run_id must be a string");
@@ -527,6 +550,7 @@ export function validateDynamicExpansionManifest(
   if (!isDigest(fingerprint)) fail("template.fingerprint must be SHA-256");
 
   const maxDynamicNodes = nonNegativeIntegerField(document, "max_dynamic_nodes", fail);
+  const sequence = document.sequence === undefined ? undefined : nonNegativeIntegerField(document, "sequence", fail);
   const before = nonNegativeIntegerField(document, "dynamic_nodes_before", fail);
   const after = nonNegativeIntegerField(document, "dynamic_nodes_after", fail);
   if (maxDynamicNodes < 1) fail("max_dynamic_nodes must be positive");
@@ -631,6 +655,7 @@ export function validateDynamicExpansionManifest(
       fingerprint
     },
     max_dynamic_nodes: maxDynamicNodes,
+    ...(sequence === undefined ? {} : { sequence }),
     dynamic_nodes_before: before,
     dynamic_nodes_after: after,
     items
@@ -641,13 +666,45 @@ function validateManifestSet(manifests: readonly DynamicExpansionManifest[], dir
   const groupIds = new Set<string>();
   const nodeIds = new Set<string>();
   const storageIds = new Set<string>();
+  const sequences = new Set<number>();
   let expectedBefore = 0;
+  let expectedSequence = 0;
   let runId: string | undefined;
   let maxDynamicNodes: number | undefined;
-  for (const manifest of [...manifests].sort(
-    (left, right) =>
-      left.dynamic_nodes_before - right.dynamic_nodes_before || left.group_node_id.localeCompare(right.group_node_id)
-  )) {
+  // A set published before `sequence` existed keeps a count-based ordering so an in-flight run
+  // still resumes; every newly published set carries an explicit publication order. The fallback
+  // orders zero-length transitions (before === after) ahead of expanding ones at the same count,
+  // otherwise a legacy empty expansion published before a non-empty one can never validate.
+  const sequenced = manifests.every((manifest) => manifest.sequence !== undefined);
+  const ordered = sequenced
+    ? [...manifests].sort((left, right) => left.sequence! - right.sequence!)
+    : [...manifests].sort(
+        (left, right) =>
+          left.dynamic_nodes_before - right.dynamic_nodes_before ||
+          left.dynamic_nodes_after - right.dynamic_nodes_after ||
+          left.group_node_id.localeCompare(right.group_node_id)
+      );
+  for (const manifest of ordered) {
+    if (sequenced) {
+      const sequence = manifest.sequence!;
+      if (sequences.has(sequence)) {
+        throw dynamicError(
+          "DYNAMIC_MANIFEST_SET_INVALID",
+          "Dynamic expansion manifests repeat a publication sequence",
+          { directory, groupNodeId: manifest.group_node_id, sequence }
+        );
+      }
+      sequences.add(sequence);
+      if (sequence !== expectedSequence) {
+        throw dynamicError("DYNAMIC_MANIFEST_SET_INVALID", "Dynamic expansion manifest sequence is not contiguous", {
+          directory,
+          groupNodeId: manifest.group_node_id,
+          expectedSequence,
+          actualSequence: sequence
+        });
+      }
+      expectedSequence += 1;
+    }
     if (groupIds.has(manifest.group_node_id)) {
       throw dynamicError("DYNAMIC_MANIFEST_SET_INVALID", "Dynamic expansion manifests repeat a group", {
         directory,
@@ -782,9 +839,10 @@ function assertExactKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
   context: string,
-  fail: ManifestFailure
+  fail: ManifestFailure,
+  optionalKeys: readonly string[] = []
 ): void {
-  const allowed = new Set(keys);
+  const allowed = new Set([...keys, ...optionalKeys]);
   const actual = Object.keys(value);
   const missing = keys.filter((key) => !(key in value));
   const unknown = actual.filter((key) => !allowed.has(key));

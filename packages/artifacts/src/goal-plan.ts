@@ -2,10 +2,14 @@ import fs from "node:fs";
 
 import { z } from "zod/v4";
 
+import { isNamespacedDynamicReplacementKey, promptTemplateOccurrences } from "@ultrafuzz/prompts";
+
 import {
   NODE_REFERENCE_PATTERN,
+  ArtifactPathError,
   assertRegularFileInside,
   listSafeFiles,
+  normalizeSafeRelativePath,
   safeResolveInside,
   sha256Bytes
 } from "./safe-paths.js";
@@ -24,7 +28,13 @@ const threatId = z.string().regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*:[a-z0-9]+(?:[.:-
 const uniqueIds = z
   .array(stableId)
   .refine((values) => new Set(values).size === values.length, { message: "IDs must be unique" });
-const replacementKey = z.string().regex(/^[a-z0-9]+(?:[.:-][a-z0-9]+)*$/u);
+/**
+ * Replacement keys must be namespaced exactly as the dynamic fanout consumer requires
+ * (`<namespace>:<name>`), so a contract-valid plan can never abort its own fanout node.
+ */
+const replacementKey = z.string().refine(isNamespacedDynamicReplacementKey, {
+  message: "Replacement keys must be namespaced as <namespace>:<name>"
+});
 const replacementsSchema = z
   .record(replacementKey, z.union([nonEmptyString, z.number().finite(), z.boolean()]))
   .refine((value) => Object.keys(value).length > 0, { message: "At least one item-scoped replacement is required" });
@@ -70,14 +80,46 @@ const threatGoalSchema = z
     validatePromptReplacements(value.goal_prompt, value.replacements, [value.id], context);
   });
 
+const SELECTED_RECORD_PATH_PREFIX = "vulnerability-db/selected/" as const;
+
+/**
+ * Composes the canonical safe-relative-path validator with the required prefix and `.md` suffix.
+ * The raw value must already be canonical, so `.`, `..`, `./`, empty, and nested traversal
+ * segments are rejected in the contract instead of only being caught by a later filesystem check.
+ * Remote and in-memory consumers of the exported snapshot verifier get the same guarantee.
+ */
+const selectedRecordPath = z.string().superRefine((value, context) => {
+  let normalized: string;
+  try {
+    normalized = normalizeSafeRelativePath(value, "selected vulnerability record path");
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      message:
+        error instanceof ArtifactPathError
+          ? `Selected record path is unsafe: ${error.message}`
+          : "Selected record path is unsafe"
+    });
+    return;
+  }
+  if (normalized !== value) {
+    context.addIssue({ code: "custom", message: "Selected record path must already be canonical" });
+    return;
+  }
+  if (!value.startsWith(SELECTED_RECORD_PATH_PREFIX) || value.length === SELECTED_RECORD_PATH_PREFIX.length) {
+    context.addIssue({
+      code: "custom",
+      message: `Selected record path must start with ${SELECTED_RECORD_PATH_PREFIX}`
+    });
+  }
+  if (!value.endsWith(".md")) {
+    context.addIssue({ code: "custom", message: "Selected record path must be a Markdown file" });
+  }
+});
+
 const selectedRecordSchema = z.strictObject({
   id: stableId,
-  path: z
-    .string()
-    .regex(
-      /^vulnerability-db\/selected\/[A-Za-z0-9._@+-]+(?:\/[A-Za-z0-9._@+-]+)*\.md$/u,
-      "Selected record path must be a safe Markdown path below vulnerability-db/selected"
-    ),
+  path: selectedRecordPath,
   sha256,
   size_bytes: z.number().int().nonnegative()
 });
@@ -295,6 +337,17 @@ export const goalPlanSchema = z
     }
   });
 
+/**
+ * The canonical JSON Schema for `ultrafuzz/goal-plan@1`, generated from the single runtime contract
+ * above and snapshotted to `schema/goal-plan.schema.json` so prompts and external consumers can
+ * reference one authoritative document instead of a hand-maintained shape summary.
+ */
+export const goalPlanJsonSchema = {
+  ...z.toJSONSchema(goalPlanSchema, { io: "input", unrepresentable: "any" }),
+  $id: GOAL_PLAN_JSON_SCHEMA_ID,
+  title: "Ultrafuzz goal plan"
+} as Record<string, unknown>;
+
 export type GoalPlan = z.infer<typeof goalPlanSchema>;
 export type ThreatGoalPlanItem = z.infer<typeof threatGoalSchema>;
 export type ClassGoalPlanItem = z.infer<typeof classGoalSchema>;
@@ -364,7 +417,8 @@ export function verifyGoalPlanSelectedRecordSnapshotBytes(
   if (
     manifest.schema_version !== plan.vulnerability_database.snapshot_manifest_schema_version ||
     manifest.database_schema_version !== plan.vulnerability_database.database_schema_version ||
-    manifest.aggregate_sha256 !== plan.vulnerability_database.aggregate_sha256
+    manifest.aggregate_sha256 !== plan.vulnerability_database.aggregate_sha256 ||
+    manifest.catalog_sha256 !== plan.vulnerability_database.catalog_sha256
   ) {
     throw new Error("vulnerability database manifest does not match goal-plan provenance");
   }
@@ -444,14 +498,29 @@ function validatePromptReplacements(
   if (!template.includes("/goal")) {
     context.addIssue({ code: "custom", path: ["goal_prompt"], message: "Goal prompt must retain the /goal marker" });
   }
-  const placeholders = [...template.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/gu)].map((match) => match[1] ?? "");
+  // Use the shared renderer occurrence parser so a "required placeholder" is exactly a placeholder
+  // the renderer will bind. Escaped `\{{key}}` occurrences render as literal text and therefore do
+  // not satisfy a requirement, and must not demand a replacement either.
+  let placeholders: string[];
+  try {
+    placeholders = promptTemplateOccurrences(template).map((occurrence) => occurrence.name);
+  } catch (error) {
+    context.addIssue({
+      code: "custom",
+      path: ["goal_prompt"],
+      message: `Goal prompt is not a renderable template: ${error instanceof Error ? error.message : String(error)}`
+    });
+    return;
+  }
   const placeholderSet = new Set(placeholders);
   for (const key of requiredKeys) {
     if (!placeholderSet.has(key)) {
       context.addIssue({
         code: "custom",
         path: ["goal_prompt"],
-        message: "Prompt must retain item-scoped placeholder {{" + key + "}}"
+        message: template.includes("\\{{" + key + "}}")
+          ? "Prompt must not escape the required item-scoped placeholder {{" + key + "}}"
+          : "Prompt must retain item-scoped placeholder {{" + key + "}}"
       });
     }
   }
@@ -491,6 +560,7 @@ const vulnerabilityDatabaseManifestSchema = z.looseObject({
   schema_version: nonEmptyString,
   database_schema_version: z.number().int().positive(),
   aggregate_sha256: sha256,
+  catalog_sha256: sha256,
   records: z.array(
     z.looseObject({
       id: stableId,

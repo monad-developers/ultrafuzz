@@ -511,6 +511,7 @@ function compiledTask(
     workspacePath: path.join(runRoot, "workspaces", attemptId),
     artifactDir,
     dependencyArtifactDirs: [],
+    referenceArtifactDirs: [],
     ...(promptTemplatePath === undefined ? {} : { promptTemplatePath }),
     ...(dynamicDependencies.length === 0 ? {} : { dynamicDependencies }),
     execution: {
@@ -580,3 +581,183 @@ function promptContext(projectRoot: string, runRoot: string): CompiledSmithersDy
     }
   };
 }
+
+test("an empty group and a nonempty group sharing a count boundary stay deterministic", () => {
+  const runRoot = tempDirectory();
+  const runId = "dynamic-boundary";
+  const emptySourcePath = path.join(runRoot, "artifacts", "planner-empty", "plan.json");
+  const workSourcePath = path.join(runRoot, "artifacts", "planner-work", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  fs.mkdirSync(path.dirname(emptySourcePath), { recursive: true });
+  fs.mkdirSync(path.dirname(workSourcePath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.writeFileSync(emptySourcePath, `${JSON.stringify({ goals: [] })}\n`, "utf8");
+  fs.writeFileSync(workSourcePath, `${JSON.stringify({ goals: [item(0)] })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Find {{item.goal_prompt}} with {{context:detail}}.\n", "utf8");
+
+  const base = {
+    runRoot,
+    runId,
+    sourcePath: "$.goals",
+    keyPath: "id",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    maxDynamicNodes: 2048,
+    reservedNodeIds: ["planner-empty", "planner-work", "z-empty", "a-work", "join"]
+  };
+
+  // The empty group publishes first: before=0, after=0.
+  const empty = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "z-empty",
+    sourceNodeId: "planner-empty",
+    sourceAttemptId: "planner-empty",
+    sourceArtifactPath: emptySourcePath,
+    nodeIdTemplate: "dynamic:empty:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:z-empty")
+  });
+  assert.equal(empty.sequence, 0);
+  assert.equal(empty.dynamic_nodes_before, 0);
+  assert.equal(empty.dynamic_nodes_after, 0);
+
+  // A later, independently sourced group also starts at before=0 and must remain valid.
+  const work = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "a-work",
+    sourceNodeId: "planner-work",
+    sourceAttemptId: "planner-work",
+    sourceArtifactPath: workSourcePath,
+    nodeIdTemplate: "dynamic:work:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:a-work")
+  });
+  assert.equal(work.sequence, 1);
+  assert.equal(work.dynamic_nodes_before, 0);
+  assert.equal(work.dynamic_nodes_after, 1);
+
+  // Automatic resume must keep working: rereading the published set revalidates it.
+  const resumed = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "z-empty",
+    sourceNodeId: "planner-empty",
+    sourceAttemptId: "planner-empty",
+    sourceArtifactPath: emptySourcePath,
+    nodeIdTemplate: "dynamic:empty:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:z-empty")
+  });
+  assert.deepEqual(resumed, empty);
+});
+
+test("a manifest that would invalidate the published set is never written to durable storage", () => {
+  const fixture = expansionFixture({ items: [item(0)], maxDynamicNodes: 2048 });
+  fixture.invoke();
+  const manifestDir = path.join(fixture.runRoot, "dynamic-expansions");
+  const before = fs.readdirSync(manifestDir).sort();
+
+  // A second group whose generated node IDs collide with the published set must be rejected before
+  // publication, so an automatic resume is never bricked by a durable invalid candidate.
+  assert.throws(
+    () =>
+      fixture.invoke({
+        groupNodeId: "colliding",
+        templateFingerprint: digest("fingerprint:colliding")
+      }),
+    DynamicExpansionError
+  );
+  assert.deepEqual(fs.readdirSync(manifestDir).sort(), before);
+  assert.doesNotThrow(() => fixture.invoke());
+});
+
+test("a manifest published before the sequence field still resumes", () => {
+  const fixture = expansionFixture({ items: [item(0)], maxDynamicNodes: 2048 });
+  const published = fixture.invoke();
+  assert.equal(published.sequence, 0);
+
+  // Simulate a run whose manifests were written by a build without the publication-order field.
+  const manifestPath = path.join(fixture.runRoot, "dynamic-expansions", "fanout.json");
+  const legacy = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Record<string, unknown>;
+  delete legacy.sequence;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+
+  const resumed = fixture.invoke();
+  assert.equal(resumed.sequence, undefined);
+  assert.deepEqual(resumed.items, published.items);
+});
+
+test("a legacy empty manifest without a sequence stays valid when a new group expands", () => {
+  const runRoot = tempDirectory();
+  const runId = "dynamic-mixed-legacy";
+  const emptySourcePath = path.join(runRoot, "artifacts", "planner-empty", "plan.json");
+  const workSourcePath = path.join(runRoot, "artifacts", "planner-work", "plan.json");
+  const templatePath = path.join(runRoot, "templates", "worker.md");
+  fs.mkdirSync(path.dirname(emptySourcePath), { recursive: true });
+  fs.mkdirSync(path.dirname(workSourcePath), { recursive: true });
+  fs.mkdirSync(path.dirname(templatePath), { recursive: true });
+  fs.writeFileSync(emptySourcePath, `${JSON.stringify({ goals: [] })}\n`, "utf8");
+  fs.writeFileSync(workSourcePath, `${JSON.stringify({ goals: [item(0)] })}\n`, "utf8");
+  fs.writeFileSync(templatePath, "Find {{item.goal_prompt}} with {{context:detail}}.\n", "utf8");
+
+  const base = {
+    runRoot,
+    runId,
+    sourcePath: "$.goals",
+    keyPath: "id",
+    templatePath,
+    templateDigest: digest(fs.readFileSync(templatePath)),
+    maxDynamicNodes: 2048,
+    reservedNodeIds: ["planner-empty", "planner-work", "z-empty", "a-work", "join"]
+  };
+
+  const empty = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "z-empty",
+    sourceNodeId: "planner-empty",
+    sourceAttemptId: "planner-empty",
+    sourceArtifactPath: emptySourcePath,
+    nodeIdTemplate: "dynamic:empty:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:z-empty")
+  });
+  assert.equal(empty.dynamic_nodes_before, 0);
+  assert.equal(empty.dynamic_nodes_after, 0);
+
+  // Simulate the upgrade path: the empty manifest was published by a build without the
+  // publication-order field, then a new build expands an independently sourced group.
+  const emptyManifestPath = path.join(runRoot, "dynamic-expansions", "z-empty.json");
+  const legacy = JSON.parse(fs.readFileSync(emptyManifestPath, "utf8")) as Record<string, unknown>;
+  delete legacy.sequence;
+  fs.writeFileSync(emptyManifestPath, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+
+  const work = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "a-work",
+    sourceNodeId: "planner-work",
+    sourceAttemptId: "planner-work",
+    sourceArtifactPath: workSourcePath,
+    nodeIdTemplate: "dynamic:work:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:a-work")
+  });
+  assert.equal(work.dynamic_nodes_before, 0);
+  assert.equal(work.dynamic_nodes_after, 1);
+
+  // Automatic resume over the mixed set must keep working for both groups.
+  const resumedEmpty = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "z-empty",
+    sourceNodeId: "planner-empty",
+    sourceAttemptId: "planner-empty",
+    sourceArtifactPath: emptySourcePath,
+    nodeIdTemplate: "dynamic:empty:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:z-empty")
+  });
+  assert.equal(resumedEmpty.sequence, undefined);
+  assert.deepEqual(resumedEmpty.items, empty.items);
+  const resumedWork = loadOrCreateDynamicExpansion({
+    ...base,
+    groupNodeId: "a-work",
+    sourceNodeId: "planner-work",
+    sourceAttemptId: "planner-work",
+    sourceArtifactPath: workSourcePath,
+    nodeIdTemplate: "dynamic:work:{{ item.id }}",
+    templateFingerprint: digest("fingerprint:a-work")
+  });
+  assert.deepEqual(resumedWork.items, work.items);
+});

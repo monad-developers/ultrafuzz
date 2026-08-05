@@ -56,11 +56,14 @@ import {
   type PlannedGraphNode,
   type RenderedPromptPlan
 } from "./types.js";
+import { projectArtifactSchemaDir } from "./init.js";
 import { validateProject } from "./validate.js";
 import { loadResolvedProject, modelProfilesForTopology, outputRootForConfig } from "./validate.js";
 import {
+  DEFERRED_PROMPT_TEMPLATE_DIR,
   diagnosticFromError,
   generateRunId,
+  sha256Text,
   hasRuntimeErrors,
   runtimeFailure,
   runtimeResult,
@@ -255,6 +258,11 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const persistedRenderedPrompts = persistRenderedPromptSnapshots(layout, renderedPrompts);
+  try {
+    persistDeferredPromptTemplates(layout, catalog, expandedGraph);
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "prompts", "PROMPT_TEMPLATE_SNAPSHOT_FAILED")]);
+  }
   writeJsonDurable(path.join(layout.root, "plan.json"), {
     schema_version: RUNTIME_SCHEMA_VERSION,
     run_id: runId,
@@ -300,7 +308,15 @@ export async function planRun(input: PlanRunInput) {
     resolved_config: resolved.config,
     validation: validation.value,
     layout,
-    rendered_prompts: renderedPrompts
+    rendered_prompts: renderedPrompts,
+    ...(vulnerabilityDatabase === undefined
+      ? {}
+      : {
+          vulnerability_database: {
+            relative_path: vulnerabilityDatabase.relative_path,
+            sha256: vulnerabilityDatabase.sha256
+          }
+        })
   });
 }
 
@@ -474,6 +490,46 @@ function readPersistedPlannedGraph(graphPath: string): PlannedGraph {
     throw new Error("persisted planned graph is invalid");
   }
   return value as PlannedGraph;
+}
+
+/**
+ * Persists the exact transformed prompt bodies that planning hashed and validated.
+ *
+ * Compilation defers rendering for dynamic templates and for static descendants of a dynamic group,
+ * so it must snapshot this immutable value instead of rereading the project file: a run-scoped
+ * prompt transform (for example an excluded artifact reference) makes the project bytes differ from
+ * the bytes the plan is bound to.
+ */
+function persistDeferredPromptTemplates(
+  layout: RunLayout,
+  catalog: PromptCatalog,
+  graph: ExpandedGraph
+): Map<string, string> {
+  const digests = graph.fingerprintInputs?.promptDigests ?? {};
+  const persisted = new Map<string, string>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "agentic" || node.promptPath === undefined) continue;
+    const expected = digests[node.promptPath] ?? node.dynamic?.templateDigest;
+    if (expected === undefined) continue;
+    const body = promptEntryForPath(catalog, node.promptPath, node.logicalId).body;
+    const digest = sha256Text(body);
+    if (digest !== expected) {
+      throw new Error(`transformed prompt template digest does not match the plan for ${node.promptPath}`);
+    }
+    if (persisted.has(digest)) continue;
+    const relativePath = `${DEFERRED_PROMPT_TEMPLATE_DIR}/${digest}.md`;
+    const snapshotPath = safeResolveInside(layout.root, relativePath, "deferred prompt template snapshot");
+    if (fs.existsSync(snapshotPath)) {
+      assertRegularFileInside(layout.root, snapshotPath, "deferred prompt template snapshot");
+      if (sha256Text(fs.readFileSync(snapshotPath, "utf8")) !== digest) {
+        throw new Error(`immutable deferred prompt template snapshot digest collision for ${node.promptPath}`);
+      }
+    } else {
+      writeFileDurable(snapshotPath, body);
+    }
+    persisted.set(digest, snapshotPath);
+  }
+  return persisted;
 }
 
 function persistRenderedPromptSnapshots(
@@ -915,7 +971,8 @@ function renderPromptsForPlan(input: {
           invariantPropertyPriorities: invariantPrioritySelection.priorities,
           invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds,
-          vulnerabilityDatabasePath: input.vulnerabilityDatabasePath
+          vulnerabilityDatabasePath: input.vulnerabilityDatabasePath,
+          artifactSchemaDir: projectArtifactSchemaDir(input.projectRoot)
         }
       });
       writeRenderedPrompt(result);

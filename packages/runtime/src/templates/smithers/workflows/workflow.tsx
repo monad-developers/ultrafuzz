@@ -29,12 +29,18 @@ const artifactsModule = process.env.ULTRAFUZZ_ARTIFACTS_MODULE ?? __ULTRAFUZZ_AR
 const runtimeModule = process.env.ULTRAFUZZ_RUNTIME_MODULE ?? __ULTRAFUZZ_RUNTIME_MODULE__;
 const {
   artifactContractDefinition,
+  assertCloudSelectedTaskMatchesCanonical,
   assertRegularFileInside,
   buildFindingSourceExpectations,
+  CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
+  CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME,
+  CLOUD_SELECTED_TASK_SCHEMA_VERSION,
   findingIdentityKeys,
+  isCloudExecutionGeneration,
   materializeCanonicalThreatModelMarkdown,
   materializePromptSchemas,
   normalizeFindings,
+  parseCloudSelectedTask,
   publishFileDurableExclusive,
   validateArtifactContract,
   validateImplementedPropertiesSchema,
@@ -61,12 +67,27 @@ const inputTaskSchema = z.object({
   prompt_path: z.string().optional()
 });
 
-const inputSchema = z.looseObject({
+/**
+ * The exact outer dispatch contract for this workflow.
+ *
+ * A relocated cloud worker is launched with an untrusted input document, so the outer object is
+ * strict: an unknown dispatch key -- a future field, a camelCase or hydrated-only alias such as
+ * `selectedTask`, or smuggled controller state -- is refused instead of transiting the boundary.
+ * The controller's own submitted document (`schema_version`, `run_id`, `tasks`, operator fields) is
+ * part of the same contract, so the non-worker invocation shape keeps working unchanged.
+ */
+const inputSchema = z.strictObject({
+  schema_version: z.string().min(1).optional(),
+  run_id: z.string().min(1).optional(),
   tasks: z.array(inputTaskSchema).default([]),
   operator_prompt: z.string().optional(),
   operator_input: z.unknown().optional(),
   cloud_worker: z.boolean().optional(),
-  task_id: z.string().optional()
+  task_id: z.string().optional(),
+  attempt_id: z.string().optional(),
+  execution_generation: z.string().refine(isCloudExecutionGeneration, "must be a bounded generation").optional(),
+  // Validated against the shared versioned contract, never trusted as a task spec.
+  selected_task: z.unknown().optional()
 });
 
 const taskOutput = z.object({
@@ -113,15 +134,26 @@ const dynamicTasksPath = path.join(dynamicRunRoot, "smithers", "tasks.json");
 const compiledBaseTasks = __ULTRAFUZZ_COMPILED_TASKS__;
 const dynamicGroupSpecs = __ULTRAFUZZ_DYNAMIC_GROUPS__;
 const serializedTaskSpecs = __ULTRAFUZZ_TASK_SPECS__ as const;
-let taskSpecs = serializedTaskSpecs.map((task) => ({
-  ...task,
-  dynamicDependencies: [] as string[],
-  promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
-  workspaceRelativePath: task.workspacePath,
-  workspacePath: path.resolve(process.cwd(), task.workspacePath),
-  artifactRelativeDir: task.artifactDir,
-  artifactDir: path.resolve(process.cwd(), task.artifactDir)
-}));
+/**
+ * Hydrates one serialized task spec against the current project root.
+ *
+ * Every path in a serialized spec is project-relative, so the same spec hydrates correctly in the
+ * controller root and in a relocated cloud-worker root.
+ */
+function hydrateTaskSpec(task: (typeof serializedTaskSpecs)[number]) {
+  return {
+    ...task,
+    dependsOn: [...task.dependsOn] as string[],
+    dynamicDependencies: [] as string[],
+    promptRelativePath: task.promptPath,
+    promptPath: task.promptPath === undefined ? undefined : path.resolve(process.cwd(), task.promptPath),
+    workspaceRelativePath: task.workspacePath,
+    workspacePath: path.resolve(process.cwd(), task.workspacePath),
+    artifactRelativeDir: task.artifactDir,
+    artifactDir: path.resolve(process.cwd(), task.artifactDir)
+  };
+}
+let taskSpecs = serializedTaskSpecs.map((task) => hydrateTaskSpec(task));
 const usesCloudExecution = [...compiledBaseTasks, ...dynamicGroupSpecs.flatMap((group) => group.taskTemplates)].some(
   (task) => task.execution.mode === "cloud"
 );
@@ -195,6 +227,10 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
       task.renderedPromptPath === undefined
         ? undefined
         : dynamicExecutionPath(task, task.renderedPromptPath, "rendered prompt"),
+    promptRelativePath:
+      task.renderedPromptPath === undefined
+        ? undefined
+        : projectRelativePath(task.renderedPromptPath, "rendered prompt"),
     workspaceRelativePath: dynamicExecutionPath(task, task.workspacePath, "task workspace"),
     workspacePath: path.resolve(process.cwd(), dynamicExecutionPath(task, task.workspacePath, "task workspace")),
     artifactRelativeDir: dynamicExecutionPath(task, task.artifactDir, "task artifact directory"),
@@ -202,6 +238,21 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
     dependencyArtifactDirs: task.dependencyArtifactDirs.map((directory) =>
       dynamicExecutionPath(task, directory, "dependency artifact directory")
     ),
+    referenceArtifactDirs: (task.referenceArtifactDirs ?? []).map((directory) =>
+      dynamicExecutionPath(task, directory, "reference artifact directory")
+    ),
+    ...(task.vulnerabilityDatabaseCatalog === undefined
+      ? {}
+      : {
+          vulnerabilityDatabase: {
+            catalogPath: dynamicExecutionPath(
+              task,
+              task.vulnerabilityDatabaseCatalog.path,
+              "vulnerability database catalog"
+            ),
+            catalogSha256: task.vulnerabilityDatabaseCatalog.sha256
+          }
+        }),
     runRoot: dynamicExecutionPath(task, path.resolve(task.artifactDir, "..", ".."), "run root"),
     workflowPath: dynamicExecutionPath(
       task,
@@ -219,6 +270,439 @@ function taskSpecsFromCompiled(tasks: typeof compiledBaseTasks) {
     outputs: task.metadata.artifacts.outputs,
     execution: task.execution
   }));
+}
+
+function projectRelativePath(value: string, label: string): string {
+  const relative = path.relative(sourceProjectRoot, path.resolve(value));
+  if (relative === "" || relative === "." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} must be a project child path`);
+  }
+  return relative.split(path.sep).join("/");
+}
+
+/**
+ * Restates one task's metadata as the exact handoff metadata DTO.
+ *
+ * Every member is named explicitly instead of spread, so a field that only exists after hydration --
+ * or a future compiled-task field -- can never silently cross the trust boundary.
+ */
+function cloudSelectedTaskMetadata(metadata: (typeof taskSpecs)[number]["metadata"]) {
+  const node = metadata.node as Record<string, undefined | string | Record<string, string>>;
+  const model = metadata.model as Record<string, undefined | string | number> | undefined;
+  const dynamic = node.dynamic as Record<string, string> | undefined;
+  return {
+    schemaVersion: metadata.schemaVersion,
+    run: {
+      ultrafuzzRunId: metadata.run.ultrafuzzRunId,
+      smithersWorkflowName: metadata.run.smithersWorkflowName,
+      graphVersion: metadata.run.graphVersion,
+      topologyVersion: metadata.run.topologyVersion
+    },
+    node: {
+      concreteNodeId: node.concreteNodeId,
+      logicalNodeId: node.logicalNodeId,
+      attemptId: node.attemptId,
+      label: node.label,
+      kind: node.kind,
+      ...(node.role === undefined ? {} : { role: node.role }),
+      ...(node.promptPath === undefined ? {} : { promptPath: node.promptPath }),
+      ...(node.group === undefined ? {} : { group: node.group }),
+      ...(node.producerNodeId === undefined ? {} : { producerNodeId: node.producerNodeId }),
+      ...(node.storageId === undefined ? {} : { storageId: node.storageId }),
+      ...(dynamic === undefined
+        ? {}
+        : {
+            dynamic: {
+              groupNodeId: dynamic.groupNodeId,
+              sourceNodeId: dynamic.sourceNodeId,
+              sourceAttemptId: dynamic.sourceAttemptId,
+              sourceDigest: dynamic.sourceDigest,
+              expansionKey: dynamic.expansionKey,
+              itemDigest: dynamic.itemDigest,
+              manifestPath: dynamic.manifestPath
+            }
+          })
+    },
+    dependencies: {
+      concreteNodeIds: [...metadata.dependencies.concreteNodeIds],
+      attemptIds: [...metadata.dependencies.attemptIds],
+      smithersNodeIds: [...metadata.dependencies.smithersNodeIds]
+    },
+    loop: {
+      index: metadata.loop.index,
+      count: metadata.loop.count,
+      mode: metadata.loop.mode,
+      attemptIndex: metadata.loop.attemptIndex
+    },
+    ...(model === undefined
+      ? {}
+      : {
+          model: {
+            profileId: model.profileId,
+            agentRef: model.agentRef,
+            ...(model.modelName === undefined ? {} : { modelName: model.modelName }),
+            ...(model.reasoningEffort === undefined ? {} : { reasoningEffort: model.reasoningEffort }),
+            modelIndex: model.modelIndex,
+            attemptIndex: model.attemptIndex
+          }
+        }),
+    // `repoPath` is deliberately dropped: it is controller-only provenance the worker never reads and
+    // cannot resolve in its relocated root, so the shared contract refuses it as an unknown key.
+    workspace: {
+      primitive: metadata.workspace.primitive,
+      path: metadata.workspace.path,
+      trustModel: metadata.workspace.trustModel
+    },
+    artifacts: {
+      dir: metadata.artifacts.dir,
+      outputs: metadata.artifacts.outputs.map((output) => ({
+        path: output.path,
+        contract: output.contract,
+        contractDigest: output.contractDigest,
+        primary: output.primary
+      })),
+      manifestPath: metadata.artifacts.manifestPath
+    },
+    retryPolicy: {
+      maxAttempts: metadata.retryPolicy.maxAttempts,
+      smithersRetries: metadata.retryPolicy.smithersRetries
+    },
+    timeout: {
+      milliseconds: metadata.timeout.milliseconds,
+      seconds: metadata.timeout.seconds,
+      heartbeatTimeoutMs: metadata.timeout.heartbeatTimeoutMs
+    },
+    execution: {
+      mode: metadata.execution.mode,
+      ...(metadata.execution.provider === undefined ? {} : { provider: metadata.execution.provider }),
+      resources: {
+        cpu: metadata.execution.resources.cpu,
+        memoryMiB: metadata.execution.resources.memoryMiB,
+        timeoutSeconds: metadata.execution.resources.timeoutSeconds
+      }
+    }
+  };
+}
+
+/**
+ * The explicit controller-to-worker handoff DTO for one already-materialized concrete attempt.
+ *
+ * A cloud worker must never rematerialize controller-global dynamic state: it receives no graph, task
+ * plan, expansion manifest, or template snapshot. Only the fields required to execute this attempt
+ * are constructed -- never a spread of a hydrated spec -- and every path is project-relative so the
+ * spec stays valid in the relocated worker root. The worker derives the inline prompt body, the
+ * dependency edges, the runtime context, the outputs list, and the hydration path aliases itself.
+ */
+function buildCloudSelectedTaskHandoff(
+  task: {
+    id: string;
+    attemptId: string;
+    preparationId: string;
+    verifierId: string;
+    agentRef: string;
+    modelName: string | null;
+    reasoningEffort: string | null;
+    branch: string;
+    runRoot: string;
+    workflowPath: string;
+    sourceProjectRoot: string;
+    dependencyArtifactDirs: readonly string[];
+    referenceArtifactDirs?: readonly string[];
+    vulnerabilityDatabase?: { catalogPath: string; catalogSha256: string };
+    timeoutMs: number;
+    heartbeatTimeoutMs: number;
+    retries: number;
+    retryPolicy: { backoff: "exponential"; initialDelayMs: number; maxDelayMs: number };
+    metadata: (typeof taskSpecs)[number]["metadata"];
+    execution: { mode: "local" | "cloud" };
+  },
+  relative: { promptPath: string; workspacePath: string; artifactDir: string },
+  executionGeneration: string
+) {
+  return {
+    schema_version: CLOUD_SELECTED_TASK_SCHEMA_VERSION,
+    id: task.id,
+    attemptId: task.attemptId,
+    preparationId: task.preparationId,
+    verifierId: task.verifierId,
+    agentRef: task.agentRef,
+    modelName: task.modelName ?? null,
+    reasoningEffort: task.reasoningEffort ?? null,
+    branch: task.branch,
+    promptPath: relative.promptPath,
+    workspacePath: relative.workspacePath,
+    artifactDir: relative.artifactDir,
+    runRoot: task.runRoot,
+    workflowPath: task.workflowPath,
+    sourceProjectRoot: task.sourceProjectRoot,
+    dependencyArtifactDirs: [...task.dependencyArtifactDirs],
+    referenceArtifactDirs: [...(task.referenceArtifactDirs ?? [])],
+    ...(task.vulnerabilityDatabase === undefined
+      ? {}
+      : {
+          vulnerabilityDatabase: {
+            catalogPath: task.vulnerabilityDatabase.catalogPath,
+            catalogSha256: task.vulnerabilityDatabase.catalogSha256
+          }
+        }),
+    timeoutMs: task.timeoutMs,
+    heartbeatTimeoutMs: task.heartbeatTimeoutMs,
+    retries: task.retries,
+    retryPolicy: {
+      backoff: task.retryPolicy.backoff,
+      initialDelayMs: task.retryPolicy.initialDelayMs,
+      maxDelayMs: task.retryPolicy.maxDelayMs
+    },
+    metadata: cloudSelectedTaskMetadata(task.metadata),
+    execution: { mode: task.execution.mode, generation: executionGeneration }
+  };
+}
+
+/** The DTO the controller dispatches, built from the hydrated spec's project-relative locations. */
+function cloudSelectedTaskHandoff(task: (typeof taskSpecs)[number]) {
+  return buildCloudSelectedTaskHandoff(
+    task,
+    {
+      promptPath: task.promptRelativePath as string,
+      workspacePath: task.workspaceRelativePath,
+      artifactDir: task.artifactRelativeDir
+    },
+    cloudExecutionGeneration
+  );
+}
+
+/**
+ * The canonical DTO a compiled attempt must produce.
+ *
+ * A compiled spec already stores cloud locations project-relative. When its prompt rendering was
+ * deferred to runtime expansion, the canonical prompt is the attempt's own rendered prompt inside its
+ * own artifact directory -- the one location runtime materialization is allowed to supply.
+ */
+function compiledCanonicalSelectedTask(compiled: (typeof serializedTaskSpecs)[number], executionGeneration: string) {
+  return buildCloudSelectedTaskHandoff(
+    compiled,
+    {
+      promptPath:
+        compiled.promptPath ?? `${compiled.artifactDir}/${CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string}`,
+      workspacePath: compiled.workspacePath,
+      artifactDir: compiled.artifactDir
+    },
+    executionGeneration
+  );
+}
+
+/** Resolves one validated project-relative handoff path inside the relocated worker root. */
+function relocatedHandoffPath(value: string, label: string): string {
+  const workerRoot = path.resolve(process.cwd());
+  const resolved = path.resolve(workerRoot, value);
+  if (resolved === workerRoot || !resolved.startsWith(`${workerRoot}${path.sep}`)) {
+    throw new Error(`cloud worker selected_task ${label} must stay inside the relocated project root`);
+  }
+  return resolved;
+}
+
+/**
+ * Re-verifies the relocated vulnerability-database catalog against its declared digest.
+ *
+ * The worker never inherits the controller's verification: the catalog travels inside the handoff
+ * archive and is then extracted into a durable volume workspace that survives retries, so absence, an
+ * irregular entry, and tampered bytes are each distinct, explicit failures rather than a silently
+ * different planner catalog feeding threat-model and goal-plan postprocessing.
+ */
+function assertRelocatedVulnerabilityDatabaseCatalog(catalogPath: string, expectedSha256: string): void {
+  if (!existsSync(catalogPath)) {
+    throw new Error("cloud worker selected_task vulnerabilityDatabase catalog is absent from the relocated project");
+  }
+  let bytes: Buffer;
+  try {
+    // Lexical containment is insufficient here: a relocated durable workspace may contain a
+    // symlinked parent component. Reuse the artifact boundary's realpath and symlink checks before
+    // reading so matching bytes outside the relocated root cannot satisfy the digest binding.
+    assertRegularFileInside(process.cwd(), catalogPath, "cloud worker vulnerability database catalog");
+    bytes = readFileSync(catalogPath);
+  } catch (error) {
+    throw new Error("cloud worker selected_task vulnerabilityDatabase catalog is unreadable in the relocated project", {
+      cause: error
+    });
+  }
+  const actual = createHash("sha256").update(bytes).digest("hex");
+  if (actual !== expectedSha256) {
+    throw new Error(
+      "cloud worker selected_task vulnerabilityDatabase catalog does not match its declared catalogSha256"
+    );
+  }
+}
+
+/**
+ * Hydrates one validated handoff into exactly one runnable task spec.
+ *
+ * Fields the handoff deliberately omits are derived here rather than trusted: the empty inline prompt
+ * body, the dropped dependency edges, the timeout-derived runtime context, and the outputs list the
+ * attempt's own metadata already declares.
+ */
+function hydrateSelectedTaskHandoff(spec: ReturnType<typeof cloudSelectedTaskHandoff>): (typeof taskSpecs)[number] {
+  if (spec.vulnerabilityDatabase !== undefined) {
+    // The controller verified the catalog bytes it archived, but the bytes this worker will actually
+    // read are the relocated ones. Re-hashing them here -- before any spec exists to hydrate and long
+    // before a postprocessor consumes the catalog -- is what makes the declared digest binding.
+    assertRelocatedVulnerabilityDatabaseCatalog(
+      relocatedHandoffPath(spec.vulnerabilityDatabase.catalogPath, "vulnerability database catalog"),
+      spec.vulnerabilityDatabase.catalogSha256
+    );
+  }
+  for (const [label, candidates] of [
+    ["dependency artifact directory", spec.dependencyArtifactDirs],
+    ["reference artifact directory", spec.referenceArtifactDirs],
+    ["run root", [spec.runRoot]],
+    ["workflow path", [spec.workflowPath]],
+    [
+      "vulnerability database catalog",
+      spec.vulnerabilityDatabase === undefined ? [] : [spec.vulnerabilityDatabase.catalogPath]
+    ],
+    ["artifact metadata directory", [spec.metadata.artifacts.dir, spec.metadata.artifacts.manifestPath]],
+    ["workspace metadata path", [spec.metadata.workspace.path]]
+  ] as Array<[string, readonly string[]]>) {
+    for (const candidate of candidates) relocatedHandoffPath(candidate, label);
+  }
+  return {
+    id: spec.id,
+    preparationId: spec.preparationId,
+    verifierId: spec.verifierId,
+    attemptId: spec.attemptId,
+    dependsOn: [] as string[],
+    dynamicDependencies: [] as string[],
+    agentRef: spec.agentRef,
+    modelName: spec.modelName,
+    reasoningEffort: spec.reasoningEffort,
+    prompt: "",
+    promptRelativePath: spec.promptPath,
+    promptPath: relocatedHandoffPath(spec.promptPath, "rendered prompt"),
+    workspaceRelativePath: spec.workspacePath,
+    workspacePath: relocatedHandoffPath(spec.workspacePath, "task workspace"),
+    artifactRelativeDir: spec.artifactDir,
+    artifactDir: relocatedHandoffPath(spec.artifactDir, "task artifact directory"),
+    dependencyArtifactDirs: [...spec.dependencyArtifactDirs],
+    referenceArtifactDirs: [...spec.referenceArtifactDirs],
+    ...(spec.vulnerabilityDatabase === undefined ? {} : { vulnerabilityDatabase: spec.vulnerabilityDatabase }),
+    runRoot: spec.runRoot,
+    workflowPath: spec.workflowPath,
+    sourceProjectRoot: spec.sourceProjectRoot,
+    branch: spec.branch,
+    timeoutMs: spec.timeoutMs,
+    runtimeContext: topologyRuntimeContextForTimeout(spec.timeoutMs),
+    heartbeatTimeoutMs: spec.heartbeatTimeoutMs,
+    retries: spec.retries,
+    retryPolicy: spec.retryPolicy,
+    metadata: spec.metadata,
+    outputs: spec.metadata.artifacts.outputs,
+    execution: spec.execution
+  } as unknown as (typeof taskSpecs)[number];
+}
+
+/**
+ * Validates one dispatch document against the exact outer input contract.
+ *
+ * Smithers already parses the declared input schema, but the relocated worker is launched from an
+ * untrusted request document, so the workflow refuses unknown or aliased dispatch keys itself instead
+ * of depending on where the document happened to enter the system.
+ */
+function parseWorkflowInput(value: unknown): z.infer<typeof inputSchema> {
+  const parsed = inputSchema.safeParse(value);
+  if (!parsed.success) {
+    const detail = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`ultrafuzz workflow input is invalid: ${detail}`);
+  }
+  return parsed.data;
+}
+
+/** Validates the handoff contract and hydrates it into exactly one runnable task spec. */
+function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs {
+  const taskId = input.task_id;
+  const attemptId = input.attempt_id;
+  if (typeof taskId !== "string" || taskId === "") {
+    throw new Error("cloud worker input must identify one task_id");
+  }
+  const compiled = serializedTaskSpecs.find((task) => task.id === taskId);
+  const selected = input.selected_task;
+  if (selected === undefined) {
+    // Only a fully compiled attempt can run without a handoff. A deferred descendant of a dynamic
+    // group has no compile-time rendered prompt, so it always needs the controller's spec. This
+    // compatibility path still binds the compiled attempt to the dispatched cloud identity before
+    // hydration; otherwise `cloud_worker: true` could select a local compiled task.
+    if (
+      compiled !== undefined &&
+      compiled.promptPath !== undefined &&
+      typeof attemptId === "string" &&
+      attemptId !== "" &&
+      compiled.attemptId === attemptId &&
+      isCloudExecutionGeneration(input.execution_generation) &&
+      compiled.execution.mode === "cloud" &&
+      compiled.metadata.execution.mode === "cloud" &&
+      compiled.metadata.execution.provider === "modal"
+    ) {
+      // This path hydrates a compiled spec directly, so the relocated catalog bytes still get the
+      // same digest re-verification the explicit handoff path performs before hydration.
+      if (compiled.vulnerabilityDatabase !== undefined) {
+        assertRelocatedVulnerabilityDatabaseCatalog(
+          relocatedHandoffPath(compiled.vulnerabilityDatabase.catalogPath, "vulnerability database catalog"),
+          compiled.vulnerabilityDatabase.catalogSha256
+        );
+      }
+      return [hydrateTaskSpec(compiled)];
+    }
+    throw new Error(`cloud worker task ${taskId} requires an explicit selected_task handoff`);
+  }
+  // The dispatch always carries the attempt identity, so the handoff is bound to it unconditionally:
+  // a runtime-generated dynamic attempt has no compiled spec to cross-check against.
+  if (typeof attemptId !== "string" || attemptId === "") {
+    throw new Error("cloud worker input must identify one attempt_id alongside selected_task");
+  }
+  // The generation names the sandbox, the durable attempt root, and the storage lineage this worker
+  // publishes under. A relocated worker cannot rederive it, so the dispatch must state it exactly.
+  if (!isCloudExecutionGeneration(input.execution_generation)) {
+    throw new Error("cloud worker input must identify one bounded execution_generation alongside selected_task");
+  }
+  try {
+    // A runtime-generated dynamic attempt has no compiled spec, so it is bound to this workflow's own
+    // compiled constants and to the identities its dispatched attempt ID determines.
+    const spec = parseCloudSelectedTask(selected, {
+      taskId,
+      attemptId,
+      executionGeneration: input.execution_generation,
+      // A relocated worker only ever executes a cloud attempt, so a self-consistent local handoff --
+      // the shape a runtime-generated attempt with no compiled peer could smuggle -- is refused.
+      ...CLOUD_SELECTED_TASK_CLOUD_EXECUTION,
+      sourceProjectRoot,
+      runId: __ULTRAFUZZ_RUN_ID_LITERAL__,
+      workflowName: __ULTRAFUZZ_WORKFLOW_NAME__,
+      workflowPath: __ULTRAFUZZ_WORKFLOW_PATH_RELATIVE__,
+      preparationId: `prepare:${attemptId}`,
+      verifierId: `verify:${attemptId}`,
+      branch: `ultrafuzz/${__ULTRAFUZZ_RUN_ID_LITERAL__}/${attemptId}`
+    });
+    // When this workflow already compiled the attempt, the handoff must reproduce its entire
+    // canonical DTO. Only runtime expansion of a declared dynamic dependency may extend it, and only
+    // in the ways the shared contract enumerates.
+    if (compiled !== undefined) {
+      const compiledBase = compiledBaseTasks.find((candidate) => candidate.smithersNodeId === taskId);
+      assertCloudSelectedTaskMatchesCanonical(
+        spec,
+        compiledCanonicalSelectedTask(compiled, input.execution_generation),
+        {
+          allowsRuntimeDependencies: (compiledBase?.dynamicDependencies?.length ?? 0) > 0,
+          allowsRuntimeRenderedPrompt: compiled.promptPath === undefined
+        }
+      );
+    }
+    return [hydrateSelectedTaskHandoff(spec)];
+  } catch (error) {
+    const message = (error as Error).message;
+    throw message.startsWith("cloud worker")
+      ? (error as Error)
+      : new Error(`cloud worker ${message}`, { cause: error });
+  }
 }
 
 function currentProjectPath(value: string, label: string): string {
@@ -4644,19 +5128,27 @@ function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ 
 }
 
 export default smithers((ctx) => {
-  const inputTasks = new Map(
-    ((ctx.input as { tasks?: Array<{ id: string; prompt?: string; prompt_path?: string }> }).tasks ?? []).map(
-      (task) => [task.id, task]
-    )
-  );
+  // The dispatch is re-validated against the exact outer contract here, so an unknown or aliased
+  // dispatch key is refused inside the workflow itself rather than only wherever it was submitted.
+  const dispatch = parseWorkflowInput(ctx.input);
+  const inputTasks = new Map(dispatch.tasks.map((task) => [task.id, task]));
   const operatorPromptInput =
-    typeof ctx.input.operator_prompt === "string" && ctx.input.operator_prompt.length > 0
-      ? ctx.input.operator_prompt
+    typeof dispatch.operator_prompt === "string" && dispatch.operator_prompt.length > 0
+      ? dispatch.operator_prompt
       : undefined;
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
-  const cloudWorker = ctx.input.cloud_worker === true;
+  const cloudWorker = dispatch.cloud_worker === true;
   let availableTaskSpecs = taskSpecs;
-  if (dynamicGroupSpecs.length > 0) {
+  if (cloudWorker) {
+    // The controller owns graph.json, smithers/tasks.json, expansion manifests, and template
+    // snapshots. A worker receives only its already-materialized selected task spec.
+    availableTaskSpecs = cloudWorkerTaskSpecs(dispatch as Record<string, unknown>);
+    // Only execution narrows to the selected attempt. Dependency identity lookups by attempt ID
+    // (goal-plan threat-model provenance, dedupe and final-report dependency resolution) still
+    // resolve against every compiled attempt, which the worker already carries in its bundle.
+    const selectedId = availableTaskSpecs[0]!.id;
+    taskSpecs = [...taskSpecs.filter((task) => task.id !== selectedId), ...availableTaskSpecs];
+  } else if (dynamicGroupSpecs.length > 0) {
     const readyGroupIds = dynamicGroupSpecs
       .filter((group) => {
         if (group.source.verifierSmithersNodeId === undefined) {
@@ -4679,7 +5171,7 @@ export default smithers((ctx) => {
     availableTaskSpecs = dynamicallyAvailableTaskSpecs(taskSpecs, new Set(materialized.expandedGroupIds));
   }
   const selectedTaskSpecs = cloudWorker
-    ? availableTaskSpecs.filter((task) => task.id === ctx.input.task_id)
+    ? availableTaskSpecs.filter((task) => task.id === dispatch.task_id)
     : availableTaskSpecs;
   if (cloudWorker && selectedTaskSpecs.length !== 1) {
     throw new Error("cloud worker task selection must identify exactly one concrete attempt");
@@ -4705,11 +5197,18 @@ export default smithers((ctx) => {
                     attempt_id: task.attemptId,
                     execution_generation: cloudExecutionGeneration,
                     workflow_path: task.workflowPath,
-                    ...(task.promptPath === undefined ? {} : { prompt_path: task.promptPath }),
+                    // Every dispatched location is project-relative so the archive, the handoff DTO,
+                    // and the relocated worker all agree on one spelling of the same path.
+                    ...(task.promptRelativePath === undefined ? {} : { prompt_path: task.promptRelativePath }),
                     run_root: task.runRoot,
                     artifact_dir: task.artifactRelativeDir,
                     workspace_dir: task.workspaceRelativePath,
                     dependency_artifact_dirs: task.dependencyArtifactDirs,
+                    reference_artifact_dirs: task.referenceArtifactDirs ?? [],
+                    ...(task.vulnerabilityDatabase === undefined
+                      ? {}
+                      : { vulnerability_database: task.vulnerabilityDatabase }),
+                    selected_task: cloudSelectedTaskHandoff(task),
                     resources: {
                       cpu: task.execution.resources.cpu,
                       memory_mib: task.execution.resources.memoryMiB,

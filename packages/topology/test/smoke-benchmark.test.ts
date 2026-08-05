@@ -78,9 +78,20 @@ describe("smoke benchmark topology", () => {
           reasoningEffort: "medium"
         }
       },
-      defaultModelProfileId: "benchmark",
-      referenceCatalog: vulnerabilityDatabaseReferenceCatalog()
+      // No fixture catalog: expansion resolves `vulnerability-database.web3` from the shipped
+      // `.ultrafuzz/references.yml`, so the smoke topology and the shipped catalog stay in sync.
+      defaultModelProfileId: "benchmark"
     });
+    const referenceNode = graph.nodes.find((node) => node.kind === "reference");
+    expect(referenceNode?.reference).toBe("vulnerability-database.web3");
+    expect(referenceNode?.referenceRevision).toEqual(
+      expect.objectContaining({
+        kind: "vulnerability-database",
+        provider: "github",
+        repo: "monad-developers/web3-vulnerability-database",
+        commit: "fbf00e990b1316879b674e9903548dba452e40d5"
+      })
+    );
     const declarations = graph.nodes.filter((node) => node.kind === "agentic");
     const executable = declarations.filter((node) => node.dynamic === undefined);
     expect(declarations).toHaveLength(12);
@@ -125,18 +136,3 @@ describe("smoke benchmark topology", () => {
     expect(production.nodes.some((node) => node.id === "dynamic-strategy-generator")).toBe(true);
   });
 });
-
-function vulnerabilityDatabaseReferenceCatalog() {
-  return {
-    version: 1,
-    references: {
-      "vulnerability-database.web3": {
-        kind: "vulnerability-database" as const,
-        provider: "github" as const,
-        repo: "monad-developers/web3-vulnerability-database",
-        commit: "b".repeat(40),
-        paths: ["database.yml", "capabilities.yml", "catalog.json"]
-      }
-    }
-  };
-}

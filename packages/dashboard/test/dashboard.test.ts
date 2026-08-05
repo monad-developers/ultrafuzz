@@ -57,7 +57,24 @@ test("serves logical topology flow with expanded attempt details", async () => {
 
 test("persisted flow and node detail expose human dynamic IDs with safe storage state", async () => {
   const projectRoot = makeProject();
-  const plan = await planRun({ projectRoot, runId: "dashboard-dynamic", env: {} });
+  // This test is about how the dashboard renders generated dynamic nodes, so it plans the shipped
+  // topology without the pinned vulnerability-database feature rather than requiring that
+  // reference's synced cache.
+  const plan = await planRun({
+    projectRoot,
+    runId: "dashboard-dynamic",
+    topologyTransform: {
+      excludedNodeIds: [
+        "reference-vulnerability-database",
+        "threat-model",
+        "goal-plan",
+        "goal-roaming",
+        "threat-goals",
+        "class-goals"
+      ]
+    },
+    env: {}
+  });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
   const graphPath = path.join(plan.value!.run_root, "graph.json");
   const graph = JSON.parse(fs.readFileSync(graphPath, "utf8")) as {

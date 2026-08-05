@@ -75,6 +75,13 @@ hunter selection belong to `goal-plan`.
 
 ## Canonical JSON
 
+The authoritative contract for this artifact is the canonical JSON Schema
+`{{artifact_schema_dir}}/threat-model.schema.json`
+(`$id: https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/threat-model`),
+generated from the same `ultrafuzz/threat-model@1` validator that gates this
+node. The shape below restates that schema for convenience; when the two ever
+disagree, the schema file wins.
+
 Write `{{artifact_path}}/threat-model.json` first with this exact top-level
 shape and `schema_version: "ultrafuzz.threat-model.v1"`:
 

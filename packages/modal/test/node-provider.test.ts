@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { CLOUD_SELECTED_TASK_SCHEMA_VERSION, type CloudSelectedTask } from "@ultrafuzz/artifacts";
 import { SandboxFilesystemNotFoundError, type Sandbox } from "modal";
 import { describe, expect, it, vi } from "vitest";
 
@@ -92,6 +93,83 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("hands a relocated worker the reference artifact tree and the digest-bound planner catalog", async () => {
+    const fixture = createProjectFixture();
+    const referenceDir = `${fixture.input.run_root}/artifacts/reference-vulnerability-database`;
+    const catalogRelativePath = `${fixture.input.run_root}/vulnerability-db/catalog.json`;
+    const catalogBytes = '{"schema_version":"ultrafuzz.vulnerability-db.planner-catalog.v1"}\n';
+    const recordRelativePath = `${referenceDir}/vulnerability-db/classes/oracle/stale-price.md`;
+    fs.mkdirSync(path.join(fixture.root, path.dirname(recordRelativePath)), { recursive: true });
+    fs.mkdirSync(path.join(fixture.root, referenceDir, "references"), { recursive: true });
+    fs.writeFileSync(path.join(fixture.root, recordRelativePath), "# stale price\n");
+    fs.writeFileSync(path.join(fixture.root, referenceDir, "vulnerability-db", "catalog.json"), catalogBytes);
+    fs.writeFileSync(path.join(fixture.root, referenceDir, "references", "manifest.json"), "{}\n");
+    fs.mkdirSync(path.dirname(path.join(fixture.root, catalogRelativePath)), { recursive: true });
+    fs.writeFileSync(path.join(fixture.root, catalogRelativePath), catalogBytes);
+    // Both compiled database-consuming attempts declare the same two cloud inputs.
+    const inputs: ModalNodeSandboxInput[] = ["node:threat-model", "node:goal-plan"].map((taskId) => ({
+      ...fixture.input,
+      task_id: taskId,
+      reference_artifact_dirs: [referenceDir],
+      vulnerability_database: {
+        catalogPath: catalogRelativePath,
+        catalogSha256: crypto.createHash("sha256").update(catalogBytes).digest("hex")
+      }
+    }));
+
+    for (const input of inputs) {
+      const archive = await createModalNodeHandoffArchive(fixture.root, input);
+      const worker = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-relocated-worker-"));
+      try {
+        await extractSafeTarArchive(archive.path, worker, { gzip: true, label: "relocated worker" });
+        // The worker sees both trees at the same project-relative locations, byte for byte.
+        expect(fs.readFileSync(path.join(worker, catalogRelativePath), "utf8")).toBe(catalogBytes);
+        expect(fs.readFileSync(path.join(worker, referenceDir, "vulnerability-db", "catalog.json"), "utf8")).toBe(
+          catalogBytes
+        );
+        expect(fs.readFileSync(path.join(worker, recordRelativePath), "utf8")).toBe("# stale price\n");
+        expect(fs.existsSync(path.join(worker, referenceDir, "references", "manifest.json"))).toBe(true);
+        // Controller-owned global state is never shipped.
+        expect(fs.existsSync(path.join(worker, fixture.input.run_root, "graph.json"))).toBe(false);
+        expect(fs.existsSync(path.join(worker, fixture.input.run_root, "smithers", "tasks.json"))).toBe(false);
+      } finally {
+        fs.rmSync(worker, { recursive: true, force: true });
+        archive.cleanup();
+      }
+    }
+
+    // The catalog is bound to its declared digest, so a tampered run root cannot reach a worker.
+    fs.writeFileSync(path.join(fixture.root, catalogRelativePath), '{"schema_version":"tampered"}\n');
+    for (const input of inputs) {
+      await expect(createModalNodeHandoffArchive(fixture.root, input)).rejects.toThrow(
+        /does not match its declared cloud-input digest/u
+      );
+    }
+    fixture.cleanup();
+  });
+
+  it("publishes the prompt-referenced canonical artifact schemas to the worker", async () => {
+    const fixture = createProjectFixture();
+    fs.mkdirSync(path.join(fixture.root, ".ultrafuzz", "schema"), { recursive: true });
+    for (const name of ["threat-model", "goal-plan"]) {
+      fs.writeFileSync(path.join(fixture.root, ".ultrafuzz", "schema", `${name}.schema.json`), `{"title":"${name}"}\n`);
+    }
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const worker = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-relocated-worker-"));
+    try {
+      await extractSafeTarArchive(archive.path, worker, { gzip: true, label: "relocated worker" });
+      for (const name of ["threat-model", "goal-plan"]) {
+        expect(fs.readFileSync(path.join(worker, ".ultrafuzz", "schema", `${name}.schema.json`), "utf8")).toBe(
+          `{"title":"${name}"}\n`
+        );
+      }
+    } finally {
+      fs.rmSync(worker, { recursive: true, force: true });
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("includes the JSON schema bundle needed by rendered property prompts", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -105,6 +183,343 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("accepts only a complete selected-task handoff that agrees with its dispatch", () => {
+    const fixture = createProjectFixture();
+    try {
+      const input = { ...fixture.input, selected_task: fixture.selectedTask };
+      expect(() => parseModalNodeSandboxInput(input)).not.toThrow();
+      // A partial stub is not a handoff: the contract is exact, so the omitted fields are rejected.
+      expect(() =>
+        parseModalNodeSandboxInput({
+          ...fixture.input,
+          selected_task: {
+            schema_version: CLOUD_SELECTED_TASK_SCHEMA_VERSION,
+            id: fixture.input.task_id,
+            attemptId: fixture.input.attempt_id
+          }
+        })
+      ).toThrow(/selected task handoff is invalid/u);
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: undefined })).not.toThrow();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it.each([
+    // 1. Every top-level identity field missing, malformed, or mismatched.
+    ["schema version absent", "schema_version", ABSENT],
+    ["schema version downgraded", "schema_version", "ultrafuzz.cloud-selected-task.v0"],
+    ["task id absent", "id", ABSENT],
+    ["task id malformed", "id", "../evil"],
+    ["task id mismatched", "id", "node:someone-else"],
+    ["attempt id absent", "attemptId", ABSENT],
+    ["attempt id malformed", "attemptId", 42],
+    ["attempt id mismatched", "attemptId", "someone-else"],
+    ["preparation id absent", "preparationId", ABSENT],
+    ["preparation id malformed", "preparationId", "prepare:../evil"],
+    ["verifier id absent", "verifierId", ABSENT],
+    ["agent ref absent", "agentRef", ABSENT],
+    ["agent ref malformed", "agentRef", "../evil"],
+    ["branch absent", "branch", ABSENT],
+    ["branch traversal", "branch", "ultrafuzz/../../escape"],
+    ["metadata run id mismatched", "metadata.run.ultrafuzzRunId", "another-run"],
+    ["metadata attempt id mismatched", "metadata.node.attemptId", "someone-else"],
+    // 2. Every path-bearing field with traversal, sibling-prefix escapes, and absolute paths.
+    ["prompt path absent", "promptPath", ABSENT],
+    ["prompt path traversal", "promptPath", "../escape.md"],
+    ["prompt path absolute", "promptPath", "/etc/passwd"],
+    ["prompt path non-canonical", "promptPath", ".ultrafuzz/runs/run-one/./prompts/attempt-one.md"],
+    ["prompt path sibling-prefix escape", "promptPath", ".ultrafuzz/runs/run-one-evil/prompts/attempt-one.md"],
+    ["prompt path disagreeing", "promptPath", ".ultrafuzz/runs/run-one/prompts/other.md"],
+    ["workspace path outside the run root", "workspacePath", ".smithers/agents"],
+    ["workspace path disagreeing", "workspacePath", ".ultrafuzz/runs/run-one/workspaces/other"],
+    ["artifact dir traversal", "artifactDir", ".ultrafuzz/runs/run-one/artifacts/../../escape"],
+    ["artifact dir disagreeing", "artifactDir", ".ultrafuzz/runs/run-one/artifacts/other"],
+    ["run root absolute", "runRoot", "/etc"],
+    ["run root disagreeing", "runRoot", ".ultrafuzz/runs/other"],
+    ["workflow path traversal", "workflowPath", "../escape.tsx"],
+    ["workflow path disagreeing", "workflowPath", ".smithers/workflows/other.tsx"],
+    ["source project root relative", "sourceProjectRoot", "controller/project"],
+    ["source project root traversal", "sourceProjectRoot", "/controller/project/../escape"],
+    // 3. Dependency and reference artifact arrays.
+    ["dependency dirs absent", "dependencyArtifactDirs", ABSENT],
+    ["dependency dirs not an array", "dependencyArtifactDirs", "not-an-array"],
+    ["dependency dirs element shape", "dependencyArtifactDirs", [{ path: "a" }]],
+    ["dependency dirs element traversal", "dependencyArtifactDirs", ["../escape"]],
+    ["dependency dirs element absolute", "dependencyArtifactDirs", ["/etc"]],
+    ["dependency dirs disagreeing", "dependencyArtifactDirs", [".ultrafuzz/runs/run-one/artifacts/dependency-one"]],
+    ["reference dirs not an array", "referenceArtifactDirs", 7],
+    ["reference dirs element traversal", "referenceArtifactDirs", [".ultrafuzz/runs/run-one/../escape"]],
+    ["reference dirs disagreeing", "referenceArtifactDirs", [".ultrafuzz/runs/run-one/artifacts/reference-one"]],
+    // 4. Vulnerability database path and digest.
+    ["database absent", "vulnerabilityDatabase", { catalogSha256: "a".repeat(64) }],
+    ["database digest malformed", "vulnerabilityDatabase", { catalogPath: "a/b.json", catalogSha256: "nope" }],
+    [
+      "database path traversal",
+      "vulnerabilityDatabase",
+      { catalogPath: "../catalog.json", catalogSha256: "a".repeat(64) }
+    ],
+    [
+      "database nested unknown field",
+      "vulnerabilityDatabase",
+      { catalogPath: ".ultrafuzz/runs/run-one/c.json", catalogSha256: "a".repeat(64), mirror: "/tmp/evil" }
+    ],
+    // 5. Nested outputs, metadata, and execution unknown keys and invalid values.
+    ["outputs nested unknown key", "metadata.artifacts.outputs.0.evil", "smuggled"],
+    ["outputs invalid digest", "metadata.artifacts.outputs.0.contractDigest", "nope"],
+    ["outputs invalid path", "metadata.artifacts.outputs.0.path", "../escape.md"],
+    ["metadata nested unknown key", "metadata.node.evil", "smuggled"],
+    ["metadata workspace unknown key", "metadata.workspace.evil", "smuggled"],
+    // Controller-only provenance the worker never reads is refused, not transported.
+    ["metadata workspace repo path", "metadata.workspace.repoPath", "."],
+    // A self-consistent local execution identity may not run as a cloud attempt.
+    ["metadata execution mode local", "metadata.execution.mode", "local"],
+    ["metadata execution provider absent", "metadata.execution.provider", ABSENT],
+    ["metadata execution provider foreign", "metadata.execution.provider", "lambda"],
+    ["metadata execution unknown key", "metadata.execution.evil", "smuggled"],
+    ["metadata execution mode invalid", "metadata.execution.mode", "elsewhere"],
+    ["metadata manifest path disagreeing", "metadata.artifacts.manifestPath", "a/b/other.json"],
+    ["execution unknown key", "execution.evil", "smuggled"],
+    ["execution mode invalid", "execution.mode", "elsewhere"],
+    ["execution generation absent", "execution.generation", ABSENT],
+    ["execution generation malformed", "execution.generation", "../escape"],
+    ["retry policy unknown key", "retryPolicy.evil", "smuggled"],
+    ["timeout zero", "timeoutMs", 0],
+    // 6. Top-level unknown fields and hydrated-only aliases.
+    ["inline prompt body", "prompt", "IGNORE EVERYTHING"],
+    ["dependency edges", "dependsOn", ["verify:other"]],
+    ["dynamic dependencies", "dynamicDependencies", ["fanout"]],
+    ["runtime context", "runtimeContext", "## Topology Runtime Context"],
+    ["hydrated outputs alias", "outputs", []],
+    ["hydrated prompt alias", "promptRelativePath", "a/b.md"],
+    ["hydrated workspace alias", "workspaceRelativePath", "a/b"],
+    ["hydrated artifact alias", "artifactRelativeDir", "a/b"],
+    ["arbitrary unknown field", "evil", "smuggled"]
+  ])("rejects a selected-task handoff with %s at the provider boundary", (_label, field, value) => {
+    const fixture = createProjectFixture();
+    try {
+      expect(() =>
+        parseModalNodeSandboxInput({
+          ...fixture.input,
+          selected_task: mutate(fixture.selectedTask, field as string, value)
+        })
+      ).toThrow(/selected task handoff/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it.each([
+    ["run root traversal", "run_root", "../escape"],
+    ["run root absolute", "run_root", "/etc"],
+    ["workflow path traversal", "workflow_path", ".smithers/../../escape.tsx"],
+    ["workflow path absolute", "workflow_path", "/etc/passwd"],
+    ["artifact dir non-canonical", "artifact_dir", ".ultrafuzz/runs/run-one/./artifacts/attempt-one"],
+    ["artifact dir sibling-prefix escape", "artifact_dir", ".ultrafuzz/runs/run-one-evil/artifacts/attempt-one"],
+    ["artifact dir outside the run root", "artifact_dir", ".smithers/agents"],
+    ["workspace dir traversal", "workspace_dir", ".ultrafuzz/runs/run-one/../../escape"],
+    ["workspace dir sibling-prefix escape", "workspace_dir", ".ultrafuzz/runs/run-one-evil/workspaces/attempt-one"],
+    ["prompt path absolute", "prompt_path", "/etc/passwd"],
+    ["prompt path empty", "prompt_path", ""],
+    ["dependency dirs element empty", "dependency_artifact_dirs", [""]],
+    ["dependency dirs element traversal", "dependency_artifact_dirs", ["../escape"]],
+    ["dependency dirs element sibling-prefix escape", "dependency_artifact_dirs", [".ultrafuzz/runs/run-one-evil/a"]],
+    ["reference dirs element empty", "reference_artifact_dirs", [""]],
+    ["reference dirs element absolute", "reference_artifact_dirs", ["/etc"]],
+    ["database catalog empty", "vulnerability_database", { catalogPath: "", catalogSha256: "a".repeat(64) }],
+    [
+      "database catalog traversal",
+      "vulnerability_database",
+      { catalogPath: "../catalog.json", catalogSha256: "a".repeat(64) }
+    ],
+    [
+      "database catalog outside the run root",
+      "vulnerability_database",
+      { catalogPath: ".smithers/catalog.json", catalogSha256: "a".repeat(64) }
+    ],
+    [
+      "database nested unknown key",
+      "vulnerability_database",
+      { catalogPath: ".ultrafuzz/runs/run-one/c.json", catalogSha256: "a".repeat(64), mirror: "/tmp/evil" }
+    ]
+  ])("rejects a cloud node input whose %s is unsafe", (_label, field, value) => {
+    const fixture = createProjectFixture();
+    try {
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, [field as string]: value })).toThrow(/cloud node/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  /**
+   * The whole outer dispatch contract is exact.
+   *
+   * A dispatch is an untrusted document at the provider boundary, so an unknown top-level key, a
+   * camelCase or hydrated-only alias, and an unknown key inside `resources` are all refused rather
+   * than carried into the archive, the request file, and the relocated worker.
+   */
+  it.each([
+    ["unknown top-level key", "evil", "smuggled"],
+    ["hydrated selected-task alias", "selectedTask", { id: "node:attempt-one" }],
+    ["camelCase run alias", "runId", "run-one"],
+    ["camelCase resource alias", "executionGeneration", "base"],
+    ["controller-only project root", "source_project_root", "/controller/project"],
+    ["smuggled operator input", "operator_input", { issue: 2 }],
+    ["unknown nested resources key", "resources", { cpu: 2, memory_mib: 4096, timeout_seconds: 60, gpu: "a100" }],
+    ["aliased nested resources key", "resources", { cpu: 2, memoryMiB: 4096, timeout_seconds: 60 }]
+  ])("rejects a cloud node dispatch carrying an %s", (_label, field, value) => {
+    const fixture = createProjectFixture();
+    try {
+      expect(() =>
+        parseModalNodeSandboxInput({
+          ...fixture.input,
+          selected_task: fixture.selectedTask,
+          [field as string]: value
+        })
+      ).toThrow(/cloud node (input has unsupported keys|resources are invalid)/u);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("omitting supported optional dispatch fields stays compatible", () => {
+    const fixture = createProjectFixture();
+    try {
+      const { prompt_path: _promptPath, ...withoutPrompt } = fixture.input;
+      expect(() => parseModalNodeSandboxInput(withoutPrompt)).not.toThrow();
+      expect(() =>
+        parseModalNodeSandboxInput({
+          ...fixture.input,
+          reference_artifact_dirs: [],
+          project_archive_sha256: "a".repeat(64),
+          operator_prompt: "operator note"
+        })
+      ).not.toThrow();
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  /**
+   * A local execution identity can never be dispatched as a cloud attempt.
+   *
+   * A runtime-generated attempt has no compiled canonical peer, so a handoff that agrees with itself
+   * about running locally would otherwise be accepted by the provider and archived for a cloud run.
+   */
+  it("refuses a self-consistent local execution identity at the provider boundary", () => {
+    const fixture = createProjectFixture();
+    try {
+      const local = mutate(mutate(fixture.selectedTask, "execution.mode", "local"), "metadata.execution.mode", "local");
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: local })).toThrow(
+        /execution mode local is not the dispatched cloud execution identity/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses a selected task from a different execution generation at the provider boundary", () => {
+    const fixture = createProjectFixture();
+    try {
+      const wrongGeneration = mutate(fixture.selectedTask, "execution.generation", "reset-one");
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: wrongGeneration })).toThrow(
+        /execution\.generation reset-one is not the dispatched base generation/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it.each([
+    [
+      "unknown outer key",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: fixture.selectedTask,
+        evil: "smuggled"
+      }),
+      /cloud node input has unsupported keys: evil/u
+    ],
+    [
+      "hydrated selected-task alias",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: fixture.selectedTask,
+        selectedTask: fixture.selectedTask
+      }),
+      /cloud node input has unsupported keys: selectedTask/u
+    ],
+    [
+      "unknown nested resources key",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: fixture.selectedTask,
+        resources: { ...fixture.input.resources, gpu: "a100" }
+      }),
+      /cloud node resources are invalid/u
+    ],
+    [
+      "local selected-task execution identity",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: mutate(
+          mutate(fixture.selectedTask, "execution.mode", "local"),
+          "metadata.execution.mode",
+          "local"
+        )
+      }),
+      /execution mode local is not the dispatched cloud execution identity/u
+    ],
+    [
+      "different selected-task execution generation",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: mutate(fixture.selectedTask, "execution.generation", "reset-one")
+      }),
+      /execution\.generation reset-one is not the dispatched base generation/u
+    ],
+    [
+      "selected-task source project mismatch",
+      (fixture: ReturnType<typeof createProjectFixture>) => ({
+        ...fixture.input,
+        selected_task: mutate(fixture.selectedTask, "sourceProjectRoot", "/controller/other-project")
+      }),
+      /source project root does not match the archived project root/u
+    ]
+  ])(
+    "refuses an invalid dispatch with %s before any archive, credential, or sandbox work",
+    async (_label, input, error) => {
+      const fixture = createProjectFixture();
+      const client = fakeClient({});
+      const provider = createModalNodeSandboxProvider(providerOptions(client));
+      const heartbeat = vi.fn();
+      const handoffDirectories = (): string[] =>
+        fs.readdirSync(os.tmpdir()).filter((entry) => entry.startsWith("ultrafuzz-node-handoff-"));
+      const before = new Set(handoffDirectories());
+      try {
+        await expect(
+          provider.run({
+            runId: "controller-run",
+            sandboxId: "node:attempt",
+            input: input(fixture),
+            rootDir: fixture.root,
+            heartbeat
+          })
+        ).rejects.toThrow(error);
+        // Nothing was archived, no credentials were read, and no sandbox was created or listed.
+        expect(client.apps.fromName).not.toHaveBeenCalled();
+        expect(client.volumes.fromName).not.toHaveBeenCalled();
+        expect(client.sandboxes.create).not.toHaveBeenCalled();
+        expect(client.sandboxes.list).not.toHaveBeenCalled();
+        expect(client.secrets.fromObject).not.toHaveBeenCalled();
+        expect(heartbeat).not.toHaveBeenCalled();
+        expect(handoffDirectories().filter((entry) => !before.has(entry))).toEqual([]);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  );
+
   it("rejects committed symlinks before building a cloud handoff archive", async () => {
     const fixture = createProjectFixture();
     try {
@@ -114,6 +529,19 @@ describe("Modal node sandbox provider", () => {
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
         /unsupported symlink entry/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("binds selected-task relocation to the exact project being archived", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const selectedTask = mutate(fixture.selectedTask, "sourceProjectRoot", "/controller/other-project");
+      const input = parseModalNodeSandboxInput({ ...fixture.input, selected_task: selectedTask });
+      await expect(createModalNodeHandoffArchive(fixture.root, input)).rejects.toThrow(
+        /source project root does not match the archived project root/u
       );
     } finally {
       fixture.cleanup();
@@ -435,6 +863,42 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("forwards the controller-materialized selected task and attempt identity to the inner workflow", () => {
+    const fixture = createProjectFixture();
+    try {
+      const selectedTask = fixture.selectedTask;
+      const args = workflowCommandArguments(
+        "/volume/workflow.tsx",
+        "/volume/workspace",
+        "inner-run",
+        { ...fixture.input, selected_task: selectedTask },
+        true
+      );
+      const inner = JSON.parse(args[args.indexOf("--input") + 1]!) as Record<string, unknown>;
+      // Without this the worker never receives the handoff and every dynamic or deferred task
+      // fails: the worker must not rematerialize controller-owned global state to recover it.
+      expect(inner.cloud_worker).toBe(true);
+      expect(inner.task_id).toBe(fixture.input.task_id);
+      expect(inner.attempt_id).toBe(fixture.input.attempt_id);
+      expect(inner.selected_task).toEqual(selectedTask);
+      // The relocated worker cannot rederive the generation it publishes under, so it is forwarded.
+      expect(inner.execution_generation).toBe(fixture.input.execution_generation);
+
+      const withoutHandoff = workflowCommandArguments(
+        "/volume/workflow.tsx",
+        "/volume/workspace",
+        "inner-run",
+        fixture.input,
+        true
+      );
+      const bare = JSON.parse(withoutHandoff[withoutHandoff.indexOf("--input") + 1]!) as Record<string, unknown>;
+      expect(bare.selected_task).toBeUndefined();
+      expect(bare.attempt_id).toBe(fixture.input.attempt_id);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("falls back to a fresh inner workflow only when no persisted run exists", async () => {
     const fixture = createProjectFixture();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-inner-workflow-test-"));
@@ -515,6 +979,93 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     } finally {
       archive.cleanup();
       replacementArchive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses to resume durable state under changed catalog, references, or selected-task provenance", async () => {
+    const fixture = createProjectFixture();
+    const referenceDir = `${fixture.input.run_root}/artifacts/reference-one`;
+    const catalogPath = `${fixture.input.run_root}/references/vulnerability-catalog.json`;
+    fs.mkdirSync(path.join(fixture.root, referenceDir), { recursive: true });
+    fs.mkdirSync(path.join(fixture.root, path.dirname(catalogPath)), { recursive: true });
+    fs.writeFileSync(path.join(fixture.root, referenceDir, "reference.md"), "invented reference\n");
+    fs.writeFileSync(path.join(fixture.root, catalogPath), '{"schema_version":"invented.v1"}\n');
+    fixture.input.reference_artifact_dirs = [referenceDir];
+    fixture.input.vulnerability_database = {
+      catalogPath,
+      catalogSha256: crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(path.join(fixture.root, catalogPath)))
+        .digest("hex")
+    };
+    const input = parseModalNodeSandboxInput({
+      ...fixture.input,
+      selected_task: selectedTaskFor(fixture.input, fixture.root)
+    });
+    const archive = await createModalNodeHandoffArchive(fixture.root, input);
+    input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "attempt-provenance");
+    try {
+      await initializeDurableNodeWorkspace(volumeRoot, archive.path, input);
+      const changedCatalog = mutate(input.selected_task!, "vulnerabilityDatabase.catalogSha256", "b".repeat(64));
+      const changedReferences = mutate(input.selected_task!, "referenceArtifactDirs", []);
+      const changedTask = mutate(input.selected_task!, "metadata.node.label", "Different task label");
+      for (const candidate of [
+        {
+          ...input,
+          vulnerability_database: { ...input.vulnerability_database!, catalogSha256: "b".repeat(64) },
+          selected_task: changedCatalog
+        },
+        { ...input, reference_artifact_dirs: [], selected_task: changedReferences },
+        { ...input, selected_task: changedTask }
+      ]) {
+        const parsed = parseModalNodeSandboxInput(candidate);
+        await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, parsed)).rejects.toThrow(
+          /durable workspace request does not match this cloud node attempt/u
+        );
+      }
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("recovers reset outputs only when the selected-task provenance still agrees", async () => {
+    const fixture = createProjectFixture();
+    const input = parseModalNodeSandboxInput({ ...fixture.input, selected_task: fixture.selectedTask });
+    const archive = await createModalNodeHandoffArchive(fixture.root, input);
+    input.project_archive_sha256 = archive.sha256;
+    const volumeParent = path.join(path.dirname(fixture.root), "modal-volume-provenance");
+    const priorRoot = path.join(volumeParent, "attempt-base");
+    try {
+      const prior = await initializeDurableNodeWorkspace(priorRoot, archive.path, input);
+      const generated = path.join(prior.projectRoot, input.workspace_dir, "test", "Property.t.sol");
+      fs.mkdirSync(path.dirname(generated), { recursive: true });
+      fs.writeFileSync(generated, "contract Property {}\n");
+      prior.recordCheckpoint("failed", new Error("reset requested"));
+
+      const compatible = parseModalNodeSandboxInput({
+        ...input,
+        execution_generation: "reset-compatible",
+        selected_task: mutate(input.selected_task!, "execution.generation", "reset-compatible")
+      });
+      const compatibleRoot = path.join(volumeParent, "attempt-compatible");
+      const recovered = await initializeDurableNodeWorkspace(compatibleRoot, archive.path, compatible);
+      expect(recovered.recordCheckpoint("prepared").restored_from).toBe(priorRoot);
+
+      const changed = mutate(input.selected_task!, "execution.generation", "reset-changed");
+      const incompatible = parseModalNodeSandboxInput({
+        ...input,
+        execution_generation: "reset-changed",
+        selected_task: mutate(changed, "metadata.node.label", "Different task label")
+      });
+      const incompatibleRoot = path.join(volumeParent, "attempt-incompatible");
+      const fresh = await initializeDurableNodeWorkspace(incompatibleRoot, archive.path, incompatible);
+      expect(fresh.recordCheckpoint("prepared").restored_from).toBeUndefined();
+      expect(fs.existsSync(path.join(fresh.projectRoot, ".ultrafuzz", "recovered"))).toBe(false);
+    } finally {
+      archive.cleanup();
       fixture.cleanup();
     }
   });
@@ -1104,9 +1655,10 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     const provider = createModalNodeSandboxProvider(providerOptions(client));
     const outside = path.join(path.dirname(fixture.root), "outside-artifacts");
     try {
-      fixture.input.artifact_dir = "published-artifacts/attempt-one";
+      // Run-root-confined and canonically shaped, so the symlinked prefix is what must be refused.
+      fixture.input.artifact_dir = `${fixture.input.run_root}/published-artifacts/attempt-one`;
       fs.mkdirSync(outside, { recursive: true });
-      fs.symlinkSync(outside, path.join(fixture.root, "published-artifacts"), "dir");
+      fs.symlinkSync(outside, path.join(fixture.root, fixture.input.run_root, "published-artifacts"), "dir");
 
       await expect(
         provider.run({
@@ -1234,7 +1786,9 @@ function createProjectFixture() {
   const artifactDir = `${runRoot}/artifacts/attempt-one`;
   const dependencyArtifactDirs = [`${runRoot}/artifacts/dependency-one`, `${runRoot}/artifacts/dependency-two`];
   const workspaceDir = `${runRoot}/workspaces/attempt-one`;
-  const workflowPath = `${runRoot}/smithers/workflow.tsx`;
+  // The generated workflow really lives under `.smithers/workflows/`, a project child outside every
+  // run root; keeping the fixture faithful is what lets the boundary tests exercise real confinement.
+  const workflowPath = ".smithers/workflows/ultrafuzz-run-one.tsx";
   const promptPath = `${runRoot}/prompts/attempt-one.md`;
   fs.mkdirSync(path.join(root, path.dirname(workflowPath)), { recursive: true });
   fs.mkdirSync(path.join(root, path.dirname(promptPath)), { recursive: true });
@@ -1296,9 +1850,96 @@ function createProjectFixture() {
   return {
     root,
     input,
+    selectedTask: selectedTaskFor(input, root),
     cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
   };
 }
+
+/**
+ * The exact handoff DTO the controller dispatches alongside a cloud node input.
+ *
+ * Written out in full rather than as a partial stub: the provider boundary rejects unknown keys and
+ * cross-checks every field against the dispatch, so only a complete, agreeing DTO is a valid input.
+ */
+function selectedTaskFor(input: ModalNodeSandboxInput, sourceProjectRoot: string): CloudSelectedTask {
+  return {
+    schema_version: CLOUD_SELECTED_TASK_SCHEMA_VERSION,
+    id: input.task_id,
+    attemptId: input.attempt_id,
+    preparationId: `prepare:${input.attempt_id}`,
+    verifierId: `verify:${input.attempt_id}`,
+    agentRef: "ClaudeAgent",
+    modelName: null,
+    reasoningEffort: null,
+    branch: `ultrafuzz/${input.run_id}/${input.attempt_id}`,
+    promptPath: input.prompt_path!,
+    workspacePath: input.workspace_dir,
+    artifactDir: input.artifact_dir,
+    runRoot: input.run_root,
+    workflowPath: input.workflow_path,
+    sourceProjectRoot,
+    dependencyArtifactDirs: [...input.dependency_artifact_dirs],
+    referenceArtifactDirs: [...(input.reference_artifact_dirs ?? [])],
+    ...(input.vulnerability_database === undefined ? {} : { vulnerabilityDatabase: input.vulnerability_database }),
+    timeoutMs: 600_000,
+    heartbeatTimeoutMs: 120_000,
+    retries: 1,
+    retryPolicy: { backoff: "exponential", initialDelayMs: 1_000, maxDelayMs: 30_000 },
+    metadata: {
+      schemaVersion: "ultrafuzz.smithers.task-metadata.v1",
+      run: {
+        ultrafuzzRunId: input.run_id,
+        smithersWorkflowName: "ultrafuzz-run-one",
+        graphVersion: "1",
+        topologyVersion: 2
+      },
+      node: {
+        concreteNodeId: "threat-model",
+        logicalNodeId: "threat-model",
+        attemptId: input.attempt_id,
+        label: "Threat model",
+        kind: "agentic"
+      },
+      dependencies: { concreteNodeIds: ["__start__"], attemptIds: [], smithersNodeIds: [] },
+      loop: { index: 0, count: 1, mode: "single", attemptIndex: 0 },
+      workspace: { primitive: "worktree", path: input.workspace_dir, trustModel: "trusted-local" },
+      artifacts: {
+        dir: input.artifact_dir,
+        outputs: [
+          {
+            path: "THREAT_MODEL.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            contractDigest: "a".repeat(64),
+            primary: true
+          }
+        ],
+        manifestPath: `${input.artifact_dir}/artifact-manifest.json`
+      },
+      retryPolicy: { maxAttempts: 2, smithersRetries: 1 },
+      timeout: { milliseconds: 600_000, seconds: 600, heartbeatTimeoutMs: 120_000 },
+      execution: { mode: "cloud", provider: "modal", resources: { cpu: 2, memoryMiB: 4096, timeoutSeconds: 60 } }
+    },
+    execution: { mode: "cloud", generation: input.execution_generation }
+  };
+}
+
+/** Returns a deep copy of `base` with one dotted field set, or removed when `value` is `ABSENT`. */
+function mutate(base: unknown, field: string, value: unknown): Record<string, unknown> {
+  const clone = structuredClone(base) as Record<string, unknown>;
+  const parts = field.split(".");
+  let cursor: Record<string, unknown> = clone;
+  for (const part of parts.slice(0, -1)) cursor = cursor[part] as Record<string, unknown>;
+  const leaf = parts.at(-1)!;
+  if (value === ABSENT) {
+    delete cursor[leaf];
+  } else {
+    cursor[leaf] = value;
+  }
+  return clone;
+}
+
+/** Sentinel for "this field is absent", which `undefined` cannot express through JSON. */
+const ABSENT = Symbol("absent");
 
 function manifestEntry(relativePath: string, filePath: string) {
   return {

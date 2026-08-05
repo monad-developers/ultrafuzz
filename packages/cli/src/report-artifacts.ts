@@ -43,6 +43,12 @@ type ReportSeverity = (typeof severityOrder)[number];
 const MAX_REPORT_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_REPORT_MARKDOWN_BYTES = 16 * 1024 * 1024;
 const MAX_AUXILIARY_JSON_BYTES = 16 * 1024 * 1024;
+/**
+ * A report-relative audit-context link: `../<dir>/.../<file>` with no traversal past the sibling
+ * artifact directory. Every segment after the single leading `..` must be an ordinary name, so a
+ * link such as `../threat-model/../../../escape.md` is rejected.
+ */
+const SAFE_REPORT_RELATIVE_LINK_PATTERN = /^\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?$)[A-Za-z0-9._-]+$/u;
 const alternateSeverityFields = new Set([
   "canonical_severity",
   "classified_severity",
@@ -302,7 +308,7 @@ function findingSourceNodes(record: JsonRecord): string[] {
 
 function reportRelativeArtifact(reportDirectory: string, artifactPath: string): string {
   const relative = path.relative(reportDirectory, artifactPath).split(path.sep).join("/");
-  if (!/^\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+$/u.test(relative)) {
+  if (!SAFE_REPORT_RELATIVE_LINK_PATTERN.test(relative)) {
     throw new Error("audit context artifact did not produce a safe report-relative link");
   }
   return relative;
@@ -731,7 +737,7 @@ function isDirectiveConformingMarkdown(
     containsPrivatePath(markdown) ||
     /<[A-Za-z][^>]*>/u.test(prose) ||
     /!\[[^\]]*\]\(/u.test(prose) ||
-    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+))\)/iu.test(prose)
+    /(?<!\\)\]\((?!(?:#[a-z0-9-]+|\.\.\/(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+(?!\.\.?\))[A-Za-z0-9._-]+)\))/iu.test(prose)
   ) {
     return false;
   }
@@ -868,7 +874,7 @@ function appendAuditContext(lines: string[], value: unknown): void {
 }
 
 function safeReportLink(value: unknown): string | undefined {
-  return typeof value === "string" && /^\.\.\/[A-Za-z0-9._-]+\/[A-Za-z0-9._/-]+$/u.test(value) ? value : undefined;
+  return typeof value === "string" && SAFE_REPORT_RELATIVE_LINK_PATTERN.test(value) ? value : undefined;
 }
 
 function appendProductionIssue(lines: string[], rendered: RenderedIssue): void {

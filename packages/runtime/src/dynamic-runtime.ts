@@ -7,6 +7,8 @@ import {
   assertNoSymlinkComponents,
   assertPathInside,
   assertRegularFileInside,
+  safeResolveInside,
+  sha256Bytes,
   validateNodeReference,
   validateSafeId,
   writeFileDurable,
@@ -19,6 +21,7 @@ import {
   type DynamicExpansionItem,
   type DynamicExpansionManifest
 } from "./dynamic-expansion.js";
+import { projectArtifactSchemaDir } from "./init.js";
 import type { CompiledSmithersDynamicGroup, CompiledSmithersTask, SmithersTaskMetadata } from "./smithers.js";
 import type { PlannedGraph, PlannedGraphNode } from "./types.js";
 import { sha256Stable } from "./utils.js";
@@ -411,7 +414,7 @@ function renderReadyRuntimePrompts(input: {
         findingsPath: path.join(artifactDir, "findings.json"),
         patchPath: path.join(artifactDir, "patch.diff")
       },
-      resolvedConfig: groupContext.resolvedConfig
+      resolvedConfig: resolvedConfigForRuntimeRoot(groupContext.resolvedConfig, input.runRoot, input.projectRoot)
     });
     const promptPath = path.join(artifactDir, "prompt.rendered.md");
     assertPathInside(input.runRoot, artifactDir, `runtime artifact directory for ${task.attemptId}`);
@@ -428,6 +431,35 @@ function renderReadyRuntimePrompts(input: {
     }
     task.renderedPromptPath = promptPath;
   }
+}
+
+/**
+ * Resolves the documented `vulnerability_database_path` and `artifact_schema_dir` core variables
+ * against the actual run and project roots.
+ *
+ * The compiled group stores the digest-bound catalog run-root-relative, so a relocated workspace or
+ * a cloud root renders the correct absolute path instead of silently substituting "unavailable".
+ */
+function resolvedConfigForRuntimeRoot(
+  resolvedConfig: CompiledSmithersDynamicGroup["promptContext"]["resolvedConfig"],
+  runRoot: string,
+  projectRoot: string
+): CompiledSmithersDynamicGroup["promptContext"]["resolvedConfig"] & {
+  vulnerabilityDatabasePath?: string;
+  artifactSchemaDir?: string;
+} {
+  const withSchemaDir = { ...resolvedConfig, artifactSchemaDir: projectArtifactSchemaDir(projectRoot) };
+  const relativePath = resolvedConfig.vulnerabilityDatabaseRelativePath;
+  if (relativePath === undefined) return withSchemaDir;
+  const catalogPath = safeResolveInside(runRoot, relativePath, "materialized vulnerability database catalog");
+  assertRegularFileInside(runRoot, catalogPath, "materialized vulnerability database catalog");
+  if (
+    resolvedConfig.vulnerabilityDatabaseSha256 !== undefined &&
+    sha256Bytes(fs.readFileSync(catalogPath)) !== resolvedConfig.vulnerabilityDatabaseSha256
+  ) {
+    throw new Error("materialized vulnerability-database catalog does not match the digest recorded at plan time");
+  }
+  return { ...withSchemaDir, vulnerabilityDatabasePath: catalogPath };
 }
 
 function promptGraphContext(

@@ -64,6 +64,7 @@ timeouts, backend settings, or artifact requirements.
 | `strategy_loop_count`         | Total loop count for this logical node.                                   |
 | `strategy_attempt_test_dir`   | Absolute workspace path for generated Foundry tests from this attempt.    |
 | `vulnerability_database_path` | Absolute path to the immutable current-run vulnerability planner catalog. |
+| `artifact_schema_dir`         | Absolute path to the scaffolded canonical artifact JSON Schema directory. |
 
 ## Triage And Invariant Variables
 

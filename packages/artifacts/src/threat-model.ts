@@ -260,6 +260,17 @@ export const threatModelSchema = z
     validateReferences(value.threats, "threats", references, context);
   });
 
+/**
+ * The canonical JSON Schema for `ultrafuzz/threat-model@1`, generated from the single runtime
+ * contract above and snapshotted to `schema/threat-model.schema.json` so prompts and external
+ * consumers can reference one authoritative document instead of a hand-maintained shape summary.
+ */
+export const threatModelJsonSchema = {
+  ...z.toJSONSchema(threatModelSchema, { io: "input", unrepresentable: "any" }),
+  $id: THREAT_MODEL_JSON_SCHEMA_ID,
+  title: "Ultrafuzz threat model"
+} as Record<string, unknown>;
+
 export type ThreatModel = z.infer<typeof threatModelSchema>;
 export type ThreatModelEvidenceReference = z.infer<typeof evidenceReferenceSchema>;
 export type CapabilityStatus = (typeof CAPABILITY_STATUSES)[number];

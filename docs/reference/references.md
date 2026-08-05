@@ -41,20 +41,38 @@ vulnerability-database.web3:
   kind: vulnerability-database
   provider: github
   repo: monad-developers/web3-vulnerability-database
-  commit: cccccccccccccccccccccccccccccccccccccccc
+  commit: fbf00e990b1316879b674e9903548dba452e40d5
   paths:
     - database.yml
     - capabilities.yml
     - catalog.json
-  resolved_at: "2026-08-04T00:00:00Z"
+  resolved_at: "2026-08-04T22:33:24Z"
 ```
 
-Replace the example commit with the reviewed database release commit. The three
+The shipped `.ultrafuzz/references.yml` defines exactly this entry, so a clean
+`ultrafuzz init` scaffold already pins the reviewed database release and the
+`reference-vulnerability-database`, `threat-model`, `goal-plan`, and goal-fanout
+nodes run by default. Run `ultrafuzz references sync` once to populate the cache
+before running offline.
+
+Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record
 paths from `catalog.json`, verifies that the pinned Git tree contains exactly
 those regular Markdown files below `classes/`, and adds them to the same
 digest-checked cache entry. Mutable branches and an external checkout that has
 not yet published the contract fail closed.
+
+The pinned commit publishes the upstream v1 contract: `database.yml` declares
+`schema_version: 1` with `classes/**/*.md`, `capabilities.yml`, and
+`catalog.json`; `capabilities.yml` declares the controlled capability registry
+with optional aliases; and `catalog.json` carries `schemaVersion`, `algorithm`,
+`aggregateSha256`, capability definitions, and records with dotted IDs,
+`sourcePath`, `selectedArtifactPath`, `sha256`, `bytes`, `routing`,
+`applicability`, `sources`, and `reviewStatus`. Ultrafuzz validates that shape
+strictly, recomputes the upstream aggregate digest over the canonical catalog
+payload, and only then normalizes it into its own digest-bound planner catalog.
+Nothing from an external repository is executed, and no unvalidated upstream
+field reaches a planner prompt.
 
 ## Cache
 
@@ -116,13 +134,26 @@ During planning, normal document reference nodes materialize normalized
 Markdown headed with the reference ID, repo, commit, and resolved timestamp.
 Non-Markdown source files are included as fenced code blocks.
 
-A `kind: vulnerability-database` reference instead materializes the validated
-database files below `vulnerability-db/` in its node artifact directory. Its
-primary output is `vulnerability-db/catalog.json`. Validation independently
-checks the top-level schema, capability registry, strict record frontmatter and
-required sections, catalog normalization, related-class and capability
-references, every source digest and byte size, and the aggregate digest. The
-runtime never executes code from the external repository.
+A `kind: vulnerability-database` reference instead materializes the exact
+upstream database files below `vulnerability-db/` in its node artifact
+directory. Its primary output is `vulnerability-db/catalog.json`, the unmodified
+upstream file. Validation independently checks the upstream top-level schema and
+digest algorithm, the capability registry against `capabilities.yml`, strict
+record frontmatter and the required upstream sections, safe class and selected
+artifact paths, the domain/category/path agreement rule, capability references,
+canonical ordering, every source digest and byte size, and the recomputed
+aggregate digest. The runtime never executes code from the external repository.
+
+Planning then normalizes the validated upstream catalog into the internal
+planner catalog (`ultrafuzz.vulnerability-db.planner-catalog.v1`) written to
+`vulnerability-db/catalog.json` in the run root. That document is a pure
+function of the validated upstream bytes and records both digests:
+`database_aggregate_sha256` from upstream and `upstream_catalog_sha256` for the
+exact upstream file it was derived from. Goal plans bind the planner catalog by
+its own digest. The normalized records also carry the validated required class
+sections, including hunter instructions and examples, so goal planning retains
+its class-replacement context without reconstructing Markdown. A planner
+catalog that does not re-derive from the pinned database fails closed.
 
 Every reference node must also write:
 

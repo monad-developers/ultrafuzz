@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { modalAttemptVerificationMarkerName, parseModalNodeSandboxInput } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
@@ -300,6 +301,12 @@ export function workflowCommandArguments(
     JSON.stringify({
       cloud_worker: true,
       task_id: input.task_id,
+      attempt_id: input.attempt_id,
+      // The relocated worker cannot rederive the generation it runs under: the controller's evidence
+      // never enters the handoff archive, so the validated dispatch carries the identity forward.
+      execution_generation: input.execution_generation,
+      // The controller-materialized selected task is the worker's only view of the compiled graph.
+      ...(input.selected_task === undefined ? {} : { selected_task: input.selected_task }),
       ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
     }),
     "--format",
@@ -471,11 +478,32 @@ function sameResumableNodeInput(
     left.artifact_dir === right.artifact_dir &&
     left.workspace_dir === right.workspace_dir &&
     sameStrings(left.dependency_artifact_dirs, right.dependency_artifact_dirs) &&
+    sameStrings(left.reference_artifact_dirs ?? [], right.reference_artifact_dirs ?? []) &&
+    isDeepStrictEqual(left.vulnerability_database, right.vulnerability_database) &&
+    sameSelectedTask(left.selected_task, right.selected_task, ignoreExecutionGeneration) &&
     left.resources.cpu === right.resources.cpu &&
     left.resources.memory_mib === right.resources.memory_mib &&
     left.resources.timeout_seconds === right.resources.timeout_seconds &&
     sameStrings(left.agent_credential_env, right.agent_credential_env) &&
     left.operator_prompt === right.operator_prompt
+  );
+}
+
+/**
+ * Compares the complete task handoff while allowing only the generation identity to change for an
+ * explicit reset. Every other task and planner-catalog binding is provenance for the durable output,
+ * so a reset may recover it only when those bindings still agree.
+ */
+function sameSelectedTask(
+  left: ReturnType<typeof parseModalNodeSandboxInput>["selected_task"],
+  right: ReturnType<typeof parseModalNodeSandboxInput>["selected_task"],
+  ignoreExecutionGeneration: boolean
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (!ignoreExecutionGeneration) return isDeepStrictEqual(left, right);
+  return isDeepStrictEqual(
+    { ...left, execution: { ...left.execution, generation: "<reset-generation>" } },
+    { ...right, execution: { ...right.execution, generation: "<reset-generation>" } }
   );
 }
 

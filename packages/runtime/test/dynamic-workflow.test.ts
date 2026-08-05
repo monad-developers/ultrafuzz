@@ -202,3 +202,64 @@ function findSmithersModules(): string | undefined {
   }
   return undefined;
 }
+
+test("compilation snapshots the exact transformed prompt body used during planning", async () => {
+  const project = tempProject();
+  writeDynamicProject(project);
+  // A run-scoped prompt transform excludes an artifact reference, so the project bytes and the
+  // bytes the plan is bound to deliberately differ.
+  writePrompt(
+    project,
+    "dynamic/worker.md",
+    "dynamic-worker",
+    [
+      "Your /goal is {{item.goal_prompt}} using {{context:detail}}.",
+      "Excluded planner context: {{artifact_path:planner}}/plan.json"
+    ].join("\n")
+  );
+  writePrompt(
+    project,
+    "dynamic/join.md",
+    "dynamic-join",
+    ["Summarize all completed work.", "Excluded planner context: {{artifact_path:planner}}/plan.json"].join("\n")
+  );
+
+  const plan = await planRun({
+    projectRoot: project,
+    runId: "dynamic-transform",
+    topologyTransform: { excludedNodeIds: [] },
+    env: {}
+  });
+  assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+
+  const compiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-dynamic-transform",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+
+  const templatePath = compiled.dynamicGroups[0]!.templatePath;
+  const deferredJoinTemplatePath = compiled.tasks.find((task) => task.concreteNodeId === "join")!.promptTemplatePath!;
+  // Both deferred templates resolve to immutable run-root snapshots, never to the project file.
+  for (const snapshotPath of [templatePath, deferredJoinTemplatePath]) {
+    assert.equal(snapshotPath.startsWith(path.join(plan.value!.layout.root, "dynamic-prompt-templates")), true);
+  }
+
+  // Mutating the project prompt after planning must not change what compilation snapshots.
+  writePrompt(project, "dynamic/join.md", "dynamic-join", "Divergent project bytes.");
+  const recompiled = compileSmithersWorkflow({
+    projectRoot: project,
+    config: plan.value!.resolved_config,
+    graph: plan.value!.expanded_graph,
+    runLayout: plan.value!.layout,
+    workflowName: "ultrafuzz-dynamic-transform",
+    renderedPrompts: plan.value!.rendered_prompts
+  });
+  const recompiledJoinTemplate = recompiled.tasks.find((task) => task.concreteNodeId === "join")!.promptTemplatePath!;
+  assert.equal(recompiledJoinTemplate, deferredJoinTemplatePath);
+  assert.doesNotMatch(fs.readFileSync(recompiledJoinTemplate, "utf8"), /Divergent project bytes/u);
+  assert.match(fs.readFileSync(recompiledJoinTemplate, "utf8"), /Summarize all completed work/u);
+});

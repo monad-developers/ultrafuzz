@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   GRAPH_VERSION,
   TOPOLOGY_VERSION,
+  expandTopology,
   expandedGraphJsonSchema,
   validateExpandedGraphSchema,
   type ExpandedGraph
@@ -86,15 +87,15 @@ describe("expanded graph schema", () => {
   });
 
   it("snapshot is present and aligned with exported schema constants", () => {
-    const snapshot = JSON.parse(
-      readFileSync(path.join(packageRoot, "schema", "expanded-graph.schema.json"), "utf8")
-    ) as {
-      $id?: string;
-      required?: unknown;
-    };
+    const snapshot = readSnapshot();
 
     expect(snapshot.$id).toBe(expandedGraphJsonSchema.$id);
     expect(snapshot.required).toEqual(expandedGraphJsonSchema.required);
+    // Comparing only `$id`/`required` let the snapshot drift from the runtime validator: the
+    // snapshot rejected every generated reference node because it omitted `referenceRevision.kind`
+    // while declaring `additionalProperties: false`.
+    expect(snapshot).toEqual(expandedGraphJsonSchema);
+
     const outputContractEnum = (
       snapshot as {
         properties?: {
@@ -106,4 +107,74 @@ describe("expanded graph schema", () => {
     ).properties?.nodes?.items?.properties?.outputs?.items?.properties?.contract?.enum;
     expect(outputContractEnum).toEqual(ARTIFACT_CONTRACT_IDS);
   });
+
+  it("accepts every field an actually generated reference node emits", () => {
+    const commit = "a".repeat(40);
+    const graph = expandTopology(
+      {
+        version: TOPOLOGY_VERSION,
+        defaults: { strategy_loops: 1 },
+        nodes: [
+          { id: "__start__", kind: "meta", role: "start", depends_on: [] },
+          {
+            id: "reference-pinned-database",
+            kind: "reference",
+            reference: "vulnerability-database.web3",
+            depends_on: ["__start__"],
+            outputs: [
+              { path: "vulnerability-db/catalog.json", contract: "ultrafuzz/json-object@1", primary: true },
+              { path: "references/manifest.json", contract: "ultrafuzz/json-object@1" }
+            ]
+          },
+          {
+            id: "consumer",
+            kind: "agentic",
+            prompt: "setup/project-discovery.md",
+            depends_on: ["reference-pinned-database"],
+            outputs: [{ path: "findings.json", contract: "ultrafuzz/findings@1", primary: true }]
+          },
+          { id: "__finish__", kind: "meta", role: "finish", depends_on: ["consumer"] }
+        ]
+      },
+      {
+        referenceCatalog: {
+          version: 1,
+          references: {
+            "vulnerability-database.web3": {
+              kind: "vulnerability-database",
+              provider: "github",
+              repo: "monad-developers/web3-vulnerability-database",
+              commit,
+              paths: ["database.yml", "capabilities.yml", "catalog.json"]
+            }
+          }
+        }
+      }
+    );
+
+    const referenceNode = graph.nodes.find((node) => node.kind === "reference");
+    expect(referenceNode?.referenceRevision?.kind).toBe("vulnerability-database");
+    expect(validateExpandedGraphSchema(graph).ok).toBe(true);
+
+    // The committed snapshot must accept the same generated node, field for field.
+    const snapshot = readSnapshot() as unknown as {
+      properties: {
+        nodes: {
+          items: { properties: { referenceRevision: { required: string[]; properties: Record<string, unknown> } } };
+        };
+      };
+    };
+    const revisionSchema = snapshot.properties.nodes.items.properties.referenceRevision;
+    expect(Object.keys(referenceNode!.referenceRevision!).sort()).toEqual([...revisionSchema.required].sort());
+    for (const field of Object.keys(referenceNode!.referenceRevision!)) {
+      expect(Object.keys(revisionSchema.properties)).toContain(field);
+    }
+  });
 });
+
+function readSnapshot(): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(packageRoot, "schema", "expanded-graph.schema.json"), "utf8")) as Record<
+    string,
+    unknown
+  >;
+}

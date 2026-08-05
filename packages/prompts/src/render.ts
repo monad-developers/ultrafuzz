@@ -28,7 +28,8 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir",
-  "vulnerability_database_path"
+  "vulnerability_database_path",
+  "artifact_schema_dir"
 ] as const;
 
 export type SupportedTemplateVariable = (typeof SUPPORTED_TEMPLATE_VARIABLES)[number];
@@ -131,6 +132,7 @@ export interface PromptRenderInput {
     invariantTestingSmokeTimeout?: string | number;
     invariantTestingFuzzerTimeout?: string | number;
     vulnerabilityDatabasePath?: string;
+    artifactSchemaDir?: string;
   };
 }
 
@@ -158,11 +160,21 @@ export type PromptArtifactReference =
 type ArtifactProducer =
   { kind: "current" } | { kind: "logical"; logicalId: string } | { kind: "handoff"; logicalId: string };
 
-interface TemplateOccurrence {
+export interface TemplateOccurrence {
   name: string;
   rawName: string;
   start: number;
   end: number;
+}
+
+/**
+ * The single source of truth for which `{{...}}` occurrences a rendered prompt will actually bind.
+ * Escaped `\{{...}}` occurrences are deliberately skipped here and unescaped verbatim at render
+ * time, so every contract that promises "this placeholder is bound" must use this parser instead
+ * of its own regex.
+ */
+export function promptTemplateOccurrences(template: string): TemplateOccurrence[] {
+  return findTemplateOccurrences(template);
 }
 
 export interface PromptVariableReference {
@@ -184,8 +196,17 @@ export function isSupportedTemplateVariable(name: string): name is SupportedTemp
 export function isDynamicItemTemplateVariable(name: string): boolean {
   return (
     /^item\.[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*$/u.test(name) ||
-    /^[a-z0-9][a-z0-9_.-]*(?::[a-z0-9][a-z0-9_.-]*)+$/u.test(name)
+    isNamespacedDynamicReplacementKey(name)
   );
+}
+
+/**
+ * The exact key shape a dynamic fanout consumer accepts for planner-supplied replacements. Every
+ * layer that accepts or produces `replacements` keys must use this predicate so a contract-valid
+ * artifact can never carry a key the renderer refuses to bind.
+ */
+export function isNamespacedDynamicReplacementKey(name: string): boolean {
+  return /^[a-z0-9][a-z0-9_.-]*(?::[a-z0-9][a-z0-9_.-]*)+$/u.test(name);
 }
 
 export function parsePromptVariableReference(
@@ -812,6 +833,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
     vulnerability_database_path: input.resolvedConfig?.vulnerabilityDatabasePath ?? "unavailable",
+    artifact_schema_dir: input.resolvedConfig?.artifactSchemaDir ?? "unavailable",
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)])),
     ...Object.fromEntries(Object.entries(input.dynamicVariables ?? {}).map(([key, value]) => [key, String(value)]))
   };

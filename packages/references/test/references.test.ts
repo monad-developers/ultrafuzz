@@ -74,10 +74,21 @@ function writeCacheFixture(cacheRoot: string, reference = fixtureReference()): s
   return cacheDir;
 }
 
-test("default catalog restores original pinned property references", () => {
+test("default catalog pins the property references and the reviewed vulnerability database", () => {
   const catalog = parseReferenceCatalog(defaultReferenceCatalogYaml());
 
-  assert.equal(Object.keys(catalog.references).length, 9);
+  const ids = Object.keys(catalog.references).sort();
+  assert.equal(ids.filter((id) => id.startsWith("properties.")).length, 9);
+  assert.deepEqual(
+    ids.filter((id) => !id.startsWith("properties.")),
+    ["vulnerability-database.web3"]
+  );
+  const database = catalog.references["vulnerability-database.web3"];
+  assert.equal(database?.kind, "vulnerability-database");
+  assert.equal(database?.repo, "monad-developers/web3-vulnerability-database");
+  assert.equal(database?.commit, "fbf00e990b1316879b674e9903548dba452e40d5");
+  assert.deepEqual(database?.paths, ["database.yml", "capabilities.yml", "catalog.json"]);
+  assert.equal(database?.resolved_at, "2026-08-04T22:33:24Z");
   assert.deepEqual(catalog.references["properties.certora-thinking"]?.paths, [
     "06.Lesson_ThinkingProperties/README.md",
     "06.Lesson_ThinkingProperties/AuctionDemonstration/README.md",

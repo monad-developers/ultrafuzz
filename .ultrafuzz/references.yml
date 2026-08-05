@@ -81,3 +81,13 @@ references:
       - src/ERC4626/Light/ERC4626Standard.sol
       - src/ERC4626/Heavy/ERC4626Standard.sol
     resolved_at: "2026-06-23T00:00:00Z"
+  vulnerability-database.web3:
+    kind: vulnerability-database
+    provider: github
+    repo: monad-developers/web3-vulnerability-database
+    commit: fbf00e990b1316879b674e9903548dba452e40d5
+    paths:
+      - database.yml
+      - capabilities.yml
+      - catalog.json
+    resolved_at: "2026-08-04T22:33:24Z"

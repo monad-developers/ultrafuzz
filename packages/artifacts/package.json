@@ -18,10 +18,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "pnpm --filter @ultrafuzz/security build && sh -c 'rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js' --",
-    "typecheck": "pnpm --filter @ultrafuzz/security build && tsc -p tsconfig.json --noEmit"
+    "test": "pnpm --filter @ultrafuzz/artifacts^... build && sh -c 'rm -rf dist-test && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js' --",
+    "typecheck": "pnpm --filter @ultrafuzz/artifacts^... build && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ultrafuzz/prompts": "workspace:*",
     "@ultrafuzz/security": "workspace:*",
     "zod": "^4.4.3"
   }
