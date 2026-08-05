@@ -2420,7 +2420,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
           status: "blocked",
           implementation_paths: ["test/recon/Properties.sol"],
           test_paths: ["test/foundry/PropertyHigh.t.sol"],
-          blocker: { code: "MISSING_ORACLE", summary: "Oracle unavailable", next_action: "Add oracle" }
+          blocker: { code: "MISSING_ORACLE", summary: "Oracle unavailable_*", next_action: "Add oracle" }
         }
       ]
     })
@@ -2441,7 +2441,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
         deferred_property_ids: [],
         reference_expected_property_ids: [],
         reference_expectation_ids: [],
-        blocker_summaries: ["property-high: Oracle unavailable"]
+        blocker_summaries: ["property-high: Oracle unavailable_*"]
       }
     })
   );
@@ -2449,7 +2449,7 @@ test("current final reports preserve implementation coverage in JSON and Markdow
     layout,
     node.id,
     "report.md",
-    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `0`\n- Blocked properties: `1`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n\nBlocker summaries:\n- property-high: Oracle unavailable\n"
+    "# Ultrafuzz report\n\n## Property implementation coverage\n\n- Priority threshold: `high`\n- Included priorities: `high`\n- Selected properties: `1`\n- Implemented properties: `0`\n- Blocked properties: `1`\n- Pending properties: `0`\n- Deferred properties: `0`\n- Reference expectation properties: `0`\n\nBlocker summaries:\n- property-high: Oracle unavailable\\_\\*\n"
   );
   const validBlockedCoverage = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(validBlockedCoverage.ok, true, JSON.stringify(validBlockedCoverage.diagnostics));
