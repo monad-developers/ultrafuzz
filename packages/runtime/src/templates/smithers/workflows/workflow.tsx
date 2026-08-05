@@ -33,6 +33,7 @@ const {
   materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
+  validateImplementedPropertiesSchema,
   validateInvariantLedgerSchema,
   validateInvariantSourceProofSchema,
   writeFileDurable
@@ -214,6 +215,7 @@ function artifactAwareAgent(task: (typeof taskSpecs)[number], agent: AgentLike):
       normalizeLegacyReportProvenance(task);
       normalizeLegacyGeneratedTestManifests(task);
       materializeGeneratedTestCompanions(task);
+      materializeInvariantSuiteCompanions(task);
       // Keep artifact validation inside the agent task completion boundary.
       // This does not create a second model opportunity; it validates and, for
       // Markdown only, preserves the same agent's final response as its output.
@@ -336,6 +338,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   const workspaceRoot = realpathSync(task.workspacePath);
   materializePromptSchemas(path.join(workspaceRoot, ".ultrafuzz", "schemas"));
   assertTaskInputs(task, workspaceRoot);
+  materializeInvariantSuiteFromDependencies(task, workspaceRoot);
   const candidate = path.resolve(workspaceRoot, "artifacts", task.attemptId);
   if (!isStrictlyInsideDirectory(workspaceRoot, candidate)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
