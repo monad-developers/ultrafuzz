@@ -546,11 +546,9 @@ function verifyInvariantProbePath(
 ): void {
   const probePath = path.resolve(workspacePath, relativePath);
   const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
-  const isWorkspaceRootProbe = probePath === workspacePath && !path.isAbsolute(relativePath);
-  if (
-    (!isWorkspaceRootProbe && !probePath.startsWith(`${workspacePath}${path.sep}`)) ||
-    path.isAbsolute(relativePath)
-  ) {
+  const isSafeRelativeProbe = isSafeInvariantProbePath(relativePath);
+  const isWorkspaceRootProbe = isSafeRelativeProbe && probePath === workspacePath;
+  if (!isSafeRelativeProbe || (!isWorkspaceRootProbe && !probePath.startsWith(`${workspacePath}${path.sep}`))) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
       message: `Invariant scan probe path escapes the discovery workspace: ${relativePath}`,
@@ -560,7 +558,28 @@ function verifyInvariantProbePath(
     });
     return;
   }
-  if (!isWorkspaceRootProbe && !invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
+  if (isWorkspaceRootProbe) {
+    try {
+      const workspaceStat = fs.lstatSync(workspacePath);
+      if (
+        !workspaceStat.isDirectory() ||
+        workspaceStat.isSymbolicLink() ||
+        fs.realpathSync(workspacePath) !== workspacePath
+      ) {
+        throw new Error("workspace root is not a canonical directory");
+      }
+    } catch {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+        message: `Invariant repository-root scan probe requires a canonical workspace directory: ${relativePath}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: diagnosticPath
+      });
+    }
+    return;
+  }
+  if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
       message: `Invariant scan probe path crosses a symlinked parent: ${relativePath}`,
@@ -570,7 +589,6 @@ function verifyInvariantProbePath(
     });
     return;
   }
-  if (isWorkspaceRootProbe) return;
   try {
     const stat = fs.lstatSync(probePath);
     if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -599,6 +617,15 @@ function verifyInvariantProbePath(
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
   }
+}
+
+function isSafeInvariantProbePath(relativePath: string): boolean {
+  return (
+    !path.isAbsolute(relativePath) &&
+    !relativePath.includes("\\") &&
+    !/^[A-Za-z]:/u.test(relativePath) &&
+    !relativePath.split("/").includes("..")
+  );
 }
 
 function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePath: string): boolean {

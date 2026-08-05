@@ -349,6 +349,59 @@ test("project discovery gate accepts a repository-root scan probe", () => {
   assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
 });
 
+test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {
+  const traversalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-traversal" });
+  const traversalNode = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  fs.mkdirSync(path.join(traversalLayout.workspacesDir, "project-discovery"), { recursive: true });
+  writeArtifact(traversalLayout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    traversalLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        { id: "probe-traversal", source_path: "foo/..", query: "inventory", result: "done" },
+        { id: "probe-drive", source_path: "C:/outside", query: "inventory", result: "done" },
+        { id: "probe-backslash", source_path: "C:\\\\outside", query: "inventory", result: "done" },
+        { id: "probe-absolute", source_path: "/outside", query: "inventory", result: "done" }
+      ]
+    })
+  );
+  const traversal = verifyRequiredArtifactsForAttempt(traversalLayout, traversalNode, traversalNode.id);
+  assert.equal(traversal.ok, false);
+  assert.ok(traversal.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+
+  const symlinkLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-symlink" });
+  const symlinkNode = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  fs.symlinkSync(tempProject(), path.join(symlinkLayout.workspacesDir, "project-discovery"), "dir");
+  writeArtifact(symlinkLayout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    symlinkLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [{ id: "probe-root", source_path: ".", query: "inventory", result: "done" }]
+    })
+  );
+  const symlink = verifyRequiredArtifactsForAttempt(symlinkLayout, symlinkNode, symlinkNode.id);
+  assert.equal(symlink.ok, false);
+  assert.ok(symlink.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+});
+
 test("project discovery gate verifies immutable source proof after the discovery workspace is reclaimed", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-source-proof" });
   const node = {

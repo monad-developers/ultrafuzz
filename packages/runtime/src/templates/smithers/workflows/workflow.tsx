@@ -1398,23 +1398,33 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const workspaceRoot = realpathSync(task.workspacePath);
   for (const probe of validation.value.scan_probes) {
     const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
-    const isWorkspaceRootProbe = probeCandidate === workspaceRoot && !path.isAbsolute(probe.source_path);
-    if (
-      (!isWorkspaceRootProbe && !isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) ||
-      path.isAbsolute(probe.source_path)
-    ) {
+    const isSafeRelativeProbe = isSafeInvariantProbePath(probe.source_path);
+    const isWorkspaceRootProbe = isSafeRelativeProbe && probeCandidate === workspaceRoot;
+    if (!isSafeRelativeProbe || (!isWorkspaceRootProbe && !isStrictlyInsideDirectory(workspaceRoot, probeCandidate))) {
       throw new Error(
         `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
       );
     }
-    if (!isWorkspaceRootProbe && !invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
+    if (isWorkspaceRootProbe) {
+      const workspaceStat = lstatSync(task.workspacePath);
+      if (
+        !workspaceStat.isDirectory() ||
+        workspaceStat.isSymbolicLink() ||
+        realpathSync(task.workspacePath) !== task.workspacePath
+      ) {
+        throw new Error(
+          `artifact-contract failure: invariant repository-root scan probe requires a canonical workspace directory: ${probe.source_path}`
+        );
+      }
+      // A repository-wide probe names the workspace directory itself. It is
+      // valid evidence, but cannot be snapshotted as a regular UTF-8 file.
+      continue;
+    }
+    if (!invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
       throw new Error(
         `artifact-contract failure: invariant scan probe path crosses a symlinked parent: ${probe.source_path}`
       );
     }
-    // A repository-wide probe names the workspace directory itself. It is
-    // valid evidence, but cannot be snapshotted as a regular UTF-8 file.
-    if (isWorkspaceRootProbe) continue;
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
     try {
@@ -1546,6 +1556,15 @@ function invariantPathParentsInsideWorkspace(workspaceRoot: string, candidatePat
     }
   }
   return true;
+}
+
+function isSafeInvariantProbePath(relativePath: string): boolean {
+  return (
+    !path.isAbsolute(relativePath) &&
+    !relativePath.includes("\\") &&
+    !/^[A-Za-z]:/u.test(relativePath) &&
+    !relativePath.split("/").includes("..")
+  );
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {
