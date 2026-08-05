@@ -66,6 +66,9 @@ catalog priority values are:
 3. Implement properties in the invariant suite.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
+   - Every assertion observes state after a directly invoked protocol action;
+     preserve any target revert, panic, or out-of-gas failure as Recon evidence
+     and connect it to the selected property when the catalog requires it.
    - Put new Foundry-compatible invariant test or reproducer files under
      `test/foundry/stateful-invariant-implement-properties/` when possible.
      Existing changed `*.t.sol` files under `test/recon/`, `test/chimera/`,

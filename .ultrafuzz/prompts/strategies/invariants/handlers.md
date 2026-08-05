@@ -62,9 +62,18 @@ Apply these Recon/Chimera rules:
 - Shortcut handlers are sparing and must model the exact behavior under test,
   such as approve-then-deposit, permit-then-transfer, quote-then-execute, or a
   force-liquidation sequence with named actors.
-- Avoid broad try/catch, artificial coverage handlers, sweep/surface handlers,
-  forced require/revert branches, and stateful-unit-test scripts.
-- Do not weaken assertions or convert real target failures into harness skips.
+- Invoke each protocol entrypoint as a direct call. Construct its arguments
+  from documented valid preconditions so every reached call represents a
+  realistic user, keeper, liquidator, or protocol-role action.
+- Every reached target revert, panic, or out-of-gas failure propagates to Recon;
+  that observable failure is the signal the campaign records. When a
+  documented precondition cannot be met, return before invoking the target and
+  record the guard and its source in the handler inventory.
+- Use a narrowly documented non-protocol dependency boundary only when the
+  dependency contract explicitly defines an expected failure result; preserve
+  the target protocol call and its failure semantics in all other cases.
+- Keep assertions strong, keep coverage handlers tied to real entrypoints, and
+  keep stateful tests focused on sequence behavior.
 
 ## Work
 
@@ -90,8 +99,10 @@ Apply these Recon/Chimera rules:
    - Use shortcut handlers only when the shortcut is the behavior being tested.
 
 4. Preserve failures:
-   - If a handler reveals a production bug, record a finding.
-   - Do not hide failures with blanket catch blocks or broad precondition skips.
+   - If a handler reveals a production bug, record a finding with the raw
+     sequence and the reached protocol entrypoint.
+   - Every reached protocol failure remains visible to Recon and is classified
+     from the observed target behavior.
 
 ## Required Outputs
 

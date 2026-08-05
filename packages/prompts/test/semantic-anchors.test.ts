@@ -56,6 +56,26 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("keeps protocol failures observable during invariant handler execution", () => {
+    const handlers = prompt("strategies/invariants/handlers.md");
+    const setup = prompt("strategies/invariants/setup.md");
+    const coverage = prompt("strategies/invariants/coverage.md");
+    const implementation = prompt("strategies/invariants/implement-properties.md");
+    const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+    const corpus = `${handlers}\n${setup}\n${coverage}\n${implementation}\n${campaign}`;
+
+    expect(handlers).toContain("Invoke each protocol entrypoint as a direct call");
+    expect(handlers).toContain("Every reached target revert, panic, or out-of-gas failure propagates to Recon");
+    expect(handlers).toContain("documented precondition cannot be met");
+    expect(handlers).toContain("return before invoking the target");
+    expect(handlers).toContain("narrowly documented non-protocol dependency");
+    expect(setup).toContain("Every protocol call made during setup remains directly observable");
+    expect(coverage).toContain("Every reached protocol failure remains part of the coverage evidence");
+    expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
+    expect(campaign).toContain("Record every reached protocol revert as a raw backend failure");
+    expect(corpus).toContain("documented valid preconditions");
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()

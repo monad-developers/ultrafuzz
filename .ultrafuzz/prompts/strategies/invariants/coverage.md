@@ -46,6 +46,9 @@ Apply these Recon/Chimera rules:
 - Prioritize stateful sequences that reach edge states described by the
   property catalog, handler inventory, source constants, and public workflow
   boundaries.
+- Every reached protocol failure remains part of the coverage evidence. Keep
+  the target call direct, retain its raw revert or panic, and record the
+  documented precondition that selected the call.
 - Use the Recon `covg_eval` tool from
   https://github.com/Recon-Fuzz/recon-magic-framework/tree/main/tools/covg_eval
   to evaluate Magic `recon-coverage.json` against Echidna LCOV files. The tool

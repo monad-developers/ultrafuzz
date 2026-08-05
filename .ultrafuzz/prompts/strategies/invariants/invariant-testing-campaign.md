@@ -54,6 +54,9 @@ Use this configured invariant testing fuzzer timeout:
      `vm.startPrank` semantics. Save any repair patch and rerun the smoke. If the
      smoke cannot succeed within the bounded setup budget, do not start the long
      campaign and report the campaign as blocked.
+   - Record every reached protocol revert as a raw backend failure with its
+     entrypoint, sequence, precondition evidence, and exact property IDs when
+     the failure exercises an implemented catalog property.
    - recon-fuzzer is the single final bug-finding backend. Do not run Echidna,
      Medusa, or any other fuzzer as an additional final backend, and do not
      require their CLIs.
