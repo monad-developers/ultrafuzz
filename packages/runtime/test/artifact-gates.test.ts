@@ -316,6 +316,112 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   );
 });
 
+test("project discovery gate accepts a repository-root scan probe", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-probe" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const discoveryWorkspace = path.join(layout.workspacesDir, "project-discovery");
+  fs.mkdirSync(discoveryWorkspace, { recursive: true });
+  writeArtifact(layout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        {
+          id: "probe-repository-root",
+          source_path: ".",
+          query: "repository-wide invariant inventory",
+          result: "Repository-wide scan completed"
+        }
+      ]
+    })
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("project discovery gate rejects root-normalizing traversal and a symlinked workspace root", () => {
+  const traversalLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-traversal" });
+  const traversalNode = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  fs.mkdirSync(path.join(traversalLayout.workspacesDir, "project-discovery"), { recursive: true });
+  writeArtifact(traversalLayout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    traversalLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        { id: "probe-traversal", source_path: "foo/..", query: "inventory", result: "done" },
+        { id: "probe-drive", source_path: "C:/outside", query: "inventory", result: "done" },
+        { id: "probe-backslash", source_path: "C:\\\\outside", query: "inventory", result: "done" },
+        { id: "probe-absolute", source_path: "/outside", query: "inventory", result: "done" },
+        { id: "probe-nul", source_path: "missing\u0000path", query: "inventory", result: "done" }
+      ]
+    })
+  );
+  const traversal = verifyRequiredArtifactsForAttempt(traversalLayout, traversalNode, traversalNode.id);
+  assert.equal(traversal.ok, false);
+  assert.ok(traversal.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+
+  const canonicalWorkspace = path.join(traversalLayout.workspacesDir, "project-discovery");
+  fs.symlinkSync(path.join(canonicalWorkspace, "missing-target"), path.join(canonicalWorkspace, "broken"), "dir");
+  writeArtifact(
+    traversalLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        { id: "probe-broken-parent", source_path: "broken/optional.txt", query: "inventory", result: "absent" }
+      ]
+    })
+  );
+  const brokenParent = verifyRequiredArtifactsForAttempt(traversalLayout, traversalNode, traversalNode.id);
+  assert.equal(brokenParent.ok, false);
+  assert.ok(brokenParent.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+
+  const symlinkLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-symlink" });
+  const symlinkNode = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  fs.symlinkSync(tempProject(), path.join(symlinkLayout.workspacesDir, "project-discovery"), "dir");
+  writeArtifact(symlinkLayout, "project-discovery", "setup/project-discovery.md", "# Discovery\n");
+  writeArtifact(
+    symlinkLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [{ id: "probe-root", source_path: ".", query: "inventory", result: "done" }]
+    })
+  );
+  const symlink = verifyRequiredArtifactsForAttempt(symlinkLayout, symlinkNode, symlinkNode.id);
+  assert.equal(symlink.ok, false);
+  assert.ok(symlink.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+});
+
 test("project discovery gate verifies immutable source proof after the discovery workspace is reclaimed", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-source-proof" });
   const node = {
@@ -342,7 +448,14 @@ test("project discovery gate verifies immutable source proof after the discovery
         ledger_ids: ["evidence-solvency"]
       }
     ],
-    scan_probes: []
+    scan_probes: [
+      {
+        id: "probe-repository-root",
+        source_path: ".",
+        query: "repository-wide invariant inventory",
+        result: "Repository-wide scan completed"
+      }
+    ]
   };
   const ledgerBytes = Buffer.from(JSON.stringify(ledger));
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledgerBytes.toString("utf8"));
@@ -367,6 +480,21 @@ test("project discovery gate verifies immutable source proof after the discovery
   );
   fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      ...ledger,
+      scan_probes: [{ id: "probe-unsafe", source_path: "../../outside", query: "inventory", result: "done" }]
+    })
+  );
+  const unsafeRecoveredProbe = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unsafeRecoveredProbe.ok, false);
+  assert.ok(
+    unsafeRecoveredProbe.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID")
+  );
 
   fs.writeFileSync(path.join(layout.root, "source-proofs", "project-discovery.invariant.json"), "{}");
   const invalidProof = verifyRequiredArtifactsForAttempt(layout, node, node.id);
