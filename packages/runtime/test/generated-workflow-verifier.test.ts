@@ -119,7 +119,8 @@ test("generated Smithers retries reset exact task-owned artifact contents after 
     /resetTaskArtifactContents\(path\.join\(artifactsParent, task\.attemptId\), task\.attemptId, "mirror"\)/u
   );
   assert.match(reset, /output\.contract === "ultrafuzz\/generated-tests@1"/u);
-  assert.match(reset, /path\.resolve\(workspaceRoot, "test", "foundry"\)/u);
+  assert.match(reset, /for \(const testRoot of invariantTestRoots\(workspaceRoot\)\)/u);
+  assert.match(reset, /path\.resolve\(workspaceRoot, testRoot, "foundry"\)/u);
   assert.match(
     reset,
     /path\.join\(foundryParent, task\.metadata\.node\.logicalNodeId\),\s*task\.metadata\.node\.logicalNodeId,\s*"generated-test"/u
@@ -336,14 +337,104 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
 
   const materializer = source.slice(materializerStart, resolverStart);
   assert.match(materializer, /const generatedPrefix = "generated-tests\/"/u);
-  assert.match(materializer, /const directSourceCandidate = path\.resolve\(workspaceRoot, "test", "foundry"/u);
-  assert.match(materializer, /path\.resolve\(workspaceRoot, "test", "foundry", nodeId, workspaceRelativePath\)/u);
-  assert.match(materializer, /existsSync\(directSourceCandidate\)/u);
-  assert.match(materializer, /existsSync\(nodeScopedSourceCandidate\)/u);
+  assert.match(materializer, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap/u);
+  assert.match(materializer, /path\.resolve\(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath\)/u);
+  assert.match(
+    materializer,
+    /const existingCandidates = sourceCandidates\.filter\(\(candidate\) => existsSync\(candidate\)\)/u
+  );
+  assert.match(materializer, /generated test sources conflict/u);
   assert.match(materializer, /resolveNonEmptyRegularArtifactFile\(workspaceRoot, sourceCandidate/u);
   assert.match(materializer, /sourceBefore\.nlink !== 1/u);
   assert.match(materializer, /writeFileSync\(anchoredArtifactPath, contents, \{ flag: "wx", mode: 0o600 \}\)/u);
   assert.match(materializer, /generated test copy mismatch/u);
+});
+
+test("generated Smithers workflow preserves the complete invariant suite across worktree handoffs", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(resolverStart > preparationStart, source);
+  assert.ok(workflowStart > verifierStart, source);
+  assert.match(source, /materializeInvariantSuiteFromDependencies\(task, workspaceRoot\)/u);
+  assert.match(source, /materializeInvariantSuiteCompanions\(task\)/u);
+  assert.match(source, /validateImplementedPropertiesSchema/u);
+  assert.match(source, /invariant-suite/u);
+  assert.match(source, /changedTestTreePaths/u);
+  assert.match(source, /changedInvariantSourcePaths/u);
+  assert.match(source, /CryticTester/u);
+  assert.match(source, /TargetFunctions/u);
+  assert.match(source, /Properties/u);
+  assert.match(source, /copyInvariantSuiteIntoWorkspace/u);
+  assert.match(source, /rememberInvariantSuitePublications\(task, publications, artifactRoots\)/u);
+  assert.match(source, /artifact handoff is missing invariant-suite sources/u);
+  assert.match(source, /stateful-invariant-setup/u);
+  assert.match(source, /stateful-invariant-handlers/u);
+  assert.match(source, /stateful-invariant-coverage/u);
+  assert.match(source, /directDependencies/u);
+  assert.match(source, /leftDirect \? 1 : -1/u);
+  assert.match(source, /safeInvariantSuiteDirectory/u);
+  assert.match(source, /invariant suite destination is a symlink/u);
+  assert.match(source, /invariant suite directory is unsafe/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_PATH_LENGTH/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_SEGMENT_LENGTH/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_FILES/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_SOURCE_BYTES/u);
+  assert.match(source, /MAX_INVARIANT_SUITE_TOTAL_BYTES/u);
+  assert.match(source, /INVARIANT_SUITE_BASELINE_FILE/u);
+  assert.match(source, /captureInvariantSuiteBaseline/u);
+  assert.match(source, /invariantSuiteProtectedBaselinePath/u);
+  assert.match(source, /protected invariant suite baseline was modified/u);
+  assert.match(source, /ultrafuzz\.invariant-suite-baseline\.v1/u);
+  assert.match(source, /gitTestTreePaths/u);
+  assert.match(source, /INVARIANT_SUITE_SENSITIVE_SEGMENTS/u);
+  assert.match(source, /assertSafeInvariantSuiteTestPath/u);
+  assert.match(source, /record\.implementation_paths/u);
+  assert.match(source, /record\.test_paths/u);
+  assert.match(source, /pinnedSourceRef, "HEAD\^"/u);
+  assert.match(source, /\$\{baseRef\}\.\.\.HEAD/u);
+  assert.match(source, /implemented properties JSON is malformed/u);
+  assert.match(source, /selectedSources/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
+  assert.match(source, /src\/contracts/u);
+  assert.match(source, /invariant suite source is hard-linked/u);
+  assert.match(source, /unable to enumerate changed invariant suite sources/u);
+  assert.match(source, /writeFileDurable\(anchoredDestination/u);
+  assert.match(source, /copyDependencyInvariantSuiteToArtifact/u);
+  assert.match(source, /invariantSuiteDependencySnapshots/u);
+  assert.match(source, /invariant suite dependency changed/u);
+  assert.match(source, /captureInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /restoreInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
+  assert.match(source, /invariant-suite-manifest\.v1/u);
+  assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
+  assert.match(source, /ancestor invariant suite sources conflict/u);
+
+  const suiteMaterializerStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const suitePublicationStart = source.indexOf("function rememberInvariantSuitePublications");
+  assert.ok(suiteMaterializerStart > preparationStart, source);
+  assert.ok(suitePublicationStart > suiteMaterializerStart, source);
+  assert.ok(resolverStart > suitePublicationStart, source);
+  assert.ok(workflowStart > resolverStart, source);
+});
+
+test("generated Smithers invariant provenance accepts only supported source roots", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const pathStart = source.indexOf("function assertSafeInvariantSuitePath");
+  const pathEnd = source.indexOf("function assertSafeInvariantSuiteTestPath", pathStart);
+
+  assert.ok(pathStart >= 0, source);
+  assert.ok(pathEnd > pathStart, source);
+  const validator = source.slice(pathStart, pathEnd);
+  assert.match(validator, /INVARIANT_SUITE_ALLOWED_ROOTS\.some/u);
+  assert.match(source, /const INVARIANT_SUITE_ALLOWED_ROOTS = \["src", "contracts", "test", "tests"\]/u);
+  assert.match(validator, /unsupported invariant suite source root/u);
+  assert.doesNotMatch(validator, /artifacts/u);
+  assert.match(validator, /segment === "\.envrc"/u);
 });
 
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
@@ -360,6 +451,43 @@ test("generated Smithers verifier rejects in-root leaf and parent symlinks", () 
   const parentSymlink = path.join(root, "linked-parent");
   fs.symlinkSync(realDirectory, parentSymlink, "dir");
   assert.throws(() => assertRegularFileInside(root, path.join(parentSymlink, "Test.t.sol")), /symlink/u);
+});
+
+test("generated Smithers retry snapshots are durable and restore through canonical parents", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const prepareStart = source.indexOf("function prepareArtifactMirror");
+  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
+  const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+
+  assert.ok(prepareStart >= 0 && materializeStart > prepareStart && restoreStart > prepareStart, source);
+  assert.ok(restoreEnd > restoreStart, source);
+  const prepare = source.slice(prepareStart, materializeStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  assert.ok(
+    prepare.indexOf("restoreInvariantSuiteWorkspaceSnapshot(task)") <
+      prepare.indexOf("materializeInvariantSuiteFromDependencies(task, workspaceRoot)")
+  );
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR/u);
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(source, /invariantSuiteWorkspaceSnapshotRoot/u);
+  assert.match(source, /invariant-workspace-snapshot\.v1/u);
+  assert.match(source, /loadInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /readStableWorkspaceSnapshotFile/u);
+  assert.match(source, /const runRootCandidate = path\.resolve\(process\.cwd\(\), task\.runRoot\)/u);
+  assert.match(source, /runRootStat = lstatSync\(runRootCandidate\)/u);
+  assert.match(source, /realpathSync\(runRootCandidate\) !== runRootCandidate/u);
+  assert.match(source, /before\.dev !== after\.dev/u);
+  assert.match(source, /before\.ino !== after\.ino/u);
+  assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
+  assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
+  assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
+  assert.match(source, /isStrictlyInsideDirectory\(runRoot, workspaceCandidate\)/u);
+  assert.match(restore, /lstatSync\(workspaceCandidate\)/u);
+  assert.match(restore, /safeInvariantSuiteDirectory\(workspaceRoot, path\.dirname\(candidate\)\)/u);
+  assert.match(restore, /stat\.isSymbolicLink\(\)/u);
+  assert.match(restore, /writeFileDurable\(anchored, bytes\)/u);
 });
 
 test("generated Smithers verifier publishes the complete validated set before task success", () => {

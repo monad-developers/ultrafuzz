@@ -73,10 +73,12 @@ catalog priority values are:
    - Every assertion observes state after a directly invoked protocol action;
      preserve any target revert, panic, or out-of-gas failure as Recon evidence
      and connect it to the selected property when the catalog requires it.
-   - Put new Foundry-compatible invariant test or reproducer files under
-     `test/foundry/stateful-invariant-implement-properties/` when possible.
-     Existing changed `*.t.sol` files under `test/recon/`, `test/chimera/`,
-     `test/invariants/`, or `test/foundry/invariants/` are also collected.
+   - Put new Foundry-compatible invariant test or reproducer files under the
+     repository's test root, for example
+     `test/foundry/stateful-invariant-implement-properties/` or
+     `tests/foundry/stateful-invariant-implement-properties/`. Existing changed
+     `*.t.sol` files under that root's `recon/`, `chimera/`, `invariants/`, or
+     `foundry/invariants/` directories are also collected.
    - Keep setup and handler changes minimal and realistic.
    - Do not weaken existing assertions or hide failures with broad
      precondition skips.
@@ -119,6 +121,9 @@ Write structured implementation records to:
 
 Use this exact top-level shape:
 
+The example below uses `tests/`; replace that prefix with the detected
+repository test root when it uses `test/` instead.
+
 ```json
 {
   "schema_version": "ultrafuzz.implemented-properties.v1",
@@ -126,8 +131,8 @@ Use this exact top-level shape:
     {
       "property_id": "property-1",
       "status": "implemented",
-      "implementation_paths": ["test/recon/Properties.sol"],
-      "test_paths": ["test/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
+      "implementation_paths": ["tests/recon/Properties.sol"],
+      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
     }
   ]
 }
