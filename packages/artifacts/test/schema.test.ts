@@ -34,6 +34,7 @@ import {
   runStateJsonSchema,
   validateAnalysisBundleManifestSchema,
   usageLedgerJsonSchema,
+  workspacePatchJsonSchema,
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
@@ -516,6 +517,26 @@ test("property implementation and campaign schemas retain canonical references",
   );
 });
 
+test("property implementation schema rejects source-less implemented records", () => {
+  const sourceLess = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: [],
+        test_paths: []
+      }
+    ]
+  };
+
+  const invalid = validateImplementedPropertiesSchema(sourceLess);
+  assert.equal(invalid.ok, false);
+  assert.ok(
+    invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message))
+  );
+});
+
 test("property implementation schema rejects duplicate canonical references", () => {
   const duplicate = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
@@ -954,6 +975,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
   const runStateSnapshot = readSchemaSnapshot("run-state.schema.json");
   const usageLedgerSnapshot = readSchemaSnapshot("usage-ledger.schema.json");
+  const workspacePatchSnapshot = readSchemaSnapshot("workspace-patch.schema.json");
 
   assert.equal(findingSnapshot.$id, findingJsonSchema.$id);
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
@@ -977,6 +999,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);
+  assert.deepEqual(workspacePatchSnapshot, workspacePatchJsonSchema);
 });
 
 function readSchemaSnapshot(name: string): Record<string, unknown> {

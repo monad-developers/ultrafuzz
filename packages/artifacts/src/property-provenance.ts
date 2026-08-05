@@ -210,6 +210,18 @@ export const implementedPropertiesSchema = z
         });
       }
       propertyIds.add(property.property_id);
+
+      if (
+        property.status === "implemented" &&
+        property.implementation_paths.length === 0 &&
+        property.test_paths.length === 0
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "An implemented property must identify at least one source path",
+          path: ["properties", propertyIndex]
+        });
+      }
     }
   });
 

@@ -76,6 +76,7 @@ export interface WorkspaceBaseProvenance {
 
 export interface AgentWorkspaceProvenance extends WorkspaceBaseProvenance {
   agentRootVerified: true;
+  sourceTree: string;
   trackedClean: true;
 }
 
@@ -85,6 +86,7 @@ export interface LegacyWorkspaceSourceClaimTask {
   expected_base_commit: string;
   initial_head: string;
   agent_root_verified: true;
+  source_tree: string;
   tracked_clean: true;
 }
 
@@ -159,6 +161,7 @@ interface TrackedRepositorySnapshot {
   allowedUntrackedRoots: readonly string[];
   entries: TrackedPathSnapshot[];
   expectedCommit: string;
+  expectedSourceTree: string;
   headEntries: HeadTrackedEntry[];
   rootStat: BigIntStats;
   workspaceRoot: string;
@@ -235,6 +238,37 @@ function resolveCheckedOutCommitInternal(repositoryPath: string, budget: Workspa
   return normalized;
 }
 
+function resolveExpectedSourceTreeWithinBudget(
+  repositoryPath: string,
+  expectedSourceTree: string,
+  budget: WorkspaceVerificationBudget
+): string {
+  const normalizedExpected = expectedSourceTree.trim().toLowerCase();
+  if (!fullCommit.test(normalizedExpected)) {
+    throw new Error("workspace-provenance failure: expected source tree is invalid");
+  }
+  let tree: string;
+  try {
+    tree = runGitWithinVerificationBudget(budget, (timeout) =>
+      execFileSync("git", trustedGitArguments(["rev-parse", "--verify", `${normalizedExpected}^{tree}`]), {
+        cwd: repositoryPath,
+        encoding: "utf8",
+        env: gitWorkspaceEnvironment(repositoryPath),
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout
+      })
+    );
+  } catch (error) {
+    if (error instanceof WorkspaceVerificationBudgetError) throw error;
+    throw new Error("workspace-provenance failure: expected source tree is unavailable", { cause: error });
+  }
+  const normalizedTree = tree.trim().toLowerCase();
+  if (!fullCommit.test(normalizedTree)) {
+    throw new Error("workspace-provenance failure: expected source tree is invalid");
+  }
+  return normalizedTree;
+}
+
 export function assertWorkspaceBaseCommit(
   workspacePath: string,
   expectedBaseCommit: string,
@@ -267,16 +301,44 @@ export function assertAgentWorkspaceProvenance(
   allowedUntrackedRoots: readonly string[] = [],
   verificationLimits: Partial<WorkspaceProvenanceVerificationLimits> = {}
 ): AgentWorkspaceProvenance {
+  return assertAgentWorkspaceTreeProvenance(
+    workspacePath,
+    expectedBaseCommit,
+    expectedBaseCommit,
+    agentRoot,
+    allowedUntrackedRoots,
+    verificationLimits
+  );
+}
+
+/**
+ * Verify a task worktree against an exact trusted source tree while keeping
+ * HEAD and the real index pinned to the requested base commit.
+ *
+ * Workspace handoff patches intentionally change tracked worktree bytes
+ * without changing HEAD or the real index. The expected tree therefore has to
+ * be checked independently from both repository identities.
+ */
+export function assertAgentWorkspaceTreeProvenance(
+  workspacePath: string,
+  expectedBaseCommit: string,
+  expectedSourceTree: string,
+  agentRoot: string | undefined,
+  allowedUntrackedRoots: readonly string[] = [],
+  verificationLimits: Partial<WorkspaceProvenanceVerificationLimits> = {}
+): AgentWorkspaceProvenance {
   const workspaceRoot = realpathSync(path.resolve(workspacePath));
   if (agentRoot === undefined || realpathSync(agentRoot) !== workspaceRoot) {
     throw new Error("workspace-provenance failure: agent root does not match its task worktree");
   }
   const budget = createWorkspaceVerificationBudget(verificationLimits);
   const base = assertWorkspaceBaseCommitWithinBudget(workspaceRoot, expectedBaseCommit, budget);
-  assertTrackedFilesMatchCommit(workspaceRoot, base.baseCommit, allowedUntrackedRoots, budget);
+  const sourceTree = resolveExpectedSourceTreeWithinBudget(workspaceRoot, expectedSourceTree, budget);
+  assertTrackedFilesMatchSourceTree(workspaceRoot, base.baseCommit, sourceTree, allowedUntrackedRoots, budget);
   return {
     ...base,
     agentRootVerified: true,
+    sourceTree,
     trackedClean: true
   };
 }
@@ -478,6 +540,7 @@ export function persistLegacyWorkspaceSourceClaim(input: {
     expected_base_commit: input.current.workspace.baseCommit,
     initial_head: input.current.workspace.initialHead,
     agent_root_verified: input.current.workspace.agentRootVerified,
+    source_tree: input.current.workspace.sourceTree,
     tracked_clean: input.current.workspace.trackedClean
   });
   const attestation: LegacyWorkspaceSourceClaim = {
@@ -749,6 +812,7 @@ function parseWorkspaceSourceAttestationTask(
       "expected_base_commit",
       "initial_head",
       "agent_root_verified",
+      "source_tree",
       "tracked_clean",
       "workflow_run_id",
       "workflow_execution_id",
@@ -770,6 +834,8 @@ function parseWorkspaceSourceAttestationTask(
     task.expected_base_commit !== targetRevision ||
     task.initial_head !== targetRevision ||
     task.agent_root_verified !== true ||
+    typeof task.source_tree !== "string" ||
+    !fullCommit.test(task.source_tree) ||
     task.tracked_clean !== true ||
     typeof task.workflow_run_id !== "string" ||
     !dimensionId.test(task.workflow_run_id) ||
@@ -821,6 +887,7 @@ function parseLegacyWorkspaceSourceClaim(value: unknown, targetRevision: string)
         "expected_base_commit",
         "initial_head",
         "agent_root_verified",
+        "source_tree",
         "tracked_clean"
       ]) ||
       typeof task.attempt_id !== "string" ||
@@ -830,6 +897,8 @@ function parseLegacyWorkspaceSourceClaim(value: unknown, targetRevision: string)
       task.expected_base_commit !== targetRevision ||
       task.initial_head !== targetRevision ||
       task.agent_root_verified !== true ||
+      typeof task.source_tree !== "string" ||
+      !fullCommit.test(task.source_tree) ||
       task.tracked_clean !== true
     ) {
       throw new Error(`workspace-provenance failure: legacy source claim task ${index} is invalid`);
@@ -1098,14 +1167,22 @@ function consumeGitlink(budget: WorkspaceVerificationBudget, depth: number): voi
   budget.gitlinks = next;
 }
 
-function assertTrackedFilesMatchCommit(
+function assertTrackedFilesMatchSourceTree(
   workspaceRoot: string,
   expectedCommit: string,
+  expectedSourceTree: string,
   allowedUntrackedRoots: readonly string[],
   budget: WorkspaceVerificationBudget
 ): void {
   try {
-    const snapshot = captureTrackedRepositorySnapshot(workspaceRoot, expectedCommit, allowedUntrackedRoots, budget, 0);
+    const snapshot = captureTrackedRepositorySnapshot(
+      workspaceRoot,
+      expectedCommit,
+      expectedSourceTree,
+      allowedUntrackedRoots,
+      budget,
+      0
+    );
     assertTrackedRepositorySnapshotStable(snapshot, budget);
   } catch (error) {
     if (error instanceof WorkspaceVerificationBudgetError) throw error;
@@ -1130,6 +1207,7 @@ function assertTrackedFilesMatchCommit(
 function captureTrackedRepositorySnapshot(
   workspaceRoot: string,
   expectedCommit: string,
+  expectedSourceTree: string,
   allowedUntrackedRoots: readonly string[],
   budget: WorkspaceVerificationBudget,
   gitlinkDepth: number
@@ -1139,17 +1217,18 @@ function captureTrackedRepositorySnapshot(
   assertTrackedDirectory(rootStat);
   assertNoMaskedTrackedFiles(workspaceRoot, budget, budget.limits.maxTrackedEntries - budget.trackedEntries);
   assertCachedIndexMatchesCommit(workspaceRoot, expectedCommit, budget);
-  const headEntries = listCommitTrackedEntries(workspaceRoot, expectedCommit, budget);
+  const headEntries = listCommitTrackedEntries(workspaceRoot, expectedSourceTree, budget);
   const identities = headEntries.map((entry) => captureTrackedEntryIdentity(workspaceRoot, entry, budget));
   const snapshot: TrackedRepositorySnapshot = {
     allowedUntrackedRoots,
     entries: identities.map((identity) => captureTrackedEntry(workspaceRoot, identity, budget, gitlinkDepth)),
     expectedCommit,
+    expectedSourceTree,
     headEntries,
     rootStat,
     workspaceRoot
   };
-  const untracked = assertNoUnexpectedUntrackedFiles(workspaceRoot, allowedUntrackedRoots, expectedCommit, budget);
+  const untracked = assertNoUnexpectedUntrackedFiles(workspaceRoot, allowedUntrackedRoots, expectedSourceTree, budget);
   assertTrackedSymlinkTargets(snapshot, untracked, budget);
   return snapshot;
 }
@@ -1165,7 +1244,7 @@ function assertTrackedRepositorySnapshotStable(
   const untracked = assertNoUnexpectedUntrackedFiles(
     snapshot.workspaceRoot,
     snapshot.allowedUntrackedRoots,
-    snapshot.expectedCommit,
+    snapshot.expectedSourceTree,
     budget
   );
   assertTrackedSymlinkTargets(snapshot, untracked, budget);
@@ -1330,7 +1409,14 @@ function captureTrackedEntry(
     if (resolveCheckedOutCommitWithinBudget(candidate, budget) !== entry.objectId) {
       throw new Error("workspace-provenance failure: tracked gitlink does not match HEAD");
     }
-    const repository = captureTrackedRepositorySnapshot(candidate, entry.objectId, [], budget, nestedDepth);
+    const repository = captureTrackedRepositorySnapshot(
+      candidate,
+      entry.objectId,
+      entry.objectId,
+      [],
+      budget,
+      nestedDepth
+    );
     const after = lstatSync(candidate, { bigint: true });
     assertTrackedDirectory(after);
     assertStableTrackedFileStats(before, after);

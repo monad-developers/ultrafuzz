@@ -11,6 +11,7 @@ import { MAX_EXPANDED_TOPOLOGY_NODES } from "@ultrafuzz/topology";
 
 import {
   assertAgentWorkspaceProvenance,
+  assertAgentWorkspaceTreeProvenance,
   assertSingleLinkRegularFile,
   assertWorkspaceBaseCommit,
   assertWorkspaceSourceAttestationClosure,
@@ -24,6 +25,7 @@ import {
   writeWorkspaceSourceAttestation,
   type ExpectedWorkspaceSourceTask
 } from "../src/workspace-provenance.js";
+import { captureWorkspaceTree } from "../src/workspace-handoff.js";
 
 test("workspace provenance resolves detached HEAD and rejects a different exact base", () => {
   const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-provenance-"));
@@ -50,6 +52,7 @@ test("workspace provenance resolves detached HEAD and rejects a different exact 
     baseCommit: first,
     initialHead: first,
     agentRootVerified: true,
+    sourceTree: git(repository, ["rev-parse", `${first}^{tree}`]),
     trackedClean: true
   });
   assert.throws(() => assertWorkspaceBaseCommit(repository, second), /worktree started at .* expected/u);
@@ -70,6 +73,46 @@ test("workspace provenance resolves detached HEAD and rejects a different exact 
   fs.writeFileSync(path.join(repository, "target.txt"), "dirty\n", "utf8");
   assert.throws(
     () => assertAgentWorkspaceProvenance(repository, first, repository),
+    /tracked changes before agent execution/u
+  );
+});
+
+test("workspace provenance accepts only an exact trusted handoff tree while keeping HEAD and index pinned", () => {
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-workspace-handoff-provenance-"));
+  git(repository, ["init"]);
+  git(repository, ["config", "user.name", "Ultrafuzz Test"]);
+  git(repository, ["config", "user.email", "ultrafuzz-test@example.com"]);
+  fs.writeFileSync(path.join(repository, "tracked.txt"), "base\n", "utf8");
+  git(repository, ["add", "tracked.txt"]);
+  git(repository, ["commit", "-m", "base"]);
+  const revision = git(repository, ["rev-parse", "HEAD"]);
+
+  fs.writeFileSync(path.join(repository, "tracked.txt"), "prepared\n", "utf8");
+  fs.writeFileSync(path.join(repository, "new-source.txt"), "prepared source\n", "utf8");
+  const preparationTree = captureWorkspaceTree(repository);
+  assert.equal(git(repository, ["rev-parse", "HEAD"]), revision);
+  assert.equal(git(repository, ["write-tree"]), git(repository, ["rev-parse", `${revision}^{tree}`]));
+  assert.deepEqual(assertAgentWorkspaceTreeProvenance(repository, revision, preparationTree, repository), {
+    baseCommit: revision,
+    initialHead: revision,
+    agentRootVerified: true,
+    sourceTree: preparationTree,
+    trackedClean: true
+  });
+  assert.throws(
+    () => assertAgentWorkspaceProvenance(repository, revision, repository),
+    /tracked changes before agent execution/u
+  );
+
+  fs.writeFileSync(path.join(repository, "tracked.txt"), "tampered\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceTreeProvenance(repository, revision, preparationTree, repository),
+    /tracked changes before agent execution/u
+  );
+  const substitutedTree = captureWorkspaceTree(repository);
+  fs.writeFileSync(path.join(repository, "tracked.txt"), "prepared\n", "utf8");
+  assert.throws(
+    () => assertAgentWorkspaceTreeProvenance(repository, revision, substitutedTree, repository),
     /tracked changes before agent execution/u
   );
 });
@@ -504,7 +547,7 @@ test(
 
     assert.throws(
       () => assertAgentWorkspaceProvenance(repository, revision, repository),
-      /tracked changes before agent execution/u
+      /expected source tree is unavailable|tracked changes before agent execution/u
     );
     assert.equal(fs.existsSync(marker), false);
   }
@@ -1415,6 +1458,7 @@ test("workspace source attestation ordering is independent of localeCompare", ()
     baseCommit: revision,
     initialHead: revision,
     agentRootVerified: true as const,
+    sourceTree: revision,
     trackedClean: true as const
   };
   persistLegacyWorkspaceSourceClaim({
@@ -1653,6 +1697,7 @@ function attested(task: ExpectedWorkspaceSourceTask, revision: string) {
     expected_base_commit: revision,
     initial_head: revision,
     agent_root_verified: true as const,
+    source_tree: revision,
     tracked_clean: true as const,
     workflow_run_id: "workflow-run",
     workflow_execution_id: "execution-one",

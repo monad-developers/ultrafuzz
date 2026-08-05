@@ -26,6 +26,12 @@ interfaces when the target repository already generates them.
 
 Create only the minimal harness layout needed by later fuzzing agents.
 
+The workflow captures tracked and untracked harness/configuration changes from
+this workspace into a provenance-bound workspace patch for dependent setup and
+strategy nodes. Make the changes in this workspace, validate them, and record
+the exact paths in the handoff; downstream workspaces receive the validated
+patch before their agents run.
+
 Ultrafuzz collects generated strategy tests from the canonical
 `test/foundry/<strategy>` tree rendered in each strategy prompt as the exact
 strategy test directory. Do not choose or document a different path as the

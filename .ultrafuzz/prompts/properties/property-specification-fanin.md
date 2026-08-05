@@ -83,6 +83,11 @@ In `properties.md`, render each canonical row in a delimited block beginning
 with `### Canonical property: <property-id>` and include its complete
 `ledger_ids` list in that block. Close it with
 `### End canonical property: <property-id>`.
+Within each block, render `description`, `category`, and `priority` as named
+fields, render each source as `<source_node_id>:<source_property_id>` under a
+`sources` field (separate multiple sources with `<br>`), and render the exact
+ledger IDs under a `ledger_ids` field (separate multiple IDs with commas or
+`<br>`). Keep these field values identical to `properties.json`.
 
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or

@@ -989,6 +989,7 @@ const claim = {
     expected_base_commit: entry.baseCommit,
     initial_head: entry.baseCommit,
     agent_root_verified: true,
+    source_tree: entry.baseCommit,
     tracked_clean: true
   })).sort((left, right) => left.attempt_id.localeCompare(right.attempt_id))
 };
@@ -5880,7 +5881,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function isMissingPathError/);
   assert.match(workflowSource, /function prepareArtifactMirror/);
   assert.match(workflowSource, /assertWorkspaceBaseCommit\(task\.workspacePath, task\.baseCommit\)/);
-  assert.match(workflowSource, /assertAgentWorkspaceProvenance/);
+  assert.match(workflowSource, /assertAgentWorkspaceTreeProvenance/);
   assert.match(workflowSource, /typeof args\?\.rootDir === "string"/);
   assert.match(workflowSource, /taskWorkspaceOutputRoots\(task\)\s*\n\s*\);/);
   assert.match(workflowSource, /function taskTestOutputRelativeRoots/);
@@ -5891,7 +5892,7 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /persistLegacyWorkspaceSourceClaim\(\{/);
   assert.match(
     workflowSource,
-    /await postflight\("artifact-preparation-postflight",[\s\S]*?prepareTaskWorkspaceOutputRoots\(task\)[\s\S]*?const verifiedWorkspace = await postflight\("workspace-provenance-postflight",[\s\S]*?assertAgentWorkspaceProvenance\([\s\S]*?await postflight\("source-attestation-persistence-postflight",[\s\S]*?persistLegacyWorkspaceSourceClaim\(\{[\s\S]*?workspace: verifiedWorkspace/
+    /await postflight\("artifact-preparation-postflight",[\s\S]*?prepareTaskWorkspaceOutputRoots\(task, \{ replayWorkspacePatches: false \}\)[\s\S]*?workspace-patch-materialization-postflight[\s\S]*?const verifiedWorkspace = await postflight\("workspace-provenance-postflight",[\s\S]*?assertAgentWorkspaceTreeProvenance\([\s\S]*?await postflight\("source-attestation-persistence-postflight",[\s\S]*?persistLegacyWorkspaceSourceClaim\(\{[\s\S]*?workspace: verifiedWorkspace/
   );
   assert.match(workflowSource, /\(\) => agent\.generate\(args\)/);
   assert.doesNotMatch(workflowSource, /writeWorkspaceSourceAttestation/);
@@ -5916,11 +5917,16 @@ test("startRun compiles normal Smithers tasks, persists provenance, and submits 
   assert.match(workflowSource, /function artifactAwareAgent/);
   assert.match(workflowSource, /const result = await runAgentWithPostflight\(/);
   assert.match(workflowSource, /\(\) => agent\.generate\(args\)/);
+  assert.match(
+    workflowSource,
+    /await postflight\("artifact-preparation-postflight",[\s\S]*?prepareTaskWorkspaceOutputRoots\(task, \{ replayWorkspacePatches: false \}\)/
+  );
   assert.match(workflowSource, /materializeMissingMarkdownArtifacts\(task, result\)/);
   assert.match(workflowSource, /normalizeLegacyFindingFields\(task\)/);
   assert.match(workflowSource, /normalizeLegacyReportProvenance\(task\)/);
   assert.match(workflowSource, /normalizeLegacyGeneratedTestManifests\(task\)/);
   assert.match(workflowSource, /materializeGeneratedTestCompanions\(task\)/);
+  assert.match(workflowSource, /materializeWorkspacePatch\(task\)/);
   assert.match(workflowSource, /const sourceCandidates = INVARIANT_TEST_ROOT_NAMES\.flatMap\(\(testRoot\) => \[/);
   assert.match(workflowSource, /path\.resolve\(workspaceRoot, testRoot, "foundry", workspaceRelativePath\)/);
   assert.match(

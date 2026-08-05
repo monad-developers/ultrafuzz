@@ -4125,6 +4125,7 @@ function persistCurrentSourceEvidence(input: {
       expected_base_commit: currentClaim.expected_base_commit,
       initial_head: currentClaim.initial_head,
       agent_root_verified: currentClaim.agent_root_verified,
+      source_tree: currentClaim.source_tree,
       tracked_clean: currentClaim.tracked_clean,
       workflow_run_id: output.executor.workflow_run_id,
       workflow_execution_id: input.ledgerEntry.workflow_execution_id,

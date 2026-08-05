@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 import { validateFindingsSchema } from "./findings-schema.js";
 import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
 import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
+import { validateWorkspacePatchSchema } from "./workspace-patch.js";
 import {
   validateLensPropertiesSchema,
   validateImplementedPropertiesSchema,
@@ -24,7 +25,8 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/properties@1",
   "ultrafuzz/property-campaign@1",
   "ultrafuzz/report@1",
-  "ultrafuzz/text@1"
+  "ultrafuzz/text@1",
+  "ultrafuzz/workspace-patch@1"
 ] as const;
 
 export type ArtifactContractId = (typeof ARTIFACT_CONTRACT_IDS)[number];
@@ -184,6 +186,12 @@ const definitions = defineContracts([
     format: "text",
     description: "A UTF-8 text file. Empty text is valid.",
     validEmptyExample: ""
+  },
+  {
+    id: "ultrafuzz/workspace-patch@1",
+    format: "json",
+    description:
+      "A provenance-bound workspace patch manifest with base and result Git trees, a patch digest, and target-relative changed paths."
   }
 ]);
 
@@ -248,6 +256,14 @@ export function validateArtifactContract(
   }
   if (contract === "ultrafuzz/invariant-ledger@1") {
     const result = validateInvariantLedgerSchema(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
+  if (contract === "ultrafuzz/workspace-patch@1") {
+    const result = validateWorkspacePatchSchema(parsed, artifactPath);
     return {
       ok: result.ok,
       issues: result.issues,

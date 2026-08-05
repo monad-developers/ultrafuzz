@@ -1308,6 +1308,7 @@ function writeMinimalPublicExecutionEvidence(input: {
           expected_base_commit: input.targetRevision,
           initial_head: input.targetRevision,
           agent_root_verified: true,
+          source_tree: input.targetRevision,
           tracked_clean: true,
           workflow_run_id: input.workflowRunId,
           workflow_execution_id: workflowExecutionId,

@@ -3223,6 +3223,7 @@ function writePublicExecutionEvidenceFixture(input: {
       expected_base_commit: "1".repeat(40),
       initial_head: "1".repeat(40),
       agent_root_verified: true,
+      source_tree: "1".repeat(40),
       tracked_clean: true,
       workflow_run_id: input.workflowRunId,
       workflow_execution_id: workflowExecutionId,

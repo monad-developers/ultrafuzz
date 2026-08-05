@@ -123,6 +123,33 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Do NOT include Markdown fences");
   });
 
+  it("does not ask agents to author runtime-owned workspace patch outputs", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.graph.logicalNodes[2]!.outputs = [
+      ...(input.graph.logicalNodes[2]!.outputs ?? []),
+      {
+        path: "workspace.patch",
+        contract: "ultrafuzz/text@1",
+        primary: false,
+        description: "Runtime-captured workspace patch."
+      },
+      {
+        path: "workspace-patch.json",
+        contract: "ultrafuzz/workspace-patch@1",
+        primary: false,
+        description: "Runtime-captured workspace patch manifest."
+      }
+    ];
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).not.toContain("workspace.patch");
+    expect(result.renderedMarkdown).not.toContain("workspace-patch.json");
+    expect(result.renderedMarkdown).toContain("generated-tests.json");
+  });
+
   it("renders the resolved invariant priority selection when supplied by the planner", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);
