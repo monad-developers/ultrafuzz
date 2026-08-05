@@ -232,6 +232,21 @@ test("project discovery gate requires ledger evidence to survive in the markdown
 
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
 
+  const symbolMismatchLedger = structuredClone(ledger);
+  symbolMismatchLedger.entries[0]!.source_location = "function Hub.totalBorrowed";
+  symbolMismatchLedger.entries[0]!.verbatim = "This text is not present in the source";
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify(symbolMismatchLedger)
+  );
+  const symbolMismatch = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(symbolMismatch.ok, false);
+  assert.ok(
+    symbolMismatch.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH")
+  );
+
   const missingSourceLedger = structuredClone(ledger);
   missingSourceLedger.entries[0]!.source_path = "docs/missing.md";
   writeArtifact(

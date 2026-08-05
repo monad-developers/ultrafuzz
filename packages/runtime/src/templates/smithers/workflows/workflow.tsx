@@ -33,6 +33,7 @@ const {
   materializePromptSchemas,
   publishFileDurableExclusive,
   validateArtifactContract,
+  validateInvariantLedgerSchema,
   writeFileDurable
 } = await import(artifactsModule);
 const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
@@ -1245,6 +1246,7 @@ function resolveNonEmptyRegularArtifactFile(
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
+  verifyInvariantLedgerSourceEvidence(task, artifactRoots);
   const publications = new Map<string, Buffer>();
   const artifacts = task.outputs.map((output) => {
     const canonicalPath = path.resolve(artifactDir, output.path);
@@ -1300,6 +1302,98 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
   }
   publishVerifiedArtifacts(artifactDir, publications);
   return { artifacts, primary_artifact: primary.path };
+}
+
+function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], artifactRoots: readonly string[]): void {
+  if (task.metadata.node.logicalNodeId !== "project-discovery") {
+    return;
+  }
+  const ledgerOutput = task.outputs.find((output) => output.path === "setup/invariant-evidence-ledger.json");
+  if (ledgerOutput === undefined) {
+    return;
+  }
+  let ledgerPath: string | undefined;
+  for (const root of artifactRoots) {
+    try {
+      ledgerPath = resolveRegularArtifactFile(
+        root,
+        path.resolve(root, ledgerOutput.path),
+        "artifact-contract failure: invariant ledger is not a regular file"
+      );
+      break;
+    } catch {
+      // The normal output verifier below reports the missing artifact.
+    }
+  }
+  if (ledgerPath === undefined) {
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: invariant ledger JSON is unreadable: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const validation = validateInvariantLedgerSchema(parsed, ledgerPath);
+  if (!validation.ok || validation.value === undefined) {
+    return;
+  }
+  const workspaceRoot = realpathSync(task.workspacePath);
+  for (const probe of validation.value.scan_probes) {
+    const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
+    if (probeCandidate === workspaceRoot || !isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
+      );
+    }
+  }
+  for (const entry of validation.value.entries) {
+    const sourceCandidate = path.resolve(workspaceRoot, entry.source_path);
+    if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant source path escapes the task workspace: ${entry.source_path}`
+      );
+    }
+    let sourcePath: string;
+    try {
+      sourcePath = resolveRegularArtifactFile(workspaceRoot, sourceCandidate, "invariant source is not a regular file");
+    } catch (error) {
+      throw new Error(
+        `artifact-contract failure: invariant source ${entry.source_path} is unavailable: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    const source = readFileSync(sourcePath, "utf8");
+    const locationMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
+    if (source.includes("\u0000")) {
+      continue;
+    }
+    const locatedSource =
+      locationMatch === null
+        ? source
+        : normalizeInvariantSourceLines(
+            source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]))
+          );
+    const normalizedVerbatim = normalizeInvariantSourceText(entry.verbatim);
+    const sourceMatches =
+      locationMatch === null
+        ? normalizeInvariantSourceText(locatedSource).includes(normalizedVerbatim)
+        : locatedSource === normalizedVerbatim;
+    if (!sourceMatches) {
+      throw new Error(
+        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}`
+      );
+    }
+  }
+}
+
+function normalizeInvariantSourceText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function normalizeInvariantSourceLines(lines: readonly string[]): string {
+  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {

@@ -260,6 +260,20 @@ function verifyInvariantEvidenceArtifacts(
       });
     }
     const discoveryWorkspace = path.join(layout.workspacesDir, path.basename(artifactDir));
+    if (fs.existsSync(discoveryWorkspace)) {
+      for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+        const probePath = path.resolve(discoveryWorkspace, probe.source_path);
+        if (probePath === discoveryWorkspace || !probePath.startsWith(`${discoveryWorkspace}${path.sep}`)) {
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+            message: `Invariant scan probe path escapes the discovery workspace: ${probe.source_path}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`
+          });
+        }
+      }
+    }
     const markdown = fs.readFileSync(markdownPath, "utf8");
     for (const [entryIndex, entry] of parsed.value.entries.entries()) {
       if (fs.existsSync(discoveryWorkspace)) {
@@ -450,7 +464,10 @@ function verifyInvariantSourceEvidence(
 ): void {
   let sourcePath: string;
   try {
-    sourcePath = safeResolveInside(workspacePath, entry.source_path, "invariant evidence source");
+    sourcePath = path.resolve(workspacePath, entry.source_path);
+    if (sourcePath === workspacePath || !sourcePath.startsWith(`${workspacePath}${path.sep}`)) {
+      throw new Error(`invariant evidence source path escapes workspace: ${entry.source_path}`);
+    }
   } catch (error) {
     diagnostics.push({
       code: "INVARIANT_LEDGER_SOURCE_PATH_INVALID",
@@ -476,14 +493,28 @@ function verifyInvariantSourceEvidence(
     const source = fs.readFileSync(sourcePath, "utf8");
     const lineMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
     if (lineMatch === null) {
+      if (source.includes("\u0000")) {
+        return;
+      }
+      const normalizedSource = source.replace(/\s+/gu, " ").trim();
+      const normalizedVerbatim = entry.verbatim.replace(/\s+/gu, " ").trim();
+      if (!normalizedSource.includes(normalizedVerbatim)) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
+          message: `Invariant ledger verbatim text does not occur in ${JSON.stringify(entry.source_path)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${ledgerPath}#$.entries[${entryIndex}].verbatim`
+        });
+      }
       return;
     }
     const startLine = Number(lineMatch[1]);
     const endLine = Number(lineMatch[2] ?? lineMatch[1]);
     const lines = source.split(/\r?\n/u).slice(Math.max(0, startLine - 1), endLine);
-    const normalizedSource = lines.join("\n").replace(/\s+/gu, " ").trim();
-    const normalizedVerbatim = entry.verbatim.replace(/\s+/gu, " ").trim();
-    if (!normalizedSource.includes(normalizedVerbatim)) {
+    const normalizedSource = normalizeInvariantSourceLines(lines);
+    const normalizedVerbatim = normalizeInvariantSourceText(entry.verbatim);
+    if (normalizedSource !== normalizedVerbatim) {
       diagnostics.push({
         code: "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH",
         message: `Invariant ledger verbatim text does not occur at ${entry.source_location} in ${JSON.stringify(entry.source_path)}`,
@@ -495,6 +526,14 @@ function verifyInvariantSourceEvidence(
   } catch (error) {
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_SOURCE_READ_FAILED"));
   }
+}
+
+function normalizeInvariantSourceText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function normalizeInvariantSourceLines(lines: readonly string[]): string {
+  return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
 }
 
 function markdownDelimitedBlock(markdown: string, marker: string): string | undefined {
