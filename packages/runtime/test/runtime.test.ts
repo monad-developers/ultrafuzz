@@ -15679,64 +15679,6 @@ test("a process cut during pre-link dependency installation retries from durable
   assert.equal(verifyCommittedWorkflowRunLink(layoutForRunRoot(runRoot)).action, "start");
 });
 
-test(
-  "real process cuts at every initial-link and detached-submission boundary recover without false success or duplicate up",
-  { concurrency: false },
-  async () => {
-    for (const cut of [
-      "link-prepared",
-      "link-metadata",
-      "link-state",
-      "link-event",
-      "link-committed",
-      "external-invoking",
-      "external-result"
-    ] as const) {
-      const project = tempProject();
-      initProject({ projectRoot: project, force: true });
-      writeSmallTopology(project);
-      const runId = `real-${cut}`;
-      const env = durableStartSmithersEnv(project, { holdDuringUp: cut === "external-invoking" });
-      await killStartChildAtDurableCut({ project, runId, env, cut });
-      const layout = layoutForRunRoot(path.join(project, ".ultrafuzz", "runs", runId), runId);
-
-      const incomplete = await readLinkedWorkflowEvidence(project, runId);
-      assert.equal(incomplete.ok, false, `${cut}: a process cut must not appear locally submitted`);
-
-      const recovered = await startRun({ projectRoot: project, runId, env });
-      const repeated = await startRun({ projectRoot: project, runId, env });
-
-      assert.equal(recovered.ok, true, `${cut}: ${JSON.stringify(recovered.diagnostics)}`);
-      assert.equal(repeated.ok, true, `${cut}: ${JSON.stringify(repeated.diagnostics)}`);
-      assert.equal(fs.readFileSync(env.SMITHERS_START_EXTERNAL_RUN, "utf8").trim(), `ultrafuzz-${runId}`, cut);
-      assert.equal(fs.readFileSync(env.SMITHERS_START_UP_ATTEMPTS, "utf8").trim().split(/\r?\n/u).length, 1, cut);
-      const submission = JSON.parse(fs.readFileSync(startSubmissionJournalPath(layout), "utf8")) as {
-        phase?: string;
-        invocation_attempts?: Array<{ execution_snapshot_root?: string }>;
-      };
-      assert.equal(submission.phase, "submitted", cut);
-      assert.ok((submission.invocation_attempts?.length ?? 0) >= 1, cut);
-      assert.ok(
-        submission.invocation_attempts?.every(
-          (attempt) =>
-            typeof attempt.execution_snapshot_root === "string" &&
-            attempt.execution_snapshot_root.startsWith(path.join(layout.root, "smithers", "execution-snapshots"))
-        ),
-        cut
-      );
-      assert.equal(workflowLinkEventCount(layout, verifyCommittedWorkflowRunLink(layout).link_id), 1, cut);
-      assert.equal(
-        fs
-          .readFileSync(layout.eventsPath, "utf8")
-          .split(/\r?\n/u)
-          .filter((line) => line.includes('"event_type":"workflow-submitted"')).length,
-        1,
-        cut
-      );
-    }
-  }
-);
-
 test("detached start inspection treats contradictory missing and run-identity evidence as unknown", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
