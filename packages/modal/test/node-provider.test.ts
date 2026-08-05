@@ -760,6 +760,41 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("rejects v2 cloud results missing artifacts before mutating workspace publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeArtifactsDirectory: false });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/missing a required publication directory/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive({ includeDurableCheckpoint: false });
@@ -1155,6 +1190,7 @@ function manifestEntry(relativePath: string, filePath: string) {
 
 function createResultArchive(
   options: {
+    includeArtifactsDirectory?: boolean;
     includeDurableCheckpoint?: boolean;
     includeVerificationMarker?: boolean;
     schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
@@ -1163,13 +1199,17 @@ function createResultArchive(
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
-  fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
+  if (options.includeArtifactsDirectory !== false) {
+    fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
+  }
   fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "source-proofs"), { recursive: true });
   if (options.includeVerificationMarker !== false) {
     fs.mkdirSync(path.join(bundle, "verification"), { recursive: true });
   }
-  fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
+  if (options.includeArtifactsDirectory !== false) {
+    fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
+  }
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");

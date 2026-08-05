@@ -650,11 +650,14 @@ async function publishModalNodeResult(
       assertPublishedFileReplacementAllowed(sourceProof, destination);
       sourceProofs.push({ source: sourceProof, destination });
     }
+    const artifacts = path.join(extracted, "artifacts");
+    assertPublishedDirectoryReplacementAllowed(artifacts, artifactDir);
     const workspace = path.join(extracted, "workspace");
     if (fs.existsSync(workspace)) {
+      assertPublishedDirectoryReplacementAllowed(workspace, workspaceDir);
       replacePublishedDirectory(workspace, workspaceDir);
     }
-    replacePublishedDirectory(path.join(extracted, "artifacts"), artifactDir);
+    replacePublishedDirectory(artifacts, artifactDir);
     for (const { source, destination } of sourceProofs) {
       replacePublishedFile(source, destination);
     }
@@ -802,9 +805,7 @@ function assertSafeTree(root: string): void {
 }
 
 function replacePublishedDirectory(source: string, destination: string): void {
-  if (!fs.existsSync(source)) {
-    throw new Error("cloud node result is missing a required publication directory");
-  }
+  assertPublishedDirectoryReplacementAllowed(source, destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
   const previous = `${destination}.previous-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
@@ -818,6 +819,25 @@ function replacePublishedDirectory(source: string, destination: string): void {
     throw error;
   }
   if (hadPrevious) fs.rmSync(previous, { recursive: true, force: true });
+}
+
+function assertPublishedDirectoryReplacementAllowed(source: string, destination: string): void {
+  if (!fs.existsSync(source)) {
+    throw new Error("cloud node result is missing a required publication directory");
+  }
+  const sourceStat = fs.lstatSync(source);
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink() || fs.realpathSync(source) !== path.resolve(source)) {
+    throw new Error("cloud node result publication directory is unsafe");
+  }
+  if (!fs.existsSync(destination)) return;
+  const destinationStat = fs.lstatSync(destination);
+  if (
+    !destinationStat.isDirectory() ||
+    destinationStat.isSymbolicLink() ||
+    fs.realpathSync(destination) !== path.resolve(destination)
+  ) {
+    throw new Error("cloud node result destination directory is unsafe");
+  }
 }
 
 function replacePublishedFile(source: string, destination: string): void {
