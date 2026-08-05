@@ -13,6 +13,7 @@ const DURABLE_INPUT_DIRECTORY = "input";
 const DURABLE_CHECKPOINT_DIRECTORY = "checkpoints";
 const DURABLE_CHECKPOINT_INDEX = "index.json";
 const DURABLE_RESTORE_MARKER = "restore.json";
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 const MAX_PUBLICATION_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_PUBLICATION_MANIFEST_ENTRIES = 4_096;
 
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
       fs.mkdirSync(path.dirname(proofDestination), { recursive: true, mode: 0o700 });
       fs.copyFileSync(sourceProof, proofDestination);
     }
+    copyAttemptVerificationMarker(projectRoot, input, path.join(staging, "verification"));
     if (fs.existsSync(workspaceDir)) {
       copySafeTree(workspaceDir, path.join(staging, "workspace"));
     }
@@ -777,6 +779,26 @@ export function copyPublishedEvidenceTree(source: string, destination: string): 
       assertManifestFile(sourcePath, entry, "source");
     }
   }
+}
+
+export function copyAttemptVerificationMarker(
+  projectRoot: string,
+  input: { run_root: string; attempt_id: string },
+  destinationRoot: string
+): void {
+  const markerRoot = anchoredProjectPath(projectRoot, path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY));
+  assertSafeDirectoryTarget(markerRoot);
+  const markerPath = path.join(markerRoot, `${input.attempt_id}.json`);
+  if (!fs.existsSync(markerPath)) {
+    throw new Error("cloud publication verification marker is missing");
+  }
+  const markerStat = fs.lstatSync(markerPath);
+  if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1) {
+    throw new Error("cloud publication verification marker is unsafe");
+  }
+  assertSafeDirectoryTarget(destinationRoot);
+  fs.mkdirSync(destinationRoot, { recursive: true, mode: 0o700 });
+  fs.copyFileSync(markerPath, path.join(destinationRoot, `${input.attempt_id}.json`), fs.constants.COPYFILE_EXCL);
 }
 
 function recursiveRegularFiles(root: string): string[] {

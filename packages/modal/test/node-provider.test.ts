@@ -18,6 +18,7 @@ import {
   type ModalNodeSandboxInput
 } from "../src/node-provider.js";
 import {
+  copyAttemptVerificationMarker,
   copySafeTree,
   copyPublishedEvidenceTree,
   initializeDurableNodeWorkspace,
@@ -243,6 +244,43 @@ describe("Modal node sandbox provider", () => {
       );
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("stages the current cloud attempt verification marker for controller publication", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      fs.writeFileSync(
+        path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"),
+        '{"attempt_id":"attempt-one"}\n'
+      );
+      copyAttemptVerificationMarker(fixture.root, fixture.input, destination);
+
+      expect(fs.readFileSync(path.join(destination, "attempt-one.json"), "utf8")).toContain(
+        '"attempt_id":"attempt-one"'
+      );
+      expect(fs.existsSync(path.join(destination, "dependency-one.json"))).toBe(false);
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe cloud attempt verification markers before staging", () => {
+    const fixture = createProjectFixture();
+    const destination = path.join(path.dirname(fixture.root), "verification-staging");
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const marker = path.join(markerRoot, "attempt-one.json");
+      fs.symlinkSync("dependency-one.json", marker);
+
+      expect(() => copyAttemptVerificationMarker(fixture.root, fixture.input, destination)).toThrow(
+        /verification marker is unsafe/u
+      );
+    } finally {
+      fixture.cleanup();
+      fs.rmSync(destination, { recursive: true, force: true });
     }
   });
 
@@ -551,6 +589,12 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       expect(fs.readFileSync(path.join(fixture.root, fixture.input.workspace_dir, "work.txt"), "utf8")).toBe(
         "remote workspace\n"
       );
+      expect(
+        fs.readFileSync(
+          path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"),
+          "utf8"
+        )
+      ).toBe('{"verified":true}\n');
     } finally {
       result.cleanup();
       fixture.cleanup();
@@ -982,10 +1026,12 @@ function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {
   fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "source-proofs"), { recursive: true });
+  fs.mkdirSync(path.join(bundle, "verification"), { recursive: true });
   fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
+  fs.writeFileSync(path.join(bundle, "verification", "attempt-one.json"), '{"verified":true}\n');
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const tags = modalNodeTags("controller-run", "node:attempt");

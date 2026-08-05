@@ -610,6 +610,17 @@ async function publishModalNodeResult(
         replacePublishedFile(sourceProof, path.join(proofRoot, `${input.attempt_id}${suffix}`));
       }
     }
+    const verificationMarker = path.join(extracted, "verification", `${input.attempt_id}.json`);
+    if (!fs.existsSync(verificationMarker)) {
+      throw new Error("cloud node result is missing artifact verification marker");
+    }
+    const verificationRoot = checkedPath(
+      root,
+      path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+      "artifact verification directory",
+      false
+    );
+    replacePublishedFile(verificationMarker, path.join(verificationRoot, `${input.attempt_id}.json`));
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -781,7 +792,7 @@ function replacePublishedFile(source: string, destination: string): void {
   }
   if (destinationStat !== undefined) {
     if (!fs.readFileSync(destination).equals(fs.readFileSync(source))) {
-      throw new Error("cloud node result would replace immutable source proof");
+      throw new Error("cloud node result would replace an immutable publication file");
     }
     return;
   }

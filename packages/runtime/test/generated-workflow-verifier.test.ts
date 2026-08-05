@@ -830,6 +830,13 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
   assert.match(source, /publications: publicationEntries/u);
   assert.match(source, /rememberVerifiedPublication\(publications, INVARIANT_SUITE_MANIFEST_FILE/u);
+  assert.match(source, /const expectedPublicationShas = new Map/u);
+  assert.match(source, /rememberExpectedVerifiedPublication\(expectedPublicationShas, companion\.path/u);
+  assert.match(
+    source,
+    /rememberExpectedInvariantSuitePublications\(dependencyTask, dependency, expectedPublicationShas\)/u
+  );
+  assert.match(source, /files: manifestFiles/u);
   assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
   assert.ok(
     verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
@@ -868,7 +875,13 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replace(/const entry = artifact as \{[\s\S]*?\};/u, "const entry = artifact;")
     .replace("const seenPaths = new Set<string>();", "const seenPaths = new Set();")
     .replace("const declaredArtifactShas = new Map<string, string>();", "const declaredArtifactShas = new Map();")
+    .replace("const expectedPublicationShas = new Map<string, string>();", "const expectedPublicationShas = new Map();")
     .replace("const publicationPaths = new Set<string>();", "const publicationPaths = new Set();")
+    .replace("const markerPublicationShas = new Map<string, string>();", "const markerPublicationShas = new Map();")
+    .replace(
+      /function rememberExpectedVerifiedPublication\(\s*publications: Map<string, string>,\s*relativePath: string,\s*contents: Buffer\s*\): void \{/u,
+      "function rememberExpectedVerifiedPublication(publications, relativePath, contents) {"
+    )
     .replace(/\)\s+as \{ sha256\?: unknown \} \| undefined;/u, ");")
     .replace(
       "function assertSafeVerifiedPublicationPath(relativePath: string): void {",
@@ -878,7 +891,52 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replaceAll(" as Parameters<typeof validateArtifactContract>[0]", "");
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
   const dependency = path.join(runRoot, "property-specification-fanin");
+  const generatedDependency = path.join(runRoot, "generated-tests-fanin");
+  const invariantDependency = path.join(runRoot, "stateful-invariant-setup");
   fs.mkdirSync(dependency);
+  fs.mkdirSync(generatedDependency);
+  fs.mkdirSync(invariantDependency);
+  const taskSpecs = [
+    {
+      attemptId: "property-specification-fanin",
+      artifactDir: dependency,
+      metadata: { node: { logicalNodeId: "property-specification-fanin" } },
+      outputs: [
+        {
+          path: "properties.json",
+          contract: "ultrafuzz/text@1",
+          contractDigest: "a".repeat(64),
+          primary: true
+        }
+      ]
+    },
+    {
+      attemptId: "generated-tests-fanin",
+      artifactDir: generatedDependency,
+      metadata: { node: { logicalNodeId: "generated-tests-fanin" } },
+      outputs: [
+        {
+          path: "generated-tests.json",
+          contract: "ultrafuzz/generated-tests@1",
+          contractDigest: "a".repeat(64),
+          primary: true
+        }
+      ]
+    },
+    {
+      attemptId: "stateful-invariant-setup",
+      artifactDir: invariantDependency,
+      metadata: { node: { logicalNodeId: "stateful-invariant-setup" } },
+      outputs: [
+        {
+          path: "implemented-properties.json",
+          contract: "ultrafuzz/text@1",
+          contractDigest: "a".repeat(64),
+          primary: true
+        }
+      ]
+    }
+  ];
   const assertVerifiedDependency = new Function(
     "path",
     "artifactVerificationMarkerLocation",
@@ -888,9 +946,12 @@ test("generated Smithers dependency verification fails closed before descendant 
     "artifactContractDefinition",
     "validateArtifactContract",
     "createHash",
+    "invariantSuiteNodeIds",
+    "verifyGeneratedTestFiles",
+    "rememberExpectedInvariantSuitePublications",
     `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
-const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
-${helper}; return assertVerifiedDependency;`
+   const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+   ${helper}; return assertVerifiedDependency;`
   )(
     path,
     (runRoot: string, attemptId: string) => {
@@ -904,23 +965,32 @@ ${helper}; return assertVerifiedDependency;`
       return candidate;
     },
     fs.readFileSync,
-    [
-      {
-        attemptId: "property-specification-fanin",
-        artifactDir: dependency,
-        outputs: [
-          {
-            path: "properties.json",
-            contract: "ultrafuzz/text@1",
-            contractDigest: "a".repeat(64),
-            primary: true
-          }
-        ]
-      }
-    ],
+    taskSpecs,
     () => ({ digest: "a".repeat(64) }),
-    () => ({ ok: true, issues: [] }),
-    createHash
+    (contract: string) => ({
+      ok: true,
+      issues: [],
+      value:
+        contract === "ultrafuzz/generated-tests@1"
+          ? { generated_tests: [{ path: "generated-tests/Property.t.sol" }] }
+          : undefined
+    }),
+    createHash,
+    new Set(["stateful-invariant-setup"]),
+    (artifactDir: string, value: unknown) =>
+      ((value as { generated_tests?: Array<{ path: string }> }).generated_tests ?? []).map((entry) => ({
+        path: entry.path,
+        contents: fs.readFileSync(path.join(artifactDir, entry.path))
+      })),
+    (_dependencyTask: unknown, dependencyRoot: string, publications: Map<string, string>) => {
+      const relativePath = "invariant-suite/test/CryticTester.sol";
+      publications.set(
+        relativePath,
+        createHash("sha256")
+          .update(fs.readFileSync(path.join(dependencyRoot, relativePath)))
+          .digest("hex")
+      );
+    }
   ) as (task: { attemptId: string; runRoot: string }, dependency: string) => void;
 
   const task = { attemptId: "stateful-invariant-setup", runRoot };
@@ -931,7 +1001,8 @@ ${helper}; return assertVerifiedDependency;`
 
   fs.mkdirSync(path.join(runRoot, ".ultrafuzz-verification"));
   const markerPath = path.join(runRoot, ".ultrafuzz-verification", "property-specification-fanin.json");
-  const writeMarker = (
+  const writeAttemptMarker = (
+    attemptId: string,
     artifacts: Array<{
       path: string;
       contract: string;
@@ -942,16 +1013,26 @@ ${helper}; return assertVerifiedDependency;`
     publications = artifacts.map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }))
   ) => {
     fs.writeFileSync(
-      markerPath,
+      path.join(runRoot, ".ultrafuzz-verification", `${attemptId}.json`),
       `${JSON.stringify({
         schema_version: "ultrafuzz.artifact-verification.v1",
-        attempt_id: "property-specification-fanin",
+        attempt_id: attemptId,
         artifacts,
         publications
       })}\n`,
       "utf8"
     );
   };
+  const writeMarker = (
+    artifacts: Array<{
+      path: string;
+      contract: string;
+      contract_digest: string;
+      sha256: string;
+      primary: boolean;
+    }>,
+    publications = artifacts.map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }))
+  ) => writeAttemptMarker("property-specification-fanin", artifacts, publications);
   writeMarker([]);
   assert.throws(
     () => assertVerifiedDependency(task, dependency),
@@ -1002,21 +1083,65 @@ ${helper}; return assertVerifiedDependency;`
   fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
-  fs.mkdirSync(path.join(dependency, "generated-tests"), { recursive: true });
-  const companionPath = path.join(dependency, "generated-tests", "Property.t.sol");
+  fs.mkdirSync(path.join(generatedDependency, "generated-tests"), { recursive: true });
+  const generatedBytes = Buffer.from('{"generated_tests":[{"path":"generated-tests/Property.t.sol"}]}\n');
+  fs.writeFileSync(path.join(generatedDependency, "generated-tests.json"), generatedBytes);
+  const generatedArtifact = {
+    path: "generated-tests.json",
+    contract: "ultrafuzz/generated-tests@1",
+    contract_digest: "a".repeat(64),
+    sha256: createHash("sha256").update(generatedBytes).digest("hex"),
+    primary: true
+  };
+  const companionPath = path.join(generatedDependency, "generated-tests", "Property.t.sol");
   fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
   const companionPublication = {
     path: "generated-tests/Property.t.sol",
     sha256: createHash("sha256").update("contract Property {}\n").digest("hex")
   };
-  writeMarker([validArtifact], [{ path: validArtifact.path, sha256: validArtifact.sha256 }, companionPublication]);
-  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  writeAttemptMarker("generated-tests-fanin", [generatedArtifact]);
+  assert.throws(
+    () => assertVerifiedDependency(task, generatedDependency),
+    /artifact dependency has not passed verification generated-tests-fanin/u
+  );
+  writeAttemptMarker(
+    "generated-tests-fanin",
+    [generatedArtifact],
+    [{ path: generatedArtifact.path, sha256: generatedArtifact.sha256 }, companionPublication]
+  );
+  assert.doesNotThrow(() => assertVerifiedDependency(task, generatedDependency));
   fs.writeFileSync(companionPath, "contract Tampered {}\n", "utf8");
   assert.throws(
-    () => assertVerifiedDependency(task, dependency),
-    /artifact dependency has not passed verification property-specification-fanin/u
+    () => assertVerifiedDependency(task, generatedDependency),
+    /artifact dependency has not passed verification generated-tests-fanin/u
   );
-  fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
+  const invariantBytes = Buffer.from("implemented\n");
+  fs.writeFileSync(path.join(invariantDependency, "implemented-properties.json"), invariantBytes);
+  fs.mkdirSync(path.join(invariantDependency, "invariant-suite", "test"), { recursive: true });
+  const invariantSourcePath = path.join(invariantDependency, "invariant-suite", "test", "CryticTester.sol");
+  fs.writeFileSync(invariantSourcePath, "contract CryticTester {}\n", "utf8");
+  const invariantArtifact = {
+    path: "implemented-properties.json",
+    contract: "ultrafuzz/text@1",
+    contract_digest: "a".repeat(64),
+    sha256: createHash("sha256").update(invariantBytes).digest("hex"),
+    primary: true
+  };
+  const invariantPublication = {
+    path: "invariant-suite/test/CryticTester.sol",
+    sha256: createHash("sha256").update("contract CryticTester {}\n").digest("hex")
+  };
+  writeAttemptMarker("stateful-invariant-setup", [invariantArtifact]);
+  assert.throws(
+    () => assertVerifiedDependency(task, invariantDependency),
+    /artifact dependency has not passed verification stateful-invariant-setup/u
+  );
+  writeAttemptMarker(
+    "stateful-invariant-setup",
+    [invariantArtifact],
+    [{ path: invariantArtifact.path, sha256: invariantArtifact.sha256 }, invariantPublication]
+  );
+  assert.doesNotThrow(() => assertVerifiedDependency(task, invariantDependency));
   fs.writeFileSync(
     markerPath,
     `${JSON.stringify({
@@ -1062,7 +1187,11 @@ test("generated Smithers verification marker root must be a canonical directory"
     (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
     ".ultrafuzz-verification"
-  ) as (runRoot: string, attemptId: string, createRoot: boolean) => { root: string; path: string; relativePath: string };
+  ) as (
+    runRoot: string,
+    attemptId: string,
+    createRoot: boolean
+  ) => { root: string; path: string; relativePath: string };
 
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-root-"));
   try {
