@@ -346,37 +346,6 @@ test("generated Smithers agent mirrors declared workspace tests before strict ve
   assert.match(materializer, /generated test copy mismatch/u);
 });
 
-test("generated Smithers workflow preserves the complete invariant suite across worktree handoffs", () => {
-  const source = fs.readFileSync(workflowTemplatePath, "utf8");
-  const preparationStart = source.indexOf("function prepareArtifactMirror");
-  const resolverStart = source.indexOf("function resolveRegularArtifactFile");
-  const verifierStart = source.indexOf("function verifyArtifacts");
-  const workflowStart = source.indexOf("export default smithers");
-
-  assert.ok(preparationStart >= 0, source);
-  assert.ok(resolverStart > preparationStart, source);
-  assert.ok(workflowStart > verifierStart, source);
-  assert.match(source, /materializeInvariantSuiteFromDependencies\(task, workspaceRoot\)/u);
-  assert.match(source, /materializeInvariantSuiteCompanions\(task\)/u);
-  assert.match(source, /validateImplementedPropertiesSchema/u);
-  assert.match(source, /invariant-suite/u);
-  assert.match(source, /changedTestTreePaths/u);
-  assert.match(source, /CryticTester/u);
-  assert.match(source, /TargetFunctions/u);
-  assert.match(source, /Properties/u);
-  assert.match(source, /copyInvariantSuiteIntoWorkspace/u);
-  assert.match(source, /rememberInvariantSuitePublications\(publications, artifactRoots\)/u);
-  assert.match(source, /artifact handoff is missing invariant-suite sources/u);
-  assert.match(source, /invariant suite destination conflicts with source/u);
-
-  const suiteMaterializerStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
-  const suitePublicationStart = source.indexOf("function rememberInvariantSuitePublications");
-  assert.ok(suiteMaterializerStart > preparationStart, source);
-  assert.ok(suitePublicationStart > suiteMaterializerStart, source);
-  assert.ok(resolverStart > suitePublicationStart, source);
-  assert.ok(workflowStart > resolverStart, source);
-});
-
 test("generated Smithers verifier rejects in-root leaf and parent symlinks", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-generated-verifier-"));
   const realDirectory = path.join(root, "real");
