@@ -1121,6 +1121,29 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   );
   const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
   assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "medium"
+        }
+      ]
+    })
+  );
+  const droppedFromLens = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(droppedFromLens.ok, false);
+  assert.ok(
+    droppedFromLens.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
+    JSON.stringify(droppedFromLens.diagnostics)
+  );
 });
 
 test("property fan-in gate rejects a lens reference expectation dropped from canonical JSON", () => {
