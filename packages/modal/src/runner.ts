@@ -893,10 +893,27 @@ async function stageLaunchFiles(
   const lineagePath = path.join(temporary, "lineage.json");
   try {
     await writeFile(lineagePath, `${JSON.stringify(lineage, null, 2)}\n`, { mode: 0o600 });
-    await runChecked(sandbox, ["install", "-d", "-m", "700", REMOTE_CONFIG_DIR]);
+    await runChecked(sandbox, [
+      "install",
+      "-d",
+      "-m",
+      "700",
+      "-o",
+      MODAL_RUNTIME_USER,
+      "-g",
+      MODAL_RUNTIME_USER,
+      REMOTE_CONFIG_DIR
+    ]);
     await sandbox.filesystem.copyFromLocal(configPath, REMOTE_CONFIG_PATH);
     await sandbox.filesystem.copyFromLocal(lineagePath, REMOTE_LINEAGE_PATH);
     await runChecked(sandbox, ["chmod", "600", REMOTE_CONFIG_PATH, REMOTE_LINEAGE_PATH]);
+    await runChecked(sandbox, [
+      "chown",
+      `${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER}`,
+      REMOTE_CONFIG_PATH,
+      REMOTE_LINEAGE_PATH,
+      REMOTE_CONFIG_DIR
+    ]);
     if (auth !== undefined) {
       for (const entry of subscriptionAuthEntries(auth)) {
         await stageSubscriptionAuthEntry(sandbox, entry, remoteRoot, lineage.workspace_mode);
@@ -1026,6 +1043,7 @@ async function publishLaunchReady(sandbox: Sandbox, attemptId: string): Promise<
     await writeFile(readyPath, `${attemptId}\n`, { mode: 0o600 });
     await sandbox.filesystem.copyFromLocal(readyPath, REMOTE_LAUNCH_READY_PATH);
     await runChecked(sandbox, ["chmod", "600", REMOTE_LAUNCH_READY_PATH]);
+    await runChecked(sandbox, ["chown", `${MODAL_RUNTIME_USER}:${MODAL_RUNTIME_USER}`, REMOTE_LAUNCH_READY_PATH]);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
