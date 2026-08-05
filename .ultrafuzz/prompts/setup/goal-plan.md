@@ -116,13 +116,18 @@ the plan's `path`, `sha256`, and `size_bytes` fields.
 Each threat goal has `kind`, `id`, `node_id`, `title`, one-element
 `threat_ids`, `class_ids`, `attack_surface_ids`, `goal_prompt`,
 `replacements`, and `selection_rationale`. Its node ID is
-`dynamic:threat:<threat-id>`.
+`dynamic:threat:<threat-id>`. Set `id` byte-for-byte equal to the sole
+`threat_ids` element; never add a `goal:` prefix. Therefore `node_id` is
+exactly `dynamic:threat:` followed by `id`, and `goal_prompt` retains the
+placeholder whose key is exactly that same threat ID.
 
 Each class goal has `kind`, `id`, `node_id`, `class_id`,
 `class_replacement_key`, `threat_ids`, `threat_replacement_keys`,
 `attack_surface_ids`, `coverage_gap`, `title`, `selected_record`,
 `goal_prompt`, `replacements`, and `selection_rationale`. Its node ID is
-`dynamic:class:<class-id>`.
+`dynamic:class:<class-id>`. Set `id` byte-for-byte equal to `class_id`; never
+add a `goal:` prefix. Therefore `node_id` is exactly `dynamic:class:` followed
+by `id`, and `class_replacement_key` is exactly `class:` followed by `id`.
 
 For a mapped class goal, `threat_replacement_keys` must contain exactly its
 `threat_ids`. For a coverage-gap class goal it must contain only

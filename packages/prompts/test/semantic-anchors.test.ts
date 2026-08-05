@@ -626,6 +626,10 @@ describe("prompt semantic anchors", () => {
     // The invented example follows dotted upstream class IDs without publishing a catalog identifier.
     expect(planner).toContain("{{class:clockwork.deferred-settlement-gap}}");
     expect(planner).toContain("{{clockwork:late-tick}}");
+    expect(planner).toContain("Set `id` byte-for-byte equal to the sole");
+    expect(planner).toMatch(/`threat_ids` element; never add a `goal:` prefix/u);
+    expect(planner).toContain("Set `id` byte-for-byte equal to `class_id`; never");
+    expect(planner).toMatch(/`class_replacement_key` is exactly `class:` followed\s+by `id`/u);
     expect(threatModel).toContain("canonical repository-relative POSIX path");
     expect(threatModel).toContain("existing regular file in the current task workspace");
     expect(smokeThreatModel).toMatch(/canonical\s+repository-relative POSIX path/u);
