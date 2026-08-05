@@ -67,6 +67,10 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
 - `CryticTester` and `Setup` must deploy under Recon without relying on
   `vm.prank`, `vm.startPrank`, or other Foundry cheatcodes to authorize
   constructor-time calls.
+- Every protocol call made during setup remains directly observable. Build
+  setup state with documented valid preconditions and let a reached protocol
+  revert, panic, or out-of-gas failure propagate so constructor or
+  initialization defects stay visible.
 - If reusing a Foundry fixture whose `setUp()` grants roles through
   `vm.prank(admin)` or `vm.startPrank(admin)`, make the constructor bootstrap
   naturally authorized. Prefer setting the fixture's mutable root admin,

@@ -64,8 +64,15 @@ catalog priority values are:
      explaining that no selected properties were eligible.
 
 3. Implement properties in the invariant suite.
+   - Audit inherited handlers before implementing properties. Use the handler
+     audit to confirm typed direct calls, documented preconditions, checked
+     return values, and explicit property-scoped expected-revert selectors;
+     repair the handler and rerun its bounded smoke when any entry is missing.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
+   - Every assertion observes state after a directly invoked protocol action;
+     preserve any target revert, panic, or out-of-gas failure as Recon evidence
+     and connect it to the selected property when the catalog requires it.
    - Put new Foundry-compatible invariant test or reproducer files under
      `test/foundry/stateful-invariant-implement-properties/` when possible.
      Existing changed `*.t.sol` files under `test/recon/`, `test/chimera/`,
