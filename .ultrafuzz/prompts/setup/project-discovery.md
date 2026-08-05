@@ -126,7 +126,10 @@ such as `\\%` and `\\times` intact: JSON source shows each backslash escaped,
 while the parsed `verbatim` value must equal the source slice, including repeated
 backslashes and other literals. Build the Markdown
 handoff from those same parsed ledger objects so its `verbatim` blocks carry the
-identical text. Keep extraction scripts small and file-based so source slices
+identical text. Render multiline `verbatim` values as an indented literal block:
+place two spaces before each source line after the `verbatim:` field. This keeps
+source headings and delimiter-looking lines inside the field while preserving
+the parsed text. Keep extraction scripts small and file-based so source slices
 are not retyped in a large inline shell command.
 
 Extract every explicit equation, inequality, bound, and state relation into the

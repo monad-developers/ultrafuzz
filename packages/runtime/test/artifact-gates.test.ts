@@ -580,7 +580,7 @@ test("project discovery gate parses source text containing a closing ledger mark
     id: "project-discovery",
     logical_id: "project-discovery"
   };
-  const verbatim = "- Total borrowed assets <= total supplied assets\n- ### End ledger entry: evidence-marker";
+  const verbatim = "Total borrowed assets <= total supplied assets\n### End ledger entry: evidence-marker";
   const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
   fs.mkdirSync(sourceDir, { recursive: true });
   fs.writeFileSync(path.join(sourceDir, "overview.md"), `${verbatim}\n`, "utf8");
@@ -621,6 +621,140 @@ test("project discovery gate parses source text containing a closing ledger mark
       "description: The source statement remains linked to its inventory row.",
       "ledger_ids: evidence-marker",
       "### End inventory row: inventory-marker"
+    ].join("\n")
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+
+  writeArtifact(
+    layout,
+    node.id,
+    "setup/project-discovery.md",
+    [
+      "### Ledger entry: evidence-marker",
+      "source_path: docs/overview.md",
+      "source_location: lines 1-2",
+      "verbatim: Total borrowed assets <= total supplied assets",
+      "  ### End ledger entry: evidence-marker",
+      "inventory-marker",
+      "### Inventory row: inventory-marker",
+      "description: The source statement remains linked to its inventory row.",
+      "ledger_ids: evidence-marker",
+      "### End ledger entry: evidence-marker",
+      "### End inventory row: inventory-marker"
+    ].join("\n")
+  );
+  const missingCloser = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(missingCloser.ok, false);
+  assert.ok(
+    missingCloser.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING")
+  );
+});
+
+test("project discovery gate normalizes multiline Markdown presentation prefixes consistently", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-multiline-prefix" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const source = "- first invariant\n- second invariant\n";
+  const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(sourceDir, "overview.md"), source, "utf8");
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-multiline-prefix",
+        source_path: "docs/overview.md",
+        source_location: "lines 1-2",
+        kind: "invariant",
+        verbatim: source.trim(),
+        inventory_ids: ["inventory-multiline-prefix"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-multiline-prefix",
+        description: "Both source bullets remain linked to one inventory row.",
+        ledger_ids: ["evidence-multiline-prefix"]
+      }
+    ],
+    scan_probes: []
+  };
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    node.id,
+    "setup/project-discovery.md",
+    [
+      "### Ledger entry: evidence-multiline-prefix",
+      "source_path: docs/overview.md",
+      "source_location: lines 1-2",
+      `verbatim: ${source.trim()}`,
+      "inventory-multiline-prefix",
+      "### End ledger entry: evidence-multiline-prefix",
+      "### Inventory row: inventory-multiline-prefix",
+      "description: Both source bullets remain linked to one inventory row.",
+      "ledger_ids: evidence-multiline-prefix",
+      "### End inventory row: inventory-multiline-prefix"
+    ].join("\n")
+  );
+
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+});
+
+test("project discovery gate preserves symbol evidence whitespace", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-symbol-whitespace" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const verbatim = "function foo  () external {\n  return;\n}";
+  const sourceDir = path.join(layout.workspacesDir, node.id, "src");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(sourceDir, "Hub.sol"), `${verbatim}\n`, "utf8");
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-symbol-whitespace",
+        source_path: "src/Hub.sol",
+        source_location: "function foo",
+        kind: "invariant",
+        verbatim,
+        inventory_ids: ["inventory-symbol-whitespace"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-symbol-whitespace",
+        description: "The symbol declaration remains linked to its source evidence.",
+        ledger_ids: ["evidence-symbol-whitespace"]
+      }
+    ],
+    scan_probes: []
+  };
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    node.id,
+    "setup/project-discovery.md",
+    [
+      "### Ledger entry: evidence-symbol-whitespace",
+      "source_path: src/Hub.sol",
+      "source_location: function foo",
+      `verbatim: ${verbatim}`,
+      "inventory-symbol-whitespace",
+      "### End ledger entry: evidence-symbol-whitespace",
+      "### Inventory row: inventory-symbol-whitespace",
+      "description: The symbol declaration remains linked to its source evidence.",
+      "ledger_ids: evidence-symbol-whitespace",
+      "### End inventory row: inventory-symbol-whitespace"
     ].join("\n")
   );
 

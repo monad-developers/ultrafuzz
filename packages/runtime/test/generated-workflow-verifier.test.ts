@@ -68,6 +68,7 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
   assert.ok(helperStart >= 0, source);
   assert.ok(workflowStart > helperStart, source);
   assert.match(source.slice(helperStart, workflowStart), /\.join\("\\n"\)/u);
+  assert.match(source, /invariantSymbolDeclaration\([^)]*\)\.split\(\/\\r\?\\n\/u\)/u);
 });
 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
