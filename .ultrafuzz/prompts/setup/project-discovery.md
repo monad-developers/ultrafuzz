@@ -78,6 +78,18 @@ discovery; they are not Ultrafuzz beta execution dependencies.
 
 Read the target's documentation, NatSpec, interfaces, source comments, tests,
 and existing harnesses for target-derived invariants and liveness requirements.
+
+### Verbatim source-evidence ledger
+
+Before writing the normalized inventory, create a `Verbatim source-evidence
+ledger` in the discovery artifact. For every source section whose heading or
+symbol names invariants, accounting, solvency, conservation, monotonicity, or
+liveness, copy every explicitly enumerated invariant, equation, inequality, or bound verbatim before interpreting it, as well as each explicitly enumerated state relation. Include the source path and line or symbol location beside each copied entry. Do not summarize, merge, or omit a source bullet before it has a corresponding inventory entry;
+the normalized inventory must map one-to-one to the ledger and retain the
+original operands, comparison direction, units, denominator, and rounding
+terms. If a separate source probe finds no matching section, record that probe
+and its result rather than silently skipping it.
+
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
 Preserve distinct denominator and rounding variants as separate entries, even

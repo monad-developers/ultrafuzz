@@ -62,6 +62,13 @@ into their descriptions. Preserve the target getter, function, test, or source
 location that supplies each oracle so downstream implementation can observe
 the same relation.
 
+Read the `Verbatim source-evidence ledger` in the project-discovery handoff
+before deduplicating. Map every ledger entry to at least one canonical property
+row, retaining the copied source wording and its path plus line or symbol
+location in the description or source list. A ledger entry may be merged with an
+equivalent row only when the canonical row preserves every operand, comparison
+direction, unit, denominator, and rounding term; otherwise keep a separate row.
+
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or
 regression target. If an upstream lens uses misuse-oriented or sensational
