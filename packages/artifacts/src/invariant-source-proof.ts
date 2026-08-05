@@ -90,7 +90,16 @@ export const invariantSourceProofJsonSchema = {
         additionalProperties: false,
         required: ["path", "sha256", "content"],
         properties: {
-          path: { type: "string", minLength: 1, pattern: "^[^\\\\\\u0000]+$" },
+          path: {
+            type: "string",
+            minLength: 1,
+            pattern: "^[^\\\\\\u0000]+$",
+            allOf: [
+              { not: { pattern: "^/" } },
+              { not: { pattern: "^[A-Za-z]:[\\\\/]" } },
+              { not: { pattern: "(^|/)\\.\\.(?:/|$)" } }
+            ]
+          },
           sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
           content: { type: "string", pattern: "^[^\\u0000]*$" }
         }

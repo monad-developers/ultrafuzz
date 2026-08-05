@@ -448,25 +448,29 @@ function preservePinnedSourceProof(task: (typeof taskSpecs)[number]): void {
   if (!isStrictlyInsideDirectory(runRoot, resolvedProofRoot)) {
     throw new Error(`source-isolation failure: unsafe proof root ${task.attemptId}`);
   }
-  writeFileSync(
-    path.join(resolvedProofRoot, `${task.attemptId}.json`),
-    `${JSON.stringify(
-      {
-        schema_version: "ultrafuzz.agent-source-proof.v1",
-        attempt_id: task.attemptId,
-        commit,
-        tree,
-        base_ref: pinnedSourceRef,
-        refs,
-        remotes,
-        revision_count: revisions.length,
-        commit_object_count: commitObjectCount
-      },
-      null,
-      2
-    )}\n`,
-    { encoding: "utf8", mode: 0o600 }
-  );
+  const proofPath = path.join(resolvedProofRoot, `${task.attemptId}.json`);
+  const proofContents = `${JSON.stringify(
+    {
+      schema_version: "ultrafuzz.agent-source-proof.v1",
+      attempt_id: task.attemptId,
+      commit,
+      tree,
+      base_ref: pinnedSourceRef,
+      refs,
+      remotes,
+      revision_count: revisions.length,
+      commit_object_count: commitObjectCount
+    },
+    null,
+    2
+  )}\n`;
+  if (existsSync(proofPath)) {
+    if (!readFileSync(proofPath).equals(Buffer.from(proofContents, "utf8"))) {
+      throw new Error(`source-isolation failure: pinned source proof ${task.attemptId} changed`);
+    }
+    return;
+  }
+  writeFileDurable(proofPath, proofContents);
 }
 
 function canonicalEmptyArtifact(
@@ -1393,6 +1397,15 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
   const workspaceRoot = realpathSync(task.workspacePath);
   for (const probe of validation.value.scan_probes) {
+    const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
+    if (!isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
+      );
+    }
+    // Scan probes may intentionally target optional files. When a probe path
+    // is absent, its result text is the durable evidence of that absence.
+    if (!existsSync(probeCandidate)) continue;
     const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
     sourceSnapshots.set(probe.source_path, snapshot);
     files.set(probe.source_path, {

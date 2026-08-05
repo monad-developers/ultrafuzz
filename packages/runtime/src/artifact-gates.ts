@@ -581,6 +581,17 @@ function readInvariantSourceProof(
       });
       return undefined;
     }
+    const expectedAttemptId = path.basename(proofPath).replace(/\.invariant\.json$/u, "");
+    if (parsed.value.attempt_id !== expectedAttemptId) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_SOURCE_PROOF_ATTEMPT_MISMATCH",
+        message: "Invariant source proof attempt does not match its durable path",
+        severity: "error",
+        source: "invariant-ledger",
+        path: `${proofPath}#$.attempt_id`
+      });
+      return undefined;
+    }
     const ledgerBytes = fs.readFileSync(ledgerPath);
     const ledgerDigest = crypto.createHash("sha256").update(ledgerBytes).digest("hex");
     if (ledgerDigest !== parsed.value.ledger_sha256) {
@@ -595,8 +606,17 @@ function readInvariantSourceProof(
     }
     const baseProofPath = proofPath.replace(/\.invariant\.json$/u, ".json");
     if (fs.existsSync(baseProofPath)) {
-      const base = JSON.parse(fs.readFileSync(baseProofPath, "utf8")) as { commit?: unknown; tree?: unknown };
-      if (base.commit !== parsed.value.commit || base.tree !== parsed.value.tree) {
+      assertRegularFileInside(path.dirname(path.dirname(proofPath)), baseProofPath, "pinned source proof");
+      const base = JSON.parse(fs.readFileSync(baseProofPath, "utf8")) as {
+        attempt_id?: unknown;
+        commit?: unknown;
+        tree?: unknown;
+      };
+      if (
+        base.attempt_id !== expectedAttemptId ||
+        base.commit !== parsed.value.commit ||
+        base.tree !== parsed.value.tree
+      ) {
         diagnostics.push({
           code: "INVARIANT_LEDGER_SOURCE_PROOF_SOURCE_MISMATCH",
           message: "Invariant source proof does not match the pinned source proof",
