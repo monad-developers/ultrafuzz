@@ -654,7 +654,17 @@ function verifyLensReferenceExpectationPreservation(
     const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
     if (!dependency.startsWith("property-specification-") || dependency === "property-specification-fanin") continue;
     const lensName = dependency.slice("property-specification-".length);
-    const lensPath = findLogicalNodeArtifact(layout, dependency, `properties/${lensName}.json`);
+    // Expanded graphs may give fan-in concrete dependencies such as
+    // `property-specification-recon-0` and `property-specification-recon-1`.
+    // Resolve each concrete artifact directory first so one loop cannot hide
+    // metadata emitted by another; retain the logical lookup for historical
+    // runs whose artifacts were written under the unexpanded logical ID.
+    const lensPath = findDependencyArtifact(
+      layout,
+      dependencyId,
+      dependency,
+      `properties/${lensName}.json`
+    );
     if (lensPath === undefined) {
       diagnostics.push({
         code: "PROPERTY_LENS_MISSING",
@@ -2091,6 +2101,19 @@ function findLogicalNodeArtifact(layout: RunLayout, logicalNodeId: string, fileN
     }
   }
   return undefined;
+}
+
+function findDependencyArtifact(
+  layout: RunLayout,
+  dependencyId: string,
+  logicalNodeId: string,
+  fileName: string
+): string | undefined {
+  const concretePath = path.join(getNodeArtifactDir(layout, dependencyId), fileName);
+  if (fs.existsSync(concretePath)) {
+    return concretePath;
+  }
+  return dependencyId === logicalNodeId ? findLogicalNodeArtifact(layout, logicalNodeId, fileName) : undefined;
 }
 
 function findingPropertyReferences(value: unknown, artifactPath: string): PropertyReferenceInput[] {

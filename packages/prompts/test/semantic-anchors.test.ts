@@ -114,6 +114,13 @@ describe("prompt semantic anchors", () => {
     expect(discovery).toMatch(/JSON escaping is serialization only/iu);
   });
 
+  it("requires final reports to preserve benchmark expectation coverage", () => {
+    const finalReport = prompt("review/final-report.md");
+    expect(finalReport).toContain("reference_expected_property_ids");
+    expect(finalReport).toContain("reference_expectation_ids");
+    expect(finalReport).toMatch(/Preserve these arrays even when the property priority is below/iu);
+  });
+
   it("keeps protocol failures observable during invariant handler execution", () => {
     const handlers = prompt("strategies/invariants/handlers.md");
     const setup = prompt("strategies/invariants/setup.md");

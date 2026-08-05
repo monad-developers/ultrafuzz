@@ -1124,7 +1124,14 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
 });
 
 test("property fan-in gate rejects a lens reference expectation dropped from canonical JSON", () => {
-  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-drop" });
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-drop",
+    stateNodes: [
+      { id: "property-specification-recon-0", logicalNodeId: "property-specification-recon", status: "succeeded" },
+      { id: "property-specification-recon-1", logicalNodeId: "property-specification-recon", status: "succeeded" }
+    ]
+  });
   writeArtifact(
     layout,
     "project-discovery",
@@ -1149,7 +1156,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
   );
   writeArtifact(
     layout,
-    "property-specification-recon",
+    "property-specification-recon-0",
     "properties/recon.json",
     JSON.stringify({
       schema_version: "ultrafuzz.property-lens.v1",
@@ -1166,6 +1173,23 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
   );
   writeArtifact(
     layout,
+    "property-specification-recon-1",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_withdraw",
+          description: "Withdraw completes for valid state.",
+          category: "dos-liveness",
+          priority: "medium",
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_withdraw"]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
     "property-specification-fanin",
     "properties.json",
     JSON.stringify({
@@ -1176,6 +1200,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
           description: "Supply completes for valid state.",
           category: "dos-liveness",
           priority: "medium",
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
           sources: [{ source_node_id: "property-specification-recon", source_property_id: "iSpoke_supply" }],
           ledger_ids: ["evidence-supply"]
         }
@@ -1186,13 +1211,13 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
     layout,
     "property-specification-fanin",
     "properties.md",
-    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n### End canonical property: property-supply\n"
+    "### Canonical property: property-supply\n- description: Supply completes for valid state.\n- category: dos-liveness\n- priority: medium\n- sources: property-specification-recon:iSpoke_supply\n- ledger_ids: evidence-supply\n- reference_expectations: scfuzzbench:aave-v4:iSpoke_supply\n### End canonical property: property-supply\n"
   );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
     logical_id: "property-specification-fanin",
-    depends_on: ["property-specification-recon"]
+    depends_on: ["property-specification-recon-0", "property-specification-recon-1"]
   };
 
   const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);

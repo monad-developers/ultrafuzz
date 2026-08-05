@@ -468,12 +468,22 @@ this exact shape:
   "implemented_property_ids": ["property-1"],
   "blocked_property_ids": [],
   "pending_property_ids": [],
-  "deferred_property_ids": []
+  "deferred_property_ids": [],
+  "reference_expected_property_ids": [],
+  "reference_expectation_ids": [],
+  "blocker_summaries": []
 }
 ```
 
 Use the canonical catalog order for every ID array. Keep the arrays as the
 machine-readable source of truth; counts in Markdown must match them exactly.
+When the canonical catalog contains `reference_expectations`, include every
+corresponding canonical property ID in `reference_expected_property_ids` and
+every distinct expectation identifier in `reference_expectation_ids`, in
+catalog order. Preserve these arrays even when the property priority is below
+the configured threshold.
+Include `blocker_summaries` for selected records whose status is `blocked`,
+`pending`, or `deferred`, using each typed blocker summary.
 If selection metadata is unavailable, use the string `"unavailable"` in
 `report.json` and write `unavailable` in Markdown.
 
