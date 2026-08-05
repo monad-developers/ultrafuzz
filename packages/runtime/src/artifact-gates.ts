@@ -533,16 +533,27 @@ function verifyInvariantEvidenceArtifacts(
         );
         const renderedSourcePairs =
           block === undefined ? [] : markdownFieldEntries(block, "sources", normalizeSourcePair);
+        const ledgerFieldValues = block === undefined ? [] : markdownFieldValues(block, "ledger_ids");
+        const missingLedgerField = block !== undefined && ledgerFieldValues.length !== 1;
         const extraSourcePair = renderedSourcePairs.find(
           (source) =>
             !expectedSourcePairs.includes(source) ||
             renderedSourcePairs.filter((candidate) => candidate === source).length >
               expectedSourcePairs.filter((candidate) => candidate === source).length
         );
-        if (missingPropertyField !== undefined || mismatchedMarkdownId || missingSource !== undefined) {
+        if (
+          missingPropertyField !== undefined ||
+          mismatchedMarkdownId ||
+          missingSource !== undefined ||
+          missingLedgerField
+        ) {
           const missingValue =
             missingPropertyField?.[0] ??
-            (mismatchedMarkdownId ? "id" : `${missingSource?.source_node_id}:${missingSource?.source_property_id}`);
+            (mismatchedMarkdownId
+              ? "id"
+              : missingLedgerField
+                ? "ledger_ids"
+                : `${missingSource?.source_node_id}:${missingSource?.source_property_id}`);
           diagnostics.push({
             code: "PROPERTY_MARKDOWN_PARITY_MISSING",
             message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingValue)})`,
