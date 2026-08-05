@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -420,6 +421,48 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.ok(suitePublicationStart > suiteMaterializerStart, source);
   assert.ok(resolverStart > suitePublicationStart, source);
   assert.ok(workflowStart > resolverStart, source);
+});
+
+test("generated Smithers invariant discovery uses a Git-compatible ls-files invocation", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+
+  assert.doesNotMatch(source, /--no-exclude-standard/u);
+  assert.match(source, /\["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"\]/u);
+  assert.match(source, /\["ls-files", "--others", "--", "src", "contracts"\]/u);
+  assert.match(source, /\["ls-files", "--others", "--", "test", "tests"\]/u);
+});
+
+test("invariant git discovery includes tracked, untracked, and ignored sources", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-git-discovery-"));
+  try {
+    execFileSync("git", ["init", "--quiet", workspace]);
+    for (const relativePath of [
+      "src/tracked.sol",
+      "contracts/untracked.sol",
+      "test/ignored.sol",
+      "tests/visible.sol"
+    ]) {
+      const filePath = path.join(workspace, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, "contract Source {}\n");
+    }
+    fs.writeFileSync(path.join(workspace, ".gitignore"), "test/ignored.sol\n");
+    execFileSync("git", ["add", "--", ".gitignore", "src/tracked.sol", "tests/visible.sol"], { cwd: workspace });
+
+    const sourcePaths = execFileSync(
+      "git",
+      ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"],
+      { cwd: workspace, encoding: "utf8" }
+    )
+      .split(/\r?\n/u)
+      .filter(Boolean);
+    assert.deepEqual(
+      new Set(sourcePaths),
+      new Set(["contracts/untracked.sol", "src/tracked.sol", "test/ignored.sol", "tests/visible.sol"])
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers invariant provenance accepts only supported source roots", () => {

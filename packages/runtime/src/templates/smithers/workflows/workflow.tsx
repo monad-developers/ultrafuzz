@@ -426,11 +426,10 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
   }
   const files = new Map<string, { path: string; sha256: string; size: number }>();
   try {
-    for (const value of execFileSync(
-      "git",
-      ["ls-files", "--cached", "--others", "--no-exclude-standard", "--", "test", "tests"],
-      { cwd: workspaceRoot, encoding: "utf8" }
-    ).split(/\r?\n/u)) {
+    for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
+      cwd: workspaceRoot,
+      encoding: "utf8"
+    }).split(/\r?\n/u)) {
       if (value.length === 0 || (!value.startsWith("test/") && !value.startsWith("tests/"))) continue;
       const relativePath = assertSafeInvariantSuiteTestPath(value);
       const sourcePath = path.resolve(workspaceRoot, relativePath);
@@ -496,11 +495,10 @@ function invariantSuiteProtectedBaselinePath(task: (typeof taskSpecs)[number]): 
 }
 
 function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
-  const values = execFileSync(
-    "git",
-    ["ls-files", "--cached", "--others", "--no-exclude-standard", "--", "src", "contracts", "test", "tests"],
-    { cwd: workspaceRoot, encoding: "utf8" }
-  ).split(/\r?\n/u);
+  const values = execFileSync("git", ["ls-files", "--cached", "--others", "--", "src", "contracts", "test", "tests"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  }).split(/\r?\n/u);
   return values.filter(
     (value) =>
       value.startsWith("src/") ||
@@ -2137,7 +2135,7 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
     for (const args of [
       diffArgs,
       ["diff", "--name-only", "HEAD", "--", "test", "tests"],
-      ["ls-files", "--others", "--no-exclude-standard", "--", "test", "tests"]
+      ["ls-files", "--others", "--", "test", "tests"]
     ]) {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
         if (value.startsWith("test/") || value.startsWith("tests/")) {
@@ -2173,7 +2171,7 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
   try {
     for (const args of [
       ["diff", "--name-only", "HEAD", "--", "src", "contracts"],
-      ["ls-files", "--others", "--no-exclude-standard", "--", "src", "contracts"]
+      ["ls-files", "--others", "--", "src", "contracts"]
     ]) {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
         if (!value.startsWith("src/") && !value.startsWith("contracts/")) continue;
@@ -2201,11 +2199,10 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
 
 function gitTestTreePaths(workspaceRoot: string): string[] {
   const paths = new Set<string>();
-  for (const value of execFileSync(
-    "git",
-    ["ls-files", "--cached", "--others", "--no-exclude-standard", "--", "test", "tests"],
-    { cwd: workspaceRoot, encoding: "utf8" }
-  ).split(/\r?\n/u)) {
+  for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--", "test", "tests"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  }).split(/\r?\n/u)) {
     if (value.startsWith("test/") || value.startsWith("tests/")) {
       const source = resolveRegularArtifactFile(
         workspaceRoot,
