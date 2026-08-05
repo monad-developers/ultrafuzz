@@ -1459,7 +1459,8 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
       path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE),
       `${JSON.stringify({
         schema_version: "ultrafuzz.invariant-suite-manifest.v1",
-        producer_node_id: task.metadata.node.logicalNodeId
+        producer_node_id: task.metadata.node.logicalNodeId,
+        producer_attempt_id: task.attemptId
       })}\n`
     );
   }
@@ -1474,6 +1475,13 @@ function resetInvariantSuiteArtifactRoot(artifactRoot: string): void {
   }
   rmSync(suiteRoot, { recursive: true, force: true });
   mkdirSync(suiteRoot, { recursive: true, mode: 0o700 });
+}
+
+function invariantSuiteProducerTask(dependencyArtifactDir: string): (typeof taskSpecs)[number] | undefined {
+  const attemptId = path.basename(dependencyArtifactDir);
+  const producer = taskSpecs.find((candidate) => candidate.attemptId === attemptId);
+  if (producer === undefined || !invariantSuiteNodeIds.has(producer.metadata.node.logicalNodeId)) return undefined;
+  return producer;
 }
 
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1501,13 +1509,16 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
   let selectedBytes = 0;
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
+    const producer = invariantSuiteProducerTask(dependency);
+    const dependencyAttemptId = path.basename(dependency);
+    if (!task.metadata.dependencies.attemptIds.includes(dependencyAttemptId)) continue;
     const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
     const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
     const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
     if (!existsSync(manifestPath)) continue;
-    let manifest: { schema_version?: unknown; producer_node_id?: unknown };
+    let manifest: { schema_version?: unknown; producer_node_id?: unknown; producer_attempt_id?: unknown };
     try {
       manifest = JSON.parse(
         readFileSync(
@@ -1518,7 +1529,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
           ),
           "utf8"
         )
-      ) as { schema_version?: unknown; producer_node_id?: unknown };
+      ) as { schema_version?: unknown; producer_node_id?: unknown; producer_attempt_id?: unknown };
     } catch (error) {
       throw new Error(`artifact-contract failure: invariant suite manifest is malformed ${manifestPath}`, {
         cause: error
@@ -1527,7 +1538,9 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     if (
       manifest.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
       typeof manifest.producer_node_id !== "string" ||
-      !invariantSuiteNodeIds.has(manifest.producer_node_id)
+      !invariantSuiteNodeIds.has(manifest.producer_node_id) ||
+      manifest.producer_attempt_id !== dependencyAttemptId ||
+      (producer !== undefined && manifest.producer_node_id !== producer.metadata.node.logicalNodeId)
     ) {
       continue;
     }
@@ -2190,7 +2203,9 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
       primary: output.primary
     };
   });
-  rememberInvariantSuitePublications(publications, artifactRoots);
+  if (invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
+    rememberInvariantSuitePublications(publications, artifactRoots);
+  }
   const primary = artifacts.find((artifact) => artifact.primary);
   if (primary === undefined) {
     throw new Error("artifact-contract failure: primary artifact is missing");
