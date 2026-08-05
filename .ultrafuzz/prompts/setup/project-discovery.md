@@ -101,6 +101,13 @@ operands, comparison direction, units, denominator, and rounding terms. If a
 separate source probe finds no matching section, record that probe and its result
 rather than silently skipping it.
 
+The JSON ledger must also contain `inventory_rows`, where each row has a stable
+`inventory-` ID, a normalized description, and one or more `ledger_ids`; every
+`inventory_id` in an entry must name one of these rows. Record each negative
+source probe in `scan_probes` with a stable `probe-` ID, source path, query, and
+result. Use `safety`, `risk`, or `interest` as the `kind` when those are the
+most precise classifications.
+
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
 Preserve distinct denominator and rounding variants as separate entries, even
@@ -126,4 +133,6 @@ source path, source location, verbatim text, and inventory IDs so reviewers can
 audit the structured artifact without opening JSON. A source statement may map to
 multiple normalized inventory rows, and equivalent source statements may map to
 one row; record those cardinalities explicitly rather than forcing a one-to-one
-mapping.
+mapping. Render each entry in a delimited block beginning with
+`### Ledger entry: <id>` and each normalized row in a block beginning with
+`### Inventory row: <inventory-id>`, including the complete fields in each block.

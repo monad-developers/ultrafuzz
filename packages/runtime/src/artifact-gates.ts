@@ -165,7 +165,11 @@ export function verifyRequiredArtifactsForAttempt(
     }
   }
   diagnostics.push(...verifySeverityMatrixArtifacts(artifactDir, node));
-  diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
+  try {
+    diagnostics.push(...verifyInvariantEvidenceArtifacts(layout, artifactDir, node));
+  } catch (error) {
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_EVIDENCE_READ_FAILED"));
+  }
   try {
     diagnostics.push(...verifyPropertyProvenanceArtifacts(layout, artifactDir, node));
   } catch (error) {
@@ -207,9 +211,20 @@ function verifyInvariantEvidenceArtifacts(
     }
     const markdown = fs.readFileSync(markdownPath, "utf8");
     for (const [entryIndex, entry] of parsed.value.entries.entries()) {
+      const block = markdownDelimitedBlock(markdown, `### Ledger entry: ${entry.id}`);
+      if (block === undefined) {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING",
+          message: `Discovery Markdown is missing the delimited block for ledger entry ${JSON.stringify(entry.id)}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: `${markdownPath}#$.entries[${entryIndex}]`
+        });
+        continue;
+      }
       const evidence = [entry.id, entry.source_path, entry.source_location, entry.verbatim, ...entry.inventory_ids];
       for (const token of evidence) {
-        if (markdown.includes(token)) {
+        if (markdownContainsToken(block, token)) {
           continue;
         }
         diagnostics.push({
@@ -219,6 +234,31 @@ function verifyInvariantEvidenceArtifacts(
           source: "invariant-ledger",
           path: `${markdownPath}#$.entries[${entryIndex}]`
         });
+      }
+      for (const inventoryId of entry.inventory_ids) {
+        const row = parsed.value.inventory_rows.find((candidate) => candidate.id === inventoryId);
+        const rowBlock = markdownDelimitedBlock(markdown, `### Inventory row: ${inventoryId}`);
+        if (row === undefined || rowBlock === undefined || !markdownContainsToken(rowBlock, row.description)) {
+          diagnostics.push({
+            code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
+            message: `Discovery Markdown is missing normalized inventory row ${JSON.stringify(inventoryId)}`,
+            severity: "error",
+            source: "invariant-ledger",
+            path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
+          });
+          continue;
+        }
+        for (const ledgerId of row.ledger_ids) {
+          if (!markdownContainsToken(rowBlock, ledgerId)) {
+            diagnostics.push({
+              code: "INVARIANT_LEDGER_MARKDOWN_INVENTORY_MISSING",
+              message: `Inventory row ${JSON.stringify(inventoryId)} is missing ledger ID ${JSON.stringify(ledgerId)}`,
+              severity: "error",
+              source: "invariant-ledger",
+              path: `${markdownPath}#$.entries[${entryIndex}].inventory_ids`
+            });
+          }
+        }
       }
     }
     return diagnostics;
@@ -233,7 +273,17 @@ function verifyInvariantEvidenceArtifacts(
 
   const ledgerPath = findLogicalNodeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json");
   const catalogPath = path.join(artifactDir, "properties.json");
-  if (ledgerPath === undefined || !fs.existsSync(catalogPath)) {
+  if (ledgerPath === undefined) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_MISSING",
+      message: "Project discovery invariant evidence ledger is unavailable for property fan-in",
+      severity: "error",
+      source: "invariant-ledger",
+      path: catalogPath
+    });
+    return diagnostics;
+  }
+  if (!fs.existsSync(catalogPath)) {
     return diagnostics;
   }
   const ledger = validateInvariantLedgerSchema(readJsonFile(ledgerPath), ledgerPath);
@@ -277,7 +327,8 @@ function verifyInvariantEvidenceArtifacts(
       const markdown = fs.readFileSync(markdownPath, "utf8");
       for (const [propertyIndex, property] of catalog.value.properties.entries()) {
         for (const ledgerId of property.ledger_ids ?? []) {
-          if (markdown.includes(property.id) && markdown.includes(ledgerId)) {
+          const block = markdownDelimitedBlock(markdown, `### Canonical property: ${property.id}`);
+          if (block !== undefined && markdownContainsToken(block, ledgerId)) {
             continue;
           }
           diagnostics.push({
@@ -292,6 +343,22 @@ function verifyInvariantEvidenceArtifacts(
     }
   }
   return diagnostics;
+}
+
+function markdownDelimitedBlock(markdown: string, marker: string): string | undefined {
+  const start = markdown.indexOf(marker);
+  if (start < 0) {
+    return undefined;
+  }
+  const next = markdown
+    .slice(start + marker.length)
+    .search(/^### (?:Ledger entry|Inventory row|Canonical property): /mu);
+  return next < 0 ? markdown.slice(start) : markdown.slice(start, start + marker.length + next);
+}
+
+function markdownContainsToken(markdown: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9._-])${escaped}(?![A-Za-z0-9._-])`, "u").test(markdown);
 }
 
 function verifyRequiredArtifactShape(

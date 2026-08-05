@@ -125,8 +125,9 @@ const definitions = defineContracts([
     id: "ultrafuzz/invariant-ledger@1",
     format: "json",
     description:
-      "A structured invariant evidence ledger. Every entry preserves verbatim source text, its source path and line or symbol location, and one or more inventory IDs.",
-    validEmptyExample: '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[]}'
+      "A structured invariant evidence ledger. Every entry preserves verbatim source text, its source path and line or symbol location, and one or more inventory IDs; inventory rows provide the normalized join and each row maps back to one or more ledger entries.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[{"id":"evidence-example","source_path":"docs/example.md","source_location":"line 1","kind":"invariant","verbatim":"Example relation","inventory_ids":["inventory-example"]}],"inventory_rows":[{"id":"inventory-example","description":"Example relation","ledger_ids":["evidence-example"]}],"scan_probes":[]}'
   },
   {
     id: "ultrafuzz/implemented-properties@1",

@@ -475,6 +475,12 @@ function canonicalEmptyArtifact(
   task: (typeof taskSpecs)[number],
   output: (typeof task.outputs)[number]
 ): string | undefined {
+  // These artifacts carry source-completeness and provenance joins. An empty
+  // sidecar would make an omitted agent output look successful, so they must
+  // always be produced by the agent and rejected by the strict verifier.
+  if (output.contract === "ultrafuzz/invariant-ledger@1" || output.contract === "ultrafuzz/properties@1") {
+    return undefined;
+  }
   // A primary findings array canonically represents "no findings". Other
   // primary outputs must still come from the agent. Non-primary outputs use
   // their contract-defined empty representation and remain overwritable.

@@ -219,7 +219,20 @@ test("invariant evidence ledger preserves verbatim source entries and inventory 
         verbatim: "totalBorrowed <= totalSupplied",
         inventory_ids: ["inventory-hub-borrowed-assets", "inventory-hub-solvency-v1"]
       }
-    ]
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-hub-borrowed-assets",
+        description: "Hub borrowed assets remain at or below supplied assets.",
+        ledger_ids: ["evidence-1", "evidence-2"]
+      },
+      {
+        id: "inventory-hub-solvency-v1",
+        description: "Aggregate borrowed and supplied assets remain solvent.",
+        ledger_ids: ["evidence-2"]
+      }
+    ],
+    scan_probes: []
   };
 
   const result = validateInvariantLedgerSchema(ledger, "ledger.json");
@@ -229,6 +242,12 @@ test("invariant evidence ledger preserves verbatim source entries and inventory 
     validateArtifactContract("ultrafuzz/invariant-ledger@1", JSON.stringify(ledger), "ledger.json").ok,
     true
   );
+
+  const contradictory = structuredClone(ledger);
+  contradictory.inventory_rows[0]!.ledger_ids = ["evidence-1"];
+  const contradictoryResult = validateInvariantLedgerSchema(contradictory);
+  assert.equal(contradictoryResult.ok, false);
+  assert.ok(contradictoryResult.issues.some((issue) => /does not link back/u.test(issue.message)));
 });
 
 test("invariant evidence ledger rejects duplicate entries, duplicate inventory joins, and invalid prefixes", () => {
@@ -243,7 +262,15 @@ test("invariant evidence ledger rejects duplicate entries, duplicate inventory j
         verbatim: "Total borrowed assets <= total supplied assets",
         inventory_ids: ["inventory-hub-borrowed-assets"]
       }
-    ]
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-hub-borrowed-assets",
+        description: "Hub borrowed assets remain at or below supplied assets.",
+        ledger_ids: ["evidence-1"]
+      }
+    ],
+    scan_probes: []
   };
 
   const duplicateEntry = structuredClone(base);
@@ -262,7 +289,7 @@ test("invariant evidence ledger rejects duplicate entries, duplicate inventory j
   invalidPrefix.entries[0]!.inventory_ids = ["hub-borrowed-assets"];
   const invalidPrefixResult = validateInvariantLedgerSchema(invalidPrefix);
   assert.equal(invalidPrefixResult.ok, false);
-  assert.ok(invalidPrefixResult.issues.some((issue) => /inventory- prefix/u.test(issue.message)));
+  assert.ok(invalidPrefixResult.issues.some((issue) => /inventory-|pattern/u.test(issue.message)));
 });
 
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
@@ -837,6 +864,16 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  const runStateContractEnum = (
+    runStateSnapshot.properties as {
+      nodes?: {
+        additionalProperties?: {
+          properties?: { outputs?: { items?: { properties?: { contract?: { enum?: unknown } } } } };
+        };
+      };
+    }
+  ).nodes?.additionalProperties?.properties?.outputs?.items?.properties?.contract?.enum;
+  assert.deepEqual(runStateContractEnum, ARTIFACT_CONTRACT_IDS);
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);

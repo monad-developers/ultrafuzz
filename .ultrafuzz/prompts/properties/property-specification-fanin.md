@@ -63,7 +63,8 @@ location that supplies each oracle so downstream implementation can observe
 the same relation.
 
 Read the `Verbatim source-evidence ledger` in the project-discovery handoff
-before deduplicating. Map every ledger entry to at least one canonical property
+before deduplicating, including its structured `inventory_rows` and `scan_probes`.
+Map every ledger entry to at least one canonical property
 row, retaining the copied source wording and its path plus line or symbol
 location in the description or source list. A ledger entry may be merged with an
 equivalent row only when the canonical row preserves every operand, comparison
@@ -74,6 +75,9 @@ IDs exactly. Every ledger ID must appear in at least one canonical property's
 `ledger_ids`; one source statement may map to several canonical properties and
 several equivalent source statements may share one canonical property. Preserve
 the complete mapping in both `properties.json` and the Markdown table.
+In `properties.md`, render each canonical row in a delimited block beginning
+with `### Canonical property: <property-id>` and include its complete
+`ledger_ids` list in that block.
 
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or
