@@ -1179,7 +1179,7 @@ test("property fan-in gate rejects a lens reference expectation dropped from can
       schema_version: "ultrafuzz.property-lens.v1",
       properties: [
         {
-          id: "iSpoke_withdraw",
+          id: "iSpoke_supply",
           description: "Withdraw completes for valid state.",
           category: "dos-liveness",
           priority: "medium",

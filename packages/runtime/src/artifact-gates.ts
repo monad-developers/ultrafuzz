@@ -690,12 +690,30 @@ function verifyLensReferenceExpectationPreservation(
     }
     for (const [index, property] of lens.value.properties.entries()) {
       if ((property.reference_expectations?.length ?? 0) === 0) continue;
-      lensRows.set(`${dependency}\u0000${property.id}`, {
+      lensRows.set(`${dependencyId}\u0000${property.id}`, {
         sourceNodeId: dependency,
         propertyId: property.id,
         expectationIds: property.reference_expectations ?? [],
         path: lensPath,
         index
+      });
+    }
+  }
+
+  const dependencyLogicalIds = new Set(
+    node.depends_on.map((dependencyId) => state.nodes[dependencyId]?.logical_node_id ?? dependencyId)
+  );
+  for (const [propertyIndex, property] of catalog.properties.entries()) {
+    if ((property.reference_expectations?.length ?? 0) === 0) continue;
+    for (const [sourceIndex, source] of property.sources.entries()) {
+      if (source.source_node_id === "property-specification-fanin") continue;
+      if (dependencyLogicalIds.has(source.source_node_id)) continue;
+      diagnostics.push({
+        code: "PROPERTY_LENS_DEPENDENCY_MISSING",
+        message: `Canonical property ${JSON.stringify(property.id)} carries reference expectations but fan-in does not depend on source lens ${JSON.stringify(source.source_node_id)}`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${path.join(getNodeArtifactDir(layout, node.id), "properties.json")}#$.properties[${propertyIndex}].sources[${sourceIndex}]`
       });
     }
   }
