@@ -38,7 +38,7 @@ const {
   validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
-const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
+const { normalizeFinalReportSeverityRecord } = await import(runtimeModule);
 
 const inputTaskSchema = z.object({
   id: z.string(),
@@ -348,6 +348,7 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
   if (!isStrictlyInsideDirectory(workspaceRoot, mirrorRoot)) {
     throw new Error(`artifact-contract failure: unsafe task artifact mirror ${task.attemptId}`);
   }
+  captureInvariantSuiteBaseline(task, workspaceRoot);
 
   for (const output of task.outputs) {
     const artifactPath = path.resolve(mirrorRoot, output.path);
@@ -367,6 +368,63 @@ function prepareArtifactMirror(task: (typeof taskSpecs)[number]): z.infer<typeof
     }
   }
   return { prepared: true };
+}
+
+function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const artifactRoot = realpathSync(task.metadata.artifacts.dir);
+  const baselinePath = path.join(artifactRoot, INVARIANT_SUITE_BASELINE_FILE);
+  if (!isStrictlyInsideDirectory(artifactRoot, baselinePath)) {
+    throw new Error(`artifact-contract failure: unsafe invariant suite baseline ${task.attemptId}`);
+  }
+  if (existsSync(baselinePath)) {
+    resolveRegularArtifactFile(
+      artifactRoot,
+      baselinePath,
+      "artifact-contract failure: invariant suite baseline is not a regular file"
+    );
+    return;
+  }
+  const files = new Map<string, { path: string; sha256: string; size: number }>();
+  try {
+    for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", "test"], {
+      cwd: workspaceRoot,
+      encoding: "utf8"
+    }).split(/\r?\n/u)) {
+      if (value.length === 0 || !value.startsWith("test/")) continue;
+      const relativePath = assertSafeInvariantSuiteTestPath(value);
+      const sourcePath = path.resolve(workspaceRoot, relativePath);
+      const source = resolveNonEmptyRegularArtifactFile(
+        workspaceRoot,
+        sourcePath,
+        `artifact-contract failure: invariant suite baseline source is missing ${relativePath}`,
+        `artifact-contract failure: invariant suite baseline source is empty ${relativePath}`
+      );
+      const sourceStat = statSync(source);
+      if (sourceStat.nlink !== 1) {
+        throw new Error(`artifact-contract failure: invariant suite baseline source is hard-linked ${relativePath}`);
+      }
+      assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
+      const sourceBytes = readFileSync(source);
+      if (sourceBytes.length !== sourceStat.size) {
+        throw new Error(`artifact-contract failure: invariant suite baseline source changed ${relativePath}`);
+      }
+      files.set(relativePath, {
+        path: relativePath,
+        sha256: createHash("sha256").update(sourceBytes).digest("hex"),
+        size: sourceStat.size
+      });
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
+    throw new Error("artifact-contract failure: unable to capture invariant suite baseline", { cause: error });
+  }
+  const contents = `${JSON.stringify(
+    { schema_version: "ultrafuzz.invariant-suite-baseline.v1", files: [...files.values()] },
+    null,
+    2
+  )}\n`;
+  writeFileDurable(baselinePath, contents);
 }
 
 function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
@@ -1222,50 +1280,57 @@ function materializeGeneratedTestCompanion(
 }
 
 /**
- * Preserve the complete invariant suite across task worktrees.  An
- * implementation task and the final campaign deliberately use separate
- * worktrees, so dependency artifact directories are the only durable handoff
- * boundary.  The old handoff copied Markdown/JSON but left generated
- * CryticTester, Setup, TargetFunctions, and Properties sources behind in the
- * implementation worktree; the campaign consequently ran the pinned
- * repository without the selected properties.
+ * Preserve the complete invariant suite across task worktrees. Every
+ * invariant stage deliberately uses a separate worktree, so dependency
+ * artifact directories are the only durable handoff boundary. The old
+ * handoff copied Markdown/JSON but left generated CryticTester, Setup,
+ * TargetFunctions, and Properties sources behind; downstream stages then ran
+ * the pinned repository without the selected harness.
  */
 function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): void {
-  if (task.metadata.node.logicalNodeId !== "stateful-invariant-implement-properties") {
+  if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) {
     return;
   }
   const implementationOutput = task.outputs.find(
     (output) =>
       output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@1"
   );
-  if (implementationOutput === undefined) {
-    return;
-  }
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   const paths = new Set<string>();
-  for (const root of artifactRoots) {
-    let implementationPath: string;
-    try {
-      implementationPath = resolveRegularArtifactFile(
-        root,
-        path.resolve(root, implementationOutput.path),
-        "artifact-contract failure: implemented property records are not a regular file"
-      );
-    } catch {
-      continue;
-    }
-    const parsed = validateImplementedPropertiesSchema(
-      JSON.parse(readFileSync(implementationPath, "utf8")),
-      implementationPath
-    );
-    if (!parsed.ok || parsed.value === undefined) {
-      continue;
-    }
-    for (const record of parsed.value.properties) {
-      if (record.status !== "implemented") continue;
-      for (const relativePath of [...record.implementation_paths, ...record.test_paths]) {
-        paths.add(assertSafeInvariantSuiteSourcePath(relativePath));
+  if (implementationOutput !== undefined) {
+    for (const root of artifactRoots) {
+      let implementationPath: string;
+      try {
+        implementationPath = resolveRegularArtifactFile(
+          root,
+          path.resolve(root, implementationOutput.path),
+          "artifact-contract failure: implemented property records are not a regular file"
+        );
+      } catch {
+        continue;
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readFileSync(implementationPath, "utf8")) as unknown;
+      } catch {
+        // Leave malformed task output for verifyArtifacts, which reports the
+        // typed artifact-contract failure instead of leaking SyntaxError from
+        // this companion-preservation compatibility path.
+        continue;
+      }
+      const parsed = validateImplementedPropertiesSchema(raw, implementationPath);
+      if (!parsed.ok || parsed.value === undefined) {
+        continue;
+      }
+      for (const record of parsed.value.properties) {
+        if (record.status !== "implemented") continue;
+        for (const relativePath of record.implementation_paths) {
+          paths.add(assertSafeInvariantSuitePath(relativePath));
+        }
+        for (const relativePath of record.test_paths) {
+          paths.add(assertSafeInvariantSuiteTestPath(relativePath));
+        }
       }
     }
   }
@@ -1273,11 +1338,26 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   // Capture every changed test-tree source as well.  Harness files such as
   // CryticTester.sol and TargetFunctions.sol are often shared by several
   // properties and therefore are not repeated in each record's path arrays.
-  if (task.metadata.node.logicalNodeId === "stateful-invariant-implement-properties") {
-    for (const relativePath of changedTestTreePaths(realpathSync(task.workspacePath))) {
-      paths.add(relativePath);
-    }
+  for (const relativePath of changedTestTreePaths(
+    realpathSync(task.workspacePath),
+    path.join(realpathSync(task.metadata.artifacts.dir), INVARIANT_SUITE_BASELINE_FILE)
+  )) {
+    paths.add(relativePath);
   }
+  let totalBytes = 0;
+  for (const relativePath of paths) {
+    const sourcePath = path.resolve(task.workspacePath, relativePath);
+    const source = resolveNonEmptyRegularArtifactFile(
+      realpathSync(task.workspacePath),
+      sourcePath,
+      `artifact-contract failure: invariant suite source is missing ${relativePath}`,
+      `artifact-contract failure: invariant suite source is empty ${relativePath}`
+    );
+    const sourceStat = statSync(source);
+    assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
+    totalBytes += sourceStat.size;
+  }
+  assertInvariantSuiteSourceBudget(paths.size, totalBytes);
   for (const artifactRoot of artifactRoots) {
     for (const relativePath of paths) {
       copyInvariantSuiteSource(realpathSync(task.workspacePath), artifactRoot, relativePath);
@@ -1286,20 +1366,53 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
 }
 
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
-  for (const dependency of task.dependencyArtifactDirs) {
+  const directDependencies = new Set(task.metadata.dependencies.attemptIds);
+  const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
+    const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
+    const rightDirect = directDependencies.has(right) || directDependencies.has(path.basename(right));
+    if (leftDirect !== rightDirect) return leftDirect ? 1 : -1;
+    return left.localeCompare(right);
+  });
+  const directSources = new Map<string, { dependency: string; bytes: Buffer }>();
+  for (const dependency of dependencies) {
+    const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
+    if (!isDirect) continue;
+    const dependencyRoot = realpathSync(dependency);
+    const suiteRoot = path.join(dependencyRoot, "invariant-suite");
+    if (!existsSync(suiteRoot)) continue;
+    for (const relativePath of listInvariantSuiteSources(suiteRoot)) {
+      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
+      const previous = directSources.get(relativePath);
+      if (previous !== undefined && !previous.bytes.equals(bytes)) {
+        throw new Error(
+          `artifact handoff direct dependency suites conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
+        );
+      }
+      directSources.set(relativePath, { dependency, bytes });
+    }
+  }
+  for (const dependency of dependencies) {
     const dependencyRoot = realpathSync(dependency);
     const implementationPath = path.join(dependencyRoot, "implemented-properties.json");
-    if (!existsSync(implementationPath)) continue;
-    const implementation = validateImplementedPropertiesSchema(
-      JSON.parse(readFileSync(implementationPath, "utf8")),
-      implementationPath
-    );
-    if (!implementation.ok || implementation.value === undefined) continue;
     const expectedPaths = new Set<string>();
-    for (const record of implementation.value.properties) {
-      if (record.status !== "implemented") continue;
-      for (const relativePath of [...record.implementation_paths, ...record.test_paths]) {
-        expectedPaths.add(assertSafeInvariantSuiteSourcePath(relativePath));
+    if (existsSync(implementationPath)) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readFileSync(implementationPath, "utf8")) as unknown;
+      } catch {
+        throw new Error(`artifact-contract failure: implemented properties JSON is malformed ${implementationPath}`);
+      }
+      const implementation = validateImplementedPropertiesSchema(raw, implementationPath);
+      if (implementation.ok && implementation.value !== undefined) {
+        for (const record of implementation.value.properties) {
+          if (record.status !== "implemented") continue;
+          for (const relativePath of record.implementation_paths) {
+            expectedPaths.add(assertSafeInvariantSuitePath(relativePath));
+          }
+          for (const relativePath of record.test_paths) {
+            expectedPaths.add(assertSafeInvariantSuiteTestPath(relativePath));
+          }
+        }
       }
     }
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
@@ -1309,26 +1422,56 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       );
     }
     if (!existsSync(suiteRoot)) continue;
-    for (const relativePath of listInvariantSuiteSources(suiteRoot)) {
+    const suitePaths = listInvariantSuiteSources(suiteRoot);
+    for (const relativePath of suitePaths) {
       copyInvariantSuiteIntoWorkspace(workspaceRoot, suiteRoot, relativePath);
     }
     for (const relativePath of expectedPaths) {
-      const source = path.join(suiteRoot, relativePath);
-      if (!existsSync(source)) {
+      if (!suitePaths.includes(relativePath)) {
         throw new Error(`artifact handoff is missing invariant suite source ${relativePath}: ${dependency}`);
       }
     }
   }
 }
 
-function assertSafeInvariantSuiteSourcePath(value: string): string {
+const MAX_INVARIANT_SUITE_PATH_LENGTH = 4_096;
+const MAX_INVARIANT_SUITE_SEGMENT_LENGTH = 255;
+const MAX_INVARIANT_SUITE_FILES = 512;
+const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
+const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
+const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
+const invariantSuiteNodeIds = new Set([
+  "stateful-invariant-setup",
+  "stateful-invariant-handlers",
+  "stateful-invariant-coverage",
+  "stateful-invariant-implement-properties"
+]);
+const INVARIANT_SUITE_SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]);
+
+/**
+ * Validate an explicit repository-relative path from implementation/test
+ * provenance. Implementation sources commonly live under src/contracts, so
+ * this intentionally accepts any ordinary relative path while excluding
+ * internal state roots and traversal/absolute forms.
+ */
+function assertSafeInvariantSuitePath(value: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_INVARIANT_SUITE_PATH_LENGTH) {
+    throw new Error(`artifact-contract failure: unsafe invariant suite source path ${String(value)}`);
+  }
+  const segments = value.split("/");
   if (
-    typeof value !== "string" ||
-    value.length === 0 ||
     path.isAbsolute(value) ||
     value.includes("\\") ||
     value.includes("\u0000") ||
-    value.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..") ||
+    segments.some(
+      (segment) =>
+        segment.length === 0 ||
+        segment.length > MAX_INVARIANT_SUITE_SEGMENT_LENGTH ||
+        segment === "." ||
+        segment === ".." ||
+        INVARIANT_SUITE_SENSITIVE_SEGMENTS.has(segment) ||
+        segment.startsWith(".env.")
+    ) ||
     /^[A-Za-z]:/u.test(value)
   ) {
     throw new Error(`artifact-contract failure: unsafe invariant suite source path ${String(value)}`);
@@ -1336,21 +1479,128 @@ function assertSafeInvariantSuiteSourcePath(value: string): string {
   return value;
 }
 
-function changedTestTreePaths(workspaceRoot: string): string[] {
+function assertSafeInvariantSuiteTestPath(value: string): string {
+  const safePath = assertSafeInvariantSuitePath(value);
+  if (!safePath.startsWith("test/")) {
+    throw new Error(`artifact-contract failure: invariant suite test path must be under test/: ${safePath}`);
+  }
+  return safePath;
+}
+
+function assertInvariantSuiteSourceBudget(fileCount: number, totalBytes: number): void {
+  if (fileCount > MAX_INVARIANT_SUITE_FILES) {
+    throw new Error(`artifact-contract failure: invariant suite has too many source files (${fileCount})`);
+  }
+  if (totalBytes > MAX_INVARIANT_SUITE_TOTAL_BYTES) {
+    throw new Error(`artifact-contract failure: invariant suite exceeds the source byte budget (${totalBytes})`);
+  }
+}
+
+function assertInvariantSuiteSourceSize(relativePath: string, size: number): void {
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_INVARIANT_SUITE_SOURCE_BYTES) {
+    throw new Error(`artifact-contract failure: invariant suite source exceeds the file byte limit ${relativePath}`);
+  }
+}
+
+function changedTestTreePaths(workspaceRoot: string, baselinePath?: string): string[] {
   try {
+    if (baselinePath !== undefined && existsSync(baselinePath)) {
+      const baselineRoot = realpathSync(path.dirname(baselinePath));
+      const resolvedBaseline = resolveRegularArtifactFile(
+        baselineRoot,
+        baselinePath,
+        "artifact-contract failure: invariant suite baseline is not a regular file"
+      );
+      const parsed = JSON.parse(readFileSync(resolvedBaseline, "utf8")) as {
+        schema_version?: unknown;
+        files?: unknown;
+      };
+      if (parsed.schema_version !== "ultrafuzz.invariant-suite-baseline.v1" || !Array.isArray(parsed.files)) {
+        throw new Error("artifact-contract failure: invariant suite baseline is malformed");
+      }
+      const baseline = new Map<string, { sha256: string; size: number }>();
+      for (const entry of parsed.files) {
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          Array.isArray(entry) ||
+          typeof (entry as { path?: unknown }).path !== "string" ||
+          typeof (entry as { sha256?: unknown }).sha256 !== "string" ||
+          !/^[0-9a-f]{64}$/u.test((entry as { sha256: string }).sha256) ||
+          !Number.isSafeInteger((entry as { size?: unknown }).size) ||
+          (entry as { size: number }).size < 0
+        ) {
+          throw new Error("artifact-contract failure: invariant suite baseline entry is malformed");
+        }
+        const relativePath = assertSafeInvariantSuiteTestPath((entry as { path: string }).path);
+        baseline.set(relativePath, {
+          sha256: (entry as { sha256: string }).sha256,
+          size: (entry as { size: number }).size
+        });
+      }
+      const current = gitTestTreePaths(workspaceRoot);
+      const changed = new Set<string>();
+      for (const relativePath of current) {
+        const sourcePath = path.resolve(workspaceRoot, relativePath);
+        const source = resolveNonEmptyRegularArtifactFile(
+          workspaceRoot,
+          sourcePath,
+          `artifact-contract failure: invariant suite source is missing ${relativePath}`,
+          `artifact-contract failure: invariant suite source is empty ${relativePath}`
+        );
+        const sourceStat = statSync(source);
+        if (sourceStat.nlink !== 1) {
+          throw new Error(`artifact-contract failure: invariant suite source is hard-linked ${relativePath}`);
+        }
+        const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+        const previous = baseline.get(relativePath);
+        if (previous === undefined || previous.size !== sourceStat.size || previous.sha256 !== digest) {
+          changed.add(relativePath);
+        }
+      }
+      return [...changed].sort();
+    }
     const changed = new Set<string>();
+    const baseRef = [pinnedSourceRef, "HEAD^"].find((candidate) => {
+      try {
+        execFileSync("git", ["rev-parse", "--verify", `${candidate}^{commit}`], {
+          cwd: workspaceRoot,
+          stdio: ["ignore", "ignore", "pipe"]
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    const diffArgs =
+      baseRef === undefined
+        ? ["diff", "--name-only", "HEAD", "--", "test"]
+        : ["diff", "--name-only", `${baseRef}...HEAD`, "--", "test"];
     for (const args of [
+      diffArgs,
       ["diff", "--name-only", "HEAD", "--", "test"],
       ["ls-files", "--others", "--exclude-standard", "--", "test"]
     ]) {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
-        if (value.startsWith("test/")) changed.add(assertSafeInvariantSuiteSourcePath(value));
+        if (value.startsWith("test/")) changed.add(assertSafeInvariantSuiteTestPath(value));
       }
     }
     return [...changed].sort();
-  } catch {
-    return [];
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
+    throw new Error("artifact-contract failure: unable to enumerate changed invariant suite sources", { cause: error });
   }
+}
+
+function gitTestTreePaths(workspaceRoot: string): string[] {
+  const paths = new Set<string>();
+  for (const value of execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--", "test"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  }).split(/\r?\n/u)) {
+    if (value.startsWith("test/")) paths.add(assertSafeInvariantSuiteTestPath(value));
+  }
+  return [...paths].sort();
 }
 
 function copyInvariantSuiteSource(workspaceRoot: string, artifactRoot: string, relativePath: string): void {
@@ -1361,16 +1611,40 @@ function copyInvariantSuiteSource(workspaceRoot: string, artifactRoot: string, r
     `artifact-contract failure: invariant suite source is missing ${relativePath}`,
     `artifact-contract failure: invariant suite source is empty ${relativePath}`
   );
+  const sourceStat = statSync(source);
+  if (sourceStat.nlink !== 1) {
+    throw new Error(`artifact-contract failure: invariant suite source is hard-linked ${relativePath}`);
+  }
+  assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
   const sourceBytes = readFileSync(source);
+  if (sourceBytes.length !== sourceStat.size) {
+    throw new Error(`artifact-contract failure: invariant suite source changed ${relativePath}`);
+  }
   const artifactPath = path.resolve(artifactRoot, "invariant-suite", relativePath);
   if (!isStrictlyInsideDirectory(artifactRoot, artifactPath)) {
     throw new Error(`artifact-contract failure: unsafe invariant suite artifact path ${relativePath}`);
   }
-  mkdirSync(path.dirname(artifactPath), { recursive: true });
-  if (existsSync(artifactPath)) {
+  const artifactParent = safeInvariantSuiteDirectory(artifactRoot, path.dirname(artifactPath));
+  mkdirSync(artifactParent, { recursive: true });
+  const resolvedParent = realpathSync(artifactParent);
+  if (resolvedParent !== artifactParent || !isStrictlyInsideDirectory(artifactRoot, resolvedParent)) {
+    throw new Error(`artifact-contract failure: unsafe invariant suite artifact parent ${relativePath}`);
+  }
+  const anchoredArtifactPath = path.join(resolvedParent, path.basename(artifactPath));
+  let artifactEntryExists = false;
+  try {
+    const artifactStat = lstatSync(anchoredArtifactPath);
+    artifactEntryExists = true;
+    if (artifactStat.isSymbolicLink()) {
+      throw new Error(`artifact-contract failure: invariant suite artifact is a symlink ${relativePath}`);
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (artifactEntryExists) {
     const existing = resolveNonEmptyRegularArtifactFile(
       artifactRoot,
-      artifactPath,
+      anchoredArtifactPath,
       `artifact-contract failure: invariant suite artifact is missing ${relativePath}`,
       `artifact-contract failure: invariant suite artifact is empty ${relativePath}`
     );
@@ -1379,7 +1653,7 @@ function copyInvariantSuiteSource(workspaceRoot: string, artifactRoot: string, r
     }
     return;
   }
-  writeFileSync(artifactPath, sourceBytes, { flag: "wx", mode: 0o600 });
+  writeFileSync(anchoredArtifactPath, sourceBytes, { flag: "wx", mode: 0o600 });
 }
 
 function listInvariantSuiteSources(suiteRoot: string, relative = ""): string[] {
@@ -1389,46 +1663,127 @@ function listInvariantSuiteSources(suiteRoot: string, relative = ""): string[] {
     throw new Error(`artifact handoff invariant-suite path is a symlink: ${relative || "invariant-suite"}`);
   }
   if (stat.isFile()) {
-    return [assertSafeInvariantSuiteSourcePath(relative.split(path.sep).join("/"))];
+    if (stat.nlink !== 1) {
+      throw new Error(`artifact handoff invariant-suite source is hard-linked: ${relative}`);
+    }
+    assertInvariantSuiteSourceSize(relative, stat.size);
+    const fileCount = 1;
+    assertInvariantSuiteSourceBudget(fileCount, stat.size);
+    return [assertSafeInvariantSuitePath(relative.split(path.sep).join("/"))];
   }
   if (!stat.isDirectory()) {
     throw new Error(`artifact handoff invariant-suite path is not a regular file: ${relative}`);
   }
-  return readdirSync(current).flatMap((entry) =>
+  const sources = readdirSync(current).flatMap((entry) =>
     listInvariantSuiteSources(suiteRoot, relative.length === 0 ? entry : path.join(relative, entry))
   );
+  if (relative.length === 0) {
+    let totalBytes = 0;
+    for (const sourcePath of sources) {
+      const source = path.resolve(suiteRoot, sourcePath);
+      totalBytes += statSync(source).size;
+    }
+    assertInvariantSuiteSourceBudget(sources.length, totalBytes);
+  }
+  return sources;
 }
 
-function copyInvariantSuiteIntoWorkspace(workspaceRoot: string, suiteRoot: string, relativePath: string): void {
+function readInvariantSuiteSourceBytes(suiteRoot: string, relativePath: string, prefix: string): Buffer {
   const sourcePath = path.resolve(suiteRoot, relativePath);
   const source = resolveNonEmptyRegularArtifactFile(
     suiteRoot,
     sourcePath,
-    `artifact handoff invariant suite source is missing ${relativePath}`,
-    `artifact handoff invariant suite source is empty ${relativePath}`
+    `${prefix} source is missing ${relativePath}`,
+    `${prefix} source is empty ${relativePath}`
   );
+  const sourceStat = statSync(source);
+  if (sourceStat.nlink !== 1) {
+    throw new Error(`${prefix} source is hard-linked ${relativePath}`);
+  }
+  assertInvariantSuiteSourceSize(relativePath, sourceStat.size);
+  const sourceBytes = readFileSync(source);
+  if (sourceBytes.length !== sourceStat.size) {
+    throw new Error(`${prefix} source changed ${relativePath}`);
+  }
+  return sourceBytes;
+}
+
+function copyInvariantSuiteIntoWorkspace(workspaceRoot: string, suiteRoot: string, relativePath: string): void {
+  const sourceBytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
   const destination = path.resolve(workspaceRoot, relativePath);
   if (!isStrictlyInsideDirectory(workspaceRoot, destination)) {
     throw new Error(`artifact-contract failure: invariant suite destination escapes workspace ${relativePath}`);
   }
-  if (existsSync(destination)) {
+  const destinationParent = safeInvariantSuiteDirectory(workspaceRoot, path.dirname(destination));
+  mkdirSync(destinationParent, { recursive: true });
+  const resolvedParent = realpathSync(destinationParent);
+  if (resolvedParent !== destinationParent || !isStrictlyInsideDirectory(workspaceRoot, resolvedParent)) {
+    throw new Error(`artifact-contract failure: invariant suite destination parent escapes workspace ${relativePath}`);
+  }
+  const anchoredDestination = path.join(resolvedParent, path.basename(destination));
+  let destinationEntryExists = false;
+  try {
+    const destinationStat = lstatSync(anchoredDestination);
+    destinationEntryExists = true;
+    if (destinationStat.isSymbolicLink()) {
+      throw new Error(`artifact-contract failure: invariant suite destination is a symlink ${relativePath}`);
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (destinationEntryExists) {
     const existing = resolveNonEmptyRegularArtifactFile(
       workspaceRoot,
-      destination,
+      anchoredDestination,
       `artifact handoff invariant suite destination is missing ${relativePath}`,
       `artifact handoff invariant suite destination is empty ${relativePath}`
     );
-    if (!readFileSync(existing).equals(readFileSync(source))) {
-      throw new Error(`artifact handoff invariant suite destination conflicts with source ${relativePath}`);
+    if (existing !== anchoredDestination) {
+      throw new Error(`artifact handoff invariant suite destination is not canonical ${relativePath}`);
     }
-    return;
   }
-  mkdirSync(path.dirname(destination), { recursive: true });
-  const parent = realpathSync(path.dirname(destination));
-  if (!isStrictlyInsideDirectory(workspaceRoot, parent)) {
-    throw new Error(`artifact-contract failure: invariant suite destination parent escapes workspace ${relativePath}`);
+  // A generated suite is authoritative over the pinned source and over an
+  // earlier ancestor suite. Replace only after the canonical parent and leaf
+  // have been checked; writeFileDurable atomically replaces a leaf symlink
+  // rather than following it if a concurrent actor races after validation.
+  writeFileDurable(anchoredDestination, sourceBytes);
+}
+
+function safeInvariantSuiteDirectory(root: string, candidate: string): string {
+  const canonicalRoot = realpathSync(root);
+  const absoluteCandidate = path.resolve(candidate);
+  if (absoluteCandidate !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, absoluteCandidate)) {
+    throw new Error(`artifact-contract failure: invariant suite directory escapes root ${candidate}`);
   }
-  writeFileSync(path.join(parent, path.basename(destination)), readFileSync(source), { flag: "wx", mode: 0o600 });
+  let current = absoluteCandidate;
+  const missing: string[] = [];
+  while (current !== canonicalRoot) {
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(current) !== current) {
+        throw new Error(`artifact-contract failure: invariant suite directory is unsafe ${candidate}`);
+      }
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      missing.push(current);
+    }
+    const parent = path.dirname(current);
+    if (parent === current || !isStrictlyInsideDirectory(canonicalRoot, parent)) {
+      throw new Error(`artifact-contract failure: invariant suite directory escapes root ${candidate}`);
+    }
+    current = parent;
+  }
+  for (const directory of missing.reverse()) {
+    mkdirSync(directory, { recursive: false });
+  }
+  const resolved = realpathSync(absoluteCandidate);
+  if (
+    resolved !== absoluteCandidate ||
+    (resolved !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, resolved))
+  ) {
+    throw new Error(`artifact-contract failure: invariant suite directory changed during creation ${candidate}`);
+  }
+  return resolved;
 }
 
 function rememberInvariantSuitePublications(publications: Map<string, Buffer>, artifactRoots: readonly string[]): void {
@@ -1550,7 +1905,8 @@ function readInvariantSourceSnapshot(
     sourcePath = resolveRegularArtifactFile(workspaceRoot, sourceCandidate, `${label} is not a regular file`);
   } catch (error) {
     throw new Error(
-      `artifact-contract failure: invariant ${label} ${relativePath} is unavailable: ${error instanceof Error ? error.message : String(error)}`
+      `artifact-contract failure: invariant ${label} ${relativePath} is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   const bytes = readFileSync(sourcePath);
@@ -1616,7 +1972,8 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as unknown;
   } catch (error) {
     throw new Error(
-      `artifact-contract failure: invariant ledger JSON is unreadable: ${error instanceof Error ? error.message : String(error)}`
+      `artifact-contract failure: invariant ledger JSON is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   const validation = validateInvariantLedgerSchema(parsed, ledgerPath);
