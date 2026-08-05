@@ -109,6 +109,7 @@ const resolvedConfigValidationSchema = z
     invariants: z
       .object({
         propertyPriorityThreshold: z.enum(["high", "medium", "low"]),
+        invariantTestingSmokeTimeoutSeconds: timeoutSecondsSchema,
         invariantTestingFuzzerTimeoutSeconds: timeoutSecondsSchema
       })
       .passthrough(),
@@ -238,6 +239,7 @@ export function serializeResolvedConfigToml(config: ResolvedConfig): string {
   });
   pushTable(lines, "invariants", {
     property_priority_threshold: clone.invariants.propertyPriorityThreshold,
+    invariant_testing_smoke_timeout: formatDurationSeconds(clone.invariants.invariantTestingSmokeTimeoutSeconds),
     invariant_testing_fuzzer_timeout: formatDurationSeconds(clone.invariants.invariantTestingFuzzerTimeoutSeconds)
   });
   pushTable(lines, "triage", {
@@ -629,6 +631,7 @@ function resolvedConfigDiagnosticCode(issue: ZodIssue): string {
     case "run.default_timeout_seconds":
     case "run.workflow_deadline_seconds":
     case "run.controller_lease_seconds":
+    case "invariants.invariant_testing_smoke_timeout":
     case "invariants.invariant_testing_fuzzer_timeout":
       return "CONFIG_TIMEOUT_INVALID";
     case "run.workspace_mode":
@@ -706,6 +709,8 @@ function configPathSegment(segment: string): string {
       return "credential_env";
     case "propertyPriorityThreshold":
       return "property_priority_threshold";
+    case "invariantTestingSmokeTimeoutSeconds":
+      return "invariant_testing_smoke_timeout";
     case "invariantTestingFuzzerTimeoutSeconds":
       return "invariant_testing_fuzzer_timeout";
     case "trustModel":

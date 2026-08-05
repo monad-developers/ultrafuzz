@@ -55,7 +55,11 @@ const MODAL_EXECUTION_PROVIDER_KEYS = ["app", "image", "region", "credential_env
 const MODEL_PROFILE_KEYS = ["agent", "model", "reasoning", "timeout_seconds"] as const;
 const AGENT_KEYS = ["auth", "api_key_env", "config_dir"] as const;
 const PERMISSION_KEYS = ["trust_model", "prompt_review_required", "materialize_outputs_as_unstaged"] as const;
-const INVARIANT_KEYS = ["property_priority_threshold", "invariant_testing_fuzzer_timeout"] as const;
+const INVARIANT_KEYS = [
+  "property_priority_threshold",
+  "invariant_testing_smoke_timeout",
+  "invariant_testing_fuzzer_timeout"
+] as const;
 const TRIAGE_KEYS = ["quorum", "panel_size"] as const;
 const EVAL_KEYS = ["eval_config", "ground_truth_root", "provider", "providers"] as const;
 const EVAL_PROVIDER_KEYS = ["api_key_env", "project", "endpoint"] as const;
@@ -491,6 +495,27 @@ export function parseProjectConfigToml(text: string, file = CONFIG_FILE_NAME): C
       normalizeInvariantPriority,
       (value) => {
         invariantConfig.propertyPriorityThreshold = value;
+      }
+    );
+    readString(
+      invariants,
+      "invariant_testing_smoke_timeout",
+      ["invariants", "invariant_testing_smoke_timeout"],
+      diagnostics,
+      (value) => {
+        const seconds = parseDurationSeconds(value);
+        if (seconds === undefined) {
+          diagnostics.push(
+            diagnostic(
+              "CONFIG_DURATION_INVALID",
+              "invariants.invariant_testing_smoke_timeout must be a positive duration like 10min, 600s, or 1h",
+              ["invariants", "invariant_testing_smoke_timeout"],
+              "project-toml"
+            )
+          );
+        } else {
+          invariantConfig.invariantTestingSmokeTimeoutSeconds = seconds;
+        }
       }
     );
     readString(

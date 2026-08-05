@@ -107,7 +107,7 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
    - Record every setup shortcut or bias in a comment or artifact note.
    - When `recon` is available and `CryticTester` exists, run a bounded Recon
      deployment smoke before handoff:
-     `timeout 120 recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout {{invariant_testing_smoke_timeout}} recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it, and adapt corpus directories to existing local conventions.
      This smoke checks deployment and initialization, not campaign depth. If it

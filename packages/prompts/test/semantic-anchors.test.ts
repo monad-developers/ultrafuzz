@@ -134,6 +134,21 @@ describe("prompt semantic anchors", () => {
     expect(corpus).toContain("documented valid preconditions");
   });
 
+  it("uses a configured smoke budget for every invariant Recon stage", () => {
+    const promptPaths = [
+      "strategies/invariants/setup.md",
+      "strategies/invariants/handlers.md",
+      "strategies/invariants/coverage.md",
+      "strategies/invariants/implement-properties.md",
+      "strategies/invariants/invariant-testing-campaign.md"
+    ];
+    for (const relativePath of promptPaths) {
+      const markdown = prompt(relativePath);
+      expect(markdown, relativePath).toContain("{{invariant_testing_smoke_timeout}}");
+      expect(markdown, relativePath).not.toContain("timeout 120 recon fuzz");
+    }
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()

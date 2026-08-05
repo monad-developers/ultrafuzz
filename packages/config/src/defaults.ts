@@ -114,6 +114,11 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         "invariants.property_priority_threshold",
         filePath
       ),
+      invariantTestingSmokeTimeoutSeconds: required(
+        invariants.invariantTestingSmokeTimeoutSeconds,
+        "invariants.invariant_testing_smoke_timeout",
+        filePath
+      ),
       invariantTestingFuzzerTimeoutSeconds: required(
         invariants.invariantTestingFuzzerTimeoutSeconds,
         "invariants.invariant_testing_fuzzer_timeout",
@@ -312,6 +317,11 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   assertBoolean(value.permissions.materializeOutputsAsUnstaged, "permissions.materializeOutputsAsUnstaged", filePath);
   assertRecord(value.invariants, "invariants", filePath);
   assertString(value.invariants.propertyPriorityThreshold, "invariants.propertyPriorityThreshold", filePath);
+  assertNumber(
+    value.invariants.invariantTestingSmokeTimeoutSeconds,
+    "invariants.invariantTestingSmokeTimeoutSeconds",
+    filePath
+  );
   assertNumber(
     value.invariants.invariantTestingFuzzerTimeoutSeconds,
     "invariants.invariantTestingFuzzerTimeoutSeconds",
