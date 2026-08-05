@@ -24,7 +24,7 @@
             "pattern": "^[^\\\\\\u0000]+$",
             "allOf": [
               { "not": { "pattern": "^/" } },
-              { "not": { "pattern": "^[A-Za-z]:[\\\\/]" } },
+              { "not": { "pattern": "^[A-Za-z]:" } },
               { "not": { "pattern": "(^|/)\\.\\.(?:/|$)" } }
             ]
           },

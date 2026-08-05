@@ -18,7 +18,7 @@ export const invariantSourceProofFileSchema = z.strictObject({
     .min(1)
     .refine((value) => !value.includes("\u0000"), { message: "Source proof paths cannot contain NUL bytes" })
     .refine((value) => !value.includes("\\"), { message: "Source proof paths must use POSIX separators" })
-    .refine((value) => !value.startsWith("/") && !/^[A-Za-z]:[\\/]/u.test(value), {
+    .refine((value) => !value.startsWith("/") && !/^[A-Za-z]:/u.test(value), {
       message: "Source proof paths must be target-relative"
     })
     .refine((value) => !value.split("/").some((segment) => segment === ".."), {
@@ -96,7 +96,7 @@ export const invariantSourceProofJsonSchema = {
             pattern: "^[^\\\\\\u0000]+$",
             allOf: [
               { not: { pattern: "^/" } },
-              { not: { pattern: "^[A-Za-z]:[\\\\/]" } },
+              { not: { pattern: "^[A-Za-z]:" } },
               { not: { pattern: "(^|/)\\.\\.(?:/|$)" } }
             ]
           },

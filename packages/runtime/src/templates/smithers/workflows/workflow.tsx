@@ -1405,7 +1405,12 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     }
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
-    if (!existsSync(probeCandidate)) continue;
+    try {
+      lstatSync(probeCandidate);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
     const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
     sourceSnapshots.set(probe.source_path, snapshot);
     files.set(probe.source_path, {

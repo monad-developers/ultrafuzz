@@ -244,21 +244,10 @@ function verifyInvariantEvidenceArtifacts(
           path: ledgerPath
         });
       }
-      if (fs.existsSync(discoveryWorkspace)) {
-        // Probe paths may intentionally name optional files; the probe result
-        // records absence, so containment is the invariant we can enforce.
-        for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-          const probePath = path.resolve(discoveryWorkspace, probe.source_path);
-          if (probePath === discoveryWorkspace || !probePath.startsWith(`${discoveryWorkspace}${path.sep}`)) {
-            diagnostics.push({
-              code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
-              message: `Invariant scan probe path escapes the discovery workspace: ${probe.source_path}`,
-              severity: "error",
-              source: "invariant-ledger",
-              path: `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`
-            });
-          }
-        }
+      // Probe paths may intentionally name optional files; the probe result
+      // records absence, so containment is the invariant we can enforce.
+      for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+        verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
       }
       return diagnostics;
     }
@@ -306,21 +295,10 @@ function verifyInvariantEvidenceArtifacts(
         path: ledgerPath
       });
     }
-    if (fs.existsSync(discoveryWorkspace)) {
-      // Probe paths may intentionally name optional files; the probe result
-      // records absence, so containment is the invariant we can enforce.
-      for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
-        const probePath = path.resolve(discoveryWorkspace, probe.source_path);
-        if (probePath === discoveryWorkspace || !probePath.startsWith(`${discoveryWorkspace}${path.sep}`)) {
-          diagnostics.push({
-            code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
-            message: `Invariant scan probe path escapes the discovery workspace: ${probe.source_path}`,
-            severity: "error",
-            source: "invariant-ledger",
-            path: `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`
-          });
-        }
-      }
+    // Probe paths may intentionally name optional files; the probe result
+    // records absence, so containment is the invariant we can enforce.
+    for (const [probeIndex, probe] of (parsed.value.scan_probes ?? []).entries()) {
+      verifyInvariantProbePath(discoveryWorkspace, probe.source_path, probeIndex, ledgerPath, diagnostics);
     }
     const markdown = fs.readFileSync(markdownPath, "utf8");
     for (const [entryIndex, entry] of parsed.value.entries.entries()) {
@@ -559,6 +537,42 @@ function verifyInvariantSourceEvidence(
   }
 }
 
+function verifyInvariantProbePath(
+  workspacePath: string,
+  relativePath: string,
+  probeIndex: number,
+  ledgerPath: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  const probePath = path.resolve(workspacePath, relativePath);
+  const diagnosticPath = `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`;
+  if (probePath === workspacePath || !probePath.startsWith(`${workspacePath}${path.sep}`)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe path escapes the discovery workspace: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: diagnosticPath
+    });
+    return;
+  }
+  try {
+    const stat = fs.lstatSync(probePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      diagnostics.push({
+        code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+        message: `Invariant scan probe path must be a regular file when present: ${relativePath}`,
+        severity: "error",
+        source: "invariant-ledger",
+        path: diagnosticPath
+      });
+    }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+  }
+}
+
 function invariantSourceProofPath(runRoot: string, attemptId: string): string {
   return safeResolveInside(runRoot, `source-proofs/${attemptId}.invariant.json`, "invariant source proof");
 }
@@ -605,7 +619,14 @@ function readInvariantSourceProof(
       return undefined;
     }
     const baseProofPath = proofPath.replace(/\.invariant\.json$/u, ".json");
-    if (fs.existsSync(baseProofPath)) {
+    let baseProofPresent = false;
+    try {
+      fs.lstatSync(baseProofPath);
+      baseProofPresent = true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    }
+    if (baseProofPresent) {
       assertRegularFileInside(path.dirname(path.dirname(proofPath)), baseProofPath, "pinned source proof");
       const base = JSON.parse(fs.readFileSync(baseProofPath, "utf8")) as {
         attempt_id?: unknown;
