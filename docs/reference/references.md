@@ -40,7 +40,7 @@ an immutable commit that already contains the complete external contract:
 vulnerability-database.web3:
   kind: vulnerability-database
   provider: github
-  repo: monad-developers/web3-vulnerability-database
+  repo: aviggiano/web3-vulnerability-database
   commit: fbf00e990b1316879b674e9903548dba452e40d5
   paths:
     - database.yml
@@ -55,110 +55,31 @@ The shipped `.ultrafuzz/references.yml` defines exactly this entry, so a clean
 nodes run by default. Run `ultrafuzz references sync` once to populate the cache
 before running offline.
 
-#### Read access is a prerequisite
+#### Public unauthenticated materialization
 
-`monad-developers/web3-vulnerability-database` is currently a **private**
-repository, so materializing it needs a read credential. References are fetched
-anonymously by default — the right default, because most references are public
-and a fetch must never carry a credential it does not need — and a credential is
-attached only when it is declared explicitly:
+`aviggiano/web3-vulnerability-database` is public. The repository was transferred
+without changing the pinned Git object, so the immutable commit
+`fbf00e990b1316879b674e9903548dba452e40d5` remains valid and is fetched
+anonymously by `ultrafuzz references sync`, including in the detached Modal
+worker's pre-model phase. This reference needs no GitHub token, App installation,
+SSH agent, or credential helper.
 
-| Variable                           | Meaning                                                       |
-| ---------------------------------- | ------------------------------------------------------------- |
-| `ULTRAFUZZ_REFERENCE_GITHUB_TOKEN` | The short-lived read token.                                   |
-| `ULTRAFUZZ_REFERENCE_GITHUB_REPOS` | Comma-separated `owner/repo` values the token may be sent to. |
+The transfer was verified from a fresh unauthenticated fetch of the full pin. The
+three contract files are byte-for-byte identical to the pre-transfer source:
 
-Both are required together. A token with no allowlist is inert, and a reference
-whose repo is not in the allowlist is still fetched anonymously even while a
-token is present — so a token minted for one private repository can never be
-leaked to an unrelated remote just because the catalog names it.
+| Path               |  Bytes | SHA-256                                                            |
+| ------------------ | -----: | ------------------------------------------------------------------ |
+| `database.yml`     |     96 | `0da89f82af4680a9d62770c520073d9937f55d932f2a16f737024e48633694f1` |
+| `capabilities.yml` |  4,414 | `f96b2683e0ccece2cde6cf503c098a2458629cdb954ed528d82fe099ce37644d` |
+| `catalog.json`     | 34,570 | `0d7f385c882ac81699bdaffaf251a891e35f472b3dd8aa26b7eeefdde961461b` |
 
-The token reaches git through `GIT_CONFIG_*` variables carrying an
-`http.<remote>.extraheader` setting keyed to the exact remote URL. It is never
-written into the remote URL, a command argument, a config file, or a credential
-helper; the command-scoped config also resets the helper list so a rejected token
-cannot silently fall back to a broader ambient credential. The token therefore
-cannot surface in `git remote -v`, a process listing, a cache manifest, or a
-`GIT_FAILED` diagnostic — those redact both the token and its derived basic-auth
-encoding.
-
-Without a usable credential, `ultrafuzz references sync` fails closed with the
-`GIT_FAILED` reference diagnostic wrapping the git stderr:
-
-```text
-error: GIT_FAILED: git command failed: git fetch --depth=1 --filter=blob:none origin fbf00e990b1316879b674e9903548dba452e40d5: remote: Repository not found.
-fatal: Authentication failed for 'https://github.com/monad-developers/web3-vulnerability-database.git/'
-```
-
-Every downstream node fails closed behind that. A project that genuinely cannot
-reach the repository must remove the `vulnerability-database.web3` entry together
-with the `reference-vulnerability-database` node and the nodes that consume it;
-removing only the catalog entry leaves the reference node dangling and validation
-fails with `INVALID_REFERENCE_NODE`.
-
-##### Cloud runs
-
-The detached Modal benchmark worker runs `ultrafuzz references sync` in its
-**pre-model** phase, so the credential must be inside the sandbox, not merely on
-the CI runner. `Modal Eval Benchmarks` therefore:
-
-1. mints a short-lived installation token from the existing eval-history GitHub
-   App (`vars.EVAL_HISTORY_APP_CLIENT_ID` plus
-   `secrets.EVAL_HISTORY_APP_PRIVATE_KEY`), scoped to
-   `permission-contents: read` on `web3-vulnerability-database` alone;
-2. proves read access with `scripts/ci/preflight-reference-access.mjs` **before**
-   the immutable image build, using only immutable repository metadata and the
-   pinned commit — no clone, no blob fetch, no model contact — so a missing
-   installation or permission costs nothing;
-3. forwards only the token and its allowlist into the Modal secret, alongside the
-   model API keys. The App private key never leaves the trusted GitHub runner.
-
-The App private key is reachable only from `push` and `workflow_dispatch`, which
-never expose repository secrets to fork code — the same trust boundary the Modal
-and model-provider secrets already rely on. Adding a `pull_request` or
-`pull_request_target` trigger to that workflow would break it.
-
-Both the `launch` job and the `collect` job mint their **own** token with
-`skip-token-revoke: true`. Two independent timing constraints require this: an
-installation token expires one hour after creation while `collect` can wait far
-longer, and the sandboxes are detached, so a post-job revocation would invalidate
-the credential a worker still needs. The token is also registered as a forbidden
-value for public bundles, diagnostics, and lifecycle logs, exactly like a model
-API key.
-
-A successful preflight is launch authority for only 30 minutes. Every initial and
-recovery `launch` checks that deadline immediately before dispatch, preserving at
-least another 30 minutes of the one-hour token lifetime for the launch and the
-detached worker's reference fetch. If a long image build or wait outlives the proof,
-that launch is refused as `reference-access-unproven`; an old successful preflight
-is never treated as evidence that an expired token remains usable.
-
-The two jobs fail differently on purpose:
-
-- In `launch`, the preflight fails **hard**. There is no work in flight to protect,
-  so an unproven credential must stop the job before the image build and before any
-  sandbox starts. A proof that becomes stale during the image build or launch loop
-  also refuses the affected launch; the collect job can recover it with its own
-  freshly minted token.
-- In `collect`, the mint and the preflight both fail **soft**, and the preflight's
-  verdict is recorded to `diagnostics/reference-access-preflight.{json,log}`.
-  Waiting and collection are never gated on it: unproven access to a _future_
-  relaunch says nothing about sandboxes already running and still collectable. Only
-  the recovery relaunches are gated — with access unproven they record
-  `reference-access-unproven` and terminate that pair, and the incomplete-matrix
-  gate then fails the job after the artifacts are preserved.
-
-If the App is not installed on the database repository, or its installation lacks
-`Contents: Read-only`, the run stops before any paid compute and prints the exact
-action required. An absent token alone does **not** prove the installation is
-missing, though: an invalid `EVAL_HISTORY_APP_CLIENT_ID` or
-`EVAL_HISTORY_APP_PRIVATE_KEY`, an App authentication error, a GitHub outage or
-rate limit, and an action regression all produce the same empty output. The
-preflight therefore states the installation remedy conditionally on the mint log
-reporting `Not Found` from `GET /repos/{owner}/{repo}/installation`, and points at
-the mint configuration otherwise. Only the first case is external by construction:
-a repository administrator must grant it, and no change inside this repository can
-substitute for it.
+The catalog declares `schemaVersion: 1`, `algorithm: sha256`, aggregate digest
+`c0ed7d23166e4726881d99b53b9e6abd561efc97d6cd606051e4c42e038400dc`,
+21 capabilities, and 18 records (all currently `draft`). Ultrafuzz does not trust
+repository visibility or the mutable default branch as integrity evidence: it
+fetches the exact 40-character commit, verifies the selected Git tree and every
+declared file digest, recomputes the catalog aggregate, and records the pinned
+source identity in the materialized manifest.
 
 Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record

@@ -85,7 +85,7 @@ test("default catalog pins the property references and the reviewed vulnerabilit
   );
   const database = catalog.references["vulnerability-database.web3"];
   assert.equal(database?.kind, "vulnerability-database");
-  assert.equal(database?.repo, "monad-developers/web3-vulnerability-database");
+  assert.equal(database?.repo, "aviggiano/web3-vulnerability-database");
   assert.equal(database?.commit, "fbf00e990b1316879b674e9903548dba452e40d5");
   assert.deepEqual(database?.paths, ["database.yml", "capabilities.yml", "catalog.json"]);
   assert.equal(database?.resolved_at, "2026-08-04T22:33:24Z");

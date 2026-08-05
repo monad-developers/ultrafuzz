@@ -230,7 +230,7 @@ export function writeShippedVulnerabilityDatabaseCache(xdgCacheHome: string): vo
     "ultrafuzz",
     "references",
     "github",
-    "monad-developers",
+    "aviggiano",
     "web3-vulnerability-database",
     "vulnerability-database",
     SHIPPED_VULNERABILITY_DATABASE.commit
@@ -245,7 +245,7 @@ export function writeShippedVulnerabilityDatabaseCache(xdgCacheHome: string): vo
       {
         schema_version: "1.0",
         provider: "github",
-        repo: "monad-developers/web3-vulnerability-database",
+        repo: "aviggiano/web3-vulnerability-database",
         commit: SHIPPED_VULNERABILITY_DATABASE.commit,
         fetched_at: "2026-08-04T00:00:00Z",
         files

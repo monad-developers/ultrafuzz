@@ -912,9 +912,9 @@ describe("Modal result collection", () => {
   });
 
   /**
-   * The detached worker fetches the pinned private reference during its pre-model phase, so the read
-   * credential has to reach the sandbox. It travels as a Modal secret alongside the model API keys --
-   * never baked into the immutable image and never written into the launch state.
+   * A detached worker fetching a declared private reference during its pre-model phase needs the read
+   * credential inside the sandbox. It travels as a Modal secret alongside the model API keys -- never
+   * baked into the immutable image and never written into the launch state.
    */
   it("forwards the private reference read credential into the sandbox secret with its allowlist", () => {
     const config = publicCollectionLineage().config;
@@ -927,7 +927,7 @@ describe("Modal result collection", () => {
       auth_mode: "api-key"
     };
     const base = { OPENAI_API_KEY: "judge-secret" };
-    const privateRepo = "monad-developers/web3-vulnerability-database";
+    const privateRepo = "example/private-reference";
 
     // The allowlist travels with the token deliberately: without it the sandbox would attach the
     // token to every reference remote, which is strictly less safe than sending neither value.
@@ -979,7 +979,7 @@ describe("Modal result collection", () => {
       await publicBenchmarkCollectionSecretValues(config, model, {
         OPENAI_API_KEY: "judge-secret",
         ULTRAFUZZ_REFERENCE_GITHUB_TOKEN: "ghs_reference",
-        ULTRAFUZZ_REFERENCE_GITHUB_REPOS: "monad-developers/web3-vulnerability-database"
+        ULTRAFUZZ_REFERENCE_GITHUB_REPOS: "example/private-reference"
       })
     ).toContain("ghs_reference");
 

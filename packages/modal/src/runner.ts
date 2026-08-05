@@ -2860,10 +2860,10 @@ export function modalBenchmarkSecretValues(
 /**
  * Forwards the private-reference read credential into the sandbox secret, or nothing at all.
  *
- * The detached worker fetches the pinned vulnerability database during its pre-model phase, so the
- * credential has to be inside the sandbox rather than only on the runner. It travels as a Modal
- * secret -- the same channel as the model API keys -- so it is never baked into the immutable image,
- * never written into the launch state, and never part of the handoff archive.
+ * If a benchmark declares a private pinned reference, the detached worker fetches it during the
+ * pre-model phase, so the credential has to be inside the sandbox rather than only on the runner. It
+ * travels as a Modal secret -- the same channel as the model API keys -- so it is never baked into
+ * the immutable image, written into the launch state, or included in the handoff archive.
  *
  * The allowlist is forwarded alongside the token deliberately. It is what stops the token from being
  * attached to any remote other than the private repository it was minted for, so a sandbox that

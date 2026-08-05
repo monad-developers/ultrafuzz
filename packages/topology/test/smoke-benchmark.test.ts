@@ -88,7 +88,7 @@ describe("smoke benchmark topology", () => {
       expect.objectContaining({
         kind: "vulnerability-database",
         provider: "github",
-        repo: "monad-developers/web3-vulnerability-database",
+        repo: "aviggiano/web3-vulnerability-database",
         commit: "fbf00e990b1316879b674e9903548dba452e40d5"
       })
     );

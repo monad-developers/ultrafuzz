@@ -1,11 +1,10 @@
 /**
  * The explicit read credential contract for pinned references that live in private repositories.
  *
- * A pinned reference is normally fetched anonymously, which is the only safe default: most
- * references are public and a fetch must never carry a credential it does not need. One reference --
- * the curated vulnerability database -- lives in a private repository, so the fetch needs a read
- * token. That makes *which* remote may receive the token the security-relevant decision, not merely
- * whether a token exists.
+ * A pinned reference is normally fetched anonymously, which is the only safe default: public
+ * references must never carry a credential they do not need. Projects may also declare references
+ * to private repositories, which makes *which* remote may receive a token the security-relevant
+ * decision, not merely whether a token exists.
  *
  * The contract is therefore two explicit values rather than one:
  *
@@ -44,8 +43,7 @@ export interface ReferenceGitCredential {
  * A token without an allowlist is deliberately treated as absent rather than as an error: an
  * anonymous fetch of a public reference is the correct behavior, and failing the whole catalog
  * because an unused credential was half-configured would turn a harmless misconfiguration into an
- * outage. A reference that genuinely needs the credential still fails loudly at its own fetch, and
- * the CI preflight reports the missing prerequisite before any paid work starts.
+ * outage. A reference that genuinely needs the credential still fails loudly at its own fetch.
  */
 export function referenceGitCredential(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env

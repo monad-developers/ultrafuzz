@@ -143,7 +143,7 @@ describe("expanded graph schema", () => {
             "vulnerability-database.web3": {
               kind: "vulnerability-database",
               provider: "github",
-              repo: "monad-developers/web3-vulnerability-database",
+              repo: "aviggiano/web3-vulnerability-database",
               commit,
               paths: ["database.yml", "capabilities.yml", "catalog.json"]
             }

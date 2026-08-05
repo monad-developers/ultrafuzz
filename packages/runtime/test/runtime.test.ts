@@ -2817,7 +2817,7 @@ test("a clean scaffold pins the reviewed vulnerability database verbatim", () =>
   assert.ok(pinned, "the shipped scaffold must define vulnerability-database.web3");
   assert.equal(pinned.kind, "vulnerability-database");
   assert.equal(pinned.provider, "github");
-  assert.equal(pinned.repo, "monad-developers/web3-vulnerability-database");
+  assert.equal(pinned.repo, "aviggiano/web3-vulnerability-database");
   assert.equal(pinned.commit, "fbf00e990b1316879b674e9903548dba452e40d5");
   assert.deepEqual([...pinned.paths], ["database.yml", "capabilities.yml", "catalog.json"]);
   assert.equal(pinned.resolved_at, "2026-08-04T22:33:24Z");
