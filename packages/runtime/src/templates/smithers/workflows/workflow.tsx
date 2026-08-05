@@ -510,8 +510,129 @@ function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
   );
 }
 
+function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): string {
+  const projectRoot = realpathSync(process.cwd());
+  const runRoot = path.resolve(process.cwd(), task.runRoot);
+  if (runRoot !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRoot)) {
+    throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
+  }
+  const rootCandidate = path.join(runRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR);
+  mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
+  const root = realpathSync(rootCandidate);
+  if (root !== rootCandidate || !isStrictlyInsideDirectory(runRoot, root)) {
+    throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
+  }
+  const attemptCandidate = path.join(root, task.attemptId);
+  mkdirSync(attemptCandidate, { recursive: true, mode: 0o700 });
+  const attemptRoot = realpathSync(attemptCandidate);
+  if (attemptRoot !== attemptCandidate || !isStrictlyInsideDirectory(root, attemptRoot)) {
+    throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
+  }
+  return attemptRoot;
+}
+
+function readStableWorkspaceSnapshotFile(
+  root: string,
+  filePath: string,
+  relativePath: string,
+  expectedSize?: number,
+  expectedSha256?: string
+): Buffer {
+  const resolved = resolveRegularArtifactFile(
+    root,
+    filePath,
+    `artifact-contract failure: invariant workspace snapshot file is not regular ${relativePath}`
+  );
+  const beforeLstat = lstatSync(resolved);
+  if (beforeLstat.isSymbolicLink() || !beforeLstat.isFile()) {
+    throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
+  }
+  const before = statSync(resolved);
+  if (before.nlink !== 1 || (expectedSize !== undefined && before.size !== expectedSize)) {
+    throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
+  }
+  const bytes = readFileSync(resolved);
+  const afterLstat = lstatSync(resolved);
+  const after = statSync(resolved);
+  if (
+    afterLstat.isSymbolicLink() ||
+    !afterLstat.isFile() ||
+    after.nlink !== 1 ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs ||
+    bytes.length !== before.size ||
+    (expectedSha256 !== undefined && createHash("sha256").update(bytes).digest("hex") !== expectedSha256)
+  ) {
+    throw new Error(`artifact-contract failure: invariant workspace snapshot file changed ${relativePath}`);
+  }
+  return bytes;
+}
+
+function loadInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): Map<string, Buffer> | undefined {
+  const snapshotRoot = invariantSuiteWorkspaceSnapshotRoot(task);
+  const manifestPath = path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE);
+  if (!existsSync(manifestPath)) return undefined;
+  const manifestBytes = readStableWorkspaceSnapshotFile(snapshotRoot, manifestPath, "snapshot manifest");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new Error("artifact-contract failure: invariant workspace snapshot manifest is malformed", { cause: error });
+  }
+  if (
+    !isPlainRecord(parsed) ||
+    parsed.schema_version !== "ultrafuzz.invariant-workspace-snapshot.v1" ||
+    !Array.isArray(parsed.files)
+  ) {
+    throw new Error("artifact-contract failure: invariant workspace snapshot manifest is malformed");
+  }
+  if (parsed.files.length > MAX_INVARIANT_SUITE_WORKSPACE_FILES) {
+    throw new Error("artifact-contract failure: invariant workspace snapshot exceeds its file budget");
+  }
+  const filesRoot = path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_FILES_DIR);
+  const snapshot = new Map<string, Buffer>();
+  let totalBytes = 0;
+  for (const entry of parsed.files) {
+    if (
+      !isPlainRecord(entry) ||
+      typeof entry.path !== "string" ||
+      typeof entry.size !== "number" ||
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 0 ||
+      typeof entry.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(entry.sha256)
+    ) {
+      throw new Error("artifact-contract failure: invariant workspace snapshot entry is malformed");
+    }
+    const relativePath = assertSafeInvariantSuitePath(entry.path);
+    if (snapshot.has(relativePath)) {
+      throw new Error(`artifact-contract failure: duplicate invariant workspace snapshot path ${relativePath}`);
+    }
+    if (entry.size > MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES) {
+      throw new Error(`artifact-contract failure: invariant workspace snapshot file is too large ${relativePath}`);
+    }
+    totalBytes += entry.size;
+    if (totalBytes > MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES) {
+      throw new Error("artifact-contract failure: invariant workspace snapshot exceeds its byte budget");
+    }
+    const sidecarPath = path.resolve(filesRoot, relativePath);
+    if (!isStrictlyInsideDirectory(filesRoot, sidecarPath)) {
+      throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot path ${relativePath}`);
+    }
+    snapshot.set(
+      relativePath,
+      readStableWorkspaceSnapshotFile(filesRoot, sidecarPath, relativePath, entry.size, entry.sha256)
+    );
+  }
+  invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
+  return snapshot;
+}
+
 function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (invariantSuiteWorkspaceSnapshots.has(task.attemptId)) return;
+  if (loadInvariantSuiteWorkspaceSnapshot(task) !== undefined) return;
   const snapshot = new Map<string, Buffer>();
   let totalBytes = 0;
   for (const value of invariantWorkspaceSourcePaths(workspaceRoot)) {
@@ -524,30 +645,104 @@ function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
     const stat = statSync(source);
     if (stat.nlink !== 1)
       throw new Error(`artifact-contract failure: invariant workspace source is hard-linked ${relativePath}`);
+    if (stat.size > MAX_INVARIANT_SUITE_WORKSPACE_SOURCE_BYTES) {
+      throw new Error(`artifact-contract failure: invariant workspace source is too large ${relativePath}`);
+    }
     const bytes = readFileSync(source);
+    const after = statSync(source);
+    if (
+      bytes.length !== stat.size ||
+      after.dev !== stat.dev ||
+      after.ino !== stat.ino ||
+      after.size !== stat.size ||
+      after.mtimeMs !== stat.mtimeMs ||
+      after.nlink !== 1
+    ) {
+      throw new Error(`artifact-contract failure: invariant workspace source changed ${relativePath}`);
+    }
     totalBytes += bytes.length;
-    if (snapshot.size >= 4096 || totalBytes > 128 * 1024 * 1024) {
+    if (
+      snapshot.size >= MAX_INVARIANT_SUITE_WORKSPACE_FILES ||
+      totalBytes > MAX_INVARIANT_SUITE_WORKSPACE_TOTAL_BYTES
+    ) {
       throw new Error("artifact-contract failure: invariant workspace snapshot exceeds its budget");
     }
     snapshot.set(relativePath, bytes);
   }
+  const snapshotRoot = invariantSuiteWorkspaceSnapshotRoot(task);
+  const filesRoot = path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_FILES_DIR);
+  mkdirSync(filesRoot, { recursive: true, mode: 0o700 });
+  if (realpathSync(filesRoot) !== filesRoot || !isStrictlyInsideDirectory(snapshotRoot, filesRoot)) {
+    throw new Error("artifact-contract failure: invariant workspace snapshot files root is unsafe");
+  }
+  const manifestEntries: Array<{ path: string; size: number; sha256: string }> = [];
+  for (const [relativePath, bytes] of snapshot) {
+    const sidecarPath = path.resolve(filesRoot, relativePath);
+    if (!isStrictlyInsideDirectory(filesRoot, sidecarPath)) {
+      throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot path ${relativePath}`);
+    }
+    const parent = safeInvariantSuiteDirectory(filesRoot, path.dirname(sidecarPath));
+    writeFileDurable(path.join(parent, path.basename(sidecarPath)), bytes);
+    manifestEntries.push({
+      path: relativePath,
+      size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex")
+    });
+  }
+  writeFileDurable(
+    path.join(snapshotRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE),
+    `${JSON.stringify({ schema_version: "ultrafuzz.invariant-workspace-snapshot.v1", files: manifestEntries }, null, 2)}\n`
+  );
   invariantSuiteWorkspaceSnapshots.set(task.attemptId, snapshot);
 }
 
 function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): void {
-  const snapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId);
+  const snapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId) ?? loadInvariantSuiteWorkspaceSnapshot(task);
   if (snapshot === undefined) return;
   const workspaceRoot = realpathSync(task.workspacePath);
+  const workspaceStat = lstatSync(workspaceRoot);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || realpathSync(workspaceRoot) !== workspaceRoot) {
+    throw new Error(`artifact-contract failure: invariant workspace root is unsafe ${task.attemptId}`);
+  }
   for (const relativePath of invariantWorkspaceSourcePaths(workspaceRoot)) {
-    if (snapshot.has(relativePath)) continue;
-    const candidate = path.resolve(workspaceRoot, relativePath);
-    if (existsSync(candidate)) rmSync(candidate, { force: true });
+    const safePath = assertSafeInvariantSuitePath(relativePath);
+    if (snapshot.has(safePath)) continue;
+    const candidate = path.resolve(workspaceRoot, safePath);
+    const parent = safeInvariantSuiteDirectory(workspaceRoot, path.dirname(candidate));
+    const entry = path.join(parent, path.basename(candidate));
+    let stat: ReturnType<typeof lstatSync>;
+    try {
+      stat = lstatSync(entry);
+    } catch (error) {
+      if (isMissingPathError(error)) continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`artifact-contract failure: invariant workspace source is unsafe ${safePath}`);
+    }
+    rmSync(entry, { force: true });
   }
   for (const [relativePath, bytes] of snapshot) {
     const destination = path.resolve(workspaceRoot, relativePath);
-    const parent = path.dirname(destination);
-    mkdirSync(parent, { recursive: true });
-    writeFileDurable(destination, bytes);
+    const parent = safeInvariantSuiteDirectory(workspaceRoot, path.dirname(destination));
+    const anchored = path.join(parent, path.basename(destination));
+    try {
+      const stat = lstatSync(anchored);
+      if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) {
+        throw new Error(`artifact-contract failure: invariant workspace source is unsafe ${relativePath}`);
+      }
+      if (stat.isDirectory()) rmSync(anchored, { recursive: true, force: true });
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+    }
+    writeFileDurable(anchored, bytes);
+    readStableWorkspaceSnapshotFile(
+      workspaceRoot,
+      anchored,
+      relativePath,
+      bytes.length,
+      createHash("sha256").update(bytes).digest("hex")
+    );
   }
 }
 

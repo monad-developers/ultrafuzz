@@ -358,7 +358,7 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /TargetFunctions/u);
   assert.match(source, /Properties/u);
   assert.match(source, /copyInvariantSuiteIntoWorkspace/u);
-  assert.match(source, /rememberInvariantSuitePublications\(publications, artifactRoots\)/u);
+  assert.match(source, /rememberInvariantSuitePublications\(task, publications, artifactRoots\)/u);
   assert.match(source, /artifact handoff is missing invariant-suite sources/u);
   assert.match(source, /stateful-invariant-setup/u);
   assert.match(source, /stateful-invariant-handlers/u);
@@ -439,6 +439,36 @@ test("generated Smithers verifier rejects in-root leaf and parent symlinks", () 
   const parentSymlink = path.join(root, "linked-parent");
   fs.symlinkSync(realDirectory, parentSymlink, "dir");
   assert.throws(() => assertRegularFileInside(root, path.join(parentSymlink, "Test.t.sol")), /symlink/u);
+});
+
+test("generated Smithers retry snapshots are durable and restore through canonical parents", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const prepareStart = source.indexOf("function prepareArtifactMirror");
+  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
+  const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+
+  assert.ok(prepareStart >= 0 && materializeStart > prepareStart && restoreStart > prepareStart, source);
+  assert.ok(restoreEnd > restoreStart, source);
+  const prepare = source.slice(prepareStart, materializeStart);
+  const restore = source.slice(restoreStart, restoreEnd);
+  assert.ok(
+    prepare.indexOf("restoreInvariantSuiteWorkspaceSnapshot(task)") <
+      prepare.indexOf("materializeInvariantSuiteFromDependencies(task, workspaceRoot)")
+  );
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR/u);
+  assert.match(source, /INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(source, /invariantSuiteWorkspaceSnapshotRoot/u);
+  assert.match(source, /invariant-workspace-snapshot\.v1/u);
+  assert.match(source, /loadInvariantSuiteWorkspaceSnapshot/u);
+  assert.match(source, /readStableWorkspaceSnapshotFile/u);
+  assert.match(source, /before\.dev !== after\.dev/u);
+  assert.match(source, /before\.ino !== after\.ino/u);
+  assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  assert.match(restore, /lstatSync\(workspaceRoot\)/u);
+  assert.match(restore, /safeInvariantSuiteDirectory\(workspaceRoot, path\.dirname\(candidate\)\)/u);
+  assert.match(restore, /stat\.isSymbolicLink\(\)/u);
+  assert.match(restore, /writeFileDurable\(anchored, bytes\)/u);
 });
 
 test("generated Smithers verifier publishes the complete validated set before task success", () => {
