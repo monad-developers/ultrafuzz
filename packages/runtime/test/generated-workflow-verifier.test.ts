@@ -393,6 +393,10 @@ test("generated Smithers workflow preserves the complete invariant suite across 
   assert.match(source, /unable to enumerate changed invariant suite sources/u);
   assert.match(source, /writeFileDurable\(anchoredDestination/u);
   assert.match(source, /copyDependencyInvariantSuiteToArtifact/u);
+  assert.match(source, /invariantSuiteDependencySnapshots/u);
+  assert.match(source, /invariant suite dependency changed/u);
+  assert.match(source, /INVARIANT_SUITE_MANIFEST_FILE/u);
+  assert.match(source, /invariant-suite-manifest\.v1/u);
   assert.match(source, /INVARIANT_SUITE_ALLOWED_ROOTS/u);
   assert.match(source, /ancestor invariant suite sources conflict/u);
 

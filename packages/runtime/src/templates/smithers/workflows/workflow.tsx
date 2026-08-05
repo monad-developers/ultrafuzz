@@ -1455,6 +1455,13 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
     for (const relativePath of paths) {
       copyInvariantSuiteSource(realpathSync(task.workspacePath), artifactRoot, relativePath, true);
     }
+    writeFileDurable(
+      path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.invariant-suite-manifest.v1",
+        producer_node_id: task.metadata.node.logicalNodeId
+      })}\n`
+    );
   }
 }
 
@@ -1471,6 +1478,17 @@ function resetInvariantSuiteArtifactRoot(artifactRoot: string): void {
 
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const previousSnapshot = invariantSuiteDependencySnapshots.get(task.attemptId);
+  if (previousSnapshot !== undefined) {
+    for (const [relativePath, entry] of previousSnapshot) {
+      const sourceRoot = path.join(realpathSync(entry.dependency), "invariant-suite");
+      const current = readInvariantSuiteSourceBytes(sourceRoot, relativePath, "artifact handoff invariant suite");
+      if (!current.equals(entry.bytes)) {
+        throw new Error(`artifact-contract failure: invariant suite dependency changed ${relativePath}`);
+      }
+    }
+    return;
+  }
   const tombstones = invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? new Set<string>();
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
@@ -1486,6 +1504,25 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     const dependencyRoot = realpathSync(dependency);
     const suiteRoot = path.join(dependencyRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
+    const manifestPath = path.join(dependencyRoot, INVARIANT_SUITE_MANIFEST_FILE);
+    if (!existsSync(manifestPath)) continue;
+    const manifest = JSON.parse(
+      readFileSync(
+        resolveRegularArtifactFile(
+          dependencyRoot,
+          manifestPath,
+          "artifact-contract failure: invariant suite manifest is not a regular file"
+        ),
+        "utf8"
+      )
+    ) as { schema_version?: unknown; producer_node_id?: unknown };
+    if (
+      manifest.schema_version !== "ultrafuzz.invariant-suite-manifest.v1" ||
+      typeof manifest.producer_node_id !== "string" ||
+      !invariantSuiteNodeIds.has(manifest.producer_node_id)
+    ) {
+      continue;
+    }
     const suitePaths = listInvariantSuiteSources(suiteRoot);
     suitePathsByDependency.set(dependency, suitePaths);
     for (const relativePath of suitePaths) {
@@ -1502,6 +1539,11 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
       selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
     }
   }
+  assertInvariantSuiteSourceBudget(
+    selectedSources.size,
+    [...selectedSources.values()].reduce((total, entry) => total + entry.bytes.length, 0)
+  );
+  invariantSuiteDependencySnapshots.set(task.attemptId, selectedSources);
   for (const dependency of dependencies) {
     const dependencyRoot = realpathSync(dependency);
     const implementationCandidate = path.join(dependencyRoot, "implemented-properties.json");
@@ -1564,6 +1606,7 @@ const MAX_INVARIANT_SUITE_FILES = 512;
 const MAX_INVARIANT_SUITE_SOURCE_BYTES = 16 * 1024 * 1024;
 const MAX_INVARIANT_SUITE_TOTAL_BYTES = 64 * 1024 * 1024;
 const INVARIANT_SUITE_BASELINE_FILE = "invariant-suite-baseline.json";
+const INVARIANT_SUITE_MANIFEST_FILE = "invariant-suite-manifest.json";
 const INVARIANT_TEST_ROOT_NAMES = ["test", "tests"] as const;
 const invariantSuiteNodeIds = new Set([
   "stateful-invariant-setup",
@@ -1577,6 +1620,10 @@ const INVARIANT_SUITE_ALLOWED_ROOTS = ["src", "contracts", "test", "tests"] as c
 const invariantSuiteBaselineSnapshots = new Map<string, { contents: string; sha256: string }>();
 const invariantSuiteProtectedBaselineSnapshots = new Map<string, { contents: string; sha256: string }>();
 const invariantSuiteTombstones = new Map<string, Set<string>>();
+const invariantSuiteDependencySnapshots = new Map<
+  string,
+  Map<string, { dependency: string; bytes: Buffer; direct: boolean }>
+>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
@@ -1888,35 +1935,12 @@ function copyInvariantSuiteSource(
 
 function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number], artifactRoot: string): void {
   const tombstones = invariantSuiteTombstones.get(realpathSync(task.workspacePath)) ?? new Set<string>();
-  const directDependencies = new Set(task.metadata.dependencies.attemptIds);
-  const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
-    const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
-    const rightDirect = directDependencies.has(right) || directDependencies.has(path.basename(right));
-    if (leftDirect !== rightDirect) return leftDirect ? 1 : -1;
-    return left.localeCompare(right);
-  });
-  const selected = new Map<string, { bytes: Buffer; dependency: string; direct: boolean }>();
-  for (const dependency of dependencies) {
-    const dependencyRoot = realpathSync(dependency);
-    const suiteRoot = path.join(dependencyRoot, "invariant-suite");
-    if (!existsSync(suiteRoot)) continue;
-    const direct = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
-    for (const relativePath of listInvariantSuiteSources(suiteRoot)) {
-      if (tombstones.has(relativePath)) continue;
-      const bytes = readInvariantSuiteSourceBytes(suiteRoot, relativePath, "artifact handoff invariant suite");
-      const previous = selected.get(relativePath);
-      if (previous !== undefined && !previous.bytes.equals(bytes)) {
-        if (previous.direct === direct || (!previous.direct && !direct)) {
-          throw new Error(
-            `artifact handoff ancestor invariant suite sources conflict for ${relativePath}: ${previous.dependency} vs ${dependency}`
-          );
-        }
-        if (!direct) continue;
-      }
-      selected.set(relativePath, { bytes, dependency, direct });
-    }
+  const selected = invariantSuiteDependencySnapshots.get(task.attemptId);
+  if (selected === undefined) {
+    throw new Error(`artifact-contract failure: invariant suite dependency snapshot is unavailable ${task.attemptId}`);
   }
   for (const [relativePath, entry] of selected) {
+    if (tombstones.has(relativePath)) continue;
     const destination = path.resolve(artifactRoot, "invariant-suite", relativePath);
     const parent = safeInvariantSuiteDirectory(artifactRoot, path.dirname(destination));
     mkdirSync(parent, { recursive: true });
@@ -1928,7 +1952,11 @@ function copyDependencyInvariantSuiteToArtifact(task: (typeof taskSpecs)[number]
   }
 }
 
-function listInvariantSuiteSources(suiteRoot: string, relative = ""): string[] {
+function listInvariantSuiteSources(
+  suiteRoot: string,
+  relative = "",
+  budget: { files: number; totalBytes: number } = { files: 0, totalBytes: 0 }
+): string[] {
   const current = relative.length === 0 ? suiteRoot : path.join(suiteRoot, relative);
   const stat = lstatSync(current);
   if (stat.isSymbolicLink()) {
@@ -1939,24 +1967,17 @@ function listInvariantSuiteSources(suiteRoot: string, relative = ""): string[] {
       throw new Error(`artifact handoff invariant-suite source is hard-linked: ${relative}`);
     }
     assertInvariantSuiteSourceSize(relative, stat.size);
-    const fileCount = 1;
-    assertInvariantSuiteSourceBudget(fileCount, stat.size);
+    budget.files += 1;
+    budget.totalBytes += stat.size;
+    assertInvariantSuiteSourceBudget(budget.files, budget.totalBytes);
     return [assertSafeInvariantSuitePath(relative.split(path.sep).join("/"))];
   }
   if (!stat.isDirectory()) {
     throw new Error(`artifact handoff invariant-suite path is not a regular file: ${relative}`);
   }
   const sources = readdirSync(current).flatMap((entry) =>
-    listInvariantSuiteSources(suiteRoot, relative.length === 0 ? entry : path.join(relative, entry))
+    listInvariantSuiteSources(suiteRoot, relative.length === 0 ? entry : path.join(relative, entry), budget)
   );
-  if (relative.length === 0) {
-    let totalBytes = 0;
-    for (const sourcePath of sources) {
-      const source = path.resolve(suiteRoot, sourcePath);
-      totalBytes += statSync(source).size;
-    }
-    assertInvariantSuiteSourceBudget(sources.length, totalBytes);
-  }
   return sources;
 }
 
