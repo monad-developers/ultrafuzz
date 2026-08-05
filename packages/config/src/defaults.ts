@@ -318,6 +318,11 @@ function assertResolvedConfig(value: unknown, filePath: string): asserts value i
   assertRecord(value.invariants, "invariants", filePath);
   assertString(value.invariants.propertyPriorityThreshold, "invariants.propertyPriorityThreshold", filePath);
   assertNumber(
+    value.invariants.invariantTestingSmokeTimeoutSeconds,
+    "invariants.invariantTestingSmokeTimeoutSeconds",
+    filePath
+  );
+  assertNumber(
     value.invariants.invariantTestingFuzzerTimeoutSeconds,
     "invariants.invariantTestingFuzzerTimeoutSeconds",
     filePath
