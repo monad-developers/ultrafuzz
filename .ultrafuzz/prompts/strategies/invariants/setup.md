@@ -49,11 +49,12 @@ Use these Recon/Chimera rules while making decisions:
 - Read `AGENTS.md` and obey all repository-specific rules before editing.
 - Do not edit production `src/` or `contracts/` except for interfaces if they are genuinely required by the harness.
 - [Chimera](https://github.com/Recon-Fuzz/create-chimera-app) is the write-once, run-everywhere scaffold for Foundry, Echidna, Medusa, Halmos, and Kontrol style runs.
-- The create-chimera-app layout under the test root is:
-  `test/recon/Setup.sol`, `BeforeAfter.sol`, `Properties.sol`,
+- The create-chimera-app layout under the repository's test root is:
+  `<test-root>/recon/Setup.sol`, `BeforeAfter.sol`, `Properties.sol`,
   `TargetFunctions.sol`, `CryticTester.sol`, `CryticToFoundry.sol`, and
   `targets/AdminTargets.sol`, `targets/DoomsdayTargets.sol`,
-  `targets/ManagersTargets.sol` when useful.
+  `targets/ManagersTargets.sol` when useful. Detect `<test-root>` from the
+  checked-out repository (`test/` or `tests/`) and use that root consistently.
 - `Setup` deploys contracts, creates/funds actors, grants baseline approvals,
   initializes tracked state, and records setup bias.
 - The [very-liquid-vaults](https://github.com/rheo-xyz/very-liquid-vaults) setup style is a good concrete example: explicit deployment helpers, scripts/mocks/assets, token minting, WETH or dependency mocks, initial balances, reusable admin deploy paths, and private mint helper methods.
@@ -88,8 +89,9 @@ test `setUp()` lifecycle. Treat constructor deployment as a required target:
 1. Inspect repository rules and layout:
    - Look for `AGENTS.md`, Foundry markers, Hardhat markers, mixed layouts,
      existing invariant suites, and existing base tests.
-   - Decide where the Chimera suite should live. Prefer `test/recon/` unless
-     the repo already has a clear equivalent convention.
+   - Decide where the Chimera suite should live. Prefer the repository's
+     existing test-root convention (`test/recon/` or `tests/recon/`) and use
+     `test/` only when the repository has no plural `tests/` convention.
 
 2. Validate or create Chimera layout:
    - Ensure `Setup`, `BeforeAfter`, `Properties`, `TargetFunctions`,

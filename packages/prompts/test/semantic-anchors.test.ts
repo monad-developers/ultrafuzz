@@ -138,6 +138,18 @@ describe("prompt semantic anchors", () => {
     expect(corpus).toContain("documented valid preconditions");
   });
 
+  it("uses the repository's detected test root for invariant scaffolding", () => {
+    const setup = prompt("strategies/invariants/setup.md");
+    const implementation = prompt("strategies/invariants/implement-properties.md");
+    const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+
+    expect(setup).toMatch(/Detect `?<test-root>`?.*test\/.*tests\//su);
+    expect(setup).toMatch(/existing test-root convention.*test\/recon.*tests\/recon/su);
+    expect(implementation).toContain("replace that prefix with the detected");
+    expect(implementation).toMatch(/test\/foundry.*tests\/foundry/su);
+    expect(campaign).toMatch(/test\/foundry.*tests\/foundry/su);
+  });
+
   it("uses a configured smoke budget for every invariant Recon stage", () => {
     const promptPaths = [
       "strategies/invariants/setup.md",

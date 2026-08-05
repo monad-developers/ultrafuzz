@@ -124,8 +124,10 @@ Use this configured invariant testing fuzzer timeout:
 
 5. Reproduce and classify every unique failure.
    - Attempt a deterministic Foundry reproducer for every unique failure. Put
-     generated tests under `test/foundry/stateful-invariant-campaign/` when
-     possible and include them in `generated-tests.json`.
+     generated tests under the repository's test root, for example
+     `test/foundry/stateful-invariant-campaign/` or
+     `tests/foundry/stateful-invariant-campaign/`, when possible and include
+     them in `generated-tests.json`.
    - If shrinking or reproduction fails, preserve the raw sequence or corpus
      packet and classify it as `blocked-unreproduced`; never discard it.
    - For each unique failure, write one finding object in `findings.json` and
