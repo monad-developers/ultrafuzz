@@ -655,6 +655,7 @@ function verifyLensReferenceExpectationPreservation(
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
   const lensRows = new Map<string, LensReferenceRow>();
+  const lensPathsByDependency = new Map<string, string>();
   const state = readRunState(layout);
   for (const dependencyId of node.depends_on) {
     const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
@@ -669,6 +670,7 @@ function verifyLensReferenceExpectationPreservation(
       (output) => output.contract === "ultrafuzz/property-lens@1"
     )?.path;
     const lensRelativePath = declaredLensPath ?? `properties/${lensName}.json`;
+    lensPathsByDependency.set(dependencyId, lensRelativePath);
     const lensPath = findDependencyArtifact(layout, dependencyId, dependency, lensRelativePath);
     if (lensPath === undefined) {
       diagnostics.push({
@@ -702,6 +704,30 @@ function verifyLensReferenceExpectationPreservation(
         path: lensPath,
         index
       });
+    }
+  }
+
+  for (const dependencyId of node.depends_on) {
+    const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
+    if (!dependency.startsWith("property-specification-") || dependency === "property-specification-fanin") continue;
+    for (const property of catalog.properties) {
+      if ((property.reference_expectations?.length ?? 0) === 0) continue;
+      for (const source of property.sources) {
+        if (source.source_node_id !== dependency) continue;
+        if (
+          [...lensRows.values()].some(
+            (row) => row.concreteNodeId === dependencyId && row.propertyId === source.source_property_id
+          )
+        )
+          continue;
+        diagnostics.push({
+          code: "PROPERTY_REFERENCE_EXPECTATION_DROPPED",
+          message: `Lens artifact for ${JSON.stringify(dependency)} is missing source property ${JSON.stringify(source.source_property_id)} carrying reference expectations`,
+          severity: "error",
+          source: "property-fanin",
+          path: `artifacts/${dependencyId}/${lensPathsByDependency.get(dependencyId) ?? "properties.json"}`
+        });
+      }
     }
   }
 
