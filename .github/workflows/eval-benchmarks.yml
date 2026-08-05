@@ -627,8 +627,18 @@ jobs:
 
       - name: Fail an incomplete matrix after preserving artifacts
         if: always()
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_REF_NAME: ${{ github.ref_name }}
+          CI_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           matrix_failed=false
+          smoke_model_soft_fail=false
+          if [ "$BENCHMARK_MODE" = smoke ] && \
+            [ "$CI_EVENT_NAME" = push ] && \
+            [ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]; then
+            smoke_model_soft_fail=true
+          fi
           if [ ! -f "$BENCHMARK_CONTROL/manifest.json" ]; then
             echo "Detached launch control was unavailable" >&2
             matrix_failed=true
@@ -646,13 +656,21 @@ jobs:
             while IFS=$'\t' read -r pair slug; do
               outcome_file="$BENCHMARK_CONTROL/outcomes/$pair.json"
               bundle="$BENCHMARK_RESULTS/$pair/$slug/public-results.json"
-              if [ ! -f "$outcome_file" ] || \
-                ! jq -e '.terminal_status == "succeeded" and .collection_status == "succeeded"' \
-                  "$outcome_file" > /dev/null; then
+              if [ ! -f "$outcome_file" ]; then
                 echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true
-              elif [ ! -f "$bundle" ]; then
-                echo "Modal pair $pair is missing its validated public result bundle" >&2
+              elif jq -e '.terminal_status == "succeeded" and .collection_status == "succeeded"' \
+                "$outcome_file" > /dev/null; then
+                if [ ! -f "$bundle" ]; then
+                  echo "Modal pair $pair is missing its validated public result bundle" >&2
+                  matrix_failed=true
+                fi
+              elif [ "$smoke_model_soft_fail" = true ] && \
+                jq -e '.terminal_status == "failed" and .category == "resume-required" and .diagnostic_collection_status == "succeeded"' \
+                  "$outcome_file" > /dev/null; then
+                echo "Modal smoke pair $pair preserved diagnostics after model work; not blocking non-default branch smoke gate" >&2
+              else
+                echo "Modal pair $pair did not finish and collect successfully" >&2
                 matrix_failed=true
               fi
             done < <(jq -r '.pairs[] | [.pair, .model_slug] | @tsv' "$BENCHMARK_CONTROL/manifest.json")

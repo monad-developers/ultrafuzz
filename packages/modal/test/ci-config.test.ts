@@ -987,6 +987,7 @@ describe("public Modal benchmark configuration", () => {
             name?: string;
             run?: string;
             if?: string;
+            env?: Record<string, string>;
             "continue-on-error"?: boolean;
             with?: Record<string, unknown>;
           }>;
@@ -1072,8 +1073,21 @@ describe("public Modal benchmark configuration", () => {
     expect(resultUpload.with?.["if-no-files-found"]).toBe("warn");
     expect(diagnosticsUpload.if).toBe("always()");
     expect(finalGate.if).toBe("always()");
+    expect(finalGate.env).toMatchObject({
+      CI_EVENT_NAME: "${{ github.event_name }}",
+      CI_REF_NAME: "${{ github.ref_name }}",
+      CI_DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}"
+    });
     expect(collect.steps.indexOf(finalGate)).toBeGreaterThan(collect.steps.indexOf(resultUpload));
     expect(collect.steps.indexOf(finalGate)).toBeGreaterThan(collect.steps.indexOf(diagnosticsUpload));
+    expect(finalGate.run).toContain("smoke_model_soft_fail=false");
+    expect(finalGate.run).toContain('[ "$BENCHMARK_MODE" = smoke ]');
+    expect(finalGate.run).toContain('[ "$CI_EVENT_NAME" = push ]');
+    expect(finalGate.run).toContain('[ "$CI_REF_NAME" != "$CI_DEFAULT_BRANCH" ]');
+    expect(finalGate.run).toContain(
+      '.terminal_status == "failed" and .category == "resume-required" and .diagnostic_collection_status == "succeeded"'
+    );
+    expect(finalGate.run).toContain("not blocking non-default branch smoke gate");
     expect(finalGate.run).toContain("exit 1");
   });
 
