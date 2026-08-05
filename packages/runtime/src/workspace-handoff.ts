@@ -131,11 +131,25 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
 }
 
 function stageWorkspaceTree(workspaceRoot: string, index: string): void {
-  runGit(
+  const rawPaths = runGit(
     workspaceRoot,
-    ["add", "-A", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
+    ["ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z"],
     index
   );
+  const paths = parseChangedPaths(rawPaths)
+    .map((entry) => entry.path)
+    .filter((entry) => !isWorkspaceRuntimeRootPath(entry));
+  if (paths.length === 0) return;
+  runGit(
+    workspaceRoot,
+    ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
+    index,
+    `${paths.join("\0")}\0`
+  );
+}
+
+function isWorkspaceRuntimeRootPath(relativePath: string): boolean {
+  return WORKSPACE_RUNTIME_ROOTS.some((root) => relativePath === root || relativePath.startsWith(`${root}/`));
 }
 
 function assertPatchPathsMatchManifest(

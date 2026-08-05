@@ -34,13 +34,17 @@ test("captures tracked and untracked setup changes relative to the dependency ba
     const baseline = captureWorkspaceTree(root);
     mkdirSync(path.join(root, "artifacts", "mirror"), { recursive: true });
     mkdirSync(path.join(root, ".ultrafuzz", "schemas"), { recursive: true });
+    mkdirSync(path.join(root, ".smithers", "node_modules"), { recursive: true });
+    mkdirSync(path.join(root, "node_modules", "forge-std"), { recursive: true });
     writeFileSync(path.join(root, "artifacts", "mirror", "agent-output.json"), "runtime\n");
     writeFileSync(path.join(root, ".ultrafuzz", "schemas", "runtime.schema.json"), "runtime\n");
+    writeFileSync(path.join(root, ".smithers", "node_modules", "runner.txt"), "runtime\n");
+    writeFileSync(path.join(root, "node_modules", "forge-std", "README.md"), "dependency\n");
     writeFileSync(
       path.join(root, "foundry.toml"),
       "[profile.default]\ntest = 'tests'\n[profile.ultrafuzz]\ntest = 'test/foundry'\n"
     );
-    writeFileSync(path.join(root, ".gitignore"), "cache/\n");
+    writeFileSync(path.join(root, ".gitignore"), "cache/\nnode_modules/\n.smithers/\n");
     writeFileSync(path.join(root, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
 
     const captured = captureWorkspacePatch(root, baseline);
