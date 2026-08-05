@@ -129,7 +129,7 @@ async function main(): Promise<void> {
     fs.writeFileSync(
       path.join(publishing, "result.json"),
       `${JSON.stringify({
-        schema_version: "ultrafuzz.modal.node-result.v1",
+        schema_version: "ultrafuzz.modal.node-result.v2",
         status: "succeeded",
         artifact_archive: path.posix.join(dataRoot, "artifacts.tgz"),
         artifact_sha256: digest,

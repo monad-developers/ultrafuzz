@@ -453,7 +453,7 @@ function removeHandoffTemporaryRoot(temporaryRoot: string): void {
 }
 
 interface ModalNodeResult {
-  schema_version: "ultrafuzz.modal.node-result.v1";
+  schema_version: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   status: "succeeded";
   artifact_archive: string;
   artifact_sha256: string;
@@ -506,7 +506,8 @@ async function readModalNodeResult(
   }
   if (
     isRecord(parsed) &&
-    parsed.schema_version === "ultrafuzz.modal.node-result.v1" &&
+    (parsed.schema_version === "ultrafuzz.modal.node-result.v1" ||
+      parsed.schema_version === "ultrafuzz.modal.node-result.v2") &&
     parsed.status === "succeeded" &&
     parsed.artifact_archive === path.posix.join(attemptRoot, "artifacts.tgz") &&
     typeof parsed.artifact_sha256 === "string" &&
@@ -611,16 +612,17 @@ async function publishModalNodeResult(
       }
     }
     const verificationMarker = path.join(extracted, "verification", `${input.attempt_id}.json`);
-    if (!fs.existsSync(verificationMarker)) {
+    if (fs.existsSync(verificationMarker)) {
+      const verificationRoot = checkedPath(
+        root,
+        path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
+        "artifact verification directory",
+        false
+      );
+      replacePublishedFile(verificationMarker, path.join(verificationRoot, `${input.attempt_id}.json`));
+    } else if (result.schema_version === "ultrafuzz.modal.node-result.v2") {
       throw new Error("cloud node result is missing artifact verification marker");
     }
-    const verificationRoot = checkedPath(
-      root,
-      path.join(input.run_root, ARTIFACT_VERIFICATION_DIRECTORY),
-      "artifact verification directory",
-      false
-    );
-    replacePublishedFile(verificationMarker, path.join(verificationRoot, `${input.attempt_id}.json`));
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

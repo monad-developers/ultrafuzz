@@ -626,6 +626,55 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("accepts legacy v1 cloud results that predate verification marker archives", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({
+      schemaVersion: "ultrafuzz.modal.node-result.v1",
+      includeVerificationMarker: false
+    });
+    const sandbox = fakeSandbox(result);
+    const client = fakeClient({ listed: [sandbox] });
+    const provider = createModalNodeSandboxProvider(providerOptions(client));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).resolves.toMatchObject({ status: "finished" });
+      expect(
+        fs.existsSync(path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "attempt-one.json"))
+      ).toBe(false);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects v2 cloud results that omit the attempt verification marker", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive({ includeVerificationMarker: false });
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/missing artifact verification marker/u);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive({ includeDurableCheckpoint: false });
@@ -1019,19 +1068,29 @@ function manifestEntry(relativePath: string, filePath: string) {
   };
 }
 
-function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {}) {
+function createResultArchive(
+  options: {
+    includeDurableCheckpoint?: boolean;
+    includeVerificationMarker?: boolean;
+    schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
+  } = {}
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
   fs.mkdirSync(path.join(bundle, "artifacts"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "workspace"), { recursive: true });
   fs.mkdirSync(path.join(bundle, "source-proofs"), { recursive: true });
-  fs.mkdirSync(path.join(bundle, "verification"), { recursive: true });
+  if (options.includeVerificationMarker !== false) {
+    fs.mkdirSync(path.join(bundle, "verification"), { recursive: true });
+  }
   fs.writeFileSync(path.join(bundle, "artifacts", "finding.json"), '{"ok":true}\n');
   fs.writeFileSync(path.join(bundle, "workspace", "work.txt"), "remote workspace\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.invariant.json"), "durable source proof\n");
   fs.writeFileSync(path.join(bundle, "source-proofs", "attempt-one.json"), "pinned source proof\n");
-  fs.writeFileSync(path.join(bundle, "verification", "attempt-one.json"), '{"verified":true}\n');
+  if (options.includeVerificationMarker !== false) {
+    fs.writeFileSync(path.join(bundle, "verification", "attempt-one.json"), '{"verified":true}\n');
+  }
   execFileSync("tar", ["-czf", archive, "-C", bundle, "."]);
   const digest = crypto.createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   const tags = modalNodeTags("controller-run", "node:attempt");
@@ -1041,7 +1100,7 @@ function createResultArchive(options: { includeDurableCheckpoint?: boolean } = {
   return {
     archive,
     result: JSON.stringify({
-      schema_version: "ultrafuzz.modal.node-result.v1",
+      schema_version: options.schemaVersion ?? "ultrafuzz.modal.node-result.v2",
       status: "succeeded",
       artifact_archive: `${attemptRoot}/artifacts.tgz`,
       artifact_sha256: digest,
