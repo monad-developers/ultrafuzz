@@ -65,7 +65,7 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
-    assert.equal(statSync(destination).mode & 0o777, 0o500);
+    assert.equal(statSync(destination).mode & 0o777, 0o700);
   } finally {
     for (const file of readdirSync(path.join(root, "workspace", ".ultrafuzz", "schemas"))) {
       fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas", file), 0o600);
@@ -73,6 +73,16 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     fs.chmodSync(path.join(root, "workspace", ".ultrafuzz", "schemas"), 0o700);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("materialized schema directory can be removed by its owning worktree cleanup", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-schema-cleanup-"));
+  const destination = path.join(root, "workspace", ".ultrafuzz", "schemas");
+  materializePromptSchemas(destination);
+
+  assert.equal(statSync(destination).mode & 0o777, 0o700);
+  assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
+  assert.doesNotThrow(() => rmSync(root, { recursive: true, force: true }));
 });
 
 test("rejects a hard-linked schema destination before changing its inode", () => {

@@ -2388,11 +2388,24 @@ function copyInvariantSuiteIntoWorkspace(workspaceRoot: string, suiteRoot: strin
 
 function safeInvariantSuiteDirectory(root: string, candidate: string): string {
   const canonicalRoot = realpathSync(root);
+  const absoluteRoot = path.resolve(root);
   const absoluteCandidate = path.resolve(candidate);
-  if (absoluteCandidate !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, absoluteCandidate)) {
+  const relativeCandidate = path.relative(absoluteRoot, absoluteCandidate);
+  if (
+    relativeCandidate === ".." ||
+    relativeCandidate.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeCandidate)
+  ) {
     throw new Error(`artifact-contract failure: invariant suite directory escapes root ${candidate}`);
   }
-  let current = absoluteCandidate;
+  // The snapshot workspace may be reached through a symlink alias. Validate
+  // the candidate relative to the lexical root, then perform all filesystem
+  // operations below the canonical root so the alias cannot escape checks.
+  const canonicalCandidate = path.resolve(canonicalRoot, relativeCandidate);
+  if (canonicalCandidate !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, canonicalCandidate)) {
+    throw new Error(`artifact-contract failure: invariant suite directory escapes root ${candidate}`);
+  }
+  let current = canonicalCandidate;
   const missing: string[] = [];
   while (current !== canonicalRoot) {
     try {
@@ -2405,7 +2418,7 @@ function safeInvariantSuiteDirectory(root: string, candidate: string): string {
       missing.push(current);
     }
     const parent = path.dirname(current);
-    if (parent === current || !isStrictlyInsideDirectory(canonicalRoot, parent)) {
+    if (parent === current || (parent !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, parent))) {
       throw new Error(`artifact-contract failure: invariant suite directory escapes root ${candidate}`);
     }
     current = parent;
@@ -2413,9 +2426,9 @@ function safeInvariantSuiteDirectory(root: string, candidate: string): string {
   for (const directory of missing.reverse()) {
     mkdirSync(directory, { recursive: false });
   }
-  const resolved = realpathSync(absoluteCandidate);
+  const resolved = realpathSync(canonicalCandidate);
   if (
-    resolved !== absoluteCandidate ||
+    resolved !== canonicalCandidate ||
     (resolved !== canonicalRoot && !isStrictlyInsideDirectory(canonicalRoot, resolved))
   ) {
     throw new Error(`artifact-contract failure: invariant suite directory changed during creation ${candidate}`);
