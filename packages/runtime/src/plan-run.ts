@@ -716,6 +716,7 @@ function renderPromptsForPlan(input: {
           invariantPropertyPriorityThreshold: input.resolvedConfig.invariants.propertyPriorityThreshold,
           invariantPropertyPriorityFilter: invariantPrioritySelection.filter,
           invariantPropertyPriorities: invariantPrioritySelection.priorities,
+          invariantTestingSmokeTimeout: input.resolvedConfig.invariants.invariantTestingSmokeTimeoutSeconds,
           invariantTestingFuzzerTimeout: input.resolvedConfig.invariants.invariantTestingFuzzerTimeoutSeconds
         }
       });

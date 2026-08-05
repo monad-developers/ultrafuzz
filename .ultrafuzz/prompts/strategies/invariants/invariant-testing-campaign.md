@@ -45,7 +45,7 @@ Use this configured invariant testing fuzzer timeout:
      command adaptation may change only repository-required details such as
      config path, contract name, corpus path, or assertion mode.
    - Before the final campaign, run the bounded Recon deployment smoke:
-     `timeout 120 recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
+     `timeout {{invariant_testing_smoke_timeout}} recon fuzz . --contract CryticTester --test-mode assertion --test-limit 1 --seq-len 1 --workers 1 --corpus-dir echidna --recon-corpus-dir recon-corpus`.
      Add `--config <path>` only when the repository's Recon/Echidna config
      requires it, and adapt corpus directories to existing local conventions.
    - If the smoke reverts during `CryticTester` deployment or constructor setup,

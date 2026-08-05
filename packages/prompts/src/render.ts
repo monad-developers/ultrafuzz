@@ -25,6 +25,7 @@ export const SUPPORTED_TEMPLATE_VARIABLES = [
   "invariant_property_priority_threshold",
   "invariant_property_priority_filter",
   "invariant_property_priorities",
+  "invariant_testing_smoke_timeout",
   "invariant_testing_fuzzer_timeout",
   "strategy_attempt_test_dir"
 ] as const;
@@ -119,6 +120,7 @@ export interface PromptRenderInput {
     invariantPropertyPriorityThreshold?: string | number;
     invariantPropertyPriorityFilter?: string;
     invariantPropertyPriorities?: string[];
+    invariantTestingSmokeTimeout?: string | number;
     invariantTestingFuzzerTimeout?: string | number;
   };
 }
@@ -746,6 +748,7 @@ function buildVariableContext(input: PromptRenderInput): Record<string, string> 
     invariant_property_priority_threshold: String(input.resolvedConfig?.invariantPropertyPriorityThreshold ?? ""),
     invariant_property_priority_filter: input.resolvedConfig?.invariantPropertyPriorityFilter ?? "",
     invariant_property_priorities: input.resolvedConfig?.invariantPropertyPriorities?.join(", ") ?? "",
+    invariant_testing_smoke_timeout: String(input.resolvedConfig?.invariantTestingSmokeTimeout ?? ""),
     invariant_testing_fuzzer_timeout: String(input.resolvedConfig?.invariantTestingFuzzerTimeout ?? ""),
     strategy_attempt_test_dir: path.join(input.node.workspacePath, "test", "foundry", input.node.logicalId),
     ...Object.fromEntries(Object.entries(input.variables ?? {}).map(([key, value]) => [key, String(value)]))

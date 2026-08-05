@@ -142,6 +142,19 @@ describe("prompt rendering", () => {
     expect(result.renderedMarkdown).toContain("Priorities: high, medium");
   });
 
+  it("renders the configured invariant Recon smoke timeout", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
+    tmpDirs.push(tmp);
+    const input = baseRenderInput(tmp);
+    input.prompt = "Smoke timeout: {{invariant_testing_smoke_timeout}}";
+    input.resolvedConfig = { invariantTestingSmokeTimeout: 600 };
+
+    const result = renderPrompt(input);
+
+    expect(result.renderedMarkdown).toContain("Smoke timeout: 600");
+    expect(result.variablesUsed).toContain("invariant_testing_smoke_timeout");
+  });
+
   it("renders the task-local schema bundle path", () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), "ufz-render-"));
     tmpDirs.push(tmp);

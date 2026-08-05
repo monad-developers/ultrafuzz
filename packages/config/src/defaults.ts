@@ -114,6 +114,11 @@ function normalizeDefaultConfig(input: ProjectConfigInput, filePath: string): Re
         "invariants.property_priority_threshold",
         filePath
       ),
+      invariantTestingSmokeTimeoutSeconds: required(
+        invariants.invariantTestingSmokeTimeoutSeconds,
+        "invariants.invariant_testing_smoke_timeout",
+        filePath
+      ),
       invariantTestingFuzzerTimeoutSeconds: required(
         invariants.invariantTestingFuzzerTimeoutSeconds,
         "invariants.invariant_testing_fuzzer_timeout",
