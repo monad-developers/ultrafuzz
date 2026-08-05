@@ -55,6 +55,31 @@ The shipped `.ultrafuzz/references.yml` defines exactly this entry, so a clean
 nodes run by default. Run `ultrafuzz references sync` once to populate the cache
 before running offline.
 
+#### Read access is a prerequisite
+
+`monad-developers/web3-vulnerability-database` is currently a **private**
+repository. Reference materialization fetches `https://github.com/<owner>/<repo>.git`
+with plain `git fetch` and supplies no credential of its own, so the sync only
+succeeds where the ambient git configuration already resolves a credential with
+read access to that repository. Without one, `ultrafuzz references sync` fails
+closed with the `GIT_FAILED` reference diagnostic wrapping the git stderr:
+
+```text
+error: GIT_FAILED: git command failed: git fetch --depth=1 --filter=blob:none origin fbf00e990b1316879b674e9903548dba452e40d5: remote: Repository not found.
+fatal: Authentication failed for 'https://github.com/monad-developers/web3-vulnerability-database.git/'
+```
+
+Every downstream node fails closed behind that, and any environment that is
+given only model-provider credentials — including the Modal benchmark sandbox —
+cannot materialize the database at all. Making the repository readable (or
+provisioning a read credential into the environment and, for cloud runs, into
+the Modal secret set) is therefore a prerequisite for exercising the
+database-backed nodes end to end. Until then, a project that cannot reach the
+repository must remove the `vulnerability-database.web3` entry together with the
+`reference-vulnerability-database` node and the nodes that consume it; removing
+only the catalog entry leaves the reference node dangling and validation fails
+with `INVALID_REFERENCE_NODE`.
+
 Replace the commit only with another reviewed database release commit. The three
 configured paths are fixed. Ultrafuzz reads the canonically ordered record
 paths from `catalog.json`, verifies that the pinned Git tree contains exactly
