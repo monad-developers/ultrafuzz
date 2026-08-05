@@ -69,10 +69,22 @@ describe("prompt semantic anchors", () => {
     expect(handlers).toContain("documented precondition cannot be met");
     expect(handlers).toContain("return before invoking the target");
     expect(handlers).toContain("narrowly documented non-protocol dependency");
+    expect(handlers).toContain("property-scoped expected-revert case");
+    expect(handlers).toContain("typed high-level function call");
+    expect(handlers).toContain("blanket `try/catch`");
+    expect(handlers).toContain("Scan `try/catch`, `.call`, and `.delegatecall`");
+    expect(handlers).toContain("audit every handler source");
     expect(setup).toContain("Every protocol call made during setup remains directly observable");
-    expect(coverage).toContain("Every reached protocol failure remains part of the coverage evidence");
+    expect(coverage).toContain("Audit inherited handlers before coverage fuzzing");
+    expect(coverage).toMatch(
+      /Every reached protocol revert, panic, or out-of-gas failure remains part of\s+the coverage evidence/u
+    );
+    expect(implementation).toContain("Audit inherited handlers before implementing properties");
     expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
-    expect(campaign).toContain("Record every reached protocol revert as a raw backend failure");
+    expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
+    expect(campaign).toMatch(
+      /Record every reached protocol revert, panic, or out-of-gas failure as a\s+raw backend failure/u
+    );
     expect(corpus).toContain("documented valid preconditions");
   });
 

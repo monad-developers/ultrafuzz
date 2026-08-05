@@ -69,11 +69,26 @@ Apply these Recon/Chimera rules:
   that observable failure is the signal the campaign records. When a
   documented precondition cannot be met, return before invoking the target and
   record the guard and its source in the handler inventory.
+- Use a typed high-level function call for every protocol action, check each
+  ABI-declared return value, and preserve its failure status for Recon. A
+  property-scoped expected-revert case is valid only when the catalog names the
+  expected protocol error and the handler matches its exact documented selector
+  while recording the property ID and expected outcome.
+- A blanket `try/catch`, low-level `.call` or `.delegatecall`, and an ignored
+  return or status are audit violations; represent protocol actions with the
+  typed call and checked result that keeps failures observable.
 - Use a narrowly documented non-protocol dependency boundary only when the
   dependency contract explicitly defines an expected failure result; preserve
   the target protocol call and its failure semantics in all other cases.
 - Keep assertions strong, keep coverage handlers tied to real entrypoints, and
   keep stateful tests focused on sequence behavior.
+
+Before handoff, audit every handler source. Enumerate each protocol call with
+its typed call form, valid precondition, return-value handling, and failure
+behavior. Scan `try/catch`, `.call`, and `.delegatecall` occurrences and
+classify every low-level dependency boundary or catch with its
+documented dependency or property-scoped expected-revert reason, repair any
+unclassified entry, and rerun the bounded Recon smoke.
 
 ## Work
 

@@ -64,6 +64,10 @@ catalog priority values are:
      explaining that no selected properties were eligible.
 
 3. Implement properties in the invariant suite.
+   - Audit inherited handlers before implementing properties. Use the handler
+     audit to confirm typed direct calls, documented preconditions, checked
+     return values, and explicit property-scoped expected-revert selectors;
+     repair the handler and rerun its bounded smoke when any entry is missing.
    - Prefer Recon/Chimera `Properties.sol` assertions and helper methods that
      observe real state reached by handlers.
    - Every assertion observes state after a directly invoked protocol action;
