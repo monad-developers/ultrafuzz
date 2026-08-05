@@ -274,6 +274,20 @@ function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRe
   }
 
   const selection = implementation.selection;
+  const priorityOrder = ["high", "medium", "low"] as const;
+  const thresholdIndex = priorityOrder.indexOf(selection.priority_threshold);
+  const expectedPriorities = priorityOrder.slice(0, thresholdIndex + 1);
+  if (!sameStringArray(selection.priorities, expectedPriorities)) {
+    throw new Error("current-run property implementation selection priorities do not match its threshold");
+  }
+  const configuredSelection = readConfiguredInvariantPrioritySelection(runRoot);
+  if (
+    configuredSelection !== undefined &&
+    (selection.priority_threshold !== configuredSelection.priority_threshold ||
+      !sameStringArray(selection.priorities, configuredSelection.priorities))
+  ) {
+    throw new Error("current-run property implementation selection does not match resolved invariant configuration");
+  }
   const expectedIds = catalog.properties
     .filter(
       (property) =>
@@ -320,6 +334,19 @@ function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRe
       blocker_summaries: blockerSummaries
     }
   };
+}
+
+function readConfiguredInvariantPrioritySelection(
+  runRoot: string
+): { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] } | undefined {
+  const configPath = path.join(runRoot, "config.resolved.toml");
+  if (!fs.existsSync(configPath)) return undefined;
+  const contents = fs.readFileSync(configPath, "utf8");
+  const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
+  if (match === null) return undefined;
+  const priority_threshold = match[1] as "high" | "medium" | "low";
+  const order = ["high", "medium", "low"] as const;
+  return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
 }
 
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {

@@ -639,16 +639,22 @@ function verifyInvariantEvidenceArtifacts(
   return diagnostics;
 }
 
+interface LensReferenceRow {
+  concreteNodeId: string;
+  sourceNodeId: string;
+  propertyId: string;
+  expectationIds: string[];
+  path: string;
+  index: number;
+}
+
 function verifyLensReferenceExpectationPreservation(
   layout: RunLayout,
   node: PlannedGraphNode,
   catalog: PropertiesArtifact
 ): RuntimeDiagnostic[] {
   const diagnostics: RuntimeDiagnostic[] = [];
-  const lensRows = new Map<
-    string,
-    { sourceNodeId: string; propertyId: string; expectationIds: string[]; path: string; index: number }
-  >();
+  const lensRows = new Map<string, LensReferenceRow>();
   const state = readRunState(layout);
   for (const dependencyId of node.depends_on) {
     const dependency = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
@@ -659,11 +665,14 @@ function verifyLensReferenceExpectationPreservation(
     // Resolve each concrete artifact directory first so one loop cannot hide
     // metadata emitted by another; retain the logical lookup for historical
     // runs whose artifacts were written under the unexpanded logical ID.
+    const declaredLensPath = state.nodes[dependencyId]?.outputs?.find(
+      (output) => output.contract === "ultrafuzz/property-lens@1"
+    )?.path;
     const lensPath = findDependencyArtifact(
       layout,
       dependencyId,
       dependency,
-      `properties/${lensName}.json`
+      declaredLensPath ?? `properties/${lensName}.json`
     );
     if (lensPath === undefined) {
       diagnostics.push({
@@ -689,13 +698,35 @@ function verifyLensReferenceExpectationPreservation(
       continue;
     }
     for (const [index, property] of lens.value.properties.entries()) {
-      if ((property.reference_expectations?.length ?? 0) === 0) continue;
       lensRows.set(`${dependencyId}\u0000${property.id}`, {
+        concreteNodeId: dependencyId,
         sourceNodeId: dependency,
         propertyId: property.id,
         expectationIds: property.reference_expectations ?? [],
         path: lensPath,
         index
+      });
+    }
+  }
+
+  const rowsBySource = new Map<string, LensReferenceRow[]>();
+  for (const row of lensRows.values()) {
+    const key = `${row.sourceNodeId}\\u0000${row.propertyId}`;
+    const rows = rowsBySource.get(key) ?? [];
+    rows.push(row);
+    rowsBySource.set(key, rows);
+  }
+  for (const rows of rowsBySource.values()) {
+    const first = rows[0];
+    if (first === undefined) continue;
+    for (const row of rows.slice(1)) {
+      if (sameStringSet(row.expectationIds, first.expectationIds)) continue;
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_INCONSISTENT",
+        message: `Lens artifacts for ${JSON.stringify(row.sourceNodeId)}:${JSON.stringify(row.propertyId)} disagree on reference expectations across concrete dependencies`,
+        severity: "error",
+        source: "property-fanin",
+        path: `${row.path}#$.properties[${row.index}].reference_expectations`
       });
     }
   }
@@ -719,6 +750,7 @@ function verifyLensReferenceExpectationPreservation(
   }
 
   for (const row of lensRows.values()) {
+    if (row.expectationIds.length === 0) continue;
     const canonicalMatches = catalog.properties.filter((property) =>
       property.sources.some(
         (source) => source.source_node_id === row.sourceNodeId && source.source_property_id === row.propertyId
@@ -2131,7 +2163,13 @@ function findDependencyArtifact(
   if (fs.existsSync(concretePath)) {
     return concretePath;
   }
-  return dependencyId === logicalNodeId ? findLogicalNodeArtifact(layout, logicalNodeId, fileName) : undefined;
+  // A persisted concrete node proves that this run was expanded. In that
+  // case, do not satisfy the dependency from a stale logical-ID artifact.
+  const state = readRunState(layout);
+  if (dependencyId !== logicalNodeId && state.nodes[dependencyId] !== undefined) {
+    return undefined;
+  }
+  return findLogicalNodeArtifact(layout, logicalNodeId, fileName);
 }
 
 function findingPropertyReferences(value: unknown, artifactPath: string): PropertyReferenceInput[] {
