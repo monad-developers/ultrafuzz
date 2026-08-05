@@ -827,14 +827,16 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.match(source, /artifact dependency has not passed verification/u);
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
   assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
-  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts\)/u);
+  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts, publications\)/u);
+  assert.match(source, /publications: publicationEntries/u);
+  assert.match(source, /rememberVerifiedPublication\(publications, INVARIANT_SUITE_MANIFEST_FILE/u);
   assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
   assert.ok(
     verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
     verifier
   );
   assert.ok(
-    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts)") >
+    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts, publications)") >
       verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)"),
     verifier
   );
@@ -851,14 +853,27 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replace("task: (typeof taskSpecs)[number]", "task")
     .replace("dependency: string", "dependency")
     .replace("): void {", ") {")
-    .replace(/\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u, ";")
+    .replace(
+      /\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*publications\?: unknown;\s*\};/u,
+      ";"
+    )
     .replace(
       /\s+as \{\s*path\?: unknown;\s*contract\?: unknown;\s*contract_digest\?: unknown;\s*sha256\?: unknown;\s*primary\?: unknown;\s*\};/u,
       ";"
     )
+    .replace(/const entry = publication as \{[\s\S]*?\};/u, "const entry = publication;")
     .replaceAll(/\(artifact as \{[^}]+\}\)\./gu, "artifact.")
+    .replaceAll(/\(publication as \{[^}]+\}\)\./gu, "publication.")
+    .replaceAll(/\(entry as \{[^}]+\}\)\./gu, "entry.")
     .replace(/const entry = artifact as \{[\s\S]*?\};/u, "const entry = artifact;")
     .replace("const seenPaths = new Set<string>();", "const seenPaths = new Set();")
+    .replace("const declaredArtifactShas = new Map<string, string>();", "const declaredArtifactShas = new Map();")
+    .replace("const publicationPaths = new Set<string>();", "const publicationPaths = new Set();")
+    .replace(/\)\s+as \{ sha256\?: unknown \} \| undefined;/u, ");")
+    .replace(
+      "function assertSafeVerifiedPublicationPath(relativePath: string): void {",
+      "function assertSafeVerifiedPublicationPath(relativePath) {"
+    )
     .replaceAll(" as Parameters<typeof artifactContractDefinition>[0]", "")
     .replaceAll(" as Parameters<typeof validateArtifactContract>[0]", "");
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
@@ -923,14 +938,16 @@ ${helper}; return assertVerifiedDependency;`
       contract_digest: string;
       sha256: string;
       primary: boolean;
-    }>
+    }>,
+    publications = artifacts.map((artifact) => ({ path: artifact.path, sha256: artifact.sha256 }))
   ) => {
     fs.writeFileSync(
       markerPath,
       `${JSON.stringify({
         schema_version: "ultrafuzz.artifact-verification.v1",
         attempt_id: "property-specification-fanin",
-        artifacts
+        artifacts,
+        publications
       })}\n`,
       "utf8"
     );
@@ -940,8 +957,9 @@ ${helper}; return assertVerifiedDependency;`
     () => assertVerifiedDependency(task, dependency),
     /artifact dependency has not passed verification property-specification-fanin/u
   );
-  fs.writeFileSync(path.join(dependency, "properties.json"), "verified\n", "utf8");
-  const sha256 = createHash("sha256").update("verified\n").digest("hex");
+  const verifiedBytes = Buffer.from([0xff, 0x0a, 0x76]);
+  fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
+  const sha256 = createHash("sha256").update(verifiedBytes).digest("hex");
   const validArtifact = {
     path: "properties.json",
     contract: "ultrafuzz/text@1",
@@ -981,9 +999,24 @@ ${helper}; return assertVerifiedDependency;`
     () => assertVerifiedDependency(task, dependency),
     /artifact dependency has not passed verification property-specification-fanin/u
   );
-  fs.writeFileSync(path.join(dependency, "properties.json"), "verified\n", "utf8");
+  fs.writeFileSync(path.join(dependency, "properties.json"), verifiedBytes);
   writeMarker([validArtifact]);
   assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  fs.mkdirSync(path.join(dependency, "generated-tests"), { recursive: true });
+  const companionPath = path.join(dependency, "generated-tests", "Property.t.sol");
+  fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
+  const companionPublication = {
+    path: "generated-tests/Property.t.sol",
+    sha256: createHash("sha256").update("contract Property {}\n").digest("hex")
+  };
+  writeMarker([validArtifact], [{ path: validArtifact.path, sha256: validArtifact.sha256 }, companionPublication]);
+  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  fs.writeFileSync(companionPath, "contract Tampered {}\n", "utf8");
+  assert.throws(
+    () => assertVerifiedDependency(task, dependency),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+  fs.writeFileSync(companionPath, "contract Property {}\n", "utf8");
   fs.writeFileSync(
     markerPath,
     `${JSON.stringify({
@@ -997,6 +1030,55 @@ ${helper}; return assertVerifiedDependency;`
     /artifact dependency has not passed verification property-specification-fanin/u
   );
   fs.rmSync(runRoot, { recursive: true, force: true });
+});
+
+test("generated Smithers verification marker root must be a canonical directory", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function artifactVerificationMarkerLocation");
+  const helperEnd = source.indexOf("\n\nfunction clearArtifactVerificationMarker", helperStart);
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("runRoot: string", "runRoot")
+    .replace("attemptId: string", "attemptId")
+    .replace("createRoot: boolean", "createRoot")
+    .replace(/\): \{ root: string; path: string; relativePath: string \} \| undefined \{/u, ") {")
+    .replace("let rootStat: ReturnType<typeof lstatSync>;", "let rootStat;");
+  const artifactVerificationMarkerLocation = new Function(
+    "path",
+    "realpathSync",
+    "lstatSync",
+    "mkdirSync",
+    "isStrictlyInsideDirectory",
+    "isMissingPathError",
+    "ARTIFACT_VERIFICATION_DIRECTORY",
+    `${helper}; return artifactVerificationMarkerLocation;`
+  )(
+    path,
+    fs.realpathSync,
+    fs.lstatSync,
+    fs.mkdirSync,
+    (root: string, candidate: string) => candidate !== root && candidate.startsWith(`${root}${path.sep}`),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT",
+    ".ultrafuzz-verification"
+  ) as (runRoot: string, attemptId: string, createRoot: boolean) => { root: string; path: string; relativePath: string };
+
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-root-"));
+  try {
+    const markerRoot = path.join(runRoot, ".ultrafuzz-verification");
+    const realMarkerRoot = path.join(runRoot, "real-markers");
+    fs.mkdirSync(realMarkerRoot);
+    fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+    assert.throws(
+      () => artifactVerificationMarkerLocation(runRoot, "attempt-one", false),
+      /unsafe artifact verification marker root/u
+    );
+    fs.rmSync(markerRoot, { force: true });
+    assert.equal(artifactVerificationMarkerLocation(runRoot, "attempt-one", true).relativePath, "attempt-one.json");
+  } finally {
+    fs.rmSync(runRoot, { recursive: true, force: true });
+  }
 });
 
 test("generated Smithers preserves setup-patch baselines across post-agent preparation", () => {

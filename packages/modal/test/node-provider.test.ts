@@ -57,9 +57,12 @@ describe("Modal node sandbox provider", () => {
       expect(entries).toContain("./.smithers/agents/kimi.ts");
       for (const dependency of fixture.input.dependency_artifact_dirs) {
         expect(entries).toContain(`./${dependency}/`);
+        const marker = `./${fixture.input.run_root}/.ultrafuzz-verification/${path.basename(dependency)}.json`;
+        expect(entries).toContain(marker);
       }
       expect(entries).not.toContain("local-only-secret");
       expect(entries).not.toContain("unrelated.txt");
+      expect(entries).not.toContain(`./${fixture.input.run_root}/.ultrafuzz-verification/unrelated.json`);
       expect(entries).not.toContain("stale.txt");
       expect(entries).not.toContain(`./${fixture.input.run_root}/workspaces/`);
       expect(entries).not.toContain(`./${fixture.input.run_root}/logs/`);
@@ -94,6 +97,39 @@ describe("Modal node sandbox provider", () => {
 
       await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
         /unsupported symlink entry/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects symlinked dependency verification marker directories in cloud handoff archives", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const realMarkerRoot = path.join(fixture.root, fixture.input.run_root, "real-markers");
+      fs.rmSync(markerRoot, { recursive: true, force: true });
+      fs.mkdirSync(realMarkerRoot);
+      fs.symlinkSync(realMarkerRoot, markerRoot, "dir");
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /dependency verification marker directory is not an anchored run path/u
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("rejects symlinked dependency verification marker files in cloud handoff archives", async () => {
+    const fixture = createProjectFixture();
+    try {
+      const markerRoot = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification");
+      const marker = path.join(markerRoot, "dependency-one.json");
+      fs.rmSync(marker, { force: true });
+      fs.symlinkSync("dependency-two.json", marker);
+
+      await expect(createModalNodeHandoffArchive(fixture.root, fixture.input)).rejects.toThrow(
+        /cloud handoff file must be a regular unlinked file/u
       );
     } finally {
       fixture.cleanup();
@@ -874,6 +910,20 @@ function createProjectFixture() {
     fs.mkdirSync(path.join(root, dependency), { recursive: true });
     fs.writeFileSync(path.join(root, dependency, "declared.txt"), `${dependency}\n`);
   }
+  const markerRoot = path.join(root, runRoot, ".ultrafuzz-verification");
+  fs.mkdirSync(markerRoot, { recursive: true });
+  for (const dependency of dependencyArtifactDirs) {
+    fs.writeFileSync(
+      path.join(markerRoot, `${path.basename(dependency)}.json`),
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-verification.v1",
+        attempt_id: path.basename(dependency),
+        artifacts: [],
+        publications: []
+      })}\n`
+    );
+  }
+  fs.writeFileSync(path.join(markerRoot, "unrelated.json"), "{}\n");
   fs.mkdirSync(path.join(root, runRoot, "artifacts", "unrelated"), { recursive: true });
   fs.mkdirSync(path.join(root, workspaceDir), { recursive: true });
   fs.mkdirSync(path.join(root, runRoot, "logs"), { recursive: true });

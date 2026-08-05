@@ -1177,11 +1177,13 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       schema_version?: unknown;
       attempt_id?: unknown;
       artifacts?: unknown;
+      publications?: unknown;
     };
     if (
       marker.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
       marker.attempt_id !== dependencyAttemptId ||
-      !Array.isArray(marker.artifacts)
+      !Array.isArray(marker.artifacts) ||
+      !Array.isArray(marker.publications)
     ) {
       throw new Error("invalid verification marker");
     }
@@ -1196,6 +1198,7 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       throw new Error("verification marker artifact set does not match the declared outputs");
     }
     const seenPaths = new Set<string>();
+    const declaredArtifactShas = new Map<string, string>();
     for (const artifact of marker.artifacts) {
       if (
         typeof artifact !== "object" ||
@@ -1231,18 +1234,20 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       ) {
         throw new Error(`verification marker artifact is not a declared output ${entry.path}`);
       }
+      assertSafeVerifiedPublicationPath(entry.path);
       const artifactPath = path.resolve(dependency, entry.path);
       const resolvedArtifact = resolveRegularArtifactFile(
         dependency,
         artifactPath,
         `artifact-contract failure: verified dependency artifact is missing ${entry.path}`
       );
-      const contents = readFileSync(resolvedArtifact, "utf8");
+      const bytes = readFileSync(resolvedArtifact);
+      const contents = bytes.toString("utf8");
       const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
       if (definition.digest !== entry.contract_digest) {
         throw new Error(`verified dependency contract changed ${entry.path}`);
       }
-      if (createHash("sha256").update(contents).digest("hex") !== entry.sha256) {
+      if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
         throw new Error(`verified dependency artifact changed ${entry.path}`);
       }
       const validation = validateArtifactContract(
@@ -1253,15 +1258,76 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
       if (!validation.ok) {
         throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
       }
+      declaredArtifactShas.set(entry.path, entry.sha256);
     }
     if (seenPaths.size !== expectedArtifacts.size) {
       throw new Error("verification marker is missing a declared output");
+    }
+    if (marker.publications.length === 0) {
+      throw new Error("verification marker has no verified publications");
+    }
+    const publicationPaths = new Set<string>();
+    for (const publication of marker.publications) {
+      if (
+        typeof publication !== "object" ||
+        publication === null ||
+        Array.isArray(publication) ||
+        typeof (publication as { path?: unknown }).path !== "string" ||
+        typeof (publication as { sha256?: unknown }).sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test((publication as { sha256: string }).sha256)
+      ) {
+        throw new Error("invalid verification marker publication entry");
+      }
+      const entry = publication as { path: string; sha256: string };
+      assertSafeVerifiedPublicationPath(entry.path);
+      if (publicationPaths.has(entry.path)) {
+        throw new Error(`duplicate verification marker publication ${entry.path}`);
+      }
+      publicationPaths.add(entry.path);
+      const artifactPath = path.resolve(dependency, entry.path);
+      const resolvedArtifact = resolveRegularArtifactFile(
+        dependency,
+        artifactPath,
+        `artifact-contract failure: verified dependency publication is missing ${entry.path}`
+      );
+      const bytes = readFileSync(resolvedArtifact);
+      if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+        throw new Error(`verified dependency publication changed ${entry.path}`);
+      }
+      const declaredSha = declaredArtifactShas.get(entry.path);
+      if (declaredSha !== undefined && declaredSha !== entry.sha256) {
+        throw new Error(`verified dependency publication disagrees with declared artifact ${entry.path}`);
+      }
+    }
+    for (const [declaredPath, declaredSha] of declaredArtifactShas) {
+      if (!publicationPaths.has(declaredPath)) {
+        throw new Error(`verification marker publication is missing declared artifact ${declaredPath}`);
+      }
+      const publication = marker.publications.find(
+        (entry) => typeof entry === "object" && entry !== null && (entry as { path?: unknown }).path === declaredPath
+      ) as { sha256?: unknown } | undefined;
+      if (publication?.sha256 !== declaredSha) {
+        throw new Error(`verification marker publication disagrees with declared artifact ${declaredPath}`);
+      }
     }
   } catch (error) {
     throw new Error(
       `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}`,
       { cause: error }
     );
+  }
+}
+
+function assertSafeVerifiedPublicationPath(relativePath: string): void {
+  if (
+    relativePath.length === 0 ||
+    path.isAbsolute(relativePath) ||
+    relativePath.includes("\u0000") ||
+    relativePath.includes("\\") ||
+    /^[A-Za-z]:/u.test(relativePath) ||
+    relativePath.split("/").some((segment) => segment.length === 0 || segment === "..")
+  ) {
+    throw new Error(`artifact-contract failure: unsafe verified publication path ${relativePath}`);
   }
 }
 
@@ -2908,6 +2974,14 @@ function rememberInvariantSuitePublications(
   const expectedPaths = new Set(expected.keys());
   let observedRoot = false;
   for (const artifactRoot of artifactRoots) {
+    const manifestPath = path.join(artifactRoot, INVARIANT_SUITE_MANIFEST_FILE);
+    const manifest = resolveNonEmptyRegularArtifactFile(
+      artifactRoot,
+      manifestPath,
+      "artifact-contract failure: invariant suite manifest is missing",
+      "artifact-contract failure: invariant suite manifest is empty"
+    );
+    rememberVerifiedPublication(publications, INVARIANT_SUITE_MANIFEST_FILE, readFileSync(manifest));
     const suiteRoot = path.join(artifactRoot, "invariant-suite");
     if (!existsSync(suiteRoot)) continue;
     observedRoot = true;
@@ -3033,7 +3107,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     throw new Error("artifact-contract failure: primary artifact is missing");
   }
   publishVerifiedArtifacts(artifactDir, publications);
-  writeArtifactVerificationMarker(task, artifacts);
+  writeArtifactVerificationMarker(task, artifacts, publications);
   return { artifacts, primary_artifact: primary.path };
 }
 
@@ -3343,14 +3417,18 @@ function artifactVerificationMarkerLocation(
   if (createRoot) {
     mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
   }
-  let root: string;
+  let rootStat: ReturnType<typeof lstatSync>;
   try {
-    root = realpathSync(rootCandidate);
+    rootStat = lstatSync(rootCandidate);
   } catch (error) {
     if (isMissingPathError(error)) return undefined;
     throw error;
   }
-  if (!isStrictlyInsideDirectory(resolvedRunRoot, root)) {
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error("artifact-contract failure: unsafe artifact verification marker root");
+  }
+  const root = realpathSync(rootCandidate);
+  if (root !== rootCandidate || !isStrictlyInsideDirectory(resolvedRunRoot, root)) {
     throw new Error("artifact-contract failure: unsafe artifact verification marker root");
   }
   const relativePath = `${attemptId}.json`;
@@ -3383,18 +3461,32 @@ function writeArtifactVerificationMarker(
     contract_digest: string;
     sha256: string;
     primary: boolean;
-  }[]
+  }[],
+  publications: ReadonlyMap<string, Buffer>
 ): void {
   const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, true);
   if (location === undefined) {
     throw new Error(`artifact-contract failure: verification marker root is unavailable ${task.attemptId}`);
+  }
+  const publicationEntries = [...publications]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([relativePath, contents]) => {
+      assertSafeVerifiedPublicationPath(relativePath);
+      return {
+        path: relativePath,
+        sha256: createHash("sha256").update(contents).digest("hex")
+      };
+    });
+  if (publicationEntries.length === 0) {
+    throw new Error(`artifact-contract failure: verification marker has no publications ${task.attemptId}`);
   }
   const marker = `${JSON.stringify(
     {
       schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
       attempt_id: task.attemptId,
       node_id: task.metadata.node.logicalNodeId,
-      artifacts
+      artifacts,
+      publications: publicationEntries
     },
     null,
     2

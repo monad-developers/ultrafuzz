@@ -22,6 +22,7 @@ const REMOTE_REQUEST = "/tmp/ultrafuzz-node-request.json";
 const REMOTE_WORKER = "/opt/ultrafuzz/packages/modal/dist/node-worker.js";
 const REMOTE_DATA_ROOT = "/data/ultrafuzz-nodes";
 const MAX_RESULT_WAIT_MS = 24 * 60 * 60 * 1000;
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 
 export interface ModalNodeSandboxProviderOptions {
   app: string;
@@ -405,6 +406,7 @@ export async function createModalNodeHandoffArchive(
     for (const dependencyArtifactDir of dependencyArtifactDirs) {
       copyTreeChecked(dependencyArtifactDir, path.join(staging, path.relative(root, dependencyArtifactDir)));
     }
+    copyDependencyVerificationMarkers(root, runRoot, dependencyArtifactDirs, staging);
     fs.mkdirSync(path.join(staging, path.relative(root, artifactDir)), { recursive: true, mode: 0o700 });
     for (const relative of [
       ".smithers/package.json",
@@ -677,6 +679,30 @@ function checkedPath(root: string, value: string, label: string, mustExist = tru
 function assertChildPath(parent: string, child: string, label: string): void {
   if (child === parent || !child.startsWith(`${parent}${path.sep}`)) {
     throw new Error(`${label} must stay inside the run root`);
+  }
+}
+
+function copyDependencyVerificationMarkers(
+  root: string,
+  runRoot: string,
+  dependencyArtifactDirs: readonly string[],
+  staging: string
+): void {
+  const markerRoot = path.join(runRoot, ARTIFACT_VERIFICATION_DIRECTORY);
+  if (!fs.existsSync(markerRoot)) return;
+  assertChildPath(runRoot, markerRoot, "dependency verification marker directory");
+  const markerRootStat = fs.lstatSync(markerRoot);
+  if (!markerRootStat.isDirectory() || markerRootStat.isSymbolicLink()) {
+    throw new Error("dependency verification marker directory is not an anchored run path");
+  }
+  const resolvedMarkerRoot = fs.realpathSync(markerRoot);
+  if (resolvedMarkerRoot !== markerRoot || !resolvedMarkerRoot.startsWith(`${runRoot}${path.sep}`)) {
+    throw new Error("dependency verification marker directory is not an anchored run path");
+  }
+  for (const dependencyArtifactDir of dependencyArtifactDirs) {
+    const markerPath = path.join(markerRoot, `${path.basename(dependencyArtifactDir)}.json`);
+    if (!fs.existsSync(markerPath)) continue;
+    copyFileChecked(root, markerPath, path.join(staging, path.relative(root, markerPath)));
   }
 }
 
