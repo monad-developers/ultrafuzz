@@ -760,6 +760,49 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  it("rejects hard-linked existing verification marker destinations before mutating publications", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive();
+    const sandbox = fakeSandbox(result);
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
+    try {
+      const artifactFinding = path.join(fixture.root, fixture.input.artifact_dir, "finding.json");
+      const workspaceWork = path.join(fixture.root, fixture.input.workspace_dir, "work.txt");
+      const sourceProofRoot = path.join(fixture.root, fixture.input.run_root, "source-proofs");
+      const verificationMarker = path.join(
+        fixture.root,
+        fixture.input.run_root,
+        ".ultrafuzz-verification",
+        "attempt-one.json"
+      );
+      const linkedMarker = path.join(fixture.root, fixture.input.run_root, ".ultrafuzz-verification", "linked.json");
+      fs.writeFileSync(artifactFinding, "existing artifact\n");
+      fs.writeFileSync(workspaceWork, "existing workspace\n");
+      fs.writeFileSync(linkedMarker, '{"verified":true}\n');
+      fs.linkSync(linkedMarker, verificationMarker);
+
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/destination file is unsafe/u);
+      expect(fs.readFileSync(artifactFinding, "utf8")).toBe("existing artifact\n");
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "stale.txt"))).toBe(true);
+      expect(fs.readFileSync(workspaceWork, "utf8")).toBe("existing workspace\n");
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.json"))).toBe(false);
+      expect(fs.existsSync(path.join(sourceProofRoot, "attempt-one.invariant.json"))).toBe(false);
+      expect(fs.readFileSync(verificationMarker, "utf8")).toBe('{"verified":true}\n');
+      expect(fs.readFileSync(linkedMarker, "utf8")).toBe('{"verified":true}\n');
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects v2 cloud results missing artifacts before mutating workspace publications", async () => {
     const fixture = createProjectFixture();
     const result = createResultArchive({ includeArtifactsDirectory: false });

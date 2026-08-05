@@ -862,7 +862,10 @@ function assertPublishedFileReplacementAllowed(source: string, destination: stri
     throw new Error("cloud node result source file is unsafe");
   }
   const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
-  if (destinationStat?.isSymbolicLink() || (destinationStat !== undefined && !destinationStat.isFile())) {
+  if (
+    destinationStat?.isSymbolicLink() ||
+    (destinationStat !== undefined && (!destinationStat.isFile() || destinationStat.nlink !== 1))
+  ) {
     throw new Error("cloud node result destination file is unsafe");
   }
   if (destinationStat !== undefined) {
