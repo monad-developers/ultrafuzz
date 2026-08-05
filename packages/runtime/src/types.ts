@@ -99,6 +99,8 @@ export interface ValidateProjectResult {
 export interface PlanRunInput extends ValidateProjectInput {
   runId?: string;
   sourceRunId?: string;
+  /** Optional trusted benchmark catalog copied into pinned reference inputs. */
+  referenceExpectationsPath?: string;
   mode?: "run" | "resume" | "replay" | "fork";
   prompt?: string;
   workflowInput?: unknown;

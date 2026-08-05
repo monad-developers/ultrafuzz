@@ -667,7 +667,11 @@ function renderArtifactProducer(producer: ArtifactProducer, suffix: string | und
         `primary output for \`${producer.logicalId}\` is not listed in outputs`
       );
     }
-    return renderPathList(dirs.map((dir) => path.join(dir, primary)));
+    const referenceExpectationOutputs = required.filter(
+      (output) => output !== primary && /^references\/(?:expectations|reference-expectations)\.json$/u.test(output)
+    );
+    const handoffOutputs = [primary, ...referenceExpectationOutputs];
+    return renderPathList(dirs.flatMap((dir) => handoffOutputs.map((output) => path.join(dir, output))));
   }
 
   return renderPathList(dirs.map((dir) => path.join(dir, suffix ?? "")));

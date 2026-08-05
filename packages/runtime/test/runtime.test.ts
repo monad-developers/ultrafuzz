@@ -5032,6 +5032,79 @@ test("plan materializes pinned reference nodes before rendering dependent prompt
   }
 });
 
+test("plan provisions a validated trusted expectation catalog through pinned reference handoffs", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeReferenceTopology(project);
+  fs.writeFileSync(
+    path.join(project, "reference-expectations.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: "benchmark:example:supply", description: "Supply remains live." }]
+    }),
+    "utf8"
+  );
+  const xdgCacheHome = path.join(project, "xdg-cache");
+  writeReferenceCache(xdgCacheHome);
+  const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = xdgCacheHome;
+  try {
+    const plan = await planRun({
+      projectRoot: project,
+      runId: "reference-expectations-plan",
+      referenceExpectationsPath: "reference-expectations.json",
+      env: {}
+    });
+
+    assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
+    const referenceNode = plan.value!.graph.nodes.find((node) => node.kind === "reference");
+    assert.ok(referenceNode);
+    assert.ok(
+      referenceNode.outputs.some(
+        (output) =>
+          output.path === "references/expectations.json" && output.contract === "ultrafuzz/reference-expectations@1"
+      )
+    );
+    const catalogPath = path.join(
+      plan.value!.run_root,
+      "artifacts",
+      referenceNode.id,
+      "references",
+      "expectations.json"
+    );
+    assert.deepEqual(JSON.parse(fs.readFileSync(catalogPath, "utf8")), {
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: "benchmark:example:supply", description: "Supply remains live." }]
+    });
+    const rendered = fs.readFileSync(
+      path.join(plan.value!.run_root, "artifacts", "project-discovery", "prompt.rendered.md"),
+      "utf8"
+    );
+    assert.match(rendered, /reference-properties-example\/references\/expectations\.json/u);
+    const state = JSON.parse(fs.readFileSync(path.join(plan.value!.run_root, "state.json"), "utf8")) as {
+      nodes?: Record<string, { provenance?: Record<string, unknown>; outputs?: Array<{ path?: string }> }>;
+    };
+    assert.equal(state.nodes?.[referenceNode.id]?.provenance?.origin, "pinned-reference");
+    assert.deepEqual(state.nodes?.[referenceNode.id]?.provenance?.reference_expectations, {
+      source: "operator-supplied",
+      path: "reference-expectations.json",
+      sha256: crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(path.join(project, "reference-expectations.json")))
+        .digest("hex")
+    });
+    assert.ok(
+      state.nodes?.[referenceNode.id]?.outputs?.some((output) => output.path === "references/expectations.json")
+    );
+  } finally {
+    if (previousXdgCacheHome === undefined) {
+      delete process.env.XDG_CACHE_HOME;
+    } else {
+      process.env.XDG_CACHE_HOME = previousXdgCacheHome;
+    }
+  }
+});
+
 test("plan renders prompt variables against attempt artifact directories for model fan-out", async () => {
   const project = tempProject();
   writeFanoutProject(project);

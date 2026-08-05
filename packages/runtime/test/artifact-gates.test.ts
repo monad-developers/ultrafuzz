@@ -1097,6 +1097,27 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
       ]
     })
   );
+  writeArtifact(
+    layout,
+    "reference-properties-recon",
+    "references/recon.md",
+    "# Examples\n\nFor example, `scfuzzbench:aave-v4:iSpoke_supply` may be used when a supplied benchmark catalog names it.\n"
+  );
+  writeArtifact(
+    layout,
+    "reference-properties-recon",
+    "references/expectations.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: "scfuzzbench:aave-v4:iSpoke_supply" }]
+    })
+  );
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/arbitrary.json",
+    JSON.stringify({ expectations: [{ id: "scfuzzbench:aave-v4:iSpoke_supply" }] })
+  );
   const node = {
     ...plannedNode(["properties.json", "properties.md"]),
     id: "property-specification-fanin",
@@ -1143,6 +1164,220 @@ test("property fan-in gate preserves reference expectation metadata in Markdown"
   assert.ok(
     droppedFromLens.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_DROPPED"),
     JSON.stringify(droppedFromLens.diagnostics)
+  );
+});
+
+test("property lens gate requires reference expectations to appear in supplied input artifacts", () => {
+  const expectationId = "scfuzzbench:aave-v4:iSpoke_supply";
+  const expectationCatalog = JSON.stringify({
+    schema_version: "ultrafuzz.reference-expectations.v1",
+    expectations: [{ id: expectationId }]
+  });
+  const expectationDigest = createHash("sha256").update(expectationCatalog).digest("hex");
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-authority",
+    stateNodes: [
+      {
+        id: "reference-properties-recon",
+        status: "succeeded",
+        outputs: [
+          {
+            path: "references/expectations.json",
+            contract: "ultrafuzz/reference-expectations@1",
+            contract_digest: "a".repeat(64),
+            primary: false
+          }
+        ],
+        provenance: {
+          origin: "pinned-reference",
+          reference_expectations: {
+            source: "operator-supplied",
+            path: "reference-expectations.json",
+            sha256: expectationDigest
+          }
+        }
+      }
+    ]
+  });
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: [expectationId]
+        }
+      ]
+    })
+  );
+  writeArtifact(
+    layout,
+    "reference-properties-aviggiano",
+    "references/expectations.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: expectationId }]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
+    depends_on: ["base-test-setup", "reference-properties-recon"]
+  };
+
+  const unauthorized = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unauthorized.ok, false);
+  assert.ok(
+    unauthorized.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(unauthorized.diagnostics)
+  );
+
+  writeArtifact(
+    layout,
+    "reference-properties-recon",
+    "references/expectations.json",
+    JSON.stringify({ expectations: [{ id: expectationId }] })
+  );
+  const malformedCatalog = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(malformedCatalog.ok, false);
+  assert.ok(
+    malformedCatalog.diagnostics.some(
+      (diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"
+    ),
+    JSON.stringify(malformedCatalog.diagnostics)
+  );
+
+  writeArtifact(layout, "reference-properties-recon", "references/expectations.json", expectationCatalog);
+  writeArtifactManifest({
+    layout,
+    nodeId: "reference-properties-recon",
+    outputs: [
+      {
+        path: "references/expectations.json",
+        contract: "ultrafuzz/reference-expectations@1",
+        contract_digest: "a".repeat(64),
+        primary: false
+      }
+    ],
+    provenance: { origin: "pinned-reference" }
+  });
+  const authorized = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(authorized.ok, true, JSON.stringify(authorized.diagnostics));
+
+  writeArtifact(
+    layout,
+    "reference-properties-recon",
+    "references/expectations.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.reference-expectations.v1",
+      expectations: [{ id: "benchmark:tampered" }]
+    })
+  );
+  const tampered = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(tampered.ok, false);
+  assert.ok(
+    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_TAMPERED"),
+    JSON.stringify(tampered.diagnostics)
+  );
+  assert.ok(
+    tampered.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(tampered.diagnostics)
+  );
+});
+
+test("property lens authority gate applies to custom logical lens IDs", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-properties-reference-custom-lens" });
+  writeArtifact(
+    layout,
+    "recon-properties",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "iSpoke_supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high",
+          reference_expectations: ["benchmark:unexpected"]
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "recon-properties",
+    logical_id: "recon-properties",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const }))
+  };
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED"),
+    JSON.stringify(result.diagnostics)
+  );
+});
+
+test("ordinary pinned references without expectation catalogs do not require catalog provenance", () => {
+  const layout = createRunLayout({
+    projectRoot: tempProject(),
+    runId: "run-properties-reference-no-catalog",
+    stateNodes: [
+      {
+        id: "reference-properties-example",
+        status: "succeeded",
+        outputs: [
+          {
+            path: "references/example.md",
+            contract: "ultrafuzz/nonempty-markdown@1",
+            contract_digest: "a".repeat(64),
+            primary: true
+          }
+        ],
+        provenance: { origin: "pinned-reference" }
+      }
+    ]
+  });
+  writeArtifact(
+    layout,
+    "property-specification-recon",
+    "properties/recon.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-lens.v1",
+      properties: [
+        {
+          id: "supply",
+          description: "Supply completes for valid state.",
+          category: "dos-liveness",
+          priority: "high"
+        }
+      ]
+    })
+  );
+  const base = plannedNode(["properties/recon.json"]);
+  const node = {
+    ...base,
+    id: "property-specification-recon",
+    logical_id: "property-specification-recon",
+    outputs: base.outputs.map((output) => ({ ...output, contract: "ultrafuzz/property-lens@1" as const })),
+    depends_on: ["reference-properties-example"]
+  };
+  const result = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(result.ok, true, JSON.stringify(result.diagnostics));
+  assert.equal(
+    result.diagnostics.some((diagnostic) => diagnostic.code === "PROPERTY_REFERENCE_EXPECTATION_PROVENANCE_INVALID"),
+    false
   );
 });
 

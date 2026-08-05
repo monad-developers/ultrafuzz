@@ -5,10 +5,12 @@ import path from "node:path";
 import {
   assertRegularFileInside,
   getNodeArtifactDir,
+  readArtifactManifest,
   readJsonFile,
   readRunState,
   redactValue,
   safeResolveInside,
+  sha256Bytes,
   updateNodeState,
   validateArtifactContract,
   validateFindingsSchema,
@@ -17,6 +19,7 @@ import {
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
+  validateReferenceExpectationsSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
@@ -1464,6 +1467,10 @@ function verifyPropertyProvenanceArtifacts(
   node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
+  const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@1");
+  if (isPropertyLens) {
+    return verifyLensReferenceExpectationAuthority(layout, artifactDir, node);
+  }
   if (logicalId === "final-report") {
     return verifyFinalReportPropertyReferences(layout, artifactDir, node);
   }
@@ -1509,6 +1516,183 @@ function verifyPropertyProvenanceArtifacts(
   }
 
   return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
+}
+
+/**
+ * A reference expectation is provenance, not free-form model metadata. A lens
+ * may copy an ID only when the exact token is present in a declared pinned
+ * reference input artifact. This keeps illustrative prompt text from becoming
+ * an apparently authorized benchmark mapping.
+ */
+function verifyLensReferenceExpectationAuthority(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const lensOutput = node.outputs.find(
+    (output) => output.contract === "ultrafuzz/property-lens@1" || output.path.endsWith(".json")
+  );
+  if (lensOutput === undefined) return [];
+  const lensPath = path.join(artifactDir, lensOutput.path);
+  if (!fs.existsSync(lensPath)) return [];
+  const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
+  if (!lens.ok || lens.value === undefined) return [];
+
+  const supplied = readLensSuppliedExpectationIds(layout, node);
+  const suppliedExpectationIds = supplied.ids;
+  const diagnostics: RuntimeDiagnostic[] = [...supplied.diagnostics];
+  for (const [propertyIndex, property] of lens.value.properties.entries()) {
+    for (const [expectationIndex, expectationId] of (property.reference_expectations ?? []).entries()) {
+      if (suppliedExpectationIds.has(expectationId)) continue;
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED",
+        message: `Property lens expectation ${JSON.stringify(expectationId)} is not present in a supplied pinned-reference catalog`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations[${expectationIndex}]`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function readLensSuppliedExpectationIds(
+  layout: RunLayout,
+  node: PlannedGraphNode
+): { ids: Set<string>; diagnostics: RuntimeDiagnostic[] } {
+  const expectationIds = new Set<string>();
+  const diagnostics: RuntimeDiagnostic[] = [];
+  const state = readRunState(layout);
+  for (const dependencyId of node.depends_on) {
+    // Only declared, pinned-reference inputs can authorize provenance. In
+    // particular, an agentic setup/lens node or unrelated reference elsewhere
+    // in the run cannot authorize an ID for this lens.
+    if (state.nodes[dependencyId]?.provenance?.origin !== "pinned-reference") continue;
+    const dependencyDir = getNodeArtifactDir(layout, dependencyId);
+    const expectationPaths = [
+      ...(declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")
+        ? ["references/expectations.json"]
+        : []),
+      ...(declaresReferenceExpectationCatalog(
+        state.nodes[dependencyId]?.outputs,
+        "references/reference-expectations.json"
+      )
+        ? ["references/reference-expectations.json"]
+        : [])
+    ];
+    if (expectationPaths.length === 0) continue;
+    const metadata = state.nodes[dependencyId]?.provenance?.reference_expectations;
+    if (
+      !isRecord(metadata) ||
+      metadata.source !== "operator-supplied" ||
+      typeof metadata.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(metadata.sha256)
+    ) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_PROVENANCE_INVALID",
+        message: `Pinned reference dependency ${JSON.stringify(dependencyId)} does not carry operator-supplied expectation provenance`,
+        severity: "error",
+        source: "property-provenance",
+        path: `state.nodes.${dependencyId}.provenance.reference_expectations`
+      });
+      continue;
+    }
+    for (const expectationPath of expectationPaths) {
+      appendExpectationCatalog(
+        layout,
+        dependencyId,
+        path.join(dependencyDir, expectationPath),
+        expectationIds,
+        metadata.sha256,
+        diagnostics
+      );
+    }
+  }
+  return { ids: expectationIds, diagnostics };
+}
+
+function declaresReferenceExpectationCatalog(
+  outputs: ReadonlyArray<{ path: string; contract: string }> | undefined,
+  expectedPath: string
+): boolean {
+  return (
+    outputs?.some(
+      (output) => output.path === expectedPath && output.contract === "ultrafuzz/reference-expectations@1"
+    ) ?? false
+  );
+}
+
+function appendExpectationCatalog(
+  layout: RunLayout,
+  dependencyId: string,
+  catalogPath: string,
+  expectationIds: Set<string>,
+  expectedDigest: string,
+  diagnostics: RuntimeDiagnostic[]
+): void {
+  try {
+    const stat = fs.lstatSync(catalogPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} is not a regular file`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
+    const catalogContents = fs.readFileSync(catalogPath);
+    const actualDigest = sha256Bytes(catalogContents);
+    if (actualDigest !== expectedDigest) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} does not match its recorded provenance digest`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
+    const manifest = readArtifactManifest(layout, dependencyId);
+    const manifestEntry = manifest.files.find(
+      (file) => file.path === path.relative(getNodeArtifactDir(layout, dependencyId), catalogPath)
+    );
+    if (manifestEntry?.sha256 !== expectedDigest) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} is not bound to its artifact manifest digest`,
+        severity: "error",
+        source: "property-provenance",
+        path: path.join(getNodeArtifactDir(layout, dependencyId), "artifact-manifest.json")
+      });
+      return;
+    }
+    const parsed = validateReferenceExpectationsSchema(
+      JSON.parse(catalogContents.toString("utf8")) as unknown,
+      catalogPath
+    );
+    if (!parsed.ok || parsed.value === undefined) {
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_TAMPERED",
+        message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} failed schema validation`,
+        severity: "error",
+        source: "property-provenance",
+        path: catalogPath
+      });
+      return;
+    }
+    for (const expectation of parsed.value.expectations) expectationIds.add(expectation.id);
+  } catch {
+    diagnostics.push({
+      code: "PROPERTY_REFERENCE_EXPECTATION_MANIFEST_MISMATCH",
+      message: `Reference expectation catalog for ${JSON.stringify(dependencyId)} has no verifiable artifact manifest`,
+      severity: "error",
+      source: "property-provenance",
+      path: catalogPath
+    });
+    return;
+  }
 }
 
 /**

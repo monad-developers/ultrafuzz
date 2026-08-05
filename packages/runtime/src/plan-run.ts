@@ -21,6 +21,8 @@ import {
   replayEvents,
   RUN_LAYOUT_SCHEMA_VERSION,
   safeResolveInside,
+  sha256Bytes,
+  validateReferenceExpectationsSchema,
   updateNodeState,
   validateSafeId,
   writeArtifactManifest,
@@ -160,6 +162,17 @@ export async function planRun(input: PlanRunInput, options: { prepareWorkflowSta
   }
 
   const graph = toPlannedGraph(expandedGraph, catalog);
+  let referenceExpectationsSource: ReferenceExpectationProvision | undefined;
+  try {
+    referenceExpectationsSource = provisionReferenceExpectationOutput(
+      graph,
+      expandedGraph,
+      projectRoot,
+      input.referenceExpectationsPath
+    );
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_EXPECTATIONS_INVALID")]);
+  }
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
@@ -270,14 +283,22 @@ export async function planRun(input: PlanRunInput, options: { prepareWorkflowSta
         redactedConfigFingerprint,
         initialState,
         mode: input.mode ?? "run",
-        forgeGuard: forgeGuardMetadata(resolved.config, false)
+        forgeGuard: forgeGuardMetadata(resolved.config, false),
+        provision: referenceExpectationsSource
       });
     } catch (error) {
       return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "runtime", "RUN_LAYOUT_INVALID")]);
     }
 
     try {
-      materializeReferenceNodesForPlan({ projectRoot, graph, layout, initialState, createdAt });
+      materializeReferenceNodesForPlan({
+        projectRoot,
+        graph,
+        layout,
+        initialState,
+        createdAt,
+        provision: referenceExpectationsSource
+      });
     } catch (error) {
       return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
     }
@@ -694,6 +715,7 @@ function assertPreparedRunLayout(input: {
   initialState: ReturnType<typeof createInitialRunState>;
   mode: string;
   forgeGuard: ReturnType<typeof forgeGuardMetadata>;
+  provision: ReferenceExpectationProvision | undefined;
 }): void {
   assertExactPreparedFile(
     input.layout,
@@ -783,12 +805,13 @@ function assertPreparedRunLayout(input: {
     if (
       initialNode === undefined ||
       graphNode?.kind !== "reference" ||
-      sha256Stable(observedNode) !== sha256Stable(completedReferenceNodeState(initialNode, graphNode, input.createdAt))
+      sha256Stable(observedNode) !==
+        sha256Stable(completedReferenceNodeState(initialNode, graphNode, input.createdAt, input.provision))
     ) {
       throw new Error(`prepared run state contains conflicting node evidence: ${nodeId}`);
     }
   }
-  reconcilePreparedReferenceEvents(input.layout, input.graph, input.initialState, input.createdAt);
+  reconcilePreparedReferenceEvents(input.layout, input.graph, input.initialState, input.createdAt, input.provision);
 }
 
 function assertIncompletePreparationRootClosure(layout: RunLayout): void {
@@ -832,7 +855,8 @@ function reconcilePreparedReferenceEvents(
   layout: RunLayout,
   graph: PlannedGraph,
   initialState: ReturnType<typeof createInitialRunState>,
-  createdAt: string
+  createdAt: string,
+  provision: ReferenceExpectationProvision | undefined
 ): void {
   const replay = replayEvents(layout, Number.MAX_SAFE_INTEGER);
   if (replay.malformedRecords !== 0 || replay.truncatedRecords !== 0) {
@@ -855,7 +879,7 @@ function reconcilePreparedReferenceEvents(
     const observedNode = state.nodes[node.id];
     const isInitial = sha256Stable(observedNode) === sha256Stable(initialNode);
     const isCompleted =
-      sha256Stable(observedNode) === sha256Stable(completedReferenceNodeState(initialNode, node, createdAt));
+      sha256Stable(observedNode) === sha256Stable(completedReferenceNodeState(initialNode, node, createdAt, provision));
     if (
       (index < replay.records.length && !isCompleted) ||
       (index > replay.records.length && !isInitial) ||
@@ -1435,12 +1459,93 @@ export function transformTopologyForRun(
   };
 }
 
+interface ReferenceExpectationProvision {
+  sourceContents: Buffer;
+  sourceRelativePath: string;
+  sourceDigest: string;
+}
+
+function provisionReferenceExpectationOutput(
+  graph: PlannedGraph,
+  expandedGraph: ExpandedGraph,
+  projectRoot: string,
+  sourcePathInput: string | undefined
+): ReferenceExpectationProvision | undefined {
+  if (sourcePathInput === undefined) return undefined;
+  if (sourcePathInput.trim().length === 0) {
+    throw new Error("referenceExpectationsPath must be non-empty");
+  }
+  const sourcePath = safeResolveInside(projectRoot, sourcePathInput, "reference expectation catalog");
+  assertNoSymlinkComponents(projectRoot, sourcePath, "reference expectation catalog");
+  const stat = fs.lstatSync(sourcePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`reference expectation catalog must be a regular file: ${sourcePath}`);
+  }
+  const sourceContents = fs.readFileSync(sourcePath);
+  const parsed = validateReferenceExpectationsSchema(JSON.parse(sourceContents.toString("utf8")), sourcePath);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new Error(parsed.issues.map((issue) => issue.message).join("; "));
+  }
+  const contract = artifactContractDefinition("ultrafuzz/reference-expectations@1");
+  const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");
+  if (referenceNodes.length === 0) {
+    throw new Error("reference expectation catalog requires at least one pinned reference node");
+  }
+  for (const node of referenceNodes) {
+    const existingOutput = node.outputs.find((output) => output.path === "references/expectations.json");
+    if (
+      existingOutput !== undefined &&
+      (existingOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+        existingOutput.contract_digest !== contract.digest)
+    ) {
+      throw new Error(
+        `reference node ${node.id} declares references/expectations.json with an incompatible artifact contract`
+      );
+    }
+    if (existingOutput === undefined) {
+      node.outputs.push({
+        path: "references/expectations.json",
+        contract: "ultrafuzz/reference-expectations@1",
+        contract_digest: contract.digest,
+        primary: false
+      });
+    }
+    const expandedNode = expandedGraph.nodes.find((candidate) => candidate.id === node.id);
+    if (expandedNode !== undefined) {
+      const expandedOutput = expandedNode.outputs.find((output) => output.path === "references/expectations.json");
+      if (
+        expandedOutput !== undefined &&
+        (expandedOutput.contract !== "ultrafuzz/reference-expectations@1" ||
+          expandedOutput.contractDigest !== contract.digest)
+      ) {
+        throw new Error(
+          `reference node ${node.id} declares references/expectations.json with an incompatible artifact contract`
+        );
+      }
+      if (expandedOutput === undefined) {
+        expandedNode.outputs.push({
+          path: "references/expectations.json",
+          contract: "ultrafuzz/reference-expectations@1",
+          contractDigest: contract.digest,
+          primary: false
+        });
+      }
+    }
+  }
+  return {
+    sourceContents,
+    sourceRelativePath: path.relative(projectRoot, sourcePath),
+    sourceDigest: sha256Bytes(sourceContents)
+  };
+}
+
 function materializeReferenceNodesForPlan(input: {
   projectRoot: string;
   graph: PlannedGraph;
   layout: RunLayout;
   initialState: ReturnType<typeof createInitialRunState>;
   createdAt: string;
+  provision?: ReferenceExpectationProvision;
 }): void {
   const referenceNodes = input.graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
@@ -1459,6 +1564,14 @@ function materializeReferenceNodesForPlan(input: {
     try {
       const stagingLayout = layoutForRunRoot(stagingRoot, input.layout.runId);
       const stagingArtifactDir = getNodeArtifactDir(stagingLayout, node.id, { create: true });
+      if (input.provision !== undefined) {
+        const expectationArtifact = safeResolveInside(
+          stagingArtifactDir,
+          "references/expectations.json",
+          "reference expectation catalog"
+        );
+        writeFileDurable(expectationArtifact, input.provision.sourceContents);
+      }
       const materialized = materializeReferenceArtifacts({
         catalog,
         id: node.reference,
@@ -1472,7 +1585,7 @@ function materializeReferenceNodesForPlan(input: {
         nodeId: node.id,
         outputs: node.outputs,
         createdAt: input.createdAt,
-        provenance: referenceArtifactProvenance(node, referenceArtifact, manifestArtifact)
+        provenance: referenceArtifactProvenance(node, referenceArtifact, manifestArtifact, input.provision)
       });
       const stagedFiles = walkPreparedFiles(stagingArtifactDir);
       expectedRelativeFiles = stagedFiles.map((stagedPath) =>
@@ -1496,7 +1609,7 @@ function materializeReferenceNodesForPlan(input: {
 
     const initialNode = input.initialState.nodes[node.id];
     if (initialNode === undefined) throw new Error(`reference node ${node.id} is missing its initial state`);
-    const expectedNode = completedReferenceNodeState(initialNode, node, input.createdAt);
+    const expectedNode = completedReferenceNodeState(initialNode, node, input.createdAt, input.provision);
     const observedNode = readRunState(input.layout).nodes[node.id];
     if (sha256Stable(observedNode) === sha256Stable(initialNode)) {
       updateNodeState(
@@ -1509,7 +1622,7 @@ function materializeReferenceNodesForPlan(input: {
           wait_since: undefined,
           wait_reason: undefined,
           next_eligible_action: undefined,
-          provenance: referenceNodeProvenance(node)
+          provenance: referenceNodeProvenance(node, input.provision)
         },
         input.createdAt
       );
@@ -1559,7 +1672,8 @@ function referenceMaterializedEvent(layout: RunLayout, node: PlannedGraphNode, c
 function referenceArtifactProvenance(
   node: PlannedGraphNode,
   referenceArtifact: string,
-  manifestArtifact: string
+  manifestArtifact: string,
+  provision: ReferenceExpectationProvision | undefined
 ): Parameters<typeof writeArtifactManifest>[0]["provenance"] {
   return {
     logical_node_id: node.logical_id,
@@ -1569,27 +1683,53 @@ function referenceArtifactProvenance(
       repo: node.reference_revision?.repo,
       commit: node.reference_revision?.commit,
       reference_artifact: referenceArtifact,
-      manifest_artifact: manifestArtifact
+      manifest_artifact: manifestArtifact,
+      ...(provision === undefined
+        ? {}
+        : {
+            reference_expectations: {
+              source: "operator-supplied",
+              path: provision.sourceRelativePath,
+              sha256: provision.sourceDigest
+            }
+          })
     }
   };
 }
 
-function referenceNodeProvenance(node: PlannedGraphNode): Record<string, unknown> {
+function referenceNodeProvenance(
+  node: PlannedGraphNode,
+  provision: ReferenceExpectationProvision | undefined
+): Record<string, unknown> {
   return {
     origin: "pinned-reference",
     reference: node.reference,
     repo: node.reference_revision?.repo,
-    commit: node.reference_revision?.commit
+    commit: node.reference_revision?.commit,
+    ...(provision === undefined
+      ? {}
+      : {
+          reference_expectations: {
+            source: "operator-supplied",
+            path: provision.sourceRelativePath,
+            sha256: provision.sourceDigest
+          }
+        })
   };
 }
 
-function completedReferenceNodeState(initialNode: NodeState, node: PlannedGraphNode, createdAt: string): NodeState {
+function completedReferenceNodeState(
+  initialNode: NodeState,
+  node: PlannedGraphNode,
+  createdAt: string,
+  provision: ReferenceExpectationProvision | undefined
+): NodeState {
   const completed: NodeState = {
     ...structuredClone(initialNode),
     status: "succeeded",
     started_at: createdAt,
     finished_at: createdAt,
-    provenance: referenceNodeProvenance(node)
+    provenance: referenceNodeProvenance(node, provision)
   };
   delete completed.wait_since;
   delete completed.wait_reason;

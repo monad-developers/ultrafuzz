@@ -96,6 +96,7 @@ export interface NodeStateInput {
   waitReason?: NodeWaitReason;
   nextEligibleAction?: NodeNextEligibleAction;
   waitSince?: string;
+  provenance?: Record<string, unknown>;
 }
 
 export interface NodeOutputContract {
@@ -268,6 +269,9 @@ export function createNodeState(input: NodeStateInput): NodeState {
   }
   if (input.modelIndex !== undefined) {
     state.model_index = input.modelIndex;
+  }
+  if (input.provenance !== undefined) {
+    state.provenance = input.provenance;
   }
   if (!isTerminalNodeStatus(state.status)) {
     state.wait_since = input.waitSince ?? new Date().toISOString();

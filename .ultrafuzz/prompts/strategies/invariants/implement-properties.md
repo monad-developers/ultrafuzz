@@ -145,8 +145,7 @@ repository test root when it uses `test/` instead.
       "property_id": "property-1",
       "status": "implemented",
       "implementation_paths": ["tests/recon/Properties.sol"],
-      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"],
-      "reference_expectations": ["scfuzzbench:aave-v4:iSpoke_supply"]
+      "test_paths": ["tests/foundry/stateful-invariant-implement-properties/Property1.t.sol"]
     }
   ]
 }
