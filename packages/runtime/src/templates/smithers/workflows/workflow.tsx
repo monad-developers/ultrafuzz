@@ -34,6 +34,7 @@ const {
   publishFileDurableExclusive,
   validateArtifactContract,
   validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
   writeFileDurable
 } = await import(artifactsModule);
 const { normalizeFinalReportSeverityRecord, normalizeSeverityLevel } = await import(runtimeModule);
@@ -306,10 +307,6 @@ function resetTaskArtifactContents(
     if (candidate === preservedInput) continue;
     rmSync(candidate, { recursive: true, force: true });
   }
-}
-
-function isMissingPathError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -1340,52 +1337,85 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   if (!validation.ok || validation.value === undefined) {
     return;
   }
+  const ledgerBytes = readFileSync(ledgerPath);
+  const files = new Map<string, { path: string; sha256: string; content: string }>();
   const workspaceRoot = realpathSync(task.workspacePath);
   for (const probe of validation.value.scan_probes) {
-    const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
-    if (probeCandidate === workspaceRoot || !isStrictlyInsideDirectory(workspaceRoot, probeCandidate)) {
-      throw new Error(
-        `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
-      );
-    }
+    const snapshot = readInvariantSourceSnapshot(workspaceRoot, probe.source_path, "scan probe");
+    files.set(probe.source_path, {
+      path: probe.source_path,
+      sha256: createHash("sha256").update(snapshot.bytes).digest("hex"),
+      content: snapshot.content
+    });
   }
   for (const entry of validation.value.entries) {
-    const sourceCandidate = path.resolve(workspaceRoot, entry.source_path);
-    if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
-      throw new Error(
-        `artifact-contract failure: invariant source path escapes the task workspace: ${entry.source_path}`
-      );
-    }
-    let sourcePath: string;
-    try {
-      sourcePath = resolveRegularArtifactFile(workspaceRoot, sourceCandidate, "invariant source is not a regular file");
-    } catch (error) {
-      throw new Error(
-        `artifact-contract failure: invariant source ${entry.source_path} is unavailable: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-    const source = readFileSync(sourcePath, "utf8");
+    const snapshot =
+      files.get(entry.source_path) === undefined
+        ? readInvariantSourceSnapshot(workspaceRoot, entry.source_path, "invariant source")
+        : undefined;
+    const sourceBytes = snapshot?.bytes ?? Buffer.from(files.get(entry.source_path)!.content, "utf8");
+    const source = snapshot?.content ?? files.get(entry.source_path)!.content;
     const locationMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
-    if (source.includes("\u0000")) {
-      continue;
-    }
     const locatedSource =
       locationMatch === null
         ? source
         : normalizeInvariantSourceLines(
             source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]))
           );
-    const normalizedVerbatim = normalizeInvariantSourceText(entry.verbatim);
     const sourceMatches =
       locationMatch === null
-        ? normalizeInvariantSourceText(locatedSource).includes(normalizedVerbatim)
-        : locatedSource === normalizedVerbatim;
+        ? symbolFromInvariantLocation(entry.source_location) !== undefined &&
+          invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!) !== undefined &&
+          normalizeInvariantSourceText(
+            invariantSymbolDeclaration(source, symbolFromInvariantLocation(entry.source_location)!)!
+          ).includes(normalizeInvariantSourceLines([entry.verbatim]))
+        : locatedSource === normalizeInvariantSourceLines([entry.verbatim]);
     if (!sourceMatches) {
       throw new Error(
         `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}`
       );
     }
+    if (snapshot !== undefined) {
+      files.set(entry.source_path, {
+        path: entry.source_path,
+        sha256: createHash("sha256").update(sourceBytes).digest("hex"),
+        content: source
+      });
+    }
   }
+  const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: workspaceRoot, encoding: "utf8" })
+    .trim()
+    .toLowerCase();
+  const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+    cwd: workspaceRoot,
+    encoding: "utf8"
+  })
+    .trim()
+    .toLowerCase();
+  const proof = {
+    schema_version: "ultrafuzz.invariant-source-proof.v1",
+    attempt_id: task.attemptId,
+    commit,
+    tree,
+    ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+    files: [...files.values()]
+  };
+  const proofValidation = validateInvariantSourceProofSchema(proof, "invariant-source-proof");
+  if (!proofValidation.ok) {
+    throw new Error(
+      `artifact-contract failure: invariant source proof is invalid: ${proofValidation.issues
+        .map((issue) => issue.message)
+        .join("; ")}`
+    );
+  }
+  const runRoot = realpathSync(path.resolve(process.cwd(), task.metadata.artifacts.dir, "..", ".."));
+  const proofRoot = path.join(runRoot, "source-proofs");
+  const proofPath = path.join(proofRoot, `${task.attemptId}.invariant.json`);
+  if (!isStrictlyInsideDirectory(runRoot, proofRoot) || !isStrictlyInsideDirectory(proofRoot, proofPath)) {
+    throw new Error(`artifact-contract failure: unsafe invariant source proof path ${task.attemptId}`);
+  }
+  mkdirSync(proofRoot, { recursive: true });
+  writeFileDurable(proofPath, `${JSON.stringify(proof, null, 2)}\n`);
 }
 
 function normalizeInvariantSourceText(value: string): string {
@@ -1394,6 +1424,25 @@ function normalizeInvariantSourceText(value: string): string {
 
 function normalizeInvariantSourceLines(lines: readonly string[]): string {
   return normalizeInvariantSourceText(lines.map((line) => line.replace(/^\s*(?:[-*+]\s+|>\s+)/u, "").trim()).join(" "));
+}
+
+function symbolFromInvariantLocation(location: string): string | undefined {
+  return /([A-Za-z_$][A-Za-z0-9_$]*)\s*$/u.exec(location)?.[1];
+}
+
+function escapeRegExpForPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function invariantSymbolDeclaration(source: string, symbol: string): string | undefined {
+  const declaration = new RegExp(
+    `\\b(?:function|contract|library|interface|modifier|event|error|struct|enum)\\s+(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)?${escapeRegExpForPattern(symbol)}\\b`,
+    "u"
+  ).exec(source);
+  if (declaration === null || declaration.index === undefined) return undefined;
+  const tail = source.slice(declaration.index + declaration[0].length);
+  const next = /\n\s*(?:function|contract|library|interface|modifier|event|error|struct|enum)\s+/u.exec(tail);
+  return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {

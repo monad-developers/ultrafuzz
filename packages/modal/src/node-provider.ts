@@ -601,6 +601,12 @@ async function publishModalNodeResult(
       replacePublishedDirectory(workspace, workspaceDir);
     }
     replacePublishedDirectory(path.join(extracted, "artifacts"), artifactDir);
+    const sourceProof = path.join(extracted, "source-proofs", `${input.attempt_id}.invariant.json`);
+    if (fs.existsSync(sourceProof)) {
+      const proofRoot = checkedPath(root, path.join(input.run_root, "source-proofs"), "source proof directory", false);
+      const destination = path.join(proofRoot, `${input.attempt_id}.invariant.json`);
+      replacePublishedFile(sourceProof, destination);
+    }
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
@@ -734,6 +740,25 @@ function replacePublishedDirectory(source: string, destination: string): void {
     throw error;
   }
   if (hadPrevious) fs.rmSync(previous, { recursive: true, force: true });
+}
+
+function replacePublishedFile(source: string, destination: string): void {
+  const sourceStat = fs.lstatSync(source);
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1) {
+    throw new Error("cloud node result source file is unsafe");
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  const destinationStat = fs.existsSync(destination) ? fs.lstatSync(destination) : undefined;
+  if (destinationStat?.isSymbolicLink() || (destinationStat !== undefined && !destinationStat.isFile())) {
+    throw new Error("cloud node result destination file is unsafe");
+  }
+  const pending = `${destination}.publishing-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  fs.copyFileSync(source, pending);
+  try {
+    fs.renameSync(pending, destination);
+  } finally {
+    if (fs.existsSync(pending)) fs.rmSync(pending, { force: true });
+  }
 }
 
 function requiredCredential(env: Record<string, string | undefined>, name: string | undefined): string {

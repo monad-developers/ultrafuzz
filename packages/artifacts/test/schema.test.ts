@@ -11,6 +11,7 @@ import {
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
   INVARIANT_LEDGER_SCHEMA_VERSION,
+  INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
@@ -26,6 +27,7 @@ import {
   findingJsonSchema,
   generatedTestsJsonSchema,
   invariantLedgerJsonSchema,
+  invariantSourceProofJsonSchema,
   lensPropertiesJsonSchema,
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
@@ -36,6 +38,7 @@ import {
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
   validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
   validateArtifactContract,
@@ -58,6 +61,7 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("invariant-evidence-ledger.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("invariant-source-proof.schema.json")));
     assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
@@ -330,6 +334,34 @@ test("invariant evidence ledger rejects duplicate entries, duplicate inventory j
   const noEvidenceWithoutProbeResult = validateInvariantLedgerSchema(noEvidenceWithoutProbe);
   assert.equal(noEvidenceWithoutProbeResult.ok, false);
   assert.ok(noEvidenceWithoutProbeResult.issues.some((issue) => /at least one scan probe/u.test(issue.message)));
+});
+
+test("invariant source proofs bind immutable text snapshots to a ledger digest", () => {
+  const proof = {
+    schema_version: INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
+    attempt_id: "project-discovery",
+    commit: "a".repeat(40),
+    tree: "b".repeat(40),
+    ledger_sha256: "c".repeat(64),
+    files: [
+      { path: "docs/Some File.md", sha256: "d".repeat(64), content: "Total borrowed assets <= total supplied assets" }
+    ]
+  };
+  assert.equal(validateInvariantSourceProofSchema(proof).ok, true);
+  assert.deepEqual(invariantSourceProofJsonSchema.required, [
+    "schema_version",
+    "attempt_id",
+    "commit",
+    "tree",
+    "ledger_sha256",
+    "files"
+  ]);
+  const binary = structuredClone(proof);
+  binary.files[0]!.content = "\u0000";
+  assert.equal(validateInvariantSourceProofSchema(binary).ok, false);
+  const duplicate = structuredClone(proof);
+  duplicate.files.push({ ...duplicate.files[0]! });
+  assert.equal(validateInvariantSourceProofSchema(duplicate).ok, false);
 });
 
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
@@ -889,6 +921,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
   const invariantLedgerSnapshot = readSchemaSnapshot("invariant-evidence-ledger.schema.json");
+  const invariantSourceProofSnapshot = readSchemaSnapshot("invariant-source-proof.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const propertiesSnapshot = readSchemaSnapshot("properties.schema.json");
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
@@ -900,6 +933,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
+  assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);
   assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -313,6 +314,64 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   assert.ok(
     missingEvidence.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_MARKDOWN_EVIDENCE_MISSING")
   );
+});
+
+test("project discovery gate verifies immutable source proof after the discovery workspace is reclaimed", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-source-proof" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-solvency",
+        source_path: "docs/overview.md",
+        source_location: "lines 1-1",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-solvency"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-solvency",
+        description: "Borrowed assets stay below supplied assets.",
+        ledger_ids: ["evidence-solvency"]
+      }
+    ],
+    scan_probes: []
+  };
+  const ledgerBytes = Buffer.from(JSON.stringify(ledger));
+  writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledgerBytes.toString("utf8"));
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/project-discovery.md",
+    "### Ledger entry: evidence-solvency\nsource_path: docs/overview.md\nsource_location: lines 1-1\nverbatim: Total borrowed assets <= total supplied assets\ninventory-solvency\n### End ledger entry: evidence-solvency\n### Inventory row: inventory-solvency\ndescription: Borrowed assets stay below supplied assets.\nledger_ids: evidence-solvency\n### End inventory row: inventory-solvency\n"
+  );
+  const source = "Total borrowed assets <= total supplied assets\n";
+  fs.mkdirSync(path.join(layout.root, "source-proofs"), { recursive: true });
+  fs.writeFileSync(
+    path.join(layout.root, "source-proofs", "project-discovery.invariant.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-source-proof.v1",
+      attempt_id: "project-discovery",
+      commit: "a".repeat(40),
+      tree: "b".repeat(40),
+      ledger_sha256: createHash("sha256").update(ledgerBytes).digest("hex"),
+      files: [{ path: "docs/overview.md", sha256: createHash("sha256").update(source).digest("hex"), content: source }]
+    })
+  );
+  fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });
+  assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  fs.writeFileSync(path.join(layout.root, "source-proofs", "project-discovery.invariant.json"), "{}");
+  const invalidProof = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(invalidProof.ok, false);
+  assert.ok(invalidProof.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_PROOF_INVALID"));
 });
 
 test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {
