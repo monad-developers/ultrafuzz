@@ -17,6 +17,7 @@ import {
   validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
+  validateReferenceExpectationsSchema,
   validatePropertiesSchema,
   validatePropertyCampaignSchema,
   validatePropertyReferences,
@@ -1464,6 +1465,10 @@ function verifyPropertyProvenanceArtifacts(
   node: PlannedGraphNode
 ): RuntimeDiagnostic[] {
   const logicalId = node.logical_id ?? node.id;
+  const isPropertyLens = node.outputs.some((output) => output.contract === "ultrafuzz/property-lens@1");
+  if (isPropertyLens) {
+    return verifyLensReferenceExpectationAuthority(layout, artifactDir, node);
+  }
   if (logicalId === "final-report") {
     return verifyFinalReportPropertyReferences(layout, artifactDir, node);
   }
@@ -1509,6 +1514,92 @@ function verifyPropertyProvenanceArtifacts(
   }
 
   return verifyCampaignPropertyReferences(layout, artifactDir, catalog.value);
+}
+
+/**
+ * A reference expectation is provenance, not free-form model metadata. A lens
+ * may copy an ID only when the exact token is present in an upstream input
+ * artifact (reference material or an explicit setup/evidence handoff). This
+ * keeps illustrative prompt text from becoming an apparently authorized
+ * benchmark mapping.
+ */
+function verifyLensReferenceExpectationAuthority(
+  layout: RunLayout,
+  artifactDir: string,
+  node: PlannedGraphNode
+): RuntimeDiagnostic[] {
+  const lensOutput = node.outputs.find(
+    (output) => output.contract === "ultrafuzz/property-lens@1" || output.path.endsWith(".json")
+  );
+  if (lensOutput === undefined) return [];
+  const lensPath = path.join(artifactDir, lensOutput.path);
+  if (!fs.existsSync(lensPath)) return [];
+  const lens = validateLensPropertiesSchema(readJsonFile(lensPath), lensPath);
+  if (!lens.ok || lens.value === undefined) return [];
+
+  const suppliedExpectationIds = readLensSuppliedExpectationIds(layout, node);
+  const diagnostics: RuntimeDiagnostic[] = [];
+  for (const [propertyIndex, property] of lens.value.properties.entries()) {
+    for (const [expectationIndex, expectationId] of (property.reference_expectations ?? []).entries()) {
+      if (suppliedExpectationIds.has(expectationId)) continue;
+      diagnostics.push({
+        code: "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED",
+        message: `Property lens expectation ${JSON.stringify(expectationId)} is not present in a supplied reference or target-evidence artifact`,
+        severity: "error",
+        source: "property-provenance",
+        path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations[${expectationIndex}]`
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function readLensSuppliedExpectationIds(layout: RunLayout, node: PlannedGraphNode): Set<string> {
+  const expectationIds = new Set<string>();
+  const state = readRunState(layout);
+  for (const dependencyId of node.depends_on) {
+    const logicalId = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
+    // Only declared, pinned-reference inputs can authorize provenance. In
+    // particular, an agentic setup/lens node or unrelated reference elsewhere
+    // in the run cannot authorize an ID for this lens.
+    if (state.nodes[dependencyId]?.provenance?.origin !== "pinned-reference") continue;
+    const dependencyDir = getNodeArtifactDir(layout, dependencyId);
+    if (declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/expectations.json")) {
+      appendExpectationCatalog(path.join(dependencyDir, "references", "expectations.json"), expectationIds);
+    }
+    if (
+      declaresReferenceExpectationCatalog(state.nodes[dependencyId]?.outputs, "references/reference-expectations.json")
+    ) {
+      appendExpectationCatalog(path.join(dependencyDir, "references", "reference-expectations.json"), expectationIds);
+    }
+  }
+  return expectationIds;
+}
+
+function declaresReferenceExpectationCatalog(
+  outputs: ReadonlyArray<{ path: string; contract: string }> | undefined,
+  expectedPath: string
+): boolean {
+  return (
+    outputs?.some(
+      (output) => output.path === expectedPath && output.contract === "ultrafuzz/reference-expectations@1"
+    ) ?? false
+  );
+}
+
+function appendExpectationCatalog(catalogPath: string, expectationIds: Set<string>): void {
+  try {
+    const stat = fs.lstatSync(catalogPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return;
+    const parsed = validateReferenceExpectationsSchema(
+      JSON.parse(fs.readFileSync(catalogPath, "utf8")) as unknown,
+      catalogPath
+    );
+    if (!parsed.ok || parsed.value === undefined) return;
+    for (const expectation of parsed.value.expectations) expectationIds.add(expectation.id);
+  } catch {
+    return;
+  }
 }
 
 /**

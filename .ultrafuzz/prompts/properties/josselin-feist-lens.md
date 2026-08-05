@@ -31,10 +31,12 @@ You must produce a typed JSON catalog and a matching Markdown companion. Use
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
-When a property corresponds to a named benchmark or reference expectation,
-include a `reference_expectations` array containing the exact stable identifier
-(for example `scfuzzbench:aave-v4:iSpoke_supply`). Preserve one identifier per
-named expectation; omit the field only when no named expectation is represented.
+Populate `reference_expectations` only from exact identifiers present in the
+supplied reference artifacts or explicit target-evidence handoffs. Preserve one
+identifier per named expectation and carry the supplied identifier unchanged;
+when the supplied inputs contain no named expectation, leave the field absent.
+
+When an expectation catalog is supplied, read `{{artifact_path:project-discovery}}/setup/reference-expectations.json` or `references/expectations.json` and validate it with `{{schema_path}}/reference-expectations.schema.json` before copying identifiers.
 
 ## Target-derived invariant extraction
 
