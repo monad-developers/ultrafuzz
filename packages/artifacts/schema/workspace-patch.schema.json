@@ -28,7 +28,8 @@
               { "not": { "pattern": "(^|/)\\.(?:/|$)" } },
               { "not": { "pattern": "(^|/)\\.\\.(?:/|$)" } },
               { "not": { "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)" } },
-              { "not": { "pattern": "(^|/)\\.env(?:\\.|/|$)" } }
+              { "not": { "pattern": "(^|/)\\.env(?:\\.|/|$)" } },
+              { "not": { "pattern": "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
             ]
           }
         }

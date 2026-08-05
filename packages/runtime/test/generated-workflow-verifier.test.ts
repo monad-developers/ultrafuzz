@@ -546,6 +546,7 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
   const restoreStart = source.indexOf("function restoreInvariantSuiteWorkspaceSnapshot");
   const restoreEnd = source.indexOf("function assertTaskInputs", restoreStart);
+  const workflowStart = source.indexOf("export default smithers");
 
   assert.ok(prepareStart >= 0 && materializeStart > prepareStart && restoreStart > prepareStart, source);
   assert.ok(restoreEnd > restoreStart, source);
@@ -567,6 +568,14 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(source, /before\.dev !== after\.dev/u);
   assert.match(source, /before\.ino !== after\.ino/u);
   assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
+  const preparationRestoreStart = source.indexOf("function restoreWorkspacePatchPreparation");
+  assert.ok(preparationRestoreStart > 0, source);
+  const preparationRestore = source.slice(preparationRestoreStart, workflowStart);
+  assert.ok(
+    preparationRestore.indexOf('git", ["read-tree", "--reset", "-u"') <
+      preparationRestore.indexOf('git", ["clean", "-fdx"'),
+    preparationRestore
+  );
   assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
   assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
   assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
@@ -617,6 +626,7 @@ test("generated Smithers preserves setup-patch baselines across post-agent prepa
   assert.match(helper, /!workspacePatchBaselineTrees\.has\(task\.attemptId\)/u);
   assert.match(helper, /readWorkspacePatchBaseline\(task\)/u);
   assert.match(helper, /writeWorkspacePatchBaseline\(task, baselineTree\)/u);
+  assert.match(helper, /persistedPreparation === undefined && !replayWorkspacePatches/u);
   assert.match(helper, /taskPublishesWorkspacePatch\(task\) && !workspacePatchBaselineTrees\.has/u);
   assert.match(
     source,

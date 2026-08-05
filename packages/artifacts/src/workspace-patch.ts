@@ -55,7 +55,9 @@ function isSafeWorkspacePatchPath(value: string): boolean {
     return (
       [".git", ".ultrafuzz", ".smithers", "node_modules"].includes(segment) ||
       segment === ".env" ||
-      segment.startsWith(".env.")
+      segment.startsWith(".env.") ||
+      segment === ".envrc" ||
+      segment === ".npmrc"
     );
   });
 }
@@ -126,7 +128,8 @@ export const workspacePatchJsonSchema = {
               { not: { pattern: "(^|/)\\.(?:/|$)" } },
               { not: { pattern: "(^|/)\\.\\.(?:/|$)" } },
               { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)" } },
-              { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } }
+              { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } },
+              { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
             ]
           }
         }

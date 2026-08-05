@@ -414,6 +414,10 @@ function materializeWorkspacePatchDependencies(
   workspaceRoot: string,
   replayWorkspacePatches: boolean
 ): void {
+  const expectedPreparation = workspacePatchPreparationTrees.get(task.attemptId);
+  if (expectedPreparation !== undefined && readWorkspacePatchPreparation(task) !== expectedPreparation) {
+    throw new Error(`artifact-contract failure: workspace preparation was modified ${task.attemptId}`);
+  }
   const dependencies = [...task.dependencyArtifactDirs]
     .filter(
       (dependency) =>
@@ -460,9 +464,16 @@ function materializeWorkspacePatchDependencies(
   }
   if (!workspacePatchPreparationTrees.has(task.attemptId)) {
     const persistedPreparation = readWorkspacePatchPreparation(task);
+    if (persistedPreparation === undefined && !replayWorkspacePatches) {
+      throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
+    }
     const preparationTree = persistedPreparation ?? captureWorkspaceTree(workspaceRoot);
     workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
     if (persistedPreparation === undefined) writeWorkspacePatchPreparation(task, preparationTree);
+  }
+  const expectedBaseline = workspacePatchBaselineTrees.get(task.attemptId);
+  if (expectedBaseline !== undefined && readWorkspacePatchBaseline(task) !== expectedBaseline) {
+    throw new Error(`artifact-contract failure: workspace patch baseline was modified ${task.attemptId}`);
   }
   if (taskPublishesWorkspacePatch(task) && !workspacePatchBaselineTrees.has(task.attemptId)) {
     const persistedBaseline = readWorkspacePatchBaseline(task);
@@ -595,11 +606,13 @@ function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], work
     throw new Error(`artifact-contract failure: workspace preparation is unavailable ${task.attemptId}`);
   }
   workspacePatchPreparationTrees.set(task.attemptId, preparationTree);
-  execFileSync("git", ["clean", "-fd", "--"], { cwd: workspaceRoot, stdio: ["ignore", "pipe", "pipe"] });
   execFileSync("git", ["read-tree", "--reset", "-u", preparationTree], {
     cwd: workspaceRoot,
     stdio: ["ignore", "pipe", "pipe"]
   });
+  // Restore tracked ignore rules first, then remove all untracked files,
+  // including files hidden by an ignore rule introduced by the failed agent.
+  execFileSync("git", ["clean", "-fdx", "--"], { cwd: workspaceRoot, stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {

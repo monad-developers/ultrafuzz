@@ -24,6 +24,7 @@ test("validates the workspace patch manifest contract", () => {
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: "./foundry.toml" }] }).ok, false);
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: ".gitignore" }] }).ok, true);
   assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: ".git/.keep" }] }).ok, false);
+  assert.equal(validateWorkspacePatchSchema({ ...valid, files: [{ path: ".npmrc" }] }).ok, false);
 });
 
 test("rejects duplicate or traversal workspace patch paths", () => {

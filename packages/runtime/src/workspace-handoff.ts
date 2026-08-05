@@ -9,7 +9,7 @@ import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
 const MAX_PATCH_BYTES = 16 * 1024 * 1024;
-const SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules"]);
+const SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".envrc", ".npmrc"]);
 
 export interface WorkspacePatchFile {
   path: string;
@@ -136,15 +136,51 @@ function assertPatchPathsMatchManifest(
   }
   const patchFiles = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
+    for (const entry of manifestFiles) assertNotIgnoredPatchPath(workspaceRoot, index, entry.path, true);
     runGit(workspaceRoot, ["apply", "--cached", "--check", "--binary", "--whitespace=nowarn", "-"], index, patch);
     runGit(workspaceRoot, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], index, patch);
-    return parseChangedPaths(runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index));
+    const paths = parseChangedPaths(
+      runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index)
+    );
+    for (const entry of paths) assertNotIgnoredPatchPath(workspaceRoot, index, entry.path);
+    return paths;
   });
   const expected = manifestFiles.map((entry) => entry.path).sort();
   const actual = patchFiles.map((entry) => entry.path).sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error("workspace patch manifest files do not match the patch paths");
   }
+}
+
+function assertNotIgnoredPatchPath(
+  workspaceRoot: string,
+  index: string,
+  relativePath: string,
+  checkOnlyWhenUntracked = false
+): void {
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  let tracked = false;
+  try {
+    execFileSync("git", ["ls-files", "--error-unmatch", "--", relativePath], {
+      cwd: workspaceRoot,
+      env,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
+    tracked = true;
+  } catch (error) {
+    if (!(error instanceof Error) || !("status" in error) || error.status !== 1) throw error;
+  }
+  if (tracked && checkOnlyWhenUntracked) return;
+  try {
+    execFileSync("git", ["check-ignore", "--no-index", "--quiet", "--", relativePath], {
+      cwd: workspaceRoot,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
+  } catch (error) {
+    if (error instanceof Error && "status" in error && error.status === 1) return;
+    throw error;
+  }
+  throw new Error(`workspace patch cannot modify an ignored untracked path: ${relativePath}`);
 }
 
 function validateManifest(manifest: WorkspacePatchManifest): void {
