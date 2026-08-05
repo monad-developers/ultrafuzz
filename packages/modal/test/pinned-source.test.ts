@@ -60,6 +60,10 @@ describe("pinned benchmark source", () => {
 
   it("hydrates submodules at the gitlink revisions recorded by the pinned commit", async () => {
     const fixture = submoduleSourceRepository();
+    expect(git(fixture.repository, ["ls-tree", "HEAD", "vendor/dependency"]).split("\t")[0].split(" ")[2]).toBe(
+      fixture.submoduleCommit
+    );
+    expect(git(fixture.submodule, ["ls-tree", "HEAD", "nested/child"]).split("\t")[1]).toBe("nested/child");
     const destination = path.join(fixture.root, "sanitized-submodule");
 
     const previousAllowedProtocols = process.env.GIT_ALLOW_PROTOCOL;
@@ -79,7 +83,13 @@ describe("pinned benchmark source", () => {
     expect(fs.readFileSync(path.join(destination, "vendor/dependency/dependency.txt"), "utf8")).toBe(
       "pinned dependency\n"
     );
-    expect(git(path.join(destination, "vendor/dependency"), ["rev-parse", "HEAD"])).toBe(fixture.submoduleCommit);
+    expect(gitlinkHash(destination, "vendor/dependency")).toBe(fixture.submoduleCommit);
+    expect(fs.readFileSync(path.join(destination, "vendor/dependency/nested/child/child.txt"), "utf8")).toBe(
+      "nested dependency\n"
+    );
+    expect(fs.existsSync(path.join(destination, ".git", "modules"))).toBe(false);
+    expect(fs.existsSync(path.join(destination, "vendor/dependency/.git"))).toBe(false);
+    expect(fs.existsSync(path.join(destination, "vendor/dependency/nested/child/.git"))).toBe(false);
     expect(proof).toMatchObject({ commit: fixture.pinned, revision_count: 1, remotes: [] });
     await expect(inspectPinnedSource(destination, fixture.pinned)).resolves.toEqual(proof);
   });
@@ -135,9 +145,19 @@ function submoduleSourceRepository(): {
   repository: string;
   pinned: string;
   submoduleCommit: string;
+  submodule: string;
 } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-pinned-submodule-"));
   roots.push(root);
+  const nested = path.join(root, "nested");
+  fs.mkdirSync(nested);
+  git(nested, ["init", "--quiet", "--initial-branch=main"]);
+  git(nested, ["config", "user.name", "Ultrafuzz test"]);
+  git(nested, ["config", "user.email", "test@example.invalid"]);
+  fs.writeFileSync(path.join(nested, "child.txt"), "nested dependency\n");
+  git(nested, ["add", "child.txt"]);
+  git(nested, ["commit", "--quiet", "-m", "nested dependency"]);
+
   const submodule = path.join(root, "dependency");
   fs.mkdirSync(submodule);
   git(submodule, ["init", "--quiet", "--initial-branch=main"]);
@@ -146,6 +166,8 @@ function submoduleSourceRepository(): {
   fs.writeFileSync(path.join(submodule, "dependency.txt"), "pinned dependency\n");
   git(submodule, ["add", "dependency.txt"]);
   git(submodule, ["commit", "--quiet", "-m", "dependency"]);
+  git(submodule, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", "../nested", "nested/child"]);
+  git(submodule, ["commit", "--quiet", "-am", "nested submodule"]);
   const submoduleCommit = git(submodule, ["rev-parse", "HEAD"]);
 
   const repository = path.join(root, "source");
@@ -156,10 +178,18 @@ function submoduleSourceRepository(): {
   fs.writeFileSync(path.join(repository, "source.txt"), "pinned\n");
   git(repository, ["add", "source.txt"]);
   git(repository, ["commit", "--quiet", "-m", "source"]);
-  git(repository, ["-c", "protocol.file.allow=always", "submodule", "add", "--quiet", submodule, "vendor/dependency"]);
+  git(repository, [
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    "--quiet",
+    "../dependency",
+    "vendor/dependency"
+  ]);
   git(repository, ["commit", "--quiet", "-am", "submodule"]);
   const pinned = git(repository, ["rev-parse", "HEAD"]);
-  return { root, repository, pinned, submoduleCommit };
+  return { root, repository, pinned, submoduleCommit, submodule };
 }
 
 function git(cwd: string, args: string[]): string {
@@ -168,4 +198,8 @@ function git(cwd: string, args: string[]): string {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   }).trim();
+}
+
+function gitlinkHash(repository: string, relativePath: string): string {
+  return git(repository, ["ls-tree", "HEAD", relativePath]).split("\t")[0].split(" ")[2]!;
 }

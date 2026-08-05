@@ -65,8 +65,14 @@ export async function materializePinnedSource(input: {
 
     await git(destination, ["checkout", "--quiet", "-B", PINNED_SOURCE_BRANCH, revision], input.signal);
     if (await containsGitlinks(destination, input.signal)) {
-      await git(destination, ["submodule", "sync", "--recursive"], input.signal);
-      await git(destination, ["submodule", "update", "--init", "--recursive", "--depth", "1"], input.signal);
+      await git(destination, ["remote", "add", "origin", input.repository], input.signal);
+      try {
+        await git(destination, ["submodule", "sync", "--recursive"], input.signal);
+        await git(destination, ["submodule", "update", "--init", "--recursive", "--depth", "1"], input.signal);
+      } finally {
+        await git(destination, ["remote", "remove", "origin"], input.signal).catch(() => undefined);
+      }
+      await removeSubmoduleMetadata(destination, input.signal);
     }
 
     await rm(path.join(destination, ".git", "FETCH_HEAD"), { force: true });
@@ -158,6 +164,29 @@ export async function inspectPinnedSource(
 async function containsGitlinks(repositoryRoot: string, signal?: AbortSignal): Promise<boolean> {
   const entries = await git(repositoryRoot, ["ls-files", "--stage"], signal);
   return entries.split("\n").some((entry) => entry.startsWith("160000 "));
+}
+
+async function removeSubmoduleMetadata(repositoryRoot: string, signal?: AbortSignal): Promise<void> {
+  const paths = await submodulePaths(repositoryRoot, signal);
+  await Promise.all(
+    paths.map((relative) => rm(path.join(repositoryRoot, relative, ".git"), { recursive: true, force: true }))
+  );
+  await rm(path.join(repositoryRoot, ".git", "modules"), { recursive: true, force: true });
+}
+
+async function submodulePaths(repositoryRoot: string, signal?: AbortSignal, prefix = ""): Promise<string[]> {
+  const entries = await git(repositoryRoot, ["ls-files", "--stage"], signal);
+  const relativePaths = entries
+    .split("\n")
+    .filter((entry) => entry.startsWith("160000 "))
+    .map((entry) => entry.split("\t")[1])
+    .filter((relative): relative is string => relative !== undefined && relative !== "")
+    .filter((relative) => !path.posix.isAbsolute(relative) && !relative.split("/").includes(".."));
+  const paths = relativePaths.map((relative) => (prefix === "" ? relative : path.posix.join(prefix, relative)));
+  const nested = await Promise.all(
+    relativePaths.map((relative, index) => submodulePaths(path.join(repositoryRoot, relative), signal, paths[index]!))
+  );
+  return paths.concat(nested.flat());
 }
 
 async function git(cwd: string, args: string[], signal?: AbortSignal): Promise<string> {
