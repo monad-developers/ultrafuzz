@@ -668,19 +668,15 @@ function verifyLensReferenceExpectationPreservation(
     const declaredLensPath = state.nodes[dependencyId]?.outputs?.find(
       (output) => output.contract === "ultrafuzz/property-lens@1"
     )?.path;
-    const lensPath = findDependencyArtifact(
-      layout,
-      dependencyId,
-      dependency,
-      declaredLensPath ?? `properties/${lensName}.json`
-    );
+    const lensRelativePath = declaredLensPath ?? `properties/${lensName}.json`;
+    const lensPath = findDependencyArtifact(layout, dependencyId, dependency, lensRelativePath);
     if (lensPath === undefined) {
       diagnostics.push({
         code: "PROPERTY_LENS_MISSING",
         message: `Property fan-in cannot verify reference expectations because lens artifact for ${JSON.stringify(dependency)} is unavailable`,
         severity: "error",
         source: "property-fanin",
-        path: `artifacts/${dependency}/properties/${lensName}.json`
+        path: `artifacts/${dependency}/${lensRelativePath}`
       });
       continue;
     }
