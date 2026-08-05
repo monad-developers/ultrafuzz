@@ -179,7 +179,8 @@ test("project discovery gate requires ledger evidence to survive in the markdown
   const node = {
     ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
     id: "project-discovery",
-    logical_id: "project-discovery"
+    logical_id: "project-discovery",
+    artifact_dir: "artifacts/project-discovery"
   };
   const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
   fs.mkdirSync(sourceDir, { recursive: true });
@@ -578,7 +579,8 @@ test("project discovery gate parses source text containing a closing ledger mark
   const node = {
     ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
     id: "project-discovery",
-    logical_id: "project-discovery"
+    logical_id: "project-discovery",
+    artifact_dir: "artifacts/project-discovery"
   };
   const verbatim = "Total borrowed assets <= total supplied assets\n### End ledger entry: evidence-marker";
   const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
@@ -632,16 +634,16 @@ test("project discovery gate parses source text containing a closing ledger mark
     node.id,
     "setup/project-discovery.md",
     [
-      "### Ledger entry: evidence-marker",
+      "### Ledger entry (malformed): evidence-marker",
       "source_path: docs/overview.md",
       "source_location: lines 1-2",
       "verbatim: Total borrowed assets <= total supplied assets",
-      "  ### End ledger entry: evidence-marker",
+      "  not-a-structural-closer",
       "inventory-marker",
       "### Inventory row: inventory-marker",
       "description: The source statement remains linked to its inventory row.",
       "ledger_ids: evidence-marker",
-      "### End ledger entry: evidence-marker",
+      "### End inventory row: inventory-marker",
       "### End inventory row: inventory-marker"
     ].join("\n")
   );

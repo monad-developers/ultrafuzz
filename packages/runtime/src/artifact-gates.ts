@@ -916,7 +916,7 @@ function markdownContainsToken(markdown: string, token: string): boolean {
   const pattern = new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(token)}(?![A-Za-z0-9._-])`, "u");
   if (pattern.test(markdown)) return true;
   const normalizeIndented = (value: string): string => value.replace(/\r\n?/gu, "\n").replace(/^ {2}/gmu, "");
-  return pattern.test(normalizeIndented(markdown)) || pattern.test(normalizeIndented(token));
+  return pattern.test(normalizeIndented(markdown));
 }
 
 function escapeRegExp(value: string): string {
