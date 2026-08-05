@@ -517,6 +517,26 @@ test("property implementation and campaign schemas retain canonical references",
   );
 });
 
+test("property implementation schema rejects source-less implemented records", () => {
+  const sourceLess = {
+    schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        property_id: "property-1",
+        status: "implemented",
+        implementation_paths: [],
+        test_paths: []
+      }
+    ]
+  };
+
+  const invalid = validateImplementedPropertiesSchema(sourceLess);
+  assert.equal(invalid.ok, false);
+  assert.ok(
+    invalid.issues.some((issue) => /implemented property must identify at least one source/u.test(issue.message))
+  );
+});
+
 test("property implementation schema rejects duplicate canonical references", () => {
   const duplicate = {
     schema_version: IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
