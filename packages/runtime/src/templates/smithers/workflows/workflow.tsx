@@ -54,6 +54,7 @@ const {
   applyWorkspacePatch,
   captureWorkspacePatch,
   captureWorkspaceTree,
+  dynamicStorageId,
   materializeDynamicRuntime,
   materializeGoalPlanVulnerabilityDatabaseSnapshots,
   normalizeFinalReportSeverityRecord,
@@ -491,6 +492,147 @@ function compiledCanonicalSelectedTask(compiled: (typeof serializedTaskSpecs)[nu
   );
 }
 
+/**
+ * Every attempt ID one declared dynamic group could materialize for a generated concrete node ID.
+ *
+ * A group's storage identity is a pure function of the group node ID and the generated node ID, and
+ * the per-template attempt suffix comes from the group's own compiled model fan-out, so the whole set
+ * is derivable from compile-time constants inside a relocated worker -- no expansion manifest needed.
+ */
+function generatedAttemptIdsFor(group: (typeof dynamicGroupSpecs)[number], generatedNodeId: string): string[] {
+  const storageId = dynamicStorageId(group.groupNodeId, generatedNodeId) as string;
+  if (group.taskTemplates.length <= 1) return [storageId];
+  return group.taskTemplates.map((template, index) => {
+    const model = template.metadata.model;
+    return `${storageId}__model_${model?.modelIndex ?? index}__attempt_${model?.attemptIndex ?? index}`;
+  });
+}
+
+/**
+ * Correlated runtime-materialization evidence for the dynamic groups one compiled task declared.
+ *
+ * A handoff may only gain a dependency that one of those groups could actually have produced: a
+ * generated child's own attempt, or -- when a group expanded to no items -- the group's compiled
+ * source attempt, which is the single fallback runtime lowering substitutes.
+ */
+function runtimeDependencyEvidence(groupNodeIds: readonly string[]) {
+  const groups = groupNodeIds.map((groupNodeId) => {
+    const group = dynamicGroupSpecs.find((candidate) => candidate.groupNodeId === groupNodeId);
+    if (group === undefined) {
+      throw new Error(`cloud worker task declares unknown dynamic group ${groupNodeId}`);
+    }
+    return group;
+  });
+  return {
+    admissibleAttemptIds(concreteNodeId: string): string[] {
+      return groups.flatMap((group) => [
+        ...generatedAttemptIdsFor(group, concreteNodeId),
+        ...(group.source.concreteNodeId === concreteNodeId ? [group.source.attemptId] : [])
+      ]);
+    }
+  };
+}
+
+/**
+ * Resolves the declared dynamic group and template that could have produced one dispatched attempt.
+ *
+ * The group is never taken from the handoff: it is the group whose compile-time storage derivation
+ * actually yields the dispatched attempt ID from the claimed generated node ID. Group, storage
+ * identity, and attempt identity therefore form one mutually consistent claim instead of three
+ * independent ones a runtime-generated attempt could each choose freely.
+ */
+function generatingGroupFor(
+  concreteNodeId: string,
+  attemptId: string
+): { group: (typeof dynamicGroupSpecs)[number]; template: (typeof compiledBaseTasks)[number] } | undefined {
+  for (const group of dynamicGroupSpecs) {
+    const index = generatedAttemptIdsFor(group, concreteNodeId).indexOf(attemptId);
+    const template = index < 0 ? undefined : group.taskTemplates[index];
+    if (template !== undefined) return { group, template: template as (typeof compiledBaseTasks)[number] };
+  }
+  return undefined;
+}
+
+/**
+ * Placeholder for the three values only the expansion itself produced.
+ *
+ * These are never compared: the shared contract relaxes exactly the expansion key and the two runtime
+ * digests. The placeholder exists so the reconstructed canonical DTO stays structurally complete,
+ * which is what makes an *absent* dynamic provenance block a mismatch rather than a silent omission.
+ */
+const GENERATED_EXPANSION_PLACEHOLDER = "<runtime-expansion-value>";
+
+/**
+ * The canonical DTO a runtime-generated child of one declared dynamic group must produce.
+ *
+ * A generated attempt has no compiled spec of its own, so without this every constant it inherits
+ * would be attacker-chosen. Everything its group's compiled template fixes is reconstructed here from
+ * compile-time constants -- the run root and every path derived from it, the snapshotted prompt
+ * template's rendered location, the agent and model profile, the execution mode/provider/resources,
+ * the artifact output contracts, the pinned planner catalog, and the reference trees -- so only the
+ * three expansion-only values above remain runtime-supplied.
+ */
+function generatedCanonicalSelectedTask(
+  group: (typeof dynamicGroupSpecs)[number],
+  template: (typeof compiledBaseTasks)[number],
+  concreteNodeId: string,
+  attemptId: string,
+  expansionKey: string,
+  executionGeneration: string
+) {
+  const runRoot = path.resolve(sourceProjectRoot, __ULTRAFUZZ_RUN_ROOT_RELATIVE__);
+  const artifactDir = path.join(runRoot, "artifacts", attemptId);
+  const workspacePath = path.join(runRoot, "workspaces", attemptId);
+  const generated = {
+    ...template,
+    attemptId,
+    concreteNodeId,
+    smithersNodeId: `node:${attemptId}`,
+    verifierSmithersNodeId: `verify:${attemptId}`,
+    workspacePath,
+    artifactDir,
+    renderedPromptPath: path.join(artifactDir, CLOUD_SELECTED_TASK_RUNTIME_PROMPT_BASENAME as string),
+    metadata: {
+      ...template.metadata,
+      node: {
+        ...template.metadata.node,
+        concreteNodeId,
+        attemptId,
+        // The label is the template's compiled label composed with the claimed expansion key, so it
+        // stays bound to a compile-time constant even though the key itself is runtime data.
+        label: `${template.metadata.node.label}: ${expansionKey}`,
+        producerNodeId: concreteNodeId,
+        storageId: dynamicStorageId(group.groupNodeId, concreteNodeId) as string,
+        dynamic: {
+          groupNodeId: group.groupNodeId,
+          sourceNodeId: group.source.concreteNodeId,
+          sourceAttemptId: group.source.attemptId,
+          sourceDigest: GENERATED_EXPANSION_PLACEHOLDER,
+          expansionKey: GENERATED_EXPANSION_PLACEHOLDER,
+          itemDigest: GENERATED_EXPANSION_PLACEHOLDER,
+          manifestPath: `dynamic-expansions/${group.groupNodeId}.json`
+        }
+      },
+      workspace: { ...template.metadata.workspace, path: workspacePath },
+      artifacts: {
+        ...template.metadata.artifacts,
+        dir: artifactDir,
+        manifestPath: path.join(artifactDir, "artifact-manifest.json")
+      }
+    }
+  };
+  const hydrated = taskSpecsFromCompiled([generated] as unknown as typeof compiledBaseTasks)[0]!;
+  return buildCloudSelectedTaskHandoff(
+    hydrated,
+    {
+      promptPath: hydrated.promptRelativePath as string,
+      workspacePath: hydrated.workspaceRelativePath,
+      artifactDir: hydrated.artifactRelativeDir
+    },
+    executionGeneration
+  );
+}
+
 /** Resolves one validated project-relative handoff path inside the relocated worker root. */
 function relocatedHandoffPath(value: string, label: string): string {
   const workerRoot = path.resolve(process.cwd());
@@ -626,32 +768,11 @@ function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs 
   }
   const compiled = serializedTaskSpecs.find((task) => task.id === taskId);
   const selected = input.selected_task;
+  // Every cloud dispatch carries the controller's already-materialized handoff. There is no
+  // no-handoff fallback: hydrating a compiled spec instead would silently substitute a *different*
+  // attempt whenever the dispatch and the bundle disagree, which is exactly the disagreement the
+  // handoff exists to make impossible.
   if (selected === undefined) {
-    // Only a fully compiled attempt can run without a handoff. A deferred descendant of a dynamic
-    // group has no compile-time rendered prompt, so it always needs the controller's spec. This
-    // compatibility path still binds the compiled attempt to the dispatched cloud identity before
-    // hydration; otherwise `cloud_worker: true` could select a local compiled task.
-    if (
-      compiled !== undefined &&
-      compiled.promptPath !== undefined &&
-      typeof attemptId === "string" &&
-      attemptId !== "" &&
-      compiled.attemptId === attemptId &&
-      isCloudExecutionGeneration(input.execution_generation) &&
-      compiled.execution.mode === "cloud" &&
-      compiled.metadata.execution.mode === "cloud" &&
-      compiled.metadata.execution.provider === "modal"
-    ) {
-      // This path hydrates a compiled spec directly, so the relocated catalog bytes still get the
-      // same digest re-verification the explicit handoff path performs before hydration.
-      if (compiled.vulnerabilityDatabase !== undefined) {
-        assertRelocatedVulnerabilityDatabaseCatalog(
-          relocatedHandoffPath(compiled.vulnerabilityDatabase.catalogPath, "vulnerability database catalog"),
-          compiled.vulnerabilityDatabase.catalogSha256
-        );
-      }
-      return [hydrateTaskSpec(compiled)];
-    }
     throw new Error(`cloud worker task ${taskId} requires an explicit selected_task handoff`);
   }
   // The dispatch always carries the attempt identity, so the handoff is bound to it unconditionally:
@@ -684,16 +805,39 @@ function cloudWorkerTaskSpecs(input: Record<string, unknown>): typeof taskSpecs 
     });
     // When this workflow already compiled the attempt, the handoff must reproduce its entire
     // canonical DTO. Only runtime expansion of a declared dynamic dependency may extend it, and only
-    // in the ways the shared contract enumerates.
+    // with correlated evidence of the materialization behind each added entry.
     if (compiled !== undefined) {
       const compiledBase = compiledBaseTasks.find((candidate) => candidate.smithersNodeId === taskId);
+      const declaredGroups = compiledBase?.dynamicDependencies ?? [];
       assertCloudSelectedTaskMatchesCanonical(
         spec,
         compiledCanonicalSelectedTask(compiled, input.execution_generation),
         {
-          allowsRuntimeDependencies: (compiledBase?.dynamicDependencies?.length ?? 0) > 0,
+          ...(declaredGroups.length === 0 ? {} : { runtimeDependencies: runtimeDependencyEvidence(declaredGroups) }),
           allowsRuntimeRenderedPrompt: compiled.promptPath === undefined
         }
+      );
+    } else {
+      // A runtime-generated child of a declared dynamic group. It has no compiled spec, so it is
+      // bound to the whole canonical DTO its group's compiled template determines; only the three
+      // expansion-only values the shared contract enumerates stay runtime-supplied.
+      const generating = generatingGroupFor(spec.metadata.node.concreteNodeId, attemptId);
+      if (generating === undefined || spec.metadata.node.dynamic?.groupNodeId !== generating.group.groupNodeId) {
+        throw new Error(
+          `cloud worker selected_task ${attemptId} is not a generated attempt of any dynamic group this workflow compiled`
+        );
+      }
+      assertCloudSelectedTaskMatchesCanonical(
+        spec,
+        generatedCanonicalSelectedTask(
+          generating.group,
+          generating.template,
+          spec.metadata.node.concreteNodeId,
+          attemptId,
+          spec.metadata.node.dynamic.expansionKey,
+          input.execution_generation
+        ),
+        { allowsGeneratedExpansionValues: true }
       );
     }
     return [hydrateSelectedTaskHandoff(spec)];
@@ -5139,6 +5283,13 @@ export default smithers((ctx) => {
   const operatorPrompt = operatorPromptInput === undefined ? "" : `${operatorPromptInput}\n\n`;
   const cloudWorker = dispatch.cloud_worker === true;
   let availableTaskSpecs = taskSpecs;
+  if (cloudWorker && dispatch.tasks.length > 0) {
+    // A worker runs exactly the attempt the controller already materialized, and it reads that
+    // attempt's prompt from the validated handoff path. An outer task entry has only two possible
+    // effects here -- replacing the prompt body with attacker text, or naming a second attempt -- so
+    // a non-empty `tasks` array is refused rather than filtered down to the dispatched ID.
+    throw new Error("cloud worker dispatch must not carry outer task entries");
+  }
   if (cloudWorker) {
     // The controller owns graph.json, smithers/tasks.json, expansion manifests, and template
     // snapshots. A worker receives only its already-materialized selected task spec.

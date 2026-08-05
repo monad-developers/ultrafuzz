@@ -19,9 +19,16 @@ function writePrompt(project: string, relativePath: string, id: string, body: st
   fs.writeFileSync(promptPath, `---\nid: ${id}\ndisplay_name: ${id}\n---\n\n${body}\n`, "utf8");
 }
 
-function writeDynamicProject(project: string): void {
+/**
+ * `excludableContextNode` adds a node that exists only so a run-scoped topology transform has
+ * something real to exclude; the default graph stays exactly as the other tests expect it.
+ */
+function writeDynamicProject(project: string, options: { excludableContextNode?: boolean } = {}): void {
   initProject({ projectRoot: project, force: true });
   writePrompt(project, "dynamic/planner.md", "dynamic-planner", "Write the plan to {{artifact_path}}/plan.json.");
+  if (options.excludableContextNode === true) {
+    writePrompt(project, "dynamic/context.md", "dynamic-context", "Collect context into {{artifact_path}}/notes.json.");
+  }
   writePrompt(
     project,
     "dynamic/worker.md",
@@ -39,7 +46,19 @@ nodes:
     kind: meta
     role: start
     depends_on: []
-  - id: planner
+${
+  options.excludableContextNode === true
+    ? `  - id: context
+    kind: agentic
+    prompt: dynamic/context.md
+    depends_on: [__start__]
+    outputs:
+      - path: notes.json
+        contract: ultrafuzz/json-object@1
+        primary: true
+`
+    : ""
+}  - id: planner
     kind: agentic
     prompt: dynamic/planner.md
     depends_on: [__start__]
@@ -50,7 +69,7 @@ nodes:
   - id: fanout
     kind: agentic
     prompt: dynamic/worker.md
-    depends_on: [planner]
+    depends_on: [planner${options.excludableContextNode === true ? ", context" : ""}]
     dynamic:
       from:
         node: planner
@@ -64,7 +83,7 @@ nodes:
   - id: join
     kind: agentic
     prompt: dynamic/join.md
-    depends_on: [fanout]
+    depends_on: [fanout${options.excludableContextNode === true ? ", context" : ""}]
     outputs:
       - path: report.md
         contract: ultrafuzz/nonempty-markdown@1
@@ -205,29 +224,23 @@ function findSmithersModules(): string | undefined {
 
 test("compilation snapshots the exact transformed prompt body used during planning", async () => {
   const project = tempProject();
-  writeDynamicProject(project);
-  // A run-scoped prompt transform excludes an artifact reference, so the project bytes and the
-  // bytes the plan is bound to deliberately differ.
+  writeDynamicProject(project, { excludableContextNode: true });
+  // A run-scoped prompt transform drops every line referencing an excluded node's artifacts, so the
+  // project bytes and the bytes the plan is bound to deliberately differ. `context` exists only to be
+  // excluded: an empty exclusion list would leave the transform a no-op and prove nothing.
+  const excludedLine = "Excluded context: {{artifact_path:context}}/notes.json";
   writePrompt(
     project,
     "dynamic/worker.md",
     "dynamic-worker",
-    [
-      "Your /goal is {{item.goal_prompt}} using {{context:detail}}.",
-      "Excluded planner context: {{artifact_path:planner}}/plan.json"
-    ].join("\n")
+    ["Your /goal is {{item.goal_prompt}} using {{context:detail}}.", excludedLine].join("\n")
   );
-  writePrompt(
-    project,
-    "dynamic/join.md",
-    "dynamic-join",
-    ["Summarize all completed work.", "Excluded planner context: {{artifact_path:planner}}/plan.json"].join("\n")
-  );
+  writePrompt(project, "dynamic/join.md", "dynamic-join", ["Summarize all completed work.", excludedLine].join("\n"));
 
   const plan = await planRun({
     projectRoot: project,
     runId: "dynamic-transform",
-    topologyTransform: { excludedNodeIds: [] },
+    topologyTransform: { excludedNodeIds: ["context"] },
     env: {}
   });
   assert.equal(plan.ok, true, JSON.stringify(plan.diagnostics));
@@ -246,6 +259,26 @@ test("compilation snapshots the exact transformed prompt body used during planni
   // Both deferred templates resolve to immutable run-root snapshots, never to the project file.
   for (const snapshotPath of [templatePath, deferredJoinTemplatePath]) {
     assert.equal(snapshotPath.startsWith(path.join(plan.value!.layout.root, "dynamic-prompt-templates")), true);
+  }
+  // Both snapshots carry the transformed bytes: the excluded reference is gone and the surviving body
+  // is intact. Asserting only the path would pass even if a snapshot held the untransformed project
+  // file, which is the substitution the run-scoped transform exists to prevent.
+  const snapshots: Array<[string, string, string]> = [
+    ["dynamic group", templatePath, "Your /goal is {{item.goal_prompt}}"],
+    ["deferred join", deferredJoinTemplatePath, "Summarize all completed work"]
+  ];
+  for (const [label, snapshotPath, survivingBody] of snapshots) {
+    const bytes = fs.readFileSync(snapshotPath, "utf8");
+    assert.doesNotMatch(bytes, /artifact_path:context/u, `${label} snapshot must hold the transformed bytes`);
+    assert.match(bytes, new RegExp(survivingBody.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"), label);
+    assert.notEqual(
+      bytes,
+      fs.readFileSync(
+        path.join(project, ".ultrafuzz", "prompts", "dynamic", label === "dynamic group" ? "worker.md" : "join.md"),
+        "utf8"
+      ),
+      `${label} snapshot must differ from the untransformed project prompt`
+    );
   }
 
   // Mutating the project prompt after planning must not change what compilation snapshots.

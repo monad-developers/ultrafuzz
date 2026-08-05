@@ -988,7 +988,8 @@ test("goal-plan replacement keys are exactly the keys the dynamic fanout consume
   const goals = plan.threat_goals as Array<Record<string, unknown>>;
   const base = goals[0]!;
 
-  // An unnamespaced key is contract-valid today and deterministically aborts the next node.
+  // An unnamespaced key would reach the dynamic fanout consumer as an unresolvable placeholder, so
+  // the contract rejects it here rather than letting the next node abort on it.
   const unnamespaced = structuredClone(plan);
   const unnamespacedGoal = (unnamespaced.threat_goals as Array<Record<string, unknown>>)[0]!;
   unnamespacedGoal.replacements = { ...(base.replacements as Record<string, unknown>), detail: "extra" };

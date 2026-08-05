@@ -13,6 +13,7 @@ import {
   createModalNodeHandoffArchive,
   createModalNodeSandboxProvider,
   ModalNodeCleanupRefusedError,
+  modalNodeDispatchFingerprint,
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
@@ -48,6 +49,141 @@ describe("Modal node sandbox provider", () => {
       /^ufz-run-with-spaces-node-attempt-bas-[0-9a-f]{12}$/u
     );
     expect(modalNodeTags("run/with spaces", "node:attempt", "reset-one").attempt).not.toBe(tags.attempt);
+    // Reattachment looks a sandbox up by tag, so the logical dispatch is part of the lookup key.
+    expect(modalNodeTags("run/with spaces", "node:attempt", "base", "a".repeat(64)).dispatch).toBe("a".repeat(32));
+  });
+
+  /**
+   * The logical dispatch fingerprint is the identity that survives a generation reset.
+   *
+   * A reset deliberately re-dispatches the same logical attempt into a new sandbox, volume attempt
+   * root, and storage lineage, so the generation must not change the fingerprint while every other
+   * binding must. Durable resume, checkpoint records, result publication, and live reattachment all
+   * compare this one value instead of each re-deriving its own field subset.
+   */
+  it("fingerprints the logical dispatch independently of the generation it runs under", () => {
+    const fixture = createProjectFixture();
+    try {
+      const dispatched = parseModalNodeSandboxInput({ ...fixture.input, selected_task: fixture.selectedTask });
+      const base = modalNodeDispatchFingerprint(dispatched);
+      expect(base).toMatch(/^[0-9a-f]{64}$/u);
+
+      // A generation reset keeps the logical identity, in the dispatch and inside the handoff.
+      const reset = parseModalNodeSandboxInput({
+        ...structuredClone(fixture.input),
+        execution_generation: "reset-one",
+        selected_task: {
+          ...structuredClone(fixture.selectedTask),
+          execution: { ...fixture.selectedTask.execution, generation: "reset-one" }
+        }
+      });
+      expect(modalNodeDispatchFingerprint(reset)).toBe(base);
+
+      // A rebuilt archive of identical inputs has a different tar digest; that is bound separately.
+      expect(modalNodeDispatchFingerprint({ ...dispatched, project_archive_sha256: "b".repeat(64) })).toBe(base);
+
+      // Key ordering is not identity.
+      const reordered = parseModalNodeSandboxInput(
+        JSON.parse(JSON.stringify(Object.fromEntries(Object.entries(structuredClone(dispatched)).reverse()))) as unknown
+      );
+      expect(modalNodeDispatchFingerprint(reordered)).toBe(base);
+
+      // Every other binding is provenance for whatever the durable workspace publishes.
+      const divergences: Array<[string, Partial<ModalNodeSandboxInput>]> = [
+        ["task_id", { task_id: "node:someone-else" }],
+        ["attempt_id", { attempt_id: "someone-else" }],
+        ["run_id", { run_id: "another-run" }],
+        ["workflow_path", { workflow_path: ".smithers/workflows/other.tsx" }],
+        ["prompt_path", { prompt_path: `${fixture.input.run_root}/prompts/other.md` }],
+        ["dependency_artifact_dirs", { dependency_artifact_dirs: [fixture.input.dependency_artifact_dirs[0]!] }],
+        ["reference_artifact_dirs", { reference_artifact_dirs: [`${fixture.input.run_root}/artifacts/reference`] }],
+        ["resources", { resources: { ...fixture.input.resources, cpu: 8 } }],
+        ["agent_credential_env", { agent_credential_env: [...fixture.input.agent_credential_env, "EXTRA_KEY"] }],
+        ["operator_prompt", { operator_prompt: "smuggled operator note" }],
+        // Including the handoff DTO, so a substituted selected task is a different logical dispatch.
+        ["selected_task", { selected_task: { ...fixture.selectedTask, agentRef: "SomeOtherAgent" } }],
+        ["selected_task absent", { selected_task: undefined }]
+      ];
+      for (const [label, override] of divergences) {
+        expect(modalNodeDispatchFingerprint({ ...dispatched, ...override }), label).not.toBe(base);
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses a published result whose durable provenance names another logical dispatch", async () => {
+    const fixture = createProjectFixture();
+    const foreign = createResultArchive(fixture.input, { logicalDispatchFingerprint: "f".repeat(64) });
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(foreign)] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/cloud node result is invalid/u);
+      // Nothing from the foreign bundle reached the controller's artifact directory.
+      expect(fs.existsSync(path.join(fixture.root, fixture.input.artifact_dir, "finding.json"))).toBe(false);
+    } finally {
+      foreign.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses a durable checkpoint whose record names another logical dispatch", async () => {
+    const fixture = createProjectFixture();
+    const result = createResultArchive(fixture.input);
+    const tampered = {
+      ...result,
+      durableCheckpoint: JSON.stringify({
+        ...(JSON.parse(result.durableCheckpoint) as Record<string, unknown>),
+        logical_dispatch_fingerprint: "e".repeat(64)
+      })
+    };
+    const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [fakeSandbox(tampered)] })));
+    try {
+      await expect(
+        provider.run({
+          runId: "controller-run",
+          sandboxId: "node:attempt",
+          input: fixture.input,
+          rootDir: fixture.root,
+          heartbeat: vi.fn()
+        })
+      ).rejects.toThrow(/cloud node durable checkpoint is invalid/u);
+    } finally {
+      result.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("refuses to resume a durable workspace whose persisted request is another logical dispatch", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "fingerprint");
+    try {
+      await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      // Same run, attempt, and generation, but a different logical dispatch: the workspace is not it.
+      const substituted = parseModalNodeSandboxInput({
+        ...structuredClone(fixture.input),
+        operator_prompt: "smuggled operator note"
+      });
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, substituted)).rejects.toThrow(
+        /durable workspace request does not match this cloud node attempt/u
+      );
+      // The unchanged dispatch still resumes, so the rejection above is not vacuous.
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).resolves.toMatchObject({
+        hasCompletedCheckpoint: false
+      });
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
   });
 
   it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
@@ -1070,6 +1206,80 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     }
   });
 
+  /**
+   * The fingerprint is durable evidence, not a transient comparison.
+   *
+   * A restore copies another generation's outputs into this attempt, so the source must be a
+   * generation of this same logical dispatch by its own persisted record. A request document sitting
+   * next to a workspace is only a claim about what ran there.
+   */
+  it("persists the logical dispatch in every checkpoint and requires it before restoring outputs", async () => {
+    const fixture = createProjectFixture();
+    const input = parseModalNodeSandboxInput({ ...fixture.input, selected_task: fixture.selectedTask });
+    const archive = await createModalNodeHandoffArchive(fixture.root, input);
+    input.project_archive_sha256 = archive.sha256;
+    const fingerprint = modalNodeDispatchFingerprint(input);
+    const volumeParent = path.join(path.dirname(fixture.root), "modal-volume-fingerprint-evidence");
+    const priorRoot = path.join(volumeParent, "attempt-base");
+    try {
+      const prior = await initializeDurableNodeWorkspace(priorRoot, archive.path, input);
+      const generated = path.join(prior.projectRoot, input.workspace_dir, "test", "Property.t.sol");
+      fs.mkdirSync(path.dirname(generated), { recursive: true });
+      fs.writeFileSync(generated, "contract Property {}\n");
+      const failed = prior.recordCheckpoint("failed", new Error("reset requested"));
+
+      // Both the record and the index carry the fingerprint the controller will re-derive.
+      expect(failed.logical_dispatch_fingerprint).toBe(fingerprint);
+      const indexPath = path.join(priorRoot, "checkpoints", "index.json");
+      expect(
+        (JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>).logical_dispatch_fingerprint
+      ).toBe(fingerprint);
+      const manifest = path.join(priorRoot, "checkpoints", `${failed.checkpoint_id}.json`);
+      expect(
+        (JSON.parse(fs.readFileSync(manifest, "utf8")) as Record<string, unknown>).logical_dispatch_fingerprint
+      ).toBe(fingerprint);
+
+      // A prior root whose durable index disowns the dispatch is not a restore source, even though
+      // its request document still claims it.
+      fs.writeFileSync(
+        indexPath,
+        `${JSON.stringify({
+          ...(JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>),
+          logical_dispatch_fingerprint: "c".repeat(64)
+        })}\n`
+      );
+      const reset = parseModalNodeSandboxInput({
+        ...input,
+        execution_generation: "reset-one",
+        selected_task: mutate(input.selected_task!, "execution.generation", "reset-one")
+      });
+      const disowned = await initializeDurableNodeWorkspace(
+        path.join(volumeParent, "attempt-disowned"),
+        archive.path,
+        reset
+      );
+      expect(disowned.recordCheckpoint("prepared").restored_from).toBeUndefined();
+
+      // Restored once the index records the dispatch again, so the rejection above is not vacuous.
+      fs.writeFileSync(
+        indexPath,
+        `${JSON.stringify({
+          ...(JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>),
+          logical_dispatch_fingerprint: fingerprint
+        })}\n`
+      );
+      const restored = await initializeDurableNodeWorkspace(
+        path.join(volumeParent, "attempt-restored"),
+        archive.path,
+        reset
+      );
+      expect(restored.recordCheckpoint("prepared").restored_from).toBe(priorRoot);
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("seeds a reset generation from the prior generation's durable outputs", async () => {
     const fixture = createProjectFixture();
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
@@ -1212,7 +1422,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("reattaches to one live attempt and atomically publishes its durable result", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ listed: [sandbox] });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -1264,7 +1474,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("recovers a published result before starting a replacement worker", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -1289,7 +1499,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("accepts legacy v1 cloud results that predate verification marker archives", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({
+    const result = createResultArchive(fixture.input, {
       schemaVersion: "ultrafuzz.modal.node-result.v1",
       includeVerificationMarker: false
     });
@@ -1317,7 +1527,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results that omit the attempt verification marker", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeVerificationMarker: false });
+    const result = createResultArchive(fixture.input, { includeVerificationMarker: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1351,7 +1561,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results with conflicting existing verification markers before mutating publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1391,7 +1601,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects hard-linked existing verification marker destinations before mutating publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1434,7 +1644,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("rejects v2 cloud results missing artifacts before mutating workspace publications", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeArtifactsDirectory: false });
+    const result = createResultArchive(fixture.input, { includeArtifactsDirectory: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1469,7 +1679,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("refuses a terminal result that lacks a durable checkpoint reference", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive({ includeDurableCheckpoint: false });
+    const result = createResultArchive(fixture.input, { includeDurableCheckpoint: false });
     const sandbox = fakeSandbox(result);
     const provider = createModalNodeSandboxProvider(providerOptions(fakeClient({ listed: [sandbox] })));
     try {
@@ -1521,7 +1731,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("binds Moonshot fallback credentials into the canonical Kimi API-key secret", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    fixture.input.agent_credential_env = ["KIMI_API_KEY"];
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1532,7 +1743,6 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         MOONSHOT_API_KEY: "moonshot-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -1552,7 +1762,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("treats Moonshot as an optional Kimi fallback when compiled cloud tasks list both names", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1563,7 +1774,6 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         KIMI_API_KEY: "kimi-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -1583,7 +1793,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("binds a compiled Moonshot fallback list into Kimi Code's canonical API-key secret", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1594,7 +1805,6 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         MOONSHOT_API_KEY: "moonshot-key-value"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY"];
     try {
       await expect(
         provider.run({
@@ -1614,7 +1824,8 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("forwards optional Kimi API base URLs into cloud-node workers", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"];
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ created: sandbox });
     const provider = createModalNodeSandboxProvider({
@@ -1626,7 +1837,6 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         KIMI_BASE_URL: "https://kimi.example.invalid/v1"
       }
     });
-    fixture.input.agent_credential_env = ["KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_BASE_URL"];
     try {
       await expect(
         provider.run({
@@ -1649,7 +1859,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
   it("refuses to publish cloud results through a symlinked project destination prefix", async () => {
     const fixture = createProjectFixture();
-    const result = createResultArchive();
+    const result = createResultArchive(fixture.input);
     const sandbox = fakeSandbox(result);
     const client = fakeClient({ listed: [sandbox] });
     const provider = createModalNodeSandboxProvider(providerOptions(client));
@@ -1951,13 +2161,18 @@ function manifestEntry(relativePath: string, filePath: string) {
 }
 
 function createResultArchive(
+  dispatch: ModalNodeSandboxInput,
   options: {
     includeArtifactsDirectory?: boolean;
     includeDurableCheckpoint?: boolean;
     includeVerificationMarker?: boolean;
+    logicalDispatchFingerprint?: string;
     schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   } = {}
 ) {
+  // The published bundle names the logical dispatch that produced it, so the controller can only
+  // adopt a result whose provenance is its own dispatch.
+  const fingerprint = options.logicalDispatchFingerprint ?? modalNodeDispatchFingerprint(dispatch);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-result-test-"));
   const bundle = path.join(root, "bundle");
   const archive = path.join(root, "result.tgz");
@@ -1992,6 +2207,7 @@ function createResultArchive(
       artifact_archive: `${attemptRoot}/artifacts.tgz`,
       artifact_sha256: digest,
       storage_lineage: "run-one/attempt-one/base",
+      logical_dispatch_fingerprint: fingerprint,
       ...(options.includeDurableCheckpoint === false
         ? {}
         : {
@@ -2003,6 +2219,7 @@ function createResultArchive(
       schema_version: "ultrafuzz.modal.node-checkpoint.v1",
       stage: "completed",
       storage_lineage: "run-one/attempt-one/base",
+      logical_dispatch_fingerprint: fingerprint,
       workspace_path: `${attemptRoot}/workspace`,
       run_root: ".ultrafuzz/runs/run-one",
       handoff_archive: `${attemptRoot}/input/project.tgz`
@@ -2010,6 +2227,7 @@ function createResultArchive(
     durableCheckpointIndex: JSON.stringify({
       schema_version: "ultrafuzz.modal.node-checkpoint-index.v1",
       storage_lineage: "run-one/attempt-one/base",
+      logical_dispatch_fingerprint: fingerprint,
       workspace_path: `${attemptRoot}/workspace`,
       run_root: ".ultrafuzz/runs/run-one",
       handoff_archive: `${attemptRoot}/input/project.tgz`,

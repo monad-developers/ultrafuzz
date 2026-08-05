@@ -15,53 +15,136 @@ const RUN_ROOT = ".ultrafuzz/runs/run-one";
 const ATTEMPT = "attempt-one";
 const ARTIFACT_DIR = `${RUN_ROOT}/artifacts/${ATTEMPT}`;
 
+/** The declared group in these cases derives exactly one generated attempt for `dynamic:item:one`. */
+const EVIDENCE = {
+  admissibleAttemptIds: (concreteNodeId: string): string[] =>
+    concreteNodeId === "dynamic:item:one" ? ["generated-one"] : []
+};
+
+/** Applies one dependency-array override on top of the canonical handoff. */
+function withDependencies(overrides: {
+  artifactDirs?: string[];
+  concreteNodeIds?: string[];
+  attemptIds?: string[];
+  smithersNodeIds?: string[];
+}): CloudSelectedTask {
+  const canonical = handoff();
+  return handoff({
+    dependencyArtifactDirs: overrides.artifactDirs ?? canonical.dependencyArtifactDirs,
+    metadata: {
+      ...canonical.metadata,
+      dependencies: {
+        concreteNodeIds: overrides.concreteNodeIds ?? canonical.metadata.dependencies.concreteNodeIds,
+        attemptIds: overrides.attemptIds ?? canonical.metadata.dependencies.attemptIds,
+        smithersNodeIds: overrides.smithersNodeIds ?? canonical.metadata.dependencies.smithersNodeIds
+      }
+    }
+  });
+}
+
 /**
  * The runtime-extension rules the two boundaries cannot easily reach.
  *
  * A compiled task that declares dynamic dependencies gains its expanded children's artifact
- * directories and identities. The generated workflow exercises the accepting side; these cover the
+ * directories and identities -- but as one correlated set per materialized attempt, never as three
+ * independent supersets. The generated workflow exercises the accepting side; these cover the
  * rejecting side, which requires a controller that lies about its own compiled dependencies.
  */
-test("a compiled attempt may only gain the dependencies its dynamic expansion produced", () => {
+test("a compiled attempt may only gain correlated evidence of the dependencies its expansion produced", () => {
   const canonical = handoff();
-  const extended = handoff({
-    dependencyArtifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
-    metadata: {
-      ...canonical.metadata,
-      dependencies: {
-        concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:one"],
-        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"],
-        smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:generated-one"]
-      }
-    }
+  const extended = withDependencies({
+    artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
+    concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:one"],
+    attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"],
+    smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:generated-one"]
   });
-  assertCloudSelectedTaskMatchesCanonical(extended, canonical, { allowsRuntimeDependencies: true });
+  assertCloudSelectedTaskMatchesCanonical(extended, canonical, { runtimeDependencies: EVIDENCE });
 
   // Without a declared dynamic dependency, the same extension is an unexplained divergence.
   assert.throws(
     () => assertCloudSelectedTaskMatchesCanonical(extended, canonical),
     /does not match the compiled attempt: dependencyArtifactDirs/u
   );
-  // A compiled dependency may never be dropped, even when extension is allowed.
-  assert.throws(
-    () =>
-      assertCloudSelectedTaskMatchesCanonical(
-        handoff({ dependencyArtifactDirs: [`${RUN_ROOT}/artifacts/generated-one`] }),
-        canonical,
-        { allowsRuntimeDependencies: true }
-      ),
-    /dependencyArtifactDirs must extend the compiled attempt without dropping entries/u
-  );
-  // An extension must be a run-root artifact directory, not an arbitrary safe path.
-  assert.throws(
-    () =>
-      assertCloudSelectedTaskMatchesCanonical(
-        handoff({ dependencyArtifactDirs: [...canonical.dependencyArtifactDirs, ".smithers/agents"] }),
-        canonical,
-        { allowsRuntimeDependencies: true }
-      ),
-    /may only gain run-root artifact directories/u
-  );
+
+  const rejections: Array<[string, CloudSelectedTask, RegExp]> = [
+    [
+      "a compiled dependency dropped",
+      withDependencies({ artifactDirs: [`${RUN_ROOT}/artifacts/generated-one`] }),
+      /dependencyArtifactDirs must extend the compiled attempt without reordering, dropping, or repeating/u
+    ],
+    [
+      "a repeated entry counting one materialization twice",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, ...canonical.dependencyArtifactDirs]
+      }),
+      /dependencyArtifactDirs must extend the compiled attempt without reordering, dropping, or repeating/u
+    ],
+    [
+      "an artifact directory with no attempt behind it",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`]
+      }),
+      /dependencyArtifactDirs must gain exactly one run-root artifact directory per materialized dependency attempt/u
+    ],
+    [
+      "an arbitrary safe path instead of the attempt's own directory",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, ".smithers/agents"],
+        concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:one"],
+        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"]
+      }),
+      /dependencyArtifactDirs must gain exactly one run-root artifact directory per materialized dependency attempt/u
+    ],
+    [
+      "a verifier for an attempt that was never added",
+      withDependencies({
+        smithersNodeIds: [...canonical.metadata.dependencies.smithersNodeIds, "verify:generated-one"]
+      }),
+      /smithersNodeIds may only gain verifiers of materialized dependency attempts/u
+    ],
+    [
+      "a generated node no declared group derives",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
+        concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "dynamic:item:two"],
+        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"]
+      }),
+      /gained dynamic:item:two, which no declared dynamic group materialized/u
+    ],
+    [
+      "an attempt with no generated node behind it",
+      withDependencies({
+        artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/generated-one`],
+        attemptIds: [...canonical.metadata.dependencies.attemptIds, "generated-one"]
+      }),
+      /gained generated-one without the generated node that produced it/u
+    ]
+  ];
+  for (const [label, actual, message] of rejections) {
+    assert.throws(
+      () => assertCloudSelectedTaskMatchesCanonical(actual, canonical, { runtimeDependencies: EVIDENCE }),
+      message,
+      label
+    );
+  }
+});
+
+/**
+ * A group that expanded to no items substitutes its own source attempt, and a non-agentic source has
+ * no verifier at all, so the verifier identities are a subsequence of the added attempts.
+ */
+test("a runtime extension without a verifier is still correlated with its attempt", () => {
+  const canonical = handoff();
+  const sourceOnly = withDependencies({
+    artifactDirs: [...canonical.dependencyArtifactDirs, `${RUN_ROOT}/artifacts/source-one`],
+    concreteNodeIds: [...canonical.metadata.dependencies.concreteNodeIds, "reference-source"],
+    attemptIds: [...canonical.metadata.dependencies.attemptIds, "source-one"]
+  });
+  const evidence = {
+    admissibleAttemptIds: (concreteNodeId: string): string[] =>
+      concreteNodeId === "reference-source" ? ["source-one"] : []
+  };
+  assertCloudSelectedTaskMatchesCanonical(sourceOnly, canonical, { runtimeDependencies: evidence });
 });
 
 test("a deferred attempt may only claim its own runtime-rendered prompt", () => {

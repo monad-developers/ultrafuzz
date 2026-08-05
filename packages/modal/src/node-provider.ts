@@ -202,7 +202,12 @@ async function runModalNodeSandbox(
       (new ModalClient({ tokenId, tokenSecret }) as unknown as ModalNodeClient);
     const app = await client.apps.fromName(options.app, { createIfMissing: true });
     const image = await client.images.fromName(options.image);
-    const tags = modalNodeTags(request.runId, request.sandboxId, input.execution_generation);
+    const tags = modalNodeTags(
+      request.runId,
+      request.sandboxId,
+      input.execution_generation,
+      modalNodeDispatchFingerprint(input)
+    );
     const volume = await client.volumes.fromName(modalNodeVolumeName(request.runId), { createIfMissing: true });
     sandbox = await findLiveSandbox(client, app, tags);
     let result: ModalNodeResult | undefined;
@@ -506,12 +511,73 @@ function assertSelectedTaskAgreesWithDispatch(selected: CloudSelectedTask, input
   }
 }
 
-export function modalNodeTags(runId: string, sandboxId: string, executionGeneration = "base"): Record<string, string> {
+export function modalNodeTags(
+  runId: string,
+  sandboxId: string,
+  executionGeneration = "base",
+  logicalDispatchFingerprint?: string
+): Record<string, string> {
   return {
     purpose: "ultrafuzz-node",
     run: boundedIdentity(runId),
-    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`)
+    attempt: boundedIdentity(`${sandboxId}:${executionGeneration}`),
+    // Reattachment is a lookup by tag, so the logical dispatch is part of the lookup key: a live
+    // sandbox launched for a different logical attempt under the same identity is not found at all,
+    // rather than found and then adopted.
+    ...(logicalDispatchFingerprint === undefined ? {} : { dispatch: logicalDispatchFingerprint.slice(0, 32) })
   };
+}
+
+/**
+ * The canonical logical identity of one cloud dispatch, independent of the generation it runs under.
+ *
+ * A generation reset deliberately re-dispatches the same logical attempt into a new sandbox, volume
+ * attempt root, and storage lineage, so the generation itself cannot be part of this identity.
+ * Everything else -- the archived locations, the validated handoff DTO, the pinned planner catalog,
+ * the resources, and the credential surface -- is provenance for whatever a durable workspace
+ * publishes. Reducing it to one fingerprint gives every durable record, published result, and live
+ * reattachment a single value to agree on instead of each boundary re-deriving its own field subset.
+ *
+ * The project archive digest is deliberately excluded: rebuilding an identical tree produces a
+ * different tar digest, and that digest is already bound separately to the durable handoff archive.
+ */
+export function modalNodeDispatchFingerprint(input: ModalNodeSandboxInput): string {
+  const selected = input.selected_task;
+  const logical = {
+    schema_version: input.schema_version,
+    run_id: input.run_id,
+    task_id: input.task_id,
+    attempt_id: input.attempt_id,
+    workflow_path: input.workflow_path,
+    prompt_path: input.prompt_path ?? null,
+    run_root: input.run_root,
+    artifact_dir: input.artifact_dir,
+    workspace_dir: input.workspace_dir,
+    dependency_artifact_dirs: input.dependency_artifact_dirs,
+    reference_artifact_dirs: input.reference_artifact_dirs ?? [],
+    vulnerability_database: input.vulnerability_database ?? null,
+    // The dispatched generation is the one value a reset is allowed to change, so it is normalized
+    // out of the handoff too; every other handoff field stays part of the logical identity.
+    selected_task:
+      selected === undefined ? null : { ...selected, execution: { ...selected.execution, generation: "<logical>" } },
+    resources: input.resources,
+    agent_credential_env: input.agent_credential_env,
+    operator_prompt: input.operator_prompt ?? null
+  };
+  return crypto.createHash("sha256").update(canonicalDispatchJson(logical)).digest("hex");
+}
+
+/** Key-ordered JSON, so an equal logical dispatch always hashes to the same fingerprint. */
+function canonicalDispatchJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((entry) => canonicalDispatchJson(entry)).join(",")}]`;
+  if (isRecord(value)) {
+    const members = Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalDispatchJson(value[key])}`);
+    return `{${members.join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
 }
 
 export function modalNodeVolumeName(runId: string): string {
@@ -666,6 +732,8 @@ interface ModalNodeResult {
   artifact_archive: string;
   artifact_sha256: string;
   storage_lineage: string;
+  /** The logical dispatch this durable workspace actually ran, independent of its generation. */
+  logical_dispatch_fingerprint: string;
   durable_checkpoint: string;
   durable_checkpoint_index: string;
 }
@@ -721,6 +789,9 @@ async function readModalNodeResult(
     typeof parsed.artifact_sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(parsed.artifact_sha256) &&
     parsed.storage_lineage === `${input.run_id}/${input.attempt_id}/${input.execution_generation}` &&
+    // A recovered or resumed sandbox may already hold a published result. Accepting it means adopting
+    // its artifacts as this dispatch's outputs, so the logical dispatch behind it must be this one.
+    parsed.logical_dispatch_fingerprint === modalNodeDispatchFingerprint(input) &&
     isDurableCheckpointPath(parsed.durable_checkpoint, attemptRoot) &&
     parsed.durable_checkpoint_index === path.posix.join(attemptRoot, "checkpoints", "index.json")
   ) {
@@ -758,11 +829,15 @@ async function validateDurableCheckpoint(
   const workspacePath = path.posix.join(attemptRoot, "workspace");
   const handoffArchive = path.posix.join(attemptRoot, "input", "project.tgz");
   const lineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
+  // The checkpoint and its index are the durable record of what the workspace ran, so both must name
+  // the same logical dispatch the published result claims and this dispatch expects.
+  const fingerprint = modalNodeDispatchFingerprint(input);
   if (
     !isRecord(checkpoint) ||
     checkpoint.schema_version !== "ultrafuzz.modal.node-checkpoint.v1" ||
     checkpoint.stage !== "completed" ||
     checkpoint.storage_lineage !== lineage ||
+    checkpoint.logical_dispatch_fingerprint !== fingerprint ||
     checkpoint.workspace_path !== workspacePath ||
     checkpoint.run_root !== input.run_root ||
     checkpoint.handoff_archive !== handoffArchive
@@ -773,6 +848,7 @@ async function validateDurableCheckpoint(
     !isRecord(index) ||
     index.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
     index.storage_lineage !== lineage ||
+    index.logical_dispatch_fingerprint !== fingerprint ||
     index.workspace_path !== workspacePath ||
     index.run_root !== input.run_root ||
     index.handoff_archive !== handoffArchive ||
