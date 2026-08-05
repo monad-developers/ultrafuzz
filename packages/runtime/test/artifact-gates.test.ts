@@ -370,13 +370,33 @@ test("project discovery gate rejects root-normalizing traversal and a symlinked 
         { id: "probe-traversal", source_path: "foo/..", query: "inventory", result: "done" },
         { id: "probe-drive", source_path: "C:/outside", query: "inventory", result: "done" },
         { id: "probe-backslash", source_path: "C:\\\\outside", query: "inventory", result: "done" },
-        { id: "probe-absolute", source_path: "/outside", query: "inventory", result: "done" }
+        { id: "probe-absolute", source_path: "/outside", query: "inventory", result: "done" },
+        { id: "probe-nul", source_path: "missing\u0000path", query: "inventory", result: "done" }
       ]
     })
   );
   const traversal = verifyRequiredArtifactsForAttempt(traversalLayout, traversalNode, traversalNode.id);
   assert.equal(traversal.ok, false);
   assert.ok(traversal.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
+
+  const canonicalWorkspace = path.join(traversalLayout.workspacesDir, "project-discovery");
+  fs.symlinkSync(path.join(canonicalWorkspace, "missing-target"), path.join(canonicalWorkspace, "broken"), "dir");
+  writeArtifact(
+    traversalLayout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+      entries: [],
+      inventory_rows: [],
+      scan_probes: [
+        { id: "probe-broken-parent", source_path: "broken/optional.txt", query: "inventory", result: "absent" }
+      ]
+    })
+  );
+  const brokenParent = verifyRequiredArtifactsForAttempt(traversalLayout, traversalNode, traversalNode.id);
+  assert.equal(brokenParent.ok, false);
+  assert.ok(brokenParent.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
 
   const symlinkLayout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-root-symlink" });
   const symlinkNode = {

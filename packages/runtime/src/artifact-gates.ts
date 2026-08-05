@@ -624,6 +624,7 @@ function verifyInvariantProbePath(
 function isSafeInvariantProbePath(relativePath: string): boolean {
   return (
     !path.isAbsolute(relativePath) &&
+    !relativePath.includes("\u0000") &&
     !relativePath.includes("\\") &&
     !/^[A-Za-z]:/u.test(relativePath) &&
     !relativePath.split("/").includes("..")
@@ -638,6 +639,13 @@ function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePat
       return fs.realpathSync(current) === current;
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return false;
+      try {
+        if (fs.lstatSync(current).isSymbolicLink()) return false;
+      } catch (lstatError) {
+        if (!(lstatError instanceof Error && "code" in lstatError && lstatError.code === "ENOENT")) {
+          return false;
+        }
+      }
       const parent = path.dirname(current);
       if (parent === current) return false;
       current = parent;
