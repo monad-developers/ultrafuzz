@@ -3,20 +3,40 @@ import path from "node:path";
 
 import { writeJsonDurable } from "@ultrafuzz/artifacts";
 
+export interface ProperLockfileDirectoryIdentity {
+  device: number;
+  inode: number;
+}
+
+export function captureProperLockfileDirectoryIdentity(
+  lockPath: string,
+  label: string
+): ProperLockfileDirectoryIdentity {
+  const stat = fs.lstatSync(path.resolve(lockPath));
+  assertLockDirectory(stat, label);
+  return { device: stat.dev, inode: stat.ino };
+}
+
 /**
  * proper-lockfile owns the lock directory mtime and compares its millisecond
  * value with the one captured during acquisition. Keep the durable owner marker
  * in that directory for atomic reclaim, but restore the timestamps changed by
  * its creation before yielding back to the event loop.
  */
-export function writeProperLockfileOwner(lockPath: string, ownerPath: string, owner: unknown, label: string): void {
+export function writeProperLockfileOwner(
+  lockPath: string,
+  ownerPath: string,
+  owner: unknown,
+  label: string,
+  acquiredIdentity: ProperLockfileDirectoryIdentity
+): void {
   const resolvedLockPath = path.resolve(lockPath);
   if (path.dirname(path.resolve(ownerPath)) !== resolvedLockPath) {
     throw new Error(`${label} owner must be stored directly inside its lock directory`);
   }
 
   if (process.platform === "win32") {
-    writeOwnerWithLexicalTimestampRestore(resolvedLockPath, ownerPath, owner, label);
+    writeOwnerWithLexicalTimestampRestore(resolvedLockPath, ownerPath, owner, label, acquiredIdentity);
     return;
   }
 
@@ -28,6 +48,7 @@ export function writeProperLockfileOwner(lockPath: string, ownerPath: string, ow
     const before = fs.fstatSync(descriptor);
     const lexicalBefore = fs.lstatSync(resolvedLockPath);
     assertSameLockDirectory(before, lexicalBefore, label);
+    assertAcquiredLockDirectory(before, acquiredIdentity, label);
 
     try {
       writeJsonDurable(ownerPath, owner);
@@ -57,10 +78,12 @@ function writeOwnerWithLexicalTimestampRestore(
   lockPath: string,
   ownerPath: string,
   owner: unknown,
-  label: string
+  label: string,
+  acquiredIdentity: ProperLockfileDirectoryIdentity
 ): void {
   const before = fs.lstatSync(lockPath);
   assertLockDirectory(before, label);
+  assertAcquiredLockDirectory(before, acquiredIdentity, label);
   try {
     writeJsonDurable(ownerPath, owner);
   } catch (error) {
@@ -144,6 +167,12 @@ function assertSameLockDirectory(left: fs.Stats, right: fs.Stats, label: string)
 function assertLockDirectory(stat: fs.Stats, label: string): void {
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`${label} changed while its owner was persisted`);
+  }
+}
+
+function assertAcquiredLockDirectory(stat: fs.Stats, identity: ProperLockfileDirectoryIdentity, label: string): void {
+  if (stat.dev !== identity.device || stat.ino !== identity.inode) {
+    throw new Error(`${label} changed after acquisition and before its owner was persisted`);
   }
 }
 

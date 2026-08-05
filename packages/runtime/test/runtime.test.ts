@@ -16,6 +16,7 @@ import {
   createInitialRunState,
   getPricingCatalogSnapshotPath,
   layoutForRunRoot,
+  readRunState,
   replayEvents,
   writeRunState,
   type RunState
@@ -9080,6 +9081,102 @@ test("syncRun prices deepseek-v4-flash at exact first-party publication rates", 
   );
 });
 
+test("syncRun reconciles matching and contradictory token/terminal provider identities", async () => {
+  for (const testCase of [
+    { label: "matching", terminalModel: "deepseek-v4-flash", expectedStatus: "complete" },
+    {
+      label: "contradictory",
+      terminalModel: "deepseek-v4-pro",
+      expectedStatus: "mixed"
+    }
+  ] as const) {
+    const project = tempProject();
+    initProject({ projectRoot: project, force: true });
+    writeSmallTopology(project);
+    const runId = `provider-identity-${testCase.label}`;
+    const workflowRunId = `ultrafuzz-${runId}`;
+    const env = fakeLifecycleSmithersEnv(project, {
+      inspect: workflowInspect({
+        workflowRunId,
+        status: "failed",
+        state: "failed",
+        steps: [{ id: "node:project-discovery", state: "failed", attempt: 1 }]
+      }),
+      events: workflowEvents(workflowRunId, [
+        { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1, extra: { iteration: 0 } },
+        {
+          type: "TokenUsageReported",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          extra: {
+            iteration: 0,
+            inputTokens: 10,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            outputTokens: 5,
+            reasoningTokens: 0,
+            model: "deepseek-v4-flash",
+            agent: "DeepSeekAgent"
+          }
+        },
+        {
+          type: "NodeFailed",
+          nodeId: "node:project-discovery",
+          attempt: 1,
+          error: { result: { response: { modelId: testCase.terminalModel } } },
+          extra: { iteration: 0 }
+        },
+        { type: "RunFailed" }
+      ])
+    });
+    env.ULTRAFUZZ_PRICING_CATALOG_URL = pricingCatalogDataUrl({
+      deepseek: {
+        models: {
+          "deepseek-v4-flash": { cost: { input: 0.14, cache_read: 0.0028, output: 0.28, reasoning: 0.28 } },
+          "ultrafuzz-provider-identity-mixed": {
+            cost: { input: 0.14, cache_read: 0.0028, output: 0.28, reasoning: 0.28 }
+          }
+        }
+      }
+    });
+    const run = await startRun({
+      projectRoot: project,
+      runId,
+      agent: "DeepSeekAgent",
+      model: "deepseek-v4-flash",
+      env
+    });
+    assert.equal(run.ok, true, `${testCase.label}: ${JSON.stringify(run.diagnostics)}`);
+
+    const sync = await syncRun({ projectRoot: project, runId, env });
+    assert.equal(sync.ok, true, `${testCase.label}: ${JSON.stringify(sync.diagnostics)}`);
+    const metadata = JSON.parse(fs.readFileSync(path.join(run.value!.run_root, "run.json"), "utf8")) as {
+      accounting?: {
+        model_identity?: {
+          status?: string;
+          provider_reported_models?: string[];
+          invocations?: Array<{ provider_reported_model?: string }>;
+        };
+      };
+    };
+    const expectedModel =
+      testCase.expectedStatus === "complete" ? "deepseek-v4-flash" : "ultrafuzz-provider-identity-mixed";
+    assert.equal(metadata.accounting?.model_identity?.status, testCase.expectedStatus, testCase.label);
+    assert.deepEqual(metadata.accounting?.model_identity?.provider_reported_models, [expectedModel], testCase.label);
+    assert.equal(
+      metadata.accounting?.model_identity?.invocations?.[0]?.provider_reported_model,
+      expectedModel,
+      testCase.label
+    );
+    const usage = fs
+      .readFileSync(path.join(run.value!.run_root, "usage.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { usage?: { model?: string } });
+    assert.equal(usage[0]?.usage?.model, expectedModel, testCase.label);
+  }
+});
+
 test("syncRun preserves an unmatched invocation and recovers when delayed usage arrives", async () => {
   const project = tempProject();
   initProject({ projectRoot: project, force: true });
@@ -10755,6 +10852,156 @@ test("syncRun cancellation and deadline bound workflow mutation lock acquisition
   }
 });
 
+test("workflow mutation locks preserve fresh ownerless acquisitions for the full stale window", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const run = await startRun({
+    projectRoot: project,
+    runId: "fresh-ownerless-mutation-lock",
+    env: fakeSmithersEnv(project)
+  });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  const lockPath = path.join(layout.root, ".workflow-mutation");
+  fs.mkdirSync(lockPath);
+
+  await assert.rejects(
+    acquireWorkflowMutationLock(layout, { timeoutMs: 50 }),
+    /exceeded its synchronization deadline/u
+  );
+  assert.equal(fs.existsSync(lockPath), true);
+
+  fs.utimesSync(lockPath, new Date(0), new Date(0));
+  const release = await acquireWorkflowMutationLock(layout, { timeoutMs: 2_000 });
+  await release();
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("syncRun finishes the node state-and-event commit unit when cancellation lands during the state write", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-node-local-commit";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const controller = new AbortController();
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+  const originalRenameSync = fs.renameSync;
+  let interruptedStateCommit = false;
+  Object.defineProperty(fs, "renameSync", {
+    ...originalDescriptor,
+    value: ((source: fs.PathLike, destination: fs.PathLike) => {
+      const result = originalRenameSync(source, destination);
+      if (!interruptedStateCommit && path.resolve(String(destination)) === statePath) {
+        interruptedStateCommit = true;
+        controller.abort();
+      }
+      return result;
+    }) as typeof fs.renameSync
+  });
+  let interrupted;
+  try {
+    interrupted = await syncRun({ projectRoot: project, runId, env }, { signal: controller.signal });
+  } finally {
+    Object.defineProperty(fs, "renameSync", originalDescriptor);
+  }
+  assert.equal(interruptedStateCommit, true);
+  assert.equal(interrupted.ok, false, JSON.stringify(interrupted.diagnostics));
+  assert.ok(interrupted.diagnostics.some((diagnostic) => diagnostic.code === "WORKFLOW_SYNC_CANCELLED"));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  assert.equal(readRunState(layout).nodes["project-discovery"]?.status, "succeeded");
+  const nodeEvents = replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter(
+    (event) => event.node_id === "project-discovery"
+  );
+  assert.ok(nodeEvents.some((event) => event.event_type === "node-synced"));
+  assert.ok(nodeEvents.some((event) => event.event_type === "artifact-manifest-written"));
+
+  const retried = await syncRun({ projectRoot: project, runId, env });
+  assert.equal(retried.ok, true, JSON.stringify(retried.diagnostics));
+  assert.equal(
+    replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter(
+      (event) => event.node_id === "project-discovery" && event.event_type === "node-synced"
+    ).length,
+    1
+  );
+});
+
+test("syncRun finishes the final run state-and-event commit unit when cancellation lands during the state write", async () => {
+  const project = tempProject();
+  initProject({ projectRoot: project, force: true });
+  writeSmallTopology(project);
+  const runId = "sync-final-local-commit";
+  const workflowRunId = `ultrafuzz-${runId}`;
+  const env = fakeLifecycleSmithersEnv(project, {
+    inspect: workflowInspect({
+      workflowRunId,
+      steps: [{ id: "node:project-discovery", state: "finished", attempt: 1 }]
+    }),
+    events: workflowEvents(workflowRunId, [
+      { type: "NodeStarted", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "node:project-discovery", attempt: 1 },
+      { type: "NodeStarted", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "NodeFinished", nodeId: "verify:project-discovery", attempt: 1 },
+      { type: "RunFinished" }
+    ])
+  });
+  const run = await startRun({ projectRoot: project, runId, env });
+  assert.equal(run.ok, true, JSON.stringify(run.diagnostics));
+  writeRequiredArtifactSet(run.value!.run_root, "project-discovery", ["setup/project-discovery.md", "findings.json"]);
+  const statePath = path.join(run.value!.run_root, "state.json");
+  const controller = new AbortController();
+  const originalDescriptor = Object.getOwnPropertyDescriptor(fs, "renameSync")!;
+  const originalRenameSync = fs.renameSync;
+  let interruptedFinalCommit = false;
+  Object.defineProperty(fs, "renameSync", {
+    ...originalDescriptor,
+    value: ((source: fs.PathLike, destination: fs.PathLike) => {
+      const result = originalRenameSync(source, destination);
+      if (!interruptedFinalCommit && path.resolve(String(destination)) === statePath) {
+        const persisted = JSON.parse(fs.readFileSync(statePath, "utf8")) as { status?: string };
+        if (persisted.status === "succeeded") {
+          interruptedFinalCommit = true;
+          controller.abort();
+        }
+      }
+      return result;
+    }) as typeof fs.renameSync
+  });
+  let synchronized;
+  try {
+    synchronized = await syncRun({ projectRoot: project, runId, env }, { signal: controller.signal });
+  } finally {
+    Object.defineProperty(fs, "renameSync", originalDescriptor);
+  }
+  assert.equal(interruptedFinalCommit, true);
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(synchronized.ok, true, JSON.stringify(synchronized.diagnostics));
+  const layout = layoutForRunRoot(run.value!.run_root);
+  assert.equal(readRunState(layout).status, "succeeded");
+  assert.equal(
+    replayEvents(layout, Number.MAX_SAFE_INTEGER).records.filter((event) => event.event_type === "workflow-synced")
+      .length,
+    1
+  );
+});
+
 test("syncRun rejects conflicting inspect, event, and state evidence before mutating durable state", async () => {
   const cases: Array<{
     name: string;
@@ -10825,10 +11072,13 @@ test("bounded one-shot runner commands escalate past ignored SIGTERM with stable
   fs.mkdirSync(binDir, { recursive: true });
   const smithers = path.join(binDir, "smithers");
   const marker = path.join(project, "termination-child-pid");
+  const descendantMarker = path.join(project, "termination-descendant-pid");
   fs.writeFileSync(
     smithers,
     `#!/bin/sh
 printf '%s\n' "$$" > ${shellQuote(marker)}
+( trap '' TERM; while :; do sleep 1; done ) &
+printf '%s\n' "$!" > ${shellQuote(descendantMarker)}
 trap '' TERM
 while :; do sleep 1; done
 `,
@@ -10839,6 +11089,7 @@ while :; do sleep 1; done
 
   for (const mode of ["timeout", "abort"] as const) {
     if (fs.existsSync(marker)) fs.unlinkSync(marker);
+    if (fs.existsSync(descendantMarker)) fs.unlinkSync(descendantMarker);
     const controller = new AbortController();
     const abortTimer = mode === "abort" ? setTimeout(() => controller.abort(), 100) : undefined;
     const startedAt = Date.now();
@@ -10852,12 +11103,24 @@ while :; do sleep 1; done
     assert.equal(snapshot.ok, false, mode);
     assert.match(snapshot.error ?? "", mode === "abort" ? /was aborted/u : /timed out/u, mode);
     assert.ok(Date.now() - startedAt < 3_000, mode);
-    const pid = Number(fs.readFileSync(marker, "utf8").trim());
-    assert.throws(
-      () => process.kill(pid, 0),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
-      mode
-    );
+    for (const pidPath of [marker, descendantMarker]) {
+      const pid = Number(fs.readFileSync(pidPath, "utf8").trim());
+      const processGoneDeadline = Date.now() + 2_000;
+      while (Date.now() < processGoneDeadline) {
+        try {
+          process.kill(pid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") break;
+          throw error;
+        }
+      }
+      assert.throws(
+        () => process.kill(pid, 0),
+        (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+        `${mode}: ${path.basename(pidPath)}`
+      );
+    }
   }
 });
 
@@ -14356,11 +14619,24 @@ async function killStartChildAtDurableCut(input: {
     }
   });
   const externalMarker = input.env.SMITHERS_START_HOLD_MARKER;
-  await waitForPath(input.cut === "external-invoking" ? externalMarker! : cutMarker, 20_000);
-  child.kill("SIGKILL");
-  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const externalRelease = input.env.SMITHERS_START_HOLD_RELEASE;
-  if (externalRelease !== undefined) fs.writeFileSync(externalRelease, "release\n", "utf8");
+  let cutObserved = false;
+  try {
+    await waitForPath(input.cut === "external-invoking" ? externalMarker! : cutMarker, 60_000);
+    cutObserved = true;
+  } finally {
+    const exited =
+      child.exitCode === null && child.signalCode === null
+        ? new Promise<void>((resolve) => child.once("exit", () => resolve()))
+        : Promise.resolve();
+    // On the intended cut, preserve the crash-before-release ordering. If the
+    // marker wait itself fails, release the detached fake runner first so the
+    // failing test cannot strand a held child after its controller is killed.
+    if (!cutObserved && externalRelease !== undefined) fs.writeFileSync(externalRelease, "release\n", "utf8");
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exited;
+    if (cutObserved && externalRelease !== undefined) fs.writeFileSync(externalRelease, "release\n", "utf8");
+  }
   if (input.cut === "external-invoking") await waitForPath(input.env.SMITHERS_START_EXTERNAL_RUN!, 5_000);
 }
 
@@ -14408,6 +14684,7 @@ test("startRun admits only an empty pre-intent run root and rejects traversal wi
   const ownerlessRunId = "ownerless-preparation-lock";
   const ownerlessLock = path.join(project, ".ultrafuzz", "runs", ownerlessRunId, ".start-preparation-lock");
   fs.mkdirSync(ownerlessLock, { recursive: true });
+  fs.utimesSync(ownerlessLock, new Date(0), new Date(0));
   const ownerless = await startRun({ projectRoot: project, runId: ownerlessRunId, env });
   assert.equal(ownerless.ok, true, JSON.stringify(ownerless.diagnostics));
 });

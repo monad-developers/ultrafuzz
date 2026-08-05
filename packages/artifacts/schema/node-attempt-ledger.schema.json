@@ -72,6 +72,15 @@
         }
       }
     },
+    "evidence": {
+      "type": "object",
+      "required": ["verifier_receipt_sha256", "smithers_output_sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "verifier_receipt_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "smithers_output_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
     "failure_category": {
       "enum": [
         "executor-error",

@@ -535,6 +535,9 @@ function prepareCloudAgentCommandPaths(env: NodeJS.ProcessEnv): void {
   lchownTree(workspace, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
   lchownTree(artifactDir, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
   lchownTree(AGENT_HOME, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
+  if (env.KIMI_CODE_HOME === KIMI_AGENT_AUTH_HOME && env.KIMI_SHARE_DIR === KIMI_AGENT_AUTH_HOME) {
+    sealCloudKimiSubscriptionAuthHome();
+  }
   for (const name of [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
@@ -812,6 +815,88 @@ export function secureRootPrivateTree(root: string): void {
   visit(resolvedRoot);
 }
 
+export function sealCloudKimiSubscriptionAuthHome(
+  authHome = KIMI_AGENT_AUTH_HOME,
+  agentHome = AGENT_HOME,
+  ownership: { rootUid?: number; rootGid?: number; agentUid?: number; agentGid?: number } = {}
+): void {
+  const rootUid = ownership.rootUid ?? 0;
+  const rootGid = ownership.rootGid ?? 0;
+  const agentUid = ownership.agentUid ?? CLOUD_AGENT_UID;
+  const agentGid = ownership.agentGid ?? CLOUD_AGENT_GID;
+  const resolvedAgentHome = path.resolve(agentHome);
+  const resolvedAuthHome = path.resolve(authHome);
+  if (
+    resolvedAuthHome === resolvedAgentHome ||
+    !resolvedAuthHome.startsWith(`${resolvedAgentHome}${path.sep}`) ||
+    path.dirname(resolvedAuthHome) !== resolvedAgentHome
+  ) {
+    throw new Error("cloud Kimi subscription auth home is outside its sealed parent");
+  }
+  const assertAnchored = (entryPath: string, kind: "directory" | "file"): fs.Stats => {
+    const stat = fs.lstatSync(entryPath);
+    if (
+      (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) ||
+      stat.isSymbolicLink() ||
+      (stat.isFile() && stat.nlink !== 1) ||
+      fs.realpathSync(entryPath) !== entryPath
+    ) {
+      throw new Error("cloud Kimi subscription auth home contains an unsafe entry");
+    }
+    return stat;
+  };
+  assertAnchored(resolvedAgentHome, "directory");
+  assertAnchored(resolvedAuthHome, "directory");
+  const oauth = path.join(resolvedAuthHome, "oauth");
+  if (!fs.existsSync(oauth)) fs.mkdirSync(oauth, { mode: 0o700 });
+  const expectedRootEntries = ["config.toml", "credentials", "device_id", "oauth"];
+  if (JSON.stringify(fs.readdirSync(resolvedAuthHome).sort()) !== JSON.stringify(expectedRootEntries)) {
+    throw new Error("cloud Kimi subscription auth home contains unexpected entries");
+  }
+  const credentials = path.join(resolvedAuthHome, "credentials");
+  assertAnchored(credentials, "directory");
+  const credentialEntries = fs.readdirSync(credentials);
+  if (credentialEntries.length !== 1) {
+    throw new Error("cloud Kimi subscription auth home must contain exactly one credential file");
+  }
+  const immutableFiles = [
+    path.join(resolvedAuthHome, "config.toml"),
+    path.join(resolvedAuthHome, "device_id"),
+    path.join(credentials, credentialEntries[0]!)
+  ];
+  for (const file of immutableFiles) {
+    assertAnchored(file, "file");
+    fs.chownSync(file, rootUid, rootGid);
+    fs.chmodSync(file, 0o444);
+  }
+  fs.chownSync(credentials, rootUid, rootGid);
+  fs.chmodSync(credentials, 0o555);
+
+  const secureWritableOauthEntry = (entryPath: string): void => {
+    const stat = fs.lstatSync(entryPath);
+    if (
+      (!stat.isDirectory() && !stat.isFile()) ||
+      stat.isSymbolicLink() ||
+      (stat.isFile() && stat.nlink !== 1) ||
+      fs.realpathSync(entryPath) !== entryPath
+    ) {
+      throw new Error("cloud Kimi OAuth lock directory contains an unsafe entry");
+    }
+    fs.chownSync(entryPath, agentUid, agentGid);
+    fs.chmodSync(entryPath, stat.isDirectory() ? 0o700 : 0o600);
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(entryPath)) secureWritableOauthEntry(path.join(entryPath, entry));
+    }
+  };
+  secureWritableOauthEntry(oauth);
+  fs.chownSync(resolvedAuthHome, rootUid, rootGid);
+  fs.chmodSync(resolvedAuthHome, 0o555);
+  // The model UID must not be able to rename the sealed auth root out of its
+  // writable HOME and replace it with a credential-generating tree.
+  fs.chownSync(resolvedAgentHome, rootUid, rootGid);
+  fs.chmodSync(resolvedAgentHome, 0o755);
+}
+
 function prepareCloudAgentWorkspace(projectRoot: string, kimiSnapshotRoot?: string): void {
   fs.rmSync(AGENT_HOME, { force: true, recursive: true });
   for (const directory of [
@@ -830,6 +915,7 @@ function prepareCloudAgentWorkspace(projectRoot: string, kimiSnapshotRoot?: stri
   }
   exposeTrustedProjectTree(projectRoot);
   lchownTree(AGENT_HOME, CLOUD_AGENT_UID, CLOUD_AGENT_GID);
+  if (kimiSnapshotRoot !== undefined) sealCloudKimiSubscriptionAuthHome();
 }
 
 function exposeTrustedProjectTree(root: string): void {

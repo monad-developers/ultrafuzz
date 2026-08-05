@@ -221,9 +221,12 @@ exact producer attempt's launch and collection jobs both succeeded, and every
 configured pair must finish and score before publication. Branch results remain
 keyed to the exact pushed commit.
 
-Smoke publication also fails when any target row produces zero normalized
-findings. This is a no-regression signal, not a synthetic canary: the workflow
-must find and support a real issue from target source evidence.
+Smoke publication also fails when a cleanly completed target row produces zero
+normalized findings. This is a no-regression signal, not a synthetic canary:
+the workflow must find and support a real issue from target source evidence. A
+single report-backed row whose terminal evidence proves a genuine task-output
+failure remains a scoreable failed datapoint and may have zero findings;
+operational failures or two failed targets still block publication.
 
 The compare-and-swap publisher validates the generation with the benchmark
 policy from the exact candidate checkout, appends observations keyed to that

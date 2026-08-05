@@ -14,6 +14,7 @@ import {
   createNodeAttemptLedgerEntry,
   getPricingCatalogSnapshotPath,
   getNodeArtifactDir,
+  isTerminalRunStatus,
   layoutForRunRoot,
   listSafeFiles,
   normalizeFindings,
@@ -26,7 +27,6 @@ import {
   stableUsageDimension,
   sha256File,
   updateNodeState,
-  updateRunStatus,
   validateSafeId,
   verifyArtifactManifestPrerequisites,
   writeFileDurable,
@@ -836,22 +836,18 @@ async function synchronizeLinkedWorkflowRunWithExecution(
       return { ok: false, diagnostics: [preFinalMutationBudgetDiagnostic] };
     }
 
-    const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, readRunState(layout).status, {
+    const observedAtMs = synchronizationClock(control);
+    const statusObservedAt = new Date(observedAtMs).toISOString();
+    const currentRunState = readRunState(layout);
+    const finalStatus = finalRunStatus(inspect, syncResult.nodeStatuses, currentRunState.status, {
       evidenceComplete: syncResult.syncedNodes >= loaded.tasks.length
     });
-    const previousRunStatus = readRunState(layout).status;
+    const previousRunStatus = currentRunState.status;
     const runStatusChanged = previousRunStatus !== finalStatus;
-    if (runStatusChanged) {
-      const preStatusWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-      if (preStatusWriteBudgetDiagnostic !== undefined) {
-        return { ok: false, diagnostics: [preStatusWriteBudgetDiagnostic] };
-      }
-      updateRunStatus(layout, finalStatus);
-    }
-    const observedAtMs = synchronizationClock(control);
+    const projectedRunState = projectRunStatus(currentRunState, finalStatus, statusObservedAt);
     const workflowControl = projectWorkflowControlState({
       previousState: previousControlState,
-      state: readRunState(layout),
+      state: projectedRunState,
       graph: loaded.graph,
       tasks: loaded.tasks,
       workflowStates: syncResult.workflowStates,
@@ -876,11 +872,15 @@ async function synchronizeLinkedWorkflowRunWithExecution(
         diagnostics.push(smithersDiagnostic(error, "WORKFLOW_DEADLINE_CANCEL_FAILED"));
       }
     }
-    const preControlMutationBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-    if (preControlMutationBudgetDiagnostic !== undefined) {
-      return { ok: false, diagnostics: [preControlMutationBudgetDiagnostic] };
+    // No remote or otherwise unbounded operation may follow this checkpoint.
+    // State plus its associated events form one bounded synchronous local
+    // commit unit, so cancellation cannot expose terminal state without the
+    // evidence events that make it replayable.
+    const preLocalCommitBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
+    if (preLocalCommitBudgetDiagnostic !== undefined) {
+      return { ok: false, diagnostics: [preLocalCommitBudgetDiagnostic] };
     }
-    if (workflowControl.changed || deadlineApplied) {
+    if (runStatusChanged || workflowControl.changed || deadlineApplied) {
       writeRunState(layout, workflowControl.state);
     }
     if (deadlineApplied) {
@@ -900,10 +900,6 @@ async function synchronizeLinkedWorkflowRunWithExecution(
       workflowControl.transitioned ||
       deadlineApplied
     ) {
-      const preEventWriteBudgetDiagnostic = synchronizationBudgetDiagnostic(control, synchronizationClock(control));
-      if (preEventWriteBudgetDiagnostic !== undefined) {
-        return { ok: false, diagnostics: [preEventWriteBudgetDiagnostic] };
-      }
       appendEvent(layout, {
         eventType: "workflow-synced",
         status: deadlineApplied ? "timed-out" : finalStatus,
@@ -933,6 +929,16 @@ async function synchronizeLinkedWorkflowRunWithExecution(
   } finally {
     await releaseWorkflowMutationLock();
   }
+}
+
+function projectRunStatus(state: ReturnType<typeof readRunState>, status: RunStatus, timestamp: string) {
+  const projected = structuredClone(state);
+  if (projected.status !== status) projected.last_transition_at = timestamp;
+  projected.status = status;
+  if (status === "running" && projected.started_at === undefined) projected.started_at = timestamp;
+  if (isTerminalRunStatus(status)) projected.finished_at = timestamp;
+  else delete projected.finished_at;
+  return projected;
 }
 
 function synchronizationBudgetDiagnostic(
@@ -1529,7 +1535,11 @@ function normalizedUsageLedgerInput(
   if (costUsd !== undefined) {
     usage.cost_usd = costUsd;
   }
-  const providerReportedModel = providerModelEvidence(payload.model);
+  const tokenProviderReportedModel = providerModelEvidence(payload.model);
+  const providerReportedModel = reconcileProviderModelEvidence(
+    tokenProviderReportedModel,
+    lifecycleInvocation.providerReportedModel
+  );
   const configuredModel = configuredModelEvidence(task);
   usage.model = providerReportedModel;
   const agent = stringField(payload, "agent");
@@ -1765,6 +1775,15 @@ function providerModelFromTerminalEvent(event: WorkflowEvent): string {
   const errorResult = recordField(error, "result");
   const errorResponse = recordField(errorResult, "response");
   return providerModelEvidence(errorResponse?.modelId);
+}
+
+function reconcileProviderModelEvidence(tokenModel: string, terminalModel: string): string {
+  if (tokenModel === PROVIDER_IDENTITY_INVALID || terminalModel === PROVIDER_IDENTITY_INVALID) {
+    return PROVIDER_IDENTITY_INVALID;
+  }
+  if (terminalModel === PROVIDER_IDENTITY_MISSING) return tokenModel;
+  if (tokenModel === PROVIDER_IDENTITY_MISSING) return terminalModel;
+  return tokenModel === terminalModel ? tokenModel : PROVIDER_IDENTITY_MIXED;
 }
 
 function configuredModelEvidence(task: StoredWorkflowTask | undefined): string {
@@ -3009,14 +3028,12 @@ async function synchronizeTasks(input: {
     };
     const stateChanged = nodePatchChanges(previous, patch);
     if (stateChanged) {
-      assertSynchronizationBudget(input.control);
       updateNodeState(input.layout, task.attemptId, patch);
-      appendNodeEvents(input.layout, task.attemptId, effectiveFinalization.events, input.control);
+      appendNodeEvents(input.layout, task.attemptId, effectiveFinalization.events);
       changed = true;
     }
     syncedNodes += 1;
     if (previous?.status !== patchStatus) {
-      assertSynchronizationBudget(input.control);
       appendEvent(input.layout, {
         eventType: "node-synced",
         nodeId: task.attemptId,
@@ -3764,14 +3781,8 @@ function dependencyCascadeFailure(
   };
 }
 
-function appendNodeEvents(
-  layout: RunLayout,
-  nodeId: string,
-  events: PendingNodeEvent[],
-  control: WorkflowSynchronizationControl
-): void {
+function appendNodeEvents(layout: RunLayout, nodeId: string, events: PendingNodeEvent[]): void {
   for (const event of events) {
-    assertSynchronizationBudget(control);
     appendEvent(layout, {
       eventType: event.eventType,
       nodeId,

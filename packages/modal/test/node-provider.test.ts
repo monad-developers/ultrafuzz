@@ -43,6 +43,7 @@ import {
   rewriteCloudAgentAuthConfig,
   runAfterCloudAgentQuiescence,
   runDurableWorkflow,
+  sealCloudKimiSubscriptionAuthHome,
   stageCanonicalNodeResultBundle,
   workflowCommandArguments,
   workerErrorPayload
@@ -454,6 +455,60 @@ describe("Modal node sandbox provider", () => {
     );
 
     expect(invocation.env.ULTRAFUZZ_KIMI_SESSION_HOME).toBe("/workspace/agent-home/.kimi-code-sessions");
+  });
+
+  it("seals Kimi subscription credentials against worker-side rotation while leaving only OAuth locks writable", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-kimi-worker-seal-"));
+    const agentHome = path.join(root, "agent-home");
+    const authHome = path.join(agentHome, ".kimi-code");
+    const credentials = path.join(authHome, "credentials");
+    const credential = path.join(credentials, "kimi-code.json");
+    const uid = process.getuid?.() ?? fs.statSync(root).uid;
+    const gid = process.getgid?.() ?? fs.statSync(root).gid;
+    try {
+      fs.mkdirSync(credentials, { recursive: true });
+      fs.writeFileSync(path.join(authHome, "config.toml"), "[providers.kimi]\n");
+      fs.writeFileSync(path.join(authHome, "device_id"), "device-a\n");
+      fs.writeFileSync(credential, '{"access_token":"A","refresh_token":"A-refresh"}\n');
+
+      sealCloudKimiSubscriptionAuthHome(authHome, agentHome, {
+        rootUid: uid,
+        rootGid: gid,
+        agentUid: uid,
+        agentGid: gid
+      });
+      expect(fs.statSync(agentHome).mode & 0o777).toBe(0o755);
+      expect(fs.statSync(authHome).mode & 0o777).toBe(0o555);
+      expect(fs.statSync(credentials).mode & 0o777).toBe(0o555);
+      expect(fs.statSync(credential).mode & 0o777).toBe(0o444);
+      expect(() => fs.writeFileSync(credential, '{"access_token":"B","refresh_token":"B-refresh"}\n')).toThrow();
+      expect(() => fs.writeFileSync(path.join(credentials, "successor.json"), "C\n")).toThrow();
+      expect(fs.readFileSync(credential, "utf8")).toContain('"access_token":"A"');
+
+      const oauthLock = path.join(authHome, "oauth", "kimi-code.lock");
+      fs.writeFileSync(oauthLock, "lock\n");
+      expect(fs.readFileSync(oauthLock, "utf8")).toBe("lock\n");
+
+      // Reproduce the recursive ownership preparation performed before every
+      // supervised model command, then prove resealing restores the boundary.
+      fs.chmodSync(agentHome, 0o700);
+      fs.chmodSync(authHome, 0o700);
+      fs.chmodSync(credentials, 0o700);
+      fs.chmodSync(credential, 0o600);
+      sealCloudKimiSubscriptionAuthHome(authHome, agentHome, {
+        rootUid: uid,
+        rootGid: gid,
+        agentUid: uid,
+        agentGid: gid
+      });
+      expect(fs.statSync(credential).mode & 0o777).toBe(0o444);
+      expect(fs.statSync(path.join(authHome, "oauth")).mode & 0o777).toBe(0o700);
+    } finally {
+      for (const entry of [agentHome, authHome, credentials, credential]) {
+        if (fs.existsSync(entry)) fs.chmodSync(entry, fs.lstatSync(entry).isDirectory() ? 0o700 : 0o600);
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("drops only the model CLI subprocess to a capability-free uid", () => {

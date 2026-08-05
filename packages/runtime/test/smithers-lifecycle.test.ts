@@ -368,3 +368,61 @@ test("a delayed stream callback rejection waits for the runner to close", async 
     (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH"
   );
 });
+
+test("stream cancellation does not wait for a never-settling line consumer", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-callback-abort-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runner = path.join(root, "smithers.mjs");
+  fs.writeFileSync(
+    runner,
+    ["#!/usr/bin/env node", 'process.stdout.write("{\\"event\\":1}\\n");', "setInterval(() => {}, 1_000);", ""].join(
+      "\n"
+    ),
+    "utf8"
+  );
+  fs.chmodSync(runner, 0o755);
+  const env = createSmithersTestEnvironment(runner, { PATH: process.env.PATH });
+  const controller = new AbortController();
+  let markCallbackStarted: (() => void) | undefined;
+  const callbackStarted = new Promise<void>((resolve) => {
+    markCallbackStarted = resolve;
+  });
+  const stream = streamSmithersCommand({
+    args: ["events", "run-id", "--follow", "--json"],
+    projectRoot: root,
+    env,
+    signal: controller.signal,
+    maxLines: 10,
+    onLine: () => {
+      markCallbackStarted?.();
+      return new Promise<void>(() => undefined);
+    }
+  });
+  await callbackStarted;
+  const abortedAt = Date.now();
+  controller.abort();
+  const result = await stream;
+  assert.equal(result.stoppedByCaller, true);
+  assert.ok(Date.now() - abortedAt < 2_000);
+});
+
+test("stream callback drain has an absolute deadline after the runner exits", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ufz-stream-callback-deadline-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runner = path.join(root, "smithers.mjs");
+  fs.writeFileSync(runner, '#!/usr/bin/env node\nprocess.stdout.write("{\\"event\\":1}\\n");\n', "utf8");
+  fs.chmodSync(runner, 0o755);
+  const env = createSmithersTestEnvironment(runner, { PATH: process.env.PATH });
+  const startedAt = Date.now();
+  await assert.rejects(
+    streamSmithersCommand({
+      args: ["events", "run-id", "--json"],
+      projectRoot: root,
+      env,
+      maxLines: 10,
+      onLine: () => new Promise<void>(() => undefined)
+    }),
+    /bounded drain deadline/u
+  );
+  assert.ok(Date.now() - startedAt < 3_000);
+});

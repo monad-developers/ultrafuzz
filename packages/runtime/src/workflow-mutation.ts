@@ -12,7 +12,11 @@ import {
 } from "@ultrafuzz/artifacts";
 import lockfile from "proper-lockfile";
 
-import { writeProperLockfileOwner } from "./proper-lockfile-owner.js";
+import {
+  captureProperLockfileDirectoryIdentity,
+  writeProperLockfileOwner,
+  type ProperLockfileDirectoryIdentity
+} from "./proper-lockfile-owner.js";
 
 const WORKFLOW_MUTATION_LOCK = ".workflow-mutation";
 const WORKFLOW_LIFECYCLE_ACTION_LOCK = ".workflow-lifecycle-action";
@@ -21,7 +25,6 @@ const WORKFLOW_RUN_LINK_JOURNAL = "workflow-run-link-journal.json";
 const WORKFLOW_MUTATION_LOCK_STALE_MS = 30 * 60 * 1_000;
 const WORKFLOW_LIFECYCLE_ACTION_LOCK_STALE_MS = 10 * 60 * 1_000;
 const WORKFLOW_MUTATION_LOCK_OWNER = "owner.json";
-const WORKFLOW_MUTATION_LOCK_OWNER_GRACE_MS = 2_000;
 const WORKFLOW_LIFECYCLE_ACTION_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-lifecycle-action-journal.v1" as const;
 const WORKFLOW_RUN_LINK_JOURNAL_SCHEMA_VERSION = "ultrafuzz.workflow-run-link-journal.v1" as const;
 export const WORKFLOW_CHECKPOINT_FRAME_MAX = 0x7fff_ffff;
@@ -600,16 +603,24 @@ async function acquireOwnedRunLock(
   const waitMs = Math.max(0, Math.min(options.waitMs, options.timeoutMs ?? options.waitMs));
   const deadline = Date.now() + waitMs;
   let release: (() => Promise<void>) | undefined;
+  let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
   while (release === undefined) {
     try {
-      reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label);
-      release = await lockfile.lock(lockPath, {
+      reclaimTerminatedWorkflowRunLock(layout, lockPath, options.label, options.stale);
+      const acquiredRelease = await lockfile.lock(lockPath, {
         lockfilePath: lockPath,
         realpath: false,
         stale: options.stale,
         update: 30_000,
         retries: 0
       });
+      try {
+        acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, options.label);
+      } catch (error) {
+        await acquiredRelease().catch(() => undefined);
+        throw error;
+      }
+      release = acquiredRelease;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ELOCKED" && code !== "ENOENT") throw error;
@@ -626,6 +637,7 @@ async function acquireOwnedRunLock(
     throw new WorkflowMutationLockInterruptedError(workflowRunLockCancelled(options.signal) ? "cancelled" : "deadline");
   }
   const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
+  if (acquiredIdentity === undefined) throw new Error(`${options.label} identity was not captured`);
   const processStart = workflowMutationProcessStartToken(process.pid);
   if (processStart === null) {
     await release();
@@ -637,7 +649,7 @@ async function acquireOwnedRunLock(
     acquired_at: new Date().toISOString()
   };
   try {
-    writeProperLockfileOwner(lockPath, ownerPath, owner, options.label);
+    writeProperLockfileOwner(lockPath, ownerPath, owner, options.label, acquiredIdentity);
   } catch (error) {
     try {
       await release();
@@ -681,14 +693,14 @@ function workflowRunLockCancelled(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
 }
 
-function reclaimTerminatedWorkflowRunLock(layout: RunLayout, lockPath: string, label: string): void {
+function reclaimTerminatedWorkflowRunLock(layout: RunLayout, lockPath: string, label: string, staleMs: number): void {
   if (!fs.existsSync(lockPath)) return;
   assertNoSymlinkComponents(layout.root, lockPath, label);
   const lockStat = fs.lstatSync(lockPath);
   if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) throw new Error(`${label} is unsafe`);
   const ownerPath = path.join(lockPath, WORKFLOW_MUTATION_LOCK_OWNER);
   if (!fs.existsSync(ownerPath)) {
-    if (Date.now() - lockStat.mtimeMs < WORKFLOW_MUTATION_LOCK_OWNER_GRACE_MS) return;
+    if (Date.now() - lockStat.mtimeMs < staleMs) return;
     if (fs.readdirSync(lockPath).length !== 0) {
       throw new Error(`ownerless ${label} contains unexpected evidence`);
     }

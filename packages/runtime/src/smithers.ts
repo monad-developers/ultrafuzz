@@ -43,6 +43,8 @@ const SMITHERS_CLI_MAX_BUFFER_BYTES = 1024 * 1024 * 128;
 const SMITHERS_DEPENDENCY_INSTALL_TIMEOUT_MS = 300_000;
 const STREAM_TERMINATION_GRACE_MS = 5_000;
 const ONE_SHOT_TERMINATION_GRACE_MS = 500;
+const ONE_SHOT_TERMINATION_HARD_LIMIT_MS = 1_500;
+const STREAM_CALLBACK_DRAIN_TIMEOUT_MS = 1_000;
 const SMITHERS_EVIDENCE_TEXT_LIMIT_CHARACTERS = 1024 * 1024;
 const ULTRAFUZZ_WORKFLOW_PERSISTED_PATH = "ULTRAFUZZ_WORKFLOW_PERSISTED_PATH";
 const WORKFLOW_EXECUTION_DEPENDENCY_MAP_SCHEMA_VERSION = "ultrafuzz.workflow-execution-dependencies.v1" as const;
@@ -1770,7 +1772,7 @@ async function streamSmithersCommandUnanchored(input: {
     // later turn. Wait until readline can emit no more lines, then settle every
     // bounded callback before deciding whether streaming succeeded.
     await readerClosed;
-    await Promise.all(pendingLineCallbacks);
+    await drainStreamLineCallbacks(pendingLineCallbacks, input.signal);
     if (streamError !== undefined) throw streamError;
     return {
       command: displayCommand,
@@ -1792,6 +1794,31 @@ async function streamSmithersCommandUnanchored(input: {
     } finally {
       executableAnchor?.close();
     }
+  }
+}
+
+async function drainStreamLineCallbacks(callbacks: readonly Promise<void>[], signal: AbortSignal | undefined) {
+  if (callbacks.length === 0 || signal?.aborted === true) return;
+  let timeout: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+  const aborted =
+    signal === undefined
+      ? new Promise<"aborted">(() => undefined)
+      : new Promise<"aborted">((resolve) => {
+          onAbort = () => resolve("aborted");
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+  const deadline = new Promise<"deadline">((resolve) => {
+    timeout = setTimeout(() => resolve("deadline"), STREAM_CALLBACK_DRAIN_TIMEOUT_MS);
+  });
+  try {
+    const outcome = await Promise.race([Promise.all(callbacks).then(() => "settled" as const), aborted, deadline]);
+    if (outcome === "deadline") {
+      throw new Error("workflow runner stream line consumer exceeded its bounded drain deadline");
+    }
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -2871,7 +2898,8 @@ async function executeBoundedSmithersCommand(input: {
   const child = spawn(input.executable, [...input.args], {
     cwd: input.cwd,
     env: input.env,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32"
   });
   child.once("spawn", () => input.onSpawn?.());
   let processError: Error | undefined;
@@ -2891,16 +2919,37 @@ async function executeBoundedSmithersCommand(input: {
   let stderrBytes = 0;
   let terminationReason: SmithersTerminationReason | undefined;
   let escalationTimer: NodeJS.Timeout | undefined;
+  let hardTeardownTimer: NodeJS.Timeout | undefined;
+  let resolveHardTeardown: ((value: { code: number | null; signal: NodeJS.Signals | null }) => void) | undefined;
+  const hardTeardown = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    resolveHardTeardown = resolve;
+  });
   let timeoutTimer: NodeJS.Timeout | undefined;
+  const signalCommandTree = (signal: NodeJS.Signals): void => {
+    if (process.platform !== "win32" && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && String(error.code) === "ESRCH") {
+          // The direct child may already have exited while a descendant still
+          // owns a pipe; fall through to the direct-child best effort.
+        }
+      }
+    }
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  };
   const terminate = (reason: SmithersTerminationReason): void => {
     if (terminationReason !== undefined) return;
     terminationReason = reason;
-    if (child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
-      escalationTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      }, ONE_SHOT_TERMINATION_GRACE_MS).unref();
-    }
+    signalCommandTree("SIGTERM");
+    escalationTimer = setTimeout(() => signalCommandTree("SIGKILL"), ONE_SHOT_TERMINATION_GRACE_MS).unref();
+    hardTeardownTimer = setTimeout(() => {
+      signalCommandTree("SIGKILL");
+      child.stdout.destroy();
+      child.stderr.destroy();
+      resolveHardTeardown?.({ code: child.exitCode, signal: child.signalCode });
+    }, ONE_SHOT_TERMINATION_HARD_LIMIT_MS);
   };
   const append = (target: Buffer[], chunk: Buffer | string, stream: "stdout" | "stderr"): void => {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -2922,7 +2971,7 @@ async function executeBoundedSmithersCommand(input: {
   }
   if (isAbortedSignal(input.signal)) terminate("abort");
   try {
-    const outcome = await closed;
+    const outcome = await Promise.race([closed, hardTeardown]);
     const stdout = Buffer.concat(stdoutChunks).toString("utf8");
     const stderr = Buffer.concat(stderrChunks).toString("utf8");
     if (terminationReason !== undefined) {
@@ -2934,6 +2983,7 @@ async function executeBoundedSmithersCommand(input: {
     input.signal?.removeEventListener("abort", onAbort);
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     if (escalationTimer !== undefined) clearTimeout(escalationTimer);
+    if (hardTeardownTimer !== undefined) clearTimeout(hardTeardownTimer);
   }
 }
 

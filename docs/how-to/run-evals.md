@@ -171,13 +171,15 @@ ultrafuzz eval history <eval-run-id> \
 ```
 
 Use `--benchmark evmbench` and `--lane full` for the full cohort. Publication
-refuses missing rows, failed or non-terminal workflows, non-clean recovery classifications,
-invalid reports, a matrix that differs from the exact public target/variant/trial
-scope, incomplete or inconsistent lineage, unpinned targets, and missing scoring
-evidence before modifying history. Repeating the same immutable eval result is
-idempotent; conflicting content for an existing result is rejected. Candidate,
-cohort, execution-policy, and scoring fingerprints remain available in every
-published observation.
+refuses missing rows, non-terminal workflows, operational failures, more than
+one report-backed genuine task-output failure, non-clean recovery
+classifications, invalid reports, a matrix that differs from the exact public
+target/variant/trial scope, incomplete or inconsistent lineage, unpinned
+targets, and missing scoring evidence before modifying history. One terminal,
+report-backed genuine task-output failure remains a scoreable failed datapoint.
+Repeating the same immutable eval result is idempotent; conflicting content for
+an existing result is rejected. Candidate, cohort, execution-policy, and
+scoring fingerprints remain available in every published observation.
 
 To regenerate charts without a benchmark or model call, run:
 
@@ -188,9 +190,10 @@ ultrafuzz eval history --check
 
 `--check` is the ordinary-CI path: it validates history and reports stale or
 missing charts without writing them. If publication fails, inspect the scored
-run for a complete `summary.json`, `scores.jsonl`, terminal-success lifecycle,
-and available candidate, cohort, and scoring provenance. Missing timing or cost
-is allowed and renders as unavailable; it is never converted to zero.
+run for a complete `summary.json`, `scores.jsonl`, an exact scoreable terminal
+lifecycle (clean success or the one allowed report-backed genuine failure), and
+available candidate, cohort, and scoring provenance. Missing timing or cost is
+allowed and renders as unavailable; it is never converted to zero.
 
 Every non-deletion push to a branch in this repository launches the real
 three-target Ultrafuzz-bench smoke as detached Modal work, including pushes to

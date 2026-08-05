@@ -8,6 +8,7 @@ const reportPath = path.resolve(root, readOption("--report") ?? ".ultrafuzz/rele
 
 const gates = [
   gate("docs", "Documentation inventory", "pnpm", ["-w", "docs:check"], ["G-DOCS"]),
+  gate("ci-scripts", "CI script tests", "pnpm", ["-w", "test:ci-scripts"], ["G-CI-SCRIPTS"]),
   gate("config", "Config package tests", "pnpm", ["--filter", "@ultrafuzz/config", "test"], ["G-CONFIG"]),
   gate("security", "Security package tests", "pnpm", ["--filter", "@ultrafuzz/security", "test"], ["G-SECURITY"]),
   gate("topology", "Topology package tests", "pnpm", ["--filter", "@ultrafuzz/topology", "test"], ["G-TOPOLOGY"]),
@@ -16,6 +17,7 @@ const gates = [
   gate("runtime", "Runtime package tests", "pnpm", ["--filter", "@ultrafuzz/runtime", "test"], ["G-RUNTIME"]),
   gate("evals", "Evals package tests", "pnpm", ["--filter", "@ultrafuzz/evals", "test"], ["G-EVALS"]),
   gate("modal", "Modal package tests", "pnpm", ["--filter", "@ultrafuzz/modal", "test"], ["G-MODAL"]),
+  gate("dashboard", "Dashboard package tests", "pnpm", ["--filter", "@ultrafuzz/dashboard", "test"], ["G-DASHBOARD"]),
   gate("cli", "CLI package tests", "pnpm", ["--filter", "@ultrafuzz/cli", "test"], ["G-CLI"]),
   gate("workspace-typecheck", "Workspace typecheck", "pnpm", ["-w", "typecheck"], ["G-WORKSPACE-TYPECHECK"])
 ];

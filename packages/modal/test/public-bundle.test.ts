@@ -966,6 +966,119 @@ describe("public Modal benchmark bundles", () => {
     ).toThrow(/must report at least one normalized finding/u);
   });
 
+  it("accepts one report-backed genuine failed datapoint with empty normalized findings", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-genuine-failure-"));
+    const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1", "target-c-runner-trial-1"];
+    const failedRowId = rowIds[2]!;
+    let bundle = createPublicBenchmarkBundle({
+      ...TEST_BUNDLE_METADATA,
+      files: completePublicSources(root, rowIds)
+    });
+
+    const diagnosticsPath = "eval/public-eval-diagnostics.json";
+    const diagnostics = JSON.parse(bundleFileText(bundle, diagnosticsPath)) as {
+      summary: Record<string, unknown>;
+      rows: Array<Record<string, unknown>>;
+    };
+    Object.assign(diagnostics.rows[2]!, {
+      final_status: "failed",
+      workflow_status: "failed",
+      terminal_disposition: "genuine-task-failures",
+      scoring_ready: true,
+      reason_codes: []
+    });
+    Object.assign(diagnostics.summary, {
+      workflow_succeeded: 2,
+      workflow_failed: 1,
+      genuine_task_failure_rows: 1,
+      scoring_ready: true
+    });
+    bundle = replaceBundleContents(bundle, diagnosticsPath, `${JSON.stringify(diagnostics, null, 2)}\n`);
+
+    const statePath = `reports/${failedRowId}/execution-evidence/terminal/state.json`;
+    const state = JSON.parse(bundleFileText(bundle, statePath)) as {
+      status: string;
+      nodes: Record<string, Record<string, unknown>>;
+    };
+    state.status = "failed";
+    const failedAttemptId = "dedupe-findings__model_0__attempt_0";
+    Object.assign(state.nodes[failedAttemptId]!, {
+      status: "failed",
+      last_error: "task output did not pass final validation",
+      provenance: {
+        ...(state.nodes[failedAttemptId]!.provenance as Record<string, unknown>),
+        output_contracts: { ok: false, missing: [] },
+        terminal_disposition: {
+          schema_version: "ultrafuzz.terminal-disposition.v1",
+          kind: "task-output-validation-failure"
+        }
+      }
+    });
+    Object.assign(state.nodes["dedupe-findings"]!, {
+      status: "failed",
+      timed_out: false,
+      provenance: {
+        workflow: {
+          run_id: (
+            (state.nodes["dedupe-findings"]!.provenance as Record<string, Record<string, unknown>>).workflow as Record<
+              string,
+              unknown
+            >
+          ).run_id,
+          aggregate_attempt_statuses: ["failed"]
+        }
+      }
+    });
+    const stateContents = `${JSON.stringify(state, null, 2)}\n`;
+    const stateSha256 = crypto.createHash("sha256").update(stateContents).digest("hex");
+    bundle = replaceBundleContents(bundle, statePath, stateContents);
+    bundle = mutateFinalRunRecords(bundle, failedRowId, (record) => {
+      record.final_status = "failed";
+      record.terminal_disposition = "genuine-task-failures";
+      record.workflow = { status: "failed", terminal: true };
+      record.terminal_evidence = {
+        ...(record.terminal_evidence as Record<string, unknown>),
+        state_sha256: stateSha256
+      };
+    });
+
+    const reportPath = `reports/${failedRowId}/report.json`;
+    const report = JSON.parse(bundleFileText(bundle, reportPath)) as Record<string, unknown>;
+    report.issues = [];
+    bundle = replaceBundleContents(bundle, reportPath, `${JSON.stringify(report, null, 2)}\n`);
+    bundle = replaceBundleContents(bundle, `reports/${failedRowId}/findings.normalized.json`, "[]\n");
+
+    const summary = JSON.parse(bundleFileText(bundle, "eval/summary.json")) as {
+      rows: Array<Record<string, unknown>>;
+    };
+    const failedSummaryRow = summary.rows.find((row) => row.row_id === failedRowId);
+    if (failedSummaryRow === undefined) throw new Error("missing genuine failed summary row fixture");
+    failedSummaryRow.finding_count = 0;
+    bundle = replaceBundleContents(bundle, "eval/summary.json", `${JSON.stringify(summary, null, 2)}\n`);
+    const scores = bundleFileText(bundle, "eval/scores.jsonl")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((score) => score.row_id !== failedRowId);
+    bundle = replaceBundleContents(
+      bundle,
+      "eval/scores.jsonl",
+      `${scores.map((score) => JSON.stringify(score)).join("\n")}\n`
+    );
+    bundle = {
+      ...bundle,
+      status: "genuine-task-failures",
+      targets: bundle.targets.map((target) =>
+        target.id === "target-3" ? { ...target, status: "genuine-task-failures" as const } : target
+      )
+    };
+
+    expect(parsePublicBenchmarkBundle(bundle)).toMatchObject({
+      status: "genuine-task-failures",
+      targets: expect.arrayContaining([expect.objectContaining({ id: "target-3", status: "genuine-task-failures" })])
+    });
+  });
+
   it("rejects an operational failure even when it is the only failed target", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-public-bundle-failed-datapoint-"));
     const rowIds = ["target-a-runner-trial-1", "target-b-runner-trial-1", "target-c-runner-trial-1"];

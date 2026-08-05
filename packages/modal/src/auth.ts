@@ -326,7 +326,22 @@ export async function acquireKimiModalNodeExecutionLease(
       ]);
       assertKimiLegacyExecutionLeaseJournalsMigratable(legacyTarget, legacyFence);
     } else {
-      assertKimiExecutionLeaseJournalsAcquirable(previousTarget, previousFence);
+      const abandonedActive = assertKimiExecutionLeaseJournalsAcquirable(previousTarget, previousFence);
+      if (abandonedActive !== undefined) {
+        await writeKimiExecutionLeaseStatePair(
+          credentialsAnchor,
+          leaseName,
+          targetHandle,
+          fenceName,
+          fenceHandle,
+          abandonedActive.credentialLeaseId,
+          abandonedActive.ownerId,
+          abandonedActive.ownerProcessId,
+          abandonedActive.journalPairId,
+          abandonedActive.transitionSequence + 1,
+          "resolved"
+        );
+      }
     }
   } catch (error) {
     await releaseLock?.().catch(() => undefined);
@@ -408,6 +423,7 @@ export async function acquireKimiModalNodeExecutionLease(
     .update(heldCredentialName)
     .digest("hex");
   const ownerId = randomUUID();
+  const ownerProcessId = process.pid;
   const journalPairId = randomUUID();
 
   let handleState: KimiModalNodeExecutionLeaseHandleState = "open";
@@ -423,6 +439,7 @@ export async function acquireKimiModalNodeExecutionLease(
       heldFenceHandle,
       credentialLeaseId,
       ownerId,
+      ownerProcessId,
       journalPairId,
       transitionSequence,
       rotationState
@@ -513,6 +530,7 @@ export async function acquireKimiModalNodeExecutionLease(
           metadata,
           credentialLeaseId,
           ownerId,
+          ownerProcessId,
           journalPairId,
           transitionSequence,
           rotationState
@@ -532,6 +550,7 @@ export async function acquireKimiModalNodeExecutionLease(
       heldFenceHandle,
       credentialLeaseId,
       ownerId,
+      ownerProcessId,
       journalPairId,
       nextSequence,
       next
@@ -1152,6 +1171,7 @@ async function writeBoundKimiExecutionLeaseMetadata(
   label: string,
   credentialLeaseId: string,
   ownerId: string,
+  ownerProcessId: number,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1161,6 +1181,7 @@ async function writeBoundKimiExecutionLeaseMetadata(
     handle,
     credentialLeaseId,
     ownerId,
+    ownerProcessId,
     journalPairId,
     transitionSequence,
     rotationState
@@ -1176,6 +1197,7 @@ async function writeKimiExecutionLeaseStatePair(
   fenceHandle: FileHandle,
   credentialLeaseId: string,
   ownerId: string,
+  ownerProcessId: number,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1202,6 +1224,7 @@ async function writeKimiExecutionLeaseStatePair(
       entry.label,
       credentialLeaseId,
       ownerId,
+      ownerProcessId,
       journalPairId,
       transitionSequence,
       rotationState
@@ -1216,6 +1239,7 @@ function isKimiExecutionLeaseOwnerState(
   metadata: unknown,
   credentialLeaseId: string,
   ownerId: string,
+  ownerProcessId: number,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1225,6 +1249,7 @@ function isKimiExecutionLeaseOwnerState(
     metadata.schema_version === "ultrafuzz.kimi-modal-execution-lease.v1" &&
     metadata.credential_lease === credentialLeaseId &&
     metadata.owner_id === ownerId &&
+    metadata.owner_process_id === ownerProcessId &&
     metadata.journal_pair_id === journalPairId &&
     metadata.transition_sequence === transitionSequence &&
     metadata.rotation_state === rotationState
@@ -1234,8 +1259,8 @@ function isKimiExecutionLeaseOwnerState(
 function assertKimiExecutionLeaseJournalsAcquirable(
   target: Record<string, unknown> | undefined,
   fence: Record<string, unknown> | undefined
-): void {
-  if (target === undefined && fence === undefined) return;
+): KimiExecutionLeasePairState | undefined {
+  if (target === undefined && fence === undefined) return undefined;
 
   const targetPair = kimiExecutionLeasePairState(target);
   const fencePair = kimiExecutionLeasePairState(fence);
@@ -1244,13 +1269,43 @@ function assertKimiExecutionLeaseJournalsAcquirable(
     fencePair !== undefined &&
     targetPair.credentialLeaseId === fencePair.credentialLeaseId &&
     targetPair.ownerId === fencePair.ownerId &&
+    targetPair.ownerProcessId === fencePair.ownerProcessId &&
     targetPair.journalPairId === fencePair.journalPairId &&
     targetPair.transitionSequence === fencePair.transitionSequence &&
     targetPair.rotationState === fencePair.rotationState;
-  if (!exactPair || targetPair?.rotationState !== "resolved") {
+  if (exactPair && targetPair?.rotationState === "resolved") return undefined;
+  if (
+    exactPair &&
+    targetPair?.rotationState === "active" &&
+    targetPair.ownerProcessId !== undefined &&
+    !kimiExecutionLeaseProcessIsAlive(targetPair.ownerProcessId)
+  ) {
+    return targetPair as KimiExecutionLeasePairState;
+  }
+  {
     throw new Error(
       "a durable unresolved Kimi Modal credential-rotation fence is present or its paired journals are inconsistent"
     );
+  }
+}
+
+interface KimiExecutionLeasePairState {
+  credentialLeaseId: string;
+  ownerId: string;
+  ownerProcessId: number;
+  journalPairId: string;
+  transitionSequence: number;
+  rotationState: KimiModalNodeExecutionLeaseState;
+}
+
+function kimiExecutionLeaseProcessIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ESRCH") return false;
+    if (isNodeError(error) && error.code === "EPERM") return true;
+    throw error;
   }
 }
 
@@ -1295,6 +1350,7 @@ function kimiExecutionLeasePairState(metadata: Record<string, unknown> | undefin
   | {
       credentialLeaseId: string;
       ownerId: string;
+      ownerProcessId: number | undefined;
       journalPairId: string;
       transitionSequence: number;
       rotationState: KimiModalNodeExecutionLeaseState;
@@ -1304,6 +1360,8 @@ function kimiExecutionLeasePairState(metadata: Record<string, unknown> | undefin
     metadata === undefined ||
     typeof metadata.credential_lease !== "string" ||
     typeof metadata.owner_id !== "string" ||
+    (metadata.owner_process_id !== undefined &&
+      (!Number.isSafeInteger(metadata.owner_process_id) || (metadata.owner_process_id as number) <= 0)) ||
     typeof metadata.journal_pair_id !== "string" ||
     metadata.journal_pair_id === "" ||
     !Number.isSafeInteger(metadata.transition_sequence) ||
@@ -1317,6 +1375,7 @@ function kimiExecutionLeasePairState(metadata: Record<string, unknown> | undefin
   return {
     credentialLeaseId: metadata.credential_lease,
     ownerId: metadata.owner_id,
+    ownerProcessId: metadata.owner_process_id as number | undefined,
     journalPairId: metadata.journal_pair_id,
     transitionSequence: metadata.transition_sequence as number,
     rotationState: metadata.rotation_state
@@ -1355,6 +1414,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
   const records = journal.slice(0, -1).split("\n");
   let last: Record<string, unknown> | undefined;
   let activeOwner: string | undefined;
+  let activeOwnerProcessId: number | undefined;
   let activeCredentialLease: string | undefined;
   let activeState: KimiModalNodeExecutionLeaseState | undefined;
   let declaresPairState = false;
@@ -1370,6 +1430,8 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
       parsed.schema_version !== "ultrafuzz.kimi-modal-execution-lease.v1" ||
       typeof parsed.credential_lease !== "string" ||
       typeof parsed.owner_id !== "string" ||
+      (parsed.owner_process_id !== undefined &&
+        (!Number.isSafeInteger(parsed.owner_process_id) || (parsed.owner_process_id as number) <= 0)) ||
       (parsed.rotation_state !== "active" &&
         parsed.rotation_state !== "rotation-possible" &&
         parsed.rotation_state !== "resolved")
@@ -1385,6 +1447,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
         throw new Error("Kimi Modal execution lease journal has an invalid state transition");
       }
       activeOwner = owner;
+      activeOwnerProcessId = parsed.owner_process_id as number | undefined;
       activeCredentialLease = credentialLease;
       activeState = state;
     } else {
@@ -1392,6 +1455,7 @@ async function readKimiExecutionLeaseJournal(handle: FileHandle): Promise<{
         activeState === undefined ||
         activeState === "resolved" ||
         owner !== activeOwner ||
+        parsed.owner_process_id !== activeOwnerProcessId ||
         credentialLease !== activeCredentialLease ||
         (state === "rotation-possible" && activeState !== "active")
       ) {
@@ -1412,6 +1476,7 @@ async function writeKimiExecutionLeaseMetadata(
   handle: FileHandle,
   credentialLeaseId: string,
   ownerId: string,
+  ownerProcessId: number,
   journalPairId: string,
   transitionSequence: number,
   rotationState: KimiModalNodeExecutionLeaseState
@@ -1421,6 +1486,7 @@ async function writeKimiExecutionLeaseMetadata(
       schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
       credential_lease: credentialLeaseId,
       owner_id: ownerId,
+      owner_process_id: ownerProcessId,
       journal_pair_id: journalPairId,
       transition_sequence: transitionSequence,
       rotation_state: rotationState

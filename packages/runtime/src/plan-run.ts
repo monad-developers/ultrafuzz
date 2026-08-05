@@ -79,7 +79,11 @@ import {
 } from "./utils.js";
 import { checkDependencyLegality } from "./artifact-gates.js";
 import { forgeGuardMetadata } from "./forge-guard.js";
-import { writeProperLockfileOwner } from "./proper-lockfile-owner.js";
+import {
+  captureProperLockfileDirectoryIdentity,
+  writeProperLockfileOwner,
+  type ProperLockfileDirectoryIdentity
+} from "./proper-lockfile-owner.js";
 import { resolveCheckedOutCommit } from "./workspace-provenance.js";
 
 const RENDERED_PROMPT_SNAPSHOT_DIR = "prompt-snapshots";
@@ -91,7 +95,6 @@ const START_PREPARATION_INTENT_FILE = "start-preparation-intent.json";
 const START_PREPARATION_LOCK = ".start-preparation-lock";
 const START_PREPARATION_LOCK_OWNER = "owner.json";
 const START_PREPARATION_LOCK_STALE_MS = 30 * 60 * 1_000;
-const START_PREPARATION_OWNER_GRACE_MS = 2_000;
 
 export async function planRun(input: PlanRunInput, options: { prepareWorkflowStart?: boolean } = {}) {
   const projectRoot = path.resolve(input.projectRoot);
@@ -407,16 +410,24 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
   assertNoSymlinkComponents(layout.root, lockPath, "workflow start preparation lock");
   const deadline = Date.now() + 5 * 60 * 1_000;
   let release: (() => Promise<void>) | undefined;
+  let acquiredIdentity: ProperLockfileDirectoryIdentity | undefined;
   while (release === undefined) {
     try {
       reclaimTerminatedStartPreparationLock(layout, lockPath);
-      release = await lockfile.lock(layout.root, {
+      const acquiredRelease = await lockfile.lock(layout.root, {
         lockfilePath: lockPath,
         realpath: false,
         stale: START_PREPARATION_LOCK_STALE_MS,
         update: 30_000,
         retries: 0
       });
+      try {
+        acquiredIdentity = captureProperLockfileDirectoryIdentity(lockPath, "workflow start preparation lock");
+      } catch (error) {
+        await acquiredRelease().catch(() => undefined);
+        throw error;
+      }
+      release = acquiredRelease;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ELOCKED" && code !== "ENOENT") throw error;
@@ -426,8 +437,9 @@ export async function acquireWorkflowStartPreparationLock(layout: RunLayout): Pr
   }
   const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
   const owner = startPreparationLockOwner();
+  if (acquiredIdentity === undefined) throw new Error("workflow start preparation lock identity was not captured");
   try {
-    writeProperLockfileOwner(lockPath, ownerPath, owner, "workflow start preparation lock");
+    writeProperLockfileOwner(lockPath, ownerPath, owner, "workflow start preparation lock", acquiredIdentity);
   } catch (error) {
     try {
       await release();
@@ -473,7 +485,7 @@ function reclaimTerminatedStartPreparationLock(layout: RunLayout, lockPath: stri
   }
   const ownerPath = path.join(lockPath, START_PREPARATION_LOCK_OWNER);
   if (!pathEntryExists(ownerPath)) {
-    if (Date.now() - lockStat.mtimeMs < START_PREPARATION_OWNER_GRACE_MS) return;
+    if (Date.now() - lockStat.mtimeMs < START_PREPARATION_LOCK_STALE_MS) return;
     if (fs.readdirSync(lockPath).length !== 0) {
       throw new Error("ownerless workflow start preparation lock contains unexpected evidence");
     }

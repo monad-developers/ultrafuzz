@@ -951,8 +951,7 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
   assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
   assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);
-  assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
-  assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
+  assert.deepEqual(nodeAttemptLedgerSnapshot, nodeAttemptLedgerJsonSchema);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
   const runStateContractEnum = (

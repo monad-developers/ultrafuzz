@@ -185,6 +185,57 @@ describe("runtime-only subscription auth", () => {
     }
   });
 
+  it("recovers only an exact paired active journal whose former process owner is dead", async () => {
+    const source = kimiAuthFixture({ fresh: true });
+    const credentials = path.join(source, "credentials");
+    const leaseFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-execution");
+    const fenceFile = path.join(credentials, ".kimi-code.ultrafuzz-modal-node-fence");
+    const deadPid = 2_147_483_647;
+    const record = (rotationState: "active" | "rotation-possible", transitionSequence: number) =>
+      JSON.stringify({
+        schema_version: "ultrafuzz.kimi-modal-execution-lease.v1",
+        credential_lease: "a".repeat(64),
+        owner_id: "crashed-before-remote-exposure",
+        owner_process_id: deadPid,
+        journal_pair_id: "11111111-2222-4333-8444-555555555555",
+        transition_sequence: transitionSequence,
+        rotation_state: rotationState
+      });
+    const activeJournal = `${record("active", 1)}\n`;
+    fs.writeFileSync(leaseFile, activeJournal, { mode: 0o600 });
+    fs.writeFileSync(fenceFile, activeJournal, { mode: 0o600 });
+    let lease: Awaited<ReturnType<typeof acquireKimiModalNodeExecutionLease>> | undefined;
+    try {
+      lease = await acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+        timeoutMs: 5_000
+      });
+      const states = fs
+        .readFileSync(leaseFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { owner_id: string; rotation_state: string });
+      expect(states).toHaveLength(3);
+      expect(states[0]).toMatchObject({ owner_id: "crashed-before-remote-exposure", rotation_state: "active" });
+      expect(states[1]).toMatchObject({ owner_id: "crashed-before-remote-exposure", rotation_state: "resolved" });
+      expect(states[2]).toMatchObject({ owner_id: lease.ownerId, rotation_state: "active" });
+      await expect(lease.assertOwner()).resolves.toBeUndefined();
+      await lease.release();
+      lease = undefined;
+
+      const unresolved = `${record("active", 1)}\n${record("rotation-possible", 2)}\n`;
+      fs.writeFileSync(leaseFile, unresolved, { mode: 0o600 });
+      fs.writeFileSync(fenceFile, unresolved, { mode: 0o600 });
+      await expect(
+        acquireKimiModalNodeExecutionLease("kimi-k3", { KIMI_CODE_HOME: source }, "/unused", {
+          timeoutMs: 5_000
+        })
+      ).rejects.toThrow(/durable unresolved Kimi Modal credential-rotation fence/u);
+    } finally {
+      await lease?.release().catch(() => undefined);
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+  });
+
   it("fsyncs a new Kimi execution fence from file through both containing directories", async () => {
     const source = kimiAuthFixture({ fresh: true });
     const credentialsDirectory = path.join(source, "credentials");
