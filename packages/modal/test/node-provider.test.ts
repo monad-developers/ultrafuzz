@@ -14,6 +14,7 @@ import {
   createModalNodeSandboxProvider,
   ModalNodeCleanupRefusedError,
   modalNodeDispatchFingerprint,
+  modalNodeHandoffContentFingerprint,
   modalNodeSandboxName,
   modalNodeTags,
   modalNodeVolumeName,
@@ -98,11 +99,11 @@ describe("Modal node sandbox provider", () => {
         ["dependency_artifact_dirs", { dependency_artifact_dirs: [fixture.input.dependency_artifact_dirs[0]!] }],
         ["reference_artifact_dirs", { reference_artifact_dirs: [`${fixture.input.run_root}/artifacts/reference`] }],
         ["resources", { resources: { ...fixture.input.resources, cpu: 8 } }],
+        ["project_content_sha256", { project_content_sha256: "c".repeat(64) }],
         ["agent_credential_env", { agent_credential_env: [...fixture.input.agent_credential_env, "EXTRA_KEY"] }],
         ["operator_prompt", { operator_prompt: "smuggled operator note" }],
         // Including the handoff DTO, so a substituted selected task is a different logical dispatch.
-        ["selected_task", { selected_task: { ...fixture.selectedTask, agentRef: "SomeOtherAgent" } }],
-        ["selected_task absent", { selected_task: undefined }]
+        ["selected_task", { selected_task: { ...fixture.selectedTask, agentRef: "SomeOtherAgent" } }]
       ];
       for (const [label, override] of divergences) {
         expect(modalNodeDispatchFingerprint({ ...dispatched, ...override }), label).not.toBe(base);
@@ -186,6 +187,49 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
+  it("migrates a fingerprint-less v1 index only for the exact same-generation durable request", async () => {
+    const fixture = createProjectFixture();
+    const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    fixture.input.project_archive_sha256 = archive.sha256;
+    const volumeRoot = path.join(path.dirname(fixture.root), "modal-volume", "legacy-index");
+    try {
+      const initial = await initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input);
+      initial.recordCheckpoint("prepared");
+      const indexPath = path.join(volumeRoot, "checkpoints", "index.json");
+      const legacy = JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>;
+      delete legacy.logical_dispatch_fingerprint;
+      fs.writeFileSync(indexPath, `${JSON.stringify(legacy)}\n`);
+      const requestPath = path.join(volumeRoot, "input", "request.json");
+      const legacyRequest = JSON.parse(fs.readFileSync(requestPath, "utf8")) as Record<string, unknown>;
+      delete legacyRequest.project_content_sha256;
+      fs.writeFileSync(requestPath, `${JSON.stringify(legacyRequest)}\n`);
+      // Durable execution may legitimately mutate its extracted workspace. Migration derives the
+      // original semantic identity from the separately digest-protected handoff archive, not this
+      // live tree.
+      fs.writeFileSync(path.join(initial.projectRoot, fixture.input.prompt_path), "runtime-mutated prompt\n");
+
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).resolves.toMatchObject({
+        hasCompletedCheckpoint: false
+      });
+      expect(
+        (JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>).logical_dispatch_fingerprint
+      ).toBe(modalNodeDispatchFingerprint(fixture.input));
+      expect((JSON.parse(fs.readFileSync(requestPath, "utf8")) as Record<string, unknown>).project_content_sha256).toBe(
+        fixture.input.project_content_sha256
+      );
+
+      const mismatched = JSON.parse(fs.readFileSync(indexPath, "utf8")) as Record<string, unknown>;
+      mismatched.logical_dispatch_fingerprint = "d".repeat(64);
+      fs.writeFileSync(indexPath, `${JSON.stringify(mismatched)}\n`);
+      await expect(initializeDurableNodeWorkspace(volumeRoot, archive.path, fixture.input)).rejects.toThrow(
+        /durable checkpoint index is invalid/u
+      );
+    } finally {
+      archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
   it("rejects unsafe cloud attempt identifiers before marker paths are created", () => {
     const fixture = createProjectFixture();
     try {
@@ -202,6 +246,8 @@ describe("Modal node sandbox provider", () => {
   it("creates an immutable handoff from committed source plus only declared dependency evidence", async () => {
     const fixture = createProjectFixture();
     fs.writeFileSync(path.join(fixture.root, "local-only-secret"), "must stay local\n");
+    // Source directory permissions are normalized in the private archive and are not semantic input.
+    fs.chmodSync(path.join(fixture.root, fixture.input.dependency_artifact_dirs[0]!), 0o755);
     const archive = await createModalNodeHandoffArchive(fixture.root, fixture.input);
     try {
       const entries = execFileSync("tar", ["-tzf", archive.path], { encoding: "utf8" });
@@ -225,6 +271,44 @@ describe("Modal node sandbox provider", () => {
       expect(archive.sha256).toMatch(/^[0-9a-f]{64}$/u);
     } finally {
       archive.cleanup();
+      fixture.cleanup();
+    }
+  });
+
+  it("fingerprints equivalent handoff contents deterministically and detects changed prompt bytes", async () => {
+    const fixture = createProjectFixture();
+    const first = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const second = await createModalNodeHandoffArchive(fixture.root, fixture.input);
+    const extractedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-node-content-test-"));
+    const extracted = path.join(extractedRoot, "project");
+    fs.mkdirSync(extracted);
+    let changed: Awaited<ReturnType<typeof createModalNodeHandoffArchive>> | undefined;
+    try {
+      expect(second.contentSha256).toBe(first.contentSha256);
+      await extractSafeTarArchive(first.path, extracted, { gzip: true, label: "cloud handoff test" });
+      expect(modalNodeHandoffContentFingerprint(extracted, fixture.input, { materialized: true })).toBe(
+        first.contentSha256
+      );
+      const schemas = path.join(extracted, ".ultrafuzz", "schemas");
+      const generatedSchema = path.join(schemas, fs.readdirSync(schemas).sort()[0]!);
+      fs.chmodSync(schemas, 0o700);
+      fs.chmodSync(generatedSchema, 0o600);
+      fs.appendFileSync(generatedSchema, "\n");
+      expect(modalNodeHandoffContentFingerprint(extracted, fixture.input, { materialized: true })).not.toBe(
+        first.contentSha256
+      );
+      fs.writeFileSync(path.join(fixture.root, fixture.input.prompt_path), "different rendered prompt\n");
+      const changedInput = { ...fixture.input, project_content_sha256: undefined };
+      changed = await createModalNodeHandoffArchive(fixture.root, changedInput);
+      expect(changed.contentSha256).not.toBe(first.contentSha256);
+      expect(modalNodeDispatchFingerprint(changedInput)).not.toBe(modalNodeDispatchFingerprint(fixture.input));
+    } finally {
+      changed?.cleanup();
+      const schemas = path.join(extracted, ".ultrafuzz", "schemas");
+      if (fs.existsSync(schemas)) fs.chmodSync(schemas, 0o700);
+      fs.rmSync(extractedRoot, { recursive: true, force: true });
+      second.cleanup();
+      first.cleanup();
       fixture.cleanup();
     }
   });
@@ -277,9 +361,9 @@ describe("Modal node sandbox provider", () => {
     // The catalog is bound to its declared digest, so a tampered run root cannot reach a worker.
     fs.writeFileSync(path.join(fixture.root, catalogRelativePath), '{"schema_version":"tampered"}\n');
     for (const input of inputs) {
-      await expect(createModalNodeHandoffArchive(fixture.root, input)).rejects.toThrow(
-        /does not match its declared cloud-input digest/u
-      );
+      await expect(
+        createModalNodeHandoffArchive(fixture.root, { ...input, project_content_sha256: undefined })
+      ).rejects.toThrow(/does not match its declared cloud-input digest/u);
     }
     fixture.cleanup();
   });
@@ -335,7 +419,9 @@ describe("Modal node sandbox provider", () => {
           }
         })
       ).toThrow(/selected task handoff is invalid/u);
-      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: undefined })).not.toThrow();
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: undefined })).toThrow(
+        /selected task handoff is required/u
+      );
     } finally {
       fixture.cleanup();
     }
@@ -518,11 +604,11 @@ describe("Modal node sandbox provider", () => {
     }
   });
 
-  it("omitting supported optional dispatch fields stays compatible", () => {
+  it("requires the selected prompt path while retaining unrelated optional dispatch fields", () => {
     const fixture = createProjectFixture();
     try {
       const { prompt_path: _promptPath, ...withoutPrompt } = fixture.input;
-      expect(() => parseModalNodeSandboxInput(withoutPrompt)).not.toThrow();
+      expect(() => parseModalNodeSandboxInput(withoutPrompt)).toThrow(/cloud node prompt_path is invalid/u);
       expect(() =>
         parseModalNodeSandboxInput({
           ...fixture.input,
@@ -1020,16 +1106,9 @@ describe("Modal node sandbox provider", () => {
       // The relocated worker cannot rederive the generation it publishes under, so it is forwarded.
       expect(inner.execution_generation).toBe(fixture.input.execution_generation);
 
-      const withoutHandoff = workflowCommandArguments(
-        "/volume/workflow.tsx",
-        "/volume/workspace",
-        "inner-run",
-        fixture.input,
-        true
+      expect(() => parseModalNodeSandboxInput({ ...fixture.input, selected_task: undefined })).toThrow(
+        /selected task handoff is required/u
       );
-      const bare = JSON.parse(withoutHandoff[withoutHandoff.indexOf("--input") + 1]!) as Record<string, unknown>;
-      expect(bare.selected_task).toBeUndefined();
-      expect(bare.attempt_id).toBe(fixture.input.attempt_id);
     } finally {
       fixture.cleanup();
     }
@@ -1303,7 +1382,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
 
       fs.mkdirSync(path.join(interruptedRoot, "input"), { recursive: true });
       fs.copyFileSync(archive.path, path.join(interruptedRoot, "input", "project.tgz"));
-      const interruptedInput = { ...fixture.input, execution_generation: "reset-interrupted" };
+      const interruptedInput = withExecutionGeneration(fixture.input, "reset-interrupted");
       fs.writeFileSync(path.join(interruptedRoot, "input", "request.json"), `${JSON.stringify(interruptedInput)}\n`);
       const interrupted = await initializeDurableNodeWorkspace(interruptedRoot, archive.path, interruptedInput);
       expect(
@@ -1312,7 +1391,7 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
         )
       ).toBe(true);
 
-      const resetInput = { ...fixture.input, execution_generation: "reset-one" };
+      const resetInput = withExecutionGeneration(fixture.input, "reset-one");
       const reset = await initializeDurableNodeWorkspace(resetRoot, archive.path, resetInput);
       expect(fs.existsSync(path.join(reset.projectRoot, resetInput.workspace_dir))).toBe(false);
       expect(
@@ -1345,10 +1424,11 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
       const prepared = reset.recordCheckpoint("prepared");
       expect(prepared.restored_from).toBe(priorRoot);
 
-      const secondReset = await initializeDurableNodeWorkspace(secondResetRoot, archive.path, {
-        ...resetInput,
-        execution_generation: "reset-two"
-      });
+      const secondReset = await initializeDurableNodeWorkspace(
+        secondResetRoot,
+        archive.path,
+        withExecutionGeneration(resetInput, "reset-two")
+      );
       expect(
         fs.readFileSync(
           path.join(
@@ -1867,6 +1947,18 @@ if (args.includes("--resume")) { process.stderr.write("RUN_NOT_FOUND\\n"); proce
     try {
       // Run-root-confined and canonically shaped, so the symlinked prefix is what must be refused.
       fixture.input.artifact_dir = `${fixture.input.run_root}/published-artifacts/attempt-one`;
+      fixture.input.selected_task = {
+        ...fixture.input.selected_task,
+        artifactDir: fixture.input.artifact_dir,
+        metadata: {
+          ...fixture.input.selected_task.metadata,
+          artifacts: {
+            ...fixture.input.selected_task.metadata.artifacts,
+            dir: fixture.input.artifact_dir,
+            manifestPath: `${fixture.input.artifact_dir}/artifact-manifest.json`
+          }
+        }
+      };
       fs.mkdirSync(outside, { recursive: true });
       fs.symlinkSync(outside, path.join(fixture.root, fixture.input.run_root, "published-artifacts"), "dir");
 
@@ -2038,7 +2130,7 @@ function createProjectFixture() {
   execFileSync("git", ["config", "user.email", "test@invalid"], { cwd: root });
   execFileSync("git", ["add", "source.txt"], { cwd: root });
   execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
-  const input: ModalNodeSandboxInput = {
+  const inputWithoutSelectedTask: Omit<ModalNodeSandboxInput, "selected_task"> = {
     schema_version: "ultrafuzz.modal.node.v1",
     run_id: "run-one",
     task_id: "node:attempt-one",
@@ -2057,10 +2149,12 @@ function createProjectFixture() {
     },
     agent_credential_env: [AGENT_ENV]
   };
+  const selectedTask = selectedTaskFor(inputWithoutSelectedTask, root);
+  const input: ModalNodeSandboxInput = { ...inputWithoutSelectedTask, selected_task: selectedTask };
   return {
     root,
     input,
-    selectedTask: selectedTaskFor(input, root),
+    selectedTask,
     cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true })
   };
 }
@@ -2071,7 +2165,10 @@ function createProjectFixture() {
  * Written out in full rather than as a partial stub: the provider boundary rejects unknown keys and
  * cross-checks every field against the dispatch, so only a complete, agreeing DTO is a valid input.
  */
-function selectedTaskFor(input: ModalNodeSandboxInput, sourceProjectRoot: string): CloudSelectedTask {
+function selectedTaskFor(
+  input: Omit<ModalNodeSandboxInput, "selected_task">,
+  sourceProjectRoot: string
+): CloudSelectedTask {
   return {
     schema_version: CLOUD_SELECTED_TASK_SCHEMA_VERSION,
     id: input.task_id,
@@ -2133,6 +2230,17 @@ function selectedTaskFor(input: ModalNodeSandboxInput, sourceProjectRoot: string
   };
 }
 
+function withExecutionGeneration(input: ModalNodeSandboxInput, generation: string): ModalNodeSandboxInput {
+  return {
+    ...input,
+    execution_generation: generation,
+    selected_task: {
+      ...input.selected_task,
+      execution: { ...input.selected_task.execution, generation }
+    }
+  };
+}
+
 /** Returns a deep copy of `base` with one dotted field set, or removed when `value` is `ABSENT`. */
 function mutate(base: unknown, field: string, value: unknown): Record<string, unknown> {
   const clone = structuredClone(base) as Record<string, unknown>;
@@ -2170,6 +2278,10 @@ function createResultArchive(
     schemaVersion?: "ultrafuzz.modal.node-result.v1" | "ultrafuzz.modal.node-result.v2";
   } = {}
 ) {
+  dispatch.project_content_sha256 ??= modalNodeHandoffContentFingerprint(
+    dispatch.selected_task.sourceProjectRoot,
+    dispatch
+  );
   // The published bundle names the logical dispatch that produced it, so the controller can only
   // adopt a result whose provenance is its own dispatch.
   const fingerprint = options.logicalDispatchFingerprint ?? modalNodeDispatchFingerprint(dispatch);

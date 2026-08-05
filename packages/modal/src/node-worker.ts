@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
   modalAttemptVerificationMarkerName,
   modalNodeDispatchFingerprint,
+  modalNodeHandoffContentFingerprint,
   parseModalNodeSandboxInput
 } from "./node-provider.js";
 import { extractSafeTarArchive, sha256File } from "./safe-archive.js";
@@ -321,7 +322,7 @@ export function workflowCommandArguments(
       // never enters the handoff archive, so the validated dispatch carries the identity forward.
       execution_generation: input.execution_generation,
       // The controller-materialized selected task is the worker's only view of the compiled graph.
-      ...(input.selected_task === undefined ? {} : { selected_task: input.selected_task }),
+      selected_task: input.selected_task,
       ...(input.operator_prompt === undefined ? {} : { operator_prompt: input.operator_prompt })
     }),
     "--format",
@@ -353,17 +354,22 @@ export async function initializeDurableNodeWorkspace(
   fs.mkdirSync(handoffDirectory, { recursive: true, mode: 0o700 });
   fs.mkdirSync(checkpointsDirectory, { recursive: true, mode: 0o700 });
   const hasDurableHandoff = fs.existsSync(handoffArchive);
-  const input = hasDurableHandoff
-    ? readDurableInput(durableRequest, requestedInput)
-    : validateFreshHandoff(archivePath, requestedInput);
+  let input: ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
+  if (hasDurableHandoff) {
+    const durable = readDurableInput(durableRequest, requestedInput);
+    if (sha256File(handoffArchive) !== durable.input.project_archive_sha256) {
+      throw new Error("durable cloud handoff archive digest mismatch");
+    }
+    input = durable.needsContentFingerprintMigration
+      ? await migrateLegacyContentFingerprint(handoffArchive, durableRequest, durable.input, requestedInput)
+      : durable.input;
+  } else {
+    input = validateFreshHandoff(archivePath, requestedInput);
+  }
   const projectArchiveSha256 = input.project_archive_sha256;
   const storageLineage = `${input.run_id}/${input.attempt_id}/${input.execution_generation}`;
   const logicalDispatchFingerprint = modalNodeDispatchFingerprint(input);
-  if (hasDurableHandoff) {
-    if (sha256File(handoffArchive) !== projectArchiveSha256) {
-      throw new Error("durable cloud handoff archive digest mismatch");
-    }
-  } else {
+  if (!hasDurableHandoff) {
     const handoffPublishing = path.join(handoffDirectory, ".project.tgz.publishing");
     writeJsonAtomic(durableRequest, input);
     if (fs.existsSync(handoffPublishing)) {
@@ -456,7 +462,11 @@ function validateFreshHandoff(
   archivePath: string,
   input: ReturnType<typeof parseModalNodeSandboxInput>
 ): ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string } {
-  if (input.project_archive_sha256 === undefined || sha256File(archivePath) !== input.project_archive_sha256) {
+  if (
+    input.project_content_sha256 === undefined ||
+    input.project_archive_sha256 === undefined ||
+    sha256File(archivePath) !== input.project_archive_sha256
+  ) {
     throw new Error("cloud handoff archive digest mismatch");
   }
   return input as ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
@@ -465,17 +475,65 @@ function validateFreshHandoff(
 function readDurableInput(
   durableRequest: string,
   requestedInput: ReturnType<typeof parseModalNodeSandboxInput>
-): ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string } {
+): {
+  input: ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
+  needsContentFingerprintMigration: boolean;
+} {
   let persistedInput: ReturnType<typeof parseModalNodeSandboxInput>;
   try {
     persistedInput = parseModalNodeSandboxInput(JSON.parse(fs.readFileSync(durableRequest, "utf8")) as unknown);
   } catch (error) {
     throw new Error("durable cloud handoff request is unavailable", { cause: error });
   }
-  if (persistedInput.project_archive_sha256 === undefined || !sameDurableNodeAttempt(persistedInput, requestedInput)) {
+  if (persistedInput.project_archive_sha256 === undefined) {
     throw new Error("durable workspace request does not match this cloud node attempt");
   }
-  return persistedInput as ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string };
+  const needsContentFingerprintMigration =
+    persistedInput.project_content_sha256 === undefined &&
+    requestedInput.project_content_sha256 !== undefined &&
+    persistedInput.execution_generation === requestedInput.execution_generation &&
+    modalNodeDispatchFingerprint(persistedInput) ===
+      modalNodeDispatchFingerprint({ ...requestedInput, project_content_sha256: undefined });
+  if (!needsContentFingerprintMigration && !sameDurableNodeAttempt(persistedInput, requestedInput)) {
+    throw new Error("durable workspace request does not match this cloud node attempt");
+  }
+  return {
+    input: persistedInput as ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string },
+    needsContentFingerprintMigration
+  };
+}
+
+async function migrateLegacyContentFingerprint(
+  handoffArchive: string,
+  durableRequest: string,
+  persistedInput: ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string },
+  requestedInput: ReturnType<typeof parseModalNodeSandboxInput>
+): Promise<ReturnType<typeof parseModalNodeSandboxInput> & { project_archive_sha256: string }> {
+  const expected = requestedInput.project_content_sha256;
+  if (expected === undefined) throw new Error("durable workspace request does not match this cloud node attempt");
+  const temporaryRoot = fs.mkdtempSync(path.join(path.dirname(handoffArchive), ".legacy-content-"));
+  fs.chmodSync(temporaryRoot, 0o700);
+  const extracted = path.join(temporaryRoot, "project");
+  fs.mkdirSync(extracted, { mode: 0o700 });
+  try {
+    await extractSafeTarArchive(handoffArchive, extracted, { gzip: true, label: "durable cloud handoff" });
+    assertSafeTree(extracted);
+    if (modalNodeHandoffContentFingerprint(extracted, persistedInput, { materialized: true }) !== expected) {
+      throw new Error("durable workspace request does not match this cloud node attempt");
+    }
+    const migrated = { ...persistedInput, project_content_sha256: expected };
+    if (!sameDurableNodeAttempt(migrated, requestedInput)) {
+      throw new Error("durable workspace request does not match this cloud node attempt");
+    }
+    // Only persist the migration after the caller verified the exact archived bytes and this
+    // independently extracted copy verified every semantic input represented by the new fingerprint.
+    writeJsonAtomic(durableRequest, migrated);
+    return migrated;
+  } finally {
+    const schemas = path.join(extracted, ".ultrafuzz", "schemas");
+    if (fs.existsSync(schemas) && !fs.lstatSync(schemas).isSymbolicLink()) fs.chmodSync(schemas, 0o700);
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -669,13 +727,15 @@ function loadDurableCheckpointIndex(
     };
   }
   const parsed = JSON.parse(fs.readFileSync(checkpointIndex, "utf8")) as unknown;
+  const missingLogicalDispatchFingerprint = isRecord(parsed) && parsed.logical_dispatch_fingerprint === undefined;
   if (
     !isRecord(parsed) ||
     parsed.schema_version !== "ultrafuzz.modal.node-checkpoint-index.v1" ||
     parsed.storage_lineage !== identity.storageLineage ||
     // An existing index is only this attempt's index when it records the same logical dispatch. The
     // storage lineage alone cannot say so: it names the generation, not what the dispatch asked for.
-    parsed.logical_dispatch_fingerprint !== identity.logicalDispatchFingerprint ||
+    (!missingLogicalDispatchFingerprint &&
+      parsed.logical_dispatch_fingerprint !== identity.logicalDispatchFingerprint) ||
     parsed.workspace_path !== identity.projectRoot ||
     parsed.run_root !== identity.runRoot ||
     parsed.handoff_archive !== identity.handoffArchive ||
@@ -683,6 +743,14 @@ function loadDurableCheckpointIndex(
     !Array.isArray(parsed.checkpoints)
   ) {
     throw new Error("durable checkpoint index is invalid");
+  }
+  if (missingLogicalDispatchFingerprint) {
+    // The previous v1 worker persisted every identity above but predated the logical fingerprint.
+    // `readDurableInput` has already required the same generation and whole logical dispatch, and the
+    // caller has already verified the persisted archive digest, so only that exact legacy shape may
+    // be upgraded in place. A present mismatch is rejected above and is never rewritten.
+    parsed.logical_dispatch_fingerprint = identity.logicalDispatchFingerprint;
+    writeJsonAtomic(checkpointIndex, parsed);
   }
   return parsed as unknown as DurableCheckpointIndex;
 }
