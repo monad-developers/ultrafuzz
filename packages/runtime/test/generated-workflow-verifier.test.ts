@@ -255,10 +255,12 @@ test("generated Smithers verifier explains byte-preserving invariant evidence", 
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const proofStart = source.indexOf("function preservePinnedSourceProof");
+  const proofEnd = source.indexOf("\n\nfunction canonicalEmptyArtifact", proofStart);
   const preparationStart = source.indexOf("function prepareArtifactMirror");
   const workflowStart = source.indexOf("export default smithers");
 
   assert.ok(proofStart > preparationStart, source);
+  assert.ok(proofEnd > proofStart, source);
   assert.ok(workflowStart > proofStart, source);
   assert.match(source, /const pinnedSourceBranch = "ultrafuzz-pinned"/u);
   assert.match(source, /\.\.\.\(usesPinnedSource \? \{ baseBranch: pinnedSourceBranch \} : \{\}\)/u);
@@ -272,7 +274,7 @@ test("generated Smithers worktrees fail closed on any source other than the pinn
   assert.match(source, /source-isolation failure/u);
   assert.match(source, /"source-proofs"/u);
   assert.match(source, /path\.resolve\(process\.cwd\(\), task\.metadata\.artifacts\.dir, "\.\.", "\.\."\)/u);
-  assert.doesNotMatch(source.slice(proofStart, workflowStart), /task\.runRoot/u);
+  assert.doesNotMatch(source.slice(proofStart, proofEnd), /task\.runRoot/u);
   assert.match(source, /ultrafuzz\.agent-source-proof\.v1/u);
 });
 
@@ -820,14 +822,15 @@ test("generated Smithers preparation requires a successful dependency artifact v
   assert.ok(workflowStart > verifierStart, source);
 
   const verifier = source.slice(verifierStart, workflowStart);
-  assert.match(source, /ARTIFACT_VERIFICATION_MARKER/u);
+  assert.match(source, /ARTIFACT_VERIFICATION_DIRECTORY/u);
   assert.match(source, /function assertVerifiedDependency/u);
   assert.match(source, /artifact dependency has not passed verification/u);
   assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
-  assert.match(verifier, /clearArtifactVerificationMarker\(artifactDir\)/u);
+  assert.match(verifier, /clearArtifactVerificationMarker\(task\)/u);
   assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts\)/u);
+  assert.notEqual(verifier.indexOf("clearArtifactVerificationMarker(task)"), -1, verifier);
   assert.ok(
-    verifier.indexOf("clearArtifactVerificationMarker(artifactDir)") < verifier.indexOf("const artifactRoots"),
+    verifier.indexOf("clearArtifactVerificationMarker(task)") < verifier.indexOf("const artifactRoots"),
     verifier
   );
   assert.ok(
@@ -848,44 +851,151 @@ test("generated Smithers dependency verification fails closed before descendant 
     .replace("task: (typeof taskSpecs)[number]", "task")
     .replace("dependency: string", "dependency")
     .replace("): void {", ") {")
-    .replace(/\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u, ";");
+    .replace(/\s+as \{\s*schema_version\?: unknown;\s*attempt_id\?: unknown;\s*artifacts\?: unknown;\s*\};/u, ";")
+    .replace(
+      /\s+as \{\s*path\?: unknown;\s*contract\?: unknown;\s*contract_digest\?: unknown;\s*sha256\?: unknown;\s*primary\?: unknown;\s*\};/u,
+      ";"
+    )
+    .replaceAll(/\(artifact as \{[^}]+\}\)\./gu, "artifact.")
+    .replace(/const entry = artifact as \{[\s\S]*?\};/u, "const entry = artifact;")
+    .replace("const seenPaths = new Set<string>();", "const seenPaths = new Set();")
+    .replaceAll(" as Parameters<typeof artifactContractDefinition>[0]", "")
+    .replaceAll(" as Parameters<typeof validateArtifactContract>[0]", "");
+  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
+  const dependency = path.join(runRoot, "property-specification-fanin");
+  fs.mkdirSync(dependency);
   const assertVerifiedDependency = new Function(
     "path",
+    "artifactVerificationMarkerLocation",
     "resolveRegularArtifactFile",
     "readFileSync",
+    "taskSpecs",
+    "artifactContractDefinition",
+    "validateArtifactContract",
+    "createHash",
     `const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
 ${helper}; return assertVerifiedDependency;`
   )(
     path,
+    (runRoot: string, attemptId: string) => {
+      const root = path.join(runRoot, ".ultrafuzz-verification");
+      return { root, path: path.join(root, `${attemptId}.json`), relativePath: `${attemptId}.json` };
+    },
     (root: string, candidate: string) => {
       if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
         throw new Error("unsafe path");
       }
       return candidate;
     },
-    fs.readFileSync
-  ) as (task: { attemptId: string }, dependency: string) => void;
+    fs.readFileSync,
+    [
+      {
+        attemptId: "property-specification-fanin",
+        artifactDir: dependency,
+        outputs: [
+          {
+            path: "properties.json",
+            contract: "ultrafuzz/text@1",
+            contractDigest: "a".repeat(64),
+            primary: true
+          }
+        ]
+      }
+    ],
+    () => ({ digest: "a".repeat(64) }),
+    () => ({ ok: true, issues: [] }),
+    createHash
+  ) as (task: { attemptId: string; runRoot: string }, dependency: string) => void;
 
-  const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-verification-gate-"));
-  const dependency = path.join(runRoot, "property-specification-fanin");
-  fs.mkdirSync(dependency);
-  const task = { attemptId: "stateful-invariant-setup" };
+  const task = { attemptId: "stateful-invariant-setup", runRoot };
   assert.throws(
     () => assertVerifiedDependency(task, dependency),
     /artifact dependency has not passed verification property-specification-fanin/u
   );
 
+  fs.mkdirSync(path.join(runRoot, ".ultrafuzz-verification"));
+  const markerPath = path.join(runRoot, ".ultrafuzz-verification", "property-specification-fanin.json");
+  const writeMarker = (
+    artifacts: Array<{
+      path: string;
+      contract: string;
+      contract_digest: string;
+      sha256: string;
+      primary: boolean;
+    }>
+  ) => {
+    fs.writeFileSync(
+      markerPath,
+      `${JSON.stringify({
+        schema_version: "ultrafuzz.artifact-verification.v1",
+        attempt_id: "property-specification-fanin",
+        artifacts
+      })}\n`,
+      "utf8"
+    );
+  };
+  writeMarker([]);
+  assert.throws(
+    () => assertVerifiedDependency(task, dependency),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), "verified\n", "utf8");
+  const sha256 = createHash("sha256").update("verified\n").digest("hex");
+  const validArtifact = {
+    path: "properties.json",
+    contract: "ultrafuzz/text@1",
+    contract_digest: "a".repeat(64),
+    sha256,
+    primary: true
+  };
+  for (const artifacts of [
+    [
+      {
+        ...validArtifact,
+        path: "forged.json"
+      }
+    ],
+    [
+      {
+        ...validArtifact,
+        contract: "ultrafuzz/json-object@1"
+      }
+    ],
+    [
+      {
+        ...validArtifact,
+        contract_digest: "b".repeat(64)
+      }
+    ]
+  ]) {
+    writeMarker(artifacts);
+    assert.throws(
+      () => assertVerifiedDependency(task, dependency),
+      /artifact dependency has not passed verification property-specification-fanin/u
+    );
+  }
+  writeMarker([validArtifact]);
+  fs.writeFileSync(path.join(dependency, "properties.json"), "tampered\n", "utf8");
+  assert.throws(
+    () => assertVerifiedDependency(task, dependency),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
+  fs.writeFileSync(path.join(dependency, "properties.json"), "verified\n", "utf8");
+  writeMarker([validArtifact]);
+  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
   fs.writeFileSync(
-    path.join(dependency, ".ultrafuzz-artifact-verification.json"),
+    markerPath,
     `${JSON.stringify({
       schema_version: "ultrafuzz.artifact-verification.v1",
-      attempt_id: "property-specification-fanin",
-      artifacts: []
+      attempt_id: "property-specification-fanin"
     })}\n`,
     "utf8"
   );
-  assert.doesNotThrow(() => assertVerifiedDependency(task, dependency));
+  assert.throws(
+    () => assertVerifiedDependency(task, dependency),
+    /artifact dependency has not passed verification property-specification-fanin/u
+  );
   fs.rmSync(runRoot, { recursive: true, force: true });
 });
 

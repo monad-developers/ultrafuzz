@@ -76,8 +76,8 @@ const verificationOutput = z.object({
   primary_artifact: z.string().min(1)
 });
 
-const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
 const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+const ARTIFACT_VERIFICATION_DIRECTORY = ".ultrafuzz-verification";
 
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
@@ -1158,12 +1158,20 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
 }
 
 function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: string): void {
-  const markerPath = path.resolve(dependency, ARTIFACT_VERIFICATION_MARKER);
   try {
+    const dependencyAttemptId = path.basename(dependency);
+    const dependencyTask = taskSpecs.find((candidate) => candidate.attemptId === dependencyAttemptId);
+    if (dependencyTask === undefined || path.resolve(dependencyTask.artifactDir) !== path.resolve(dependency)) {
+      throw new Error("dependency task is not declared for this handoff");
+    }
+    const markerLocation = artifactVerificationMarkerLocation(task.runRoot, dependencyAttemptId, false);
+    if (markerLocation === undefined) {
+      throw new Error("verification marker is missing");
+    }
     const resolvedMarker = resolveRegularArtifactFile(
-      dependency,
-      markerPath,
-      `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)}`
+      markerLocation.root,
+      markerLocation.path,
+      `artifact-contract failure: artifact dependency has not passed verification ${dependencyAttemptId}`
     );
     const marker = JSON.parse(readFileSync(resolvedMarker, "utf8")) as {
       schema_version?: unknown;
@@ -1172,10 +1180,82 @@ function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: 
     };
     if (
       marker.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
-      marker.attempt_id !== path.basename(dependency) ||
+      marker.attempt_id !== dependencyAttemptId ||
       !Array.isArray(marker.artifacts)
     ) {
       throw new Error("invalid verification marker");
+    }
+    if (marker.artifacts.length === 0 || dependencyTask.outputs.length === 0) {
+      throw new Error("verification marker has no declared artifacts");
+    }
+    const expectedArtifacts = new Map(dependencyTask.outputs.map((output) => [output.path, output]));
+    if (
+      expectedArtifacts.size !== dependencyTask.outputs.length ||
+      marker.artifacts.length !== expectedArtifacts.size
+    ) {
+      throw new Error("verification marker artifact set does not match the declared outputs");
+    }
+    const seenPaths = new Set<string>();
+    for (const artifact of marker.artifacts) {
+      if (
+        typeof artifact !== "object" ||
+        artifact === null ||
+        Array.isArray(artifact) ||
+        typeof (artifact as { path?: unknown }).path !== "string" ||
+        typeof (artifact as { contract?: unknown }).contract !== "string" ||
+        typeof (artifact as { contract_digest?: unknown }).contract_digest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test((artifact as { contract_digest: string }).contract_digest) ||
+        typeof (artifact as { sha256?: unknown }).sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/u.test((artifact as { sha256: string }).sha256) ||
+        typeof (artifact as { primary?: unknown }).primary !== "boolean"
+      ) {
+        throw new Error("invalid verification marker artifact entry");
+      }
+      const entry = artifact as {
+        path: string;
+        contract: string;
+        contract_digest: string;
+        sha256: string;
+        primary: boolean;
+      };
+      if (seenPaths.has(entry.path)) {
+        throw new Error(`duplicate verification marker artifact ${entry.path}`);
+      }
+      seenPaths.add(entry.path);
+      const expected = expectedArtifacts.get(entry.path);
+      if (
+        expected === undefined ||
+        expected.contract !== entry.contract ||
+        expected.contractDigest !== entry.contract_digest ||
+        expected.primary !== entry.primary
+      ) {
+        throw new Error(`verification marker artifact is not a declared output ${entry.path}`);
+      }
+      const artifactPath = path.resolve(dependency, entry.path);
+      const resolvedArtifact = resolveRegularArtifactFile(
+        dependency,
+        artifactPath,
+        `artifact-contract failure: verified dependency artifact is missing ${entry.path}`
+      );
+      const contents = readFileSync(resolvedArtifact, "utf8");
+      const definition = artifactContractDefinition(entry.contract as Parameters<typeof artifactContractDefinition>[0]);
+      if (definition.digest !== entry.contract_digest) {
+        throw new Error(`verified dependency contract changed ${entry.path}`);
+      }
+      if (createHash("sha256").update(contents).digest("hex") !== entry.sha256) {
+        throw new Error(`verified dependency artifact changed ${entry.path}`);
+      }
+      const validation = validateArtifactContract(
+        entry.contract as Parameters<typeof validateArtifactContract>[0],
+        contents,
+        entry.path
+      );
+      if (!validation.ok) {
+        throw new Error(`verified dependency artifact is no longer valid ${entry.path}`);
+      }
+    }
+    if (seenPaths.size !== expectedArtifacts.size) {
+      throw new Error("verification marker is missing a declared output");
     }
   } catch (error) {
     throw new Error(
@@ -2893,7 +2973,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
   // A model-controlled workspace can pre-create arbitrary sidecars. Remove
   // any stale marker before validating so only this verifier can publish the
   // success boundary consumed by downstream preparation tasks.
-  clearArtifactVerificationMarker(artifactDir);
+  clearArtifactVerificationMarker(task);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   verifyInvariantLedgerSourceEvidence(task, artifactRoots);
   const publications = new Map<string, Buffer>();
@@ -3250,17 +3330,46 @@ function publishVerifiedArtifacts(artifactDir: string, publications: ReadonlyMap
   }
 }
 
-function clearArtifactVerificationMarker(artifactDir: string): void {
-  const markerPath = path.resolve(artifactDir, ARTIFACT_VERIFICATION_MARKER);
-  if (!isStrictlyInsideDirectory(artifactDir, markerPath)) {
+function artifactVerificationMarkerLocation(
+  runRoot: string,
+  attemptId: string,
+  createRoot: boolean
+): { root: string; path: string; relativePath: string } | undefined {
+  const resolvedRunRoot = realpathSync(runRoot);
+  const rootCandidate = path.resolve(resolvedRunRoot, ARTIFACT_VERIFICATION_DIRECTORY);
+  if (!isStrictlyInsideDirectory(resolvedRunRoot, rootCandidate)) {
+    throw new Error("artifact-contract failure: unsafe artifact verification marker root");
+  }
+  if (createRoot) {
+    mkdirSync(rootCandidate, { recursive: true, mode: 0o700 });
+  }
+  let root: string;
+  try {
+    root = realpathSync(rootCandidate);
+  } catch (error) {
+    if (isMissingPathError(error)) return undefined;
+    throw error;
+  }
+  if (!isStrictlyInsideDirectory(resolvedRunRoot, root)) {
+    throw new Error("artifact-contract failure: unsafe artifact verification marker root");
+  }
+  const relativePath = `${attemptId}.json`;
+  const markerPath = path.resolve(root, relativePath);
+  if (!isStrictlyInsideDirectory(root, markerPath)) {
     throw new Error("artifact-contract failure: unsafe artifact verification marker path");
   }
+  return { root, path: markerPath, relativePath };
+}
+
+function clearArtifactVerificationMarker(task: (typeof taskSpecs)[number]): void {
+  const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, false);
+  if (location === undefined) return;
   try {
-    const stat = lstatSync(markerPath);
+    const stat = lstatSync(location.path);
     if (stat.isDirectory()) {
       throw new Error("artifact-contract failure: artifact verification marker is a directory");
     }
-    rmSync(markerPath, { force: true });
+    rmSync(location.path, { force: true });
   } catch (error) {
     if (!isMissingPathError(error)) throw error;
   }
@@ -3276,7 +3385,10 @@ function writeArtifactVerificationMarker(
     primary: boolean;
   }[]
 ): void {
-  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const location = artifactVerificationMarkerLocation(task.runRoot, task.attemptId, true);
+  if (location === undefined) {
+    throw new Error(`artifact-contract failure: verification marker root is unavailable ${task.attemptId}`);
+  }
   const marker = `${JSON.stringify(
     {
       schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
@@ -3287,7 +3399,7 @@ function writeArtifactVerificationMarker(
     null,
     2
   )}\n`;
-  publishFileDurableExclusive(artifactDir, ARTIFACT_VERIFICATION_MARKER, marker);
+  publishFileDurableExclusive(location.root, location.relativePath, marker);
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {
