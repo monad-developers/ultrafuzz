@@ -13,6 +13,8 @@ import {
   getNodeArtifactDir,
   layoutForRunRoot,
   safeResolveInside,
+  sha256File,
+  validateReferenceExpectationsSchema,
   updateNodeState,
   writeArtifactManifest,
   writeFileDurable,
@@ -127,6 +129,17 @@ export async function planRun(input: PlanRunInput) {
   }
 
   const graph = toPlannedGraph(expandedGraph, catalog);
+  let referenceExpectationsSource: ReferenceExpectationProvision | undefined;
+  try {
+    referenceExpectationsSource = provisionReferenceExpectationOutput(
+      graph,
+      expandedGraph,
+      projectRoot,
+      input.referenceExpectationsPath
+    );
+  } catch (error) {
+    return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_EXPECTATIONS_INVALID")]);
+  }
   const graphDiagnostics = checkDependencyLegality(graph);
   if (hasRuntimeErrors(graphDiagnostics)) {
     return runtimeFailure<PlanRunValue>(graphDiagnostics);
@@ -185,7 +198,8 @@ export async function planRun(input: PlanRunInput) {
   }
 
   try {
-    materializeReferenceNodesForPlan({ projectRoot, graph, layout });
+    provisionReferenceExpectationArtifacts({ graph, layout, provision: referenceExpectationsSource });
+    materializeReferenceNodesForPlan({ projectRoot, graph, layout, provision: referenceExpectationsSource });
   } catch (error) {
     return runtimeFailure<PlanRunValue>([diagnosticFromError(error, "references", "REFERENCE_MATERIALIZE_FAILED")]);
   }
@@ -520,10 +534,82 @@ export function transformTopologyForRun(
   };
 }
 
+interface ReferenceExpectationProvision {
+  sourcePath: string;
+  sourceRelativePath: string;
+  sourceDigest: string;
+}
+
+function provisionReferenceExpectationOutput(
+  graph: PlannedGraph,
+  expandedGraph: ExpandedGraph,
+  projectRoot: string,
+  sourcePathInput: string | undefined
+): ReferenceExpectationProvision | undefined {
+  if (sourcePathInput === undefined) return undefined;
+  if (sourcePathInput.trim().length === 0) {
+    throw new Error("referenceExpectationsPath must be non-empty");
+  }
+  const sourcePath = safeResolveInside(projectRoot, sourcePathInput, "reference expectation catalog");
+  assertNoSymlinkComponents(projectRoot, sourcePath, "reference expectation catalog");
+  const stat = fs.lstatSync(sourcePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`reference expectation catalog must be a regular file: ${sourcePath}`);
+  }
+  const parsed = validateReferenceExpectationsSchema(JSON.parse(fs.readFileSync(sourcePath, "utf8")), sourcePath);
+  if (!parsed.ok || parsed.value === undefined) {
+    throw new Error(parsed.issues.map((issue) => issue.message).join("; "));
+  }
+  const contract = artifactContractDefinition("ultrafuzz/reference-expectations@1");
+  const referenceNodes = graph.nodes.filter((node) => node.kind === "reference");
+  if (referenceNodes.length === 0) {
+    throw new Error("reference expectation catalog requires at least one pinned reference node");
+  }
+  for (const node of referenceNodes) {
+    if (node.outputs.some((output) => output.path === "references/expectations.json")) continue;
+    node.outputs.push({
+      path: "references/expectations.json",
+      contract: "ultrafuzz/reference-expectations@1",
+      contract_digest: contract.digest,
+      primary: false
+    });
+    const expandedNode = expandedGraph.nodes.find((candidate) => candidate.id === node.id);
+    if (expandedNode !== undefined) {
+      expandedNode.outputs.push({
+        path: "references/expectations.json",
+        contract: "ultrafuzz/reference-expectations@1",
+        contractDigest: contract.digest,
+        primary: false
+      });
+    }
+  }
+  return {
+    sourcePath,
+    sourceRelativePath: path.relative(projectRoot, sourcePath),
+    sourceDigest: sha256File(sourcePath)
+  };
+}
+
+function provisionReferenceExpectationArtifacts(input: {
+  graph: PlannedGraph;
+  layout: RunLayout;
+  provision: ReferenceExpectationProvision | undefined;
+}): void {
+  if (input.provision === undefined) return;
+  const contents = fs.readFileSync(input.provision.sourcePath);
+  for (const node of input.graph.nodes) {
+    if (node.kind !== "reference") continue;
+    const artifactDir = getNodeArtifactDir(input.layout, node.id, { create: true });
+    const destination = safeResolveInside(artifactDir, "references/expectations.json", "reference expectation catalog");
+    writeFileDurable(destination, contents);
+  }
+}
+
 function materializeReferenceNodesForPlan(input: {
   projectRoot: string;
   graph: PlannedGraph;
   layout: RunLayout;
+  provision?: ReferenceExpectationProvision;
 }): void {
   const referenceNodes = input.graph.nodes.filter((node) => node.kind === "reference");
   if (referenceNodes.length === 0) {
@@ -555,7 +641,16 @@ function materializeReferenceNodesForPlan(input: {
           repo: node.reference_revision?.repo,
           commit: node.reference_revision?.commit,
           reference_artifact: materialized.referenceArtifact,
-          manifest_artifact: materialized.manifestArtifact
+          manifest_artifact: materialized.manifestArtifact,
+          ...(input.provision === undefined
+            ? {}
+            : {
+                reference_expectations: {
+                  source: "operator-supplied",
+                  path: input.provision.sourceRelativePath,
+                  sha256: input.provision.sourceDigest
+                }
+              })
         }
       }
     });
@@ -570,7 +665,16 @@ function materializeReferenceNodesForPlan(input: {
         origin: "pinned-reference",
         reference: node.reference,
         repo: node.reference_revision?.repo,
-        commit: node.reference_revision?.commit
+        commit: node.reference_revision?.commit,
+        ...(input.provision === undefined
+          ? {}
+          : {
+              reference_expectations: {
+                source: "operator-supplied",
+                path: input.provision.sourceRelativePath,
+                sha256: input.provision.sourceDigest
+              }
+            })
       }
     });
     appendEvent(input.layout, {

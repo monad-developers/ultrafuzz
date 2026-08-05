@@ -48,15 +48,14 @@ source row, preserve:
   source table.
 - `reference_expectations`: copy the exact identifiers present on contributing
   source rows when those identifiers are supplied by the reference artifacts or
-  explicit target-evidence handoffs. Merge equivalent rows by taking the union
+  pinned-reference artifacts. Merge equivalent rows by taking the union
   of supplied expectation identifiers, preserving each identifier unchanged.
   When source rows carry no supplied expectation identifier, leave the field
   absent.
 
-When an expectation catalog is supplied, use the structured JSON catalog at
-`{{artifact_path:project-discovery}}/setup/reference-expectations.json` or the
-reference node's `references/expectations.json`, validated with
-`{{schema_path}}/reference-expectations.schema.json`.
+When a pinned-reference node declares a catalog with
+`ultrafuzz/reference-expectations@1`, read its declared artifact and validate it
+with `{{schema_path}}/reference-expectations.schema.json`.
 
 When several source rows describe one equivalent property, emit one canonical
 property with every distinct contributing source in `sources`. Never keep only

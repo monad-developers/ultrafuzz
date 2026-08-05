@@ -1518,10 +1518,9 @@ function verifyPropertyProvenanceArtifacts(
 
 /**
  * A reference expectation is provenance, not free-form model metadata. A lens
- * may copy an ID only when the exact token is present in an upstream input
- * artifact (reference material or an explicit setup/evidence handoff). This
- * keeps illustrative prompt text from becoming an apparently authorized
- * benchmark mapping.
+ * may copy an ID only when the exact token is present in a declared pinned
+ * reference input artifact. This keeps illustrative prompt text from becoming
+ * an apparently authorized benchmark mapping.
  */
 function verifyLensReferenceExpectationAuthority(
   layout: RunLayout,
@@ -1544,7 +1543,7 @@ function verifyLensReferenceExpectationAuthority(
       if (suppliedExpectationIds.has(expectationId)) continue;
       diagnostics.push({
         code: "PROPERTY_REFERENCE_EXPECTATION_UNAUTHORIZED",
-        message: `Property lens expectation ${JSON.stringify(expectationId)} is not present in a supplied reference or target-evidence artifact`,
+        message: `Property lens expectation ${JSON.stringify(expectationId)} is not present in a supplied pinned-reference catalog`,
         severity: "error",
         source: "property-provenance",
         path: `${lensPath}#$.properties[${propertyIndex}].reference_expectations[${expectationIndex}]`
@@ -1558,7 +1557,6 @@ function readLensSuppliedExpectationIds(layout: RunLayout, node: PlannedGraphNod
   const expectationIds = new Set<string>();
   const state = readRunState(layout);
   for (const dependencyId of node.depends_on) {
-    const logicalId = state.nodes[dependencyId]?.logical_node_id ?? dependencyId;
     // Only declared, pinned-reference inputs can authorize provenance. In
     // particular, an agentic setup/lens node or unrelated reference elsewhere
     // in the run cannot authorize an ID for this lens.
