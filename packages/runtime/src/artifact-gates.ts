@@ -558,25 +558,27 @@ function verifyInvariantProbePath(
     });
     return;
   }
-  if (isWorkspaceRootProbe) {
-    try {
-      const workspaceStat = fs.lstatSync(workspacePath);
-      if (
-        !workspaceStat.isDirectory() ||
-        workspaceStat.isSymbolicLink() ||
-        fs.realpathSync(workspacePath) !== workspacePath
-      ) {
-        throw new Error("workspace root is not a canonical directory");
-      }
-    } catch {
-      diagnostics.push({
-        code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
-        message: `Invariant repository-root scan probe requires a canonical workspace directory: ${relativePath}`,
-        severity: "error",
-        source: "invariant-ledger",
-        path: diagnosticPath
-      });
+  try {
+    const workspaceStat = fs.lstatSync(workspacePath);
+    if (
+      !workspaceStat.isDirectory() ||
+      workspaceStat.isSymbolicLink() ||
+      fs.realpathSync(workspacePath) !== workspacePath
+    ) {
+      throw new Error("workspace root is not a canonical directory");
     }
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe requires a canonical discovery workspace: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: `${ledgerPath}#$.scan_probes[${probeIndex}].source_path`
+    });
+    return;
+  }
+  if (isWorkspaceRootProbe) {
     return;
   }
   if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {

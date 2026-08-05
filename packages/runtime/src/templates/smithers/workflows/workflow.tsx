@@ -1395,7 +1395,12 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
   const ledgerBytes = readFileSync(ledgerPath);
   const files = new Map<string, { path: string; sha256: string; content: string }>();
   const sourceSnapshots = new Map<string, { bytes: Buffer; content: string }>();
-  const workspaceRoot = realpathSync(task.workspacePath);
+  const workspacePath = path.resolve(task.workspacePath);
+  const workspaceStat = lstatSync(workspacePath);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || realpathSync(workspacePath) !== workspacePath) {
+    throw new Error("artifact-contract failure: invariant discovery workspace is not a canonical directory");
+  }
+  const workspaceRoot = workspacePath;
   for (const probe of validation.value.scan_probes) {
     const probeCandidate = path.resolve(workspaceRoot, probe.source_path);
     const isSafeRelativeProbe = isSafeInvariantProbePath(probe.source_path);
@@ -1406,11 +1411,10 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
       );
     }
     if (isWorkspaceRootProbe) {
-      const workspaceStat = lstatSync(task.workspacePath);
       if (
         !workspaceStat.isDirectory() ||
         workspaceStat.isSymbolicLink() ||
-        realpathSync(task.workspacePath) !== task.workspacePath
+        realpathSync(workspacePath) !== workspacePath
       ) {
         throw new Error(
           `artifact-contract failure: invariant repository-root scan probe requires a canonical workspace directory: ${probe.source_path}`

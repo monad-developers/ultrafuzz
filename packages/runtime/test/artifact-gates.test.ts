@@ -428,7 +428,14 @@ test("project discovery gate verifies immutable source proof after the discovery
         ledger_ids: ["evidence-solvency"]
       }
     ],
-    scan_probes: []
+    scan_probes: [
+      {
+        id: "probe-repository-root",
+        source_path: ".",
+        query: "repository-wide invariant inventory",
+        result: "Repository-wide scan completed"
+      }
+    ]
   };
   const ledgerBytes = Buffer.from(JSON.stringify(ledger));
   writeArtifact(layout, "project-discovery", "setup/invariant-evidence-ledger.json", ledgerBytes.toString("utf8"));
@@ -453,6 +460,21 @@ test("project discovery gate verifies immutable source proof after the discovery
   );
   fs.rmSync(path.join(layout.workspacesDir, "project-discovery"), { recursive: true, force: true });
   assert.equal(verifyRequiredArtifactsForAttempt(layout, node, node.id).ok, true);
+
+  writeArtifact(
+    layout,
+    "project-discovery",
+    "setup/invariant-evidence-ledger.json",
+    JSON.stringify({
+      ...ledger,
+      scan_probes: [{ id: "probe-unsafe", source_path: "../../outside", query: "inventory", result: "done" }]
+    })
+  );
+  const unsafeRecoveredProbe = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(unsafeRecoveredProbe.ok, false);
+  assert.ok(
+    unsafeRecoveredProbe.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_PROBE_PATH_INVALID")
+  );
 
   fs.writeFileSync(path.join(layout.root, "source-proofs", "project-discovery.invariant.json"), "{}");
   const invalidProof = verifyRequiredArtifactsForAttempt(layout, node, node.id);
