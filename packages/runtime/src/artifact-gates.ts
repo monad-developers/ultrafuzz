@@ -556,6 +556,16 @@ function verifyInvariantProbePath(
     });
     return;
   }
+  if (!invariantPathParentsInsideWorkspace(workspacePath, probePath)) {
+    diagnostics.push({
+      code: "INVARIANT_LEDGER_PROBE_PATH_INVALID",
+      message: `Invariant scan probe path crosses a symlinked parent: ${relativePath}`,
+      severity: "error",
+      source: "invariant-ledger",
+      path: diagnosticPath
+    });
+    return;
+  }
   try {
     const stat = fs.lstatSync(probePath);
     if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -566,11 +576,40 @@ function verifyInvariantProbePath(
         source: "invariant-ledger",
         path: diagnosticPath
       });
+    } else {
+      try {
+        const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(probePath));
+        if (content.includes("\u0000")) throw new Error("NUL");
+      } catch {
+        diagnostics.push({
+          code: "INVARIANT_LEDGER_PROBE_SOURCE_BINARY",
+          message: `Invariant scan probe source is not UTF-8 text: ${relativePath}`,
+          severity: "error",
+          source: "invariant-ledger",
+          path: diagnosticPath
+        });
+      }
     }
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
     diagnostics.push(diagnosticFromError(error, "invariant-ledger", "INVARIANT_LEDGER_PROBE_PATH_INVALID"));
   }
+}
+
+function invariantPathParentsInsideWorkspace(workspacePath: string, candidatePath: string): boolean {
+  let current = path.dirname(candidatePath);
+  while (current !== workspacePath) {
+    if (!current.startsWith(`${workspacePath}${path.sep}`)) return false;
+    try {
+      return fs.realpathSync(current) === current;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) return false;
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+  }
+  return true;
 }
 
 function invariantSourceProofPath(runRoot: string, attemptId: string): string {

@@ -1403,6 +1403,11 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
         `artifact-contract failure: invariant scan probe path escapes the task workspace: ${probe.source_path}`
       );
     }
+    if (!invariantPathParentsInsideWorkspace(workspaceRoot, probeCandidate)) {
+      throw new Error(
+        `artifact-contract failure: invariant scan probe path crosses a symlinked parent: ${probe.source_path}`
+      );
+    }
     // Scan probes may intentionally target optional files. When a probe path
     // is absent, its result text is the durable evidence of that absence.
     try {
@@ -1518,6 +1523,22 @@ function invariantSymbolDeclaration(source: string, symbol: string): string | un
   const tail = source.slice(declaration.index + declaration[0].length);
   const next = /\n\s*(?:function|contract|library|interface|modifier|event|error|struct|enum)\s+/u.exec(tail);
   return source.slice(declaration.index, declaration.index + declaration[0].length + (next?.index ?? tail.length));
+}
+
+function invariantPathParentsInsideWorkspace(workspaceRoot: string, candidatePath: string): boolean {
+  let current = path.dirname(candidatePath);
+  while (current !== workspaceRoot) {
+    if (!isStrictlyInsideDirectory(workspaceRoot, current)) return false;
+    try {
+      return realpathSync(current) === current;
+    } catch (error) {
+      if (!isMissingPathError(error)) return false;
+      const parent = path.dirname(current);
+      if (parent === current) return false;
+      current = parent;
+    }
+  }
+  return true;
 }
 
 function rememberVerifiedPublication(publications: Map<string, Buffer>, relativePath: string, contents: Buffer): void {
