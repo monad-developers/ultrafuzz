@@ -59,6 +59,12 @@ test("generated Smithers workflow prefers its relocatable task prompt path", () 
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
 });
 
+test("generated Smithers verifier explains byte-preserving invariant evidence", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  assert.match(source, /Derive verbatim from the cited source with a JSON serializer/u);
+  assert.match(source, /repeated backslashes and other literals remain intact/u);
+});
+
 test("generated Smithers worktrees fail closed on any source other than the pinned benchmark ref", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const proofStart = source.indexOf("function preservePinnedSourceProof");

@@ -246,7 +246,12 @@ export const invariantLedgerJsonSchema = {
               "interest"
             ]
           },
-          verbatim: { type: "string", minLength: 1 },
+          verbatim: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Exact source slice after line-ending and presentation-prefix normalization; preserve all other characters, including repeated backslashes."
+          },
           inventory_ids: {
             type: "array",
             minItems: 1,

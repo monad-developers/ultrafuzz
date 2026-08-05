@@ -1453,12 +1453,11 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
     const sourceBytes = snapshot.bytes;
     const source = snapshot.content;
     const locationMatch = /^(?:line|lines)\s+(\d+)(?:\s*[-–]\s*(\d+))?/iu.exec(entry.source_location);
-    const locatedSource =
+    const sourceLines =
       locationMatch === null
-        ? source
-        : normalizeInvariantSourceLines(
-            source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]))
-          );
+        ? undefined
+        : source.split(/\r?\n/u).slice(Number(locationMatch[1]) - 1, Number(locationMatch[2] ?? locationMatch[1]));
+    const locatedSource = sourceLines === undefined ? source : normalizeInvariantSourceLines(sourceLines);
     const sourceMatches =
       locationMatch === null
         ? symbolFromInvariantLocation(entry.source_location) !== undefined &&
@@ -1468,8 +1467,10 @@ function verifyInvariantLedgerSourceEvidence(task: (typeof taskSpecs)[number], a
           ).includes(normalizeInvariantSourceLines([entry.verbatim]))
         : locatedSource === normalizeInvariantSourceLines([entry.verbatim]);
     if (!sourceMatches) {
+      const expected = sourceLines === undefined ? undefined : normalizeInvariantSourceLines(sourceLines);
+      const expectedDetail = expected === undefined ? "the source declaration" : JSON.stringify(expected);
       throw new Error(
-        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}`
+        `artifact-contract failure: invariant ledger entry ${entry.id} does not preserve source text at ${entry.source_location}; expected ${expectedDetail}, received ${JSON.stringify(entry.verbatim)}. Derive verbatim from the cited source with a JSON serializer so repeated backslashes and other literals remain intact.`
       );
     }
     if (!files.has(entry.source_path)) {

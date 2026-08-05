@@ -502,6 +502,68 @@ test("project discovery gate verifies immutable source proof after the discovery
   assert.ok(invalidProof.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_PROOF_INVALID"));
 });
 
+test("project discovery gate preserves repeated backslashes in Markdown formula evidence", () => {
+  const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-escaped-formula" });
+  const node = {
+    ...plannedNode(["setup/project-discovery.md", "setup/invariant-evidence-ledger.json"]),
+    id: "project-discovery",
+    logical_id: "project-discovery"
+  };
+  const source = "$$ minLB = (maxLB - 100\\\\%) \\\\times lbFactor + 100\\\\% $$\n";
+  const sourceDir = path.join(layout.workspacesDir, node.id, "docs");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(sourceDir, "overview.md"), source, "utf8");
+  const ledger = {
+    schema_version: "ultrafuzz.invariant-evidence-ledger.v1",
+    entries: [
+      {
+        id: "evidence-min-lb-formula",
+        source_path: "docs/overview.md",
+        source_location: "line 1",
+        kind: "bound",
+        verbatim: source.trim(),
+        inventory_ids: ["inventory-min-lb-formula"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-min-lb-formula",
+        description: "The minimum liquidation bonus uses the documented lower-bound formula.",
+        ledger_ids: ["evidence-min-lb-formula"]
+      }
+    ],
+    scan_probes: []
+  };
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(ledger));
+  writeArtifact(
+    layout,
+    node.id,
+    "setup/project-discovery.md",
+    [
+      "### Ledger entry: evidence-min-lb-formula",
+      "source_path: docs/overview.md",
+      "source_location: line 1",
+      `verbatim: ${source.trim()}`,
+      "inventory-min-lb-formula",
+      "### End ledger entry: evidence-min-lb-formula",
+      "### Inventory row: inventory-min-lb-formula",
+      "description: The minimum liquidation bonus uses the documented lower-bound formula.",
+      "ledger_ids: evidence-min-lb-formula",
+      "### End inventory row: inventory-min-lb-formula"
+    ].join("\n")
+  );
+
+  const valid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(valid.ok, true, JSON.stringify(valid.diagnostics));
+
+  const collapsed = structuredClone(ledger);
+  collapsed.entries[0]!.verbatim = source.trim().replaceAll("\\\\", "\\");
+  writeArtifact(layout, node.id, "setup/invariant-evidence-ledger.json", JSON.stringify(collapsed));
+  const invalid = verifyRequiredArtifactsForAttempt(layout, node, node.id);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.diagnostics.some((diagnostic) => diagnostic.code === "INVARIANT_LEDGER_SOURCE_TEXT_MISMATCH"));
+});
+
 test("fanin gate requires every invariant ledger entry to map to a canonical property", () => {
   const layout = createRunLayout({ projectRoot: tempProject(), runId: "run-invariant-ledger-properties" });
   const ledger = {
