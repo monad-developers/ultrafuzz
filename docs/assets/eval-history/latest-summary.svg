@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="176" viewBox="0 0 960 176" role="img" aria-labelledby="title desc">
 <title id="title">Latest UltrafuzzBench run</title>
-<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. gpt-5.6-luna high: UltrafuzzBench Score 30.2%, 5 of 31 bugs found.</desc>
+<desc id="desc">Latest complete ultrafuzz-bench smoke run with 1 model profile. gpt-5.6-luna high: UltrafuzzBench Score 18.3%, 4 of 31 bugs found.</desc>
 <rect width="960" height="176" rx="12" fill="#f9fafb"/>
 <text x="40" y="36" font-family="system-ui, sans-serif" font-size="22" font-weight="600" fill="#111827">Latest UltrafuzzBench run</text>
 <text x="40" y="62" font-family="system-ui, sans-serif" font-size="13" fill="#6b7280">ultrafuzz-bench · smoke · 1 profile · 3 targets each · 2026-08-05</text>
-<a href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/650dc02cf904e33d00049bf0dc361d655579add2"><text x="920" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">650dc02</text></a>
+<a href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c" xlink:href="https://github.com/monad-developers/ultrafuzz/commit/4c5900210ab2d2b3eef1184164817a881e2fb09c"><text x="920" y="36" text-anchor="end" font-family="ui-monospace, monospace" font-size="13" fill="#2563eb">4c59002</text></a>
 <text x="40" y="96" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Model profile</text>
 <text x="400" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">UltrafuzzBench Score (macro-F1)</text>
 <text x="600" y="96" text-anchor="end" font-family="system-ui, sans-serif" font-size="12" font-weight="600" fill="#6b7280">Bugs found</text>
@@ -14,8 +14,8 @@
 <line x1="40" y1="106" x2="920" y2="106" stroke="#d1d5db"/>
 <rect x="40" y="112" width="880" height="34" rx="6" fill="#ffffff" stroke="#e5e7eb"/>
 <text x="52" y="135" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#111827"><title>smoke · benchmark-smoke-gpt-5-6-luna-high</title>gpt-5.6-luna · high</text>
-<text x="400" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">30.2%</text>
-<text x="600" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">5 / 31</text>
-<text x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">$14.63</text>
-<text x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">8m 59s</text>
+<text x="400" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#0f766e">18.3%</text>
+<text x="600" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">4 / 31</text>
+<text x="760" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">$13.91</text>
+<text x="920" y="135" text-anchor="end" font-family="system-ui, sans-serif" font-size="14" fill="#374151">10m 27s</text>
 </svg>
