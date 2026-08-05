@@ -462,10 +462,17 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.match(source, /invariant-workspace-snapshot\.v1/u);
   assert.match(source, /loadInvariantSuiteWorkspaceSnapshot/u);
   assert.match(source, /readStableWorkspaceSnapshotFile/u);
+  assert.match(source, /const runRootCandidate = path\.resolve\(process\.cwd\(\), task\.runRoot\)/u);
+  assert.match(source, /runRootStat = lstatSync\(runRootCandidate\)/u);
+  assert.match(source, /realpathSync\(runRootCandidate\) !== runRootCandidate/u);
   assert.match(source, /before\.dev !== after\.dev/u);
   assert.match(source, /before\.ino !== after\.ino/u);
   assert.match(source, /writeFileDurable\(\s*path\.join\(snapshotRoot,\s*INVARIANT_SUITE_WORKSPACE_SNAPSHOT_FILE/u);
-  assert.match(restore, /lstatSync\(workspaceRoot\)/u);
+  assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
+  assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
+  assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);
+  assert.match(source, /isStrictlyInsideDirectory\(runRoot, workspaceCandidate\)/u);
+  assert.match(restore, /lstatSync\(workspaceCandidate\)/u);
   assert.match(restore, /safeInvariantSuiteDirectory\(workspaceRoot, path\.dirname\(candidate\)\)/u);
   assert.match(restore, /stat\.isSymbolicLink\(\)/u);
   assert.match(restore, /writeFileDurable\(anchored, bytes\)/u);

@@ -512,8 +512,24 @@ function invariantWorkspaceSourcePaths(workspaceRoot: string): string[] {
 
 function invariantSuiteWorkspaceSnapshotRoot(task: (typeof taskSpecs)[number]): string {
   const projectRoot = realpathSync(process.cwd());
-  const runRoot = path.resolve(process.cwd(), task.runRoot);
-  if (runRoot !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRoot)) {
+  const runRootCandidate = path.resolve(process.cwd(), task.runRoot);
+  if (runRootCandidate !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRootCandidate)) {
+    throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
+  }
+  let runRootStat: ReturnType<typeof lstatSync>;
+  try {
+    runRootStat = lstatSync(runRootCandidate);
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+    safeInvariantSuiteDirectory(projectRoot, path.dirname(runRootCandidate));
+    mkdirSync(runRootCandidate, { recursive: false, mode: 0o700 });
+    runRootStat = lstatSync(runRootCandidate);
+  }
+  if (!runRootStat.isDirectory() || runRootStat.isSymbolicLink()) {
+    throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
+  }
+  const runRoot = realpathSync(runRootCandidate);
+  if (runRoot !== runRootCandidate || (runRoot !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRoot))) {
     throw new Error(`artifact-contract failure: unsafe invariant workspace snapshot root ${task.attemptId}`);
   }
   const rootCandidate = path.join(runRoot, INVARIANT_SUITE_WORKSPACE_SNAPSHOT_DIR);
@@ -699,11 +715,37 @@ function captureInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]
 function restoreInvariantSuiteWorkspaceSnapshot(task: (typeof taskSpecs)[number]): void {
   const snapshot = invariantSuiteWorkspaceSnapshots.get(task.attemptId) ?? loadInvariantSuiteWorkspaceSnapshot(task);
   if (snapshot === undefined) return;
-  const workspaceRoot = realpathSync(task.workspacePath);
-  const workspaceStat = lstatSync(workspaceRoot);
-  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink() || realpathSync(workspaceRoot) !== workspaceRoot) {
+  const projectRoot = realpathSync(process.cwd());
+  const workspaceCandidate = path.resolve(task.workspacePath);
+  const runRootCandidate = path.resolve(process.cwd(), task.runRoot);
+  if (
+    (workspaceCandidate !== projectRoot && !isStrictlyInsideDirectory(projectRoot, workspaceCandidate)) ||
+    (runRootCandidate !== projectRoot && !isStrictlyInsideDirectory(projectRoot, runRootCandidate)) ||
+    !isStrictlyInsideDirectory(runRootCandidate, workspaceCandidate)
+  ) {
+    throw new Error(`artifact-contract failure: invariant workspace root is outside its run root ${task.attemptId}`);
+  }
+  const runRootStat = lstatSync(runRootCandidate);
+  if (
+    !runRootStat.isDirectory() ||
+    runRootStat.isSymbolicLink() ||
+    realpathSync(runRootCandidate) !== runRootCandidate
+  ) {
+    throw new Error(`artifact-contract failure: invariant workspace run root is unsafe ${task.attemptId}`);
+  }
+  const runRoot = runRootCandidate;
+  if (!isStrictlyInsideDirectory(runRoot, workspaceCandidate)) {
+    throw new Error(`artifact-contract failure: invariant workspace root is outside its run root ${task.attemptId}`);
+  }
+  const workspaceStat = lstatSync(workspaceCandidate);
+  if (
+    !workspaceStat.isDirectory() ||
+    workspaceStat.isSymbolicLink() ||
+    realpathSync(workspaceCandidate) !== workspaceCandidate
+  ) {
     throw new Error(`artifact-contract failure: invariant workspace root is unsafe ${task.attemptId}`);
   }
+  const workspaceRoot = workspaceCandidate;
   for (const relativePath of invariantWorkspaceSourcePaths(workspaceRoot)) {
     const safePath = assertSafeInvariantSuitePath(relativePath);
     if (snapshot.has(safePath)) continue;
