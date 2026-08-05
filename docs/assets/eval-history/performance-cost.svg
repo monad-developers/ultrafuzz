@@ -33,10 +33,10 @@
 <g data-model="deepseek-v4-pro" data-run-count="1" data-cost-q1="1.26551998" data-cost-median="1.26551998" data-cost-q3="1.26551998" data-f1-q1="0.1" data-f1-median="0.1" data-f1-q3="0.1"><title>deepseek-v4-pro: median 10.0% at $1.27; 1 run from 2026-08-01 to 2026-08-01</title>
 <circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="142.52" cy="360" r="8"/>
 </g>
-<g data-model="gpt-5.6-luna" data-run-count="13" data-cost-q1="12.15942708" data-cost-median="13.40427964" data-cost-q3="14.66714452" data-f1-q1="0.18516667" data-f1-median="0.2183" data-f1-q3="0.28686667"><title>gpt-5.6-luna: median 21.8% at $13.40; 13 runs from 2026-07-31 to 2026-08-05 (current pricing since 2026-07-31)</title>
-<line data-iqr="cost" x1="594.62" y1="265.36" x2="698.69" y2="265.36" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
-<line data-iqr="f1" x1="646.28" y1="291.87" x2="646.28" y2="210.51" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
-<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="638.28" y="257.36" width="16" height="16"/>
+<g data-model="gpt-5.6-luna" data-run-count="14" data-cost-q1="12.23037327" data-cost-median="13.47776234" data-cost-q3="14.6571929" data-f1-q1="0.18516667" data-f1-median="0.2249" data-f1-q3="0.29796667"><title>gpt-5.6-luna: median 22.5% at $13.48; 14 runs from 2026-07-31 to 2026-08-05 (current pricing since 2026-07-31)</title>
+<line data-iqr="cost" x1="597.56" y1="260.08" x2="698.27" y2="260.08" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
+<line data-iqr="f1" x1="649.33" y1="291.87" x2="649.33" y2="201.63" stroke="#c2410c" stroke-width="10" stroke-linecap="round" opacity="0.22"/>
+<rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="641.33" y="252.08" width="16" height="16"/>
 </g>
 <g data-model="kimi-k3" data-run-count="1" data-cost-q1="16.6637064" data-cost-median="16.6637064" data-cost-q3="16.6637064" data-f1-q1="0.29373333" data-f1-median="0.29373333" data-f1-q3="0.29373333"><title>kimi-k3: median 29.4% at $16.66; 1 run from 2026-08-03 to 2026-08-03</title>
 <polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="781.54,196.01 790.54,205.01 781.54,214.01 772.54,205.01"/>
@@ -44,7 +44,7 @@
 <circle  fill="#2563eb" stroke="#ffffff" stroke-width="1" cx="98" cy="530" r="6"/>
 <text x="114" y="534" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">deepseek-v4-pro</tspan><tspan fill="#6b7280"> · median 10.0% · $1.27 · n=1</tspan></text>
 <rect  fill="#c2410c" stroke="#ffffff" stroke-width="1" x="92" y="550" width="12" height="12"/>
-<text x="114" y="560" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">gpt-5.6-luna</tspan><tspan fill="#6b7280"> · median 21.8% · $13.40 · n=13</tspan></text>
+<text x="114" y="560" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">gpt-5.6-luna</tspan><tspan fill="#6b7280"> · median 22.5% · $13.48 · n=14</tspan></text>
 <polygon  fill="#7c3aed" stroke="#ffffff" stroke-width="1" points="98,575 105,582 98,589 91,582"/>
 <text x="114" y="586" font-family="system-ui, sans-serif" font-size="14" fill="#374151"><tspan font-weight="600">kimi-k3</tspan><tspan fill="#6b7280"> · median 29.4% · $16.66 · n=1</tspan></text>
 </svg>
