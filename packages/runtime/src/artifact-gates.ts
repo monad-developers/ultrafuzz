@@ -1622,10 +1622,8 @@ function verifyImplementationSelectionCoverage(
   for (const [recordIndex, record] of implementation.properties.entries()) {
     const canonical = catalog.properties.find((property) => property.id === record.property_id);
     const expectedReferenceExpectations = canonical?.reference_expectations ?? [];
-    if (
-      expectedReferenceExpectations.length > 0 &&
-      !sameStringSet(record.reference_expectations ?? [], expectedReferenceExpectations)
-    ) {
+    const actualReferenceExpectations = record.reference_expectations ?? [];
+    if (!sameStringSet(actualReferenceExpectations, expectedReferenceExpectations)) {
       diagnostics.push({
         code: "PROPERTY_IMPLEMENTATION_REFERENCE_EXPECTATIONS_MISMATCH",
         message: `Implementation record ${JSON.stringify(record.property_id)} must preserve the complete canonical reference expectation ID set`,
