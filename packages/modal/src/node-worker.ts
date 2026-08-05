@@ -698,9 +698,11 @@ export function copyPublishedEvidenceTree(source: string, destination: string): 
   copySafeTree(source, destination);
   const sourceRoot = path.resolve(source);
   const destinationRoot = path.resolve(destination);
-  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter(
-    (filePath) => path.basename(filePath) === "artifact-manifest.json"
-  )) {
+  for (const manifestPath of recursiveRegularFiles(sourceRoot).filter((filePath) => {
+    if (path.basename(filePath) !== "artifact-manifest.json") return false;
+    const parentRelative = path.relative(sourceRoot, path.dirname(filePath));
+    return parentRelative === "" || parentRelative.split(path.sep).length === 1;
+  })) {
     const manifest = parsePublicationManifest(manifestPath);
     const nodeRoot = path.dirname(manifestPath);
     for (const entry of manifest.files) {
@@ -712,6 +714,9 @@ export function copyPublishedEvidenceTree(source: string, destination: string): 
         throw new Error(`artifact manifest destination path escapes publication root: ${entry.path}`);
       }
       assertManifestFile(destinationPath, entry, "published");
+      // Recheck the source after publication to detect a source mutation
+      // between the initial digest and the staged copy.
+      assertManifestFile(sourcePath, entry, "source");
     }
   }
 }
@@ -757,6 +762,10 @@ function parsePublicationManifest(manifestPath: string): {
     throw new Error(`artifact manifest is missing its files array: ${manifestPath}`);
   }
   const files = (parsed as { files: unknown[] }).files;
+  if (files.length === 0) {
+    throw new Error(`artifact manifest must declare at least one file: ${manifestPath}`);
+  }
+  const paths = new Set<string>();
   for (const entry of files) {
     if (
       typeof entry !== "object" ||
@@ -770,6 +779,11 @@ function parsePublicationManifest(manifestPath: string): {
     ) {
       throw new Error(`artifact manifest entry is invalid: ${manifestPath}`);
     }
+    const relativePath = (entry as { path: string }).path;
+    if (paths.has(relativePath)) {
+      throw new Error(`artifact manifest contains duplicate file path: ${manifestPath}`);
+    }
+    paths.add(relativePath);
   }
   return { files: files as Array<{ path: string; size_bytes: number; sha256: string }> };
 }
@@ -779,7 +793,8 @@ function safeManifestFilePath(nodeRoot: string, relativePath: string): string {
     relativePath.length === 0 ||
     relativePath.includes("\0") ||
     relativePath.includes("\\") ||
-    path.isAbsolute(relativePath)
+    path.isAbsolute(relativePath) ||
+    !/^[A-Za-z0-9._/-]+$/u.test(relativePath)
   ) {
     throw new Error(`unsafe artifact manifest path: ${relativePath}`);
   }

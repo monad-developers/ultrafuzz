@@ -166,9 +166,12 @@ describe("Modal node sandbox provider", () => {
       fs.mkdirSync(node, { recursive: true });
       const property = path.join(node, "properties.json");
       const generated = path.join(node, "generated-tests", "HubInvariant.t.sol");
+      const nestedManifest = path.join(node, "fixtures", "artifact-manifest.json");
       fs.mkdirSync(path.dirname(generated), { recursive: true });
+      fs.mkdirSync(path.dirname(nestedManifest), { recursive: true });
       fs.writeFileSync(property, '{"schema_version":"ultrafuzz.properties.v1"}\n');
       fs.writeFileSync(generated, "contract HubInvariant {}\n");
+      fs.writeFileSync(nestedManifest, '{"schema_version":"fixture"}\n');
       const manifest = {
         schema_version: "1.0",
         files: [
@@ -192,6 +195,12 @@ describe("Modal node sandbox provider", () => {
       expect(fs.existsSync(path.join(destination, "property-specification-fanin", "artifact-manifest.json"))).toBe(
         true
       );
+      expect(
+        fs.readFileSync(
+          path.join(destination, "property-specification-fanin", "fixtures", "artifact-manifest.json"),
+          "utf8"
+        )
+      ).toBe('{"schema_version":"fixture"}\n');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -222,6 +231,21 @@ describe("Modal node sandbox provider", () => {
         })}\n`
       );
       expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/manifest file digest mismatch/u);
+
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({ schema_version: "1.0", files: [] })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/at least one file/u);
+
+      fs.writeFileSync(
+        path.join(source, "artifact-manifest.json"),
+        `${JSON.stringify({
+          schema_version: "1.0",
+          files: [manifestEntry("missing.json", missing), manifestEntry("missing.json", missing)]
+        })}\n`
+      );
+      expect(() => copyPublishedEvidenceTree(source, destination)).toThrow(/duplicate file path/u);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
