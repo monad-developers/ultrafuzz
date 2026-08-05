@@ -76,6 +76,9 @@ const verificationOutput = z.object({
   primary_artifact: z.string().min(1)
 });
 
+const ARTIFACT_VERIFICATION_MARKER = ".ultrafuzz-artifact-verification.json";
+const ARTIFACT_VERIFICATION_SCHEMA_VERSION = "ultrafuzz.artifact-verification.v1";
+
 const { Workflow, Task, Worktree, Parallel, Sandbox, smithers, outputs } = createSmithers({
   input: inputSchema,
   task: taskOutput,
@@ -1145,6 +1148,40 @@ function assertTaskInputs(task: (typeof taskSpecs)[number], workspaceRoot: strin
     ) {
       throw new Error(`artifact handoff directory is unsafe: ${dependency}`);
     }
+    // Pinned/reference nodes are materialized without an agent verifier and
+    // therefore have no success marker; only agentic task dependencies need
+    // this explicit verifier boundary.
+    if (taskSpecs.some((candidate) => candidate.attemptId === path.basename(dependency))) {
+      assertVerifiedDependency(task, dependency);
+    }
+  }
+}
+
+function assertVerifiedDependency(task: (typeof taskSpecs)[number], dependency: string): void {
+  const markerPath = path.resolve(dependency, ARTIFACT_VERIFICATION_MARKER);
+  try {
+    const resolvedMarker = resolveRegularArtifactFile(
+      dependency,
+      markerPath,
+      `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)}`
+    );
+    const marker = JSON.parse(readFileSync(resolvedMarker, "utf8")) as {
+      schema_version?: unknown;
+      attempt_id?: unknown;
+      artifacts?: unknown;
+    };
+    if (
+      marker.schema_version !== ARTIFACT_VERIFICATION_SCHEMA_VERSION ||
+      marker.attempt_id !== path.basename(dependency) ||
+      !Array.isArray(marker.artifacts)
+    ) {
+      throw new Error("invalid verification marker");
+    }
+  } catch (error) {
+    throw new Error(
+      `artifact-contract failure: artifact dependency has not passed verification ${path.basename(dependency)} for ${task.attemptId}`,
+      { cause: error }
+    );
   }
 }
 
@@ -2853,6 +2890,10 @@ function resolveNonEmptyRegularArtifactFile(
 
 function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verificationOutput> {
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  // A model-controlled workspace can pre-create arbitrary sidecars. Remove
+  // any stale marker before validating so only this verifier can publish the
+  // success boundary consumed by downstream preparation tasks.
+  clearArtifactVerificationMarker(artifactDir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);
   verifyInvariantLedgerSourceEvidence(task, artifactRoots);
   const publications = new Map<string, Buffer>();
@@ -2912,6 +2953,7 @@ function verifyArtifacts(task: (typeof taskSpecs)[number]): z.infer<typeof verif
     throw new Error("artifact-contract failure: primary artifact is missing");
   }
   publishVerifiedArtifacts(artifactDir, publications);
+  writeArtifactVerificationMarker(task, artifacts);
   return { artifacts, primary_artifact: primary.path };
 }
 
@@ -3206,6 +3248,46 @@ function publishVerifiedArtifacts(artifactDir: string, publications: ReadonlyMap
   for (const [relativePath, contents] of [...publications].sort(([left], [right]) => left.localeCompare(right))) {
     publishFileDurableExclusive(artifactDir, relativePath, contents);
   }
+}
+
+function clearArtifactVerificationMarker(artifactDir: string): void {
+  const markerPath = path.resolve(artifactDir, ARTIFACT_VERIFICATION_MARKER);
+  if (!isStrictlyInsideDirectory(artifactDir, markerPath)) {
+    throw new Error("artifact-contract failure: unsafe artifact verification marker path");
+  }
+  try {
+    const stat = lstatSync(markerPath);
+    if (stat.isDirectory()) {
+      throw new Error("artifact-contract failure: artifact verification marker is a directory");
+    }
+    rmSync(markerPath, { force: true });
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+}
+
+function writeArtifactVerificationMarker(
+  task: (typeof taskSpecs)[number],
+  artifacts: readonly {
+    path: string;
+    contract: string;
+    contract_digest: string;
+    sha256: string;
+    primary: boolean;
+  }[]
+): void {
+  const artifactDir = realpathSync(task.metadata.artifacts.dir);
+  const marker = `${JSON.stringify(
+    {
+      schema_version: ARTIFACT_VERIFICATION_SCHEMA_VERSION,
+      attempt_id: task.attemptId,
+      node_id: task.metadata.node.logicalNodeId,
+      artifacts
+    },
+    null,
+    2
+  )}\n`;
+  publishFileDurableExclusive(artifactDir, ARTIFACT_VERIFICATION_MARKER, marker);
 }
 
 function verifyGeneratedTestFiles(artifactDir: string, value: unknown): Array<{ path: string; contents: Buffer }> {

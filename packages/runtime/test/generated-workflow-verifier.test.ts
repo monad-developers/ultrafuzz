@@ -807,6 +807,36 @@ test("generated Smithers verifier publishes the complete validated set before ta
   );
 });
 
+test("generated Smithers preparation requires a successful dependency artifact verification", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const preparationStart = source.indexOf("function prepareArtifactMirror");
+  const materializeStart = source.indexOf("function materializeInvariantSuiteFromDependencies");
+  const verifierStart = source.indexOf("function verifyArtifacts");
+  const workflowStart = source.indexOf("export default smithers");
+
+  assert.ok(preparationStart >= 0, source);
+  assert.ok(materializeStart > preparationStart, source);
+  assert.ok(verifierStart > materializeStart, source);
+  assert.ok(workflowStart > verifierStart, source);
+
+  const verifier = source.slice(verifierStart, workflowStart);
+  assert.match(source, /ARTIFACT_VERIFICATION_MARKER/u);
+  assert.match(source, /function assertVerifiedDependency/u);
+  assert.match(source, /artifact dependency has not passed verification/u);
+  assert.match(source, /assertVerifiedDependency\(task, dependency\)/u);
+  assert.match(verifier, /clearArtifactVerificationMarker\(artifactDir\)/u);
+  assert.match(verifier, /writeArtifactVerificationMarker\(task, artifacts\)/u);
+  assert.ok(
+    verifier.indexOf("clearArtifactVerificationMarker(artifactDir)") < verifier.indexOf("const artifactRoots"),
+    verifier
+  );
+  assert.ok(
+    verifier.indexOf("writeArtifactVerificationMarker(task, artifacts)") >
+      verifier.indexOf("publishVerifiedArtifacts(artifactDir, publications)"),
+    verifier
+  );
+});
+
 test("generated Smithers preserves setup-patch baselines across post-agent preparation", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   const helperStart = source.indexOf("function materializeWorkspacePatchDependencies");
