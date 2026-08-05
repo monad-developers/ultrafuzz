@@ -1471,6 +1471,7 @@ function resetInvariantSuiteArtifactRoot(artifactRoot: string): void {
 
 function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[number], workspaceRoot: string): void {
   if (!invariantSuiteNodeIds.has(task.metadata.node.logicalNodeId)) return;
+  const tombstones = invariantSuiteTombstones.get(realpathSync(workspaceRoot)) ?? new Set<string>();
   const directDependencies = new Set(task.metadata.dependencies.attemptIds);
   const dependencies = [...task.dependencyArtifactDirs].sort((left, right) => {
     const leftDirect = directDependencies.has(left) || directDependencies.has(path.basename(left));
@@ -1548,6 +1549,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     }
   }
   for (const [relativePath, entry] of selectedSources) {
+    if (tombstones.has(relativePath)) continue;
     copyInvariantSuiteIntoWorkspace(
       workspaceRoot,
       path.join(realpathSync(entry.dependency), "invariant-suite"),
@@ -1659,7 +1661,10 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
       );
       const baselineContents = readFileSync(resolvedBaseline, "utf8");
       const baselineDigest = createHash("sha256").update(baselineContents).digest("hex");
-      const snapshot = invariantSuiteBaselineSnapshots.get(baselineRoot);
+      const snapshot =
+        protectedBaselinePath !== undefined && authoritativeBaselinePath === protectedBaselinePath
+          ? invariantSuiteProtectedBaselineSnapshots.get(authoritativeBaselinePath)
+          : invariantSuiteBaselineSnapshots.get(baselineRoot);
       if (snapshot !== undefined && snapshot.sha256 !== baselineDigest) {
         throw new Error("artifact-contract failure: invariant suite baseline was modified by the agent");
       }
