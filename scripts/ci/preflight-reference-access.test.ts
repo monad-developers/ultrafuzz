@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import {
   REFERENCE_GITHUB_REPOS_ENV,
+  missingReferenceTokenPrerequisite,
   referenceAccessAllowlist,
   referenceAccessTargets,
   referenceAccessVerdict,
@@ -157,6 +158,21 @@ describe("pinned private reference access preflight", () => {
     const verdicts = await verifyReferenceAccess([target()], TOKEN, fetchImpl as unknown as typeof fetch);
     expect(calls).toEqual([`https://api.github.com/repos/${PRIVATE_REPO}`]);
     expect(verdicts[0]!.ok).toBe(false);
+  });
+
+  it("reports the installation prerequisite when the mint step produced no token", () => {
+    // The mint step fails with GitHub's bare `Not Found`, which reads like an infrastructure fault.
+    // An absent token in CI means exactly one actionable thing, so say it rather than restate that a
+    // variable is empty.
+    const prerequisite = missingReferenceTokenPrerequisite([PRIVATE_REPO]);
+    expect(prerequisite).toContain("EXTERNAL PREREQUISITE");
+    expect(prerequisite).toContain("install the eval-history GitHub App");
+    expect(prerequisite).toContain(PRIVATE_REPO);
+    expect(prerequisite).toContain("Contents: Read-only");
+    expect(prerequisite).toContain("/repos/{owner}/{repo}/installation");
+    // The forbidden workarounds are named so the failure cannot be "fixed" by weakening the pin.
+    expect(prerequisite).toContain("must not be replaced, vendored, or removed");
+    expect(prerequisite).toContain("administrator");
   });
 
   it("names the environment variable a caller must set", () => {

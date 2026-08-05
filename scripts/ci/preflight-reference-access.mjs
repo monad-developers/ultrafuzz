@@ -181,6 +181,28 @@ export function readReferenceCatalog(catalogPath) {
   return parse(fs.readFileSync(catalogPath, "utf8"));
 }
 
+/**
+ * The prerequisite to report when no token reached this step at all.
+ *
+ * In CI an empty token almost always means the mint step itself failed, and it fails for exactly one
+ * reason worth acting on: `actions/create-github-app-token` asks GitHub for the App's installation on
+ * the target repository and gets `404 Not Found` when there is none. That 404 is indistinguishable
+ * from "repository does not exist" at the API level but is reported before any permission is
+ * evaluated, so the actionable instruction is to install the App -- not to adjust a permission and not
+ * to change anything in this repository.
+ */
+export function missingReferenceTokenPrerequisite(allowlist) {
+  return (
+    `EXTERNAL PREREQUISITE: install the eval-history GitHub App on ${allowlist.join(", ")} with ` +
+    "Repository permission `Contents: Read-only`.\n" +
+    `No token reached this step, which means the mint step could not find an installation of the App ` +
+    "on that repository (`actions/create-github-app-token` reports GitHub's `Not Found` from " +
+    "`GET /repos/{owner}/{repo}/installation`).\n" +
+    "A repository or organization administrator must install it; no change inside this repository can " +
+    "substitute for that, and the pin must not be replaced, vendored, or removed to work around it."
+  );
+}
+
 async function main() {
   const catalogPath = path.resolve(process.argv[2] ?? ".ultrafuzz/references.yml");
   const allowlist = referenceAccessAllowlist(process.env[REFERENCE_GITHUB_REPOS_ENV]);
@@ -192,10 +214,8 @@ async function main() {
   }
   const token = process.env[REFERENCE_GITHUB_TOKEN_ENV];
   if (token === undefined || token.trim() === "") {
-    console.error(
-      `${REFERENCE_GITHUB_REPOS_ENV} declares private references but ${REFERENCE_GITHUB_TOKEN_ENV} is empty. ` +
-        "The launching job must mint a short-lived installation token before this step."
-    );
+    console.error(missingReferenceTokenPrerequisite(allowlist));
+    console.error("Pinned private reference access is unproven; refusing to start model-backed compute.");
     process.exit(1);
   }
   const targets = referenceAccessTargets(readReferenceCatalog(catalogPath), allowlist);
