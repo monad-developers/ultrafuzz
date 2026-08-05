@@ -98,6 +98,10 @@ describe("prompt semantic anchors", () => {
       /explicitly documented or source-observed aggregate\s+accounting\s+relationships between supplied assets, borrowed\s+assets, and shares/u
     );
     expect(fanin).toMatch(/getter, function, test, or source\s+location that supplies each oracle/u);
+    expect(fanin).toContain("Verbatim source-evidence ledger");
+    expect(fanin).toContain("{{artifact_path:project-discovery}}/setup/invariant-evidence-ledger.json");
+    expect(fanin).toContain("{{schema_path}}/invariant-evidence-ledger.schema.json");
+    expect(fanin).toMatch(/Map every ledger entry to at least one canonical property\s+row/u);
   });
 
   it("keeps protocol failures observable during invariant handler execution", () => {
@@ -176,6 +180,14 @@ describe("prompt semantic anchors", () => {
     expect(discovery).toMatch(
       /aggregate accounting relationships between supplied assets, borrowed assets,\s+and shares when those relationships are explicitly documented or observed/u
     );
+    expect(discovery).toContain("Verbatim source-evidence ledger");
+    expect(discovery).toMatch(/every explicitly enumerated bullet or formula/u);
+    expect(discovery).toMatch(/Copy each such statement\s+verbatim/u);
+    expect(discovery).toMatch(
+      /Do not summarize, merge, or omit a source\s+bullet before it has a corresponding ledger entry/u
+    );
+    expect(discovery).toMatch(/source path and line or symbol location/u);
+    expect(discovery).toContain("including statements under generic headings");
   });
 
   it("keeps the final invariant campaign backend-neutral on the single recon-fuzzer backend", () => {

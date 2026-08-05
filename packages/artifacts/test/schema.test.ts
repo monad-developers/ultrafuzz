@@ -10,6 +10,8 @@ import {
   ANALYSIS_BUNDLE_SCHEMA_VERSION,
   FINDINGS_SCHEMA_VERSION,
   GENERATED_TESTS_SCHEMA_VERSION,
+  INVARIANT_LEDGER_SCHEMA_VERSION,
+  INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
   IMPLEMENTED_PROPERTIES_SCHEMA_VERSION,
   NODE_ATTEMPT_LEDGER_SCHEMA_VERSION,
   NODE_STATE_STATUSES,
@@ -24,6 +26,8 @@ import {
   createInitialRunState,
   findingJsonSchema,
   generatedTestsJsonSchema,
+  invariantLedgerJsonSchema,
+  invariantSourceProofJsonSchema,
   lensPropertiesJsonSchema,
   nodeAttemptLedgerJsonSchema,
   propertiesJsonSchema,
@@ -33,6 +37,8 @@ import {
   validateFindingSchema,
   validateFindingsSchema,
   validateGeneratedTestManifestSchema,
+  validateInvariantLedgerSchema,
+  validateInvariantSourceProofSchema,
   validateImplementedPropertiesSchema,
   validateLensPropertiesSchema,
   validateArtifactContract,
@@ -54,6 +60,8 @@ test("materializes the checked-in JSON schema bundle into a task-local directory
     const copied = materializePromptSchemas(destination);
     assert.ok(copied.some((file) => file.endsWith("property-lens.schema.json")));
     assert.ok(copied.some((file) => file.endsWith("properties.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("invariant-evidence-ledger.schema.json")));
+    assert.ok(copied.some((file) => file.endsWith("invariant-source-proof.schema.json")));
     assert.ok(readdirSync(destination).every((file) => file.endsWith(".schema.json")));
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).isFile(), true);
     assert.equal(statSync(path.join(destination, "property-lens.schema.json")).mode & 0o777, 0o400);
@@ -195,6 +203,167 @@ test("artifact contract registry validates structured, empty, and malformed outp
   }
 });
 
+test("invariant evidence ledger preserves verbatim source entries and inventory joins", () => {
+  const ledger = {
+    schema_version: INVARIANT_LEDGER_SCHEMA_VERSION,
+    entries: [
+      {
+        id: "evidence-1",
+        source_path: "docs/overview.md",
+        source_location: "lines 54-57",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-hub-borrowed-assets"]
+      },
+      {
+        id: "evidence-2",
+        source_path: "tests/recon/Properties.sol",
+        source_location: "invariant_totalBorrowedLessThanSupplied_v1",
+        kind: "invariant",
+        verbatim: "totalBorrowed <= totalSupplied",
+        inventory_ids: ["inventory-hub-borrowed-assets", "inventory-hub-solvency-v1"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-hub-borrowed-assets",
+        description: "Hub borrowed assets remain at or below supplied assets.",
+        ledger_ids: ["evidence-1", "evidence-2"]
+      },
+      {
+        id: "inventory-hub-solvency-v1",
+        description: "Aggregate borrowed and supplied assets remain solvent.",
+        ledger_ids: ["evidence-2"]
+      }
+    ],
+    scan_probes: []
+  };
+
+  const result = validateInvariantLedgerSchema(ledger, "ledger.json");
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value, ledger);
+  assert.equal(
+    validateArtifactContract("ultrafuzz/invariant-ledger@1", JSON.stringify(ledger), "ledger.json").ok,
+    true
+  );
+
+  const contradictory = structuredClone(ledger);
+  contradictory.inventory_rows[0]!.ledger_ids = ["evidence-1"];
+  const contradictoryResult = validateInvariantLedgerSchema(contradictory);
+  assert.equal(contradictoryResult.ok, false);
+  assert.ok(contradictoryResult.issues.some((issue) => /does not link back/u.test(issue.message)));
+});
+
+test("invariant evidence ledger rejects duplicate entries, duplicate inventory joins, and invalid prefixes", () => {
+  const base = {
+    schema_version: INVARIANT_LEDGER_SCHEMA_VERSION,
+    entries: [
+      {
+        id: "evidence-1",
+        source_path: "docs/overview.md",
+        source_location: "lines 54-57",
+        kind: "inequality",
+        verbatim: "Total borrowed assets <= total supplied assets",
+        inventory_ids: ["inventory-hub-borrowed-assets"]
+      }
+    ],
+    inventory_rows: [
+      {
+        id: "inventory-hub-borrowed-assets",
+        description: "Hub borrowed assets remain at or below supplied assets.",
+        ledger_ids: ["evidence-1"]
+      }
+    ],
+    scan_probes: []
+  };
+
+  const duplicateEntry = structuredClone(base);
+  duplicateEntry.entries.push(structuredClone(base.entries[0]!));
+  const duplicateEntryResult = validateInvariantLedgerSchema(duplicateEntry);
+  assert.equal(duplicateEntryResult.ok, false);
+  assert.ok(duplicateEntryResult.issues.some((issue) => /Duplicate ledger entry ID/u.test(issue.message)));
+
+  const duplicateInventory = structuredClone(base);
+  duplicateInventory.entries[0]!.inventory_ids = ["inventory-hub-borrowed-assets", "inventory-hub-borrowed-assets"];
+  const duplicateInventoryResult = validateInvariantLedgerSchema(duplicateInventory);
+  assert.equal(duplicateInventoryResult.ok, false);
+  assert.ok(duplicateInventoryResult.issues.some((issue) => /Duplicate inventory ID/u.test(issue.message)));
+
+  const invalidPrefix = structuredClone(base);
+  invalidPrefix.entries[0]!.inventory_ids = ["hub-borrowed-assets"];
+  const invalidPrefixResult = validateInvariantLedgerSchema(invalidPrefix);
+  assert.equal(invalidPrefixResult.ok, false);
+  assert.ok(invalidPrefixResult.issues.some((issue) => /inventory-|pattern/u.test(issue.message)));
+
+  const duplicateProbe = {
+    ...structuredClone(base),
+    entries: [],
+    inventory_rows: [],
+    scan_probes: [
+      {
+        id: "probe-docs-no-invariants",
+        source_path: "docs/overview.md",
+        query: "invariant|accounting|solvency",
+        result: "No explicit invariant statements found"
+      },
+      {
+        id: "probe-docs-no-invariants",
+        source_path: "docs/overview.md",
+        query: "invariant|accounting|solvency",
+        result: "No explicit invariant statements found"
+      }
+    ]
+  };
+  const duplicateProbeResult = validateInvariantLedgerSchema(duplicateProbe);
+  assert.equal(duplicateProbeResult.ok, false);
+  assert.ok(duplicateProbeResult.issues.some((issue) => /Duplicate scan probe ID/u.test(issue.message)));
+
+  const legacyShape = structuredClone(base) as Record<string, unknown>;
+  delete legacyShape.inventory_rows;
+  delete legacyShape.scan_probes;
+  const legacyShapeResult = validateInvariantLedgerSchema(legacyShape);
+  assert.equal(legacyShapeResult.ok, false);
+  assert.ok(legacyShapeResult.issues.some((issue) => /include inventory_rows/u.test(issue.message)));
+
+  const noEvidenceWithoutProbe = {
+    ...structuredClone(base),
+    entries: [],
+    inventory_rows: [],
+    scan_probes: []
+  };
+  const noEvidenceWithoutProbeResult = validateInvariantLedgerSchema(noEvidenceWithoutProbe);
+  assert.equal(noEvidenceWithoutProbeResult.ok, false);
+  assert.ok(noEvidenceWithoutProbeResult.issues.some((issue) => /at least one scan probe/u.test(issue.message)));
+});
+
+test("invariant source proofs bind immutable text snapshots to a ledger digest", () => {
+  const proof = {
+    schema_version: INVARIANT_SOURCE_PROOF_SCHEMA_VERSION,
+    attempt_id: "project-discovery",
+    commit: "a".repeat(40),
+    tree: "b".repeat(40),
+    ledger_sha256: "c".repeat(64),
+    files: [
+      { path: "docs/Some File.md", sha256: "d".repeat(64), content: "Total borrowed assets <= total supplied assets" }
+    ]
+  };
+  assert.equal(validateInvariantSourceProofSchema(proof).ok, true);
+  assert.deepEqual(invariantSourceProofJsonSchema.required, [
+    "schema_version",
+    "attempt_id",
+    "commit",
+    "tree",
+    "ledger_sha256",
+    "files"
+  ]);
+  const binary = structuredClone(proof);
+  binary.files[0]!.content = "\u0000";
+  assert.equal(validateInvariantSourceProofSchema(binary).ok, false);
+  const duplicate = structuredClone(proof);
+  duplicate.files.push({ ...duplicate.files[0]! });
+  assert.equal(validateInvariantSourceProofSchema(duplicate).ok, false);
+});
+
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {
   const finding = {
     schema_version: FINDINGS_SCHEMA_VERSION,
@@ -264,6 +433,14 @@ test("property catalog schema accepts one source and preserves multiple deduplic
   const invalidSource = validatePropertiesSchema(sourceWithExtra);
   assert.equal(invalidSource.ok, false);
   assert.ok(invalidSource.issues.some((issue) => issue.path.endsWith(".sources[0]") && /note/u.test(issue.message)));
+
+  const duplicateLedgerIds = {
+    ...oneSource,
+    properties: [{ ...oneSource.properties[0]!, ledger_ids: ["evidence-1", "evidence-1"] }]
+  };
+  const invalidLedgerIds = validatePropertiesSchema(duplicateLedgerIds);
+  assert.equal(invalidLedgerIds.ok, false);
+  assert.ok(invalidLedgerIds.issues.some((issue) => /Duplicate invariant ledger ID/u.test(issue.message)));
 });
 
 test("property lens schema requires normalized priorities and unique IDs", () => {
@@ -743,6 +920,8 @@ test("artifact schema snapshots are present and aligned with exported schema con
   const findingSnapshot = readSchemaSnapshot("finding.schema.json");
   const analysisBundleSnapshot = readSchemaSnapshot("analysis-bundle.schema.json");
   const generatedTestsSnapshot = readSchemaSnapshot("generated-tests.schema.json");
+  const invariantLedgerSnapshot = readSchemaSnapshot("invariant-evidence-ledger.schema.json");
+  const invariantSourceProofSnapshot = readSchemaSnapshot("invariant-source-proof.schema.json");
   const nodeAttemptLedgerSnapshot = readSchemaSnapshot("node-attempt-ledger.schema.json");
   const propertiesSnapshot = readSchemaSnapshot("properties.schema.json");
   const lensPropertiesSnapshot = readSchemaSnapshot("property-lens.schema.json");
@@ -753,10 +932,22 @@ test("artifact schema snapshots are present and aligned with exported schema con
   assert.deepEqual(analysisBundleSnapshot, analysisBundleManifestJsonSchema);
   assert.deepEqual(findingSnapshot.required, findingJsonSchema.required);
   assert.deepEqual(generatedTestsSnapshot, generatedTestsJsonSchema);
+  assert.deepEqual(invariantLedgerSnapshot, invariantLedgerJsonSchema);
+  assert.deepEqual(invariantSourceProofSnapshot, invariantSourceProofJsonSchema);
   assert.equal(nodeAttemptLedgerSnapshot.$id, nodeAttemptLedgerJsonSchema.$id);
   assert.deepEqual(nodeAttemptLedgerSnapshot.required, nodeAttemptLedgerJsonSchema.required);
   assert.equal(runStateSnapshot.$id, runStateJsonSchema.$id);
   assert.deepEqual(runStateSnapshot.required, runStateJsonSchema.required);
+  const runStateContractEnum = (
+    runStateSnapshot.properties as {
+      nodes?: {
+        additionalProperties?: {
+          properties?: { outputs?: { items?: { properties?: { contract?: { enum?: unknown } } } } };
+        };
+      };
+    }
+  ).nodes?.additionalProperties?.properties?.outputs?.items?.properties?.contract?.enum;
+  assert.deepEqual(runStateContractEnum, ARTIFACT_CONTRACT_IDS);
   assert.deepEqual(propertiesSnapshot, propertiesJsonSchema);
   assert.deepEqual(lensPropertiesSnapshot, lensPropertiesJsonSchema);
   assert.deepEqual(usageLedgerSnapshot, usageLedgerJsonSchema);

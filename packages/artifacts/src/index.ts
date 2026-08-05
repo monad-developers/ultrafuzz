@@ -5,6 +5,8 @@ export * from "./artifact-contracts.js";
 export * from "./findings.js";
 export * from "./findings-schema.js";
 export * from "./generated-tests.js";
+export * from "./invariant-ledger.js";
+export * from "./invariant-source-proof.js";
 export * from "./manifests.js";
 export * from "./property-provenance.js";
 export * from "./run-layout.js";

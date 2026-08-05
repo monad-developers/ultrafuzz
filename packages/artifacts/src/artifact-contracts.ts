@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 
 import { validateFindingsSchema } from "./findings-schema.js";
 import { validateGeneratedTestManifestSchema } from "./generated-tests.js";
+import { validateInvariantLedgerSchema } from "./invariant-ledger.js";
 import {
   validateLensPropertiesSchema,
   validateImplementedPropertiesSchema,
@@ -15,6 +16,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/implemented-properties@1",
+  "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/json-array@1",
   "ultrafuzz/json-object@1",
   "ultrafuzz/nonempty-markdown@1",
@@ -118,6 +120,14 @@ const definitions = defineContracts([
     description:
       "A generated-test manifest with schema_version, run_id, node_id, and generated_tests. generated_tests is the only test-file list. Every entry path must be a safe forward-slash path with the generated-tests/<file> prefix; mirror the named non-empty regular file at that exact path beneath the node artifact directory.",
     validEmptyExample: '{"schema_version":"1.0","run_id":"<run-id>","node_id":"<node-id>","generated_tests":[]}'
+  },
+  {
+    id: "ultrafuzz/invariant-ledger@1",
+    format: "json",
+    description:
+      "A structured invariant evidence ledger. Every entry preserves verbatim source text, its source path and line or symbol location, and one or more inventory IDs; inventory rows provide the normalized join and each row maps back to one or more ledger entries.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.invariant-evidence-ledger.v1","entries":[{"id":"evidence-example","source_path":"docs/example.md","source_location":"line 1","kind":"invariant","verbatim":"Example relation","inventory_ids":["inventory-example"]}],"inventory_rows":[{"id":"inventory-example","description":"Example relation","ledger_ids":["evidence-example"]}],"scan_probes":[]}'
   },
   {
     id: "ultrafuzz/implemented-properties@1",
@@ -230,6 +240,14 @@ export function validateArtifactContract(
   }
   if (contract === "ultrafuzz/generated-tests@1") {
     const result = validateGeneratedTestManifestSchema(parsed, artifactPath);
+    return {
+      ok: result.ok,
+      issues: result.issues,
+      ...(result.value === undefined ? {} : { value: result.value })
+    };
+  }
+  if (contract === "ultrafuzz/invariant-ledger@1") {
+    const result = validateInvariantLedgerSchema(parsed, artifactPath);
     return {
       ok: result.ok,
       issues: result.issues,
