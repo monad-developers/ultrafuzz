@@ -682,16 +682,14 @@ function writeWorkspacePatchArtifact(root: string, relativePath: string, content
   }
   mkdirSync(path.dirname(target), { recursive: true });
   if (existsSync(target)) {
-    const existing = resolveRegularArtifactFile(
+    resolveRegularArtifactFile(
       root,
       target,
       "artifact-contract failure: workspace patch artifact is unsafe"
     );
-    if (readFileSync(existing, "utf8") !== contents) {
-      throw new Error(`artifact-contract failure: workspace patch artifact was modified ${relativePath}`);
-    }
-    return;
   }
+  // These paths are runtime-owned. Replace any regular agent-authored
+  // placeholder or partial patch with the complete post-agent capture.
   writeFileDurable(target, contents);
 }
 
@@ -1211,6 +1209,13 @@ function canonicalEmptyArtifact(
   task: (typeof taskSpecs)[number],
   output: (typeof task.outputs)[number]
 ): string | undefined {
+  // Workspace patches are captured and materialized by the runtime after the
+  // agent returns. Leaving an empty placeholder here would make the later
+  // runtime-owned workspace patch outputs look like agent modifications to the
+  // strict writer.
+  if (output.path === "workspace.patch" || output.path === "workspace-patch.json") {
+    return undefined;
+  }
   // These artifacts carry source-completeness and provenance joins. An empty
   // sidecar would make an omitted agent output look successful, so they must
   // always be produced by the agent and rejected by the strict verifier.

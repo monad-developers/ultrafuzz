@@ -297,7 +297,13 @@ export function renderPrompt(input: PromptRenderInput): PromptRenderResult {
 }
 
 function appendOutputContract(rendered: string, input: PromptRenderInput, current: PromptGraphNode): string {
-  const outputs = artifactOutputsFor(current);
+  // Workspace patches are captured from the complete post-agent worktree by
+  // the runtime. They remain declared in the graph for validation and
+  // dependency handoff, but must not be presented as files for the agent to
+  // author (an agent can only see a partial pre-capture patch).
+  const outputs = artifactOutputsFor(current).filter(
+    (output) => output.path !== "workspace.patch" && output.path !== "workspace-patch.json"
+  );
   if (outputs.length === 0) {
     return rendered;
   }

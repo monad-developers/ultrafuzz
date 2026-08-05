@@ -98,6 +98,37 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers workflow leaves runtime-owned workspace patch outputs unmaterialized", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function canonicalEmptyArtifact");
+  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(
+    helper,
+    /output\.path === "workspace\.patch" \|\| output\.path === "workspace-patch\.json"/u
+  );
+  assert.match(helper, /runtime-owned workspace patch outputs/u);
+});
+
+test("generated Smithers workflow replaces agent-authored workspace patch output with the runtime capture", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
+  const helperEnd = source.indexOf("\n\nfunction captureInvariantSuiteBaseline", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /resolveRegularArtifactFile\(/u);
+  assert.match(helper, /These paths are runtime-owned/u);
+  assert.match(helper, /writeFileDurable\(target, contents\)/u);
+  assert.doesNotMatch(helper, /workspace patch artifact was modified/u);
+});
+
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
