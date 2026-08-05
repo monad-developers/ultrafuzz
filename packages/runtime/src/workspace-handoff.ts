@@ -9,7 +9,16 @@ import { normalizeWorkspacePatchPath } from "@ultrafuzz/artifacts";
 const WORKSPACE_PATCH_SCHEMA_VERSION = "ultrafuzz.workspace-patch.v1" as const;
 const GIT_OBJECT_ID = /^[0-9a-f]{40,64}$/u;
 const MAX_PATCH_BYTES = 16 * 1024 * 1024;
-const SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".envrc", ".npmrc"]);
+const SENSITIVE_SEGMENTS = new Set([
+  ".git",
+  ".ultrafuzz",
+  ".smithers",
+  "node_modules",
+  "artifacts",
+  ".envrc",
+  ".npmrc"
+]);
+const WORKSPACE_RUNTIME_ROOTS = [".ultrafuzz", ".smithers", "node_modules", "artifacts"] as const;
 
 export interface WorkspacePatchFile {
   path: string;
@@ -33,7 +42,7 @@ export interface WorkspacePatchCapture {
 export function captureWorkspaceTree(workspaceRoot: string): string {
   return withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", "HEAD"], index);
-    runGit(workspaceRoot, ["add", "-A", "--"], index);
+    stageWorkspaceTree(workspaceRoot, index);
     return runGit(workspaceRoot, ["write-tree"], index).trim();
   });
 }
@@ -44,7 +53,7 @@ export function captureWorkspacePatch(workspaceRoot: string, baselineTree: strin
   const baseCommit = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   const capture = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    runGit(workspaceRoot, ["add", "-A", "--"], index);
+    stageWorkspaceTree(workspaceRoot, index);
     const resultTree = runGit(workspaceRoot, ["write-tree"], index).trim();
     const patch = runGit(
       workspaceRoot,
@@ -82,7 +91,6 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (sha256(capture.patch) !== capture.manifest.patch_sha256) {
     throw new Error("workspace patch digest mismatch");
   }
-  assertPatchPathsMatchManifest(workspaceRoot, capture.manifest.base_tree, capture.patch, capture.manifest.files);
   const head = runGit(workspaceRoot, ["rev-parse", "HEAD"]).trim();
   if (head !== capture.manifest.base_commit) {
     throw new Error(`workspace patch base commit mismatch: expected ${capture.manifest.base_commit}, got ${head}`);
@@ -92,6 +100,7 @@ export function applyWorkspacePatch(workspaceRoot: string, capture: WorkspacePat
   if (currentTree !== capture.manifest.base_tree) {
     throw new Error(`workspace patch base tree mismatch: expected ${capture.manifest.base_tree}, got ${currentTree}`);
   }
+  assertPatchPathsMatchManifest(workspaceRoot, capture.manifest.base_tree, capture.patch, capture.manifest.files);
   if (capture.patch.length === 0) {
     if (capture.manifest.base_tree !== capture.manifest.result_tree) {
       throw new Error("workspace patch is empty but changes are declared");
@@ -121,6 +130,14 @@ function parseChangedPaths(raw: string): WorkspacePatchFile[] {
   return [...unique.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
+function stageWorkspaceTree(workspaceRoot: string, index: string): void {
+  runGit(
+    workspaceRoot,
+    ["add", "-A", "--", ".", ...WORKSPACE_RUNTIME_ROOTS.map((root) => `:(exclude)${root}/**`)],
+    index
+  );
+}
+
 function assertPatchPathsMatchManifest(
   workspaceRoot: string,
   baselineTree: string,
@@ -136,13 +153,17 @@ function assertPatchPathsMatchManifest(
   }
   const patchFiles = withTemporaryIndex(workspaceRoot, (index) => {
     runGit(workspaceRoot, ["read-tree", baselineTree], index);
-    for (const entry of manifestFiles) assertNotIgnoredPatchPath(workspaceRoot, index, entry.path, true);
+    const baselinePaths = new Set(
+      parseChangedPaths(runGit(workspaceRoot, ["ls-files", "-z"], index)).map((entry) => entry.path)
+    );
     runGit(workspaceRoot, ["apply", "--cached", "--check", "--binary", "--whitespace=nowarn", "-"], index, patch);
     runGit(workspaceRoot, ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"], index, patch);
     const paths = parseChangedPaths(
       runGit(workspaceRoot, ["diff", "--cached", "--name-only", "-z", baselineTree], index)
     );
-    for (const entry of paths) assertNotIgnoredPatchPath(workspaceRoot, index, entry.path);
+    for (const entry of paths) {
+      if (!baselinePaths.has(entry.path)) assertNotIgnoredPatchPath(workspaceRoot, index, entry.path, true);
+    }
     return paths;
   });
   const expected = manifestFiles.map((entry) => entry.path).sort();
@@ -158,6 +179,18 @@ function assertNotIgnoredPatchPath(
   relativePath: string,
   checkOnlyWhenUntracked = false
 ): void {
+  if (checkOnlyWhenUntracked) {
+    try {
+      execFileSync("git", ["check-ignore", "--no-index", "--quiet", "--", relativePath], {
+        cwd: workspaceRoot,
+        stdio: ["ignore", "ignore", "ignore"]
+      });
+    } catch (error) {
+      if (error instanceof Error && "status" in error && error.status === 1) return;
+      throw error;
+    }
+    throw new Error(`workspace patch cannot modify an ignored untracked path: ${relativePath}`);
+  }
   const env = { ...process.env, GIT_INDEX_FILE: index };
   let tracked = false;
   try {
@@ -170,7 +203,7 @@ function assertNotIgnoredPatchPath(
   } catch (error) {
     if (!(error instanceof Error) || !("status" in error) || error.status !== 1) throw error;
   }
-  if (tracked && checkOnlyWhenUntracked) return;
+  if (tracked) return;
   try {
     execFileSync("git", ["check-ignore", "--no-index", "--quiet", "--", relativePath], {
       cwd: workspaceRoot,

@@ -572,10 +572,11 @@ test("generated Smithers retry snapshots are durable and restore through canonic
   assert.ok(preparationRestoreStart > 0, source);
   const preparationRestore = source.slice(preparationRestoreStart, workflowStart);
   assert.ok(
-    preparationRestore.indexOf('git", ["read-tree", "--reset", "-u"') <
-      preparationRestore.indexOf('git", ["clean", "-fdx"'),
+    preparationRestore.indexOf('["read-tree", "--reset", "-u"') <
+      preparationRestore.indexOf("removeStaleWorkspaceFiles(workspaceRoot, preparationTree)"),
     preparationRestore
   );
+  assert.match(preparationRestore, /\["ls-files", "--others", "--ignored", "--exclude-standard", "-z"\]/u);
   assert.match(source, /const workspaceCandidate = path\.resolve\(task\.workspacePath\)/u);
   assert.match(source, /const workspaceStat = lstatSync\(workspaceCandidate\)/u);
   assert.match(source, /realpathSync\(workspaceCandidate\) !== workspaceCandidate/u);

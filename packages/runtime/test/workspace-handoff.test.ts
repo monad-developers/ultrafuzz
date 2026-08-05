@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -32,6 +32,10 @@ test("captures tracked and untracked setup changes relative to the dependency ba
   const root = fixture();
   try {
     const baseline = captureWorkspaceTree(root);
+    mkdirSync(path.join(root, "artifacts", "mirror"), { recursive: true });
+    mkdirSync(path.join(root, ".ultrafuzz", "schemas"), { recursive: true });
+    writeFileSync(path.join(root, "artifacts", "mirror", "agent-output.json"), "runtime\n");
+    writeFileSync(path.join(root, ".ultrafuzz", "schemas", "runtime.schema.json"), "runtime\n");
     writeFileSync(
       path.join(root, "foundry.toml"),
       "[profile.default]\ntest = 'tests'\n[profile.ultrafuzz]\ntest = 'test/foundry'\n"
@@ -53,10 +57,15 @@ test("captures tracked and untracked setup changes relative to the dependency ba
 
 test("applies a validated setup patch and rejects a base-tree mismatch", () => {
   const source = fixture();
+  // The patch contract is keyed to the exact Git tree.  Build the downstream
+  // checkout from the source fixture rather than initializing a second
+  // repository: independently-created commits can have different hashes even
+  // when their files are byte-for-byte identical (for example, due to commit
+  // timestamps), making this test accidentally depend on wall-clock timing.
   const downstreamParent = mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-handoff-downstream-"));
-  const downstream = path.join(downstreamParent, "downstream");
+  const downstream = path.join(downstreamParent, "checkout");
+  git(downstreamParent, ["clone", "--quiet", source, downstream]);
   try {
-    git(os.tmpdir(), ["clone", "--quiet", source, downstream]);
     const baseline = captureWorkspaceTree(source);
     writeFileSync(
       path.join(source, "foundry.toml"),
@@ -64,17 +73,16 @@ test("applies a validated setup patch and rejects a base-tree mismatch", () => {
     );
     writeFileSync(path.join(source, "UltrafuzzSmoke.t.sol"), "contract UltrafuzzSmoke {}\n");
     const captured = captureWorkspacePatch(source, baseline);
+    assert.throws(
+      () => applyWorkspacePatch(downstream, { ...captured, manifest: { ...captured.manifest, files: [] } }),
+      /manifest files do not match/u
+    );
     applyWorkspacePatch(downstream, captured);
     assert.equal(
       readFileSync(path.join(downstream, "foundry.toml"), "utf8"),
       readFileSync(path.join(source, "foundry.toml"), "utf8")
     );
     assert.equal(readFileSync(path.join(downstream, "UltrafuzzSmoke.t.sol"), "utf8"), "contract UltrafuzzSmoke {}\n");
-
-    assert.throws(
-      () => applyWorkspacePatch(downstream, { ...captured, manifest: { ...captured.manifest, files: [] } }),
-      /manifest files do not match/u
-    );
 
     writeFileSync(path.join(downstream, "unrelated.txt"), "drift\n");
     assert.throws(() => applyWorkspacePatch(downstream, captured), /base tree mismatch/u);

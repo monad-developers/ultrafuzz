@@ -27,7 +27,7 @@
               { "not": { "pattern": "^[A-Za-z]:" } },
               { "not": { "pattern": "(^|/)\\.(?:/|$)" } },
               { "not": { "pattern": "(^|/)\\.\\.(?:/|$)" } },
-              { "not": { "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)" } },
+              { "not": { "pattern": "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)" } },
               { "not": { "pattern": "(^|/)\\.env(?:\\.|/|$)" } },
               { "not": { "pattern": "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
             ]

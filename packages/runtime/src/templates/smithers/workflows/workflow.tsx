@@ -610,9 +610,55 @@ function restoreWorkspacePatchPreparation(task: (typeof taskSpecs)[number], work
     cwd: workspaceRoot,
     stdio: ["ignore", "pipe", "pipe"]
   });
-  // Restore tracked ignore rules first, then remove all untracked files,
-  // including files hidden by an ignore rule introduced by the failed agent.
-  execFileSync("git", ["clean", "-fdx", "--"], { cwd: workspaceRoot, stdio: ["ignore", "pipe", "pipe"] });
+  removeStaleWorkspaceFiles(workspaceRoot, preparationTree);
+}
+
+function removeStaleWorkspaceFiles(workspaceRoot: string, preparationTree: string): void {
+  const expected = new Set(
+    execFileSync("git", ["ls-tree", "-r", "--name-only", "-z", preparationTree], {
+      cwd: workspaceRoot,
+      encoding: "utf8"
+    })
+      .split("\0")
+      .filter(Boolean)
+  );
+  const candidates = new Set<string>();
+  for (const args of [
+    ["ls-files", "--others", "--exclude-standard", "-z"],
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"]
+  ]) {
+    for (const entry of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split("\0")) {
+      if (entry) candidates.add(entry);
+    }
+  }
+  for (const relativePath of candidates) {
+    if (expected.has(relativePath) || isWorkspaceRuntimePath(relativePath)) continue;
+    const candidate = path.resolve(workspaceRoot, ...relativePath.split("/"));
+    if (!isStrictlyInsideDirectory(workspaceRoot, candidate) || hasSymlinkComponent(workspaceRoot, candidate)) {
+      throw new Error(`artifact-contract failure: unsafe stale workspace path ${relativePath}`);
+    }
+    rmSync(candidate, { recursive: true, force: true });
+  }
+}
+
+function isWorkspaceRuntimePath(relativePath: string): boolean {
+  const root = relativePath.split("/")[0];
+  return [".ultrafuzz", ".smithers", "node_modules", "artifacts"].includes(root);
+}
+
+function hasSymlinkComponent(root: string, candidate: string): boolean {
+  let current = path.resolve(root);
+  const relative = path.relative(current, candidate);
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      throw error;
+    }
+  }
+  return false;
 }
 
 function materializeWorkspacePatch(task: (typeof taskSpecs)[number]): void {

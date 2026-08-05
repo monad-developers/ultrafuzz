@@ -53,7 +53,7 @@ const workspacePatchPath = z
 function isSafeWorkspacePatchPath(value: string): boolean {
   return !value.split("/").some((segment) => {
     return (
-      [".git", ".ultrafuzz", ".smithers", "node_modules"].includes(segment) ||
+      [".git", ".ultrafuzz", ".smithers", "node_modules", "artifacts"].includes(segment) ||
       segment === ".env" ||
       segment.startsWith(".env.") ||
       segment === ".envrc" ||
@@ -127,7 +127,7 @@ export const workspacePatchJsonSchema = {
               { not: { pattern: "^[A-Za-z]:" } },
               { not: { pattern: "(^|/)\\.(?:/|$)" } },
               { not: { pattern: "(^|/)\\.\\.(?:/|$)" } },
-              { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules)(?:/|$)" } },
+              { not: { pattern: "(^|/)(?:\\.git|\\.ultrafuzz|\\.smithers|node_modules|artifacts)(?:/|$)" } },
               { not: { pattern: "(^|/)\\.env(?:\\.|/|$)" } },
               { not: { pattern: "(^|/)(?:\\.envrc|\\.npmrc)(?:/|$)" } }
             ]
