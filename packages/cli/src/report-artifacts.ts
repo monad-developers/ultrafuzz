@@ -89,6 +89,9 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   }
 
   if (!reportSupportsCanonicalRendering(original.value)) {
+    if (readImplementedPropertiesArtifact(root)?.selection !== undefined) {
+      throw new Error("current invariant final report is not renderable and cannot be preserved as historical");
+    }
     if (!fs.existsSync(markdownPath)) {
       throw new Error("historical final report cannot be regenerated because its Markdown artifact is missing");
     }

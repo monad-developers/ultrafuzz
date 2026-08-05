@@ -1257,6 +1257,41 @@ test("canonical production reports require an exact strategy rate but accept a p
   assert.match(markdown, /\| stateful-invariant \| 3\/6 \|/u);
 });
 
+test("current invariant reports with malformed issues fail closed instead of preserving stale coverage", async () => {
+  const project = tempProject();
+  const runData = await createReportRun(project, "report-current-malformed");
+  const reportDir = path.join(runData.run_root, "artifacts", "final-report");
+  const reportPath = path.join(reportDir, "report.json");
+  fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
+  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
+    recursive: true
+  });
+  writeJsonRecord(
+    path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"),
+    { schema_version: "ultrafuzz.properties.v1", properties: [] }
+  );
+  writeJsonRecord(
+    path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
+    {
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: [] },
+      properties: []
+    }
+  );
+  writeJsonRecord(reportPath, {
+    schema_version: "1.0",
+    run_metadata: {},
+    issues: [{ schema_version: "1.0", id: "malformed-current", title: "Malformed current issue", status: "confirmed", summary: "Missing renderable evidence." }],
+    non_production_outcomes: [],
+    property_implementation_coverage: "unavailable"
+  });
+  fs.writeFileSync(path.join(reportDir, "report.md"), "# historical placeholder\n", "utf8");
+
+  const result = await cli(project, ["report", runData.run_id, "--json"]);
+  assert.equal(result.code, 1);
+  assert.match(JSON.stringify(parseJson(result).diagnostics), /current invariant final report|historical|renderable/iu);
+});
+
 test("historical loose reports preserve conforming Markdown and reject missing or nonconforming Markdown", async () => {
   const project = tempProject();
   const runData = await createReportRun(project, "report-historical-compatibility");
