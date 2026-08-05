@@ -1498,6 +1498,7 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
     return left.localeCompare(right);
   });
   const selectedSources = new Map<string, { dependency: string; bytes: Buffer; direct: boolean }>();
+  let selectedBytes = 0;
   const suitePathsByDependency = new Map<string, string[]>();
   for (const dependency of dependencies) {
     const isDirect = directDependencies.has(dependency) || directDependencies.has(path.basename(dependency));
@@ -1536,7 +1537,11 @@ function materializeInvariantSuiteFromDependencies(task: (typeof taskSpecs)[numb
         }
         if (!isDirect) continue;
       }
+      const prior = selectedSources.get(relativePath);
+      if (prior === undefined) selectedBytes += bytes.length;
+      else selectedBytes += bytes.length - prior.bytes.length;
       selectedSources.set(relativePath, { dependency, bytes, direct: isDirect });
+      assertInvariantSuiteSourceBudget(selectedSources.size, selectedBytes);
     }
   }
   assertInvariantSuiteSourceBudget(
