@@ -43,12 +43,13 @@ target-derived requirements. Add a target-derived pass alongside the assigned
 reference:
 
 - preserve every explicit mathematical invariant, accounting equation, bound,
-  and state relation as its own property row, retaining named formulas and
-  units;
+  and state relation as its own property row, retaining exact operands,
+  constants, named formulas, units, denominator expressions, and rounding
+  direction;
 - Keep distinct formula, denominator, and rounding variants as separate
   property rows, even when they share a business-level description;
-- include aggregate accounting relationships between supplied assets, borrowed
-  assets, and shares whenever the target exposes those quantities;
+- include explicitly documented or source-observed aggregate accounting
+  relationships between supplied assets, borrowed assets, and shares;
 - record the target getter, function, or source location that supplies its
   oracle in the property description so implementation can observe the exact
   relation.

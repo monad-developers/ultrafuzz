@@ -84,7 +84,8 @@ Preserve distinct denominator and rounding variants as separate entries, even
 when they describe the same business rule. For each entry, name the getter,
 function, test, or source location that supplies each oracle, including
 aggregate accounting relationships between supplied assets, borrowed assets,
-and shares. Record liveness requirements for public and external operations,
+and shares when those relationships are explicitly documented or observed in
+the target. Record liveness requirements for public and external operations,
 including valid-state preconditions and source-defined validation outcomes.
 
 ## 2. Testing coverage
