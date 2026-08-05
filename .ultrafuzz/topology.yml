@@ -665,7 +665,7 @@ nodes:
         contract: ultrafuzz/nonempty-markdown@1
         primary: true
       - path: implemented-properties.json
-        contract: ultrafuzz/implemented-properties@1
+        contract: ultrafuzz/implemented-properties@2
       - path: generated-tests.json
         contract: ultrafuzz/generated-tests@1
       - path: findings.json

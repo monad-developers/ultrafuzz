@@ -29,6 +29,11 @@ You must produce a typed JSON catalog and a matching Markdown companion. Use
 the catalog, and set every property priority to `high`, `medium`, or `low`.
 The JSON catalog is the machine-readable source of truth.
 
+When a property corresponds to a named benchmark or reference expectation,
+include a `reference_expectations` array containing the exact stable identifier
+(for example `scfuzzbench:aave-v4:iSpoke_supply`). Preserve one identifier per
+named expectation; omit the field only when no named expectation is represented.
+
 ## Target-derived invariant extraction
 
 Use the upstream handoffs as a starting point and inspect the target source,

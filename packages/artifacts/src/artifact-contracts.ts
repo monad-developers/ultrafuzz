@@ -17,6 +17,7 @@ export const ARTIFACT_CONTRACT_IDS = [
   "ultrafuzz/findings@1",
   "ultrafuzz/generated-tests@1",
   "ultrafuzz/implemented-properties@1",
+  "ultrafuzz/implemented-properties@2",
   "ultrafuzz/invariant-ledger@1",
   "ultrafuzz/json-array@1",
   "ultrafuzz/json-object@1",
@@ -119,7 +120,10 @@ const propertyImplementationCoverageSchema = z.union([
     implemented_property_ids: uniquePropertyIdArraySchema,
     blocked_property_ids: uniquePropertyIdArraySchema,
     pending_property_ids: uniquePropertyIdArraySchema,
-    deferred_property_ids: uniquePropertyIdArraySchema
+    deferred_property_ids: uniquePropertyIdArraySchema,
+    reference_expected_property_ids: uniquePropertyIdArraySchema.optional(),
+    reference_expectation_ids: uniquePropertyIdArraySchema.optional(),
+    blocker_summaries: z.array(z.string().min(1)).optional()
   })
 ]);
 
@@ -161,6 +165,14 @@ const definitions = defineContracts([
     description:
       "Implementation records keyed by canonical property_id, with implementation status and implementation/test paths. Current runs also emit selection metadata and a typed blocker for every selected property that is not implemented.",
     validEmptyExample: '{"schema_version":"ultrafuzz.implemented-properties.v1","properties":[]}'
+  },
+  {
+    id: "ultrafuzz/implemented-properties@2",
+    format: "json",
+    description:
+      "Current invariant implementation records keyed by canonical property_id. The artifact must declare the exact inclusive priority selection and a typed blocker for every selected property that is not implemented.",
+    validEmptyExample:
+      '{"schema_version":"ultrafuzz.implemented-properties.v1","selection":{"priority_threshold":"high","priorities":["high"],"property_ids":[]},"properties":[]}'
   },
   {
     id: "ultrafuzz/json-array@1",
@@ -310,7 +322,7 @@ export function validateArtifactContract(
       ...(result.value === undefined ? {} : { value: result.value })
     };
   }
-  if (contract === "ultrafuzz/implemented-properties@1") {
+  if (contract === "ultrafuzz/implemented-properties@1" || contract === "ultrafuzz/implemented-properties@2") {
     const result = validateImplementedPropertiesSchema(parsed, artifactPath);
     return {
       ok: result.ok,

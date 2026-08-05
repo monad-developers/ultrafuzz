@@ -2011,7 +2011,9 @@ function materializeInvariantSuiteCompanions(task: (typeof taskSpecs)[number]): 
   }
   const implementationOutput = task.outputs.find(
     (output) =>
-      output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@1"
+      output.path === "implemented-properties.json" &&
+      (output.contract === "ultrafuzz/implemented-properties@1" ||
+        output.contract === "ultrafuzz/implemented-properties@2")
   );
   const artifactDir = realpathSync(task.metadata.artifacts.dir);
   const artifactRoots = taskArtifactRoots(task, artifactDir);

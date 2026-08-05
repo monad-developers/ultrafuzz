@@ -835,6 +835,15 @@ test("report regenerates canonical Markdown from structured issues and non-produ
             lifecycle: { dedupe_key: "internal-outcome-key", source_artifacts: ["internal/outcome.json"] }
           }
         ],
+        property_implementation_coverage: {
+          priority_threshold: "high",
+          priorities: ["high"],
+          selected_property_ids: ["bogus"],
+          implemented_property_ids: ["bogus"],
+          blocked_property_ids: [],
+          pending_property_ids: [],
+          deferred_property_ids: []
+        },
         property_provenance: [
           {
             finding_id: "finding-stable-1",
@@ -856,6 +865,58 @@ test("report regenerates canonical Markdown from structured issues and non-produ
       null,
       2
     )}\n`,
+    "utf8"
+  );
+  fs.mkdirSync(path.join(runData.run_root, "artifacts", "property-specification-fanin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.properties.v1",
+      properties: [
+        {
+          id: "property-report-contract-1",
+          description: "Structured report property",
+          category: "accounting",
+          priority: "high",
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
+          sources: [
+            {
+              source_node_id: "property-specification-example",
+              source_property_id: "property-specification-example-001"
+            }
+          ]
+        }
+      ]
+    }),
+    "utf8"
+  );
+  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
+    recursive: true
+  });
+  fs.writeFileSync(
+    path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.implemented-properties.v1",
+      selection: { priority_threshold: "high", priorities: ["high"], property_ids: ["property-report-contract-1"] },
+      properties: [
+        {
+          property_id: "property-report-contract-1",
+          status: "implemented",
+          implementation_paths: ["src/Example.sol"],
+          test_paths: ["test/ExampleInvariant.t.sol"]
+        }
+      ]
+    }),
+    "utf8"
+  );
+  fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-campaign"), { recursive: true });
+  fs.writeFileSync(
+    path.join(runData.run_root, "artifacts", "stateful-invariant-campaign", "echidna-results.json"),
+    JSON.stringify({
+      schema_version: "ultrafuzz.property-campaign.v1",
+      fuzzer_backend: "echidna",
+      failures: [{ id: "finding-stable-1", status: "reproduced", property_ids: ["property-report-contract-1"] }]
+    }),
     "utf8"
   );
   fs.writeFileSync(path.join(reportDir, "report.md"), "# Placeholder\n\nunavailable\n", "utf8");
@@ -906,6 +967,8 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     markdown,
     /## Property provenance\n\n\| Finding \| Property IDs \| Source nodes \| Source property IDs \| Implementation\/test paths \| Fuzzer backends \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| \\\[M-01\\\] - Structured issue title \| property-report-contract-1 \| property-specification-example \| property-specification-example-001 \| src\/Example\.sol<br>test\/ExampleInvariant\.t\.sol \| echidna \|/u
   );
+  assert.match(markdown, /## Property implementation coverage\n\n- Priority threshold: `high`/u);
+  assert.match(markdown, /- Reference expectation properties: `1`/u);
   assert.match(
     markdown,
     /## Non-production actionable outcomes\n\n\| Classification \| Title \| Status \| Evidence \| Strategy provenance \| Recommended next action \|\n\| --- \| --- \| --- \| --- \| --- \| --- \|\n\| harness-defect \| Review-only outcome \| non-production \| Focused harness evidence\. \| stateful-invariant \(1\/8\) \| Repair the focused harness\. \|/u
@@ -928,6 +991,7 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     run_metadata: Record<string, unknown>;
     issues: Array<{ id: string; title: string }>;
     property_provenance: Array<{ finding_id: string; title: string }>;
+    property_implementation_coverage: Record<string, unknown>;
   };
   assert.equal(json.run_metadata.tokens_used, "321");
   assert.equal(json.run_metadata.estimated_spend, "$0.72");
@@ -939,6 +1003,18 @@ test("report regenerates canonical Markdown from structured issues and non-produ
     json.property_provenance.map(({ finding_id, title }) => ({ finding_id, title })),
     [{ finding_id: "M-01", title: "[M-01] - Structured issue title" }]
   );
+  assert.deepEqual(json.property_implementation_coverage, {
+    priority_threshold: "high",
+    priorities: ["high"],
+    selected_property_ids: ["property-report-contract-1"],
+    implemented_property_ids: ["property-report-contract-1"],
+    blocked_property_ids: [],
+    pending_property_ids: [],
+    deferred_property_ids: [],
+    reference_expected_property_ids: ["property-report-contract-1"],
+    reference_expectation_ids: ["scfuzzbench:aave-v4:iSpoke_supply"],
+    blocker_summaries: []
+  });
 
   fs.writeFileSync(
     reportPath,

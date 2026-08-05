@@ -94,7 +94,7 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
     }
     assertRegularFileInside(root, markdownPath, "report markdown path");
     const existingMarkdown = readBoundedText(root, markdownPath, "report Markdown", MAX_REPORT_MARKDOWN_BYTES);
-    if (!isDirectiveConformingMarkdown(existingMarkdown, original.value)) {
+    if (!isDirectiveConformingMarkdown(existingMarkdown, original.value, false)) {
       throw new Error("historical final report Markdown does not satisfy the final-review report shape");
     }
     reconcileReportArtifactManifest(root, reportDirectory, original.value);
@@ -102,6 +102,7 @@ export function reconcileReportArtifacts(runRoot: string): ReconciledReportArtif
   }
 
   let report = reconcileRunMetadata(root, original.value);
+  report = reconcilePropertyImplementationCoverage(root, report);
   report = reconcilePropertyProvenance(root, report);
   report = reconcileIssuePresentation(report);
   assertValidReport(report, jsonPath);
@@ -263,6 +264,66 @@ function reconcilePropertyProvenance(runRoot: string, report: JsonRecord): JsonR
     });
   }
   return { ...report, property_provenance: entries };
+}
+
+function reconcilePropertyImplementationCoverage(runRoot: string, report: JsonRecord): JsonRecord {
+  const catalog = readPropertiesArtifact(runRoot);
+  const implementation = readImplementedPropertiesArtifact(runRoot);
+  if (catalog === undefined || implementation?.selection === undefined) {
+    return { ...report, property_implementation_coverage: "unavailable" };
+  }
+
+  const selection = implementation.selection;
+  const expectedIds = catalog.properties
+    .filter(
+      (property) =>
+        selection.priorities.includes(property.priority) ||
+        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+    )
+    .map((property) => property.id);
+  if (!sameStringArray(selection.property_ids, expectedIds)) {
+    throw new Error("current-run property implementation selection does not match the canonical catalog");
+  }
+  const recordsById = new Map(implementation.properties.map((record) => [record.property_id, record]));
+  if (
+    recordsById.size !== expectedIds.length ||
+    expectedIds.some((propertyId) => !recordsById.has(propertyId)) ||
+    implementation.properties.some((record) => !expectedIds.includes(record.property_id))
+  ) {
+    throw new Error("current-run property implementation records do not match the canonical selection");
+  }
+  const idsWithStatus = (status: string): string[] =>
+    expectedIds.filter((propertyId) => recordsById.get(propertyId)?.status === status);
+  const blockerSummaries = expectedIds.flatMap((propertyId) => {
+    const record = recordsById.get(propertyId);
+    if (record === undefined || record.status === "implemented" || record.blocker === undefined) return [];
+    return [`${propertyId}: ${record.blocker.summary}`];
+  });
+  const referenceExpectedPropertyIds = catalog.properties
+    .filter((property) => (property.reference_expectations?.length ?? 0) > 0)
+    .map((property) => property.id);
+  const referenceExpectationIds = uniqueStrings(
+    catalog.properties.flatMap((property) => property.reference_expectations ?? [])
+  );
+  return {
+    ...report,
+    property_implementation_coverage: {
+      priority_threshold: selection.priority_threshold,
+      priorities: selection.priorities,
+      selected_property_ids: expectedIds,
+      implemented_property_ids: idsWithStatus("implemented"),
+      blocked_property_ids: idsWithStatus("blocked"),
+      pending_property_ids: idsWithStatus("pending"),
+      deferred_property_ids: idsWithStatus("deferred"),
+      reference_expected_property_ids: referenceExpectedPropertyIds,
+      reference_expectation_ids: referenceExpectationIds,
+      blocker_summaries: blockerSummaries
+    }
+  };
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function reconcileIssuePresentation(report: JsonRecord): JsonRecord {
@@ -513,8 +574,15 @@ function proofOfConcept(issue: JsonRecord): RenderableProof | undefined {
   };
 }
 
-function isDirectiveConformingMarkdown(markdown: string, report: JsonRecord): boolean {
+function isDirectiveConformingMarkdown(
+  markdown: string,
+  report: JsonRecord,
+  requireImplementationCoverage = true
+): boolean {
   if (!markdown.startsWith("# Ultrafuzz report\n") || !markdown.includes("\n## Run summary\n")) {
+    return false;
+  }
+  if (requireImplementationCoverage && !markdown.includes("\n## Property implementation coverage\n")) {
     return false;
   }
   if (!markdown.includes("\n## Property provenance\n")) {
@@ -616,6 +684,7 @@ function renderCanonicalReport(report: JsonRecord): string {
     lines.push("", "No issues reported.");
   }
 
+  appendPropertyImplementationCoverage(lines, report.property_implementation_coverage);
   appendPropertyProvenance(lines, report.property_provenance, issues, outcomes);
   appendPriorFindingDisposition(lines, issues, outcomes);
   appendNonProductionOutcomes(lines, outcomes);
@@ -786,6 +855,44 @@ function appendPropertyProvenance(
     lines.push(
       `| ${tableCell(finding)} | ${tableList(entry.property_ids)} | ${tableList(sources.map((source) => source.source_node_id))} | ${tableList(sources.map((source) => source.source_property_id))} | ${tableList(paths)} | ${tableList(backends)} |`
     );
+  }
+}
+
+function appendPropertyImplementationCoverage(lines: string[], value: unknown): void {
+  lines.push("", "## Property implementation coverage", "");
+  if (isUnavailable(value)) {
+    lines.push("unavailable");
+    return;
+  }
+  if (!isRecord(value)) {
+    lines.push("unavailable");
+    return;
+  }
+  const priorities = Array.isArray(value.priorities) ? value.priorities : [];
+  const selected = Array.isArray(value.selected_property_ids) ? value.selected_property_ids : [];
+  const implemented = Array.isArray(value.implemented_property_ids) ? value.implemented_property_ids : [];
+  const blocked = Array.isArray(value.blocked_property_ids) ? value.blocked_property_ids : [];
+  const pending = Array.isArray(value.pending_property_ids) ? value.pending_property_ids : [];
+  const deferred = Array.isArray(value.deferred_property_ids) ? value.deferred_property_ids : [];
+  lines.push(`- Priority threshold: \`${inlineValue(value.priority_threshold)}\``);
+  lines.push(`- Included priorities: \`${tableList(priorities)}\``);
+  lines.push(`- Selected properties: \`${selected.length}\``);
+  lines.push(`- Implemented properties: \`${implemented.length}\``);
+  lines.push(`- Blocked properties: \`${blocked.length}\``);
+  lines.push(`- Pending properties: \`${pending.length}\``);
+  lines.push(`- Deferred properties: \`${deferred.length}\``);
+  const referenceExpected = Array.isArray(value.reference_expected_property_ids)
+    ? value.reference_expected_property_ids
+    : [];
+  lines.push(`- Reference expectation properties: \`${referenceExpected.length}\``);
+  const blockerSummaries = Array.isArray(value.blocker_summaries)
+    ? value.blocker_summaries.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  if (blockerSummaries.length > 0) {
+    lines.push("", "Blocker summaries:");
+    for (const summary of blockerSummaries) {
+      lines.push(`- ${publicProse(summary)}`);
+    }
   }
 }
 

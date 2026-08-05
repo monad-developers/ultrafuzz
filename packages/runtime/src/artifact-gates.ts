@@ -535,6 +535,18 @@ function verifyInvariantEvidenceArtifacts(
           block === undefined ? [] : markdownFieldEntries(block, "sources", normalizeSourcePair);
         const ledgerFieldValues = block === undefined ? [] : markdownFieldValues(block, "ledger_ids");
         const missingLedgerField = block !== undefined && ledgerFieldValues.length !== 1;
+        const expectedReferenceExpectations = property.reference_expectations ?? [];
+        const renderedReferenceExpectations =
+          block === undefined ? [] : markdownFieldEntries(block, "reference_expectations", normalizeLedgerId);
+        const missingReferenceExpectation = expectedReferenceExpectations.find(
+          (expectationId) => !renderedReferenceExpectations.includes(expectationId)
+        );
+        const extraReferenceExpectation = renderedReferenceExpectations.find(
+          (expectationId) =>
+            !expectedReferenceExpectations.includes(expectationId) ||
+            renderedReferenceExpectations.filter((candidate) => candidate === expectationId).length >
+              expectedReferenceExpectations.filter((candidate) => candidate === expectationId).length
+        );
         const extraSourcePair = renderedSourcePairs.find(
           (source) =>
             !expectedSourcePairs.includes(source) ||
@@ -545,7 +557,8 @@ function verifyInvariantEvidenceArtifacts(
           missingPropertyField !== undefined ||
           mismatchedMarkdownId ||
           missingSource !== undefined ||
-          missingLedgerField
+          missingLedgerField ||
+          missingReferenceExpectation !== undefined
         ) {
           const missingValue =
             missingPropertyField?.[0] ??
@@ -553,7 +566,9 @@ function verifyInvariantEvidenceArtifacts(
               ? "id"
               : missingLedgerField
                 ? "ledger_ids"
-                : `${missingSource?.source_node_id}:${missingSource?.source_property_id}`);
+                : missingReferenceExpectation !== undefined
+                  ? "reference_expectations"
+                  : `${missingSource?.source_node_id}:${missingSource?.source_property_id}`);
           diagnostics.push({
             code: "PROPERTY_MARKDOWN_PARITY_MISSING",
             message: `Properties Markdown must preserve canonical property ${JSON.stringify(property.id)} with its description, category, priority, and sources (missing ${JSON.stringify(missingValue)})`,
@@ -569,6 +584,15 @@ function verifyInvariantEvidenceArtifacts(
             severity: "error",
             source: "property-fanin",
             path: `${markdownPath}#$.properties[${propertyIndex}].sources`
+          });
+        }
+        if (extraReferenceExpectation !== undefined) {
+          diagnostics.push({
+            code: "PROPERTY_MARKDOWN_PARITY_EXTRA",
+            message: `Properties Markdown must not add an unlisted reference expectation ${JSON.stringify(extraReferenceExpectation)} to canonical property ${JSON.stringify(property.id)}`,
+            severity: "error",
+            source: "property-fanin",
+            path: `${markdownPath}#$.properties[${propertyIndex}].reference_expectations`
           });
         }
         if (block === undefined) {
@@ -1095,7 +1119,7 @@ function markdownFieldValues(markdown: string, field: string): string[] {
   const lines = markdown.replace(/\r\n?/gu, "\n").split("\n");
   const fieldPattern = new RegExp(`^\\s*(?:\\|\\s*)?(?:[-*+]\\s*)?${escapeRegExp(field)}\\s*(?::|\\|)\\s*(.*)$`, "iu");
   const nextFieldPattern =
-    /^\s*(?:\|\s*)?(?:[-*+]\s*)?(?:id|description|category|priority|sources?|ledger[_ -]?ids?|ledger evidence(?: retained)?)\s*(?::|\|)/iu;
+    /^\s*(?:\|\s*)?(?:[-*+]\s*)?(?:id|description|category|priority|sources?|ledger[_ -]?ids?|reference[_ -]?expectations?|ledger evidence(?: retained)?)\s*(?::|\|)/iu;
   const values: string[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     const match = fieldPattern.exec(lines[index] ?? "");
@@ -1280,7 +1304,16 @@ function verifyPropertyProvenanceArtifacts(
     }
     return [
       ...propertyReferenceDiagnostics(catalog.value, references),
-      ...verifyImplementationSelectionCoverage(catalog.value, implementation.value, implementationPath)
+      ...verifyImplementationSelectionCoverage(
+        catalog.value,
+        implementation.value,
+        implementationPath,
+        layout,
+        node.outputs.some(
+          (output) =>
+            output.path === "implemented-properties.json" && output.contract === "ultrafuzz/implemented-properties@2"
+        )
+      )
     ];
   }
 
@@ -1295,12 +1328,37 @@ function verifyPropertyProvenanceArtifacts(
 function verifyImplementationSelectionCoverage(
   catalog: PropertiesArtifact,
   implementation: ImplementedPropertiesArtifact,
-  implementationPath: string
+  implementationPath: string,
+  layout: RunLayout,
+  required: boolean
 ): RuntimeDiagnostic[] {
   const selection = implementation.selection;
-  if (selection === undefined) return [];
+  if (selection === undefined) {
+    return required
+      ? [
+          {
+            code: "PROPERTY_IMPLEMENTATION_SELECTION_MISSING",
+            message: "Current invariant implementation artifacts must declare selection metadata",
+            severity: "error",
+            source: "property-provenance",
+            path: `${implementationPath}#$.selection`
+          }
+        ]
+      : [];
+  }
 
   const diagnostics: RuntimeDiagnostic[] = [];
+  const configuredSelection = readConfiguredInvariantPrioritySelection(layout);
+  if (required && configuredSelection === undefined) {
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_CONFIG_MISSING",
+      message:
+        "Current invariant implementation coverage cannot be verified without resolved invariant priority configuration",
+      severity: "error",
+      source: "property-provenance",
+      path: layout.resolvedConfigPath
+    });
+  }
   const priorityOrder = ["high", "medium", "low"] as const;
   const thresholdIndex = priorityOrder.indexOf(selection.priority_threshold);
   const expectedPriorities = priorityOrder.slice(0, thresholdIndex + 1);
@@ -1316,9 +1374,27 @@ function verifyImplementationSelectionCoverage(
       path: `${implementationPath}#$.selection.priorities`
     });
   }
+  if (
+    configuredSelection !== undefined &&
+    (selection.priority_threshold !== configuredSelection.priority_threshold ||
+      selection.priorities.length !== configuredSelection.priorities.length ||
+      selection.priorities.some((priority, index) => priority !== configuredSelection.priorities[index]))
+  ) {
+    diagnostics.push({
+      code: "PROPERTY_IMPLEMENTATION_SELECTION_CONFIG_MISMATCH",
+      message: "Implementation selection does not match the resolved invariant priority configuration",
+      severity: "error",
+      source: "property-provenance",
+      path: `${implementationPath}#$.selection`
+    });
+  }
 
   const expectedIds = catalog.properties
-    .filter((property) => selection.priorities.includes(property.priority))
+    .filter(
+      (property) =>
+        selection.priorities.includes(property.priority) ||
+        (property.reference_expectations !== undefined && property.reference_expectations.length > 0)
+    )
     .map((property) => property.id);
   const selectedIds = new Set(selection.property_ids);
   const expectedIdSet = new Set(expectedIds);
@@ -1330,7 +1406,7 @@ function verifyImplementationSelectionCoverage(
   if (missingSelectedIds.length > 0 || extraSelectedIds.length > 0 || !selectionOrderMatches) {
     diagnostics.push({
       code: "PROPERTY_IMPLEMENTATION_SELECTION_MISMATCH",
-      message: `Implementation selection must list every canonical property matching its priority scope in catalog order (missing: ${JSON.stringify(missingSelectedIds)}, extra: ${JSON.stringify(extraSelectedIds)})`,
+      message: `Implementation selection must list every canonical property matching its priority scope or an explicit reference expectation in catalog order (missing: ${JSON.stringify(missingSelectedIds)}, extra: ${JSON.stringify(extraSelectedIds)})`,
       severity: "error",
       source: "property-provenance",
       path: `${implementationPath}#$.selection.property_ids`
@@ -1365,6 +1441,18 @@ function verifyImplementationSelectionCoverage(
     });
   }
   return diagnostics;
+}
+
+function readConfiguredInvariantPrioritySelection(
+  layout: RunLayout
+): { priority_threshold: "high" | "medium" | "low"; priorities: ("high" | "medium" | "low")[] } | undefined {
+  if (!fs.existsSync(layout.resolvedConfigPath)) return undefined;
+  const contents = fs.readFileSync(layout.resolvedConfigPath, "utf8");
+  const match = /^\s*property_priority_threshold\s*=\s*["'](high|medium|low)["']\s*$/mu.exec(contents);
+  if (match === null) return undefined;
+  const priority_threshold = match[1] as "high" | "medium" | "low";
+  const order = ["high", "medium", "low"] as const;
+  return { priority_threshold, priorities: order.slice(0, order.indexOf(priority_threshold) + 1) };
 }
 
 function verifyCampaignPropertyReferences(

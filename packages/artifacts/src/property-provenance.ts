@@ -16,6 +16,22 @@ export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#
 const nonEmptyString = z.string().min(1);
 const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
+const referenceExpectationIdsSchema = z
+  .array(nonEmptyString)
+  .min(1)
+  .superRefine((expectationIds, context) => {
+    const seen = new Set<string>();
+    for (const [expectationIndex, expectationId] of expectationIds.entries()) {
+      if (seen.has(expectationId)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate reference expectation ID ${JSON.stringify(expectationId)}`,
+          path: [expectationIndex]
+        });
+      }
+      seen.add(expectationId);
+    }
+  });
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
 export type PropertyPriority = (typeof PROPERTY_PRIORITIES)[number];
@@ -46,6 +62,8 @@ export interface LensProperty extends Record<string, unknown> {
   description: string;
   category: string;
   priority: PropertyPriority;
+  /** Stable identities for named benchmark/reference expectations represented by this property. */
+  reference_expectations?: string[];
 }
 
 export interface LensPropertiesArtifact {
@@ -59,6 +77,8 @@ export interface CanonicalProperty extends Record<string, unknown> {
   category: string;
   priority: PropertyPriority;
   sources: PropertySource[];
+  /** Stable identities for named benchmark/reference expectations represented by this property. */
+  reference_expectations?: string[];
   /** Stable IDs from the project-discovery invariant evidence ledger. */
   ledger_ids?: string[];
 }
@@ -127,7 +147,8 @@ const lensPropertySchema = z.strictObject({
   id: nonEmptyString,
   description: nonEmptyString,
   category: nonEmptyString,
-  priority: propertyPrioritySchema
+  priority: propertyPrioritySchema,
+  reference_expectations: referenceExpectationIdsSchema.optional()
 });
 
 export const lensPropertiesSchema = z
@@ -154,6 +175,7 @@ const canonicalPropertySchema = z.looseObject({
   description: nonEmptyString,
   category: nonEmptyString,
   priority: propertyPrioritySchema,
+  reference_expectations: referenceExpectationIdsSchema.optional(),
   sources: z.array(propertySourceSchema).min(1),
   ledger_ids: z
     .array(stableLedgerId)
@@ -331,6 +353,12 @@ export const propertiesJsonSchema = {
           description: { type: "string", minLength: 1 },
           category: { type: "string", minLength: 1 },
           priority: { enum: [...PROPERTY_PRIORITIES] },
+          reference_expectations: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 }
+          },
           sources: {
             type: "array",
             minItems: 1,
@@ -377,7 +405,13 @@ export const lensPropertiesJsonSchema = {
           id: { type: "string", minLength: 1 },
           description: { type: "string", minLength: 1 },
           category: { type: "string", minLength: 1 },
-          priority: { enum: [...PROPERTY_PRIORITIES] }
+          priority: { enum: [...PROPERTY_PRIORITIES] },
+          reference_expectations: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 }
+          }
         }
       }
     }

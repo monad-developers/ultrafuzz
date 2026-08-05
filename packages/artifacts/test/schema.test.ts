@@ -505,7 +505,8 @@ test("property lens schema requires normalized priorities and unique IDs", () =>
         id: "aviggiano-001",
         description: "Expected behavior",
         category: "accounting",
-        priority: "high"
+        priority: "high",
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"]
       }
     ]
   };
@@ -521,6 +522,48 @@ test("property lens schema requires normalized priorities and unique IDs", () =>
     validateLensPropertiesSchema({
       ...valid,
       properties: [valid.properties[0], valid.properties[0]]
+    }).ok,
+    false
+  );
+  assert.equal(
+    validateLensPropertiesSchema({
+      ...valid,
+      properties: [
+        {
+          ...valid.properties[0],
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply", "scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
+    }).ok,
+    false,
+    "reference expectation IDs must be unique"
+  );
+});
+
+test("canonical property schema preserves typed benchmark expectations", () => {
+  const valid = {
+    schema_version: PROPERTIES_SCHEMA_VERSION,
+    properties: [
+      {
+        id: "property-1",
+        description: "Supply remains live for valid state",
+        category: "dos-liveness",
+        priority: "medium",
+        reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply"],
+        sources: [{ source_node_id: "property-specification-recon", source_property_id: "iSpoke_supply" }]
+      }
+    ]
+  };
+  assert.equal(validatePropertiesSchema(valid).ok, true);
+  assert.equal(
+    validatePropertiesSchema({
+      ...valid,
+      properties: [
+        {
+          ...valid.properties[0],
+          reference_expectations: ["scfuzzbench:aave-v4:iSpoke_supply", "scfuzzbench:aave-v4:iSpoke_supply"]
+        }
+      ]
     }).ok,
     false
   );
