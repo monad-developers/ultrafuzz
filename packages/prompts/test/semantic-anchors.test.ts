@@ -104,6 +104,16 @@ describe("prompt semantic anchors", () => {
     expect(fanin).toMatch(/Map every ledger entry to at least one canonical property\s+row/u);
   });
 
+  it("requires a mechanical byte-preserving check for escaped ledger source text", () => {
+    const discovery = prompt("setup/project-discovery.md");
+
+    expect(discovery).toMatch(/obtain each cited source span mechanically/iu);
+    expect(discovery).toMatch(/Do not retype or render Markdown or LaTeX/iu);
+    expect(discovery).toMatch(/preserve every backslash/iu);
+    expect(discovery).toContain("load the JSON ledger and compare each `verbatim` field");
+    expect(discovery).toMatch(/JSON escaping is serialization only/iu);
+  });
+
   it("keeps protocol failures observable during invariant handler execution", () => {
     const handlers = prompt("strategies/invariants/handlers.md");
     const setup = prompt("strategies/invariants/setup.md");
