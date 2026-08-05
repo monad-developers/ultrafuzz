@@ -98,6 +98,85 @@ test("generated Smithers workflow prepares canonical empty sidecars and primary 
   assert.match(source, /dependsOn=\{\[task\.preparationId\]\}/u);
 });
 
+test("generated Smithers workflow leaves runtime-owned workspace patch outputs unmaterialized", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function canonicalEmptyArtifact");
+  const helperEnd = source.indexOf("\n\nfunction materializeMissingMarkdownArtifacts", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /output\.path === "workspace\.patch" \|\| output\.path === "workspace-patch\.json"/u);
+  assert.match(helper, /runtime-owned workspace patch outputs/u);
+});
+
+test("generated Smithers workflow guards runtime-owned workspace patch publication", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
+  const helperEnd = source.indexOf("\n\nfunction captureInvariantSuiteBaseline", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /resolveRegularArtifactFile\(/u);
+  assert.match(helper, /These paths are runtime-owned\. Replace only an empty runtime placeholder/u);
+  assert.match(helper, /existingContents !== "" && existingContents !== "\\n"/u);
+  assert.match(helper, /workspace patch artifact was modified/u);
+  assert.match(helper, /writeFileDurable\(target, contents\)/u);
+});
+
+test("runtime workspace patch publication replaces empty placeholders but rejects non-empty agent patches", () => {
+  const source = fs.readFileSync(workflowTemplatePath, "utf8");
+  const helperStart = source.indexOf("function writeWorkspacePatchArtifact");
+  const helperEnd = source.indexOf("\n\nfunction captureInvariantSuiteBaseline", helperStart);
+
+  assert.ok(helperStart >= 0, source);
+  assert.ok(helperEnd > helperStart, source);
+
+  const helper = source
+    .slice(helperStart, helperEnd)
+    .replace("root: string, relativePath: string, contents: string): void", "root, relativePath, contents)");
+  const writeWorkspacePatchArtifact = new Function(
+    "path",
+    "isStrictlyInsideDirectory",
+    "mkdirSync",
+    "existsSync",
+    "resolveRegularArtifactFile",
+    "readFileSync",
+    "writeFileDurable",
+    `${helper}; return writeWorkspacePatchArtifact;`
+  )(
+    path,
+    (root: string, candidate: string) => candidate.startsWith(`${root}${path.sep}`),
+    fs.mkdirSync,
+    fs.existsSync,
+    (root: string, target: string, failureMessage: string) => {
+      assertRegularFileInside(root, target, failureMessage);
+      return fs.realpathSync(target);
+    },
+    fs.readFileSync,
+    writeFileDurable
+  ) as (root: string, relativePath: string, contents: string) => void;
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ultrafuzz-workspace-patch-publication-"));
+  try {
+    const patchPath = path.join(root, "workspace.patch");
+    fs.writeFileSync(patchPath, "\n");
+    writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n");
+    assert.equal(fs.readFileSync(patchPath, "utf8"), "captured patch\n");
+
+    fs.writeFileSync(patchPath, "agent-authored patch\n");
+    assert.throws(
+      () => writeWorkspacePatchArtifact(root, "workspace.patch", "captured patch\n"),
+      /workspace patch artifact was modified/u
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("generated Smithers workflow prefers its relocatable task prompt path", () => {
   const source = fs.readFileSync(workflowTemplatePath, "utf8");
   assert.match(source, /const promptPath = task\.promptPath \?\? inputTask\?\.prompt_path/u);
