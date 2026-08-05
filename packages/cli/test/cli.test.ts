@@ -1266,10 +1266,10 @@ test("current invariant reports with malformed issues fail closed instead of pre
   fs.mkdirSync(path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties"), {
     recursive: true
   });
-  writeJsonRecord(
-    path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"),
-    { schema_version: "ultrafuzz.properties.v1", properties: [] }
-  );
+  writeJsonRecord(path.join(runData.run_root, "artifacts", "property-specification-fanin", "properties.json"), {
+    schema_version: "ultrafuzz.properties.v1",
+    properties: []
+  });
   writeJsonRecord(
     path.join(runData.run_root, "artifacts", "stateful-invariant-implement-properties", "implemented-properties.json"),
     {
@@ -1281,7 +1281,15 @@ test("current invariant reports with malformed issues fail closed instead of pre
   writeJsonRecord(reportPath, {
     schema_version: "1.0",
     run_metadata: {},
-    issues: [{ schema_version: "1.0", id: "malformed-current", title: "Malformed current issue", status: "confirmed", summary: "Missing renderable evidence." }],
+    issues: [
+      {
+        schema_version: "1.0",
+        id: "malformed-current",
+        title: "Malformed current issue",
+        status: "confirmed",
+        summary: "Missing renderable evidence."
+      }
+    ],
     non_production_outcomes: [],
     property_implementation_coverage: "unavailable"
   });
