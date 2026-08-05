@@ -14,6 +14,10 @@ Read these target-context handoffs before consolidating:
 Project discovery:
 {{artifact_handoff:project-discovery}}
 
+Structured discovery ledger JSON (the machine-readable source of truth):
+`{{artifact_path:project-discovery}}/setup/invariant-evidence-ledger.json`
+Validate it with `{{schema_path}}/invariant-evidence-ledger.schema.json`.
+
 Actor and flow map:
 {{artifact_handoff:actors-flows}}
 
@@ -77,7 +81,8 @@ several equivalent source statements may share one canonical property. Preserve
 the complete mapping in both `properties.json` and the Markdown table.
 In `properties.md`, render each canonical row in a delimited block beginning
 with `### Canonical property: <property-id>` and include its complete
-`ledger_ids` list in that block.
+`ledger_ids` list in that block. Close it with
+`### End canonical property: <property-id>`.
 
 Use neutral authorized-QA language in the consolidated table. Phrase each row as
 an expected property, invariant, boundary condition, state transition, or

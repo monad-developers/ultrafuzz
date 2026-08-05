@@ -106,7 +106,11 @@ The JSON ledger must also contain `inventory_rows`, where each row has a stable
 `inventory_id` in an entry must name one of these rows. Record each negative
 source probe in `scan_probes` with a stable `probe-` ID, source path, query, and
 result. Use `safety`, `risk`, or `interest` as the `kind` when those are the
-most precise classifications.
+most precise classifications. Keep every `source_path` target-relative and
+use a line range or symbol that can be checked against the checked-out source.
+If no invariant statement is found, emit `entries: []`, `inventory_rows: []`,
+and at least one non-empty `scan_probes` record explaining the searches and
+their results.
 
 Extract every explicit equation, inequality, bound, and state relation into the
 discovery artifact with its exact operands, units, and rounding semantics.
@@ -136,3 +140,5 @@ one row; record those cardinalities explicitly rather than forcing a one-to-one
 mapping. Render each entry in a delimited block beginning with
 `### Ledger entry: <id>` and each normalized row in a block beginning with
 `### Inventory row: <inventory-id>`, including the complete fields in each block.
+Close those blocks with `### End ledger entry: <id>` and
+`### End inventory row: <inventory-id>` respectively.

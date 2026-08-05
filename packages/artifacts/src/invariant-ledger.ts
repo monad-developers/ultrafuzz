@@ -36,16 +36,18 @@ export const invariantInventoryRowSchema = z.strictObject({
 export const invariantLedgerSchema = z
   .strictObject({
     schema_version: z.literal(INVARIANT_LEDGER_SCHEMA_VERSION),
-    entries: z.array(invariantLedgerEntrySchema).min(1),
-    inventory_rows: z.array(invariantInventoryRowSchema).min(1),
-    scan_probes: z.array(
-      z.strictObject({
-        id: z.string().regex(/^probe-[A-Za-z0-9._-]+$/u),
-        source_path: nonEmptyString,
-        query: nonEmptyString,
-        result: nonEmptyString
-      })
-    )
+    entries: z.array(invariantLedgerEntrySchema),
+    inventory_rows: z.array(invariantInventoryRowSchema).optional(),
+    scan_probes: z
+      .array(
+        z.strictObject({
+          id: z.string().regex(/^probe-[A-Za-z0-9._-]+$/u),
+          source_path: nonEmptyString,
+          query: nonEmptyString,
+          result: nonEmptyString
+        })
+      )
+      .optional()
   })
   .superRefine((artifact, context) => {
     const ids = new Set<string>();
@@ -70,8 +72,64 @@ export const invariantLedgerSchema = z
         entryInventoryIds.add(inventoryId);
       }
     }
+    const probeIds = new Set<string>();
+    for (const [probeIndex, probe] of (artifact.scan_probes ?? []).entries()) {
+      if (probeIds.has(probe.id)) {
+        context.addIssue({
+          code: "custom",
+          message: `Duplicate scan probe ID ${JSON.stringify(probe.id)}`,
+          path: ["scan_probes", probeIndex, "id"]
+        });
+      }
+      probeIds.add(probe.id);
+    }
+    if (artifact.entries.length === 0) {
+      if (artifact.inventory_rows === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "An empty invariant ledger must include inventory_rows: []",
+          path: ["inventory_rows"]
+        });
+      } else if (artifact.inventory_rows.length > 0) {
+        context.addIssue({
+          code: "custom",
+          message: "An empty invariant ledger must not include inventory rows",
+          path: ["inventory_rows"]
+        });
+      }
+      if (artifact.scan_probes === undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "An invariant ledger must include scan_probes",
+          path: ["scan_probes"]
+        });
+      } else if (artifact.scan_probes.length === 0) {
+        context.addIssue({
+          code: "custom",
+          message: "An empty invariant ledger must include at least one scan probe",
+          path: ["scan_probes"]
+        });
+      }
+      return;
+    }
+    if (artifact.inventory_rows === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A populated invariant ledger must include inventory_rows",
+        path: ["inventory_rows"]
+      });
+      return;
+    }
+    if (artifact.scan_probes === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "A populated invariant ledger must include scan_probes",
+        path: ["scan_probes"]
+      });
+    }
+    const inventoryRowsValue = artifact.inventory_rows;
     const inventoryRows = new Map<string, number>();
-    for (const [rowIndex, row] of artifact.inventory_rows.entries()) {
+    for (const [rowIndex, row] of inventoryRowsValue.entries()) {
       if (inventoryRows.has(row.id)) {
         context.addIssue({
           code: "custom",
@@ -87,16 +145,23 @@ export const invariantLedgerSchema = z
       entryInventoryMap.set(entry.id, new Set(entry.inventory_ids));
       for (const [inventoryIndex, inventoryIdValue] of entry.inventory_ids.entries()) {
         referencedInventoryIds.add(inventoryIdValue);
-        if (!inventoryRows.has(inventoryIdValue)) {
+        const rowIndex = inventoryRows.get(inventoryIdValue);
+        if (rowIndex === undefined) {
           context.addIssue({
             code: "custom",
             message: `Ledger entry references unknown inventory row ${JSON.stringify(inventoryIdValue)}`,
             path: ["entries", entryIndex, "inventory_ids", inventoryIndex]
           });
+        } else if (!inventoryRowsValue[rowIndex]!.ledger_ids.includes(entry.id)) {
+          context.addIssue({
+            code: "custom",
+            message: `Inventory row ${JSON.stringify(inventoryIdValue)} does not link back to ledger entry ${JSON.stringify(entry.id)}`,
+            path: ["entries", entryIndex, "inventory_ids", inventoryIndex]
+          });
         }
       }
     }
-    for (const [rowIndex, row] of artifact.inventory_rows.entries()) {
+    for (const [rowIndex, row] of inventoryRowsValue.entries()) {
       const rowLedgerIds = new Set<string>();
       for (const [ledgerIndex, ledgerId] of row.ledger_ids.entries()) {
         if (rowLedgerIds.has(ledgerId)) {
@@ -129,17 +194,6 @@ export const invariantLedgerSchema = z
         });
       }
     }
-    const probeIds = new Set<string>();
-    for (const [probeIndex, probe] of artifact.scan_probes.entries()) {
-      if (probeIds.has(probe.id)) {
-        context.addIssue({
-          code: "custom",
-          message: `Duplicate scan probe ID ${JSON.stringify(probe.id)}`,
-          path: ["scan_probes", probeIndex, "id"]
-        });
-      }
-      probeIds.add(probe.id);
-    }
   });
 
 export type InvariantLedgerEntry = z.infer<typeof invariantLedgerEntrySchema>;
@@ -171,7 +225,6 @@ export const invariantLedgerJsonSchema = {
     schema_version: { const: INVARIANT_LEDGER_SCHEMA_VERSION },
     entries: {
       type: "array",
-      minItems: 1,
       items: {
         type: "object",
         additionalProperties: false,
@@ -205,7 +258,6 @@ export const invariantLedgerJsonSchema = {
     },
     inventory_rows: {
       type: "array",
-      minItems: 1,
       items: {
         type: "object",
         additionalProperties: false,
@@ -236,5 +288,24 @@ export const invariantLedgerJsonSchema = {
         }
       }
     }
-  }
+  },
+  allOf: [
+    {
+      if: { properties: { entries: { minItems: 1 } } },
+      then: {
+        properties: {
+          inventory_rows: { minItems: 1 }
+        }
+      }
+    },
+    {
+      if: { properties: { entries: { maxItems: 0 } } },
+      then: {
+        properties: {
+          inventory_rows: { maxItems: 0 },
+          scan_probes: { minItems: 1 }
+        }
+      }
+    }
+  ]
 } as const;

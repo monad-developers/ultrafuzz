@@ -290,6 +290,46 @@ test("invariant evidence ledger rejects duplicate entries, duplicate inventory j
   const invalidPrefixResult = validateInvariantLedgerSchema(invalidPrefix);
   assert.equal(invalidPrefixResult.ok, false);
   assert.ok(invalidPrefixResult.issues.some((issue) => /inventory-|pattern/u.test(issue.message)));
+
+  const duplicateProbe = {
+    ...structuredClone(base),
+    entries: [],
+    inventory_rows: [],
+    scan_probes: [
+      {
+        id: "probe-docs-no-invariants",
+        source_path: "docs/overview.md",
+        query: "invariant|accounting|solvency",
+        result: "No explicit invariant statements found"
+      },
+      {
+        id: "probe-docs-no-invariants",
+        source_path: "docs/overview.md",
+        query: "invariant|accounting|solvency",
+        result: "No explicit invariant statements found"
+      }
+    ]
+  };
+  const duplicateProbeResult = validateInvariantLedgerSchema(duplicateProbe);
+  assert.equal(duplicateProbeResult.ok, false);
+  assert.ok(duplicateProbeResult.issues.some((issue) => /Duplicate scan probe ID/u.test(issue.message)));
+
+  const legacyShape = structuredClone(base) as Record<string, unknown>;
+  delete legacyShape.inventory_rows;
+  delete legacyShape.scan_probes;
+  const legacyShapeResult = validateInvariantLedgerSchema(legacyShape);
+  assert.equal(legacyShapeResult.ok, false);
+  assert.ok(legacyShapeResult.issues.some((issue) => /include inventory_rows/u.test(issue.message)));
+
+  const noEvidenceWithoutProbe = {
+    ...structuredClone(base),
+    entries: [],
+    inventory_rows: [],
+    scan_probes: []
+  };
+  const noEvidenceWithoutProbeResult = validateInvariantLedgerSchema(noEvidenceWithoutProbe);
+  assert.equal(noEvidenceWithoutProbeResult.ok, false);
+  assert.ok(noEvidenceWithoutProbeResult.issues.some((issue) => /at least one scan probe/u.test(issue.message)));
 });
 
 test("finding schema accepts minimal normalized findings and rejects malformed payloads", () => {

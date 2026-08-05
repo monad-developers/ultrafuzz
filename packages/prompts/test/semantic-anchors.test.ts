@@ -99,6 +99,8 @@ describe("prompt semantic anchors", () => {
     );
     expect(fanin).toMatch(/getter, function, test, or source\s+location that supplies each oracle/u);
     expect(fanin).toContain("Verbatim source-evidence ledger");
+    expect(fanin).toContain("{{artifact_path:project-discovery}}/setup/invariant-evidence-ledger.json");
+    expect(fanin).toContain("{{schema_path}}/invariant-evidence-ledger.schema.json");
     expect(fanin).toMatch(/Map every ledger entry to at least one canonical property\s+row/u);
   });
 

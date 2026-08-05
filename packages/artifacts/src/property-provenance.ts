@@ -14,6 +14,7 @@ export const PROPERTY_CAMPAIGN_SCHEMA_VERSION = "ultrafuzz.property-campaign.v1"
 export const PROPERTIES_JSON_SCHEMA_ID = "https://blog.monad.xyz/blog/ultrafuzz#schema/artifacts/properties" as const;
 
 const nonEmptyString = z.string().min(1);
+const stableLedgerId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u);
 const nonEmptyStringArray = z.array(nonEmptyString);
 export const PROPERTY_PRIORITIES = ["high", "medium", "low"] as const;
 export const propertyPrioritySchema = z.enum(PROPERTY_PRIORITIES);
@@ -136,7 +137,7 @@ const canonicalPropertySchema = z.looseObject({
   priority: propertyPrioritySchema,
   sources: z.array(propertySourceSchema).min(1),
   ledger_ids: z
-    .array(nonEmptyString)
+    .array(stableLedgerId)
     .min(1)
     .superRefine((ledgerIds, context) => {
       const seen = new Set<string>();
@@ -276,7 +277,7 @@ export const propertiesJsonSchema = {
             type: "array",
             minItems: 1,
             uniqueItems: true,
-            items: { type: "string", minLength: 1 }
+            items: { type: "string", minLength: 1, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
           }
         }
       }

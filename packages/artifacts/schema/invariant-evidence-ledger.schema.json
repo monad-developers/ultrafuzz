@@ -9,7 +9,6 @@
     "schema_version": { "const": "ultrafuzz.invariant-evidence-ledger.v1" },
     "entries": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -43,7 +42,6 @@
     },
     "inventory_rows": {
       "type": "array",
-      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -74,5 +72,20 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "entries": { "minItems": 1 } } },
+      "then": { "properties": { "inventory_rows": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "entries": { "maxItems": 0 } } },
+      "then": {
+        "properties": {
+          "inventory_rows": { "maxItems": 0 },
+          "scan_probes": { "minItems": 1 }
+        }
+      }
+    }
+  ]
 }
