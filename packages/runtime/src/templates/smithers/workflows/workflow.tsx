@@ -387,7 +387,13 @@ function captureInvariantSuiteBaseline(task: (typeof taskSpecs)[number], workspa
     throw new Error(`artifact-contract failure: unsafe invariant suite baseline ${task.attemptId}`);
   }
   if (existsSync(protectedBaselinePath)) {
-    const contents = readFileSync(protectedBaselinePath, "utf8");
+    const protectedRoot = realpathSync(path.dirname(protectedBaselinePath));
+    const resolvedProtected = resolveRegularArtifactFile(
+      protectedRoot,
+      protectedBaselinePath,
+      "artifact-contract failure: protected invariant suite baseline is not a regular file"
+    );
+    const contents = readFileSync(resolvedProtected, "utf8");
     const digest = createHash("sha256").update(contents).digest("hex");
     const snapshot = invariantSuiteBaselineSnapshots.get(artifactRoot);
     if (snapshot !== undefined && snapshot.sha256 !== digest) {
@@ -1278,7 +1284,31 @@ function materializeGeneratedTestCompanion(
     path.resolve(workspaceRoot, testRoot, "foundry", workspaceRelativePath),
     path.resolve(workspaceRoot, testRoot, "foundry", nodeId, workspaceRelativePath)
   ]);
-  const sourceCandidate = sourceCandidates.find((candidate) => existsSync(candidate)) ?? sourceCandidates[0];
+  const existingCandidates = sourceCandidates.filter((candidate) => existsSync(candidate));
+  const sourceCandidate = existingCandidates[0] ?? sourceCandidates[0];
+  if (existingCandidates.length > 1) {
+    const first = readFileSync(
+      resolveNonEmptyRegularArtifactFile(
+        workspaceRoot,
+        existingCandidates[0],
+        `artifact-contract failure: generated test file is missing ${relativePath}`,
+        `artifact-contract failure: generated test file is empty ${relativePath}`
+      )
+    );
+    for (const candidate of existingCandidates.slice(1)) {
+      const bytes = readFileSync(
+        resolveNonEmptyRegularArtifactFile(
+          workspaceRoot,
+          candidate,
+          `artifact-contract failure: generated test file is missing ${relativePath}`,
+          `artifact-contract failure: generated test file is empty ${relativePath}`
+        )
+      );
+      if (!bytes.equals(first)) {
+        throw new Error(`artifact-contract failure: generated test sources conflict ${relativePath}`);
+      }
+    }
+  }
   if (!isStrictlyInsideDirectory(workspaceRoot, sourceCandidate)) {
     throw new Error(`artifact-contract failure: unsafe generated test source ${relativePath}`);
   }
@@ -1537,6 +1567,7 @@ const invariantSuiteNodeIds = new Set([
 const INVARIANT_SUITE_SENSITIVE_SEGMENTS = new Set([".git", ".ultrafuzz", ".smithers", "node_modules", ".env"]);
 const INVARIANT_SUITE_ALLOWED_ROOTS = ["src", "contracts", "test", "tests"] as const;
 const invariantSuiteBaselineSnapshots = new Map<string, { contents: string; sha256: string }>();
+const invariantSuiteTombstones = new Map<string, Set<string>>();
 
 function invariantTestRoots(workspaceRoot: string): readonly string[] {
   const discovered = INVARIANT_TEST_ROOT_NAMES.filter((root) => {
@@ -1653,7 +1684,11 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
         });
       }
       const current = gitTestTreePaths(workspaceRoot);
+      const currentSet = new Set(current);
       const changed = new Set<string>();
+      for (const relativePath of baseline.keys()) {
+        if (!currentSet.has(relativePath)) recordInvariantSuiteTombstone(workspaceRoot, relativePath);
+      }
       for (const relativePath of current) {
         const sourcePath = path.resolve(workspaceRoot, relativePath);
         const source = resolveRegularArtifactFile(
@@ -1662,7 +1697,10 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
           `artifact-contract failure: invariant suite source is not regular ${relativePath}`
         );
         const sourceStat = statSync(source);
-        if (sourceStat.size === 0) continue;
+        if (sourceStat.size === 0) {
+          recordInvariantSuiteTombstone(workspaceRoot, relativePath);
+          continue;
+        }
         if (sourceStat.nlink !== 1) {
           throw new Error(`artifact-contract failure: invariant suite source is hard-linked ${relativePath}`);
         }
@@ -1697,9 +1735,14 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
     ]) {
       for (const value of execFileSync("git", args, { cwd: workspaceRoot, encoding: "utf8" }).split(/\r?\n/u)) {
         if (value.startsWith("test/") || value.startsWith("tests/")) {
+          const candidate = path.resolve(workspaceRoot, value);
+          if (!existsSync(candidate)) {
+            recordInvariantSuiteTombstone(workspaceRoot, assertSafeInvariantSuiteTestPath(value));
+            continue;
+          }
           const source = resolveRegularArtifactFile(
             workspaceRoot,
-            path.resolve(workspaceRoot, value),
+            candidate,
             `artifact-contract failure: invariant suite source is not regular ${value}`
           );
           if (statSync(source).size > 0) changed.add(assertSafeInvariantSuiteTestPath(value));
@@ -1711,6 +1754,12 @@ function changedTestTreePaths(workspaceRoot: string, baselinePath?: string, prot
     if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) throw error;
     throw new Error("artifact-contract failure: unable to enumerate changed invariant suite sources", { cause: error });
   }
+}
+
+function recordInvariantSuiteTombstone(workspaceRoot: string, relativePath: string): void {
+  const tombstones = invariantSuiteTombstones.get(workspaceRoot) ?? new Set<string>();
+  tombstones.add(relativePath);
+  invariantSuiteTombstones.set(workspaceRoot, tombstones);
 }
 
 function changedInvariantSourcePaths(workspaceRoot: string): string[] {
@@ -1729,6 +1778,13 @@ function changedInvariantSourcePaths(workspaceRoot: string): string[] {
           `artifact-contract failure: invariant source is not regular ${relativePath}`
         );
         if (statSync(source).size > 0) changed.add(relativePath);
+        else recordInvariantSuiteTombstone(workspaceRoot, relativePath);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("artifact-contract failure:")) {
+          recordInvariantSuiteTombstone(workspaceRoot, relativePath);
+          continue;
+        }
+        throw error;
       }
     }
     return [...changed].sort();
