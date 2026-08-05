@@ -56,6 +56,40 @@ describe("prompt semantic anchors", () => {
     }
   });
 
+  it("keeps protocol failures observable during invariant handler execution", () => {
+    const handlers = prompt("strategies/invariants/handlers.md");
+    const setup = prompt("strategies/invariants/setup.md");
+    const coverage = prompt("strategies/invariants/coverage.md");
+    const implementation = prompt("strategies/invariants/implement-properties.md");
+    const campaign = prompt("strategies/invariants/invariant-testing-campaign.md");
+    const corpus = `${handlers}\n${setup}\n${coverage}\n${implementation}\n${campaign}`;
+
+    expect(handlers).toContain("Invoke each protocol entrypoint as a direct call");
+    expect(handlers).toContain("Every reached target revert, panic, or out-of-gas failure propagates to Recon");
+    expect(handlers).toContain("documented precondition cannot be met");
+    expect(handlers).toContain("return before invoking the target");
+    expect(handlers).toContain("narrowly documented non-protocol dependency");
+    expect(handlers).toContain("property-scoped expected-revert case");
+    expect(handlers).toContain("typed high-level function call");
+    expect(handlers).toContain("blanket `try/catch`");
+    expect(handlers).toContain("Scan `try/catch`, `.call`, and `.delegatecall`");
+    expect(handlers).toMatch(/Synthetic coverage-only\s+handlers/u);
+    expect(handlers).toContain("audit every handler source");
+    expect(setup).toContain("Every protocol call made during setup remains directly observable");
+    expect(setup).toMatch(/revert,\s+panic, or out-of-gas failure propagate/u);
+    expect(coverage).toContain("Audit inherited handlers before coverage fuzzing");
+    expect(coverage).toMatch(
+      /Every reached protocol revert, panic, or out-of-gas failure remains part of\s+the coverage evidence/u
+    );
+    expect(implementation).toContain("Audit inherited handlers before implementing properties");
+    expect(implementation).toContain("Every assertion observes state after a directly invoked protocol action");
+    expect(campaign).toContain("Audit inherited handlers before the final Recon smoke");
+    expect(campaign).toMatch(
+      /Record every reached protocol revert, panic, or out-of-gas failure as a\s+raw backend failure/u
+    );
+    expect(corpus).toContain("documented valid preconditions");
+  });
+
   it("does not require unused fuzzer CLIs during project discovery", () => {
     const markdown = prompt("setup/project-discovery.md");
     const promptCorpus = loadBuiltInPromptAssets()
