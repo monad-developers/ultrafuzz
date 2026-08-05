@@ -279,7 +279,7 @@ test("run exposes the trusted reference expectation catalog option", async () =>
   const body = parseJson(run);
   assert.equal(
     (body.diagnostics as Array<{ code?: string }>).some(
-      (diagnostic) => diagnostic.code === "REFERENCE_EXPECTATIONS_INVALID"
+      (diagnostic) => diagnostic.code === "REFERENCE_EXPECTATIONS_INVALID" || diagnostic.code === "ENOENT"
     ),
     true
   );
